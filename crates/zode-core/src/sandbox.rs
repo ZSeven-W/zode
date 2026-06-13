@@ -20,14 +20,14 @@ pub enum SandboxConfig {
 
 impl SandboxConfig {
     pub fn for_current_os(cwd: &Path) -> Result<Self, CoreError> {
+        // Canonicalize: the OS sandbox resolves symlinks before matching, so
+        // an allowed subpath must be the real path (e.g. macOS /tmp ->
+        // /private/tmp). Without this, writes *inside* cwd get denied.
+        let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
         if cfg!(target_os = "macos") {
-            Ok(SandboxConfig::MacOs {
-                cwd: cwd.to_path_buf(),
-            })
+            Ok(SandboxConfig::MacOs { cwd })
         } else if cfg!(target_os = "linux") {
-            Ok(SandboxConfig::Linux {
-                cwd: cwd.to_path_buf(),
-            })
+            Ok(SandboxConfig::Linux { cwd })
         } else {
             Err(CoreError::Other(
                 "--sandbox is only supported on macOS and Linux".into(),
@@ -201,6 +201,21 @@ mod tests {
             assert!(r.is_ok());
         } else {
             assert!(r.is_err());
+        }
+    }
+
+    #[test]
+    fn for_current_os_canonicalizes_cwd() {
+        // The stored cwd must be the canonical (symlink-resolved) path, or
+        // the OS sandbox would deny writes inside cwd (e.g. /tmp ->
+        // /private/tmp on macOS).
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(dir.path()).unwrap();
+        if let Ok(cfg) = SandboxConfig::for_current_os(dir.path()) {
+            let stored = match cfg {
+                SandboxConfig::MacOs { cwd } | SandboxConfig::Linux { cwd } => cwd,
+            };
+            assert_eq!(stored, real);
         }
     }
 }
