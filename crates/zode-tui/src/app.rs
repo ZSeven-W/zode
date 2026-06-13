@@ -22,6 +22,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use zode_core::approval::{ApprovalReceiver, ApprovalRequest};
+use zode_core::bg_shells::BgShell;
 use zode_core::commands::parse_slash;
 use zode_core::config::ConfigManager;
 use zode_core::session_meta::{SessionIndex, SessionMeta};
@@ -35,6 +36,7 @@ use crate::ui::chat::ChatView;
 use crate::ui::dialog::permission::PermissionDialog;
 use crate::ui::dialog::session_picker::SessionPicker;
 use crate::ui::dialog::settings::{SettingsAction, SettingsDialog, SettingsLevel};
+use crate::ui::dialog::tasks_panel::TasksPanel;
 use crate::ui::input::InputBox;
 use crate::ui::status::{Mode, StatusBar};
 use crate::ui::tabs::render_tabs;
@@ -69,6 +71,11 @@ pub struct TuiApp {
     autocomplete: Autocomplete,
     settings: Option<SettingsDialog>,
     session_picker: Option<SessionPicker>,
+    tasks_panel: Option<TasksPanel>,
+    /// Snapshot of the active tab's background shells, refreshed while the
+    /// tasks panel is open (the tracker's `list()` is async; the render path
+    /// is not).
+    bg_shells: Vec<BgShell>,
     show_help: bool,
     toast: Option<Toast>,
     provider_names: Vec<String>,
@@ -115,6 +122,8 @@ impl TuiApp {
             autocomplete: Autocomplete::new(),
             settings: None,
             session_picker: None,
+            tasks_panel: None,
+            bg_shells: Vec::new(),
             show_help: false,
             toast: None,
             provider_names: ui.provider_names,
@@ -295,6 +304,48 @@ impl TuiApp {
         self.toast = Some(Toast::info("session deleted"));
     }
 
+    /// Open the background tasks panel (Ctrl+B / /tasks).
+    async fn open_tasks_panel(&mut self) {
+        self.refresh_bg_shells().await;
+        self.tasks_panel = Some(TasksPanel::new());
+    }
+
+    /// Refresh the cached shell snapshot from the active tab's tracker.
+    async fn refresh_bg_shells(&mut self) {
+        self.bg_shells = self.active_tab().engine.bg_shells_meta.list().await;
+    }
+
+    async fn handle_tasks_panel_key(&mut self, code: KeyCode) {
+        let len = self.bg_shells.len();
+        match code {
+            KeyCode::Esc => self.tasks_panel = None,
+            KeyCode::Up => {
+                if let Some(p) = &mut self.tasks_panel {
+                    p.prev(len);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(p) = &mut self.tasks_panel {
+                    p.next(len);
+                }
+            }
+            KeyCode::Char('k') => {
+                let idx = self.tasks_panel.as_ref().map(|p| p.selected()).unwrap_or(0);
+                if let Some(shell) = self.bg_shells.get(idx).cloned() {
+                    let engine = self.active_tab().engine.clone();
+                    match engine.kill_shell(&shell.shell_id).await {
+                        Ok(()) => {
+                            self.toast = Some(Toast::info(format!("killed {}", shell.shell_id)))
+                        }
+                        Err(e) => self.toast = Some(Toast::error(e.to_string())),
+                    }
+                    self.refresh_bg_shells().await;
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub async fn run(mut self) -> std::io::Result<()> {
         let mut terminal = setup_terminal()?;
         let result = self.event_loop(&mut terminal).await;
@@ -327,10 +378,11 @@ impl TuiApp {
                 }
                 Some(req) = self.approval_rx.next() => {
                     // An approval is the highest-priority modal: dismiss any
-                    // settings/help/picker overlay so it can't hide the prompt
-                    // that is now capturing input.
+                    // settings/help/picker/panel overlay so it can't hide the
+                    // prompt that is now capturing input.
                     self.settings = None;
                     self.session_picker = None;
+                    self.tasks_panel = None;
                     self.show_help = false;
                     if self.active_dialog.is_none() {
                         let cwd = self.active_tab().engine.cwd.clone();
@@ -345,6 +397,10 @@ impl TuiApp {
                         if t.tick() {
                             self.toast = None;
                         }
+                    }
+                    // Keep the open tasks panel's shell list live.
+                    if self.tasks_panel.is_some() {
+                        self.refresh_bg_shells().await;
                     }
                 }
             }
@@ -406,6 +462,20 @@ impl TuiApp {
         if let Some(picker) = &mut self.session_picker {
             picker.render(f, area, &theme);
         }
+        if self.tasks_panel.is_some() {
+            let turns: Vec<String> = self
+                .tabs
+                .iter()
+                .filter(|t| t.is_busy())
+                .map(|t| format!("{}: running", t.title))
+                .collect();
+            let now = now_secs();
+            let shells = std::mem::take(&mut self.bg_shells);
+            if let Some(panel) = &mut self.tasks_panel {
+                panel.render(f, area, &shells, &turns, now, &theme);
+            }
+            self.bg_shells = shells;
+        }
         if self.show_help {
             crate::ui::help::render_help(f, area, &theme);
         }
@@ -457,6 +527,12 @@ impl TuiApp {
             return;
         }
 
+        // 2c. Tasks panel captures input.
+        if self.tasks_panel.is_some() {
+            self.handle_tasks_panel_key(key.code).await;
+            return;
+        }
+
         // 3. Help overlay: Esc / F1 / q closes it.
         if self.show_help {
             if matches!(key.code, KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('q')) {
@@ -498,6 +574,10 @@ impl TuiApp {
             }
             (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
                 self.close_active_tab();
+                return;
+            }
+            (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+                self.open_tasks_panel().await;
                 return;
             }
             // Ctrl+1..9 jump to a tab by position.
@@ -805,6 +885,7 @@ impl TuiApp {
                 self.active_tab_mut().chat.push_system(&report);
             }
             "sessions" | "resume" => self.open_session_picker(),
+            "tasks" => self.open_tasks_panel().await,
             other => {
                 self.toast = Some(Toast::info(format!("/{other} lands in a later phase")));
             }
@@ -895,6 +976,13 @@ fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
         }
     }
     chat
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {

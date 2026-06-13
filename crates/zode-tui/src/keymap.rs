@@ -14,6 +14,7 @@ pub enum ActionId {
     ScrollDown,
     OpenSettings,
     OpenHelp,
+    OpenTasks,
     NewTab,
     CloseTab,
     SwitchTab,
@@ -73,6 +74,11 @@ pub static KEYMAP: &[Binding] = &[
         keys: "F1 / /help",
         action: ActionId::OpenHelp,
         help: "Help",
+    },
+    Binding {
+        keys: "Ctrl+B",
+        action: ActionId::OpenTasks,
+        help: "Background tasks panel",
     },
     Binding {
         keys: "Ctrl+T",

@@ -16,7 +16,7 @@ use agent::provider::Provider;
 use agent::query::QueryLoop;
 use agent::skills::SkillRegistry;
 use agent::stream::EventStream;
-use agent::tool::{SafetyClass, ToolRegistry};
+use agent::tool::{SafetyClass, Tool, ToolRegistry, ToolUseContext};
 use agent_tools_code::{
     register_default_with_todo, BashOutputTool, BashRunTool, BashSessionRegistry, KillShellTool,
     TaskTool, TodoState, ToolSearchTool, WorkspacePolicy,
@@ -245,6 +245,23 @@ impl ZodeEngine {
     /// Redo the most recently undone file edit. Returns the affected path.
     pub async fn redo(&self) -> Result<PathBuf, CoreError> {
         self.history.lock().await.redo()
+    }
+
+    /// Kill a background shell by id (the tasks panel's `k` action). Bypasses
+    /// the approval gate on purpose — the user's keypress is the confirmation —
+    /// by calling a fresh KillShell tool over the shared session registry, then
+    /// reflects the kill in the host-side tracker (the hook path doesn't fire
+    /// for direct calls).
+    pub async fn kill_shell(&self, shell_id: &str) -> Result<(), CoreError> {
+        let tool = KillShellTool::new(self.bash_sessions.clone());
+        let ctx = ToolUseContext::new(self.cwd.clone());
+        let result = tool
+            .call(&ctx, serde_json::json!({ "shell_id": shell_id }))
+            .await
+            .map(|_| ())
+            .map_err(|e| CoreError::Other(format!("kill_shell: {e}")));
+        self.bg_shells_meta.mark_killed(shell_id).await;
+        result
     }
 
     /// Inject a pre-loaded MessageStore (for `--continue` / `--resume`).

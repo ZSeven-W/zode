@@ -66,6 +66,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Ui,
     },
     SlashCommand {
+        name: "tasks",
+        description: "Background shells + running turns",
+        usage: "/tasks",
+        action: CommandAction::Ui,
+    },
+    SlashCommand {
         name: "undo",
         description: "Undo the last file edit",
         usage: "/undo",
