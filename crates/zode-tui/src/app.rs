@@ -223,13 +223,21 @@ impl TuiApp {
 
     /// Rebuild the active tab's engine from `template` (a model / provider /
     /// yolo hot-switch), carrying the conversation store + cwd over so the
-    /// context survives. On failure the old engine stays in place.
-    async fn reassemble_active(&mut self, template: EngineTemplate) {
+    /// context survives. On failure the old engine stays in place. Refused
+    /// mid-turn: the in-flight turn writes to the OLD engine's store, which the
+    /// new engine wouldn't see — switch after the turn (or Ctrl+C).
+    /// Returns true if the swap succeeded (callers commit template/status
+    /// changes only then, so a refused/failed switch leaves no half-state).
+    async fn reassemble_active(&mut self, template: EngineTemplate) -> bool {
+        if self.active_tab().is_busy() {
+            self.toast = Some(Toast::info("can't switch during a turn — Ctrl+C first"));
+            return false;
+        }
         let (store, cwd, id) = {
             let tab = self.active_tab();
             let store = match tab.engine.store.lock() {
                 Ok(s) => s.clone(),
-                Err(_) => return,
+                Err(_) => return false,
             };
             (store, tab.engine.cwd.clone(), tab.id)
         };
@@ -239,9 +247,11 @@ impl TuiApp {
                 let model = engine.model.clone();
                 self.active_tab_mut().engine = Arc::new(engine);
                 self.status.model = model;
+                true
             }
             Err(e) => {
                 self.toast = Some(Toast::error(format!("switch failed: {e}")));
+                false
             }
         }
     }
@@ -770,12 +780,14 @@ impl TuiApp {
             }
             SettingsAction::SetProvider(name) => {
                 // Real hot switch: reassemble the active tab from the named
-                // provider, carrying the conversation over.
+                // provider, carrying the conversation over. Commit only on
+                // success (else the template/status would drift from reality).
                 match self.template.with_provider(&name) {
                     Some(t) => {
-                        self.template = t.clone();
-                        self.reassemble_active(t).await;
-                        self.toast = Some(Toast::info(format!("provider → {name}")));
+                        if self.reassemble_active(t.clone()).await {
+                            self.template = t;
+                            self.toast = Some(Toast::info(format!("provider → {name}")));
+                        }
                     }
                     None => {
                         self.toast = Some(Toast::error(format!("no provider '{name}' in config")));
@@ -785,11 +797,12 @@ impl TuiApp {
             SettingsAction::SetMode(m) => {
                 // Map the approval mode to yolo: "dontAsk" auto-approves.
                 let yolo = m == "dontAsk";
-                self.template = self.template.with_yolo(yolo);
-                let t = self.template.clone();
-                self.reassemble_active(t).await;
-                self.status.yolo = yolo;
-                self.toast = Some(Toast::info(format!("mode → {m}")));
+                let t = self.template.with_yolo(yolo);
+                if self.reassemble_active(t.clone()).await {
+                    self.template = t;
+                    self.status.yolo = yolo;
+                    self.toast = Some(Toast::info(format!("mode → {m}")));
+                }
             }
         }
     }
@@ -1005,25 +1018,27 @@ impl TuiApp {
                         .chat
                         .push_system(&format!("model: {m}"));
                 } else {
-                    self.template = self.template.with_model(args.to_string());
-                    let t = self.template.clone();
-                    self.reassemble_active(t).await;
-                    self.active_tab_mut()
-                        .chat
-                        .push_system(&format!("model → {args}"));
+                    let t = self.template.with_model(args.to_string());
+                    if self.reassemble_active(t.clone()).await {
+                        self.template = t;
+                        self.active_tab_mut()
+                            .chat
+                            .push_system(&format!("model → {args}"));
+                    }
                 }
             }
             "yolo" => {
                 let on = !self.template.yolo();
-                self.template = self.template.with_yolo(on);
-                let t = self.template.clone();
-                self.reassemble_active(t).await;
-                self.status.yolo = on;
-                self.active_tab_mut().chat.push_system(if on {
-                    "yolo: ON — tools auto-approve (deny rules still apply)"
-                } else {
-                    "yolo: OFF — tools prompt for approval"
-                });
+                let t = self.template.with_yolo(on);
+                if self.reassemble_active(t.clone()).await {
+                    self.template = t;
+                    self.status.yolo = on;
+                    self.active_tab_mut().chat.push_system(if on {
+                        "yolo: ON — tools auto-approve (deny rules still apply)"
+                    } else {
+                        "yolo: OFF — tools prompt for approval"
+                    });
+                }
             }
             "mcp" => {
                 let lines: Vec<String> = match &self.active_tab().engine.mcp {
