@@ -12,6 +12,7 @@ use zode_core::commands::{CommandRegistry, SlashCommand};
 use crate::theme::Theme;
 
 const MAX_VISIBLE: usize = 8;
+const POPUP_WIDTH: u16 = 76;
 
 pub struct Autocomplete {
     registry: CommandRegistry,
@@ -76,6 +77,10 @@ impl Autocomplete {
         self.state.selected().unwrap_or(0)
     }
 
+    pub fn selected_name(&self) -> Option<&'static str> {
+        self.matches.get(self.selected_index()).map(|c| c.name)
+    }
+
     pub fn next(&mut self) {
         if self.matches.is_empty() {
             return;
@@ -110,13 +115,7 @@ impl Autocomplete {
             return;
         }
         let n = self.matches.len().min(MAX_VISIBLE) as u16;
-        let h = n + 2; // borders
-        let area = Rect {
-            x: input_area.x,
-            y: input_area.y.saturating_sub(h),
-            width: input_area.width.min(50),
-            height: h,
-        };
+        let area = popup_area(input_area, n);
         let items: Vec<ListItem> = self
             .matches
             .iter()
@@ -134,6 +133,8 @@ impl Autocomplete {
         let list = List::new(items)
             .block(
                 Block::default()
+                    .title(" Commands ")
+                    .title_bottom(" ↑↓ move · Enter select · Tab insert · Esc close ")
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.accent_secondary))
                     .style(Style::default().bg(theme.bg_secondary)),
@@ -145,6 +146,16 @@ impl Autocomplete {
                     .add_modifier(Modifier::BOLD),
             );
         f.render_stateful_widget(list, area, &mut self.state);
+    }
+}
+
+fn popup_area(input_area: Rect, visible_rows: u16) -> Rect {
+    let h = visible_rows + 2; // borders
+    Rect {
+        x: input_area.x,
+        y: input_area.y.saturating_sub(h),
+        width: input_area.width.min(POPUP_WIDTH),
+        height: h,
     }
 }
 
@@ -178,5 +189,47 @@ mod tests {
         ac.prev();
         assert_eq!(ac.selected_index(), 0);
         assert!(ac.confirm().is_some());
+    }
+
+    #[test]
+    fn popup_uses_wider_command_palette_area() {
+        let input_area = Rect::new(2, 20, 100, 4);
+        let area = popup_area(input_area, 8);
+        assert_eq!(area.x, 2);
+        assert_eq!(area.width, 76);
+        assert_eq!(area.height, 10);
+        assert_eq!(area.y, 10);
+    }
+
+    #[test]
+    fn exposes_selected_command_name() {
+        let mut ac = Autocomplete::new();
+        ac.update("/theme");
+        assert_eq!(ac.selected_name(), Some("theme"));
+    }
+
+    #[test]
+    fn rerender_clears_stale_rows_when_matches_shrink() {
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("cyberpunk"));
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let input_area = Rect::new(0, 20, 100, 4);
+        let mut ac = Autocomplete::new();
+
+        ac.update("/");
+        term.draw(|f| ac.render(f, input_area, &theme)).unwrap();
+        ac.update("/theme");
+        term.draw(|f| ac.render(f, input_area, &theme)).unwrap();
+
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("/theme"));
+        assert!(!content.contains("/compact"));
+        assert!(!content.contains("/cost"));
     }
 }

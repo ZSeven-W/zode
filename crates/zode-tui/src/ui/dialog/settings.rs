@@ -4,7 +4,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::theme::Theme;
@@ -27,6 +27,7 @@ pub enum SettingsAction {
 
 pub struct SettingsDialog {
     level: SettingsLevel,
+    root_level: SettingsLevel,
     state: ListState,
     theme_ids: Vec<String>,
     provider_names: Vec<String>,
@@ -41,6 +42,7 @@ impl SettingsDialog {
         state.select(Some(0));
         Self {
             level: SettingsLevel::Top,
+            root_level: SettingsLevel::Top,
             state,
             theme_ids,
             provider_names,
@@ -48,8 +50,25 @@ impl SettingsDialog {
         }
     }
 
+    pub fn theme_picker(theme_ids: Vec<String>) -> Self {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        Self {
+            level: SettingsLevel::Theme,
+            root_level: SettingsLevel::Theme,
+            state,
+            theme_ids,
+            provider_names: Vec::new(),
+            modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
+        }
+    }
+
     pub fn level(&self) -> SettingsLevel {
         self.level
+    }
+
+    pub fn is_root_level(&self) -> bool {
+        self.level == self.root_level
     }
 
     fn items(&self) -> Vec<String> {
@@ -91,7 +110,7 @@ impl SettingsDialog {
     }
 
     pub fn back(&mut self) {
-        self.level = SettingsLevel::Top;
+        self.level = self.root_level;
         self.state.select(Some(0));
     }
 
@@ -116,6 +135,12 @@ impl SettingsDialog {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
+        f.render_widget(Clear, area);
+        f.render_widget(
+            Paragraph::new("").style(Style::default().bg(theme.bg_primary)),
+            area,
+        );
+
         let items: Vec<ListItem> = self
             .items()
             .into_iter()
@@ -125,6 +150,7 @@ impl SettingsDialog {
         f.render_widget(Clear, popup);
         let title = match self.level {
             SettingsLevel::Top => " Settings ",
+            SettingsLevel::Theme if self.root_level == SettingsLevel::Theme => " Theme ",
             SettingsLevel::Theme => " Settings › Theme ",
             SettingsLevel::Provider => " Settings › Provider ",
             SettingsLevel::Mode => " Settings › Permission mode ",
@@ -173,5 +199,46 @@ mod tests {
     fn top_level_confirm_is_none() {
         let d = SettingsDialog::new(vec![], vec![]);
         assert_eq!(d.confirm(), None);
+    }
+
+    #[test]
+    fn theme_picker_starts_at_theme_root() {
+        let d = SettingsDialog::theme_picker(vec!["catppuccin-mocha".into(), "hacker".into()]);
+        assert_eq!(d.level(), SettingsLevel::Theme);
+        assert!(d.is_root_level());
+        assert_eq!(
+            d.confirm(),
+            Some(SettingsAction::SetTheme("catppuccin-mocha".into()))
+        );
+    }
+
+    #[test]
+    fn render_clears_screen_behind_dialog() {
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("cyberpunk"));
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut dialog =
+            SettingsDialog::theme_picker(vec!["catppuccin-mocha".into(), "hacker".into()]);
+
+        terminal
+            .draw(|f| {
+                f.render_widget(
+                    ratatui::widgets::Paragraph::new("LEAK_OUTSIDE_SETTINGS"),
+                    f.area(),
+                );
+                dialog.render(f, f.area(), &theme);
+            })
+            .unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(!content.contains("LEAK_OUTSIDE_SETTINGS"));
+        assert!(content.contains("Theme"));
+        assert!(content.contains("hacker"));
     }
 }

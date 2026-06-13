@@ -694,6 +694,12 @@ impl TuiApp {
                     self.autocomplete.next();
                     return;
                 }
+                KeyCode::Enter if self.autocomplete.selected_name() == Some("theme") => {
+                    self.input.take();
+                    self.autocomplete.dismiss();
+                    self.open_theme_picker();
+                    return;
+                }
                 KeyCode::Tab | KeyCode::Enter => {
                     self.apply_completion();
                     return;
@@ -725,13 +731,20 @@ impl TuiApp {
     }
 
     fn open_settings(&mut self) {
-        let theme_ids = self
-            .theme_store
+        let theme_ids = self.theme_ids();
+        self.settings = Some(SettingsDialog::new(theme_ids, self.provider_names.clone()));
+    }
+
+    fn open_theme_picker(&mut self) {
+        self.settings = Some(SettingsDialog::theme_picker(self.theme_ids()));
+    }
+
+    fn theme_ids(&self) -> Vec<String> {
+        self.theme_store
             .list()
             .iter()
             .map(|t| t.id.clone())
-            .collect();
-        self.settings = Some(SettingsDialog::new(theme_ids, self.provider_names.clone()));
+            .collect()
     }
 
     async fn handle_settings_key(&mut self, code: KeyCode) {
@@ -751,7 +764,7 @@ impl TuiApp {
                     None
                 }
                 KeyCode::Esc => {
-                    if d.level() == SettingsLevel::Top {
+                    if d.is_root_level() {
                         self.settings = None;
                     } else {
                         d.back();
@@ -1121,15 +1134,7 @@ impl TuiApp {
 
     fn handle_theme(&mut self, args: &str) {
         if args.is_empty() {
-            let ids: Vec<String> = self
-                .theme_store
-                .list()
-                .iter()
-                .map(|t| format!("{} ({})", t.id, t.name))
-                .collect();
-            self.active_tab_mut()
-                .chat
-                .push_system(&format!("themes: {}", ids.join(", ")));
+            self.open_theme_picker();
             return;
         }
         if self.theme_store.contains(args) {
