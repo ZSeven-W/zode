@@ -86,7 +86,7 @@ async fn run(args: Args) -> i32 {
         match SessionIndex::session_path(&meta.id) {
             Ok(path) => match Session::load(&path).await {
                 Ok(store) => {
-                    let short = &meta.id[..8.min(meta.id.len())];
+                    let short: String = meta.id.chars().take(8).collect();
                     eprintln!("zode: resumed session {short} ({})", meta.title);
                     resumed_id = Some(meta.id.clone());
                     engine.with_store(store)
