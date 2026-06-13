@@ -8,8 +8,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent::abort::AbortController;
 use agent::session::Session;
+use once_cell::sync::Lazy;
 use zode_core::session_meta::{title_from_prompt, SessionIndex, SessionMeta};
 use zode_core::ZodeEngine;
+
+/// Serializes ALL session persistence process-wide. `Session::save` reuses the
+/// same temp path per session id, and `SessionIndex` is a load-modify-save, so
+/// concurrent saves (multiple tabs finishing turns, or two saves of one tab)
+/// could corrupt the temp file or lose an index update. Saves are infrequent
+/// and tiny, so one global lock is cheaper than the bugs it prevents.
+static SAVE_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
 
 use crate::ui::chat::ChatView;
 use crate::ui::status::Mode;
@@ -93,6 +101,9 @@ impl SessionTab {
 /// event loop. The std mutex guard is dropped before the await, so it never
 /// crosses an await point.
 pub async fn persist_session(session_id: String, engine: Arc<ZodeEngine>, title: String) {
+    // Serialize all saves: prevents same-session transcript temp-file races and
+    // SessionIndex lost updates across concurrent tab saves.
+    let _guard = SAVE_LOCK.lock().await;
     let Ok(path) = SessionIndex::session_path(&session_id) else {
         return;
     };

@@ -21,9 +21,40 @@ impl CostState {
         }
     }
 
-    /// Feed one event (only Usage events are counted by the tracker).
+    /// Feed one event. Usage events are counted by the tracker directly; Task
+    /// tool results carry the sub-agent's token usage (`usage_input_tokens` /
+    /// `usage_output_tokens`, alongside `agent_type`) which the child consumed
+    /// internally and never emitted to the parent stream — fold those in too so
+    /// `/cost` reflects sub-agent calls.
     pub async fn observe(&self, event: &Event) {
-        self.tracker.lock().await.observe_event(&self.model, event);
+        let mut tracker = self.tracker.lock().await;
+        tracker.observe_event(&self.model, event);
+        if let Event::ToolResult { output, .. } = event {
+            // `agent_type` is unique to the Task tool's result shape — gate on
+            // it so an MCP tool that happens to use those field names can't be
+            // mistaken for a sub-agent.
+            if output.get("agent_type").is_some() {
+                let ci = output
+                    .get("usage_input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                let co = output
+                    .get("usage_output_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                if ci > 0 || co > 0 {
+                    tracker.observe_event(
+                        &self.model,
+                        &Event::Usage {
+                            input_tokens: ci,
+                            output_tokens: co,
+                            cache_read: 0,
+                            cache_create: 0,
+                        },
+                    );
+                }
+            }
+        }
     }
 
     /// Human-readable report for `/cost`.
@@ -68,6 +99,40 @@ mod tests {
         assert!(report.to_lowercase().contains("token"), "{report}");
         assert!(report.contains("100"));
         assert!(report.contains("50"));
+    }
+
+    #[tokio::test]
+    async fn folds_subagent_usage_from_task_result() {
+        let cost = CostState::new("MiniMax-M1".into());
+        // A Task tool result carries the child's usage; it must be counted.
+        let task_result = Event::ToolResult {
+            id: "tu_1".into(),
+            ok: true,
+            output: serde_json::json!({
+                "output": "done",
+                "agent_type": "researcher",
+                "usage_input_tokens": 200,
+                "usage_output_tokens": 80,
+            }),
+        };
+        cost.observe(&task_result).await;
+        let report = cost.report().await;
+        assert!(report.contains("200"), "{report}");
+        assert!(report.contains("80"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn non_task_tool_result_is_not_counted() {
+        let cost = CostState::new("MiniMax-M1".into());
+        // A normal tool result (no agent_type) must not add tokens.
+        let other = Event::ToolResult {
+            id: "tu_2".into(),
+            ok: true,
+            output: serde_json::json!({"text": "ok", "usage_input_tokens": 999}),
+        };
+        cost.observe(&other).await;
+        let report = cost.report().await;
+        assert!(!report.contains("999"), "{report}");
     }
 
     #[tokio::test]

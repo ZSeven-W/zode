@@ -119,6 +119,9 @@ use tokio::sync::{mpsc, oneshot};
 pub struct ApprovalRequest {
     pub tool: String,
     pub input: serde_json::Value,
+    /// Opaque label identifying the source (the TUI sets this to the
+    /// requesting tab's id) so the UI can focus the right conversation.
+    pub source: Option<String>,
     sender: oneshot::Sender<Approval>,
 }
 
@@ -163,12 +166,19 @@ pub fn approval_queue() -> (ApprovalQueue, ApprovalReceiver) {
 
 impl ApprovalQueue {
     /// Submit a request and await the user's decision. A closed queue (no
-    /// UI draining) or a dropped responder fails closed -> Deny.
-    pub async fn request(&self, tool: &str, input: &serde_json::Value) -> Approval {
+    /// UI draining) or a dropped responder fails closed -> Deny. `source`
+    /// labels the requester (the TUI tab id) so the UI can focus it.
+    pub async fn request(
+        &self,
+        tool: &str,
+        input: &serde_json::Value,
+        source: Option<String>,
+    ) -> Approval {
         let (tx, rx) = oneshot::channel();
         let req = ApprovalRequest {
             tool: tool.to_string(),
             input: input.clone(),
+            source,
             sender: tx,
         };
         if self.sender.send(req).is_err() {
@@ -178,22 +188,29 @@ impl ApprovalQueue {
     }
 }
 
-/// ApprovalGate backed by the queue (used by the TUI).
+/// ApprovalGate backed by the queue (used by the TUI). Each tab's engine gets
+/// a gate labeled with that tab's id so approvals carry their source.
 #[derive(Debug)]
 pub struct QueueGate {
     queue: ApprovalQueue,
+    label: Option<String>,
 }
 
 impl QueueGate {
     pub fn new(queue: ApprovalQueue) -> Self {
-        Self { queue }
+        Self { queue, label: None }
+    }
+
+    /// Gate whose requests are tagged with `label` (the source tab id).
+    pub fn with_label(queue: ApprovalQueue, label: Option<String>) -> Self {
+        Self { queue, label }
     }
 }
 
 #[async_trait]
 impl ApprovalGate for QueueGate {
     async fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval {
-        self.queue.request(tool, input).await
+        self.queue.request(tool, input, self.label.clone()).await
     }
 }
 

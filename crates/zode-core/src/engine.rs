@@ -4,7 +4,7 @@
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use agent::abort::AbortController;
 use agent::compact::AutoCompactState;
@@ -26,7 +26,7 @@ use agent_tools_code::{
 // before async work.
 use std::sync::Mutex;
 
-use crate::approval::ApprovalGate;
+use crate::approval::{ApprovalGate, ApprovalQueue, QueueGate};
 use crate::bg_shells::{BackgroundShellTracker, BgShellHook};
 use crate::config::ZodeConfig;
 use crate::cost::CostState;
@@ -37,7 +37,7 @@ use crate::hooks_config::load_hook_handlers;
 use crate::instructions::{build_system_prompt, discover_instructions, gather_env};
 use crate::provider::build_provider;
 use crate::skills::{load_skills_from, skills_dirs, skills_index, SkillTool};
-use crate::task_factory::ZodeTaskFactory;
+use crate::task_factory::{ParentToolsCell, ZodeTaskFactory};
 
 const EDIT_HISTORY_CAPACITY: usize = 50;
 
@@ -145,6 +145,32 @@ impl ZodeEngine {
             None => None,
         };
 
+        // File cache + edit-history + background-shell tracker + hook runner.
+        // Built BEFORE the Task factory so the child sub-agent can share them:
+        // the same file_cache (read-before-write tracking) and the same hook
+        // runner (edit history, bg-shell tracking, external hook blockers all
+        // apply to the child too — no bypass).
+        let file_cache = Arc::new(FileStateCache::new(
+            NonZeroUsize::new(FILE_CACHE_ENTRIES).expect("nonzero"),
+            FILE_CACHE_BYTES,
+        ));
+        let history = Arc::new(tokio::sync::Mutex::new(EditHistory::new(
+            EDIT_HISTORY_CAPACITY,
+        )));
+        let bg_shells_meta = BackgroundShellTracker::new();
+        let mut hook_runner = HookRunner::new();
+        // EditHistoryHook resolves paths via the same policy the fs tools use.
+        hook_runner.register(Arc::new(EditHistoryHook::new(
+            history.clone(),
+            policy.clone(),
+        )));
+        hook_runner.register(Arc::new(BgShellHook::new(bg_shells_meta.clone())));
+        // External hooks.json scripts (global ⊕ project).
+        for h in load_hook_handlers(&cwd) {
+            hook_runner.register(h);
+        }
+        let hooks = Arc::new(hook_runner);
+
         // Permissions: Bypass mode (so non-denied tools reach the gate) plus
         // hard-deny rules (still enforced ahead of the bypass). Interactive
         // `ask` is handled entirely by the gate (master §4.6①). Built here so
@@ -155,14 +181,20 @@ impl ZodeEngine {
         }
         let permissions = Arc::new(pm);
 
-        // Task sub-agent tool: the factory snapshots the current tool set
-        // (which has no Task yet — recursion guard) and shares the parent's
-        // provider/model/permissions. Registered LAST among base tools.
+        // Task sub-agent tool. The child inherits the parent's FINAL gated +
+        // sandboxed registry (minus Task — recursion guard), plus the same
+        // permissions/hooks/cwd/file_cache. The gated registry only exists
+        // after wrapping, so it is late-bound through a OnceLock the engine
+        // populates below. Registered LAST among base tools.
+        let task_tools: ParentToolsCell = Arc::new(OnceLock::new());
         let task_factory = Arc::new(ZodeTaskFactory::new(
             provider.clone(),
             model.clone(),
-            Arc::new(base.clone()),
             permissions.clone(),
+            cwd.clone(),
+            file_cache.clone(),
+            hooks.clone(),
+            task_tools.clone(),
         ));
         base.register(Arc::new(TaskTool::new(task_factory)));
 
@@ -183,29 +215,9 @@ impl ZodeEngine {
         gated.register(Arc::new(ToolSearchTool::new(candidates)));
 
         let tools = Arc::new(gated);
-
-        let file_cache = Arc::new(FileStateCache::new(
-            NonZeroUsize::new(FILE_CACHE_ENTRIES).expect("nonzero"),
-            FILE_CACHE_BYTES,
-        ));
-
-        // Hooks: file-edit undo history. EditHistoryHook captures
-        // before/after around FileWrite/FileEdit/Remove.
-        let history = Arc::new(tokio::sync::Mutex::new(EditHistory::new(
-            EDIT_HISTORY_CAPACITY,
-        )));
-        let bg_shells_meta = BackgroundShellTracker::new();
-        let mut hooks = HookRunner::new();
-        // EditHistoryHook resolves paths via the same policy the fs tools use.
-        hooks.register(Arc::new(EditHistoryHook::new(
-            history.clone(),
-            policy.clone(),
-        )));
-        hooks.register(Arc::new(BgShellHook::new(bg_shells_meta.clone())));
-        // External hooks.json scripts (global ⊕ project).
-        for h in load_hook_handlers(&cwd) {
-            hooks.register(h);
-        }
+        // Late-bind the child sub-agent's tool set to the final gated+sandboxed
+        // registry now that wrapping is complete.
+        let _ = task_tools.set(tools.clone());
 
         // System prompt: identity + env + three-level instructions + skills.
         let env = gather_env(&cwd, date);
@@ -219,7 +231,7 @@ impl ZodeEngine {
             provider,
             tools,
             permissions,
-            hooks: Arc::new(hooks),
+            hooks,
             store: Arc::new(Mutex::new(MessageStore::new())),
             file_cache,
             compact_state: Arc::new(Mutex::new(AutoCompactState::default())),
@@ -294,14 +306,25 @@ impl ZodeEngine {
     }
 }
 
+/// How a tab's engine obtains its approval gate.
+#[derive(Clone)]
+pub enum GateSource {
+    /// One shared gate for every tab (headless / `--yolo`). No per-tab label.
+    Shared(Arc<dyn ApprovalGate>),
+    /// TUI approval queue: each tab gets a `QueueGate` labeled with its id so
+    /// approval prompts carry their source tab.
+    Queue(ApprovalQueue),
+}
+
 /// Everything needed to assemble a fresh `ZodeEngine`. The TUI keeps one of
-/// these so it can spin up an independent engine per session tab. The gate is
-/// shared (Arc) so every tab's approvals route to the same UI queue.
+/// these so it can spin up an independent engine per session tab. All tabs
+/// share the same underlying approval channel (so prompts reach one UI), but
+/// each tab's gate is labeled with its id.
 #[derive(Clone)]
 pub struct EngineTemplate {
     cfg: ZodeConfig,
     cwd: PathBuf,
-    gate: Arc<dyn ApprovalGate>,
+    gate: GateSource,
     sandbox: Option<crate::sandbox::SandboxConfig>,
     date: String,
 }
@@ -310,7 +333,7 @@ impl EngineTemplate {
     pub fn new(
         cfg: ZodeConfig,
         cwd: PathBuf,
-        gate: Arc<dyn ApprovalGate>,
+        gate: GateSource,
         sandbox: Option<crate::sandbox::SandboxConfig>,
         date: String,
     ) -> Self {
@@ -323,17 +346,26 @@ impl EngineTemplate {
         }
     }
 
-    /// Assemble a fresh engine from the template (new MessageStore, new
-    /// per-tab tool/permission/cost state; shared gate).
+    /// Assemble a fresh engine using the template's default cwd and no source
+    /// label.
     pub async fn assemble(&self) -> Result<ZodeEngine, CoreError> {
-        ZodeEngine::assemble(
-            &self.cfg,
-            self.cwd.clone(),
-            self.gate.clone(),
-            self.sandbox.clone(),
-            &self.date,
-        )
-        .await
+        self.assemble_tab(None, None).await
+    }
+
+    /// Assemble a fresh engine for a tab. `cwd_override` lets a resumed session
+    /// run in its original directory; `label` tags approval prompts with the
+    /// requesting tab's id.
+    pub async fn assemble_tab(
+        &self,
+        cwd_override: Option<PathBuf>,
+        label: Option<String>,
+    ) -> Result<ZodeEngine, CoreError> {
+        let gate: Arc<dyn ApprovalGate> = match &self.gate {
+            GateSource::Shared(g) => g.clone(),
+            GateSource::Queue(q) => Arc::new(QueueGate::with_label(q.clone(), label)),
+        };
+        let cwd = cwd_override.unwrap_or_else(|| self.cwd.clone());
+        ZodeEngine::assemble(&self.cfg, cwd, gate, self.sandbox.clone(), &self.date).await
     }
 
     pub fn cwd(&self) -> &std::path::Path {

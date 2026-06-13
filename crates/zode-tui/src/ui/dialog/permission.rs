@@ -102,7 +102,8 @@ mod tests {
         let (queue, mut rx) = approval_queue();
         // Tool side requests; we capture the request to feed the dialog.
         let q = queue.clone();
-        let join = tokio::spawn(async move { q.request("Bash", &serde_json::json!({})).await });
+        let join =
+            tokio::spawn(async move { q.request("Bash", &serde_json::json!({}), None).await });
         let req = rx.next().await.unwrap();
         let mut dialog = PermissionDialog::new(req, std::env::temp_dir());
         assert!(!dialog.on_key('x')); // not a decision key

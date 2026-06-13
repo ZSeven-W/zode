@@ -105,6 +105,19 @@ impl TuiApp {
             .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
         let mut tab0 = SessionTab::new(0, Arc::new(engine), session_id);
         tab0.titled = resumed_id.is_some();
+        // A resumed session (--continue/--resume): replay its transcript into
+        // the chat and restore its title (the engine already holds the store).
+        if let Some(id) = &resumed_id {
+            if let Ok(store) = tab0.engine.store.lock() {
+                tab0.chat = rebuild_chat_from_store(&store);
+            }
+            if let Some(meta) = SessionIndex::load()
+                .ok()
+                .and_then(|i| i.find_prefix(id).cloned())
+            {
+                tab0.title = meta.title;
+            }
+        }
 
         Self {
             tabs: vec![tab0],
@@ -140,9 +153,9 @@ impl TuiApp {
 
     /// Open a fresh tab (Ctrl+T) with its own engine; focus it.
     async fn new_tab(&mut self) {
-        match self.template.assemble().await {
+        let id = self.next_tab_id;
+        match self.template.assemble_tab(None, Some(id.to_string())).await {
             Ok(engine) => {
-                let id = self.next_tab_id;
                 self.next_tab_id += 1;
                 let session_id = Uuid::new_v4().simple().to_string();
                 self.tabs
@@ -272,14 +285,25 @@ impl TuiApp {
             }
         };
         let chat = rebuild_chat_from_store(&store);
-        let engine = match self.template.assemble().await {
+        // Resume in the session's original directory when it still exists, so
+        // tools operate in the right repo (not the launch cwd).
+        let cwd_override = if std::path::Path::new(&meta.cwd).is_dir() {
+            Some(std::path::PathBuf::from(&meta.cwd))
+        } else {
+            None
+        };
+        let id = self.next_tab_id;
+        let engine = match self
+            .template
+            .assemble_tab(cwd_override, Some(id.to_string()))
+            .await
+        {
             Ok(e) => e.with_store(store),
             Err(e) => {
                 self.toast = Some(Toast::error(format!("assemble failed: {e}")));
                 return;
             }
         };
-        let id = self.next_tab_id;
         self.next_tab_id += 1;
         let mut tab = SessionTab::new(id, Arc::new(engine), meta.id.clone());
         tab.title = meta.title.clone();
@@ -377,6 +401,14 @@ impl TuiApp {
                     self.handle_agent_event(app_ev);
                 }
                 Some(req) = self.approval_rx.next() => {
+                    // Focus the tab that requested this approval (its gate is
+                    // labeled with its id) so the prompt appears over the right
+                    // conversation, not whatever tab happens to be active.
+                    if let Some(src) = req.source.as_deref().and_then(|s| s.parse::<usize>().ok()) {
+                        if let Some(pos) = self.tabs.iter().position(|t| t.id == src) {
+                            self.active = pos;
+                        }
+                    }
                     // An approval is the highest-priority modal: dismiss any
                     // settings/help/picker/panel overlay so it can't hide the
                     // prompt that is now capturing input.
@@ -721,6 +753,14 @@ impl TuiApp {
             self.handle_slash(name, args, agent_tx).await;
             return;
         }
+        // One turn per tab. A second turn on the same engine would run a second
+        // QueryLoop mutating the same MessageStore concurrently — reject it and
+        // restore the draft so the user can resend after the turn (or Ctrl+C).
+        if self.active_tab().is_busy() {
+            self.input.insert_str(text);
+            self.toast = Some(Toast::info("turn in progress — Ctrl+C to interrupt"));
+            return;
+        }
         // Stamp the session title from the first user prompt of this tab.
         if !self.active_tab().titled {
             self.active_tab_mut().stamp_title(text);
@@ -869,10 +909,15 @@ impl TuiApp {
             "exit" => self.should_quit = true,
             "help" => self.show_help = true,
             "clear" => {
-                let tab = &mut self.tabs[self.active];
-                tab.chat = ChatView::new();
-                if let Ok(mut store) = tab.engine.store.lock() {
-                    *store = agent::message::MessageStore::new();
+                // Mutating the store mid-turn races the running QueryLoop.
+                if self.active_tab().is_busy() {
+                    self.toast = Some(Toast::info("can't clear during a turn — Ctrl+C first"));
+                } else {
+                    let tab = &mut self.tabs[self.active];
+                    tab.chat = ChatView::new();
+                    if let Ok(mut store) = tab.engine.store.lock() {
+                        *store = agent::message::MessageStore::new();
+                    }
                 }
             }
             "theme" => self.handle_theme(args),
