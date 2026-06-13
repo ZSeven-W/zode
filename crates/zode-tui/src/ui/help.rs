@@ -13,6 +13,12 @@ use crate::theme::Theme;
 use crate::ui::centered;
 
 pub fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new("").style(Style::default().bg(theme.bg_primary)),
+        area,
+    );
+
     let popup = centered(area, 80, 70);
     f.render_widget(Clear, popup);
 
@@ -64,4 +70,34 @@ pub fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
         ),
         cols[1],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::ThemeStore;
+    use ratatui::{backend::TestBackend, widgets::Paragraph, Terminal};
+
+    #[test]
+    fn clears_the_full_screen_before_rendering_overlay() {
+        let theme = ThemeStore::with_builtins().resolve(Some("cyberpunk"));
+        let backend = TestBackend::new(100, 30);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            f.render_widget(Paragraph::new("LEAK_LEFT_SIDE"), f.area());
+            render_help(f, f.area(), &theme);
+        })
+        .unwrap();
+
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(!content.contains("LEAK_LEFT_SIDE"));
+        assert!(content.contains("Commands"));
+        assert!(content.contains("Keys"));
+    }
 }
