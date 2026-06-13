@@ -3,10 +3,14 @@
 //! keys here.
 
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders};
 use ratatui::Frame;
 use tui_textarea::TextArea;
+
+use crate::theme::Theme;
+use crate::ui::status::Mode;
 
 pub struct InputBox {
     area: TextArea<'static>,
@@ -53,12 +57,30 @@ impl InputBox {
         text
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect, theme: &crate::theme::Theme) {
+    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme, mode: Mode) {
+        let border_color = match mode {
+            Mode::Ready => theme.accent_secondary,
+            Mode::Thinking => theme.system,
+            Mode::Streaming => theme.accent,
+            Mode::Error => Color::Red,
+        };
+        let title = Line::styled(
+            " prompt ",
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
+        );
+        let hint = Line::styled(
+            " Enter send · Shift/Alt+Enter newline ",
+            Style::default().fg(theme.fg_subtle),
+        );
         let mut ta = self.area.clone();
         ta.set_block(
             Block::default()
-                .borders(Borders::LEFT)
-                .border_style(Style::default().fg(theme.accent))
+                .title(title)
+                .title_bottom(hint)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
                 .style(Style::default().bg(theme.bg_input).fg(theme.fg_text)),
         );
         f.render_widget(&ta, area);
@@ -68,6 +90,9 @@ impl InputBox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::ThemeStore;
+    use crate::ui::status::Mode;
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn take_submits_and_clears() {
@@ -83,5 +108,26 @@ mod tests {
     fn empty_take_returns_empty() {
         let mut ib = InputBox::new();
         assert_eq!(ib.take(), "");
+    }
+
+    #[test]
+    fn renders_composer_title_hint_and_text() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut ib = InputBox::new();
+        ib.insert_str("hello");
+        let backend = TestBackend::new(80, 4);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| ib.render(f, f.area(), &theme, Mode::Ready))
+            .unwrap();
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("prompt"));
+        assert!(content.contains("Enter send"));
+        assert!(content.contains("hello"));
     }
 }

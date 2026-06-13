@@ -530,7 +530,7 @@ impl TuiApp {
             };
             tab.chat.render(f, chat_area, &theme, chat_meta);
         }
-        self.input.render(f, input_area, &theme);
+        self.input.render(f, input_area, &theme, self.status.mode);
         self.status.render(f, status_area, &theme);
         // Autocomplete popup floats above the input row.
         self.autocomplete.render(f, input_area, &theme);
