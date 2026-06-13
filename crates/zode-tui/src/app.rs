@@ -410,6 +410,8 @@ impl TuiApp {
                     while let Some(item) = stream.next().await {
                         match item {
                             Ok(event) => {
+                                // Feed the cost tracker (counts only Usage events).
+                                engine.cost.observe(&event).await;
                                 if tx.send(AppEvent::Agent { turn_id, event }).is_err() {
                                     return;
                                 }
@@ -515,6 +517,10 @@ impl TuiApp {
             // restore could block) and toast the result back as an event.
             "undo" => self.spawn_history_op(agent_tx, true),
             "redo" => self.spawn_history_op(agent_tx, false),
+            "cost" => {
+                let report = self.engine.cost.report().await;
+                self.chat.push_system(&report);
+            }
             other => {
                 self.toast = Some(Toast::info(format!("/{other} lands in a later phase")));
             }

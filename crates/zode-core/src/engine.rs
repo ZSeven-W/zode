@@ -19,7 +19,7 @@ use agent::stream::EventStream;
 use agent::tool::{SafetyClass, ToolRegistry};
 use agent_tools_code::{
     register_default_with_todo, BashOutputTool, BashRunTool, BashSessionRegistry, KillShellTool,
-    TodoState, ToolSearchTool, WorkspacePolicy,
+    TaskTool, TodoState, ToolSearchTool, WorkspacePolicy,
 };
 // QueryLoop's builder takes std::sync::Mutex (not tokio's). We never hold
 // these guards across an await — callers snapshot (MessageStore: Clone)
@@ -29,6 +29,7 @@ use std::sync::Mutex;
 use crate::approval::ApprovalGate;
 use crate::bg_shells::{BackgroundShellTracker, BgShellHook};
 use crate::config::ZodeConfig;
+use crate::cost::CostState;
 use crate::error::CoreError;
 use crate::gated_tool::PermissionGatedTool;
 use crate::history::{EditHistory, EditHistoryHook};
@@ -36,6 +37,7 @@ use crate::hooks_config::load_hook_handlers;
 use crate::instructions::{build_system_prompt, discover_instructions, gather_env};
 use crate::provider::build_provider;
 use crate::skills::{load_skills_from, skills_dirs, skills_index, SkillTool};
+use crate::task_factory::ZodeTaskFactory;
 
 const EDIT_HISTORY_CAPACITY: usize = 50;
 
@@ -68,6 +70,8 @@ pub struct ZodeEngine {
     pub skills: Arc<SkillRegistry>,
     /// MCP lifecycle, if any servers were configured (`/mcp` reports state).
     pub mcp: Option<Arc<agent::mcp::Lifecycle>>,
+    /// Token/cost tracking (fed Usage events by the consumer; `/cost`).
+    pub cost: Arc<CostState>,
 }
 
 impl ZodeEngine {
@@ -141,6 +145,27 @@ impl ZodeEngine {
             None => None,
         };
 
+        // Permissions: Bypass mode (so non-denied tools reach the gate) plus
+        // hard-deny rules (still enforced ahead of the bypass). Interactive
+        // `ask` is handled entirely by the gate (master §4.6①). Built here so
+        // the Task sub-agent factory can share it.
+        let mut pm = PermissionManager::new().with_mode(PermissionMode::Bypass);
+        for tool in &cfg.permissions.deny {
+            pm = pm.deny(RuleSource::User, tool.clone());
+        }
+        let permissions = Arc::new(pm);
+
+        // Task sub-agent tool: the factory snapshots the current tool set
+        // (which has no Task yet — recursion guard) and shares the parent's
+        // provider/model/permissions. Registered LAST among base tools.
+        let task_factory = Arc::new(ZodeTaskFactory::new(
+            provider.clone(),
+            model.clone(),
+            Arc::new(base.clone()),
+            permissions.clone(),
+        ));
+        base.register(Arc::new(TaskTool::new(task_factory)));
+
         // --sandbox: wrap Bash/BashRun so writes are confined to cwd. Done
         // before gate-wrapping so the final shape is
         // PermissionGatedTool(SandboxedBashTool(Bash)).
@@ -158,15 +183,6 @@ impl ZodeEngine {
         gated.register(Arc::new(ToolSearchTool::new(candidates)));
 
         let tools = Arc::new(gated);
-
-        // Permissions: Bypass mode (so non-denied tools reach the gate)
-        // plus hard-deny rules (still enforced ahead of the bypass).
-        // Interactive `ask` is handled entirely by the gate (master §4.6①).
-        let mut pm = PermissionManager::new().with_mode(PermissionMode::Bypass);
-        for tool in &cfg.permissions.deny {
-            pm = pm.deny(RuleSource::User, tool.clone());
-        }
-        let permissions = Arc::new(pm);
 
         let file_cache = Arc::new(FileStateCache::new(
             NonZeroUsize::new(FILE_CACHE_ENTRIES).expect("nonzero"),
@@ -196,6 +212,9 @@ impl ZodeEngine {
         let instructions = discover_instructions(&cwd);
         let system = Some(build_system_prompt(&instructions, &skills_idx, &env));
 
+        // Clone before `model` is moved into the struct's `model` field below.
+        let model_for_cost = model.clone();
+
         Ok(Self {
             provider,
             tools,
@@ -214,6 +233,7 @@ impl ZodeEngine {
             bg_shells_meta,
             skills,
             mcp,
+            cost: Arc::new(CostState::new(model_for_cost)),
         })
     }
 
@@ -311,7 +331,28 @@ mod tests {
             names.contains(&"ToolSearch".to_string()),
             "names: {names:?}"
         );
+        assert!(names.contains(&"Task".to_string()), "names: {names:?}");
         assert_eq!(eng.model, "MiniMax-M1");
+    }
+
+    #[tokio::test]
+    async fn task_tool_is_registered_and_gated() {
+        // Task is SafetyClass::Mutating, so it must reach the gate (be
+        // wrapped) rather than pass through unwrapped like a read-only tool.
+        let dir = tempfile::tempdir().unwrap();
+        let eng = ZodeEngine::assemble(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-06-13",
+        )
+        .await
+        .unwrap();
+        let task = eng.tools.get("Task").expect("Task tool registered");
+        assert!(!matches!(task.safety_class(), SafetyClass::ReadOnly));
+        // Cost tracker is wired to the configured model.
+        assert!(eng.cost.report().await.contains("MiniMax-M1"));
     }
 
     #[tokio::test]

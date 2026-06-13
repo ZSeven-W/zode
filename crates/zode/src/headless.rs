@@ -31,23 +31,28 @@ pub async fn run_print(engine: &ZodeEngine, prompt: &str) -> i32 {
     let mut exit = 0;
     let mut stdout = std::io::stdout();
     while let Some(item) = stream.next().await {
-        match item {
-            Ok(Event::TextDelta { delta }) => {
-                let _ = write!(stdout, "{delta}");
-                let _ = stdout.flush();
-            }
-            Ok(Event::ToolUse { name, .. }) => eprintln!("· {name}"),
-            Ok(Event::ToolResult { ok, .. }) if !ok => eprintln!("· tool failed"),
-            Ok(Event::Error { code, message }) => {
-                eprintln!("\nzode error [{code}]: {message}");
-                exit = 1;
-            }
-            Ok(_) => {}
+        let event = match item {
+            Ok(ev) => ev,
             Err(e) => {
                 eprintln!("\nzode stream error: {e}");
                 exit = 1;
                 break;
             }
+        };
+        // Feed every event to the cost tracker (it counts only Usage events).
+        engine.cost.observe(&event).await;
+        match event {
+            Event::TextDelta { delta } => {
+                let _ = write!(stdout, "{delta}");
+                let _ = stdout.flush();
+            }
+            Event::ToolUse { name, .. } => eprintln!("· {name}"),
+            Event::ToolResult { ok, .. } if !ok => eprintln!("· tool failed"),
+            Event::Error { code, message } => {
+                eprintln!("\nzode error [{code}]: {message}");
+                exit = 1;
+            }
+            _ => {}
         }
     }
     let _ = writeln!(stdout);
@@ -163,7 +168,7 @@ async fn dispatch_command(
             // A manual, hook-driven /compact lands in a later phase.
             println!("(auto-compaction is enabled; manual /compact lands later)");
         }
-        "cost" => println!("(cost tracking surfaces in Phase 07)"),
+        "cost" => println!("{}", engine.cost.report().await),
         "undo" => match engine.undo().await {
             Ok(p) => println!("(undid edit to {})", p.display()),
             Err(e) => println!("({e})"),
@@ -219,18 +224,23 @@ async fn run_turn(engine: &ZodeEngine, prompt: &str) {
     };
     let mut out = std::io::stdout();
     while let Some(item) = stream.next().await {
-        match item {
-            Ok(Event::TextDelta { delta }) => {
-                let _ = write!(out, "{delta}");
-                let _ = out.flush();
-            }
-            Ok(Event::ToolUse { name, .. }) => eprintln!("\n· {name}"),
-            Ok(Event::Error { code, message }) => eprintln!("\n[{code}] {message}"),
-            Ok(_) => {}
+        let event = match item {
+            Ok(ev) => ev,
             Err(e) => {
                 eprintln!("\nstream error: {e}");
                 break;
             }
+        };
+        // Feed every event to the cost tracker (it counts only Usage events).
+        engine.cost.observe(&event).await;
+        match event {
+            Event::TextDelta { delta } => {
+                let _ = write!(out, "{delta}");
+                let _ = out.flush();
+            }
+            Event::ToolUse { name, .. } => eprintln!("\n· {name}"),
+            Event::Error { code, message } => eprintln!("\n[{code}] {message}"),
+            _ => {}
         }
     }
     let _ = writeln!(out);
