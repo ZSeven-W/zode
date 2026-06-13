@@ -1,4 +1,4 @@
-//! Main TUI chrome: frame split and header rendering.
+//! Main TUI layout: frame split and header rendering.
 
 use std::path::{Component, Path};
 

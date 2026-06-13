@@ -11,7 +11,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::theme::Theme;
-use crate::ui::chrome::compact_path;
+use crate::ui::layout::compact_path;
 use crate::ui::markdown::render_markdown;
 
 /// Approximate the number of wrapped rows a line occupies at `width`

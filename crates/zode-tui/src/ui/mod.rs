@@ -2,11 +2,11 @@
 
 pub mod autocomplete;
 pub mod chat;
-pub mod chrome;
 pub mod dialog;
 pub mod diff;
 pub mod help;
 pub mod input;
+pub mod layout;
 pub mod markdown;
 pub mod status;
 pub mod tabs;
