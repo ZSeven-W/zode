@@ -1,10 +1,5 @@
-//! zode-tui — ratatui-based terminal chrome for Zode.
-//!
-//! Implemented from Phase 04 onward. This crate consumes
-//! `agent::stream::Event` streams from `zode_core::ZodeEngine` and
-//! renders them; it never talks to providers directly.
+//! zode-tui — ratatui terminal chrome for Zode. Consumes
+//! `zode_core::ZodeEngine` event streams; never talks to providers.
 
-/// Placeholder until Phase 04 lands `TuiApp::run`.
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
+pub mod theme;
+pub mod ui;
