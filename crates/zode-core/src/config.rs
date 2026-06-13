@@ -61,6 +61,9 @@ pub struct ZodeConfig {
     pub theme: Option<String>,
     pub permissions: PermissionsConfig,
     pub max_output_tokens: Option<u32>,
+    /// Sampling temperature. `None` uses the provider default; a low value
+    /// (e.g. 0) makes coding output deterministic and more reliably correct.
+    pub temperature: Option<f32>,
 
     // --- Legacy (Zig/TS-era) flat fields, read-only for backward compat.
     // Mapped into `provider` by `normalize_legacy()` and dropped on save

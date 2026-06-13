@@ -58,6 +58,8 @@ pub struct ZodeEngine {
     pub system: Option<String>,
     pub cwd: PathBuf,
     pub max_output_tokens: u32,
+    /// Sampling temperature (None = provider default).
+    pub temperature: Option<f32>,
     /// Background shell registry (Phase 03/07 inspect this).
     pub bash_sessions: BashSessionRegistry,
     /// Shared TodoWrite state handle (Phase 07 reads the list for the UI).
@@ -239,6 +241,7 @@ impl ZodeEngine {
             system,
             cwd,
             max_output_tokens: cfg.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
+            temperature: cfg.temperature,
             bash_sessions,
             todo_state,
             history,
@@ -299,6 +302,9 @@ impl ZodeEngine {
             .model_max_tokens(DEFAULT_MODEL_MAX_TOKENS)
             .cwd(self.cwd.clone())
             .auto_compact(true);
+        if let Some(t) = self.temperature {
+            builder = builder.temperature(t);
+        }
         if let Some(sys) = &self.system {
             builder = builder.system(sys.clone());
         }
