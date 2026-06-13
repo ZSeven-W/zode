@@ -1,0 +1,102 @@
+//! Central keybinding table. Used by the help overlay to list bindings;
+//! the app dispatches keys directly (the table is the documented source of
+//! truth). Phase 07 binds Ctrl+T / Ctrl+W (tabs) — listed here now so help
+//! shows them.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionId {
+    Submit,
+    Newline,
+    Interrupt,
+    Quit,
+    ClearScreen,
+    ScrollUp,
+    ScrollDown,
+    OpenSettings,
+    OpenHelp,
+    NewTab,
+    CloseTab,
+    Dismiss,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Binding {
+    pub keys: &'static str,
+    pub action: ActionId,
+    pub help: &'static str,
+}
+
+pub static KEYMAP: &[Binding] = &[
+    Binding {
+        keys: "Enter",
+        action: ActionId::Submit,
+        help: "Send message",
+    },
+    Binding {
+        keys: "Shift/Alt+Enter",
+        action: ActionId::Newline,
+        help: "Newline",
+    },
+    Binding {
+        keys: "Ctrl+C",
+        action: ActionId::Interrupt,
+        help: "Interrupt turn / quit when idle",
+    },
+    Binding {
+        keys: "Ctrl+D",
+        action: ActionId::Quit,
+        help: "Quit",
+    },
+    Binding {
+        keys: "Ctrl+L",
+        action: ActionId::ClearScreen,
+        help: "Clear screen",
+    },
+    Binding {
+        keys: "PgUp",
+        action: ActionId::ScrollUp,
+        help: "Scroll up",
+    },
+    Binding {
+        keys: "PgDn",
+        action: ActionId::ScrollDown,
+        help: "Scroll down",
+    },
+    Binding {
+        keys: "Ctrl+O",
+        action: ActionId::OpenSettings,
+        help: "Settings (options)",
+    },
+    Binding {
+        keys: "F1 / /help",
+        action: ActionId::OpenHelp,
+        help: "Help",
+    },
+    Binding {
+        keys: "Ctrl+T",
+        action: ActionId::NewTab,
+        help: "New session tab (Phase 07)",
+    },
+    Binding {
+        keys: "Ctrl+W",
+        action: ActionId::CloseTab,
+        help: "Close tab (Phase 07)",
+    },
+    Binding {
+        keys: "Esc",
+        action: ActionId::Dismiss,
+        help: "Close overlay",
+    },
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keymap_has_core_bindings() {
+        assert!(KEYMAP.iter().any(|b| b.action == ActionId::Submit));
+        assert!(KEYMAP.iter().any(|b| b.action == ActionId::OpenSettings));
+        assert!(KEYMAP.iter().any(|b| b.action == ActionId::OpenHelp));
+    }
+}

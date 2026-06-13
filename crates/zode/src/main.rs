@@ -100,6 +100,7 @@ async fn run(args: Args) -> i32 {
         theme_id: cfg.theme.clone(),
         yolo: args.yolo,
         sandbox: args.sandbox,
+        provider_names: cfg.providers.keys().cloned().collect(),
     };
     match zode_tui::TuiApp::new(engine, ui, approval_rx).run().await {
         Ok(()) => 0,

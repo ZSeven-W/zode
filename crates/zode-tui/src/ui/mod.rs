@@ -1,11 +1,14 @@
 //! TUI widgets and rendering helpers.
 
+pub mod autocomplete;
 pub mod chat;
 pub mod dialog;
 pub mod diff;
+pub mod help;
 pub mod input;
 pub mod markdown;
 pub mod status;
+pub mod toast;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
