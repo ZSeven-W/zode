@@ -277,6 +277,57 @@ impl ZodeEngine {
     }
 }
 
+/// Everything needed to assemble a fresh `ZodeEngine`. The TUI keeps one of
+/// these so it can spin up an independent engine per session tab. The gate is
+/// shared (Arc) so every tab's approvals route to the same UI queue.
+#[derive(Clone)]
+pub struct EngineTemplate {
+    cfg: ZodeConfig,
+    cwd: PathBuf,
+    gate: Arc<dyn ApprovalGate>,
+    sandbox: Option<crate::sandbox::SandboxConfig>,
+    date: String,
+}
+
+impl EngineTemplate {
+    pub fn new(
+        cfg: ZodeConfig,
+        cwd: PathBuf,
+        gate: Arc<dyn ApprovalGate>,
+        sandbox: Option<crate::sandbox::SandboxConfig>,
+        date: String,
+    ) -> Self {
+        Self {
+            cfg,
+            cwd,
+            gate,
+            sandbox,
+            date,
+        }
+    }
+
+    /// Assemble a fresh engine from the template (new MessageStore, new
+    /// per-tab tool/permission/cost state; shared gate).
+    pub async fn assemble(&self) -> Result<ZodeEngine, CoreError> {
+        ZodeEngine::assemble(
+            &self.cfg,
+            self.cwd.clone(),
+            self.gate.clone(),
+            self.sandbox.clone(),
+            &self.date,
+        )
+        .await
+    }
+
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    pub fn model(&self) -> Option<&str> {
+        self.cfg.provider.model.as_deref()
+    }
+}
+
 /// Re-register every tool, wrapping mutating/destructive ones in a
 /// PermissionGatedTool. Read-only tools pass through unwrapped.
 fn wrap_mutating_tools(src: ToolRegistry, gate: &Arc<dyn ApprovalGate>) -> ToolRegistry {

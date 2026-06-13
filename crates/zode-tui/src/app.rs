@@ -18,12 +18,14 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Terminal;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 use zode_core::approval::{ApprovalReceiver, ApprovalRequest};
 use zode_core::commands::parse_slash;
 use zode_core::config::ConfigManager;
-use zode_core::ZodeEngine;
+use zode_core::{EngineTemplate, ZodeEngine};
 
 use crate::event::AppEvent;
+use crate::tab::SessionTab;
 use crate::theme::{Theme, ThemeStore};
 use crate::ui::autocomplete::Autocomplete;
 use crate::ui::chat::ChatView;
@@ -31,6 +33,7 @@ use crate::ui::dialog::permission::PermissionDialog;
 use crate::ui::dialog::settings::{SettingsAction, SettingsDialog, SettingsLevel};
 use crate::ui::input::InputBox;
 use crate::ui::status::{Mode, StatusBar};
+use crate::ui::tabs::render_tabs;
 use crate::ui::toast::Toast;
 
 pub struct UiConfig {
@@ -42,19 +45,18 @@ pub struct UiConfig {
 }
 
 pub struct TuiApp {
-    engine: Arc<ZodeEngine>,
-    chat: ChatView,
+    /// One independent conversation per tab; `active` indexes the focused one.
+    tabs: Vec<SessionTab>,
+    active: usize,
+    /// Monotonic tab-id source (never reused, so stale events from a closed
+    /// tab can't land on a freshly-opened tab that took its Vec slot).
+    next_tab_id: usize,
+    /// Assembly context for spinning up a fresh engine on Ctrl+T / resume.
+    template: EngineTemplate,
     input: InputBox,
     status: StatusBar,
     theme_store: ThemeStore,
     theme: Theme,
-    /// Abort handle for the in-flight turn, if any.
-    turn_abort: Option<AbortController>,
-    /// Monotonic turn counter; `active_turn_id` is the turn whose events we
-    /// currently accept. Aborting/superseding bumps it so stale events from
-    /// a still-draining task are dropped (agent events carry no turn id).
-    turn_seq: u64,
-    active_turn_id: u64,
     should_quit: bool,
     /// Approval requests from gated tools (one dialog shown at a time).
     approval_rx: ApprovalReceiver,
@@ -68,7 +70,13 @@ pub struct TuiApp {
 }
 
 impl TuiApp {
-    pub fn new(engine: ZodeEngine, ui: UiConfig, approval_rx: ApprovalReceiver) -> Self {
+    pub fn new(
+        engine: ZodeEngine,
+        template: EngineTemplate,
+        ui: UiConfig,
+        approval_rx: ApprovalReceiver,
+        resumed_id: Option<String>,
+    ) -> Self {
         let mut theme_store = ThemeStore::with_builtins();
         if let Ok(dir) = ConfigManager::config_dir() {
             theme_store.merge_user(crate::theme::loader::load_dir(&dir.join("themes")));
@@ -77,15 +85,24 @@ impl TuiApp {
         let mut status = StatusBar::new(engine.model.clone());
         status.yolo = ui.yolo;
         status.sandbox = ui.sandbox;
+
+        // Tab 0 wraps the already-assembled engine. A resumed session keeps
+        // its id (and is pre-titled); a fresh one gets a new id.
+        let session_id = resumed_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+        let mut tab0 = SessionTab::new(0, Arc::new(engine), session_id);
+        tab0.titled = resumed_id.is_some();
+
         Self {
-            chat: ChatView::new(),
+            tabs: vec![tab0],
+            active: 0,
+            next_tab_id: 1,
+            template,
             input: InputBox::new(),
             status,
             theme_store,
             theme,
-            turn_abort: None,
-            turn_seq: 0,
-            active_turn_id: 0,
             should_quit: false,
             approval_rx,
             active_dialog: None,
@@ -95,8 +112,71 @@ impl TuiApp {
             show_help: false,
             toast: None,
             provider_names: ui.provider_names,
-            engine: Arc::new(engine),
         }
+    }
+
+    fn active_tab(&self) -> &SessionTab {
+        &self.tabs[self.active]
+    }
+
+    fn active_tab_mut(&mut self) -> &mut SessionTab {
+        &mut self.tabs[self.active]
+    }
+
+    /// Open a fresh tab (Ctrl+T) with its own engine; focus it.
+    async fn new_tab(&mut self) {
+        match self.template.assemble().await {
+            Ok(engine) => {
+                let id = self.next_tab_id;
+                self.next_tab_id += 1;
+                let session_id = Uuid::new_v4().simple().to_string();
+                self.tabs
+                    .push(SessionTab::new(id, Arc::new(engine), session_id));
+                self.active = self.tabs.len() - 1;
+                self.autocomplete.dismiss();
+            }
+            Err(e) => {
+                self.toast = Some(Toast::error(format!("new tab failed: {e}")));
+            }
+        }
+    }
+
+    /// Close the active tab (Ctrl+W). Aborts its in-flight turn first; closing
+    /// the last tab quits.
+    fn close_active_tab(&mut self) {
+        if self.tabs.len() == 1 {
+            self.should_quit = true;
+            return;
+        }
+        if let Some(abort) = self.tabs[self.active].turn_abort.take() {
+            abort.abort_with_reason("tab closed");
+        }
+        self.tabs.remove(self.active);
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
+        }
+        self.autocomplete.dismiss();
+    }
+
+    /// Focus the tab at position `idx` (Ctrl+digit), if it exists.
+    fn switch_to(&mut self, idx: usize) {
+        if idx < self.tabs.len() {
+            self.active = idx;
+            self.autocomplete.dismiss();
+        }
+    }
+
+    /// Cycle to the next tab (Ctrl+Tab), wrapping around.
+    fn cycle_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active = (self.active + 1) % self.tabs.len();
+            self.autocomplete.dismiss();
+        }
+    }
+
+    /// The tab whose id matches, if still open (events from closed tabs drop).
+    fn tab_by_id(&mut self, id: usize) -> Option<&mut SessionTab> {
+        self.tabs.iter_mut().find(|t| t.id == id)
     }
 
     pub async fn run(mut self) -> std::io::Result<()> {
@@ -136,7 +216,7 @@ impl TuiApp {
                     self.settings = None;
                     self.show_help = false;
                     if self.active_dialog.is_none() {
-                        let cwd = self.engine.cwd.clone();
+                        let cwd = self.active_tab().engine.cwd.clone();
                         self.active_dialog = Some(PermissionDialog::new(req, cwd));
                     } else {
                         self.pending_requests.push_back(req);
@@ -161,19 +241,45 @@ impl TuiApp {
         // borrow. Cheap relative to a frame at 10fps.
         let theme = self.theme.clone();
         let area = f.area();
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
+        // Mirror the active tab's live mode/token counts into the status bar.
+        {
+            let tab = &self.tabs[self.active];
+            self.status.mode = tab.mode;
+            self.status.input_tokens = tab.input_tokens;
+            self.status.output_tokens = tab.output_tokens;
+        }
+        // A tab bar row appears only when more than one tab exists, so the
+        // single-tab layout is unchanged.
+        let show_tabs = self.tabs.len() > 1;
+        let constraints = if show_tabs {
+            vec![
+                Constraint::Length(1), // tab bar
                 Constraint::Min(3),    // chat
                 Constraint::Length(3), // input
                 Constraint::Length(1), // status
-            ])
+            ]
+        } else {
+            vec![
+                Constraint::Min(3),    // chat
+                Constraint::Length(3), // input
+                Constraint::Length(1), // status
+            ]
+        };
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
             .split(area);
-        self.chat.render(f, chunks[0], &theme);
-        self.input.render(f, chunks[1], &theme);
-        self.status.render(f, chunks[2], &theme);
+        let (chat_area, input_area, status_area) = if show_tabs {
+            render_tabs(f, chunks[0], &self.tabs, self.active, &theme);
+            (chunks[1], chunks[2], chunks[3])
+        } else {
+            (chunks[0], chunks[1], chunks[2])
+        };
+        self.tabs[self.active].chat.render(f, chat_area, &theme);
+        self.input.render(f, input_area, &theme);
+        self.status.render(f, status_area, &theme);
         // Autocomplete popup floats above the input row.
-        self.autocomplete.render(f, chunks[1], &theme);
+        self.autocomplete.render(f, input_area, &theme);
         // Overlays, lowest first. The permission dialog renders LAST (above
         // settings/help) because it captures input with the highest
         // precedence — it must never be hidden behind another overlay.
@@ -210,7 +316,7 @@ impl TuiApp {
                 _ => return,
             };
             if dialog.on_key(answer) {
-                let cwd = self.engine.cwd.clone();
+                let cwd = self.active_tab().engine.cwd.clone();
                 self.active_dialog = self
                     .pending_requests
                     .pop_front()
@@ -236,12 +342,13 @@ impl TuiApp {
         // 4. Global chords.
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                if let Some(abort) = self.turn_abort.take() {
+                let tab = &mut self.tabs[self.active];
+                if let Some(abort) = tab.turn_abort.take() {
                     abort.abort_with_reason("user interrupted");
-                    self.active_turn_id = 0;
-                    self.chat.end_turn();
-                    self.chat.push_system("(interrupted)");
-                    self.status.mode = Mode::Ready;
+                    tab.active_turn_id = 0;
+                    tab.chat.end_turn();
+                    tab.chat.push_system("(interrupted)");
+                    tab.mode = Mode::Ready;
                 } else {
                     self.should_quit = true;
                 }
@@ -252,11 +359,29 @@ impl TuiApp {
                 return;
             }
             (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
-                self.chat = ChatView::new();
+                self.tabs[self.active].chat = ChatView::new();
                 return;
             }
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
                 self.open_settings();
+                return;
+            }
+            (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+                self.new_tab().await;
+                return;
+            }
+            (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+                self.close_active_tab();
+                return;
+            }
+            // Ctrl+1..9 jump to a tab by position.
+            (KeyCode::Char(c), KeyModifiers::CONTROL) if c.is_ascii_digit() && c != '0' => {
+                let n = (c as u8 - b'1') as usize;
+                self.switch_to(n);
+                return;
+            }
+            (KeyCode::Tab, KeyModifiers::CONTROL) => {
+                self.cycle_tab();
                 return;
             }
             (KeyCode::F(1), _) => {
@@ -264,11 +389,11 @@ impl TuiApp {
                 return;
             }
             (KeyCode::PageUp, _) => {
-                self.chat.scroll_up(5);
+                self.tabs[self.active].chat.scroll_up(5);
                 return;
             }
             (KeyCode::PageDown, _) => {
-                self.chat.scroll_down(5);
+                self.tabs[self.active].chat.scroll_down(5);
                 return;
             }
             _ => {}
@@ -390,18 +515,25 @@ impl TuiApp {
             self.handle_slash(name, args, agent_tx).await;
             return;
         }
-        self.chat.push_user(text);
+        // Stamp the session title from the first user prompt of this tab.
+        if !self.active_tab().titled {
+            self.active_tab_mut().stamp_title(text);
+        }
+
+        let tab = &mut self.tabs[self.active];
+        tab.chat.push_user(text);
         // No begin_assistant(): push_delta lazily opens an assistant segment,
         // so text after a tool card starts a fresh segment.
-        self.status.mode = Mode::Thinking;
+        tab.mode = Mode::Thinking;
 
-        self.turn_seq += 1;
-        let turn_id = self.turn_seq;
-        self.active_turn_id = turn_id;
+        tab.turn_seq += 1;
+        let turn_id = tab.turn_seq;
+        tab.active_turn_id = turn_id;
+        let tab_id = tab.id;
         let abort = AbortController::new();
-        self.turn_abort = Some(abort.clone());
+        tab.turn_abort = Some(abort.clone());
 
-        let engine = self.engine.clone();
+        let engine = tab.engine.clone();
         let prompt = text.to_string();
         let tx = agent_tx.clone();
         tokio::spawn(async move {
@@ -412,12 +544,20 @@ impl TuiApp {
                             Ok(event) => {
                                 // Feed the cost tracker (counts only Usage events).
                                 engine.cost.observe(&event).await;
-                                if tx.send(AppEvent::Agent { turn_id, event }).is_err() {
+                                if tx
+                                    .send(AppEvent::Agent {
+                                        tab_id,
+                                        turn_id,
+                                        event,
+                                    })
+                                    .is_err()
+                                {
                                     return;
                                 }
                             }
                             Err(e) => {
                                 let _ = tx.send(AppEvent::TurnDone {
+                                    tab_id,
                                     turn_id,
                                     result: Err(e.to_string()),
                                 });
@@ -426,12 +566,14 @@ impl TuiApp {
                         }
                     }
                     let _ = tx.send(AppEvent::TurnDone {
+                        tab_id,
                         turn_id,
                         result: Ok(()),
                     });
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::TurnDone {
+                        tab_id,
                         turn_id,
                         result: Err(e.to_string()),
                     });
@@ -441,7 +583,7 @@ impl TuiApp {
     }
 
     fn handle_agent_event(&mut self, ev: AppEvent) {
-        // Toasts (from off-loop work) carry no turn id.
+        // Toasts (from off-loop work) carry no tab/turn id.
         if let AppEvent::Toast { text, error } = ev {
             self.toast = Some(if error {
                 Toast::error(text)
@@ -450,48 +592,62 @@ impl TuiApp {
             });
             return;
         }
-        // Drop events from aborted/superseded turns.
-        let turn_id = match &ev {
-            AppEvent::Agent { turn_id, .. } | AppEvent::TurnDone { turn_id, .. } => *turn_id,
+        // Route to the originating tab; drop events from a closed tab.
+        let (tab_id, turn_id) = match &ev {
+            AppEvent::Agent {
+                tab_id, turn_id, ..
+            }
+            | AppEvent::TurnDone {
+                tab_id, turn_id, ..
+            } => (*tab_id, *turn_id),
             AppEvent::Toast { .. } => unreachable!("handled above"),
         };
-        if turn_id != self.active_turn_id {
+        let Some(tab) = self.tab_by_id(tab_id) else {
+            return;
+        };
+        // Drop events from an aborted/superseded turn within that tab.
+        if turn_id != tab.active_turn_id {
             return;
         }
         match ev {
             AppEvent::Agent { event, .. } => match event {
                 Event::TextDelta { delta } => {
-                    self.status.mode = Mode::Streaming;
-                    self.chat.push_delta(&delta);
+                    tab.mode = Mode::Streaming;
+                    tab.chat.push_delta(&delta);
                 }
-                Event::ToolUse { name, .. } => self.chat.push_tool(&name),
+                Event::ToolUse { name, .. } => tab.chat.push_tool(&name),
                 Event::Usage {
                     input_tokens,
                     output_tokens,
                     ..
                 } => {
-                    self.status.input_tokens =
-                        self.status.input_tokens.saturating_add(input_tokens);
-                    self.status.output_tokens =
-                        self.status.output_tokens.saturating_add(output_tokens);
+                    tab.input_tokens = tab.input_tokens.saturating_add(input_tokens);
+                    tab.output_tokens = tab.output_tokens.saturating_add(output_tokens);
                 }
                 Event::Error { code, message } => {
-                    self.chat.push_system(&format!("error [{code}]: {message}"));
-                    self.status.mode = Mode::Error;
+                    tab.chat.push_system(&format!("error [{code}]: {message}"));
+                    tab.mode = Mode::Error;
                 }
                 _ => {}
             },
             AppEvent::TurnDone { result, .. } => {
-                self.chat.end_turn();
-                self.turn_abort = None;
-                self.active_turn_id = 0;
-                self.status.mode = match result {
+                tab.chat.end_turn();
+                tab.turn_abort = None;
+                tab.active_turn_id = 0;
+                tab.mode = match result {
                     Ok(()) => Mode::Ready,
                     Err(e) => {
-                        self.chat.push_system(&format!("turn failed: {e}"));
+                        tab.chat.push_system(&format!("turn failed: {e}"));
                         Mode::Error
                     }
                 };
+                // Persist the session off the event loop.
+                let (session_id, engine, title) = (
+                    tab.session_id.clone(),
+                    tab.engine.clone(),
+                    tab.title.clone(),
+                );
+                tokio::spawn(crate::tab::persist_session(session_id, engine, title));
             }
             AppEvent::Toast { .. } => unreachable!("handled above"),
         }
@@ -507,8 +663,9 @@ impl TuiApp {
             "exit" => self.should_quit = true,
             "help" => self.show_help = true,
             "clear" => {
-                self.chat = ChatView::new();
-                if let Ok(mut store) = self.engine.store.lock() {
+                let tab = &mut self.tabs[self.active];
+                tab.chat = ChatView::new();
+                if let Ok(mut store) = tab.engine.store.lock() {
                     *store = agent::message::MessageStore::new();
                 }
             }
@@ -518,8 +675,8 @@ impl TuiApp {
             "undo" => self.spawn_history_op(agent_tx, true),
             "redo" => self.spawn_history_op(agent_tx, false),
             "cost" => {
-                let report = self.engine.cost.report().await;
-                self.chat.push_system(&report);
+                let report = self.active_tab().engine.cost.report().await;
+                self.active_tab_mut().chat.push_system(&report);
             }
             other => {
                 self.toast = Some(Toast::info(format!("/{other} lands in a later phase")));
@@ -528,7 +685,7 @@ impl TuiApp {
     }
 
     fn spawn_history_op(&self, agent_tx: &mpsc::UnboundedSender<AppEvent>, undo: bool) {
-        let engine = self.engine.clone();
+        let engine = self.active_tab().engine.clone();
         let tx = agent_tx.clone();
         tokio::spawn(async move {
             let (verb, r) = if undo {
@@ -558,7 +715,8 @@ impl TuiApp {
                 .iter()
                 .map(|t| format!("{} ({})", t.id, t.name))
                 .collect();
-            self.chat
+            self.active_tab_mut()
+                .chat
                 .push_system(&format!("themes: {}", ids.join(", ")));
             return;
         }
@@ -568,9 +726,13 @@ impl TuiApp {
                 cfg.theme = Some(args.to_string());
                 let _ = ConfigManager::save_global(&cfg);
             }
-            self.chat.push_system(&format!("theme → {args}"));
+            self.active_tab_mut()
+                .chat
+                .push_system(&format!("theme → {args}"));
         } else {
-            self.chat.push_system(&format!("unknown theme: {args}"));
+            self.active_tab_mut()
+                .chat
+                .push_system(&format!("unknown theme: {args}"));
         }
     }
 }

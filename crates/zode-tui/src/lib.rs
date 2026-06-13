@@ -4,6 +4,7 @@
 pub mod app;
 pub mod event;
 pub mod keymap;
+pub mod tab;
 pub mod theme;
 pub mod ui;
 

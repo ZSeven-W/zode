@@ -8,6 +8,7 @@ pub mod help;
 pub mod input;
 pub mod markdown;
 pub mod status;
+pub mod tabs;
 pub mod toast;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};

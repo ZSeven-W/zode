@@ -11,7 +11,7 @@ use clap::Parser;
 use zode_core::approval::{ApprovalGate, BypassGate, StdinGate};
 use zode_core::config::ConfigManager;
 use zode_core::session_meta::SessionIndex;
-use zode_core::ZodeEngine;
+use zode_core::{EngineTemplate, ZodeEngine};
 
 #[tokio::main]
 async fn main() {
@@ -94,17 +94,27 @@ async fn run(args: Args) -> i32 {
     } else {
         Arc::new(zode_core::approval::QueueGate::new(queue))
     };
-    let Some(engine) = build(&cfg, cwd, gate, sandbox, &today).await else {
-        return 1;
+    // The TUI keeps a template so Ctrl+T / resume can assemble more engines,
+    // all sharing this one gate (so every tab's approvals reach the same UI).
+    let template = EngineTemplate::new(cfg.clone(), cwd, gate, sandbox, today);
+    let engine = match template.assemble().await {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("zode: {e}");
+            return 1;
+        }
     };
-    let (engine, _resumed_id) = resume_into(engine, &args).await;
+    let (engine, resumed_id) = resume_into(engine, &args).await;
     let ui = zode_tui::UiConfig {
         theme_id: cfg.theme.clone(),
         yolo: args.yolo,
         sandbox: args.sandbox,
         provider_names: cfg.providers.keys().cloned().collect(),
     };
-    match zode_tui::TuiApp::new(engine, ui, approval_rx).run().await {
+    match zode_tui::TuiApp::new(engine, template, ui, approval_rx, resumed_id)
+        .run()
+        .await
+    {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("zode tui: {e}");
