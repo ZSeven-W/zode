@@ -164,6 +164,14 @@ async fn dispatch_command(
             println!("(auto-compaction is enabled; manual /compact lands later)");
         }
         "cost" => println!("(cost tracking surfaces in Phase 07)"),
+        "undo" => match engine.undo().await {
+            Ok(p) => println!("(undid edit to {})", p.display()),
+            Err(e) => println!("({e})"),
+        },
+        "redo" => match engine.redo().await {
+            Ok(p) => println!("(redid edit to {})", p.display()),
+            Err(e) => println!("({e})"),
+        },
         _ => match cmd.action {
             CommandAction::Ui => println!("/{name} is available in the TUI only"),
             _ => println!("/{name}: not handled in the REPL yet"),

@@ -29,7 +29,10 @@ use crate::approval::ApprovalGate;
 use crate::config::ZodeConfig;
 use crate::error::CoreError;
 use crate::gated_tool::PermissionGatedTool;
+use crate::history::{EditHistory, EditHistoryHook};
 use crate::provider::build_provider;
+
+const EDIT_HISTORY_CAPACITY: usize = 50;
 
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const DEFAULT_MODEL_MAX_TOKENS: u32 = 200_000;
@@ -52,6 +55,8 @@ pub struct ZodeEngine {
     pub bash_sessions: BashSessionRegistry,
     /// Shared TodoWrite state handle (Phase 07 reads the list for the UI).
     pub todo_state: TodoState,
+    /// File-edit undo/redo history, fed by an EditHistoryHook on `hooks`.
+    pub history: Arc<tokio::sync::Mutex<EditHistory>>,
 }
 
 impl ZodeEngine {
@@ -98,6 +103,11 @@ impl ZodeEngine {
         base.register(Arc::new(BashOutputTool::new(bash_sessions.clone())));
         base.register(Arc::new(KillShellTool::new(bash_sessions.clone())));
 
+        // Git tools (Zode product tools, not in agent-tools-code).
+        for tool in crate::tools::git::all_git_tools() {
+            base.register(tool);
+        }
+
         // 2. Wrap mutating/destructive tools with the approval gate.
         let mut gated = wrap_mutating_tools(base, &gate);
 
@@ -122,11 +132,19 @@ impl ZodeEngine {
             FILE_CACHE_BYTES,
         ));
 
+        // Hooks: file-edit undo history. EditHistoryHook captures
+        // before/after around FileWrite/FileEdit/Remove.
+        let history = Arc::new(tokio::sync::Mutex::new(EditHistory::new(
+            EDIT_HISTORY_CAPACITY,
+        )));
+        let mut hooks = HookRunner::new();
+        hooks.register(Arc::new(EditHistoryHook::new(history.clone())));
+
         Ok(Self {
             provider,
             tools,
             permissions,
-            hooks: Arc::new(HookRunner::new()),
+            hooks: Arc::new(hooks),
             store: Arc::new(Mutex::new(MessageStore::new())),
             file_cache,
             compact_state: Arc::new(Mutex::new(AutoCompactState::default())),
@@ -136,7 +154,18 @@ impl ZodeEngine {
             max_output_tokens: cfg.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
             bash_sessions,
             todo_state,
+            history,
         })
+    }
+
+    /// Undo the most recent tracked file edit. Returns the affected path.
+    pub async fn undo(&self) -> Result<PathBuf, CoreError> {
+        self.history.lock().await.undo()
+    }
+
+    /// Redo the most recently undone file edit. Returns the affected path.
+    pub async fn redo(&self) -> Result<PathBuf, CoreError> {
+        self.history.lock().await.redo()
     }
 
     /// Inject a pre-loaded MessageStore (for `--continue` / `--resume`).
@@ -231,6 +260,15 @@ mod tests {
             eng.permissions
                 .evaluate("FileWrite", &serde_json::json!({"path": "x"}), None);
         assert!(decision.is_allow(), "expected Allow, got {decision:?}");
+    }
+
+    #[tokio::test]
+    async fn assemble_registers_edit_history_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = ZodeEngine::assemble(&test_cfg(), dir.path().to_path_buf(), Arc::new(BypassGate))
+            .unwrap();
+        assert_eq!(eng.hooks.len(), 1);
+        assert!(eng.undo().await.is_err()); // empty history
     }
 
     #[test]

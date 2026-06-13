@@ -11,8 +11,10 @@ pub mod config;
 pub mod engine;
 pub mod error;
 pub mod gated_tool;
+pub mod history;
 pub mod provider;
 pub mod session_meta;
+pub mod tools;
 
 pub use engine::ZodeEngine;
 pub use error::CoreError;
