@@ -221,6 +221,31 @@ impl TuiApp {
         PermissionDialog::new(req, cwd)
     }
 
+    /// Rebuild the active tab's engine from `template` (a model / provider /
+    /// yolo hot-switch), carrying the conversation store + cwd over so the
+    /// context survives. On failure the old engine stays in place.
+    async fn reassemble_active(&mut self, template: EngineTemplate) {
+        let (store, cwd, id) = {
+            let tab = self.active_tab();
+            let store = match tab.engine.store.lock() {
+                Ok(s) => s.clone(),
+                Err(_) => return,
+            };
+            (store, tab.engine.cwd.clone(), tab.id)
+        };
+        match template.assemble_tab(Some(cwd), Some(id.to_string())).await {
+            Ok(engine) => {
+                let engine = engine.with_store(store);
+                let model = engine.model.clone();
+                self.active_tab_mut().engine = Arc::new(engine);
+                self.status.model = model;
+            }
+            Err(e) => {
+                self.toast = Some(Toast::error(format!("switch failed: {e}")));
+            }
+        }
+    }
+
     /// Open the session picker (/sessions, /resume) from the saved index.
     fn open_session_picker(&mut self) {
         let metas: Vec<SessionMeta> = SessionIndex::load()
@@ -553,7 +578,7 @@ impl TuiApp {
 
         // 2. Settings dialog captures input.
         if self.settings.is_some() {
-            self.handle_settings_key(key.code);
+            self.handle_settings_key(key.code).await;
             return;
         }
 
@@ -692,33 +717,48 @@ impl TuiApp {
         self.settings = Some(SettingsDialog::new(theme_ids, self.provider_names.clone()));
     }
 
-    fn handle_settings_key(&mut self, code: KeyCode) {
-        let Some(d) = &mut self.settings else {
-            return;
+    async fn handle_settings_key(&mut self, code: KeyCode) {
+        // Extract a confirmed action (if any), then drop the dialog borrow
+        // before the async apply.
+        let action = {
+            let Some(d) = &mut self.settings else {
+                return;
+            };
+            match code {
+                KeyCode::Up => {
+                    d.prev();
+                    None
+                }
+                KeyCode::Down => {
+                    d.next();
+                    None
+                }
+                KeyCode::Esc => {
+                    if d.level() == SettingsLevel::Top {
+                        self.settings = None;
+                    } else {
+                        d.back();
+                    }
+                    None
+                }
+                KeyCode::Enter => {
+                    if d.level() == SettingsLevel::Top {
+                        d.enter();
+                        None
+                    } else {
+                        d.confirm()
+                    }
+                }
+                _ => None,
+            }
         };
-        match code {
-            KeyCode::Up => d.prev(),
-            KeyCode::Down => d.next(),
-            KeyCode::Esc => {
-                if d.level() == SettingsLevel::Top {
-                    self.settings = None;
-                } else {
-                    d.back();
-                }
-            }
-            KeyCode::Enter => {
-                if d.level() == SettingsLevel::Top {
-                    d.enter();
-                } else if let Some(action) = d.confirm() {
-                    self.settings = None;
-                    self.apply_settings(action);
-                }
-            }
-            _ => {}
+        if let Some(action) = action {
+            self.settings = None;
+            self.apply_settings(action).await;
         }
     }
 
-    fn apply_settings(&mut self, action: SettingsAction) {
+    async fn apply_settings(&mut self, action: SettingsAction) {
         match action {
             SettingsAction::SetTheme(id) => {
                 self.theme = self.theme_store.resolve(Some(&id));
@@ -729,17 +769,27 @@ impl TuiApp {
                 self.toast = Some(Toast::info(format!("theme → {id}")));
             }
             SettingsAction::SetProvider(name) => {
-                // Hot provider switch needs engine reassembly (heavy) and we
-                // don't persist it here, so be honest: tell the user how to
-                // switch rather than implying it's already applied (v1).
-                self.toast = Some(Toast::info(format!(
-                    "relaunch with --provider {name} to switch"
-                )));
+                // Real hot switch: reassemble the active tab from the named
+                // provider, carrying the conversation over.
+                match self.template.with_provider(&name) {
+                    Some(t) => {
+                        self.template = t.clone();
+                        self.reassemble_active(t).await;
+                        self.toast = Some(Toast::info(format!("provider → {name}")));
+                    }
+                    None => {
+                        self.toast = Some(Toast::error(format!("no provider '{name}' in config")));
+                    }
+                }
             }
             SettingsAction::SetMode(m) => {
-                self.toast = Some(Toast::info(format!(
-                    "permission mode '{m}' (informational in v1)"
-                )));
+                // Map the approval mode to yolo: "dontAsk" auto-approves.
+                let yolo = m == "dontAsk";
+                self.template = self.template.with_yolo(yolo);
+                let t = self.template.clone();
+                self.reassemble_active(t).await;
+                self.status.yolo = yolo;
+                self.toast = Some(Toast::info(format!("mode → {m}")));
             }
         }
     }
@@ -935,6 +985,89 @@ impl TuiApp {
             }
             "sessions" | "resume" => self.open_session_picker(),
             "tasks" => self.open_tasks_panel().await,
+            "config" => {
+                let msg = format!(
+                    "model={} cwd={}",
+                    self.active_tab().engine.model,
+                    self.active_tab().engine.cwd.display()
+                );
+                self.active_tab_mut().chat.push_system(&msg);
+            }
+            "compact" => {
+                self.active_tab_mut()
+                    .chat
+                    .push_system("(auto-compaction is enabled; manual /compact lands later)");
+            }
+            "model" => {
+                if args.is_empty() {
+                    let m = self.active_tab().engine.model.clone();
+                    self.active_tab_mut()
+                        .chat
+                        .push_system(&format!("model: {m}"));
+                } else {
+                    self.template = self.template.with_model(args.to_string());
+                    let t = self.template.clone();
+                    self.reassemble_active(t).await;
+                    self.active_tab_mut()
+                        .chat
+                        .push_system(&format!("model → {args}"));
+                }
+            }
+            "yolo" => {
+                let on = !self.template.yolo();
+                self.template = self.template.with_yolo(on);
+                let t = self.template.clone();
+                self.reassemble_active(t).await;
+                self.status.yolo = on;
+                self.active_tab_mut().chat.push_system(if on {
+                    "yolo: ON — tools auto-approve (deny rules still apply)"
+                } else {
+                    "yolo: OFF — tools prompt for approval"
+                });
+            }
+            "mcp" => {
+                let lines: Vec<String> = match &self.active_tab().engine.mcp {
+                    None => vec!["(no MCP servers configured)".to_string()],
+                    Some(lc) => lc
+                        .registry
+                        .snapshot()
+                        .iter()
+                        .map(|s| {
+                            let status = if s.state.is_connected() {
+                                "connected"
+                            } else {
+                                "not connected"
+                            };
+                            format!(
+                                "{} — {} ({} tools)",
+                                s.name,
+                                status,
+                                s.state.tool_names().len()
+                            )
+                        })
+                        .collect(),
+                };
+                for l in lines {
+                    self.active_tab_mut().chat.push_system(&l);
+                }
+            }
+            "skills" => {
+                let list: Vec<String> = self
+                    .active_tab()
+                    .engine
+                    .skills
+                    .list()
+                    .iter()
+                    .map(|s| format!("{} — {}", s.name, s.description))
+                    .collect();
+                if list.is_empty() {
+                    self.active_tab_mut().chat.push_system("(no skills loaded)");
+                } else {
+                    for l in list {
+                        self.active_tab_mut().chat.push_system(&l);
+                    }
+                }
+            }
             other => {
                 self.toast = Some(Toast::info(format!("/{other} lands in a later phase")));
             }

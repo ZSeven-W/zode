@@ -26,7 +26,7 @@ use agent_tools_code::{
 // before async work.
 use std::sync::Mutex;
 
-use crate::approval::{ApprovalGate, ApprovalQueue, QueueGate};
+use crate::approval::{ApprovalGate, ApprovalQueue, BypassGate, QueueGate};
 use crate::bg_shells::{BackgroundShellTracker, BgShellHook};
 use crate::config::ZodeConfig;
 use crate::cost::CostState;
@@ -307,24 +307,19 @@ impl ZodeEngine {
 }
 
 /// How a tab's engine obtains its approval gate.
-#[derive(Clone)]
-pub enum GateSource {
-    /// One shared gate for every tab (headless / `--yolo`). No per-tab label.
-    Shared(Arc<dyn ApprovalGate>),
-    /// TUI approval queue: each tab gets a `QueueGate` labeled with its id so
-    /// approval prompts carry their source tab.
-    Queue(ApprovalQueue),
-}
-
 /// Everything needed to assemble a fresh `ZodeEngine`. The TUI keeps one of
-/// these so it can spin up an independent engine per session tab. All tabs
-/// share the same underlying approval channel (so prompts reach one UI), but
+/// these so it can spin up an independent engine per session tab and rebuild a
+/// tab's engine for a hot model/provider/yolo switch. The approval `queue` is
+/// retained even under `--yolo` so toggling yolo back off has a channel to use;
 /// each tab's gate is labeled with its id.
 #[derive(Clone)]
 pub struct EngineTemplate {
     cfg: ZodeConfig,
     cwd: PathBuf,
-    gate: GateSource,
+    /// Interactive approval channel (TUI). `None` → always bypass.
+    queue: Option<ApprovalQueue>,
+    /// When true, tools auto-approve (BypassGate) regardless of `queue`.
+    yolo: bool,
     sandbox: Option<crate::sandbox::SandboxConfig>,
     date: String,
 }
@@ -333,14 +328,16 @@ impl EngineTemplate {
     pub fn new(
         cfg: ZodeConfig,
         cwd: PathBuf,
-        gate: GateSource,
+        queue: Option<ApprovalQueue>,
+        yolo: bool,
         sandbox: Option<crate::sandbox::SandboxConfig>,
         date: String,
     ) -> Self {
         Self {
             cfg,
             cwd,
-            gate,
+            queue,
+            yolo,
             sandbox,
             date,
         }
@@ -354,15 +351,16 @@ impl EngineTemplate {
 
     /// Assemble a fresh engine for a tab. `cwd_override` lets a resumed session
     /// run in its original directory; `label` tags approval prompts with the
-    /// requesting tab's id.
+    /// requesting tab's id. The gate is bypass when `yolo` (or no queue), else
+    /// a labeled `QueueGate`.
     pub async fn assemble_tab(
         &self,
         cwd_override: Option<PathBuf>,
         label: Option<String>,
     ) -> Result<ZodeEngine, CoreError> {
-        let gate: Arc<dyn ApprovalGate> = match &self.gate {
-            GateSource::Shared(g) => g.clone(),
-            GateSource::Queue(q) => Arc::new(QueueGate::with_label(q.clone(), label)),
+        let gate: Arc<dyn ApprovalGate> = match (&self.queue, self.yolo) {
+            (Some(q), false) => Arc::new(QueueGate::with_label(q.clone(), label)),
+            _ => Arc::new(BypassGate),
         };
         let cwd = cwd_override.unwrap_or_else(|| self.cwd.clone());
         ZodeEngine::assemble(&self.cfg, cwd, gate, self.sandbox.clone(), &self.date).await
@@ -374,6 +372,33 @@ impl EngineTemplate {
 
     pub fn model(&self) -> Option<&str> {
         self.cfg.provider.model.as_deref()
+    }
+
+    pub fn yolo(&self) -> bool {
+        self.yolo
+    }
+
+    /// Clone with the model overridden (for `/model <id>`).
+    pub fn with_model(&self, model: String) -> Self {
+        let mut t = self.clone();
+        t.cfg.provider.model = Some(model);
+        t
+    }
+
+    /// Clone with yolo toggled (for `/yolo` and the settings mode switch).
+    pub fn with_yolo(&self, yolo: bool) -> Self {
+        let mut t = self.clone();
+        t.yolo = yolo;
+        t
+    }
+
+    /// Clone with a named provider selected (for the settings provider switch).
+    /// `None` if the name isn't in `cfg.providers`.
+    pub fn with_provider(&self, name: &str) -> Option<Self> {
+        let provider = self.cfg.providers.get(name).cloned()?;
+        let mut t = self.clone();
+        t.cfg.provider = provider;
+        Some(t)
     }
 }
 

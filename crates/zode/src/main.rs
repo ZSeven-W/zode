@@ -11,7 +11,7 @@ use clap::Parser;
 use zode_core::approval::{ApprovalGate, BypassGate, StdinGate};
 use zode_core::config::ConfigManager;
 use zode_core::session_meta::{SessionIndex, SessionMeta};
-use zode_core::{EngineTemplate, GateSource, ZodeEngine};
+use zode_core::{EngineTemplate, ZodeEngine};
 
 #[tokio::main]
 async fn main() {
@@ -91,17 +91,14 @@ async fn run(args: Args) -> i32 {
         return headless::run_repl(engine, resumed_id).await;
     }
 
-    // Full TUI: approvals are gated through a queue the UI drains. --yolo uses
-    // a shared bypass gate; otherwise each tab gets a QueueGate labeled with
-    // its id (so prompts carry their source tab) over this one channel.
+    // Full TUI: approvals are gated through a queue the UI drains. Each tab
+    // gets a QueueGate labeled with its id (so prompts carry their source tab)
+    // over this one channel; --yolo makes the gate bypass. The queue is kept
+    // even under --yolo so `/yolo` can be toggled back off at runtime.
     let (queue, approval_rx) = zode_core::approval::approval_queue();
-    let gate_source = if args.yolo {
-        GateSource::Shared(Arc::new(BypassGate))
-    } else {
-        GateSource::Queue(queue)
-    };
-    // The TUI keeps a template so Ctrl+T / resume can assemble more engines.
-    let template = EngineTemplate::new(cfg.clone(), cwd, gate_source, sandbox, today);
+    // The TUI keeps a template so Ctrl+T / resume / hot-switch can (re)assemble
+    // engines.
+    let template = EngineTemplate::new(cfg.clone(), cwd, Some(queue), args.yolo, sandbox, today);
     // Tab 0 is assembled here; the app assigns it id 0, so label it "0".
     // Resume in the session's original directory when it still exists.
     let resume_meta = resolve_resume_target(&args);

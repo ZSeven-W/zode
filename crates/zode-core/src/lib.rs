@@ -24,5 +24,5 @@ pub mod skills;
 pub mod task_factory;
 pub mod tools;
 
-pub use engine::{EngineTemplate, GateSource, ZodeEngine};
+pub use engine::{EngineTemplate, ZodeEngine};
 pub use error::CoreError;
