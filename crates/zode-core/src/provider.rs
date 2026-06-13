@@ -19,7 +19,11 @@ pub fn build_provider(cfg: &ProviderConfig) -> Result<Arc<dyn Provider>, CoreErr
                 .ok_or(CoreError::MissingApiKey("ANTHROPIC_API_KEY"))?;
             let mut p = AnthropicProvider::new(key);
             if let Some(url) = &cfg.base_url {
-                p = p.with_base_url(url.clone());
+                // agent's AnthropicProvider appends "/v1/messages" to base_url,
+                // so base_url must be the origin WITHOUT a trailing /v1. Users'
+                // existing MiniMax config stores ".../anthropic/v1"; normalize
+                // it to ".../anthropic" so we don't double the /v1.
+                p = p.with_base_url(normalize_anthropic_base_url(url));
             }
             Ok(Arc::new(p))
         }
@@ -53,19 +57,35 @@ pub(crate) fn parse_dialect(s: Option<&str>) -> Result<OpenAiDialect, CoreError>
     }
 }
 
-/// Split a base_url like "http://host:11434" into (host, port).
-/// Falls back to ("localhost", 11434).
+/// Normalize an Anthropic-compatible base_url for agent's provider, which
+/// unconditionally appends "/v1/messages". Strips a trailing slash and a
+/// trailing "/v1" so both ".../anthropic" and ".../anthropic/v1" yield the
+/// correct ".../anthropic/v1/messages".
+pub(crate) fn normalize_anthropic_base_url(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    let without_v1 = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
+    without_v1.trim_end_matches('/').to_string()
+}
+
+/// Split a base_url into (host_with_scheme, port) for agent's OllamaConfig.
+/// ollama-rs expects the host to include the scheme (default "http://localhost"),
+/// so we KEEP/ADD the scheme and only peel a trailing :port. Falls back to
+/// ("http://localhost", 11434).
 fn parse_ollama_host(url: Option<&str>) -> (String, u16) {
-    let Some(url) = url else {
-        return ("localhost".to_string(), 11434);
+    let raw = url.unwrap_or("http://localhost");
+    let with_scheme = if raw.starts_with("http://") || raw.starts_with("https://") {
+        raw.to_string()
+    } else {
+        format!("http://{raw}")
     };
-    let stripped = url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    match stripped.rsplit_once(':') {
-        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(11434)),
-        None => (stripped.to_string(), 11434),
+    // Peel a trailing ":<port>" only if it parses as a port (the scheme's
+    // "://" colon never parses as a u16, so it's safe to rsplit on ':').
+    if let Some((host, maybe_port)) = with_scheme.rsplit_once(':') {
+        if let Ok(port) = maybe_port.parse::<u16>() {
+            return (host.to_string(), port);
+        }
     }
+    (with_scheme, 11434)
 }
 
 #[cfg(test)]
@@ -118,5 +138,56 @@ mod tests {
         };
         let p = build_provider(&cfg).unwrap();
         assert_eq!(p.id(), "ollama");
+    }
+
+    #[test]
+    fn anthropic_base_url_strips_trailing_v1() {
+        // MiniMax-style base ending in /v1 must not double the /v1 that
+        // agent appends as /v1/messages.
+        assert_eq!(
+            normalize_anthropic_base_url("https://api.minimaxi.com/anthropic/v1"),
+            "https://api.minimaxi.com/anthropic"
+        );
+        assert_eq!(
+            normalize_anthropic_base_url("https://api.minimaxi.com/anthropic/v1/"),
+            "https://api.minimaxi.com/anthropic"
+        );
+        // A base without /v1 is left as-is (minus trailing slash).
+        assert_eq!(
+            normalize_anthropic_base_url("https://api.anthropic.com/"),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            normalize_anthropic_base_url("https://proxy.example/anthropic"),
+            "https://proxy.example/anthropic"
+        );
+    }
+
+    #[test]
+    fn ollama_host_keeps_or_adds_scheme() {
+        assert_eq!(
+            parse_ollama_host(Some("http://localhost:11434")),
+            ("http://localhost".to_string(), 11434)
+        );
+        // No scheme -> http:// is added.
+        assert_eq!(
+            parse_ollama_host(Some("localhost:11434")),
+            ("http://localhost".to_string(), 11434)
+        );
+        // No port -> default 11434, scheme preserved.
+        assert_eq!(
+            parse_ollama_host(Some("http://gpu-box")),
+            ("http://gpu-box".to_string(), 11434)
+        );
+        // None -> default host+port.
+        assert_eq!(
+            parse_ollama_host(None),
+            ("http://localhost".to_string(), 11434)
+        );
+        // https preserved.
+        assert_eq!(
+            parse_ollama_host(Some("https://ollama.example:443")),
+            ("https://ollama.example".to_string(), 443)
+        );
     }
 }
