@@ -11,7 +11,7 @@ use crate::config::{ProviderConfig, ProviderKind};
 use crate::error::CoreError;
 
 pub fn build_provider(cfg: &ProviderConfig) -> Result<Arc<dyn Provider>, CoreError> {
-    match cfg.r#type {
+    match cfg.kind() {
         ProviderKind::Anthropic => {
             let key = cfg
                 .api_key
@@ -61,6 +61,12 @@ pub(crate) fn parse_dialect(s: Option<&str>) -> Result<OpenAiDialect, CoreError>
 /// unconditionally appends "/v1/messages". Strips a trailing slash and a
 /// trailing "/v1" so both ".../anthropic" and ".../anthropic/v1" yield the
 /// correct ".../anthropic/v1/messages".
+///
+/// Note: a gateway base like "https://gw/api/v1" is also stripped to
+/// "https://gw/api", which is correct — the agent then targets
+/// "https://gw/api/v1/messages". base_url must therefore be the path
+/// *prefix* on which the gateway mounts the Anthropic API, optionally
+/// ending in "/v1".
 pub(crate) fn normalize_anthropic_base_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
     let without_v1 = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
@@ -72,7 +78,9 @@ pub(crate) fn normalize_anthropic_base_url(url: &str) -> String {
 /// so we KEEP/ADD the scheme and only peel a trailing :port. Falls back to
 /// ("http://localhost", 11434).
 fn parse_ollama_host(url: Option<&str>) -> (String, u16) {
-    let raw = url.unwrap_or("http://localhost");
+    // Trim a trailing slash first, else "http://h:12345/" fails the port
+    // peel and silently falls back to the default port.
+    let raw = url.unwrap_or("http://localhost").trim_end_matches('/');
     let with_scheme = if raw.starts_with("http://") || raw.starts_with("https://") {
         raw.to_string()
     } else {
@@ -96,7 +104,7 @@ mod tests {
     #[test]
     fn anthropic_with_base_url_builds() {
         let cfg = ProviderConfig {
-            r#type: ProviderKind::Anthropic,
+            r#type: Some(ProviderKind::Anthropic),
             api_key: Some("sk-test".into()),
             base_url: Some("https://api.minimaxi.com/anthropic/v1".into()),
             model: Some("MiniMax-M1".into()),
@@ -109,7 +117,7 @@ mod tests {
     #[test]
     fn anthropic_missing_key_errors() {
         let cfg = ProviderConfig {
-            r#type: ProviderKind::Anthropic,
+            r#type: Some(ProviderKind::Anthropic),
             api_key: None,
             ..Default::default()
         };
@@ -132,7 +140,7 @@ mod tests {
     #[test]
     fn ollama_builds_without_key() {
         let cfg = ProviderConfig {
-            r#type: ProviderKind::Ollama,
+            r#type: Some(ProviderKind::Ollama),
             base_url: Some("http://localhost:11434".into()),
             ..Default::default()
         };
@@ -188,6 +196,11 @@ mod tests {
         assert_eq!(
             parse_ollama_host(Some("https://ollama.example:443")),
             ("https://ollama.example".to_string(), 443)
+        );
+        // Trailing slash + non-default port must not lose the port.
+        assert_eq!(
+            parse_ollama_host(Some("http://gpu-box:12345/")),
+            ("http://gpu-box".to_string(), 12345)
         );
     }
 }

@@ -5,8 +5,14 @@
 //! and context/skills/MCP wiring. The TUI (`zode-tui`) and the binary
 //! (`zode`) depend on this crate; this crate never depends on them.
 
+pub mod approval;
+pub mod commands;
 pub mod config;
+pub mod engine;
 pub mod error;
+pub mod gated_tool;
 pub mod provider;
+pub mod session_meta;
 
+pub use engine::ZodeEngine;
 pub use error::CoreError;

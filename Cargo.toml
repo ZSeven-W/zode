@@ -17,7 +17,9 @@ authors = ["ZSeven-W <fini.yang@gmail.com>"]
 # agent-rs (vendored). `full` pulls anthropic + openai + ollama + mcp +
 # session-jsonl + swarm + tiktoken so every Zode phase has what it needs.
 agent = { path = "vendor/agent/crates/agent", features = ["full"] }
-agent-tools-code = { path = "vendor/agent/crates/agent-tools-code" }
+# `all` = fs + shell + bash-async + search + web + web-search + todo + notebook + task.
+# Zode ships the full tool surface (no M0 simplification).
+agent-tools-code = { path = "vendor/agent/crates/agent-tools-code", features = ["all"] }
 
 tokio = { version = "1", features = [
   "rt-multi-thread",
@@ -46,6 +48,7 @@ dirs = "5"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 tempfile = "3"
+serial_test = "3"
 
 [profile.release]
 lto = "thin"

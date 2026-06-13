@@ -17,7 +17,10 @@ zode-core = { path = "../zode-core" }
 zode-tui = { path = "../zode-tui" }
 agent = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+rustyline = "14"
