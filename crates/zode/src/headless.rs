@@ -56,6 +56,8 @@ pub async fn run_print(engine: &ZodeEngine, prompt: &str) -> i32 {
         }
     }
     let _ = writeln!(stdout);
+    // Token/cache usage to stderr (keeps stdout = the model's answer).
+    eprintln!("{}", engine.cost.report().await);
     exit
 }
 

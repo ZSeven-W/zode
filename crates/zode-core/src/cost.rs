@@ -54,21 +54,37 @@ impl CostState {
         }
     }
 
-    /// Human-readable report for `/cost`.
+    /// Human-readable report for `/cost`. Includes prompt-cache hits when the
+    /// provider reports them (cache_read), and a hit-rate over input tokens.
     pub async fn report(&self) -> String {
         let snap = self.tracker.lock().await.snapshot();
+        let (mut input, mut output, mut cache) = (0u64, 0u64, 0u64);
+        for t in snap.unknown_models.values() {
+            input += t.input_tokens;
+            output += t.output_tokens;
+            cache += t.cache_read_tokens;
+        }
+        for t in snap.per_model.values() {
+            input += t.input_tokens;
+            output += t.output_tokens;
+            cache += t.cache_read_tokens;
+        }
+        let hit = if input > 0 {
+            format!(" cache:{cache} ({}%)", 100 * cache / input)
+        } else {
+            String::new()
+        };
         if snap.has_unknown_models() {
-            let (mut input, mut output) = (0u64, 0u64);
-            for t in snap.unknown_models.values() {
-                input += t.input_tokens;
-                output += t.output_tokens;
-            }
             format!(
-                "model: {} (no price data)\ntokens: ↑{input} ↓{output}\n(cost estimate unavailable for this model)",
+                "model: {} (no price data)\ntokens: ↑{input} ↓{output}{hit}\n(cost estimate unavailable for this model)",
                 self.model
             )
         } else {
-            format!("model: {}\ncost: {}", self.model, snap.format_total_usd())
+            format!(
+                "model: {}\ntokens: ↑{input} ↓{output}{hit}\ncost: {}",
+                self.model,
+                snap.format_total_usd()
+            )
         }
     }
 }
