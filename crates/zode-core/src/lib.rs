@@ -13,9 +13,12 @@ pub mod engine;
 pub mod error;
 pub mod gated_tool;
 pub mod history;
+pub mod hooks_config;
+pub mod instructions;
 pub mod provider;
 pub mod sandbox;
 pub mod session_meta;
+pub mod skills;
 pub mod tools;
 
 pub use engine::ZodeEngine;

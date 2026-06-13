@@ -202,6 +202,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn empty_when_no_files() {
         let dir = tempfile::tempdir().unwrap();
         // Point the global dir somewhere empty too.
@@ -218,7 +219,10 @@ mod tests {
         let big = "x".repeat(MAX_INSTRUCTION_BYTES + 100);
         std::fs::write(dir.path().join("AGENTS.md"), &big).unwrap();
         let files = discover_instructions(dir.path());
-        let f = files.iter().find(|f| f.level == Level::ProjectRoot).unwrap();
+        let f = files
+            .iter()
+            .find(|f| f.level == Level::ProjectRoot)
+            .unwrap();
         assert!(f.truncated);
         assert!(f.content.len() <= MAX_INSTRUCTION_BYTES + 32);
     }
