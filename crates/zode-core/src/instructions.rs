@@ -41,11 +41,17 @@ fn project_root(start: &Path) -> PathBuf {
     }
 }
 
-/// Read a file, truncating to MAX_INSTRUCTION_BYTES (on a char boundary).
+/// Read a file, truncating to MAX_INSTRUCTION_BYTES. The cap is in BYTES
+/// (chars().take(N) would cap by char count and overshoot for multi-byte
+/// text); we cut at the largest char boundary <= the byte cap.
 fn read_capped(path: &Path) -> Option<(String, bool)> {
     let raw = std::fs::read_to_string(path).ok()?;
     if raw.len() > MAX_INSTRUCTION_BYTES {
-        let mut s: String = raw.chars().take(MAX_INSTRUCTION_BYTES).collect();
+        let mut end = MAX_INSTRUCTION_BYTES;
+        while end > 0 && !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut s = raw[..end].to_string();
         s.push_str("\n…(truncated)");
         Some((s, true))
     } else {
@@ -225,6 +231,24 @@ mod tests {
             .unwrap();
         assert!(f.truncated);
         assert!(f.content.len() <= MAX_INSTRUCTION_BYTES + 32);
+    }
+
+    #[test]
+    fn truncation_respects_byte_cap_with_multibyte() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        // 3-byte chars: char-count cap would overshoot the byte cap ~3x.
+        let big = "你".repeat(MAX_INSTRUCTION_BYTES);
+        std::fs::write(dir.path().join("AGENTS.md"), &big).unwrap();
+        let files = discover_instructions(dir.path());
+        let f = files
+            .iter()
+            .find(|f| f.level == Level::ProjectRoot)
+            .unwrap();
+        assert!(f.truncated);
+        // Body (minus the short marker) stays within the byte cap, and the
+        // string is valid UTF-8 (constructing it didn't panic).
+        assert!(f.content.len() <= MAX_INSTRUCTION_BYTES + 20);
     }
 
     #[test]

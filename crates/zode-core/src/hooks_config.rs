@@ -28,33 +28,6 @@ pub struct HooksConfig {
     pub hooks: Vec<HookEntry>,
 }
 
-/// Snake-case event name for a HookEvent (mirrors agent's hook/event.rs).
-fn event_kind(ev: &HookEvent) -> &'static str {
-    match ev {
-        HookEvent::BeforeToolUse { .. } => "before_tool_use",
-        HookEvent::AfterToolUse { .. } => "after_tool_use",
-        HookEvent::PostToolUseFailure { .. } => "post_tool_use_failure",
-        HookEvent::OnPermissionRequest { .. } => "on_permission_request",
-        HookEvent::OnPermissionAllowed { .. } => "on_permission_allowed",
-        HookEvent::OnPermissionDenied { .. } => "on_permission_denied",
-        HookEvent::OnUserMessage { .. } => "on_user_message",
-        HookEvent::OnAssistantMessage { .. } => "on_assistant_message",
-        HookEvent::OnSystemMessage { .. } => "on_system_message",
-        HookEvent::OnSessionStart => "on_session_start",
-        HookEvent::OnSessionEnd { .. } => "on_session_end",
-        HookEvent::OnAbort { .. } => "on_abort",
-        HookEvent::OnError { .. } => "on_error",
-        HookEvent::OnFileWrite { .. } => "on_file_write",
-        HookEvent::OnFileRead { .. } => "on_file_read",
-        HookEvent::OnShellExec { .. } => "on_shell_exec",
-        HookEvent::PreCompact { .. } => "pre_compact",
-        HookEvent::PostCompact { .. } => "post_compact",
-        HookEvent::PreSampling { .. } => "pre_sampling",
-        HookEvent::PostSampling { .. } => "post_sampling",
-        _ => "other",
-    }
-}
-
 /// Tool name a HookEvent targets, if any (for the optional tool filter).
 fn event_tool(ev: &HookEvent) -> Option<&str> {
     match ev {
@@ -67,7 +40,9 @@ fn event_tool(ev: &HookEvent) -> Option<&str> {
 
 impl HookEntry {
     pub fn matches(&self, ev: &HookEvent) -> bool {
-        if self.event != event_kind(ev) {
+        // Use agent's canonical name() (covers every variant) rather than a
+        // local partial map that could leave a supported event unreachable.
+        if self.event != ev.name() {
             return false;
         }
         match &self.tool {

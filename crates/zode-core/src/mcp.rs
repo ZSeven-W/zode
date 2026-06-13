@@ -1,7 +1,8 @@
 //! MCP integration. agent-rs provides Lifecycle + registry but no Tool
 //! adapter, so each discovered MCP tool is wrapped in a ZodeMcpTool that
-//! routes through Lifecycle::call_tool (master §4.6②). Connection happens
-//! at assembly (blocking); tools are registered under `mcp__<server>__<tool>`.
+//! routes through Lifecycle::call_tool (master §4.6②). Connection happens at
+//! assembly, bounded by a per-server timeout so a hung server can't block the
+//! launch; tools are registered under `mcp__<server>__<tool>`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -46,19 +47,38 @@ pub fn discover_mcp_config(cwd: &Path) -> Option<McpConfig> {
     merged.filter(|c| !c.servers.is_empty())
 }
 
-/// Connect all servers in `config` and return the live Lifecycle. Failures
-/// are logged; the lifecycle is returned regardless so /mcp can report state.
+/// Per-server connect timeout — a hung/unreachable server must never block
+/// the whole launch.
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Connect all servers in `config` (concurrently, each bounded by a timeout)
+/// and return the live Lifecycle. Failures/timeouts are logged and skipped;
+/// the lifecycle is returned regardless so /mcp can report state and the
+/// session starts without the unreachable server.
 pub async fn connect(config: McpConfig) -> Arc<Lifecycle> {
     let registry = McpRegistry::new();
+    let names: Vec<String> = config.servers.keys().cloned().collect();
     for (name, server_cfg) in config.servers {
         registry.upsert(name, server_cfg);
     }
     let lifecycle = Arc::new(Lifecycle::new(registry, Arc::new(RmcpConnector::new())));
-    for (server, res) in lifecycle.connect_all().await {
-        if let Err(e) = res {
-            tracing::warn!("mcp server {server} failed to connect: {e}");
+
+    let timeout = std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS);
+    let connects = names.into_iter().map(|name| {
+        let lc = lifecycle.clone();
+        async move {
+            match tokio::time::timeout(timeout, lc.connect(&name)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!("mcp server {name} failed to connect: {e}"),
+                Err(_) => {
+                    tracing::warn!(
+                        "mcp server {name} connect timed out after {CONNECT_TIMEOUT_SECS}s"
+                    )
+                }
+            }
         }
-    }
+    });
+    futures::future::join_all(connects).await;
     lifecycle
 }
 
