@@ -17,6 +17,10 @@ pub struct PermissionGatedTool {
     inner: Arc<dyn Tool>,
     gate: Arc<dyn ApprovalGate>,
     always: AtomicBool,
+    /// Serializes the check-approve-store sequence so concurrent calls to
+    /// the same tool in one turn don't double-prompt; the second waiter
+    /// re-checks `always` inside the lock and skips the prompt.
+    approve_lock: tokio::sync::Mutex<()>,
 }
 
 impl PermissionGatedTool {
@@ -25,6 +29,7 @@ impl PermissionGatedTool {
             inner,
             gate,
             always: AtomicBool::new(false),
+            approve_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -54,14 +59,19 @@ impl Tool for PermissionGatedTool {
         input: serde_json::Value,
     ) -> Result<serde_json::Value, AgentError> {
         if !self.always.load(Ordering::Relaxed) {
-            match self.gate.approve(self.inner.name(), &input).await {
-                Approval::AllowOnce => {}
-                Approval::AllowAlways => self.always.store(true, Ordering::Relaxed),
-                Approval::Deny => {
-                    return Err(AgentError::other(format!(
-                        "Tool '{}' denied by user",
-                        self.inner.name()
-                    )));
+            // Serialize per tool; re-check inside the lock so a concurrent
+            // call that already selected "always" doesn't re-prompt.
+            let _guard = self.approve_lock.lock().await;
+            if !self.always.load(Ordering::Relaxed) {
+                match self.gate.approve(self.inner.name(), &input).await {
+                    Approval::AllowOnce => {}
+                    Approval::AllowAlways => self.always.store(true, Ordering::Relaxed),
+                    Approval::Deny => {
+                        return Err(AgentError::other(format!(
+                            "Tool '{}' denied by user",
+                            self.inner.name()
+                        )));
+                    }
                 }
             }
         }

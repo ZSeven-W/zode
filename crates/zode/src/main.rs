@@ -4,7 +4,6 @@ mod headless;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent::permission::PermissionMode;
 use agent::session::Session;
 use args::Args;
 use clap::Parser;
@@ -56,18 +55,15 @@ async fn run(args: Args) -> i32 {
     }
     cfg.apply_env_fallbacks();
 
-    let mode = if args.yolo {
-        PermissionMode::Bypass
-    } else {
-        PermissionMode::Default
-    };
+    // --yolo only changes the approval gate; the internal PermissionManager
+    // always runs in Bypass so gating happens in the gate (see assemble).
     let gate: Arc<dyn ApprovalGate> = if args.yolo {
         Arc::new(BypassGate)
     } else {
-        Arc::new(StdinGate)
+        Arc::new(StdinGate::new())
     };
 
-    let engine = match ZodeEngine::assemble(&cfg, cwd, mode, gate) {
+    let engine = match ZodeEngine::assemble(&cfg, cwd, gate) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("zode: {e}");

@@ -215,7 +215,23 @@ async fn save_session(engine: &ZodeEngine, id: &str) {
     };
     if let Err(e) = Session::save(&path, &snapshot).await {
         tracing::warn!("session save failed: {e}");
+        return;
     }
+    // Keep the index's recency current so `--continue` resumes this
+    // session, not an older one. The entry exists (stamp_title on the first
+    // turn for new sessions; created at resume for old ones); create a
+    // minimal entry if somehow missing.
+    let mut idx = SessionIndex::load().unwrap_or_default();
+    if !idx.touch_updated(id, now_secs()) {
+        idx.upsert(SessionMeta {
+            id: id.to_string(),
+            title: "(session)".to_string(),
+            cwd: engine.cwd.display().to_string(),
+            model: engine.model.clone(),
+            updated_at: now_secs(),
+        });
+    }
+    let _ = idx.save();
 }
 
 fn stamp_title(engine: &ZodeEngine, id: &str, prompt: &str) {

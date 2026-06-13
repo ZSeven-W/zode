@@ -61,6 +61,18 @@ impl SessionIndex {
         }
     }
 
+    /// Bump `updated_at` for an existing session (preserving title/cwd/model)
+    /// so `--continue` resumes the genuinely most-recent one. Returns false
+    /// if the id isn't in the index (caller should upsert a fresh entry).
+    pub fn touch_updated(&mut self, id: &str, now: u64) -> bool {
+        if let Some(m) = self.sessions.iter_mut().find(|m| m.id == id) {
+            m.updated_at = now;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Most recently updated session.
     pub fn latest(&self) -> Option<&SessionMeta> {
         self.sessions.iter().max_by_key(|m| m.updated_at)
@@ -125,6 +137,23 @@ mod tests {
         assert!(reloaded.find_prefix("zzz").is_none());
 
         std::env::remove_var("ZODE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn touch_updates_recency_preserving_fields() {
+        let mut idx = SessionIndex::default();
+        idx.upsert(SessionMeta {
+            id: "s1".into(),
+            title: "keep me".into(),
+            cwd: "/p".into(),
+            model: "m".into(),
+            updated_at: 100,
+        });
+        assert!(idx.touch_updated("s1", 500));
+        let m = idx.find_prefix("s1").unwrap();
+        assert_eq!(m.updated_at, 500);
+        assert_eq!(m.title, "keep me"); // preserved
+        assert!(!idx.touch_updated("missing", 999));
     }
 
     #[test]

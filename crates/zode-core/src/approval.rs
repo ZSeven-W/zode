@@ -31,12 +31,26 @@ impl ApprovalGate for BypassGate {
     }
 }
 
-#[derive(Debug)]
-pub struct StdinGate;
+#[derive(Debug, Default)]
+pub struct StdinGate {
+    /// Serializes prompts: QueryLoop can dispatch tools concurrently, and
+    /// two unsynchronized stdin reads would interleave prompts and steal
+    /// each other's answers. One prompt is active at a time.
+    prompt_lock: tokio::sync::Mutex<()>,
+}
+
+impl StdinGate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 #[async_trait]
 impl ApprovalGate for StdinGate {
     async fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval {
+        // Hold the prompt lock across the whole prompt+read so concurrent
+        // approvals queue instead of interleaving on the terminal.
+        let _serialize = self.prompt_lock.lock().await;
         // Render the prompt on a blocking thread so we don't fight the
         // async reactor for stdin.
         let tool = tool.to_string();
@@ -77,9 +91,12 @@ pub(crate) fn summarize_input(tool: &str, input: &serde_json::Value) -> String {
         }
         _ => {
             let compact = serde_json::to_string(input).unwrap_or_default();
-            let max = 120;
-            if compact.len() > max {
-                format!("{tool} {}…", &compact[..max])
+            let max_chars = 120;
+            // Truncate on a char boundary — byte slicing JSON with
+            // non-ASCII content can split a UTF-8 code point and panic.
+            if compact.chars().count() > max_chars {
+                let truncated: String = compact.chars().take(max_chars).collect();
+                format!("{tool} {truncated}…")
             } else {
                 format!("{tool} {compact}")
             }
@@ -114,7 +131,16 @@ mod tests {
     fn summary_truncates_long_input() {
         let big = json!({"data": "x".repeat(500)});
         let s = summarize_input("Weird", &big);
-        assert!(s.len() < 200);
+        assert!(s.chars().count() < 200);
+        assert!(s.ends_with('…'));
+    }
+
+    #[test]
+    fn summary_truncation_is_utf8_safe() {
+        // Multibyte content whose byte length crosses the cap must not
+        // panic on a non-char-boundary slice.
+        let big = json!({"data": "你".repeat(500)});
+        let s = summarize_input("Weird", &big); // must not panic
         assert!(s.ends_with('…'));
     }
 }

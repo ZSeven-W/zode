@@ -55,14 +55,20 @@ pub struct ZodeEngine {
 }
 
 impl ZodeEngine {
-    /// Build all shared state. `mode` is `Bypass` for `--yolo`; `gate` is
-    /// `BypassGate` for `--yolo`, `StdinGate` for headless, `QueueGate`
-    /// for the TUI. Interactive approval happens in the gated tools, not
-    /// in the PermissionManager (master plan §4.6①).
+    /// Build all shared state. `gate` is `BypassGate` for `--yolo`,
+    /// `StdinGate` for headless, `QueueGate` for the TUI — that is the ONLY
+    /// place interactive approval is decided.
+    ///
+    /// The internal PermissionManager always runs in `Bypass` so that
+    /// unresolved tools resolve to Allow and actually reach the gated-tool
+    /// decorator. (Under `Default`, agent-rs's QueryLoop turns an unresolved
+    /// `Ask` into a failed synthetic ToolResult *before* dispatch, so the
+    /// gate would never run — master plan §4.6①.) Explicit cfg deny rules
+    /// are still honored: agent evaluates deny rules before the Bypass-mode
+    /// short-circuit.
     pub fn assemble(
         cfg: &ZodeConfig,
         cwd: PathBuf,
-        mode: PermissionMode,
         gate: Arc<dyn ApprovalGate>,
     ) -> Result<Self, CoreError> {
         let provider = build_provider(&cfg.provider)?;
@@ -102,9 +108,10 @@ impl ZodeEngine {
 
         let tools = Arc::new(gated);
 
-        // Permissions: only hard-deny rules + the mode reach the loop;
-        // interactive `ask` is handled by the gate (master §4.6①).
-        let mut pm = PermissionManager::new().with_mode(mode);
+        // Permissions: Bypass mode (so non-denied tools reach the gate)
+        // plus hard-deny rules (still enforced ahead of the bypass).
+        // Interactive `ask` is handled entirely by the gate (master §4.6①).
+        let mut pm = PermissionManager::new().with_mode(PermissionMode::Bypass);
         for tool in &cfg.permissions.deny {
             pm = pm.deny(RuleSource::User, tool.clone());
         }
@@ -199,13 +206,8 @@ mod tests {
     #[test]
     fn assemble_registers_core_tools() {
         let dir = tempfile::tempdir().unwrap();
-        let eng = ZodeEngine::assemble(
-            &test_cfg(),
-            dir.path().to_path_buf(),
-            PermissionMode::Default,
-            Arc::new(BypassGate),
-        )
-        .unwrap();
+        let eng = ZodeEngine::assemble(&test_cfg(), dir.path().to_path_buf(), Arc::new(BypassGate))
+            .unwrap();
         let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
         assert!(names.contains(&"FileRead".to_string()), "names: {names:?}");
         assert!(names.contains(&"Bash".to_string()), "names: {names:?}");
@@ -218,17 +220,26 @@ mod tests {
     }
 
     #[test]
-    fn deny_rule_reaches_permission_manager() {
+    fn unconfigured_tool_resolves_to_allow_so_the_gate_runs() {
+        // BLOCK regression: under Bypass the loop must NOT pre-empt an
+        // unconfigured mutating tool with Ask — it must reach Allow so the
+        // PermissionGatedTool decorator can prompt.
+        let dir = tempfile::tempdir().unwrap();
+        let eng = ZodeEngine::assemble(&test_cfg(), dir.path().to_path_buf(), Arc::new(BypassGate))
+            .unwrap();
+        let decision =
+            eng.permissions
+                .evaluate("FileWrite", &serde_json::json!({"path": "x"}), None);
+        assert!(decision.is_allow(), "expected Allow, got {decision:?}");
+    }
+
+    #[test]
+    fn deny_rule_still_wins_under_bypass() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_cfg();
         cfg.permissions.deny = vec!["Bash".into()];
-        let eng = ZodeEngine::assemble(
-            &cfg,
-            dir.path().to_path_buf(),
-            PermissionMode::Default,
-            Arc::new(BypassGate),
-        )
-        .unwrap();
+        let eng =
+            ZodeEngine::assemble(&cfg, dir.path().to_path_buf(), Arc::new(BypassGate)).unwrap();
         let decision = eng
             .permissions
             .evaluate("Bash", &serde_json::json!({}), None);
