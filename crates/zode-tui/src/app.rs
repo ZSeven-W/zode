@@ -43,6 +43,11 @@ pub struct TuiApp {
     commands: CommandRegistry,
     /// Abort handle for the in-flight turn, if any.
     turn_abort: Option<AbortController>,
+    /// Monotonic turn counter; `active_turn_id` is the turn whose events we
+    /// currently accept. Aborting/superseding bumps it so stale events from
+    /// a still-draining task are dropped (agent events carry no turn id).
+    turn_seq: u64,
+    active_turn_id: u64,
     should_quit: bool,
 }
 
@@ -64,6 +69,8 @@ impl TuiApp {
             theme,
             commands: CommandRegistry::with_builtins(),
             turn_abort: None,
+            turn_seq: 0,
+            active_turn_id: 0,
             should_quit: false,
             engine: Arc::new(engine),
         }
@@ -133,6 +140,9 @@ impl TuiApp {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if let Some(abort) = self.turn_abort.take() {
                     abort.abort_with_reason("user interrupted");
+                    // Invalidate the turn so its still-draining events drop.
+                    self.active_turn_id = 0;
+                    self.chat.end_turn();
                     self.chat.push_system("(interrupted)");
                     self.status.mode = Mode::Ready;
                 } else {
@@ -162,9 +172,13 @@ impl TuiApp {
             return;
         }
         self.chat.push_user(text);
-        self.chat.begin_assistant();
+        // No begin_assistant(): push_delta lazily opens an assistant segment,
+        // so text after a tool card starts a fresh segment.
         self.status.mode = Mode::Thinking;
 
+        self.turn_seq += 1;
+        let turn_id = self.turn_seq;
+        self.active_turn_id = turn_id;
         let abort = AbortController::new();
         self.turn_abort = Some(abort.clone());
 
@@ -176,50 +190,71 @@ impl TuiApp {
                 Ok(mut stream) => {
                     while let Some(item) = stream.next().await {
                         match item {
-                            Ok(ev) => {
-                                if tx.send(AppEvent::Agent(ev)).is_err() {
+                            Ok(event) => {
+                                if tx.send(AppEvent::Agent { turn_id, event }).is_err() {
                                     return;
                                 }
                             }
                             Err(e) => {
-                                let _ = tx.send(AppEvent::TurnDone(Err(e.to_string())));
+                                let _ = tx.send(AppEvent::TurnDone {
+                                    turn_id,
+                                    result: Err(e.to_string()),
+                                });
                                 return;
                             }
                         }
                     }
-                    let _ = tx.send(AppEvent::TurnDone(Ok(())));
+                    let _ = tx.send(AppEvent::TurnDone {
+                        turn_id,
+                        result: Ok(()),
+                    });
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::TurnDone(Err(e.to_string())));
+                    let _ = tx.send(AppEvent::TurnDone {
+                        turn_id,
+                        result: Err(e.to_string()),
+                    });
                 }
             }
         });
     }
 
     fn handle_agent_event(&mut self, ev: AppEvent) {
+        // Drop events from aborted/superseded turns.
+        let turn_id = match &ev {
+            AppEvent::Agent { turn_id, .. } | AppEvent::TurnDone { turn_id, .. } => *turn_id,
+        };
+        if turn_id != self.active_turn_id {
+            return;
+        }
         match ev {
-            AppEvent::Agent(Event::TextDelta { delta }) => {
-                self.status.mode = Mode::Streaming;
-                self.chat.push_delta(&delta);
-            }
-            AppEvent::Agent(Event::ToolUse { name, .. }) => self.chat.push_tool(&name),
-            AppEvent::Agent(Event::Usage {
-                input_tokens,
-                output_tokens,
-                ..
-            }) => {
-                self.status.input_tokens = self.status.input_tokens.saturating_add(input_tokens);
-                self.status.output_tokens = self.status.output_tokens.saturating_add(output_tokens);
-            }
-            AppEvent::Agent(Event::Error { code, message }) => {
-                self.chat.push_system(&format!("error [{code}]: {message}"));
-                self.status.mode = Mode::Error;
-            }
-            AppEvent::Agent(_) => {}
-            AppEvent::TurnDone(res) => {
+            AppEvent::Agent { event, .. } => match event {
+                Event::TextDelta { delta } => {
+                    self.status.mode = Mode::Streaming;
+                    self.chat.push_delta(&delta);
+                }
+                Event::ToolUse { name, .. } => self.chat.push_tool(&name),
+                Event::Usage {
+                    input_tokens,
+                    output_tokens,
+                    ..
+                } => {
+                    self.status.input_tokens =
+                        self.status.input_tokens.saturating_add(input_tokens);
+                    self.status.output_tokens =
+                        self.status.output_tokens.saturating_add(output_tokens);
+                }
+                Event::Error { code, message } => {
+                    self.chat.push_system(&format!("error [{code}]: {message}"));
+                    self.status.mode = Mode::Error;
+                }
+                _ => {}
+            },
+            AppEvent::TurnDone { result, .. } => {
                 self.chat.end_turn();
                 self.turn_abort = None;
-                self.status.mode = match res {
+                self.active_turn_id = 0;
+                self.status.mode = match result {
                     Ok(()) => Mode::Ready,
                     Err(e) => {
                         self.chat.push_system(&format!("turn failed: {e}"));
@@ -275,9 +310,23 @@ impl TuiApp {
 fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    stdout.execute(EnterAlternateScreen)?;
-    install_panic_hook();
-    Terminal::new(CrosstermBackend::new(stdout))
+    // Undo raw mode if any subsequent step fails, so we never leave the
+    // terminal in a broken state on a setup error.
+    if let Err(e) = stdout.execute(EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(e);
+    }
+    match Terminal::new(CrosstermBackend::new(std::io::stdout())) {
+        Ok(term) => {
+            install_panic_hook();
+            Ok(term)
+        }
+        Err(e) => {
+            let _ = std::io::stdout().execute(LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+            Err(e)
+        }
+    }
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> std::io::Result<()> {

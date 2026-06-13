@@ -50,8 +50,11 @@ impl StatusBar {
             Mode::Streaming => ("streaming", theme.accent),
             Mode::Error => ("error", Color::Red),
         };
-        let spin = if matches!(self.mode, Mode::Thinking | Mode::Streaming) {
-            let frames = &theme.spinner_thinking;
+        let frames = match self.mode {
+            Mode::Streaming => &theme.spinner_streaming,
+            _ => &theme.spinner_thinking,
+        };
+        let spin = if matches!(self.mode, Mode::Thinking | Mode::Streaming) && !frames.is_empty() {
             format!("{} ", frames[self.spinner_frame % frames.len()])
         } else {
             String::new()

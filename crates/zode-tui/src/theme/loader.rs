@@ -61,6 +61,15 @@ struct RawSpinner {
     streaming: Option<Vec<String>>,
 }
 
+/// Spinner frames, normalizing a missing OR empty user vector to defaults
+/// (an empty vector would later panic on a modulo-by-zero in the status bar).
+fn spinner_or(frames: Option<Vec<String>>, default: &[&str]) -> Vec<String> {
+    match frames {
+        Some(f) if !f.is_empty() => f,
+        _ => default.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
 fn color(s: &Option<String>, default: u8) -> Result<Color, ThemeLoadError> {
     match s {
         None => Ok(Color::Indexed(default)),
@@ -95,14 +104,8 @@ pub fn parse_theme(id: &str, json: &str) -> Result<Theme, ThemeLoadError> {
         icon_user: raw.icons.user.unwrap_or_else(|| "❯".into()),
         icon_assistant: raw.icons.assistant.unwrap_or_else(|| "◈".into()),
         icon_system: raw.icons.system.unwrap_or_else(|| "⚡".into()),
-        spinner_thinking: raw
-            .spinner
-            .thinking
-            .unwrap_or_else(|| ["⠋", "⠙", "⠹"].iter().map(|s| s.to_string()).collect()),
-        spinner_streaming: raw
-            .spinner
-            .streaming
-            .unwrap_or_else(|| ["◐", "◓", "◑", "◒"].iter().map(|s| s.to_string()).collect()),
+        spinner_thinking: spinner_or(raw.spinner.thinking, &["⠋", "⠙", "⠹"]),
+        spinner_streaming: spinner_or(raw.spinner.streaming, &["◐", "◓", "◑", "◒"]),
     })
 }
 

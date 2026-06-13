@@ -6,9 +6,25 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 use crate::theme::Theme;
 use crate::ui::markdown::render_markdown;
+
+/// Approximate the number of wrapped rows a line occupies at `width`
+/// columns (ratatui wraps on words, so this char-width estimate is close
+/// enough for scroll math and, crucially, never overflows).
+fn wrapped_rows(line: &Line, width: u16) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let w: usize = line
+        .spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    w.div_ceil(width as usize).max(1)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
@@ -72,9 +88,18 @@ impl ChatView {
     }
 
     pub fn push_delta(&mut self, delta: &str) {
-        if !self.streaming {
-            self.begin_assistant();
+        // Only a trailing assistant message accepts deltas; if a tool/system
+        // card was pushed mid-stream, start a fresh assistant segment so the
+        // text doesn't append to the tool card.
+        let tail_is_assistant =
+            matches!(self.messages.last(), Some(m) if m.role == Role::Assistant);
+        if !tail_is_assistant {
+            self.messages.push(ChatMessage {
+                role: Role::Assistant,
+                text: String::new(),
+            });
         }
+        self.streaming = true;
         if let Some(last) = self.messages.last_mut() {
             last.text.push_str(delta);
         }
@@ -99,10 +124,14 @@ impl ChatView {
             lines.extend(self.render_message(msg, theme));
             lines.push(Line::from(""));
         }
-        let total = lines.len() as u16;
-        let viewport = area.height;
+        // Count POST-wrap rows so scrolling is correct for wrapped content,
+        // and clamp into u16 so a huge history can't overflow. Computed
+        // before `lines` moves into the Paragraph.
+        let total: usize = lines.iter().map(|l| wrapped_rows(l, area.width)).sum();
+        let viewport = area.height as usize;
         let max_scroll = total.saturating_sub(viewport);
-        let offset = max_scroll.saturating_sub(self.scroll_back.min(max_scroll));
+        let back = (self.scroll_back as usize).min(max_scroll);
+        let offset = u16::try_from(max_scroll - back).unwrap_or(u16::MAX);
 
         let para = Paragraph::new(lines)
             .block(Block::default().borders(Borders::NONE))
@@ -159,6 +188,23 @@ mod tests {
         view.end_turn();
         assert_eq!(view.messages().len(), 2);
         assert_eq!(view.messages()[1].text, "hi there");
+    }
+
+    #[test]
+    fn delta_after_tool_starts_new_assistant_segment() {
+        // BLOCK regression: a tool card pushed mid-stream must not become the
+        // append target for subsequent assistant text.
+        let mut view = ChatView::new();
+        view.push_user("hi");
+        view.push_delta("part1 ");
+        view.push_tool("Bash");
+        view.push_delta("part2");
+        let msgs = view.messages();
+        assert_eq!(msgs.len(), 4); // user, assistant(part1), tool, assistant(part2)
+        assert_eq!(msgs[2].role, Role::Tool);
+        assert_eq!(msgs[2].text, "Bash");
+        assert_eq!(msgs[3].role, Role::Assistant);
+        assert_eq!(msgs[3].text, "part2");
     }
 
     #[test]
