@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
 use crate::ui::layout::compact_path;
@@ -134,7 +134,7 @@ impl ChatView {
         } else {
             let mut out = Vec::new();
             for msg in &self.messages {
-                out.extend(self.render_message(msg, theme));
+                out.extend(self.render_message(msg, theme, area.width));
                 out.push(Line::from(""));
             }
             out
@@ -206,15 +206,20 @@ impl ChatView {
         ]
     }
 
-    fn render_message(&self, msg: &ChatMessage, theme: &Theme) -> Vec<Line<'static>> {
+    fn render_message(&self, msg: &ChatMessage, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         match msg.role {
-            Role::User => {
-                self.render_role_block(&theme.icon_user, "You", &msg.text, theme.user, theme, false)
-            }
+            Role::User => self.render_role_block(
+                &theme.icon_user,
+                "You",
+                &msg.text,
+                theme.user,
+                Style::default().fg(theme.fg_white),
+                width,
+            ),
             Role::Assistant => {
                 let mut out =
                     vec![self.role_header(&theme.icon_assistant, "Assistant", theme.assistant)];
-                out.extend(rail_markdown(&msg.text, theme, theme.assistant));
+                out.extend(rail_markdown(&msg.text, theme, theme.assistant, width));
                 out
             }
             Role::System => self.render_role_block(
@@ -222,8 +227,8 @@ impl ChatView {
                 "System",
                 &msg.text,
                 theme.system,
-                theme,
-                true,
+                Style::default().fg(theme.fg_subtle),
+                width,
             ),
             Role::Tool => vec![Line::from(vec![
                 Span::styled("  · ", Style::default().fg(theme.accent_secondary)),
@@ -238,20 +243,16 @@ impl ChatView {
         label: &str,
         text: &str,
         color: Color,
-        theme: &Theme,
-        subtle_body: bool,
+        body_style: Style,
+        width: u16,
     ) -> Vec<Line<'static>> {
-        let body_style = if subtle_body {
-            Style::default().fg(theme.fg_subtle)
-        } else {
-            Style::default().fg(theme.fg_white)
-        };
         let mut out = vec![self.role_header(icon, label, color)];
         for line in text.lines().chain((text.is_empty()).then_some("")) {
-            out.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(color)),
-                Span::styled(line.to_string(), body_style),
-            ]));
+            out.extend(rail_line(
+                vec![Span::styled(line.to_string(), body_style)],
+                color,
+                width,
+            ));
         }
         out
     }
@@ -270,22 +271,60 @@ impl ChatView {
     }
 }
 
-fn rail_markdown(src: &str, theme: &Theme, rail_color: Color) -> Vec<Line<'static>> {
+fn rail_markdown(src: &str, theme: &Theme, rail_color: Color, width: u16) -> Vec<Line<'static>> {
     let rendered = render_markdown(src, theme);
     if rendered.is_empty() {
-        return vec![Line::from(vec![Span::styled(
-            "│ ",
-            Style::default().fg(rail_color),
-        )])];
+        return rail_line(Vec::new(), rail_color, width);
     }
     rendered
         .into_iter()
-        .map(|line| {
-            let mut spans = vec![Span::styled("│ ", Style::default().fg(rail_color))];
-            spans.extend(line.spans);
-            Line::from(spans)
-        })
+        .flat_map(|line| rail_line(line.spans, rail_color, width))
         .collect()
+}
+
+fn rail_line(spans: Vec<Span<'static>>, rail_color: Color, width: u16) -> Vec<Line<'static>> {
+    let rail = Span::styled("│ ", Style::default().fg(rail_color));
+    wrap_spans_with_prefix(spans, rail.clone(), rail, width)
+}
+
+fn wrap_spans_with_prefix(
+    spans: Vec<Span<'static>>,
+    first_prefix: Span<'static>,
+    continuation_prefix: Span<'static>,
+    width: u16,
+) -> Vec<Line<'static>> {
+    if width == 0 {
+        return vec![Line::from("")];
+    }
+
+    let max_width = width as usize;
+    let continuation_width = UnicodeWidthStr::width(continuation_prefix.content.as_ref());
+    let mut prefix = first_prefix;
+    let mut current_width = UnicodeWidthStr::width(prefix.content.as_ref());
+    let mut current = vec![prefix.clone()];
+    let mut out = Vec::new();
+    let mut saw_content = false;
+
+    for span in spans {
+        for ch in span.content.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            let has_body = current.len() > 1;
+            if has_body && current_width + ch_width > max_width {
+                out.push(Line::from(current));
+                prefix = continuation_prefix.clone();
+                current_width = continuation_width;
+                current = vec![prefix.clone()];
+            }
+            current.push(Span::styled(ch.to_string(), span.style));
+            current_width += ch_width;
+            saw_content = true;
+        }
+    }
+
+    if saw_content || out.is_empty() {
+        out.push(Line::from(current));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -400,5 +439,43 @@ mod tests {
         assert!(content.contains("System"));
         assert!(content.contains("│ hello"));
         assert!(content.contains("· Bash"));
+    }
+
+    #[test]
+    fn wrapped_assistant_cjk_lines_keep_the_body_rail() {
+        let theme = ThemeStore::with_builtins().resolve(Some("cyberpunk"));
+        let mut view = ChatView::new();
+        view.push_delta(
+            "我是 Zode，一个运行在终端中的 AI 原生编程助手。我是 ZSeven-W/zode 项目的一部分，专门帮助你处理软件工程任务。",
+        );
+        let backend = TestBackend::new(36, 8);
+        let mut term = Terminal::new(backend).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "MiniMax-M1",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
+
+        let buf = term.backend().buffer();
+        let body_rows: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .filter(|row| {
+                let trimmed = row.trim();
+                !trimmed.is_empty() && !trimmed.contains("Assistant")
+            })
+            .collect();
+
+        assert!(body_rows.len() > 1, "expected wrapped body rows");
+        assert!(
+            body_rows.iter().all(|row| row.starts_with("│ ")),
+            "all wrapped body rows should keep the rail prefix: {body_rows:?}"
+        );
     }
 }
