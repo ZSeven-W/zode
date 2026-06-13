@@ -12,3 +12,7 @@
 
 # Docs (local working artifacts — plans/specs live on disk, not pushed)
 docs/
+
+# Python
+__pycache__/
+*.pyc
