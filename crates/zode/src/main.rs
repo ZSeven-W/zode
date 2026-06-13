@@ -63,7 +63,19 @@ async fn run(args: Args) -> i32 {
         Arc::new(StdinGate::new())
     };
 
-    let engine = match ZodeEngine::assemble(&cfg, cwd, gate) {
+    let sandbox = if args.sandbox {
+        match zode_core::sandbox::SandboxConfig::for_current_os(&cwd) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("zode: {e}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+
+    let engine = match ZodeEngine::assemble(&cfg, cwd, gate, sandbox) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("zode: {e}");

@@ -6,6 +6,7 @@
 //! (`zode`) depend on this crate; this crate never depends on them.
 
 pub mod approval;
+pub mod bg_shells;
 pub mod commands;
 pub mod config;
 pub mod engine;
@@ -13,6 +14,7 @@ pub mod error;
 pub mod gated_tool;
 pub mod history;
 pub mod provider;
+pub mod sandbox;
 pub mod session_meta;
 pub mod tools;
 

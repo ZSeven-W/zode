@@ -26,6 +26,7 @@ use agent_tools_code::{
 use std::sync::Mutex;
 
 use crate::approval::ApprovalGate;
+use crate::bg_shells::{BackgroundShellTracker, BgShellHook};
 use crate::config::ZodeConfig;
 use crate::error::CoreError;
 use crate::gated_tool::PermissionGatedTool;
@@ -57,6 +58,8 @@ pub struct ZodeEngine {
     pub todo_state: TodoState,
     /// File-edit undo/redo history, fed by an EditHistoryHook on `hooks`.
     pub history: Arc<tokio::sync::Mutex<EditHistory>>,
+    /// Host-side metadata for background shells (Phase 07 task panel).
+    pub bg_shells_meta: BackgroundShellTracker,
 }
 
 impl ZodeEngine {
@@ -75,6 +78,7 @@ impl ZodeEngine {
         cfg: &ZodeConfig,
         cwd: PathBuf,
         gate: Arc<dyn ApprovalGate>,
+        sandbox: Option<crate::sandbox::SandboxConfig>,
     ) -> Result<Self, CoreError> {
         let provider = build_provider(&cfg.provider)?;
         let model = cfg
@@ -108,6 +112,14 @@ impl ZodeEngine {
             base.register(tool);
         }
 
+        // --sandbox: wrap Bash/BashRun so writes are confined to cwd. Done
+        // before gate-wrapping so the final shape is
+        // PermissionGatedTool(SandboxedBashTool(Bash)).
+        let base = match &sandbox {
+            Some(sb) => crate::sandbox::apply_sandbox(base, sb),
+            None => base,
+        };
+
         // 2. Wrap mutating/destructive tools with the approval gate.
         let mut gated = wrap_mutating_tools(base, &gate);
 
@@ -137,8 +149,10 @@ impl ZodeEngine {
         let history = Arc::new(tokio::sync::Mutex::new(EditHistory::new(
             EDIT_HISTORY_CAPACITY,
         )));
+        let bg_shells_meta = BackgroundShellTracker::new();
         let mut hooks = HookRunner::new();
         hooks.register(Arc::new(EditHistoryHook::new(history.clone())));
+        hooks.register(Arc::new(BgShellHook::new(bg_shells_meta.clone())));
 
         Ok(Self {
             provider,
@@ -155,6 +169,7 @@ impl ZodeEngine {
             bash_sessions,
             todo_state,
             history,
+            bg_shells_meta,
         })
     }
 
@@ -235,8 +250,13 @@ mod tests {
     #[test]
     fn assemble_registers_core_tools() {
         let dir = tempfile::tempdir().unwrap();
-        let eng = ZodeEngine::assemble(&test_cfg(), dir.path().to_path_buf(), Arc::new(BypassGate))
-            .unwrap();
+        let eng = ZodeEngine::assemble(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+        )
+        .unwrap();
         let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
         assert!(names.contains(&"FileRead".to_string()), "names: {names:?}");
         assert!(names.contains(&"Bash".to_string()), "names: {names:?}");
@@ -254,8 +274,13 @@ mod tests {
         // unconfigured mutating tool with Ask — it must reach Allow so the
         // PermissionGatedTool decorator can prompt.
         let dir = tempfile::tempdir().unwrap();
-        let eng = ZodeEngine::assemble(&test_cfg(), dir.path().to_path_buf(), Arc::new(BypassGate))
-            .unwrap();
+        let eng = ZodeEngine::assemble(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+        )
+        .unwrap();
         let decision =
             eng.permissions
                 .evaluate("FileWrite", &serde_json::json!({"path": "x"}), None);
@@ -265,9 +290,14 @@ mod tests {
     #[tokio::test]
     async fn assemble_registers_edit_history_hook() {
         let dir = tempfile::tempdir().unwrap();
-        let eng = ZodeEngine::assemble(&test_cfg(), dir.path().to_path_buf(), Arc::new(BypassGate))
-            .unwrap();
-        assert_eq!(eng.hooks.len(), 1);
+        let eng = ZodeEngine::assemble(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+        )
+        .unwrap();
+        assert_eq!(eng.hooks.len(), 2); // EditHistory + BgShell
         assert!(eng.undo().await.is_err()); // empty history
     }
 
@@ -276,8 +306,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_cfg();
         cfg.permissions.deny = vec!["Bash".into()];
-        let eng =
-            ZodeEngine::assemble(&cfg, dir.path().to_path_buf(), Arc::new(BypassGate)).unwrap();
+        let eng = ZodeEngine::assemble(&cfg, dir.path().to_path_buf(), Arc::new(BypassGate), None)
+            .unwrap();
         let decision = eng
             .permissions
             .evaluate("Bash", &serde_json::json!({}), None);
