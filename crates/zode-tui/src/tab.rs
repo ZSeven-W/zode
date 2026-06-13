@@ -70,19 +70,18 @@ impl SessionTab {
     }
 
     /// Stamp the session index with a title derived from the first prompt.
-    pub fn stamp_title(&mut self, prompt: &str) {
+    pub async fn stamp_title(&mut self, prompt: &str) {
         let title = title_from_prompt(prompt);
         self.title = title.clone();
-        let mut idx = SessionIndex::load().unwrap_or_default();
-        idx.upsert(SessionMeta {
+        self.titled = true;
+        index_upsert(SessionMeta {
             id: self.session_id.clone(),
             title,
             cwd: self.engine.cwd.display().to_string(),
             model: self.engine.model.clone(),
             updated_at: now_secs(),
-        });
-        let _ = idx.save();
-        self.titled = true;
+        })
+        .await;
     }
 
     /// Snapshot the store then persist. Delegates to [`persist_session`].
@@ -130,6 +129,25 @@ pub async fn persist_session(session_id: String, engine: Arc<ZodeEngine>, title:
         });
     }
     let _ = idx.save();
+}
+
+/// Locked load-modify-save: upsert one entry under SAVE_LOCK so it can't race
+/// a concurrent `persist_session` / delete and lose updates.
+pub async fn index_upsert(meta: SessionMeta) {
+    let _guard = SAVE_LOCK.lock().await;
+    let mut idx = SessionIndex::load().unwrap_or_default();
+    idx.upsert(meta);
+    let _ = idx.save();
+}
+
+/// Locked removal of a session entry from the index (see [`index_upsert`]).
+pub async fn index_remove(id: &str) {
+    let _guard = SAVE_LOCK.lock().await;
+    if let Ok(mut idx) = SessionIndex::load() {
+        if idx.remove(id) {
+            let _ = idx.save();
+        }
+    }
 }
 
 fn now_secs() -> u64 {

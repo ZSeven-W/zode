@@ -10,7 +10,7 @@ use args::Args;
 use clap::Parser;
 use zode_core::approval::{ApprovalGate, BypassGate, StdinGate};
 use zode_core::config::ConfigManager;
-use zode_core::session_meta::SessionIndex;
+use zode_core::session_meta::{SessionIndex, SessionMeta};
 use zode_core::{EngineTemplate, GateSource, ZodeEngine};
 
 #[tokio::main]
@@ -80,10 +80,14 @@ async fn run(args: Args) -> i32 {
 
     // Plain REPL when asked, or when stdout isn't a tty (piped/CI).
     if args.no_tui || !std::io::stdout().is_terminal() {
-        let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox, &today).await else {
+        // Resume in the session's original directory when it still exists.
+        let resume_meta = resolve_resume_target(&args);
+        let eff_cwd = resume_dir(&resume_meta).unwrap_or(cwd);
+        let Some(engine) = build(&cfg, eff_cwd, headless_gate(args.yolo), sandbox, &today).await
+        else {
             return 1;
         };
-        let (engine, resumed_id) = resume_into(engine, &args).await;
+        let (engine, resumed_id) = attach_session(engine, resume_meta).await;
         return headless::run_repl(engine, resumed_id).await;
     }
 
@@ -99,14 +103,19 @@ async fn run(args: Args) -> i32 {
     // The TUI keeps a template so Ctrl+T / resume can assemble more engines.
     let template = EngineTemplate::new(cfg.clone(), cwd, gate_source, sandbox, today);
     // Tab 0 is assembled here; the app assigns it id 0, so label it "0".
-    let engine = match template.assemble_tab(None, Some("0".to_string())).await {
+    // Resume in the session's original directory when it still exists.
+    let resume_meta = resolve_resume_target(&args);
+    let engine = match template
+        .assemble_tab(resume_dir(&resume_meta), Some("0".to_string()))
+        .await
+    {
         Ok(e) => e,
         Err(e) => {
             eprintln!("zode: {e}");
             return 1;
         }
     };
-    let (engine, resumed_id) = resume_into(engine, &args).await;
+    let (engine, resumed_id) = attach_session(engine, resume_meta).await;
     let ui = zode_tui::UiConfig {
         theme_id: cfg.theme.clone(),
         yolo: args.yolo,
@@ -156,10 +165,10 @@ fn today_date() -> String {
     time::OffsetDateTime::now_utc().date().to_string()
 }
 
-/// Apply --resume/--continue: load the target session's store into `engine`.
-/// Returns the (possibly updated) engine and the resumed session id.
-async fn resume_into(engine: ZodeEngine, args: &Args) -> (ZodeEngine, Option<String>) {
-    let target = if let Some(r) = &args.resume {
+/// Resolve which session `--resume`/`--continue` targets, if any. Done BEFORE
+/// engine assembly so the engine can be built in the session's own cwd.
+fn resolve_resume_target(args: &Args) -> Option<SessionMeta> {
+    if let Some(r) = &args.resume {
         SessionIndex::load()
             .ok()
             .and_then(|i| i.find_prefix(r).cloned())
@@ -167,8 +176,25 @@ async fn resume_into(engine: ZodeEngine, args: &Args) -> (ZodeEngine, Option<Str
         SessionIndex::load().ok().and_then(|i| i.latest().cloned())
     } else {
         None
-    };
-    let Some(meta) = target else {
+    }
+}
+
+/// The session's recorded cwd, but only if that directory still exists (else
+/// the caller falls back to the launch cwd).
+fn resume_dir(meta: &Option<SessionMeta>) -> Option<PathBuf> {
+    meta.as_ref().and_then(|m| {
+        let p = PathBuf::from(&m.cwd);
+        p.is_dir().then_some(p)
+    })
+}
+
+/// Load the resolved session's store into `engine`. Returns the (possibly
+/// updated) engine and the resumed session id.
+async fn attach_session(
+    engine: ZodeEngine,
+    meta: Option<SessionMeta>,
+) -> (ZodeEngine, Option<String>) {
+    let Some(meta) = meta else {
         return (engine, None);
     };
     match SessionIndex::session_path(&meta.id) {

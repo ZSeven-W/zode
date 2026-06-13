@@ -207,6 +207,20 @@ impl TuiApp {
         self.tabs.iter_mut().find(|t| t.id == id)
     }
 
+    /// Build the permission dialog for `req`, first focusing the tab that
+    /// requested it (its gate is labeled with the tab id) so the prompt shows
+    /// over the right conversation and uses that tab's cwd. Only called when a
+    /// request becomes the ACTIVE dialog — queued requests don't move focus.
+    fn open_approval(&mut self, req: ApprovalRequest) -> PermissionDialog {
+        if let Some(src) = req.source.as_deref().and_then(|s| s.parse::<usize>().ok()) {
+            if let Some(pos) = self.tabs.iter().position(|t| t.id == src) {
+                self.active = pos;
+            }
+        }
+        let cwd = self.active_tab().engine.cwd.clone();
+        PermissionDialog::new(req, cwd)
+    }
+
     /// Open the session picker (/sessions, /resume) from the saved index.
     fn open_session_picker(&mut self) {
         let metas: Vec<SessionMeta> = SessionIndex::load()
@@ -240,7 +254,7 @@ impl TuiApp {
             KeyCode::Delete => {
                 let target = self.session_picker.as_ref().and_then(|p| p.selected());
                 if let Some(meta) = target {
-                    self.delete_session(&meta.id);
+                    self.delete_session(&meta.id).await;
                     if let Some(p) = &mut self.session_picker {
                         p.remove(&meta.id);
                     }
@@ -315,16 +329,13 @@ impl TuiApp {
     }
 
     /// Delete a saved session's transcript file and index entry. Open tabs are
-    /// untouched (they re-create the file on the next save).
-    fn delete_session(&mut self, id: &str) {
+    /// untouched (they re-create the file on the next save). The index write
+    /// goes through the shared lock so it can't race a concurrent save.
+    async fn delete_session(&mut self, id: &str) {
         if let Ok(path) = SessionIndex::session_path(id) {
             let _ = std::fs::remove_file(path);
         }
-        if let Ok(mut idx) = SessionIndex::load() {
-            if idx.remove(id) {
-                let _ = idx.save();
-            }
-        }
+        crate::tab::index_remove(id).await;
         self.toast = Some(Toast::info("session deleted"));
     }
 
@@ -401,14 +412,6 @@ impl TuiApp {
                     self.handle_agent_event(app_ev);
                 }
                 Some(req) = self.approval_rx.next() => {
-                    // Focus the tab that requested this approval (its gate is
-                    // labeled with its id) so the prompt appears over the right
-                    // conversation, not whatever tab happens to be active.
-                    if let Some(src) = req.source.as_deref().and_then(|s| s.parse::<usize>().ok()) {
-                        if let Some(pos) = self.tabs.iter().position(|t| t.id == src) {
-                            self.active = pos;
-                        }
-                    }
                     // An approval is the highest-priority modal: dismiss any
                     // settings/help/picker/panel overlay so it can't hide the
                     // prompt that is now capturing input.
@@ -416,9 +419,12 @@ impl TuiApp {
                     self.session_picker = None;
                     self.tasks_panel = None;
                     self.show_help = false;
+                    // Only focus the source tab when this request becomes the
+                    // active dialog; a queued request must not steal focus from
+                    // the dialog currently shown.
                     if self.active_dialog.is_none() {
-                        let cwd = self.active_tab().engine.cwd.clone();
-                        self.active_dialog = Some(PermissionDialog::new(req, cwd));
+                        let d = self.open_approval(req);
+                        self.active_dialog = Some(d);
                     } else {
                         self.pending_requests.push_back(req);
                     }
@@ -538,11 +544,9 @@ impl TuiApp {
                 _ => return,
             };
             if dialog.on_key(answer) {
-                let cwd = self.active_tab().engine.cwd.clone();
-                self.active_dialog = self
-                    .pending_requests
-                    .pop_front()
-                    .map(|r| PermissionDialog::new(r, cwd));
+                // Show the next queued request, focusing ITS source tab/cwd.
+                let next = self.pending_requests.pop_front();
+                self.active_dialog = next.map(|r| self.open_approval(r));
             }
             return;
         }
@@ -763,7 +767,7 @@ impl TuiApp {
         }
         // Stamp the session title from the first user prompt of this tab.
         if !self.active_tab().titled {
-            self.active_tab_mut().stamp_title(text);
+            self.active_tab_mut().stamp_title(text).await;
         }
 
         let tab = &mut self.tabs[self.active];

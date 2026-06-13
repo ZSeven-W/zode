@@ -37,21 +37,18 @@ impl CostState {
                 let ci = output
                     .get("usage_input_tokens")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
+                    .unwrap_or(0);
                 let co = output
                     .get("usage_output_tokens")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
+                    .unwrap_or(0);
                 if ci > 0 || co > 0 {
-                    tracker.observe_event(
-                        &self.model,
-                        &Event::Usage {
-                            input_tokens: ci,
-                            output_tokens: co,
-                            cache_read: 0,
-                            cache_create: 0,
-                        },
-                    );
+                    // The Task result already carries the child turn's TOTAL
+                    // tokens (not cumulative frames), so add them directly via
+                    // `observe` — NOT `observe_event`, whose cumulative-delta
+                    // baseline is keyed by model and would be corrupted by an
+                    // out-of-band absolute count for the parent's model.
+                    tracker.observe(&self.model, ci, co, 0, 0);
                 }
             }
         }
