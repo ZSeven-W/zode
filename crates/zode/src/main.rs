@@ -1,6 +1,7 @@
 mod args;
 mod headless;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -118,6 +119,23 @@ async fn run(args: Args) -> i32 {
         return headless::run_print(&engine, &prompt).await;
     }
 
-    // Full TUI lands in Phase 04; for now everything else is the REPL.
-    headless::run_repl(engine, resumed_id).await
+    // Plain REPL when asked, or when stdout isn't a tty (piped/CI).
+    if args.no_tui || !std::io::stdout().is_terminal() {
+        return headless::run_repl(engine, resumed_id).await;
+    }
+
+    // Full TUI. The resumed store (if any) is already injected into `engine`,
+    // so the TUI continues that conversation.
+    let ui = zode_tui::UiConfig {
+        theme_id: cfg.theme.clone(),
+        yolo: args.yolo,
+        sandbox: args.sandbox,
+    };
+    match zode_tui::TuiApp::new(engine, ui).run().await {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("zode tui: {e}");
+            1
+        }
+    }
 }
