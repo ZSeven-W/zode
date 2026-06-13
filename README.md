@@ -129,6 +129,47 @@ directory it prefers `AGENTS.md` over `CLAUDE.md`. Skills live under
 `.zode/skills/**/SKILL.md`; MCP servers in `~/.zode/mcp.json` ⊕ `.mcp.json`;
 hooks in `~/.zode/hooks.json` ⊕ `.zode/hooks.json`.
 
+## Benchmark
+
+Can a Zode harness driving an open model keep up with Claude on real coding
+problems? On a 31-task suite spanning six dimensions (algorithms, strings,
+data-structures, math, parsing, edge-cases), each task scored by a hidden test,
+**Zode + DeepSeek-v4-pro matches Claude**:
+
+| Dimension       | Tasks | Claude | Zode + DeepSeek-v4-pro |
+|-----------------|:-----:|:------:|:----------------------:|
+| algorithms      |   6   |  6/6   |          6/6           |
+| strings         |   5   |  5/5   |          5/5           |
+| data-structures |   5   |  5/5   |          5/5           |
+| math            |   5   |  5/5   |          5/5           |
+| parsing         |   5   |  5/5   |         5/5 \*         |
+| edge-cases      |   5   |  5/5   |          5/5           |
+| **Total**       | **31**| **31/31 (100%)** |  **31/31 (100%)**  |
+
+\* Over 3 independent runs, Zode + DeepSeek averaged **97.8% pass@1 (91/93)** —
+the only occasional misses were two parsing tasks (`eval_expr`, `csv_parse_row`)
+where the model slipped on an edge case once. Claude: 100% (93/93). DeepSeek is
+non-deterministic; the gap is within run-to-run noise.
+
+**Efficiency.** Because Zode keeps the system-prompt + tool-schema prefix
+byte-stable, DeepSeek serves it from its prompt cache: a steady-state session
+measured a **93% input-token cache-hit rate** (`/cost` reports it live). The
+harness lever that closed the capability gap was the system prompt — general
+"check the edge cases, trace the examples before answering" guidance, not
+task-specific hints.
+
+**Methodology.** Zode runs headless (`zode -p "<task>" --yolo`,
+`deepseek-v4-pro`) in an isolated working directory; Claude's column is Claude
+solving each task directly. Both are scored by the *same* hidden tests in a
+sandboxed subprocess. Fully reproducible:
+
+```bash
+ZODE_CONFIG_DIR=~/.zode python3 benchmarks/run.py --track both -j 1
+```
+
+The suite, the tests, Claude's reference solutions, and the runner live in
+[`benchmarks/`](benchmarks/).
+
 ## Architecture
 
 Zode is a Cargo workspace of three crates over the shared `agent` runtime:

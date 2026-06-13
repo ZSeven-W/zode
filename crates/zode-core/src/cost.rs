@@ -69,10 +69,9 @@ impl CostState {
             output += t.output_tokens;
             cache += t.cache_read_tokens;
         }
-        let hit = if input > 0 {
-            format!(" cache:{cache} ({}%)", 100 * cache / input)
-        } else {
-            String::new()
+        let hit = match (100 * cache).checked_div(input) {
+            Some(pct) => format!(" cache:{cache} ({pct}%)"),
+            None => String::new(),
         };
         if snap.has_unknown_models() {
             format!(
