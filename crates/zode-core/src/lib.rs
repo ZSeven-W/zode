@@ -9,6 +9,7 @@ pub mod approval;
 pub mod bg_shells;
 pub mod commands;
 pub mod config;
+pub mod cost;
 pub mod engine;
 pub mod error;
 pub mod gated_tool;
@@ -20,6 +21,7 @@ pub mod provider;
 pub mod sandbox;
 pub mod session_meta;
 pub mod skills;
+pub mod task_factory;
 pub mod tools;
 
 pub use engine::ZodeEngine;
