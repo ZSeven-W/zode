@@ -17,4 +17,7 @@ pub enum AppEvent {
         turn_id: u64,
         result: Result<(), String>,
     },
+    /// A transient toast, posted from off-loop work (e.g. /undo running on a
+    /// spawned task) so the event loop is never blocked.
+    Toast { text: String, error: bool },
 }

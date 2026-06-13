@@ -14,15 +14,18 @@ use crate::ui::centered;
 use crate::ui::diff::{diff_from_tool_input, MAX_DIFF_LINES};
 
 /// State for the active approval prompt. Holds the request until the user
-/// answers, then responds and reports done.
+/// answers, then responds and reports done. `cwd` resolves the diff
+/// preview's path the same way the engine does.
 pub struct PermissionDialog {
     request: Option<ApprovalRequest>,
+    cwd: std::path::PathBuf,
 }
 
 impl PermissionDialog {
-    pub fn new(request: ApprovalRequest) -> Self {
+    pub fn new(request: ApprovalRequest, cwd: std::path::PathBuf) -> Self {
         Self {
             request: Some(request),
+            cwd,
         }
     }
 
@@ -46,7 +49,7 @@ impl PermissionDialog {
             return;
         };
         let mut lines = vec![Line::from(req.summary()), Line::from("")];
-        if let Some(diff) = diff_from_tool_input(&req.input, theme) {
+        if let Some(diff) = diff_from_tool_input(&req.input, &self.cwd, theme) {
             lines.extend(diff.into_iter().take(MAX_DIFF_LINES));
             lines.push(Line::from(""));
         }
@@ -101,7 +104,7 @@ mod tests {
         let q = queue.clone();
         let join = tokio::spawn(async move { q.request("Bash", &serde_json::json!({})).await });
         let req = rx.next().await.unwrap();
-        let mut dialog = PermissionDialog::new(req);
+        let mut dialog = PermissionDialog::new(req, std::env::temp_dir());
         assert!(!dialog.on_key('x')); // not a decision key
         assert!(dialog.on_key('y')); // responded
         assert_eq!(join.await.unwrap(), Approval::AllowOnce);

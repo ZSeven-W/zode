@@ -130,8 +130,14 @@ impl TuiApp {
                     self.handle_agent_event(app_ev);
                 }
                 Some(req) = self.approval_rx.next() => {
+                    // An approval is the highest-priority modal: dismiss any
+                    // settings/help overlay so it can't hide the prompt that
+                    // is now capturing input.
+                    self.settings = None;
+                    self.show_help = false;
                     if self.active_dialog.is_none() {
-                        self.active_dialog = Some(PermissionDialog::new(req));
+                        let cwd = self.engine.cwd.clone();
+                        self.active_dialog = Some(PermissionDialog::new(req, cwd));
                     } else {
                         self.pending_requests.push_back(req);
                     }
@@ -168,15 +174,17 @@ impl TuiApp {
         self.status.render(f, chunks[2], &theme);
         // Autocomplete popup floats above the input row.
         self.autocomplete.render(f, chunks[1], &theme);
-        // Overlays, top-most last.
-        if let Some(dialog) = &self.active_dialog {
-            dialog.render(f, area, &theme);
-        }
+        // Overlays, lowest first. The permission dialog renders LAST (above
+        // settings/help) because it captures input with the highest
+        // precedence — it must never be hidden behind another overlay.
         if let Some(settings) = &mut self.settings {
             settings.render(f, area, &theme);
         }
         if self.show_help {
             crate::ui::help::render_help(f, area, &theme);
+        }
+        if let Some(dialog) = &self.active_dialog {
+            dialog.render(f, area, &theme);
         }
         if let Some(toast) = &self.toast {
             toast.render(f, area, &theme);
@@ -200,7 +208,11 @@ impl TuiApp {
                 _ => return,
             };
             if dialog.on_key(answer) {
-                self.active_dialog = self.pending_requests.pop_front().map(PermissionDialog::new);
+                let cwd = self.engine.cwd.clone();
+                self.active_dialog = self
+                    .pending_requests
+                    .pop_front()
+                    .map(|r| PermissionDialog::new(r, cwd));
             }
             return;
         }
@@ -348,13 +360,12 @@ impl TuiApp {
                 self.toast = Some(Toast::info(format!("theme → {id}")));
             }
             SettingsAction::SetProvider(name) => {
-                // Hot provider switch needs engine reassembly (heavy) — v1
-                // applies it on next launch.
-                if let Some(a) = self.turn_abort.take() {
-                    a.abort_with_reason("provider switch");
-                    self.active_turn_id = 0;
-                }
-                self.toast = Some(Toast::info(format!("provider '{name}' applies on restart")));
+                // Hot provider switch needs engine reassembly (heavy) and we
+                // don't persist it here, so be honest: tell the user how to
+                // switch rather than implying it's already applied (v1).
+                self.toast = Some(Toast::info(format!(
+                    "relaunch with --provider {name} to switch"
+                )));
             }
             SettingsAction::SetMode(m) => {
                 self.toast = Some(Toast::info(format!(
@@ -374,7 +385,7 @@ impl TuiApp {
 
     async fn submit(&mut self, text: &str, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         if let Some((name, args)) = parse_slash(text) {
-            self.handle_slash(name, args).await;
+            self.handle_slash(name, args, agent_tx).await;
             return;
         }
         self.chat.push_user(text);
@@ -426,9 +437,19 @@ impl TuiApp {
     }
 
     fn handle_agent_event(&mut self, ev: AppEvent) {
+        // Toasts (from off-loop work) carry no turn id.
+        if let AppEvent::Toast { text, error } = ev {
+            self.toast = Some(if error {
+                Toast::error(text)
+            } else {
+                Toast::info(text)
+            });
+            return;
+        }
         // Drop events from aborted/superseded turns.
         let turn_id = match &ev {
             AppEvent::Agent { turn_id, .. } | AppEvent::TurnDone { turn_id, .. } => *turn_id,
+            AppEvent::Toast { .. } => unreachable!("handled above"),
         };
         if turn_id != self.active_turn_id {
             return;
@@ -468,10 +489,16 @@ impl TuiApp {
                     }
                 };
             }
+            AppEvent::Toast { .. } => unreachable!("handled above"),
         }
     }
 
-    async fn handle_slash(&mut self, name: &str, args: &str) {
+    async fn handle_slash(
+        &mut self,
+        name: &str,
+        args: &str,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
         match name {
             "exit" => self.should_quit = true,
             "help" => self.show_help = true,
@@ -482,24 +509,37 @@ impl TuiApp {
                 }
             }
             "theme" => self.handle_theme(args),
-            "undo" => {
-                let r = self.engine.clone().undo().await;
-                self.toast = Some(match r {
-                    Ok(p) => Toast::info(format!("undid {}", p.display())),
-                    Err(e) => Toast::error(e.to_string()),
-                });
-            }
-            "redo" => {
-                let r = self.engine.clone().redo().await;
-                self.toast = Some(match r {
-                    Ok(p) => Toast::info(format!("redid {}", p.display())),
-                    Err(e) => Toast::error(e.to_string()),
-                });
-            }
+            // Run undo/redo off the event loop (the history mutex + file
+            // restore could block) and toast the result back as an event.
+            "undo" => self.spawn_history_op(agent_tx, true),
+            "redo" => self.spawn_history_op(agent_tx, false),
             other => {
                 self.toast = Some(Toast::info(format!("/{other} lands in a later phase")));
             }
         }
+    }
+
+    fn spawn_history_op(&self, agent_tx: &mpsc::UnboundedSender<AppEvent>, undo: bool) {
+        let engine = self.engine.clone();
+        let tx = agent_tx.clone();
+        tokio::spawn(async move {
+            let (verb, r) = if undo {
+                ("undid", engine.undo().await)
+            } else {
+                ("redid", engine.redo().await)
+            };
+            let ev = match r {
+                Ok(p) => AppEvent::Toast {
+                    text: format!("{verb} {}", p.display()),
+                    error: false,
+                },
+                Err(e) => AppEvent::Toast {
+                    text: e.to_string(),
+                    error: true,
+                },
+            };
+            let _ = tx.send(ev);
+        });
     }
 
     fn handle_theme(&mut self, args: &str) {

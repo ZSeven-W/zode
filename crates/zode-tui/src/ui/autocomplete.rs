@@ -43,10 +43,16 @@ impl Autocomplete {
             Some(rest) if !rest.contains(char::is_whitespace) => {
                 self.matches = self.registry.lookup(input).into_iter().copied().collect();
                 self.active = !self.matches.is_empty();
-                if self.active && self.state.selected().is_none() {
-                    self.state.select(Some(0));
-                }
-                if !self.active {
+                if self.active {
+                    // Clamp the selection into the new (possibly shorter)
+                    // match list so confirm()/prev() never point past the end.
+                    let sel = self
+                        .state
+                        .selected()
+                        .unwrap_or(0)
+                        .min(self.matches.len() - 1);
+                    self.state.select(Some(sel));
+                } else {
                     self.state.select(None);
                 }
             }
