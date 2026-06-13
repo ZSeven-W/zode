@@ -66,6 +66,8 @@ pub struct ZodeEngine {
     pub bg_shells_meta: BackgroundShellTracker,
     /// Loaded skills (the `/skills` command lists these).
     pub skills: Arc<SkillRegistry>,
+    /// MCP lifecycle, if any servers were configured (`/mcp` reports state).
+    pub mcp: Option<Arc<agent::mcp::Lifecycle>>,
 }
 
 impl ZodeEngine {
@@ -80,7 +82,7 @@ impl ZodeEngine {
     /// gate would never run — master plan §4.6①.) Explicit cfg deny rules
     /// are still honored: agent evaluates deny rules before the Bypass-mode
     /// short-circuit.
-    pub fn assemble(
+    pub async fn assemble(
         cfg: &ZodeConfig,
         cwd: PathBuf,
         gate: Arc<dyn ApprovalGate>,
@@ -124,6 +126,20 @@ impl ZodeEngine {
         let skills = Arc::new(load_skills_from(&skills_dirs(&cwd)));
         let skills_idx = skills_index(&skills);
         base.register(Arc::new(SkillTool::new(skills.clone())));
+
+        // MCP: connect configured servers (blocking at startup) and register
+        // a ZodeMcpTool per discovered tool. MCP tools are SafetyClass::Unknown
+        // so they go through the approval gate like other mutating tools.
+        let mcp = match crate::mcp::discover_mcp_config(&cwd) {
+            Some(config) => {
+                let lifecycle = crate::mcp::connect(config).await;
+                for tool in crate::mcp::mcp_tools(&lifecycle) {
+                    base.register(tool);
+                }
+                Some(lifecycle)
+            }
+            None => None,
+        };
 
         // --sandbox: wrap Bash/BashRun so writes are confined to cwd. Done
         // before gate-wrapping so the final shape is
@@ -197,6 +213,7 @@ impl ZodeEngine {
             history,
             bg_shells_meta,
             skills,
+            mcp,
         })
     }
 
@@ -274,8 +291,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn assemble_registers_core_tools() {
+    #[tokio::test]
+    async fn assemble_registers_core_tools() {
         let dir = tempfile::tempdir().unwrap();
         let eng = ZodeEngine::assemble(
             &test_cfg(),
@@ -284,6 +301,7 @@ mod tests {
             None,
             "2026-06-13",
         )
+        .await
         .unwrap();
         let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
         assert!(names.contains(&"FileRead".to_string()), "names: {names:?}");
@@ -296,8 +314,8 @@ mod tests {
         assert_eq!(eng.model, "MiniMax-M1");
     }
 
-    #[test]
-    fn unconfigured_tool_resolves_to_allow_so_the_gate_runs() {
+    #[tokio::test]
+    async fn unconfigured_tool_resolves_to_allow_so_the_gate_runs() {
         // BLOCK regression: under Bypass the loop must NOT pre-empt an
         // unconfigured mutating tool with Ask — it must reach Allow so the
         // PermissionGatedTool decorator can prompt.
@@ -309,6 +327,7 @@ mod tests {
             None,
             "2026-06-13",
         )
+        .await
         .unwrap();
         let decision =
             eng.permissions
@@ -326,13 +345,14 @@ mod tests {
             None,
             "2026-06-13",
         )
+        .await
         .unwrap();
         assert_eq!(eng.hooks.len(), 2); // EditHistory + BgShell
         assert!(eng.undo().await.is_err()); // empty history
     }
 
-    #[test]
-    fn deny_rule_still_wins_under_bypass() {
+    #[tokio::test]
+    async fn deny_rule_still_wins_under_bypass() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_cfg();
         cfg.permissions.deny = vec!["Bash".into()];
@@ -343,6 +363,7 @@ mod tests {
             None,
             "2026-06-13",
         )
+        .await
         .unwrap();
         let decision = eng
             .permissions

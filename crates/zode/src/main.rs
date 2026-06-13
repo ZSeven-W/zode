@@ -72,7 +72,7 @@ async fn run(args: Args) -> i32 {
 
     // --print: headless single turn (stdin gate, or bypass on --yolo).
     if let Some(prompt) = args.print.clone() {
-        let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox, &today) else {
+        let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox, &today).await else {
             return 1;
         };
         return headless::run_print(&engine, &prompt).await;
@@ -80,7 +80,7 @@ async fn run(args: Args) -> i32 {
 
     // Plain REPL when asked, or when stdout isn't a tty (piped/CI).
     if args.no_tui || !std::io::stdout().is_terminal() {
-        let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox, &today) else {
+        let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox, &today).await else {
             return 1;
         };
         let (engine, resumed_id) = resume_into(engine, &args).await;
@@ -94,7 +94,7 @@ async fn run(args: Args) -> i32 {
     } else {
         Arc::new(zode_core::approval::QueueGate::new(queue))
     };
-    let Some(engine) = build(&cfg, cwd, gate, sandbox, &today) else {
+    let Some(engine) = build(&cfg, cwd, gate, sandbox, &today).await else {
         return 1;
     };
     let (engine, _resumed_id) = resume_into(engine, &args).await;
@@ -123,14 +123,14 @@ fn headless_gate(yolo: bool) -> Arc<dyn ApprovalGate> {
 }
 
 /// Assemble the engine, reporting and returning None on error.
-fn build(
+async fn build(
     cfg: &zode_core::config::ZodeConfig,
     cwd: PathBuf,
     gate: Arc<dyn ApprovalGate>,
     sandbox: Option<zode_core::sandbox::SandboxConfig>,
     date: &str,
 ) -> Option<ZodeEngine> {
-    match ZodeEngine::assemble(cfg, cwd, gate, sandbox, date) {
+    match ZodeEngine::assemble(cfg, cwd, gate, sandbox, date).await {
         Ok(e) => Some(e),
         Err(e) => {
             eprintln!("zode: {e}");

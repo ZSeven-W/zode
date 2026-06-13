@@ -182,6 +182,24 @@ async fn dispatch_command(
                 }
             }
         }
+        "mcp" => match &engine.mcp {
+            None => println!("(no MCP servers configured)"),
+            Some(lc) => {
+                for s in lc.registry.snapshot() {
+                    let status = if s.state.is_connected() {
+                        "connected"
+                    } else {
+                        "not connected"
+                    };
+                    println!(
+                        "  {} — {} ({} tools)",
+                        s.name,
+                        status,
+                        s.state.tool_names().len()
+                    );
+                }
+            }
+        },
         _ => match cmd.action {
             CommandAction::Ui => println!("/{name} is available in the TUI only"),
             _ => println!("/{name}: not handled in the REPL yet"),
