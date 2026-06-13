@@ -1,14 +1,17 @@
 //! Conversation view: holds the message list, the streaming delta buffer,
 //! and scroll state. Renders into a ratatui Frame.
 
+use std::path::Path;
+
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::theme::Theme;
+use crate::ui::chrome::compact_path;
 use crate::ui::markdown::render_markdown;
 
 /// Approximate the number of wrapped rows a line occupies at `width`
@@ -38,6 +41,13 @@ pub enum Role {
 pub struct ChatMessage {
     pub role: Role,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ChatRenderMeta<'a> {
+    pub theme_name: &'a str,
+    pub model: &'a str,
+    pub cwd: &'a Path,
 }
 
 #[derive(Debug, Default)]
@@ -118,12 +128,22 @@ impl ChatView {
     }
 
     /// Build all lines, then render the visible window into `area`.
-    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme) {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        for msg in &self.messages {
-            lines.extend(self.render_message(msg, theme));
+    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme, meta: ChatRenderMeta<'_>) {
+        let mut lines: Vec<Line<'static>> = if self.messages.is_empty() {
+            self.render_empty(theme, meta)
+        } else {
+            let mut out = Vec::new();
+            for msg in &self.messages {
+                out.extend(self.render_message(msg, theme));
+                out.push(Line::from(""));
+            }
+            out
+        };
+
+        if lines.is_empty() {
             lines.push(Line::from(""));
         }
+
         // Count POST-wrap rows so scrolling is correct for wrapped content,
         // and clamp into u16 so a huge history can't overflow. Computed
         // before `lines` moves into the Paragraph.
@@ -141,35 +161,131 @@ impl ChatView {
         f.render_widget(para, area);
     }
 
+    fn render_empty(&self, theme: &Theme, meta: ChatRenderMeta<'_>) -> Vec<Line<'static>> {
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", theme.icon_logo),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "zode",
+                    Style::default()
+                        .fg(theme.fg_white)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" workbench", Style::default().fg(theme.fg_subtle)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("theme ", Style::default().fg(theme.fg_subtle)),
+                Span::styled(
+                    meta.theme_name.to_string(),
+                    Style::default().fg(theme.accent),
+                ),
+                Span::styled("  model ", Style::default().fg(theme.fg_subtle)),
+                Span::styled(meta.model.to_string(), Style::default().fg(theme.fg_text)),
+            ]),
+            Line::from(vec![
+                Span::styled("cwd   ", Style::default().fg(theme.fg_subtle)),
+                Span::styled(compact_path(meta.cwd), Style::default().fg(theme.fg_text)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("/help", Style::default().fg(theme.accent)),
+                Span::styled(" commands   ", Style::default().fg(theme.fg_subtle)),
+                Span::styled("/theme", Style::default().fg(theme.accent)),
+                Span::styled(" switch   ", Style::default().fg(theme.fg_subtle)),
+                Span::styled("/sessions", Style::default().fg(theme.accent)),
+                Span::styled(" resume   ", Style::default().fg(theme.fg_subtle)),
+                Span::styled("/tasks", Style::default().fg(theme.accent)),
+                Span::styled(" shells", Style::default().fg(theme.fg_subtle)),
+            ]),
+        ]
+    }
+
     fn render_message(&self, msg: &ChatMessage, theme: &Theme) -> Vec<Line<'static>> {
         match msg.role {
-            Role::User => vec![Line::from(vec![
-                Span::styled(
-                    format!("{} ", theme.icon_user),
-                    Style::default().fg(theme.user).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(msg.text.clone(), Style::default().fg(theme.fg_white)),
-            ])],
+            Role::User => {
+                self.render_role_block(&theme.icon_user, "You", &msg.text, theme.user, theme, false)
+            }
             Role::Assistant => {
-                let mut out = vec![Line::from(Span::styled(
-                    format!("{} ", theme.icon_assistant),
-                    Style::default()
-                        .fg(theme.assistant)
-                        .add_modifier(Modifier::BOLD),
-                ))];
-                out.extend(render_markdown(&msg.text, theme));
+                let mut out =
+                    vec![self.role_header(&theme.icon_assistant, "Assistant", theme.assistant)];
+                out.extend(rail_markdown(&msg.text, theme, theme.assistant));
                 out
             }
-            Role::System => vec![Line::from(Span::styled(
-                msg.text.clone(),
-                Style::default().fg(theme.system),
-            ))],
-            Role::Tool => vec![Line::from(Span::styled(
-                format!("· {}", msg.text),
-                Style::default().fg(theme.fg_subtle),
-            ))],
+            Role::System => self.render_role_block(
+                &theme.icon_system,
+                "System",
+                &msg.text,
+                theme.system,
+                theme,
+                true,
+            ),
+            Role::Tool => vec![Line::from(vec![
+                Span::styled("  · ", Style::default().fg(theme.accent_secondary)),
+                Span::styled(msg.text.clone(), Style::default().fg(theme.fg_subtle)),
+            ])],
         }
     }
+
+    fn render_role_block(
+        &self,
+        icon: &str,
+        label: &str,
+        text: &str,
+        color: Color,
+        theme: &Theme,
+        subtle_body: bool,
+    ) -> Vec<Line<'static>> {
+        let body_style = if subtle_body {
+            Style::default().fg(theme.fg_subtle)
+        } else {
+            Style::default().fg(theme.fg_white)
+        };
+        let mut out = vec![self.role_header(icon, label, color)];
+        for line in text.lines().chain((text.is_empty()).then_some("")) {
+            out.push(Line::from(vec![
+                Span::styled("│ ", Style::default().fg(color)),
+                Span::styled(line.to_string(), body_style),
+            ]));
+        }
+        out
+    }
+
+    fn role_header(&self, icon: &str, label: &str, color: Color) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(
+                format!("{icon} "),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                label.to_string(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+        ])
+    }
+}
+
+fn rail_markdown(src: &str, theme: &Theme, rail_color: Color) -> Vec<Line<'static>> {
+    let rendered = render_markdown(src, theme);
+    if rendered.is_empty() {
+        return vec![Line::from(vec![Span::styled(
+            "│ ",
+            Style::default().fg(rail_color),
+        )])];
+    }
+    rendered
+        .into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::styled("│ ", Style::default().fg(rail_color))];
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -216,9 +332,73 @@ mod tests {
         view.push_delta("**bold** reply");
         let backend = TestBackend::new(40, 10);
         let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| view.render(f, f.area(), &theme)).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "MiniMax-M1",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
         let buf = term.backend().buffer().clone();
         let content: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(content.contains("hello"));
+    }
+
+    #[test]
+    fn empty_state_renders_workbench_metadata() {
+        let theme = ThemeStore::with_builtins().resolve(Some("hacker"));
+        let view = ChatView::new();
+        let backend = TestBackend::new(80, 10);
+        let mut term = Terminal::new(backend).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "MiniMax-M1",
+            cwd: std::path::Path::new("/Users/kayshen/Workspace/ZSeven-W/zode"),
+        };
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("zode"));
+        assert!(content.contains("Hacker"));
+        assert!(content.contains("MiniMax-M1"));
+        assert!(content.contains("/help"));
+        assert!(content.contains("/theme"));
+    }
+
+    #[test]
+    fn messages_render_role_headers_and_rails() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut view = ChatView::new();
+        view.push_user("hello");
+        view.push_delta("**bold** reply");
+        view.push_tool("Bash");
+        view.push_system("done");
+        let backend = TestBackend::new(80, 14);
+        let mut term = Terminal::new(backend).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "MiniMax-M1",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("You"));
+        assert!(content.contains("Assistant"));
+        assert!(content.contains("System"));
+        assert!(content.contains("│ hello"));
+        assert!(content.contains("· Bash"));
     }
 }

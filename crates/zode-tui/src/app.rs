@@ -32,7 +32,7 @@ use crate::event::AppEvent;
 use crate::tab::SessionTab;
 use crate::theme::{Theme, ThemeStore};
 use crate::ui::autocomplete::Autocomplete;
-use crate::ui::chat::ChatView;
+use crate::ui::chat::{ChatRenderMeta, ChatView};
 use crate::ui::dialog::permission::PermissionDialog;
 use crate::ui::dialog::session_picker::SessionPicker;
 use crate::ui::dialog::settings::{SettingsAction, SettingsDialog, SettingsLevel};
@@ -521,7 +521,15 @@ impl TuiApp {
         } else {
             (chunks[0], chunks[1], chunks[2])
         };
-        self.tabs[self.active].chat.render(f, chat_area, &theme);
+        {
+            let tab = &self.tabs[self.active];
+            let chat_meta = ChatRenderMeta {
+                theme_name: &theme.name,
+                model: &tab.engine.model,
+                cwd: &tab.engine.cwd,
+            };
+            tab.chat.render(f, chat_area, &theme, chat_meta);
+        }
         self.input.render(f, input_area, &theme);
         self.status.render(f, status_area, &theme);
         // Autocomplete popup floats above the input row.
