@@ -17,8 +17,8 @@ use agent::query::QueryLoop;
 use agent::stream::EventStream;
 use agent::tool::{SafetyClass, ToolRegistry};
 use agent_tools_code::{
-    register_default, BashOutputTool, BashRunTool, BashSessionRegistry, KillShellTool,
-    ToolSearchTool, WorkspacePolicy,
+    register_default_with_todo, BashOutputTool, BashRunTool, BashSessionRegistry, KillShellTool,
+    TodoState, ToolSearchTool, WorkspacePolicy,
 };
 // QueryLoop's builder takes std::sync::Mutex (not tokio's). We never hold
 // these guards across an await — callers snapshot (MessageStore: Clone)
@@ -50,6 +50,8 @@ pub struct ZodeEngine {
     pub max_output_tokens: u32,
     /// Background shell registry (Phase 03/07 inspect this).
     pub bash_sessions: BashSessionRegistry,
+    /// Shared TodoWrite state handle (Phase 07 reads the list for the UI).
+    pub todo_state: TodoState,
 }
 
 impl ZodeEngine {
@@ -76,9 +78,12 @@ impl ZodeEngine {
             .into_arc();
 
         // 1. Default tools (fs/search/shell/web/notebook/todo) + the
-        //    background-shell trio (not part of register_default).
+        //    background-shell trio (not part of register_default). We pass
+        //    a TodoState so we keep the handle (Phase 07) and avoid the
+        //    "no caller-provided TodoState" startup warning.
         let mut base = ToolRegistry::new();
-        register_default(&mut base, policy.clone());
+        let todo_state = TodoState::new();
+        register_default_with_todo(&mut base, policy.clone(), todo_state.clone());
         let bash_sessions = BashSessionRegistry::new();
         base.register(Arc::new(BashRunTool::new(
             policy.clone(),
@@ -123,6 +128,7 @@ impl ZodeEngine {
             cwd,
             max_output_tokens: cfg.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
             bash_sessions,
+            todo_state,
         })
     }
 
