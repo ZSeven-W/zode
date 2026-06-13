@@ -12,7 +12,8 @@ use zode_core::commands::{CommandRegistry, SlashCommand};
 use crate::theme::Theme;
 
 const MAX_VISIBLE: usize = 8;
-const POPUP_WIDTH: u16 = 76;
+const POPUP_WIDTH: u16 = 96;
+const COMMAND_COLUMN_WIDTH: usize = 15;
 
 pub struct Autocomplete {
     registry: CommandRegistry,
@@ -121,20 +122,32 @@ impl Autocomplete {
             .iter()
             .map(|c| {
                 ListItem::new(Line::from(vec![
+                    Span::raw("  "),
                     Span::styled(
-                        format!("/{:<10}", c.name),
-                        Style::default().fg(theme.accent),
+                        format!("/{:<width$}", c.name, width = COMMAND_COLUMN_WIDTH),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(c.description, Style::default().fg(theme.fg_subtle)),
+                    Span::styled(c.description, Style::default().fg(theme.fg_text)),
                 ]))
             })
             .collect();
         f.render_widget(Clear, area);
+        let title = format!(" Commands · {} matches ", self.matches.len());
         let list = List::new(items)
             .block(
                 Block::default()
-                    .title(" Commands ")
-                    .title_bottom(" ↑↓ move · Enter select · Tab insert · Esc close ")
+                    .title(Line::styled(
+                        title,
+                        Style::default()
+                            .fg(theme.accent_secondary)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .title_bottom(Line::styled(
+                        " ↑↓ navigate · Enter run · Tab fill · Esc close ",
+                        Style::default().fg(theme.fg_subtle),
+                    ))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.accent_secondary))
                     .style(Style::default().bg(theme.bg_secondary)),
@@ -196,9 +209,32 @@ mod tests {
         let input_area = Rect::new(2, 20, 100, 4);
         let area = popup_area(input_area, 8);
         assert_eq!(area.x, 2);
-        assert_eq!(area.width, 76);
+        assert_eq!(area.width, 96);
         assert_eq!(area.height, 10);
         assert_eq!(area.y, 10);
+    }
+
+    #[test]
+    fn render_uses_command_palette_chrome() {
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("cyberpunk"));
+        let backend = ratatui::backend::TestBackend::new(110, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let input_area = Rect::new(0, 20, 110, 4);
+        let mut ac = Autocomplete::new();
+
+        ac.update("/");
+        term.draw(|f| ac.render(f, input_area, &theme)).unwrap();
+
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("Commands ·"));
+        assert!(content.contains("↑↓ navigate"));
+        assert!(content.contains("Tab fill"));
     }
 
     #[test]
