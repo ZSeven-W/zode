@@ -183,11 +183,13 @@ impl TuiApp {
         if self.show_help {
             crate::ui::help::render_help(f, area, &theme);
         }
-        if let Some(dialog) = &self.active_dialog {
-            dialog.render(f, area, &theme);
-        }
+        // Toast renders before the permission dialog so it can never cover an
+        // active approval prompt; the dialog is the true top layer.
         if let Some(toast) = &self.toast {
             toast.render(f, area, &theme);
+        }
+        if let Some(dialog) = &self.active_dialog {
+            dialog.render(f, area, &theme);
         }
     }
 

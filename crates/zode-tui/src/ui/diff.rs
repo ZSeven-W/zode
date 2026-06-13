@@ -1,7 +1,7 @@
 //! Unified diff rendering for file-edit previews (permission dialog + tool
 //! result expansion). Uses the `similar` crate.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -52,6 +52,27 @@ pub fn diff_lines(old: &str, new: &str, theme: &Theme) -> Vec<Line<'static>> {
 /// Best-effort diff from a FileWrite/FileEdit tool input. Reads the current
 /// file as "old"; computes "new" from the input fields. None if the input
 /// isn't a recognized file edit.
+/// Lexically normalize a path (resolve `.`/`..` without touching the
+/// filesystem, so it works for not-yet-created files).
+fn normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// True if `path` is inside `base` after lexical `..`/`.` resolution.
+fn is_within(base: &Path, path: &Path) -> bool {
+    normalize(path).starts_with(normalize(base))
+}
+
 pub fn diff_from_tool_input(
     input: &serde_json::Value,
     base_cwd: &Path,
@@ -68,6 +89,16 @@ pub fn diff_from_tool_input(
             base_cwd.join(p)
         }
     };
+
+    // Containment: the fs tools confine writes to the workspace (cwd). Don't
+    // read a file outside it for a preview, even though the model could name
+    // an absolute or `..` path the tool would later reject.
+    if !is_within(base_cwd, &path) {
+        return Some(vec![Line::from(Span::styled(
+            "(path outside workspace — preview skipped)".to_string(),
+            Style::default().fg(Color::Yellow),
+        ))]);
+    }
 
     // Bound the read: skip a preview for oversized files (stat first).
     if let Ok(meta) = std::fs::metadata(&path) {
@@ -91,18 +122,24 @@ pub fn diff_from_tool_input(
             .get("replace_all")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        // Mirror the tool's match-count rule so the preview warns when the
-        // edit will be rejected (0 matches, or >1 without replace_all).
-        let count = old.matches(o).count();
-        if count == 0 {
-            note = Some("(old_string not found — the edit will fail)");
-        } else if count > 1 && !replace_all {
-            note = Some("(old_string matches multiple times — needs replace_all)");
-        }
-        if replace_all {
-            old.replace(o, n)
+        // Mirror the tool's rules so the preview warns when the edit will be
+        // rejected: empty old_string, 0 matches, or >1 without replace_all.
+        // (replace("", _) would otherwise splice new_string between chars.)
+        if o.is_empty() {
+            note = Some("(empty old_string — the edit will fail)");
+            old.clone()
         } else {
-            old.replacen(o, n, 1)
+            let count = old.matches(o).count();
+            if count == 0 {
+                note = Some("(old_string not found — the edit will fail)");
+            } else if count > 1 && !replace_all {
+                note = Some("(old_string matches multiple times — needs replace_all)");
+            }
+            if replace_all {
+                old.replace(o, n)
+            } else {
+                old.replacen(o, n, 1)
+            }
         }
     } else {
         return None;
@@ -190,6 +227,43 @@ mod tests {
         });
         let lines = diff_from_tool_input(&input, dir.path(), &theme).unwrap();
         assert!(joined(&lines).contains("not found"));
+    }
+
+    #[test]
+    fn path_outside_workspace_is_skipped() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let dir = tempfile::tempdir().unwrap();
+        // A `..`-escaping relative path must not be read for preview.
+        let input = serde_json::json!({"path": "../escape.txt", "content": "x"});
+        let lines = diff_from_tool_input(&input, dir.path(), &theme).unwrap();
+        assert!(joined(&lines).contains("outside workspace"));
+    }
+
+    #[test]
+    fn empty_old_string_is_noted_not_spliced() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+        let input = serde_json::json!({
+            "path": "a.txt", "old_string": "", "new_string": "X", "replace_all": true
+        });
+        let lines = diff_from_tool_input(&input, dir.path(), &theme).unwrap();
+        let j = joined(&lines);
+        assert!(j.contains("empty old_string"));
+        // Must NOT splice X between every character.
+        assert!(!j.contains("XhXeXlX"));
+    }
+
+    #[test]
+    fn within_check_lexical() {
+        let base = std::path::Path::new("/work/proj");
+        assert!(is_within(base, std::path::Path::new("/work/proj/src/a.rs")));
+        assert!(is_within(base, std::path::Path::new("/work/proj/./a.rs")));
+        assert!(!is_within(
+            base,
+            std::path::Path::new("/work/proj/../other/a.rs")
+        ));
+        assert!(!is_within(base, std::path::Path::new("/etc/passwd")));
     }
 
     #[test]
