@@ -17,7 +17,7 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -33,6 +33,7 @@ use crate::tab::SessionTab;
 use crate::theme::{Theme, ThemeStore};
 use crate::ui::autocomplete::Autocomplete;
 use crate::ui::chat::{ChatRenderMeta, ChatView};
+use crate::ui::chrome::{render_header, split_main, HeaderInfo};
 use crate::ui::dialog::permission::PermissionDialog;
 use crate::ui::dialog::session_picker::SessionPicker;
 use crate::ui::dialog::settings::{SettingsAction, SettingsDialog, SettingsLevel};
@@ -494,44 +495,42 @@ impl TuiApp {
             self.status.input_tokens = tab.input_tokens;
             self.status.output_tokens = tab.output_tokens;
         }
-        // A tab bar row appears only when more than one tab exists, so the
-        // single-tab layout is unchanged.
+        let active_title = self.tabs[self.active].title.clone();
+        let active_model = self.tabs[self.active].engine.model.clone();
+        let active_cwd = self.tabs[self.active].engine.cwd.clone();
+        let active_busy = self.tabs[self.active].is_busy();
         let show_tabs = self.tabs.len() > 1;
-        let constraints = if show_tabs {
-            vec![
-                Constraint::Length(1), // tab bar
-                Constraint::Min(3),    // chat
-                Constraint::Length(3), // input
-                Constraint::Length(1), // status
-            ]
-        } else {
-            vec![
-                Constraint::Min(3),    // chat
-                Constraint::Length(3), // input
-                Constraint::Length(1), // status
-            ]
-        };
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(constraints)
-            .split(area);
-        let (chat_area, input_area, status_area) = if show_tabs {
-            render_tabs(f, chunks[0], &self.tabs, self.active, &theme);
-            (chunks[1], chunks[2], chunks[3])
-        } else {
-            (chunks[0], chunks[1], chunks[2])
-        };
-        {
-            let tab = &self.tabs[self.active];
-            let chat_meta = ChatRenderMeta {
-                theme_name: &theme.name,
-                model: &tab.engine.model,
-                cwd: &tab.engine.cwd,
-            };
-            tab.chat.render(f, chat_area, &theme, chat_meta);
+
+        let areas = split_main(area, show_tabs);
+        if let Some(header) = areas.header {
+            render_header(
+                f,
+                header,
+                &theme,
+                HeaderInfo {
+                    theme_name: &theme.name,
+                    model: &active_model,
+                    cwd: &active_cwd,
+                    tab_title: &active_title,
+                    busy: active_busy,
+                },
+            );
         }
+        if let Some(tab_area) = areas.tabs {
+            render_tabs(f, tab_area, &self.tabs, self.active, &theme);
+        }
+
+        let chat_meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: &active_model,
+            cwd: &active_cwd,
+        };
+        self.tabs[self.active]
+            .chat
+            .render(f, areas.chat, &theme, chat_meta);
+        let input_area: Rect = areas.composer;
         self.input.render(f, input_area, &theme, self.status.mode);
-        self.status.render(f, status_area, &theme);
+        self.status.render(f, areas.status, &theme);
         // Autocomplete popup floats above the input row.
         self.autocomplete.render(f, input_area, &theme);
         // Overlays, lowest first. The permission dialog renders LAST (above
