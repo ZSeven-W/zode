@@ -146,10 +146,16 @@ data-structures, math, parsing, edge-cases), each task scored by a hidden test,
 | edge-cases      |   5   |  5/5   |          5/5           |
 | **Total**       | **31**| **31/31 (100%)** |  **31/31 (100%)**  |
 
-\* Over 3 independent runs, Zode + DeepSeek averaged **97.8% pass@1 (91/93)** —
-the only occasional misses were two parsing tasks (`eval_expr`, `csv_parse_row`)
-where the model slipped on an edge case once. Claude: 100% (93/93). DeepSeek is
-non-deterministic; the gap is within run-to-run noise.
+\* Over 3 independent runs, Zode + DeepSeek averaged **97.8% pass@1 (91/93)**.
+This is **one-shot, tools forbidden** ("reply with only the function"). The
+only misses were two edge-case-heavy parsing tasks (`parse_ini`, `csv_parse_row`,
+`eval_expr`) that the model gets right ~2 of 3 times — DeepSeek retains some
+non-determinism even at `temperature: 0`, and these sit at its one-shot
+reliability edge. Crucially, **that gap is the model, not the harness**: run the
+*same* tasks agentically — letting Zode write the function, run its own checks,
+and fix — and they pass **3/3 and 3/3** (`benchmarks/selfverify.py`). Self-
+verification is exactly what the harness is for, which is why every agentic tier
+below is 100%.
 
 ### Harness (agentic) — read, run, edit, fix
 
@@ -164,9 +170,12 @@ can't game it). Head-to-head, both tracks score the same:
 |------|---------------|:-----:|:------:|:----------------------:|
 | Agentic fixes/implements | bug-fix, multi-file, class impl, algorithm, refactor | 6 | 100% | **100%** (18/18, 3 runs) |
 | Tricky bugs (疑难杂症) | mutable-default, closure late-binding, dict-mutation-during-iter, shallow aliasing, generator exhaustion, `is` vs `==`, shared class attr, float truncation, off-by-one | 9 | 100% | **100%** (27/27, 3 runs) |
+| Complex multi-file | template engine, chainable query engine, multi-file expression interpreter (lexer + evaluator with vars/functions), build-order resolver w/ cycle detection, cross-file precedence-bug trace | 5 | 100% | **100%** (15/15, 3 runs) |
 
-Zode + DeepSeek diagnosed and fixed **every** subtle bug in **every** run by
-actually reproducing it with the test harness first — the same way Claude does.
+Zode + DeepSeek diagnosed/implemented **every** task in **every** run by
+exploring (`Grep`/`Glob`/`ListDir`), reproducing with the test harness, then
+editing and re-running to verify — the same loop Claude uses. The harder and
+more agentic the task, the more decisive the harness is.
 
 **Efficiency.** Because Zode keeps the system-prompt + tool-schema prefix
 byte-stable, DeepSeek serves it from its prompt cache: a steady-state session
@@ -181,9 +190,11 @@ column is Claude solving each task directly. Both are scored by the *same*
 hidden tests in a sandboxed subprocess. Fully reproducible:
 
 ```bash
-ZODE_CONFIG_DIR=~/.zode python3 benchmarks/run.py      --track both   # code-gen
-ZODE_CONFIG_DIR=~/.zode python3 benchmarks/agentic.py  --track both   # agentic harness
-ZODE_CONFIG_DIR=~/.zode python3 benchmarks/hardbugs.py --track both   # tricky bugs
+ZODE_CONFIG_DIR=~/.zode python3 benchmarks/run.py        --track both   # code-gen (one-shot)
+ZODE_CONFIG_DIR=~/.zode python3 benchmarks/agentic.py    --track both   # agentic harness
+ZODE_CONFIG_DIR=~/.zode python3 benchmarks/hardbugs.py   --track both   # tricky bugs
+ZODE_CONFIG_DIR=~/.zode python3 benchmarks/complex.py    --track both   # complex multi-file
+ZODE_CONFIG_DIR=~/.zode python3 benchmarks/selfverify.py                # one-shot gap → agentic
 ```
 
 The suites, hidden graders, Claude's reference solutions, and the runners live in

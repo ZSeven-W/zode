@@ -1,0 +1,81 @@
+{
+  "zode": {
+    "total": [
+      5,
+      5
+    ],
+    "tools_seen": [
+      "Bash",
+      "FileEdit",
+      "FileRead",
+      "FileWrite",
+      "Glob"
+    ],
+    "results": [
+      {
+        "id": "template_engine",
+        "dim": "implement-system",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileRead",
+          "FileWrite",
+          "Glob"
+        ],
+        "secs": 75.2
+      },
+      {
+        "id": "query_engine",
+        "dim": "implement-system",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileRead",
+          "FileWrite",
+          "Glob"
+        ],
+        "secs": 23.6
+      },
+      {
+        "id": "expr_language",
+        "dim": "multi-file",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileRead",
+          "FileWrite",
+          "Glob"
+        ],
+        "secs": 68.2
+      },
+      {
+        "id": "build_resolver",
+        "dim": "implement-algo",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileEdit",
+          "FileRead"
+        ],
+        "secs": 55.4
+      },
+      {
+        "id": "cross_file_precedence_bug",
+        "dim": "multi-file-debug",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileEdit",
+          "FileRead",
+          "Glob"
+        ],
+        "secs": 24.6
+      }
+    ]
+  }
+}
