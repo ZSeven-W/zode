@@ -151,7 +151,11 @@ impl ZodeEngine {
         )));
         let bg_shells_meta = BackgroundShellTracker::new();
         let mut hooks = HookRunner::new();
-        hooks.register(Arc::new(EditHistoryHook::new(history.clone())));
+        // EditHistoryHook resolves paths via the same policy the fs tools use.
+        hooks.register(Arc::new(EditHistoryHook::new(
+            history.clone(),
+            policy.clone(),
+        )));
         hooks.register(Arc::new(BgShellHook::new(bg_shells_meta.clone())));
 
         Ok(Self {

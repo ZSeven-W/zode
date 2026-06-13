@@ -51,9 +51,15 @@ impl SandboxConfig {
     }
 }
 
+/// Escape a string for a Scheme string literal (sandbox profile syntax):
+/// backslash and double-quote.
+fn scheme_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// sandbox-exec profile: read anywhere, write only cwd + /tmp.
 fn macos_profile(cwd: &Path) -> String {
-    let cwd = cwd.display();
+    let cwd = scheme_escape(&cwd.display().to_string());
     format!(
         "(version 1)\
          (allow default)\
@@ -66,6 +72,9 @@ fn macos_profile(cwd: &Path) -> String {
 }
 
 /// bwrap argv: ro-bind the whole fs, rw-bind cwd + /tmp, then sh -c.
+/// No `--chdir`: bwrap inherits the caller's working directory, which the
+/// inner Bash tool already set to its resolved `cwd` input (a forced
+/// --chdir would override that and run from the wrong directory).
 fn linux_bwrap_args(cwd: &Path, command: &str) -> Vec<String> {
     let cwd = cwd.display().to_string();
     vec![
@@ -75,7 +84,7 @@ fn linux_bwrap_args(cwd: &Path, command: &str) -> Vec<String> {
         "/".into(),
         "--bind".into(),
         cwd.clone(),
-        cwd.clone(),
+        cwd,
         "--bind".into(),
         "/tmp".into(),
         "/tmp".into(),
@@ -83,8 +92,6 @@ fn linux_bwrap_args(cwd: &Path, command: &str) -> Vec<String> {
         "/dev".into(),
         "--proc".into(),
         "/proc".into(),
-        "--chdir".into(),
-        cwd,
         "/bin/sh".into(),
         "-c".into(),
         command.to_string(),
@@ -185,6 +192,15 @@ mod tests {
         assert!(args.iter().any(|a| a == "--bind"));
         assert!(args.iter().any(|a| a == "/work/proj"));
         assert_eq!(args.last().unwrap(), "echo hi");
+    }
+
+    #[test]
+    fn scheme_escape_handles_quotes_and_backslashes() {
+        assert_eq!(scheme_escape(r#"a"b\c"#), r#"a\"b\\c"#);
+        assert_eq!(scheme_escape("/work/proj"), "/work/proj");
+        // A malicious path can't break out of the string literal.
+        let p = macos_profile(Path::new(r#"/x") (allow file-write*) ;"#));
+        assert!(p.contains(r#"\""#), "quote must be escaped in profile");
     }
 
     #[test]

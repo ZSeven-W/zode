@@ -6,14 +6,16 @@
 //!
 //! The EditHistoryHook captures `before` at BeforeToolUse (which the
 //! QueryLoop fires for every tool *before* any dispatch) and `after` at
-//! AfterToolUse (ok). Pending state is keyed by path — not a stack — so
-//! concurrent or failed tool calls don't misalign.
+//! AfterToolUse (ok). Paths are resolved through the same WorkspacePolicy
+//! the fs tools use, and pending before-snapshots are a per-path stack so a
+//! failed call pops one entry without misaligning others.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent::hook::{HookEvent, HookHandler, HookOutcome};
+use agent_tools_code::WorkspacePolicy;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
@@ -108,29 +110,40 @@ fn apply_state(path: &PathBuf, content: &Option<String>) -> Result<(), CoreError
     Ok(())
 }
 
-fn target_path(input: &serde_json::Value) -> Option<PathBuf> {
-    input
-        .get("path")
-        .and_then(|v| v.as_str())
-        .map(PathBuf::from)
-}
-
 /// HookHandler that captures before/after snapshots into a shared
 /// EditHistory. Registered on the engine's HookRunner.
+///
+/// Paths are resolved through the SAME WorkspacePolicy the fs tools use, so
+/// the recorded path is exactly where the tool reads/writes (a raw relative
+/// `path` would otherwise resolve against the process cwd, not the engine
+/// cwd, and undo could touch the wrong file).
+///
+/// Pending before-snapshots are a per-path stack so a failed call pops one
+/// entry and concurrent edits don't lose entries. Note: two *concurrent*
+/// edits to the *same* path in one turn can only be coalesced (the hook
+/// events carry no tool-use id) — undo is best-effort there, not
+/// transactional.
 #[derive(Debug)]
 pub struct EditHistoryHook {
     history: Arc<Mutex<EditHistory>>,
-    /// path -> content-before, captured at BeforeToolUse. Keyed by path so
-    /// concurrent/failed tools don't misalign a stack.
-    pending: Mutex<HashMap<PathBuf, Option<String>>>,
+    policy: Arc<WorkspacePolicy>,
+    pending: Mutex<HashMap<PathBuf, Vec<Option<String>>>>,
 }
 
 impl EditHistoryHook {
-    pub fn new(history: Arc<Mutex<EditHistory>>) -> Self {
+    pub fn new(history: Arc<Mutex<EditHistory>>, policy: Arc<WorkspacePolicy>) -> Self {
         Self {
             history,
+            policy,
             pending: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Resolve the tool's `path` input the same way the fs tools do
+    /// (absolute, workspace-relative). None if absent or outside the policy.
+    fn resolve(&self, input: &serde_json::Value) -> Option<PathBuf> {
+        let raw = input.get("path").and_then(|v| v.as_str())?;
+        self.policy.resolve(raw, false).ok()
     }
 }
 
@@ -139,16 +152,34 @@ impl HookHandler for EditHistoryHook {
     async fn handle(&self, event: &HookEvent) -> HookOutcome {
         match event {
             HookEvent::BeforeToolUse { tool, input } if is_tracked(tool) => {
-                if let Some(path) = target_path(input) {
+                if let Some(path) = self.resolve(input) {
+                    // Skip directories: the content-snapshot model can't
+                    // restore a removed tree (CONCERN — Remove of a dir).
+                    if path.exists() && !path.is_file() {
+                        return HookOutcome::Ok;
+                    }
                     let before = std::fs::read_to_string(&path).ok();
-                    self.pending.lock().await.insert(path, before);
+                    self.pending
+                        .lock()
+                        .await
+                        .entry(path)
+                        .or_default()
+                        .push(before);
                 }
             }
             HookEvent::AfterToolUse {
                 tool, input, ok, ..
             } if *ok && is_tracked(tool) => {
-                if let Some(path) = target_path(input) {
-                    if let Some(before) = self.pending.lock().await.remove(&path) {
+                if let Some(path) = self.resolve(input) {
+                    let before = {
+                        let mut pending = self.pending.lock().await;
+                        let popped = pending.get_mut(&path).and_then(|stack| stack.pop());
+                        if pending.get(&path).is_some_and(|s| s.is_empty()) {
+                            pending.remove(&path);
+                        }
+                        popped
+                    };
+                    if let Some(before) = before {
                         let after = std::fs::read_to_string(&path).ok();
                         self.history.lock().await.record(EditSnapshot {
                             tool: tool.clone(),
@@ -160,10 +191,16 @@ impl HookHandler for EditHistoryHook {
                 }
             }
             HookEvent::PostToolUseFailure { tool, input, .. } if is_tracked(tool) => {
-                // Tool failed — drop the pending before-snapshot so it can't
-                // be mis-attributed to a later edit of a different path.
-                if let Some(path) = target_path(input) {
-                    self.pending.lock().await.remove(&path);
+                // Tool failed — drop one pending before-snapshot for the path
+                // so a later edit isn't mis-paired.
+                if let Some(path) = self.resolve(input) {
+                    let mut pending = self.pending.lock().await;
+                    if let Some(stack) = pending.get_mut(&path) {
+                        stack.pop();
+                        if stack.is_empty() {
+                            pending.remove(&path);
+                        }
+                    }
                 }
             }
             _ => {}
@@ -251,22 +288,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hook_records_write_via_before_after() {
+    async fn hook_resolves_relative_path_against_policy_cwd() {
         let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("z.txt");
+        let policy = Arc::new(WorkspacePolicy::new(dir.path()).unwrap());
         let history = Arc::new(Mutex::new(EditHistory::new(50)));
-        let hook = EditHistoryHook::new(history.clone());
-        let input = serde_json::json!({ "path": f.to_str().unwrap() });
+        let hook = EditHistoryHook::new(history.clone(), policy);
+        // A RELATIVE path — must resolve against the policy cwd, not the
+        // process cwd (BLOCK regression).
+        let input = serde_json::json!({ "path": "z.txt" });
+        let resolved = dir.path().join("z.txt");
 
-        // BeforeToolUse: file doesn't exist yet.
         hook.handle(&HookEvent::BeforeToolUse {
             tool: "FileWrite".into(),
             input: input.clone(),
         })
         .await;
-        // Tool "runs": create the file.
-        std::fs::write(&f, "created\n").unwrap();
-        // AfterToolUse(ok): records before=None, after="created".
+        std::fs::write(&resolved, "created\n").unwrap(); // tool "runs"
         hook.handle(&HookEvent::AfterToolUse {
             tool: "FileWrite".into(),
             input,
@@ -276,7 +313,31 @@ mod tests {
         .await;
 
         assert_eq!(history.lock().await.undo_depth(), 1);
-        history.lock().await.undo().unwrap();
-        assert!(!f.exists(), "undo should remove the created file");
+        let undone = history.lock().await.undo().unwrap();
+        assert!(undone.ends_with("z.txt"), "resolved path: {undone:?}");
+        assert!(undone.is_absolute(), "must store an absolute path");
+        assert!(!resolved.exists(), "undo should remove the created file");
+    }
+
+    #[tokio::test]
+    async fn hook_failed_tool_does_not_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = Arc::new(WorkspacePolicy::new(dir.path()).unwrap());
+        let history = Arc::new(Mutex::new(EditHistory::new(50)));
+        let hook = EditHistoryHook::new(history.clone(), policy);
+        let input = serde_json::json!({ "path": "f.txt" });
+
+        hook.handle(&HookEvent::BeforeToolUse {
+            tool: "FileWrite".into(),
+            input: input.clone(),
+        })
+        .await;
+        hook.handle(&HookEvent::PostToolUseFailure {
+            tool: "FileWrite".into(),
+            input,
+            error: "boom".into(),
+        })
+        .await;
+        assert_eq!(history.lock().await.undo_depth(), 0);
     }
 }

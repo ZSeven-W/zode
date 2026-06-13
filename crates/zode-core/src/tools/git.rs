@@ -194,16 +194,20 @@ impl Tool for GitCommit {
         let message = str_field(&input, "message")
             .ok_or_else(|| AgentError::other("GitCommit requires `message`"))?;
         let paths = str_array(&input, "paths");
+        let stage_all = input.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
         if !paths.is_empty() {
-            let mut add = vec!["add".to_string()];
-            add.extend(paths);
+            // `--` fences user paths so a leading-dash name isn't a flag.
+            let mut add = vec!["add".to_string(), "--".to_string()];
+            add.extend(paths.clone());
             let r = run_git(&ctx.cwd, &add).await?;
             if !r["ok"].as_bool().unwrap_or(false) {
                 return Ok(r);
             }
         }
         let mut args = vec!["commit".to_string(), "-m".into(), message.to_string()];
-        if input.get("all").and_then(|v| v.as_bool()).unwrap_or(false) {
+        // `-a` only when no explicit paths: combining them would stage ALL
+        // tracked changes, not just the selected paths. Paths take precedence.
+        if stage_all && paths.is_empty() {
             args.insert(1, "-a".into());
         }
         run_git(&ctx.cwd, &args).await
@@ -229,10 +233,11 @@ impl Tool for GitBranch {
         SafetyClass::Mutating
     }
     async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+        // `--` fences the branch name so a leading-dash value isn't a flag.
         let args = if let Some(d) = str_field(&input, "delete") {
-            vec!["branch".into(), "-D".into(), d.to_string()]
+            vec!["branch".into(), "-D".into(), "--".into(), d.to_string()]
         } else if let Some(n) = str_field(&input, "name") {
-            vec!["branch".into(), n.to_string()]
+            vec!["branch".into(), "--".into(), n.to_string()]
         } else {
             vec!["branch".into(), "--list".into()]
         };
@@ -261,6 +266,13 @@ impl Tool for GitCheckout {
     async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let target = str_field(&input, "target")
             .ok_or_else(|| AgentError::other("GitCheckout requires `target`"))?;
+        // A branch switch can't use `--` fencing (that means "restore
+        // pathspec"), so reject leading-dash targets git would read as flags.
+        if target.starts_with('-') {
+            return Err(AgentError::other(
+                "GitCheckout target must not start with '-'",
+            ));
+        }
         let mut args = vec!["checkout".to_string()];
         if input
             .get("create")
@@ -291,7 +303,16 @@ impl Tool for GitStash {
         SafetyClass::Mutating
     }
     async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        let op = str_field(&input, "op").unwrap_or("push");
+        // Enforce the enum at runtime (the schema is advisory only) so an
+        // arbitrary `git stash <subcommand>` can't be smuggled in.
+        let op = match str_field(&input, "op").unwrap_or("push") {
+            valid @ ("push" | "pop" | "list") => valid,
+            other => {
+                return Err(AgentError::other(format!(
+                    "GitStash op must be push | pop | list, got {other:?}"
+                )))
+            }
+        };
         run_git(&ctx.cwd, &["stash".to_string(), op.to_string()]).await
     }
 }
@@ -407,5 +428,40 @@ mod tests {
     #[test]
     fn all_eight_tools() {
         assert_eq!(all_git_tools().len(), 8);
+    }
+
+    #[tokio::test]
+    async fn checkout_rejects_leading_dash_target() {
+        let dir = init_repo();
+        let r = GitCheckout
+            .call(&ctx(dir.path()), json!({"target": "-f"}))
+            .await;
+        assert!(r.is_err(), "leading-dash target must be rejected");
+    }
+
+    #[tokio::test]
+    async fn stash_rejects_unknown_op() {
+        let dir = init_repo();
+        let r = GitStash
+            .call(&ctx(dir.path()), json!({"op": "clear"}))
+            .await;
+        assert!(r.is_err(), "unknown stash op must be rejected");
+    }
+
+    #[tokio::test]
+    async fn commit_with_dash_named_path_is_fenced() {
+        // A path literally starting with '-' must be treated as a path, not
+        // a git flag (the `add --` fence). We just assert it doesn't error
+        // out as an unknown-flag parse and the tool runs.
+        let dir = init_repo();
+        std::fs::write(dir.path().join("-weird.txt"), "x\n").unwrap();
+        let out = GitCommit
+            .call(
+                &ctx(dir.path()),
+                json!({"message": "add weird", "paths": ["-weird.txt"]}),
+            )
+            .await
+            .unwrap();
+        assert!(out["ok"].as_bool().unwrap(), "stderr: {}", out["stderr"]);
     }
 }
