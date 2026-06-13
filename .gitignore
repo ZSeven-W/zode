@@ -1,5 +1,6 @@
 # Rust
 /target
+/dist
 **/*.rs.bk
 
 # OS

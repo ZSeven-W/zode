@@ -1,0 +1,54 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            pkg-suffix: arm64-mac
+          - os: macos-13
+            target: x86_64-apple-darwin
+            pkg-suffix: x64-mac
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            pkg-suffix: x64-linux
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            pkg-suffix: arm64-linux
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            pkg-suffix: x64-windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-zigbuild (linux musl)
+        if: contains(matrix.target, 'musl')
+        run: pip install ziglang && cargo install cargo-zigbuild --locked
+      - name: Compute package name
+        shell: bash
+        run: echo "PKG=zode-${GITHUB_REF_NAME#v}-${{ matrix.pkg-suffix }}" >> "$GITHUB_ENV"
+      - name: Build + package
+        shell: bash
+        run: ./scripts/build-release.sh "${{ matrix.target }}" "$PKG"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
