@@ -1,0 +1,136 @@
+{
+  "zode": {
+    "total": [
+      9,
+      9
+    ],
+    "tools_seen": [
+      "Bash",
+      "Edit",
+      "FileEdit",
+      "FileRead",
+      "Glob",
+      "Grep",
+      "tool"
+    ],
+    "results": [
+      {
+        "id": "mutable_default_arg",
+        "dim": "subtle-state",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileEdit",
+          "FileRead",
+          "Glob"
+        ],
+        "secs": 23.0
+      },
+      {
+        "id": "closure_late_binding",
+        "dim": "subtle-scope",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileEdit",
+          "FileRead",
+          "Glob"
+        ],
+        "secs": 20.0
+      },
+      {
+        "id": "dict_mutation_iter",
+        "dim": "runtime-error",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileEdit",
+          "FileRead"
+        ],
+        "secs": 21.4
+      },
+      {
+        "id": "shallow_grid_aliasing",
+        "dim": "subtle-aliasing",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "FileEdit",
+          "FileRead",
+          "Grep"
+        ],
+        "secs": 9.0
+      },
+      {
+        "id": "generator_consumed_twice",
+        "dim": "subtle-iterator",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileEdit",
+          "FileRead",
+          "Grep"
+        ],
+        "secs": 16.8
+      },
+      {
+        "id": "is_vs_equals",
+        "dim": "subtle-identity",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileEdit",
+          "FileRead",
+          "Grep"
+        ],
+        "secs": 14.4
+      },
+      {
+        "id": "shared_class_attr",
+        "dim": "subtle-state",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileEdit",
+          "FileRead",
+          "Grep"
+        ],
+        "secs": 13.0
+      },
+      {
+        "id": "float_truncation",
+        "dim": "subtle-float",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileEdit",
+          "FileRead",
+          "Grep"
+        ],
+        "secs": 13.7
+      },
+      {
+        "id": "off_by_one_window",
+        "dim": "off-by-one",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "Edit",
+          "FileEdit",
+          "FileRead",
+          "Glob",
+          "tool"
+        ],
+        "secs": 20.8
+      }
+    ]
+  }
+}

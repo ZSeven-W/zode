@@ -151,23 +151,42 @@ the only occasional misses were two parsing tasks (`eval_expr`, `csv_parse_row`)
 where the model slipped on an edge case once. Claude: 100% (93/93). DeepSeek is
 non-deterministic; the gap is within run-to-run noise.
 
+### Harness (agentic) — read, run, edit, fix
+
+One-shot code-gen barely touches the harness. These tiers force the full agent
+loop: the model gets a scratch repo and must **read** the files, **run** the
+failing test to reproduce, **edit** the source, and **re-run** to verify — using
+real tools (`Bash`, `FileRead`/`FileEdit`/`FileWrite`, `Grep`, `Glob`, `ListDir`).
+Each is scored by a *hidden* grader (stronger than any visible test, so the agent
+can't game it). Head-to-head, both tracks score the same:
+
+| Tier | What it tests | Tasks | Claude | Zode + DeepSeek-v4-pro |
+|------|---------------|:-----:|:------:|:----------------------:|
+| Agentic fixes/implements | bug-fix, multi-file, class impl, algorithm, refactor | 6 | 100% | **100%** (18/18, 3 runs) |
+| Tricky bugs (疑难杂症) | mutable-default, closure late-binding, dict-mutation-during-iter, shallow aliasing, generator exhaustion, `is` vs `==`, shared class attr, float truncation, off-by-one | 9 | 100% | **100%** (27/27, 3 runs) |
+
+Zode + DeepSeek diagnosed and fixed **every** subtle bug in **every** run by
+actually reproducing it with the test harness first — the same way Claude does.
+
 **Efficiency.** Because Zode keeps the system-prompt + tool-schema prefix
 byte-stable, DeepSeek serves it from its prompt cache: a steady-state session
 measured a **93% input-token cache-hit rate** (`/cost` reports it live). The
-harness lever that closed the capability gap was the system prompt — general
+harness lever that closed the code-gen gap was the system prompt — general
 "check the edge cases, trace the examples before answering" guidance, not
-task-specific hints.
+task-specific hints — plus a configurable low `temperature` for determinism.
 
 **Methodology.** Zode runs headless (`zode -p "<task>" --yolo`,
-`deepseek-v4-pro`) in an isolated working directory; Claude's column is Claude
-solving each task directly. Both are scored by the *same* hidden tests in a
-sandboxed subprocess. Fully reproducible:
+`deepseek-v4-pro`, `temperature: 0`) in an isolated working directory; Claude's
+column is Claude solving each task directly. Both are scored by the *same*
+hidden tests in a sandboxed subprocess. Fully reproducible:
 
 ```bash
-ZODE_CONFIG_DIR=~/.zode python3 benchmarks/run.py --track both -j 1
+ZODE_CONFIG_DIR=~/.zode python3 benchmarks/run.py      --track both   # code-gen
+ZODE_CONFIG_DIR=~/.zode python3 benchmarks/agentic.py  --track both   # agentic harness
+ZODE_CONFIG_DIR=~/.zode python3 benchmarks/hardbugs.py --track both   # tricky bugs
 ```
 
-The suite, the tests, Claude's reference solutions, and the runner live in
+The suites, hidden graders, Claude's reference solutions, and the runners live in
 [`benchmarks/`](benchmarks/).
 
 ## Architecture

@@ -1,0 +1,96 @@
+{
+  "zode": {
+    "total": [
+      6,
+      6
+    ],
+    "tools_seen": [
+      "Bash",
+      "FileEdit",
+      "FileRead",
+      "FileWrite",
+      "Glob",
+      "ListDir",
+      "tool"
+    ],
+    "results": [
+      {
+        "id": "fix_binary_search",
+        "dim": "debug",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileEdit",
+          "FileRead",
+          "Glob"
+        ],
+        "secs": 28.7
+      },
+      {
+        "id": "implement_lru",
+        "dim": "implement-class",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileEdit",
+          "FileRead",
+          "Glob"
+        ],
+        "secs": 20.2
+      },
+      {
+        "id": "mini_eval",
+        "dim": "implement-algo",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileRead",
+          "FileWrite",
+          "Glob",
+          "tool"
+        ],
+        "secs": 101.6
+      },
+      {
+        "id": "fix_three_bugs",
+        "dim": "multi-bug",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileRead",
+          "FileWrite"
+        ],
+        "secs": 16.1
+      },
+      {
+        "id": "topo_sort",
+        "dim": "implement-algo",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileRead",
+          "FileWrite",
+          "ListDir"
+        ],
+        "secs": 50.7
+      },
+      {
+        "id": "refactor_extend",
+        "dim": "refactor",
+        "passed": true,
+        "detail": "",
+        "tools": [
+          "Bash",
+          "FileRead",
+          "FileWrite"
+        ],
+        "secs": 28.3
+      }
+    ]
+  }
+}
