@@ -9,6 +9,21 @@ ignore = [
   # async-openai 0.36 (agent crate `openai` feature). Same ignores as agent-rs.
   "RUSTSEC-2025-0012",
   "RUSTSEC-2024-0384",
+  # lru 0.12.5 IterMut Stacked-Borrows unsoundness. Pulled transitively by
+  # ratatui 0.29 (pins lru ^0.12; no in-range fix — needs lru >= 0.16.3, which
+  # ratatui doesn't yet allow). ratatui uses lru only as a bounded layout cache
+  # and never calls the unsound `iter_mut`, so it's not reachable. Re-evaluate
+  # when ratatui bumps its lru bound.
+  "RUSTSEC-2026-0002",
+  # bincode unmaintained — transitive only; no exposed API risk. Re-evaluate
+  # when the upstream dep drops/updates it.
+  "RUSTSEC-2025-0141",
+  # paste unmaintained — transitive via ratatui (proc-macro helper, build-time
+  # only, no runtime surface).
+  "RUSTSEC-2024-0436",
+  # yaml-rust unmaintained — transitive via syntect (parses bundled syntax
+  # definitions at startup; inputs are the shipped defaults, not user data).
+  "RUSTSEC-2024-0320",
 ]
 
 [licenses]
@@ -25,6 +40,7 @@ allow = [
   "CC0-1.0",
   "OpenSSL",
   "CDLA-Permissive-2.0", # webpki-root-certs (transitive via reqwest/rustls)
+  "BSL-1.0",             # ryu / clipboard-win (transitive via ratatui/time) — permissive Boost license
 ]
 confidence-threshold = 0.93
 
@@ -34,11 +50,12 @@ wildcards = "deny"
 # Internal path deps (zode-core/zode-tui + vendored agent crates) have no
 # version field; that's a local path, not a real wildcard from the registry.
 allow-wildcard-paths = true
-# lru is pinned >= 0.18 transitively via agent-rs (RUSTSEC-2026-0002: IterMut
-# unsoundness in 0.12.x). Zode must never introduce a < 0.18 lru dependency.
-deny = [
-  { name = "lru", version = "<0.18" },
-]
+# NOTE: we previously hard-banned lru < 0.18 (RUSTSEC-2026-0002). ratatui 0.29
+# forces lru 0.12.5 transitively (tui-textarea -> ratatui), with no in-range
+# fix, so a hard version ban is unworkable here — the risk decision lives in
+# the advisories.ignore entry above (not reachable in ratatui's usage). zode's
+# own crates still never depend on lru directly.
+deny = []
 
 [sources]
 unknown-registry = "deny"

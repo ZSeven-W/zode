@@ -14,6 +14,7 @@ use agent::message::MessageStore;
 use agent::permission::{PermissionManager, PermissionMode, RuleSource};
 use agent::provider::Provider;
 use agent::query::QueryLoop;
+use agent::skills::SkillRegistry;
 use agent::stream::EventStream;
 use agent::tool::{SafetyClass, ToolRegistry};
 use agent_tools_code::{
@@ -31,7 +32,10 @@ use crate::config::ZodeConfig;
 use crate::error::CoreError;
 use crate::gated_tool::PermissionGatedTool;
 use crate::history::{EditHistory, EditHistoryHook};
+use crate::hooks_config::load_hook_handlers;
+use crate::instructions::{build_system_prompt, discover_instructions, gather_env};
 use crate::provider::build_provider;
+use crate::skills::{load_skills_from, skills_dirs, skills_index, SkillTool};
 
 const EDIT_HISTORY_CAPACITY: usize = 50;
 
@@ -60,6 +64,8 @@ pub struct ZodeEngine {
     pub history: Arc<tokio::sync::Mutex<EditHistory>>,
     /// Host-side metadata for background shells (Phase 07 task panel).
     pub bg_shells_meta: BackgroundShellTracker,
+    /// Loaded skills (the `/skills` command lists these).
+    pub skills: Arc<SkillRegistry>,
 }
 
 impl ZodeEngine {
@@ -79,6 +85,7 @@ impl ZodeEngine {
         cwd: PathBuf,
         gate: Arc<dyn ApprovalGate>,
         sandbox: Option<crate::sandbox::SandboxConfig>,
+        date: &str,
     ) -> Result<Self, CoreError> {
         let provider = build_provider(&cfg.provider)?;
         let model = cfg
@@ -111,6 +118,12 @@ impl ZodeEngine {
         for tool in crate::tools::git::all_git_tools() {
             base.register(tool);
         }
+
+        // Skills: load the three-level SKILL.md tree, register the read-only
+        // Skill tool, and capture the index for the system prompt.
+        let skills = Arc::new(load_skills_from(&skills_dirs(&cwd)));
+        let skills_idx = skills_index(&skills);
+        base.register(Arc::new(SkillTool::new(skills.clone())));
 
         // --sandbox: wrap Bash/BashRun so writes are confined to cwd. Done
         // before gate-wrapping so the final shape is
@@ -157,6 +170,15 @@ impl ZodeEngine {
             policy.clone(),
         )));
         hooks.register(Arc::new(BgShellHook::new(bg_shells_meta.clone())));
+        // External hooks.json scripts (global ⊕ project).
+        for h in load_hook_handlers(&cwd) {
+            hooks.register(h);
+        }
+
+        // System prompt: identity + env + three-level instructions + skills.
+        let env = gather_env(&cwd, date);
+        let instructions = discover_instructions(&cwd);
+        let system = Some(build_system_prompt(&instructions, &skills_idx, &env));
 
         Ok(Self {
             provider,
@@ -167,13 +189,14 @@ impl ZodeEngine {
             file_cache,
             compact_state: Arc::new(Mutex::new(AutoCompactState::default())),
             model,
-            system: None,
+            system,
             cwd,
             max_output_tokens: cfg.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
             bash_sessions,
             todo_state,
             history,
             bg_shells_meta,
+            skills,
         })
     }
 
@@ -259,6 +282,7 @@ mod tests {
             dir.path().to_path_buf(),
             Arc::new(BypassGate),
             None,
+            "2026-06-13",
         )
         .unwrap();
         let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
@@ -283,6 +307,7 @@ mod tests {
             dir.path().to_path_buf(),
             Arc::new(BypassGate),
             None,
+            "2026-06-13",
         )
         .unwrap();
         let decision =
@@ -299,6 +324,7 @@ mod tests {
             dir.path().to_path_buf(),
             Arc::new(BypassGate),
             None,
+            "2026-06-13",
         )
         .unwrap();
         assert_eq!(eng.hooks.len(), 2); // EditHistory + BgShell
@@ -310,8 +336,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_cfg();
         cfg.permissions.deny = vec!["Bash".into()];
-        let eng = ZodeEngine::assemble(&cfg, dir.path().to_path_buf(), Arc::new(BypassGate), None)
-            .unwrap();
+        let eng = ZodeEngine::assemble(
+            &cfg,
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-06-13",
+        )
+        .unwrap();
         let decision = eng
             .permissions
             .evaluate("Bash", &serde_json::json!({}), None);

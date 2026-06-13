@@ -68,9 +68,11 @@ async fn run(args: Args) -> i32 {
         None
     };
 
+    let today = today_date();
+
     // --print: headless single turn (stdin gate, or bypass on --yolo).
     if let Some(prompt) = args.print.clone() {
-        let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox) else {
+        let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox, &today) else {
             return 1;
         };
         return headless::run_print(&engine, &prompt).await;
@@ -78,7 +80,7 @@ async fn run(args: Args) -> i32 {
 
     // Plain REPL when asked, or when stdout isn't a tty (piped/CI).
     if args.no_tui || !std::io::stdout().is_terminal() {
-        let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox) else {
+        let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox, &today) else {
             return 1;
         };
         let (engine, resumed_id) = resume_into(engine, &args).await;
@@ -92,7 +94,7 @@ async fn run(args: Args) -> i32 {
     } else {
         Arc::new(zode_core::approval::QueueGate::new(queue))
     };
-    let Some(engine) = build(&cfg, cwd, gate, sandbox) else {
+    let Some(engine) = build(&cfg, cwd, gate, sandbox, &today) else {
         return 1;
     };
     let (engine, _resumed_id) = resume_into(engine, &args).await;
@@ -126,14 +128,20 @@ fn build(
     cwd: PathBuf,
     gate: Arc<dyn ApprovalGate>,
     sandbox: Option<zode_core::sandbox::SandboxConfig>,
+    date: &str,
 ) -> Option<ZodeEngine> {
-    match ZodeEngine::assemble(cfg, cwd, gate, sandbox) {
+    match ZodeEngine::assemble(cfg, cwd, gate, sandbox, date) {
         Ok(e) => Some(e),
         Err(e) => {
             eprintln!("zode: {e}");
             None
         }
     }
+}
+
+/// Today's date as YYYY-MM-DD (UTC) for the system prompt's env block.
+fn today_date() -> String {
+    time::OffsetDateTime::now_utc().date().to_string()
 }
 
 /// Apply --resume/--continue: load the target session's store into `engine`.

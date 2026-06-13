@@ -172,6 +172,16 @@ async fn dispatch_command(
             Ok(p) => println!("(redid edit to {})", p.display()),
             Err(e) => println!("({e})"),
         },
+        "skills" => {
+            let list = engine.skills.list();
+            if list.is_empty() {
+                println!("(no skills loaded)");
+            } else {
+                for s in list {
+                    println!("  {} — {}", s.name, s.description);
+                }
+            }
+        }
         _ => match cmd.action {
             CommandAction::Ui => println!("/{name} is available in the TUI only"),
             _ => println!("/{name}: not handled in the REPL yet"),

@@ -24,3 +24,4 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 rustyline = "14"
+time = "0.3"

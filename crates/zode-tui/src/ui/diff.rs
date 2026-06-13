@@ -255,6 +255,19 @@ mod tests {
     }
 
     #[test]
+    fn new_file_under_cwd_is_allowed() {
+        // A not-yet-created file under cwd must still preview (empty -> new),
+        // not be skipped as outside-workspace.
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let dir = tempfile::tempdir().unwrap();
+        let input = serde_json::json!({"path": "newfile.txt", "content": "hello\n"});
+        let lines = diff_from_tool_input(&input, dir.path(), &theme).unwrap();
+        let j = joined(&lines);
+        assert!(!j.contains("outside workspace"), "{j}");
+        assert!(j.contains("+hello"), "{j}");
+    }
+
+    #[test]
     fn within_check_lexical() {
         let base = std::path::Path::new("/work/proj");
         assert!(is_within(base, std::path::Path::new("/work/proj/src/a.rs")));
