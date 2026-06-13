@@ -73,6 +73,13 @@ impl SessionIndex {
         }
     }
 
+    /// Drop the session with `id` from the index. Returns true if removed.
+    pub fn remove(&mut self, id: &str) -> bool {
+        let before = self.sessions.len();
+        self.sessions.retain(|m| m.id != id);
+        self.sessions.len() != before
+    }
+
     /// Most recently updated session.
     pub fn latest(&self) -> Option<&SessionMeta> {
         self.sessions.iter().max_by_key(|m| m.updated_at)

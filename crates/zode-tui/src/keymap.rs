@@ -16,6 +16,8 @@ pub enum ActionId {
     OpenHelp,
     NewTab,
     CloseTab,
+    SwitchTab,
+    CycleTab,
     Dismiss,
 }
 
@@ -75,12 +77,22 @@ pub static KEYMAP: &[Binding] = &[
     Binding {
         keys: "Ctrl+T",
         action: ActionId::NewTab,
-        help: "New session tab (Phase 07)",
+        help: "New session tab",
     },
     Binding {
         keys: "Ctrl+W",
         action: ActionId::CloseTab,
-        help: "Close tab (Phase 07)",
+        help: "Close tab (quits if last)",
+    },
+    Binding {
+        keys: "Ctrl+1..9",
+        action: ActionId::SwitchTab,
+        help: "Jump to tab N",
+    },
+    Binding {
+        keys: "Ctrl+Tab",
+        action: ActionId::CycleTab,
+        help: "Cycle to next tab",
     },
     Binding {
         keys: "Esc",

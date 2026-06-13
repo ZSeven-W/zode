@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent::abort::AbortController;
+use agent::message::{ContentBlock, Message, MessageStore};
+use agent::session::Session;
 use agent::stream::Event;
 use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyModifiers};
 use crossterm::terminal::{
@@ -22,6 +24,7 @@ use uuid::Uuid;
 use zode_core::approval::{ApprovalReceiver, ApprovalRequest};
 use zode_core::commands::parse_slash;
 use zode_core::config::ConfigManager;
+use zode_core::session_meta::{SessionIndex, SessionMeta};
 use zode_core::{EngineTemplate, ZodeEngine};
 
 use crate::event::AppEvent;
@@ -30,6 +33,7 @@ use crate::theme::{Theme, ThemeStore};
 use crate::ui::autocomplete::Autocomplete;
 use crate::ui::chat::ChatView;
 use crate::ui::dialog::permission::PermissionDialog;
+use crate::ui::dialog::session_picker::SessionPicker;
 use crate::ui::dialog::settings::{SettingsAction, SettingsDialog, SettingsLevel};
 use crate::ui::input::InputBox;
 use crate::ui::status::{Mode, StatusBar};
@@ -64,6 +68,7 @@ pub struct TuiApp {
     pending_requests: VecDeque<ApprovalRequest>,
     autocomplete: Autocomplete,
     settings: Option<SettingsDialog>,
+    session_picker: Option<SessionPicker>,
     show_help: bool,
     toast: Option<Toast>,
     provider_names: Vec<String>,
@@ -109,6 +114,7 @@ impl TuiApp {
             pending_requests: VecDeque::new(),
             autocomplete: Autocomplete::new(),
             settings: None,
+            session_picker: None,
             show_help: false,
             toast: None,
             provider_names: ui.provider_names,
@@ -179,6 +185,116 @@ impl TuiApp {
         self.tabs.iter_mut().find(|t| t.id == id)
     }
 
+    /// Open the session picker (/sessions, /resume) from the saved index.
+    fn open_session_picker(&mut self) {
+        let metas: Vec<SessionMeta> = SessionIndex::load()
+            .map(|i| i.newest_first().into_iter().cloned().collect())
+            .unwrap_or_default();
+        if metas.is_empty() {
+            self.toast = Some(Toast::info("no saved sessions yet"));
+            return;
+        }
+        self.session_picker = Some(SessionPicker::new(metas));
+    }
+
+    async fn handle_picker_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.session_picker = None,
+            KeyCode::Up => {
+                if let Some(p) = &mut self.session_picker {
+                    p.prev();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(p) = &mut self.session_picker {
+                    p.next();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(p) = &mut self.session_picker {
+                    p.pop_filter_char();
+                }
+            }
+            KeyCode::Delete => {
+                let target = self.session_picker.as_ref().and_then(|p| p.selected());
+                if let Some(meta) = target {
+                    self.delete_session(&meta.id);
+                    if let Some(p) = &mut self.session_picker {
+                        p.remove(&meta.id);
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                let target = self.session_picker.as_ref().and_then(|p| p.selected());
+                self.session_picker = None;
+                if let Some(meta) = target {
+                    self.resume_session(meta).await;
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(p) = &mut self.session_picker {
+                    p.push_filter_char(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Resume a saved session in a new tab, replaying its history into the
+    /// chat. If the session is already open, just focus that tab.
+    async fn resume_session(&mut self, meta: SessionMeta) {
+        if let Some(pos) = self.tabs.iter().position(|t| t.session_id == meta.id) {
+            self.active = pos;
+            self.autocomplete.dismiss();
+            return;
+        }
+        let path = match SessionIndex::session_path(&meta.id) {
+            Ok(p) => p,
+            Err(_) => {
+                self.toast = Some(Toast::error("bad session path"));
+                return;
+            }
+        };
+        let store = match Session::load(&path).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.toast = Some(Toast::error(format!("load failed: {e}")));
+                return;
+            }
+        };
+        let chat = rebuild_chat_from_store(&store);
+        let engine = match self.template.assemble().await {
+            Ok(e) => e.with_store(store),
+            Err(e) => {
+                self.toast = Some(Toast::error(format!("assemble failed: {e}")));
+                return;
+            }
+        };
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let mut tab = SessionTab::new(id, Arc::new(engine), meta.id.clone());
+        tab.title = meta.title.clone();
+        tab.titled = true;
+        tab.chat = chat;
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        self.autocomplete.dismiss();
+    }
+
+    /// Delete a saved session's transcript file and index entry. Open tabs are
+    /// untouched (they re-create the file on the next save).
+    fn delete_session(&mut self, id: &str) {
+        if let Ok(path) = SessionIndex::session_path(id) {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Ok(mut idx) = SessionIndex::load() {
+            if idx.remove(id) {
+                let _ = idx.save();
+            }
+        }
+        self.toast = Some(Toast::info("session deleted"));
+    }
+
     pub async fn run(mut self) -> std::io::Result<()> {
         let mut terminal = setup_terminal()?;
         let result = self.event_loop(&mut terminal).await;
@@ -211,9 +327,10 @@ impl TuiApp {
                 }
                 Some(req) = self.approval_rx.next() => {
                     // An approval is the highest-priority modal: dismiss any
-                    // settings/help overlay so it can't hide the prompt that
-                    // is now capturing input.
+                    // settings/help/picker overlay so it can't hide the prompt
+                    // that is now capturing input.
                     self.settings = None;
+                    self.session_picker = None;
                     self.show_help = false;
                     if self.active_dialog.is_none() {
                         let cwd = self.active_tab().engine.cwd.clone();
@@ -286,6 +403,9 @@ impl TuiApp {
         if let Some(settings) = &mut self.settings {
             settings.render(f, area, &theme);
         }
+        if let Some(picker) = &mut self.session_picker {
+            picker.render(f, area, &theme);
+        }
         if self.show_help {
             crate::ui::help::render_help(f, area, &theme);
         }
@@ -328,6 +448,12 @@ impl TuiApp {
         // 2. Settings dialog captures input.
         if self.settings.is_some() {
             self.handle_settings_key(key.code);
+            return;
+        }
+
+        // 2b. Session picker captures input (typing filters the list).
+        if self.session_picker.is_some() {
+            self.handle_picker_key(key.code).await;
             return;
         }
 
@@ -678,6 +804,7 @@ impl TuiApp {
                 let report = self.active_tab().engine.cost.report().await;
                 self.active_tab_mut().chat.push_system(&report);
             }
+            "sessions" | "resume" => self.open_session_picker(),
             other => {
                 self.toast = Some(Toast::info(format!("/{other} lands in a later phase")));
             }
@@ -735,6 +862,39 @@ impl TuiApp {
                 .push_system(&format!("unknown theme: {args}"));
         }
     }
+}
+
+/// Rebuild a ChatView from a resumed MessageStore so the conversation history
+/// is visible after /resume. User messages that carry only tool results are
+/// skipped (their tool card already shows under the assistant turn); System /
+/// Progress / Tombstone messages are not chat content.
+fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
+    let mut chat = ChatView::new();
+    for msg in store.iter() {
+        match msg {
+            Message::User { content, .. } => {
+                for block in content {
+                    if let ContentBlock::Text { text } = block {
+                        if !text.trim().is_empty() {
+                            chat.push_user(text);
+                        }
+                    }
+                }
+            }
+            Message::Assistant { content, .. } => {
+                for block in content {
+                    match block {
+                        ContentBlock::Text { text } => chat.push_delta(text),
+                        ContentBlock::ToolUse { name, .. } => chat.push_tool(name),
+                        _ => {}
+                    }
+                }
+                chat.end_turn();
+            }
+            _ => {}
+        }
+    }
+    chat
 }
 
 fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
