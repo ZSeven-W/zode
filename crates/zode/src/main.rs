@@ -56,14 +56,6 @@ async fn run(args: Args) -> i32 {
     }
     cfg.apply_env_fallbacks();
 
-    // --yolo only changes the approval gate; the internal PermissionManager
-    // always runs in Bypass so gating happens in the gate (see assemble).
-    let gate: Arc<dyn ApprovalGate> = if args.yolo {
-        Arc::new(BypassGate)
-    } else {
-        Arc::new(StdinGate::new())
-    };
-
     let sandbox = if args.sandbox {
         match zode_core::sandbox::SandboxConfig::for_current_os(&cwd) {
             Ok(c) => Some(c),
@@ -76,16 +68,76 @@ async fn run(args: Args) -> i32 {
         None
     };
 
-    let engine = match ZodeEngine::assemble(&cfg, cwd, gate, sandbox) {
-        Ok(e) => e,
+    // --print: headless single turn (stdin gate, or bypass on --yolo).
+    if let Some(prompt) = args.print.clone() {
+        let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox) else {
+            return 1;
+        };
+        return headless::run_print(&engine, &prompt).await;
+    }
+
+    // Plain REPL when asked, or when stdout isn't a tty (piped/CI).
+    if args.no_tui || !std::io::stdout().is_terminal() {
+        let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox) else {
+            return 1;
+        };
+        let (engine, resumed_id) = resume_into(engine, &args).await;
+        return headless::run_repl(engine, resumed_id).await;
+    }
+
+    // Full TUI: approvals are gated through a queue the UI drains.
+    let (queue, approval_rx) = zode_core::approval::approval_queue();
+    let gate: Arc<dyn ApprovalGate> = if args.yolo {
+        Arc::new(BypassGate)
+    } else {
+        Arc::new(zode_core::approval::QueueGate::new(queue))
+    };
+    let Some(engine) = build(&cfg, cwd, gate, sandbox) else {
+        return 1;
+    };
+    let (engine, _resumed_id) = resume_into(engine, &args).await;
+    let ui = zode_tui::UiConfig {
+        theme_id: cfg.theme.clone(),
+        yolo: args.yolo,
+        sandbox: args.sandbox,
+    };
+    match zode_tui::TuiApp::new(engine, ui, approval_rx).run().await {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("zode tui: {e}");
+            1
+        }
+    }
+}
+
+/// Gate for the headless surfaces: bypass on --yolo, else a stdin prompt.
+fn headless_gate(yolo: bool) -> Arc<dyn ApprovalGate> {
+    if yolo {
+        Arc::new(BypassGate)
+    } else {
+        Arc::new(StdinGate::new())
+    }
+}
+
+/// Assemble the engine, reporting and returning None on error.
+fn build(
+    cfg: &zode_core::config::ZodeConfig,
+    cwd: PathBuf,
+    gate: Arc<dyn ApprovalGate>,
+    sandbox: Option<zode_core::sandbox::SandboxConfig>,
+) -> Option<ZodeEngine> {
+    match ZodeEngine::assemble(cfg, cwd, gate, sandbox) {
+        Ok(e) => Some(e),
         Err(e) => {
             eprintln!("zode: {e}");
-            return 1;
+            None
         }
-    };
+    }
+}
 
-    // Resume: --resume <id-prefix> or --continue (latest).
-    let mut resumed_id: Option<String> = None;
+/// Apply --resume/--continue: load the target session's store into `engine`.
+/// Returns the (possibly updated) engine and the resumed session id.
+async fn resume_into(engine: ZodeEngine, args: &Args) -> (ZodeEngine, Option<String>) {
     let target = if let Some(r) = &args.resume {
         SessionIndex::load()
             .ok()
@@ -95,47 +147,21 @@ async fn run(args: Args) -> i32 {
     } else {
         None
     };
-    let engine = if let Some(meta) = target {
-        match SessionIndex::session_path(&meta.id) {
-            Ok(path) => match Session::load(&path).await {
-                Ok(store) => {
-                    let short: String = meta.id.chars().take(8).collect();
-                    eprintln!("zode: resumed session {short} ({})", meta.title);
-                    resumed_id = Some(meta.id.clone());
-                    engine.with_store(store)
-                }
-                Err(e) => {
-                    eprintln!("zode: could not load session {}: {e}", meta.id);
-                    engine
-                }
-            },
-            Err(_) => engine,
-        }
-    } else {
-        engine
+    let Some(meta) = target else {
+        return (engine, None);
     };
-
-    if let Some(prompt) = args.print.clone() {
-        return headless::run_print(&engine, &prompt).await;
-    }
-
-    // Plain REPL when asked, or when stdout isn't a tty (piped/CI).
-    if args.no_tui || !std::io::stdout().is_terminal() {
-        return headless::run_repl(engine, resumed_id).await;
-    }
-
-    // Full TUI. The resumed store (if any) is already injected into `engine`,
-    // so the TUI continues that conversation.
-    let ui = zode_tui::UiConfig {
-        theme_id: cfg.theme.clone(),
-        yolo: args.yolo,
-        sandbox: args.sandbox,
-    };
-    match zode_tui::TuiApp::new(engine, ui).run().await {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("zode tui: {e}");
-            1
-        }
+    match SessionIndex::session_path(&meta.id) {
+        Ok(path) => match Session::load(&path).await {
+            Ok(store) => {
+                let short: String = meta.id.chars().take(8).collect();
+                eprintln!("zode: resumed session {short} ({})", meta.title);
+                (engine.with_store(store), Some(meta.id))
+            }
+            Err(e) => {
+                eprintln!("zode: could not load session {}: {e}", meta.id);
+                (engine, None)
+            }
+        },
+        Err(_) => (engine, None),
     }
 }

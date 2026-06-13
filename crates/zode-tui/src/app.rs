@@ -1,6 +1,7 @@
 //! TUI main loop. Initializes the terminal, runs a tokio::select! over
 //! terminal input + agent events + a tick, and drives one turn at a time.
 
+use std::collections::VecDeque;
 use std::io::Stdout;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +18,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Terminal;
 use tokio::sync::mpsc;
+use zode_core::approval::{ApprovalReceiver, ApprovalRequest};
 use zode_core::commands::{parse_slash, CommandRegistry};
 use zode_core::config::ConfigManager;
 use zode_core::ZodeEngine;
@@ -24,6 +26,7 @@ use zode_core::ZodeEngine;
 use crate::event::AppEvent;
 use crate::theme::{Theme, ThemeStore};
 use crate::ui::chat::ChatView;
+use crate::ui::dialog::permission::PermissionDialog;
 use crate::ui::input::InputBox;
 use crate::ui::status::{Mode, StatusBar};
 
@@ -49,10 +52,14 @@ pub struct TuiApp {
     turn_seq: u64,
     active_turn_id: u64,
     should_quit: bool,
+    /// Approval requests from gated tools (one dialog shown at a time).
+    approval_rx: ApprovalReceiver,
+    active_dialog: Option<PermissionDialog>,
+    pending_requests: VecDeque<ApprovalRequest>,
 }
 
 impl TuiApp {
-    pub fn new(engine: ZodeEngine, ui: UiConfig) -> Self {
+    pub fn new(engine: ZodeEngine, ui: UiConfig, approval_rx: ApprovalReceiver) -> Self {
         let mut theme_store = ThemeStore::with_builtins();
         if let Ok(dir) = ConfigManager::config_dir() {
             theme_store.merge_user(crate::theme::loader::load_dir(&dir.join("themes")));
@@ -72,6 +79,9 @@ impl TuiApp {
             turn_seq: 0,
             active_turn_id: 0,
             should_quit: false,
+            approval_rx,
+            active_dialog: None,
+            pending_requests: VecDeque::new(),
             engine: Arc::new(engine),
         }
     }
@@ -106,6 +116,13 @@ impl TuiApp {
                 Some(app_ev) = agent_rx.recv() => {
                     self.handle_agent_event(app_ev);
                 }
+                Some(req) = self.approval_rx.next() => {
+                    if self.active_dialog.is_none() {
+                        self.active_dialog = Some(PermissionDialog::new(req));
+                    } else {
+                        self.pending_requests.push_back(req);
+                    }
+                }
                 _ = ticker.tick() => {
                     self.status.tick();
                 }
@@ -126,6 +143,9 @@ impl TuiApp {
         self.chat.render(f, chunks[0], &self.theme);
         self.input.render(f, chunks[1], &self.theme);
         self.status.render(f, chunks[2], &self.theme);
+        if let Some(dialog) = &self.active_dialog {
+            dialog.render(f, f.area(), &self.theme);
+        }
     }
 
     fn handle_term(&mut self, ev: CtEvent, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
@@ -136,6 +156,21 @@ impl TuiApp {
         if key.kind == crossterm::event::KeyEventKind::Release {
             return;
         }
+
+        // A permission dialog captures input until it's answered.
+        if let Some(dialog) = &mut self.active_dialog {
+            let answer = match key.code {
+                KeyCode::Char(c) => c,
+                KeyCode::Esc => 'n', // Esc denies
+                _ => return,
+            };
+            if dialog.on_key(answer) {
+                // Responded — show the next queued request, if any.
+                self.active_dialog = self.pending_requests.pop_front().map(PermissionDialog::new);
+            }
+            return;
+        }
+
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if let Some(abort) = self.turn_abort.take() {

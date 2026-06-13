@@ -104,6 +104,99 @@ pub(crate) fn summarize_input(tool: &str, input: &serde_json::Value) -> String {
     }
 }
 
+// ---------------------------------------------------------------------
+// ApprovalQueue — the agent↔UI bridge for the TUI's QueueGate.
+//
+// Mirrors agent's external_queue.rs request/respond/timeout pattern, but
+// carries Zode's three-state `Approval` (agent's ExternalQueue is locked to
+// PermissionDecision, which can't express AllowAlways — master §4.6①).
+// ---------------------------------------------------------------------
+
+use tokio::sync::{mpsc, oneshot};
+
+/// One pending approval request flowing from a gated tool to the UI.
+#[derive(Debug)]
+pub struct ApprovalRequest {
+    pub tool: String,
+    pub input: serde_json::Value,
+    sender: oneshot::Sender<Approval>,
+}
+
+impl ApprovalRequest {
+    /// Send the user's decision back to the waiting tool. Err(approval) if
+    /// the requester already gave up (rare — turn aborted).
+    pub fn respond(self, approval: Approval) -> Result<(), Approval> {
+        self.sender.send(approval)
+    }
+
+    /// One-line summary for the dialog.
+    pub fn summary(&self) -> String {
+        summarize_input(&self.tool, &self.input)
+    }
+}
+
+/// Tool-facing handle (cheap to clone).
+#[derive(Debug, Clone)]
+pub struct ApprovalQueue {
+    sender: mpsc::UnboundedSender<ApprovalRequest>,
+}
+
+/// UI-facing handle — single consumer; drain in the TUI select! loop.
+#[derive(Debug)]
+pub struct ApprovalReceiver {
+    receiver: mpsc::UnboundedReceiver<ApprovalRequest>,
+}
+
+impl ApprovalReceiver {
+    pub async fn next(&mut self) -> Option<ApprovalRequest> {
+        self.receiver.recv().await
+    }
+}
+
+pub fn approval_queue() -> (ApprovalQueue, ApprovalReceiver) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    (
+        ApprovalQueue { sender: tx },
+        ApprovalReceiver { receiver: rx },
+    )
+}
+
+impl ApprovalQueue {
+    /// Submit a request and await the user's decision. A closed queue (no
+    /// UI draining) or a dropped responder fails closed -> Deny.
+    pub async fn request(&self, tool: &str, input: &serde_json::Value) -> Approval {
+        let (tx, rx) = oneshot::channel();
+        let req = ApprovalRequest {
+            tool: tool.to_string(),
+            input: input.clone(),
+            sender: tx,
+        };
+        if self.sender.send(req).is_err() {
+            return Approval::Deny;
+        }
+        rx.await.unwrap_or(Approval::Deny)
+    }
+}
+
+/// ApprovalGate backed by the queue (used by the TUI).
+#[derive(Debug)]
+pub struct QueueGate {
+    queue: ApprovalQueue,
+}
+
+impl QueueGate {
+    pub fn new(queue: ApprovalQueue) -> Self {
+        Self { queue }
+    }
+}
+
+#[async_trait]
+impl ApprovalGate for QueueGate {
+    async fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval {
+        self.queue.request(tool, input).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +235,34 @@ mod tests {
         let big = json!({"data": "你".repeat(500)});
         let s = summarize_input("Weird", &big); // must not panic
         assert!(s.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn approval_queue_round_trip() {
+        let (queue, mut rx) = approval_queue();
+        tokio::spawn(async move {
+            while let Some(req) = rx.next().await {
+                let a = if req.tool == "Bash" {
+                    Approval::AllowOnce
+                } else {
+                    Approval::Deny
+                };
+                let _ = req.respond(a);
+            }
+        });
+        let gate = QueueGate::new(queue);
+        assert_eq!(
+            gate.approve("Bash", &json!({"command": "ls"})).await,
+            Approval::AllowOnce
+        );
+        assert_eq!(gate.approve("Other", &json!({})).await, Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn approval_queue_closed_defaults_deny() {
+        let (queue, rx) = approval_queue();
+        drop(rx);
+        let gate = QueueGate::new(queue);
+        assert_eq!(gate.approve("Bash", &json!({})).await, Approval::Deny);
     }
 }
