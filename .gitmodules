@@ -1,0 +1,3 @@
+[submodule "vendor/agent"]
+	path = vendor/agent
+	url = https://github.com/ZSeven-W/agent-rs.git

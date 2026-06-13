@@ -1,0 +1,23 @@
+[package]
+name = "zode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "AI-native coding CLI built on the agent runtime"
+repository = "https://github.com/ZSeven-W/zode"
+
+[[bin]]
+name = "zode"
+path = "src/main.rs"
+
+[dependencies]
+zode-core = { path = "../zode-core" }
+zode-tui = { path = "../zode-tui" }
+agent = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

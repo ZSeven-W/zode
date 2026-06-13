@@ -1,0 +1,12 @@
+[package]
+name = "zode-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zode-core = { path = "../zode-core" }
+agent = { workspace = true }
+tokio = { workspace = true }

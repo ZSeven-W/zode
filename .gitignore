@@ -1,0 +1,13 @@
+# Rust
+/target
+**/*.rs.bk
+
+# OS
+.DS_Store
+
+# Environment
+.env
+.env.*
+
+# Docs (local working artifacts — plans/specs live on disk, not pushed)
+docs/

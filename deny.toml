@@ -1,0 +1,46 @@
+[graph]
+all-features = false
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = [
+  # backoff 0.4.0 / instant 0.1.13 — unmaintained, pulled transitively via
+  # async-openai 0.36 (agent crate `openai` feature). Same ignores as agent-rs.
+  "RUSTSEC-2025-0012",
+  "RUSTSEC-2024-0384",
+]
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "MPL-2.0",
+  "CC0-1.0",
+  "OpenSSL",
+  "CDLA-Permissive-2.0", # webpki-root-certs (transitive via reqwest/rustls)
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Internal path deps (zode-core/zode-tui + vendored agent crates) have no
+# version field; that's a local path, not a real wildcard from the registry.
+allow-wildcard-paths = true
+# lru is pinned >= 0.18 transitively via agent-rs (RUSTSEC-2026-0002: IterMut
+# unsoundness in 0.12.x). Zode must never introduce a < 0.18 lru dependency.
+deny = [
+  { name = "lru", version = "<0.18" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = ["crates/zode", "crates/zode-core", "crates/zode-tui"]
+# vendor/agent is its own (agent-rs) workspace; keep it out of ours so its
+# crates resolve `*.workspace = true` against agent-rs's root, not zode's.
+exclude = ["vendor/agent"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/ZSeven-W/zode"
+authors = ["ZSeven-W <fini.yang@gmail.com>"]
+
+[workspace.dependencies]
+# agent-rs (vendored). `full` pulls anthropic + openai + ollama + mcp +
+# session-jsonl + swarm + tiktoken so every Zode phase has what it needs.
+agent = { path = "vendor/agent/crates/agent", features = ["full"] }
+agent-tools-code = { path = "vendor/agent/crates/agent-tools-code" }
+
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "io-util",
+  "process",
+  "sync",
+  "time",
+  "fs",
+  "signal",
+] }
+futures = "0.3"
+async-trait = "0.1"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+thiserror = "1"
+anyhow = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "5"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
