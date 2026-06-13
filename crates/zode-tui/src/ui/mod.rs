@@ -2,6 +2,7 @@
 
 pub mod autocomplete;
 pub mod chat;
+pub mod chrome;
 pub mod dialog;
 pub mod diff;
 pub mod help;
