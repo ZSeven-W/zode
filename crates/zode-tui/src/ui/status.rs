@@ -23,6 +23,7 @@ pub struct StatusBar {
     pub output_tokens: u32,
     pub yolo: bool,
     pub sandbox: bool,
+    pub plan_mode: bool,
     spinner_frame: usize,
 }
 
@@ -35,6 +36,7 @@ impl StatusBar {
             output_tokens: 0,
             yolo: false,
             sandbox: false,
+            plan_mode: false,
             spinner_frame: 0,
         }
     }
@@ -86,6 +88,12 @@ impl StatusBar {
                 Style::default()
                     .fg(theme.accent_secondary)
                     .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if self.plan_mode {
+            spans.push(Span::styled(
+                "  PLAN",
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
             ));
         }
         spans.extend([

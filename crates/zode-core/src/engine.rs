@@ -42,6 +42,15 @@ use crate::task_factory::{ParentToolsCell, ZodeTaskFactory};
 
 const EDIT_HISTORY_CAPACITY: usize = 50;
 
+/// Appended to the system prompt in plan mode (read-only tools only).
+const PLAN_MODE_PROMPT: &str = "\n\n# Plan mode\n\
+You are in PLAN MODE. Only read-only tools are available — you cannot edit \
+files, run shell commands, commit, or spawn sub-agents. Research the codebase \
+thoroughly, then present a concise, concrete, step-by-step plan for the work. \
+Do NOT attempt to make changes; there are no tools to do so. When the plan is \
+ready, present it and tell the user to review it and run /plan to leave plan \
+mode and execute.";
+
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const DEFAULT_MODEL_MAX_TOKENS: u32 = 200_000;
 const FILE_CACHE_ENTRIES: usize = 1024;
@@ -108,6 +117,7 @@ impl ZodeEngine {
         sandbox: Option<crate::sandbox::SandboxConfig>,
         date: &str,
         question_tool: Option<Arc<dyn Tool>>,
+        plan_mode: bool,
     ) -> Result<Self, CoreError> {
         let provider = build_provider(&cfg.provider)?;
         let model = cfg
@@ -277,6 +287,14 @@ impl ZodeEngine {
         // tools are always-on and pass through).
         let base = filter_enabled_tools(base, &plugins);
 
+        // Plan mode: keep only read-only tools so the agent can research but
+        // not change anything until the user approves the plan and exits.
+        let base = if plan_mode {
+            filter_read_only(base)
+        } else {
+            base
+        };
+
         // --sandbox: wrap Bash/BashRun so writes are confined to cwd. Done
         // before gate-wrapping so the final shape is
         // PermissionGatedTool(SandboxedBashTool(Bash)).
@@ -298,10 +316,15 @@ impl ZodeEngine {
         // registry now that wrapping is complete.
         let _ = task_tools.set(tools.clone());
 
-        // System prompt: identity + env + three-level instructions + skills.
+        // System prompt: identity + env + three-level instructions + skills,
+        // plus a plan-mode preamble when only read-only tools are available.
         let env = gather_env(&cwd, date);
         let instructions = discover_instructions(&cwd);
-        let system = Some(build_system_prompt(&instructions, &skills_idx, &env));
+        let mut system = build_system_prompt(&instructions, &skills_idx, &env);
+        if plan_mode {
+            system.push_str(PLAN_MODE_PROMPT);
+        }
+        let system = Some(system);
 
         // Clone before `model` is moved into the struct's `model` field below.
         let model_for_cost = model.clone();
@@ -437,6 +460,9 @@ pub struct EngineTemplate {
     question_queue: Option<crate::question::QuestionQueue>,
     /// When true, tools auto-approve (BypassGate) regardless of `queue`.
     yolo: bool,
+    /// Plan mode: only read-only tools are registered and the system prompt
+    /// directs the agent to research and present a plan, not make changes.
+    plan_mode: bool,
     sandbox: Option<crate::sandbox::SandboxConfig>,
     date: String,
 }
@@ -456,6 +482,7 @@ impl EngineTemplate {
             queue,
             question_queue: None,
             yolo,
+            plan_mode: false,
             sandbox,
             date,
         }
@@ -503,6 +530,7 @@ impl EngineTemplate {
             self.sandbox.clone(),
             &self.date,
             question_tool,
+            self.plan_mode,
         )
         .await
     }
@@ -537,6 +565,18 @@ impl EngineTemplate {
 
     pub fn yolo(&self) -> bool {
         self.yolo
+    }
+
+    pub fn plan_mode(&self) -> bool {
+        self.plan_mode
+    }
+
+    /// Clone with plan mode toggled (for `/plan`). Read-only tools only + a
+    /// plan-mode system prompt; carried across reassembly clones.
+    pub fn with_plan_mode(&self, plan_mode: bool) -> Self {
+        let mut t = self.clone();
+        t.plan_mode = plan_mode;
+        t
     }
 
     /// Clone with the model overridden (for `/model <id>`).
@@ -585,6 +625,19 @@ fn filter_enabled_tools(src: ToolRegistry, plugins: &PluginManager) -> ToolRegis
     let mut out = ToolRegistry::new();
     for tool in src.list() {
         if plugins.tool_enabled(tool.name()) {
+            out.register(tool);
+        }
+    }
+    out
+}
+
+/// Keep only read-only tools (plan mode). Mutating/destructive tools — file
+/// writes/edits, shell, git mutations, sub-agents — are dropped so the agent
+/// can research but not change anything until the plan is approved.
+fn filter_read_only(src: ToolRegistry) -> ToolRegistry {
+    let mut out = ToolRegistry::new();
+    for tool in src.list() {
+        if matches!(tool.safety_class(), SafetyClass::ReadOnly) {
             out.register(tool);
         }
     }
@@ -689,6 +742,7 @@ mod tests {
             None,
             "2026-06-13",
             None,
+            false,
         )
         .await
         .unwrap();
@@ -716,6 +770,7 @@ mod tests {
             None,
             "2026-06-13",
             None,
+            false,
         )
         .await
         .unwrap();
@@ -738,6 +793,7 @@ mod tests {
             None,
             "2026-06-13",
             None,
+            false,
         )
         .await
         .unwrap();
@@ -757,6 +813,7 @@ mod tests {
             None,
             "2026-06-13",
             None,
+            false,
         )
         .await
         .unwrap();
@@ -776,6 +833,7 @@ mod tests {
             None,
             "2026-06-13",
             None,
+            false,
         )
         .await
         .unwrap();

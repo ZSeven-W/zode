@@ -266,11 +266,15 @@ impl TuiApp {
         PermissionDialog::new(req, cwd)
     }
 
-    /// Show a question modal, focusing the tab that asked (its `source` id).
+    /// Show a question modal, focusing the tab that asked (its `source` id) —
+    /// but not while a permission dialog is up (which captures input on top and
+    /// is about a different tab), so we don't disorient by switching away.
     fn open_question(&mut self, req: QuestionRequest) {
-        if let Some(src) = req.source.as_deref().and_then(|s| s.parse::<usize>().ok()) {
-            if let Some(pos) = self.tabs.iter().position(|t| t.id == src) {
-                self.active = pos;
+        if self.active_dialog.is_none() {
+            if let Some(src) = req.source.as_deref().and_then(|s| s.parse::<usize>().ok()) {
+                if let Some(pos) = self.tabs.iter().position(|t| t.id == src) {
+                    self.active = pos;
+                }
             }
         }
         self.active_question = Some(QuestionDialog::new(req));
@@ -1496,6 +1500,19 @@ impl TuiApp {
                         "yolo: ON — tools auto-approve (deny rules still apply)"
                     } else {
                         "yolo: OFF — tools prompt for approval"
+                    });
+                }
+            }
+            "plan" => {
+                let on = !self.template.plan_mode();
+                let t = self.template.with_plan_mode(on);
+                if self.reassemble_active(t.clone()).await {
+                    self.template = t;
+                    self.status.plan_mode = on;
+                    self.active_tab_mut().chat.push_system(if on {
+                        "plan mode: ON — read-only tools only; research and present a plan, then /plan to execute"
+                    } else {
+                        "plan mode: OFF — full tools restored"
                     });
                 }
             }

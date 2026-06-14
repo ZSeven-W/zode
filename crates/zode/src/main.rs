@@ -152,9 +152,9 @@ async fn build(
     sandbox: Option<zode_core::sandbox::SandboxConfig>,
     date: &str,
 ) -> Option<ZodeEngine> {
-    // Headless surfaces have no UI to answer questions, so AskUserQuestion is
-    // not registered (last arg None).
-    match ZodeEngine::assemble(cfg, cwd, gate, sandbox, date, None).await {
+    // Headless surfaces have no UI to answer questions (None) and don't enter
+    // plan mode (false).
+    match ZodeEngine::assemble(cfg, cwd, gate, sandbox, date, None, false).await {
         Ok(e) => Some(e),
         Err(e) => {
             eprintln!("zode: {e}");

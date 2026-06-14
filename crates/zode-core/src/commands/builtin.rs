@@ -108,6 +108,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Engine,
     },
     SlashCommand {
+        name: "plan",
+        description: "Toggle plan mode (read-only; research then present a plan)",
+        usage: "/plan",
+        action: CommandAction::Engine,
+    },
+    SlashCommand {
         name: "mcp",
         description: "List MCP servers",
         usage: "/mcp",
