@@ -131,12 +131,9 @@ mod tests {
     }
 
     #[test]
-    fn image_and_vision_commands_are_registered() {
+    fn vision_is_registered_but_image_command_is_not() {
         let reg = CommandRegistry::default();
-        assert_eq!(
-            reg.get("image").unwrap().usage,
-            "/image <path>|list|remove <n>|clear"
-        );
+        assert!(reg.get("image").is_none());
         assert_eq!(
             reg.get("vision").unwrap().usage,
             "/vision [mode|provider|model|prompt]"

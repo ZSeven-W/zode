@@ -11,8 +11,8 @@ use agent::message::{ContentBlock, Message, MessageStore};
 use agent::session::Session;
 use agent::stream::Event;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode, KeyModifiers,
-    MouseEvent, MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as CtEvent, EventStream, KeyCode, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -21,13 +21,17 @@ use crossterm::ExecutableCommand;
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use zode_core::approval::{ApprovalReceiver, ApprovalRequest};
 use zode_core::bg_shells::BgShell;
 use zode_core::commands::parse_slash;
-use zode_core::config::ConfigManager;
+use zode_core::config::{ConfigManager, ImageMode, ImagesConfig};
+use zode_core::images::{split_pasted_image_paths, ImageAttachment};
 use zode_core::question::{QuestionReceiver, QuestionRequest};
 use zode_core::session_meta::{SessionIndex, SessionMeta};
 use zode_core::{EngineTemplate, ZodeEngine};
@@ -36,7 +40,7 @@ use crate::event::AppEvent;
 use crate::tab::SessionTab;
 use crate::theme::{Theme, ThemeStore};
 use crate::ui::autocomplete::Autocomplete;
-use crate::ui::chat::{ChatRenderMeta, ChatView};
+use crate::ui::chat::{ChatRenderMeta, ChatView, ImagePreview};
 use crate::ui::dialog::connect::{ConnectAction, ConnectDialog, ConnectStage};
 use crate::ui::dialog::permission::PermissionDialog;
 use crate::ui::dialog::plugin_picker::PluginPicker;
@@ -54,6 +58,13 @@ use crate::ui::toast::Toast;
 struct CompletionHint {
     prefix: String,
     placeholder: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageSubmitRoute {
+    Direct,
+    VisionModel,
+    Unsupported,
 }
 
 pub struct UiConfig {
@@ -635,7 +646,18 @@ impl TuiApp {
         self.tabs[self.active]
             .chat
             .render(f, areas.chat, &theme, chat_meta);
-        let input_area: Rect = areas.composer;
+        let mut input_area: Rect = areas.composer;
+        if !self.tabs[self.active].pending_images.is_empty() && input_area.height > 2 {
+            let chips_area = Rect::new(input_area.x, input_area.y, input_area.width, 1);
+            render_pending_image_chips(
+                f,
+                chips_area,
+                &self.tabs[self.active].pending_images,
+                &theme,
+            );
+            input_area.y = input_area.y.saturating_add(1);
+            input_area.height = input_area.height.saturating_sub(1);
+        }
         let input_text = self.input.text();
         let completion_placeholder = self
             .completion_hint
@@ -699,6 +721,10 @@ impl TuiApp {
     async fn handle_term(&mut self, ev: CtEvent, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         let key = match ev {
             CtEvent::Key(key) => key,
+            CtEvent::Paste(text) => {
+                self.handle_paste(&text);
+                return;
+            }
             CtEvent::Mouse(mouse) => {
                 self.handle_mouse(mouse);
                 return;
@@ -798,6 +824,13 @@ impl TuiApp {
             }
             (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
                 self.tabs[self.active].chat = ChatView::new();
+                return;
+            }
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
+                match zode_core::clipboard::read_from_clipboard() {
+                    Ok(text) => self.handle_paste(&text),
+                    Err(e) => self.toast = Some(Toast::error(format!("paste failed: {e}"))),
+                }
                 return;
             }
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
@@ -909,6 +942,41 @@ impl TuiApp {
         }
         // 7. Refresh the autocomplete popup from the new input text.
         self.autocomplete.update(&self.input.text());
+    }
+
+    fn handle_paste(&mut self, text: &str) {
+        if self.active_dialog.is_some()
+            || self.active_question.is_some()
+            || self.settings.is_some()
+            || self.connect.is_some()
+            || self.plugin_picker.is_some()
+            || self.session_picker.is_some()
+            || self.tasks_panel.is_some()
+            || self.show_help
+        {
+            return;
+        }
+
+        let cwd = self.active_tab().engine.cwd.clone();
+        match split_pasted_image_paths(&cwd, text) {
+            Ok(parsed) => {
+                let image_count = parsed.images.len();
+                if image_count > 0 {
+                    self.active_tab_mut().pending_images.extend(parsed.images);
+                    self.toast = Some(Toast::info(format!(
+                        "attached {image_count} image{}",
+                        if image_count == 1 { "" } else { "s" }
+                    )));
+                }
+                if !parsed.remaining_text.is_empty() {
+                    self.input.insert_str(&parsed.remaining_text);
+                }
+                self.autocomplete.update(&self.input.text());
+            }
+            Err(e) => {
+                self.toast = Some(Toast::error(e.to_string()));
+            }
+        }
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -1296,7 +1364,41 @@ impl TuiApp {
     }
 
     async fn submit(&mut self, text: &str, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
-        if let Some((name, args)) = parse_slash(text) {
+        let cwd = self.active_tab().engine.cwd.clone();
+        let parsed = match split_pasted_image_paths(&cwd, text) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                self.toast = Some(Toast::error(e.to_string()));
+                return;
+            }
+        };
+        let mut submitted_text = parsed.remaining_text;
+        let pasted_images = parsed.images;
+
+        if pasted_images.is_empty() {
+            if let Some((name, args)) = parse_slash(&submitted_text) {
+                self.handle_slash(name, args, agent_tx).await;
+                return;
+            }
+        }
+
+        if submitted_text.trim().is_empty()
+            && pasted_images.is_empty()
+            && self.active_tab().pending_images.is_empty()
+        {
+            return;
+        }
+
+        let pasted_count = pasted_images.len();
+        if pasted_count > 0 {
+            self.active_tab_mut().pending_images.extend(pasted_images);
+        }
+
+        if pasted_count > 0 && submitted_text.trim().is_empty() {
+            submitted_text.clear();
+        }
+
+        if let Some((name, args)) = parse_slash(&submitted_text) {
             self.handle_slash(name, args, agent_tx).await;
             return;
         }
@@ -1304,22 +1406,95 @@ impl TuiApp {
         // concurrently). Instead of rejecting, QUEUE the message and send it
         // when this tab goes idle — see `dispatch_queued_input`.
         if self.active_tab().is_busy() {
-            self.active_tab_mut()
-                .queued_input
-                .push_back(text.to_string());
-            let n = self.active_tab().queued_input.len();
-            self.toast = Some(Toast::info(format!(
-                "queued ({n}) — sends when the turn finishes (Esc to interrupt now)"
-            )));
+            if !submitted_text.trim().is_empty() {
+                self.active_tab_mut()
+                    .queued_input
+                    .push_back(submitted_text.to_string());
+                let n = self.active_tab().queued_input.len();
+                self.toast = Some(Toast::info(format!(
+                    "queued ({n}) — sends when the turn finishes (Esc to interrupt now)"
+                )));
+            } else if pasted_count > 0 {
+                self.toast = Some(Toast::info(format!(
+                    "attached {pasted_count} image{}",
+                    if pasted_count == 1 { "" } else { "s" }
+                )));
+            }
             return;
         }
+
+        let has_images = !self.active_tab().pending_images.is_empty();
+        let images_cfg = self.template.images().clone();
+        let image_route = resolve_image_submit_route(
+            has_images,
+            images_cfg.effective_mode(),
+            self.active_tab().engine.supports_images(),
+            images_cfg.vision_provider.is_some(),
+        );
+        let vision_engine = match image_route {
+            ImageSubmitRoute::Direct => None,
+            ImageSubmitRoute::Unsupported => {
+                if has_images {
+                    self.toast = Some(Toast::error(
+                        "current provider does not declare image support; set supportsImages=true or configure /vision provider <name>",
+                    ));
+                    return;
+                }
+                None
+            }
+            ImageSubmitRoute::VisionModel => {
+                let Some(provider_name) = images_cfg.vision_provider.as_deref() else {
+                    self.toast = Some(Toast::error("configure /vision provider <name> first"));
+                    return;
+                };
+                let Some(template) = self.template.with_provider(provider_name) else {
+                    self.toast = Some(Toast::error(format!(
+                        "vision provider '{provider_name}' is not configured"
+                    )));
+                    return;
+                };
+                match template
+                    .assemble_tab(
+                        Some(self.active_tab().engine.cwd.clone()),
+                        Some(format!("{}:vision", self.active_tab().id)),
+                    )
+                    .await
+                {
+                    Ok(engine) if engine.supports_images() => Some(Arc::new(engine)),
+                    Ok(_) => {
+                        self.toast = Some(Toast::error(format!(
+                            "vision provider '{provider_name}' does not declare image support"
+                        )));
+                        return;
+                    }
+                    Err(e) => {
+                        self.toast = Some(Toast::error(format!("vision provider failed: {e}")));
+                        return;
+                    }
+                }
+            }
+        };
+
         // Stamp the session title from the first user prompt of this tab.
         if !self.active_tab().titled {
-            self.active_tab_mut().stamp_title(text).await;
+            let title_source = if submitted_text.trim().is_empty() {
+                self.active_tab()
+                    .pending_images
+                    .first()
+                    .map(|image| image.display_name.as_str())
+                    .unwrap_or("image")
+                    .to_string()
+            } else {
+                submitted_text.clone()
+            };
+            self.active_tab_mut().stamp_title(&title_source).await;
         }
 
         let tab = &mut self.tabs[self.active];
-        tab.chat.push_user(text);
+        let images = std::mem::take(&mut tab.pending_images);
+        let previews = image_previews(&images);
+        let content = user_content_blocks(&submitted_text, &images);
+        tab.chat.push_user_with_images(&submitted_text, previews);
         // No begin_assistant(): push_delta lazily opens an assistant segment,
         // so text after a tool card starts a fresh segment.
         tab.mode = Mode::Thinking;
@@ -1333,10 +1508,40 @@ impl TuiApp {
         tab.turn_abort = Some(abort.clone());
 
         let engine = tab.engine.clone();
-        let prompt = text.to_string();
+        let images_for_vision = images.clone();
+        let submitted_text_for_vision = submitted_text.clone();
+        let vision_prompt = images_cfg.effective_prompt().to_string();
         let tx = agent_tx.clone();
         tokio::spawn(async move {
-            match engine.turn(&prompt, abort).await {
+            let stream_result = if let Some(vision_engine) = vision_engine {
+                match run_vision_description(
+                    vision_engine,
+                    vision_prompt,
+                    submitted_text_for_vision.clone(),
+                    images_for_vision,
+                    abort.clone(),
+                )
+                .await
+                {
+                    Ok(description) => {
+                        let prompt =
+                            merge_prompt_with_vision(&submitted_text_for_vision, &description);
+                        engine.turn(&prompt, abort).await
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppEvent::TurnDone {
+                            tab_id,
+                            turn_id,
+                            result: Err(e),
+                        });
+                        return;
+                    }
+                }
+            } else {
+                engine.turn_blocks(content, abort).await
+            };
+
+            match stream_result {
                 Ok(mut stream) => {
                     while let Some(item) = stream.next().await {
                         match item {
@@ -1535,6 +1740,7 @@ impl TuiApp {
             "tab" => self.handle_tab_command(args),
             "connect" => self.open_connect_dialog(),
             "plugin" => self.open_plugin_picker(),
+            "vision" => self.handle_vision(args),
             "sidebar" => {
                 if args.trim().is_empty() {
                     self.open_sidebar_picker();
@@ -1664,7 +1870,10 @@ impl TuiApp {
                 if level.is_empty() {
                     // No arg → open the picker (low/medium/high).
                     self.open_effort_picker();
-                } else if !matches!(level.as_str(), "low" | "medium" | "high" | "clear" | "reset") {
+                } else if !matches!(
+                    level.as_str(),
+                    "low" | "medium" | "high" | "clear" | "reset"
+                ) {
                     self.toast = Some(Toast::info("usage: /effort low|medium|high"));
                 } else {
                     let new_effort =
@@ -1718,7 +1927,9 @@ impl TuiApp {
             "hooks" => {
                 let lines = self.template.hooks_summary();
                 if lines.is_empty() {
-                    self.active_tab_mut().chat.push_system("(no hooks configured)");
+                    self.active_tab_mut()
+                        .chat
+                        .push_system("(no hooks configured)");
                 } else {
                     for line in lines {
                         self.active_tab_mut().chat.push_system(&line);
@@ -1796,6 +2007,92 @@ impl TuiApp {
                 .chat
                 .push_system(&format!("unknown theme: {args}"));
         }
+    }
+
+    fn handle_vision(&mut self, args: &str) {
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            let msg = vision_summary(
+                self.template.images(),
+                self.active_tab().engine.supports_images(),
+            );
+            self.active_tab_mut().chat.push_system(&msg);
+            return;
+        }
+
+        let mut parts = trimmed.splitn(2, char::is_whitespace);
+        let key = parts.next().unwrap_or_default();
+        let value = parts.next().unwrap_or_default().trim();
+        let mut images = self.template.images().clone();
+        let message = match key {
+            "mode" => match parse_image_mode(value) {
+                Some(mode) => {
+                    images.mode = Some(mode);
+                    format!("vision mode -> {}", image_mode_label(mode))
+                }
+                None => {
+                    self.toast = Some(Toast::info("usage: /vision mode auto|direct|vision-model"));
+                    return;
+                }
+            },
+            "provider" => {
+                if value.is_empty() {
+                    let providers = self.template.provider_names();
+                    let msg = if providers.is_empty() {
+                        "no named providers configured".to_string()
+                    } else {
+                        format!("vision providers: {}", providers.join(", "))
+                    };
+                    self.active_tab_mut().chat.push_system(&msg);
+                    return;
+                }
+                if !self
+                    .template
+                    .provider_names()
+                    .iter()
+                    .any(|name| name == value)
+                {
+                    self.toast = Some(Toast::error(format!("no provider '{value}' in config")));
+                    return;
+                }
+                images.vision_provider = Some(value.to_string());
+                images.mode = Some(ImageMode::VisionModel);
+                format!("vision provider -> {value}")
+            }
+            "prompt" => {
+                if value.is_empty() {
+                    self.toast = Some(Toast::info("usage: /vision prompt <text>"));
+                    return;
+                }
+                images.vision_prompt = Some(value.to_string());
+                "vision prompt updated".to_string()
+            }
+            "clear" | "reset" => {
+                images = ImagesConfig::default();
+                "vision config reset".to_string()
+            }
+            _ => {
+                self.toast = Some(Toast::info("usage: /vision [mode|provider|prompt|reset]"));
+                return;
+            }
+        };
+
+        match ConfigManager::load_global() {
+            Ok(mut cfg) => {
+                cfg.images = images.clone();
+                if let Err(e) = ConfigManager::save_global(&cfg) {
+                    self.toast = Some(Toast::error(format!("save config failed: {e}")));
+                    return;
+                }
+            }
+            Err(e) => {
+                self.toast = Some(Toast::error(format!("load config failed: {e}")));
+                return;
+            }
+        }
+
+        self.template = self.template.with_images_config(images);
+        self.active_tab_mut().chat.push_system(&message);
     }
 
     fn handle_tab_command(&mut self, args: &str) {
@@ -2090,6 +2387,73 @@ fn resolve_sidebar_visibility(
     }
 }
 
+fn parse_image_mode(value: &str) -> Option<ImageMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(ImageMode::Auto),
+        "direct" => Some(ImageMode::Direct),
+        "vision-model" | "vision" | "model" => Some(ImageMode::VisionModel),
+        _ => None,
+    }
+}
+
+fn image_mode_label(mode: ImageMode) -> &'static str {
+    match mode {
+        ImageMode::Auto => "auto",
+        ImageMode::Direct => "direct",
+        ImageMode::VisionModel => "vision-model",
+    }
+}
+
+fn vision_summary(images: &ImagesConfig, active_provider_supports_images: bool) -> String {
+    format!(
+        "vision mode: {}\nactive provider images: {}\nvision provider: {}\nprompt: {}",
+        image_mode_label(images.effective_mode()),
+        if active_provider_supports_images {
+            "supported"
+        } else {
+            "not declared"
+        },
+        images.vision_provider.as_deref().unwrap_or("(not set)"),
+        images.effective_prompt()
+    )
+}
+
+fn resolve_image_submit_route(
+    has_images: bool,
+    mode: ImageMode,
+    active_provider_supports_images: bool,
+    vision_provider_configured: bool,
+) -> ImageSubmitRoute {
+    if !has_images {
+        return ImageSubmitRoute::Direct;
+    }
+    match mode {
+        ImageMode::Direct => {
+            if active_provider_supports_images {
+                ImageSubmitRoute::Direct
+            } else {
+                ImageSubmitRoute::Unsupported
+            }
+        }
+        ImageMode::Auto => {
+            if active_provider_supports_images {
+                ImageSubmitRoute::Direct
+            } else if vision_provider_configured {
+                ImageSubmitRoute::VisionModel
+            } else {
+                ImageSubmitRoute::Unsupported
+            }
+        }
+        ImageMode::VisionModel => {
+            if vision_provider_configured {
+                ImageSubmitRoute::VisionModel
+            } else {
+                ImageSubmitRoute::Unsupported
+            }
+        }
+    }
+}
+
 /// Rebuild a ChatView from a resumed MessageStore so the conversation history
 /// is visible after /resume. User messages that carry only tool results are
 /// skipped (their tool card already shows under the assistant turn); System /
@@ -2099,12 +2463,32 @@ fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
     for msg in store.iter() {
         match msg {
             Message::User { content, .. } => {
-                for block in content {
-                    if let ContentBlock::Text { text } = block {
-                        if !text.trim().is_empty() {
-                            chat.push_user(text);
+                let mut text_parts = Vec::new();
+                let mut images = Vec::new();
+                for (idx, block) in content.iter().enumerate() {
+                    match block {
+                        ContentBlock::Text { text } if !text.trim().is_empty() => {
+                            text_parts.push(text.as_str());
                         }
+                        ContentBlock::Image { source } => {
+                            let media_type = match source {
+                                agent::message::ImageSource::Base64 { media_type, .. } => {
+                                    media_type.clone()
+                                }
+                                agent::message::ImageSource::Url { .. } => "image/url".into(),
+                                agent::message::ImageSource::File { .. } => "image/file".into(),
+                            };
+                            images.push(ImagePreview {
+                                display_name: format!("attached image {}", idx + 1),
+                                media_type,
+                                size_bytes: 0,
+                            });
+                        }
+                        _ => {}
                     }
+                }
+                if !text_parts.is_empty() || !images.is_empty() {
+                    chat.push_user_with_images(&text_parts.join("\n"), images);
                 }
             }
             Message::Assistant { content, .. } => {
@@ -2141,6 +2525,128 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn render_pending_image_chips(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    images: &[ImageAttachment],
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let mut spans = vec![Span::styled(
+        "▣ ",
+        Style::default()
+            .bg(theme.bg_input)
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    for (idx, image) in images.iter().take(4).enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled(
+                "  ",
+                Style::default().bg(theme.bg_input).fg(theme.fg_subtle),
+            ));
+        }
+        spans.push(Span::styled(
+            image.display_name.clone(),
+            Style::default()
+                .bg(theme.bg_input)
+                .fg(theme.fg_white)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", image.media_type),
+            Style::default().bg(theme.bg_input).fg(theme.fg_subtle),
+        ));
+    }
+    if images.len() > 4 {
+        spans.push(Span::styled(
+            format!("  +{}", images.len() - 4),
+            Style::default()
+                .bg(theme.bg_input)
+                .fg(theme.accent_secondary),
+        ));
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg_input)),
+        area,
+    );
+}
+
+fn image_previews(images: &[ImageAttachment]) -> Vec<ImagePreview> {
+    images.iter().map(image_preview).collect()
+}
+
+fn image_preview(image: &ImageAttachment) -> ImagePreview {
+    ImagePreview {
+        display_name: image.display_name.clone(),
+        media_type: image.media_type.clone(),
+        size_bytes: image.size_bytes,
+    }
+}
+
+fn user_content_blocks(text: &str, images: &[ImageAttachment]) -> Vec<ContentBlock> {
+    let mut blocks = Vec::new();
+    if !text.trim().is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: text.to_string(),
+        });
+    }
+    blocks.extend(images.iter().map(|image| image.content_block.clone()));
+    blocks
+}
+
+async fn run_vision_description(
+    engine: Arc<ZodeEngine>,
+    vision_prompt: String,
+    user_text: String,
+    images: Vec<ImageAttachment>,
+    abort: AbortController,
+) -> Result<String, String> {
+    let mut blocks = Vec::new();
+    let mut prompt = vision_prompt;
+    if !user_text.trim().is_empty() {
+        prompt.push_str("\n\nUser prompt:\n");
+        prompt.push_str(user_text.trim());
+    }
+    prompt.push_str("\n\nReturn only the image description for the main coding model.");
+    blocks.push(ContentBlock::Text { text: prompt });
+    blocks.extend(images.iter().map(|image| image.content_block.clone()));
+
+    let mut stream = engine
+        .turn_blocks(blocks, abort)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut out = String::new();
+    while let Some(item) = stream.next().await {
+        match item.map_err(|e| e.to_string())? {
+            Event::TextDelta { delta } => out.push_str(&delta),
+            Event::Error { code, message } => {
+                return Err(format!("vision model error [{code}]: {message}"));
+            }
+            _ => {}
+        }
+    }
+    if out.trim().is_empty() {
+        Err("vision model returned no image description".to_string())
+    } else {
+        Ok(out)
+    }
+}
+
+fn merge_prompt_with_vision(user_text: &str, vision_description: &str) -> String {
+    if user_text.trim().is_empty() {
+        format!("Image context:\n{}", vision_description.trim())
+    } else {
+        format!(
+            "{}\n\nImage context:\n{}",
+            user_text.trim(),
+            vision_description.trim()
+        )
+    }
+}
+
 fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -2155,12 +2661,19 @@ fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
         let _ = disable_raw_mode();
         return Err(e);
     }
+    if let Err(e) = stdout.execute(EnableBracketedPaste) {
+        let _ = stdout.execute(DisableMouseCapture);
+        let _ = stdout.execute(LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+        return Err(e);
+    }
     match Terminal::new(CrosstermBackend::new(stdout)) {
         Ok(term) => {
             install_panic_hook();
             Ok(term)
         }
         Err(e) => {
+            let _ = std::io::stdout().execute(DisableBracketedPaste);
             let _ = std::io::stdout().execute(DisableMouseCapture);
             let _ = std::io::stdout().execute(LeaveAlternateScreen);
             let _ = disable_raw_mode();
@@ -2171,6 +2684,7 @@ fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> std::io::Result<()> {
     disable_raw_mode()?;
+    terminal.backend_mut().execute(DisableBracketedPaste)?;
     terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -2182,6 +2696,7 @@ fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
+        let _ = std::io::stdout().execute(DisableBracketedPaste);
         let _ = std::io::stdout().execute(DisableMouseCapture);
         let _ = std::io::stdout().execute(LeaveAlternateScreen);
         original(info);
@@ -2262,6 +2777,30 @@ mod tests {
         assert_eq!(
             resolve_sidebar_visibility("wat", SidebarVisibility::Auto, 1),
             Err("usage: /sidebar [on|off|toggle|auto]".to_string())
+        );
+    }
+
+    #[test]
+    fn image_submit_route_prefers_direct_in_auto_when_supported() {
+        assert_eq!(
+            resolve_image_submit_route(true, ImageMode::Auto, true, true),
+            ImageSubmitRoute::Direct
+        );
+    }
+
+    #[test]
+    fn image_submit_route_uses_vision_provider_when_auto_needs_fallback() {
+        assert_eq!(
+            resolve_image_submit_route(true, ImageMode::Auto, false, true),
+            ImageSubmitRoute::VisionModel
+        );
+    }
+
+    #[test]
+    fn image_submit_route_blocks_direct_mode_without_image_support() {
+        assert_eq!(
+            resolve_image_submit_route(true, ImageMode::Direct, false, true),
+            ImageSubmitRoute::Unsupported
         );
     }
 

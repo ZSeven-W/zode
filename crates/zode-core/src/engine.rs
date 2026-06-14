@@ -10,7 +10,7 @@ use agent::abort::AbortController;
 use agent::compact::AutoCompactState;
 use agent::file_cache::FileStateCache;
 use agent::hook::HookRunner;
-use agent::message::MessageStore;
+use agent::message::{ContentBlock, MessageStore};
 use agent::permission::{PermissionManager, PermissionMode, RuleSource};
 use agent::provider::Provider;
 use agent::query::QueryLoop;
@@ -337,7 +337,12 @@ impl ZodeEngine {
             ));
         }
         // Effort level (`/effort`) tunes thoroughness vs. speed.
-        match cfg.effort.as_deref().map(|e| e.trim().to_ascii_lowercase()).as_deref() {
+        match cfg
+            .effort
+            .as_deref()
+            .map(|e| e.trim().to_ascii_lowercase())
+            .as_deref()
+        {
             Some("high") => system.push_str(
                 "\n\n# Effort: high\nBe thorough and exhaustive — explore broadly, \
                  verify carefully, and prefer completeness over brevity.",
@@ -489,6 +494,21 @@ impl ZodeEngine {
         user_msg: &str,
         abort: AbortController,
     ) -> Result<Box<dyn EventStream>, agent::error::AgentError> {
+        self.turn_blocks(
+            vec![ContentBlock::Text {
+                text: user_msg.to_string(),
+            }],
+            abort,
+        )
+        .await
+    }
+
+    /// Run one turn with rich user content blocks such as text plus images.
+    pub async fn turn_blocks(
+        &self,
+        content: Vec<ContentBlock>,
+        abort: AbortController,
+    ) -> Result<Box<dyn EventStream>, agent::error::AgentError> {
         let mut builder = QueryLoop::builder(self.provider.clone(), self.model.clone())
             .tools(self.tools.clone())
             .permissions(self.permissions.clone())
@@ -507,7 +527,11 @@ impl ZodeEngine {
         if let Some(sys) = &self.system {
             builder = builder.system(sys.clone());
         }
-        builder.build().run(user_msg.to_string(), abort).await
+        builder.build().run_blocks(content, abort).await
+    }
+
+    pub fn supports_images(&self) -> bool {
+        self.provider.capabilities().supports_images
     }
 }
 
@@ -610,6 +634,16 @@ impl EngineTemplate {
         self.cfg.provider.model.as_deref()
     }
 
+    pub fn images(&self) -> &crate::config::ImagesConfig {
+        &self.cfg.images
+    }
+
+    pub fn provider_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.cfg.providers.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     pub fn model_ids(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(model) = self.cfg.provider.model.as_deref() {
@@ -674,6 +708,12 @@ impl EngineTemplate {
     pub fn with_provider_config(&self, provider: crate::config::ProviderConfig) -> Self {
         let mut t = self.clone();
         t.cfg.provider = provider;
+        t
+    }
+
+    pub fn with_images_config(&self, images: crate::config::ImagesConfig) -> Self {
+        let mut t = self.clone();
+        t.cfg.images = images;
         t
     }
 
@@ -797,6 +837,9 @@ mod tests {
     use super::*;
     use crate::approval::BypassGate;
     use crate::config::{ProviderConfig, ProviderKind, ZodeConfig};
+    use agent::message::{ContentBlock, ImageSource, Message};
+    use agent::provider::ProviderCapabilities;
+    use futures::StreamExt;
     use std::sync::Arc;
 
     fn test_cfg() -> ZodeConfig {
@@ -810,6 +853,39 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
+        }
+    }
+
+    fn minimal_engine(provider: Arc<dyn Provider>) -> ZodeEngine {
+        ZodeEngine {
+            provider,
+            tools: Arc::new(ToolRegistry::new()),
+            permissions: Arc::new(PermissionManager::new().with_mode(PermissionMode::Bypass)),
+            hooks: Arc::new(HookRunner::new()),
+            store: Arc::new(Mutex::new(MessageStore::new())),
+            file_cache: Arc::new(FileStateCache::new(
+                NonZeroUsize::new(1).expect("nonzero"),
+                1024,
+            )),
+            compact_state: Arc::new(Mutex::new(AutoCompactState::default())),
+            model: "mock-model".into(),
+            system: None,
+            cwd: PathBuf::from("."),
+            max_output_tokens: 128,
+            temperature: None,
+            prompt_cache: false,
+            bash_sessions: BashSessionRegistry::new(),
+            todo_state: TodoState::new(),
+            history: Arc::new(tokio::sync::Mutex::new(EditHistory::new(1))),
+            bg_shells_meta: BackgroundShellTracker::new(),
+            skills: Arc::new(SkillRegistry::new()),
+            mcp: None,
+            lsp: None,
+            cost: Arc::new(CostState::new("mock-model".into())),
+            plugins: PluginManager::default(),
+            all_mcp_servers: Vec::new(),
+            all_skill_meta: Vec::new(),
+            lsp_langs: Vec::new(),
         }
     }
 
@@ -866,6 +942,40 @@ mod tests {
 
         assert_eq!(switched.model(), Some("deepseek-v4-pro"));
         assert_eq!(template.model(), Some("MiniMax-M1"));
+    }
+
+    #[tokio::test]
+    async fn turn_blocks_preserves_rich_user_content() {
+        let mut caps = ProviderCapabilities::default();
+        caps.supports_images = true;
+        let provider = agent::testing::MockProvider::new(Vec::new()).with_capabilities(caps);
+        let eng = minimal_engine(Arc::new(provider));
+        let content = vec![
+            ContentBlock::Text {
+                text: "describe".into(),
+            },
+            ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "abc123".into(),
+                },
+            },
+        ];
+
+        let mut stream = eng
+            .turn_blocks(content.clone(), AbortController::new())
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let store = eng.store.lock().unwrap();
+        let Message::User {
+            content: observed, ..
+        } = store.iter().next().unwrap()
+        else {
+            panic!("expected first message to be user content");
+        };
+        assert_eq!(observed, &content);
     }
 
     #[tokio::test]

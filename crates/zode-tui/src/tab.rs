@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use agent::abort::AbortController;
 use agent::session::Session;
 use once_cell::sync::Lazy;
+use zode_core::images::ImageAttachment;
 use zode_core::session_meta::{title_from_prompt, SessionIndex, SessionMeta};
 use zode_core::ZodeEngine;
 
@@ -52,6 +53,8 @@ pub struct SessionTab {
     /// Messages typed while a turn was in flight, held FIFO and sent one per
     /// turn once this tab goes idle (Claude-style input queueing).
     pub queued_input: std::collections::VecDeque<String>,
+    /// Local image attachments waiting to be sent with the next user message.
+    pub pending_images: Vec<ImageAttachment>,
     /// Whether THIS tab is in plan mode (read-only tools). Per-tab, not global:
     /// the status badge reads it for the active tab, and reassembly re-applies
     /// it so a model/provider/yolo swap doesn't drop or leak plan mode.
@@ -76,6 +79,7 @@ impl SessionTab {
             cost_label: "$0.00".into(),
             active_tool_names: HashMap::new(),
             queued_input: std::collections::VecDeque::new(),
+            pending_images: Vec::new(),
             plan_mode: false,
         }
     }

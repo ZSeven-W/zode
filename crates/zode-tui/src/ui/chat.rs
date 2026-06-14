@@ -40,6 +40,14 @@ pub enum Role {
 pub struct ChatMessage {
     pub role: Role,
     pub text: String,
+    pub images: Vec<ImagePreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImagePreview {
+    pub display_name: String,
+    pub media_type: String,
+    pub size_bytes: u64,
 }
 
 const THINKING_PREFIX: &str = "Thinking: ";
@@ -60,6 +68,11 @@ pub struct ChatView {
     /// Lines scrolled up from the bottom (0 = following the tail).
     scroll_back: usize,
     last_render_total_rows: usize,
+    /// Display prefs (`/thinking`, `/tool-details`). Stored as "hide" so the
+    /// `Default` (false) shows everything; messages stay in the log and toggle
+    /// live at render time.
+    hide_thinking: bool,
+    hide_tool_details: bool,
 }
 
 impl ChatView {
@@ -67,16 +80,29 @@ impl ChatView {
         Self::default()
     }
 
+    /// Apply the show-thinking / show-tool-detail display preferences. Called
+    /// each frame from the app so a `/thinking` or `/tool-details` toggle takes
+    /// effect immediately without losing scrollback.
+    pub fn set_display_prefs(&mut self, show_thinking: bool, show_tool_details: bool) {
+        self.hide_thinking = !show_thinking;
+        self.hide_tool_details = !show_tool_details;
+    }
+
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
     }
 
     pub fn push_user(&mut self, text: &str) {
+        self.push_user_with_images(text, Vec::new());
+    }
+
+    pub fn push_user_with_images(&mut self, text: &str, images: Vec<ImagePreview>) {
         self.streaming = false;
         self.active_assistant_index = None;
         self.messages.push(ChatMessage {
             role: Role::User,
             text: text.to_string(),
+            images,
         });
         self.scroll_back = 0;
     }
@@ -85,6 +111,7 @@ impl ChatView {
         self.messages.push(ChatMessage {
             role: Role::System,
             text: text.to_string(),
+            images: Vec::new(),
         });
     }
 
@@ -92,6 +119,7 @@ impl ChatView {
         self.push_process_message(ChatMessage {
             role: Role::Tool,
             text: text.to_string(),
+            images: Vec::new(),
         });
     }
 
@@ -109,6 +137,7 @@ impl ChatView {
             self.push_process_message(ChatMessage {
                 role: Role::Tool,
                 text: THINKING_PREFIX.to_string(),
+                images: Vec::new(),
             })
         };
         if let Some(msg) = self.messages.get_mut(thinking_idx) {
@@ -120,6 +149,7 @@ impl ChatView {
         self.messages.push(ChatMessage {
             role: Role::Assistant,
             text: String::new(),
+            images: Vec::new(),
         });
         self.active_assistant_index = self.messages.len().checked_sub(1);
         self.streaming = true;
@@ -134,6 +164,7 @@ impl ChatView {
                 self.messages.push(ChatMessage {
                     role: Role::Assistant,
                     text: String::new(),
+                    images: Vec::new(),
                 });
                 self.messages.len() - 1
             }
@@ -207,11 +238,25 @@ impl ChatView {
             self.render_empty(theme, meta)
         } else {
             let mut out = vec![Line::from("")];
-            for (idx, msg) in self.messages.iter().enumerate() {
-                if idx > 0 && should_insert_message_gap(&self.messages[idx - 1].role, &msg.role) {
-                    out.push(Line::from(""));
+            let mut prev_role: Option<&Role> = None;
+            for msg in self.messages.iter() {
+                // Display-preference filters: thinking lines and tool-detail
+                // lines are both Role::Tool, told apart by the THINKING_PREFIX.
+                if msg.role == Role::Tool {
+                    let is_thinking = msg.text.starts_with(THINKING_PREFIX);
+                    if (is_thinking && self.hide_thinking)
+                        || (!is_thinking && self.hide_tool_details)
+                    {
+                        continue;
+                    }
+                }
+                if let Some(prev) = prev_role {
+                    if should_insert_message_gap(prev, &msg.role) {
+                        out.push(Line::from(""));
+                    }
                 }
                 out.extend(self.render_message(msg, theme, area.width));
+                prev_role = Some(&msg.role);
             }
             out
         };
@@ -291,7 +336,7 @@ impl ChatView {
 
     fn render_message(&self, msg: &ChatMessage, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         match msg.role {
-            Role::User => render_user_bar(&msg.text, theme, width),
+            Role::User => render_user_bar(&msg.text, &msg.images, theme, width),
             Role::Assistant => render_plain_markdown(&msg.text, theme, width),
             Role::System => render_process_line(
                 "⚡ ",
@@ -311,7 +356,12 @@ fn should_insert_message_gap(prev: &Role, next: &Role) -> bool {
     !matches!((prev, next), (Role::Tool, Role::Assistant))
 }
 
-fn render_user_bar(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+fn render_user_bar(
+    text: &str,
+    images: &[ImagePreview],
+    theme: &Theme,
+    width: u16,
+) -> Vec<Line<'static>> {
     let style = Style::default().bg(theme.bg_secondary).fg(theme.fg_white);
     let rail = Span::styled("▌ ", Style::default().bg(theme.bg_secondary).fg(theme.user));
     let mut out = vec![blank_user_bar_line(theme, width)];
@@ -328,8 +378,50 @@ fn render_user_bar(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> 
             })
             .map(|line| pad_line_to_width(line, width, style)),
     );
+    if !images.is_empty() {
+        out.push(blank_user_bar_line(theme, width));
+        for image in images {
+            out.extend(render_image_preview(image, theme, width));
+        }
+    }
     out.push(blank_user_bar_line(theme, width));
     out
+}
+
+fn render_image_preview(image: &ImagePreview, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    let style = Style::default().bg(theme.bg_secondary).fg(theme.fg_subtle);
+    let name = Style::default()
+        .bg(theme.bg_secondary)
+        .fg(theme.fg_white)
+        .add_modifier(Modifier::BOLD);
+    let accent = Style::default().bg(theme.bg_secondary).fg(theme.accent);
+    let rail = Span::styled("▌ ", Style::default().bg(theme.bg_secondary).fg(theme.user));
+    let spans = vec![
+        Span::styled("▣ ", accent),
+        Span::styled(image.display_name.clone(), name),
+        Span::styled(
+            format!(
+                "  {}  {}",
+                image.media_type,
+                format_size_bytes(image.size_bytes)
+            ),
+            style,
+        ),
+    ];
+    wrap_spans_with_prefix(spans, rail, Span::styled("  ", style), width)
+        .into_iter()
+        .map(|line| pad_line_to_width(line, width, style))
+        .collect()
+}
+
+fn format_size_bytes(size: u64) -> String {
+    if size < 1024 {
+        format!("{size} B")
+    } else if size < 1024 * 1024 {
+        format!("{:.1} KB", size as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
+    }
 }
 
 fn blank_user_bar_line(theme: &Theme, width: u16) -> Line<'static> {
@@ -502,6 +594,22 @@ mod tests {
     }
 
     #[test]
+    fn push_user_with_images_keeps_previews() {
+        let mut view = ChatView::new();
+        view.push_user_with_images(
+            "describe this",
+            vec![ImagePreview {
+                display_name: "screen.png".into(),
+                media_type: "image/png".into(),
+                size_bytes: 2048,
+            }],
+        );
+
+        assert_eq!(view.messages().len(), 1);
+        assert_eq!(view.messages()[0].images[0].display_name, "screen.png");
+    }
+
+    #[test]
     fn delta_after_tool_stays_in_active_assistant_answer() {
         // Process rows belong above the current answer, but they must not
         // become the append target for subsequent assistant text.
@@ -572,6 +680,38 @@ mod tests {
         let buf = term.backend().buffer().clone();
         let content: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(content.contains("hello"));
+    }
+
+    #[test]
+    fn renders_user_image_preview_without_panic() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut view = ChatView::new();
+        view.push_user_with_images(
+            "see attached",
+            vec![ImagePreview {
+                display_name: "diagram.webp".into(),
+                media_type: "image/webp".into(),
+                size_bytes: 1_500_000,
+            }],
+        );
+        let backend = TestBackend::new(80, 12);
+        let mut term = Terminal::new(backend).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "MiniMax-M1",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("diagram.webp"));
+        assert!(content.contains("image/webp"));
     }
 
     #[test]
@@ -809,6 +949,7 @@ mod tests {
             &ChatMessage {
                 role: Role::Assistant,
                 text: "hello".into(),
+                images: Vec::new(),
             },
             &theme,
             80,
@@ -831,6 +972,7 @@ mod tests {
             &ChatMessage {
                 role: Role::Assistant,
                 text: "hello".into(),
+                images: Vec::new(),
             },
             &theme,
             80,
@@ -852,6 +994,7 @@ mod tests {
             &ChatMessage {
                 role: Role::Assistant,
                 text: "第一段\n\n第二段".into(),
+                images: Vec::new(),
             },
             &theme,
             80,
@@ -877,6 +1020,7 @@ mod tests {
             &ChatMessage {
                 role: Role::Tool,
                 text: "Bash cargo build".into(),
+                images: Vec::new(),
             },
             &theme,
             80,
@@ -901,6 +1045,7 @@ mod tests {
             &ChatMessage {
                 role: Role::Tool,
                 text: "Thinking: checking context".into(),
+                images: Vec::new(),
             },
             &theme,
             80,

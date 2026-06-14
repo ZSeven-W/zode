@@ -29,12 +29,6 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Engine,
     },
     SlashCommand {
-        name: "image",
-        description: "Attach or manage local images",
-        usage: "/image <path>|list|remove <n>|clear",
-        action: CommandAction::Ui,
-    },
-    SlashCommand {
         name: "vision",
         description: "Configure image understanding",
         usage: "/vision [mode|provider|model|prompt]",

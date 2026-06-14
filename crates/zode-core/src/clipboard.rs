@@ -20,6 +20,19 @@ pub fn copy_to_clipboard(text: &str) -> Result<&'static str, String> {
     Err(last_err)
 }
 
+/// Read UTF-8 text from the system clipboard. Used as a Ctrl+V fallback when
+/// the terminal doesn't emit a bracketed paste event.
+pub fn read_from_clipboard() -> Result<String, String> {
+    let mut last_err = "no clipboard paste helper found".to_string();
+    for (bin, args) in paste_candidates() {
+        match try_paste(bin, args) {
+            Ok(text) => return Ok(text),
+            Err(e) => last_err = format!("{bin}: {e}"),
+        }
+    }
+    Err(last_err)
+}
+
 /// Clipboard CLIs to try, in order, for the current platform.
 fn clipboard_candidates() -> &'static [(&'static str, &'static [&'static str])] {
     if cfg!(target_os = "macos") {
@@ -31,6 +44,20 @@ fn clipboard_candidates() -> &'static [(&'static str, &'static [&'static str])] 
             ("wl-copy", &[]),
             ("xclip", &["-selection", "clipboard"]),
             ("xsel", &["--clipboard", "--input"]),
+        ]
+    }
+}
+
+fn paste_candidates() -> &'static [(&'static str, &'static [&'static str])] {
+    if cfg!(target_os = "macos") {
+        &[("pbpaste", &[])]
+    } else if cfg!(target_os = "windows") {
+        &[("powershell", &["-NoProfile", "-Command", "Get-Clipboard"])]
+    } else {
+        &[
+            ("wl-paste", &["-n"]),
+            ("xclip", &["-selection", "clipboard", "-out"]),
+            ("xsel", &["--clipboard", "--output"]),
         ]
     }
 }
@@ -57,6 +84,19 @@ fn try_copy(bin: &str, args: &[&str], text: &str) -> Result<(), String> {
     }
 }
 
+fn try_paste(bin: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(bin)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!("helper exited with {}", output.status));
+    }
+    String::from_utf8(output.stdout).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,5 +105,6 @@ mod tests {
     fn candidates_are_non_empty_for_this_platform() {
         // Every supported target has at least one helper to try.
         assert!(!clipboard_candidates().is_empty());
+        assert!(!paste_candidates().is_empty());
     }
 }

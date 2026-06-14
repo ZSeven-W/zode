@@ -25,6 +25,9 @@ pub fn build_provider(cfg: &ProviderConfig) -> Result<Arc<dyn Provider>, CoreErr
                 // it to ".../anthropic" so we don't double the /v1.
                 p = p.with_base_url(normalize_anthropic_base_url(url));
             }
+            if let Some(supports_images) = cfg.supports_images {
+                p = p.with_supports_images(supports_images);
+            }
             Ok(Arc::new(p))
         }
         ProviderKind::Openai => {
@@ -37,7 +40,10 @@ pub fn build_provider(cfg: &ProviderConfig) -> Result<Arc<dyn Provider>, CoreErr
                 .clone()
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
             let dialect = parse_dialect(cfg.dialect.as_deref())?;
-            let oc = OpenAiCompatConfig::new(key, base).with_dialect(dialect);
+            let mut oc = OpenAiCompatConfig::new(key, base).with_dialect(dialect);
+            if let Some(supports_images) = cfg.supports_images {
+                oc = oc.with_supports_images(supports_images);
+            }
             Ok(Arc::new(OpenAiCompatProvider::new(oc)))
         }
         ProviderKind::Ollama => {
@@ -136,6 +142,30 @@ mod tests {
         );
         assert_eq!(parse_dialect(None).unwrap(), OpenAiDialect::Standard);
         assert!(parse_dialect(Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn openai_supports_images_is_configurable() {
+        let cfg = ProviderConfig {
+            r#type: Some(ProviderKind::Openai),
+            api_key: Some("sk-test".into()),
+            supports_images: Some(true),
+            ..Default::default()
+        };
+        let p = build_provider(&cfg).unwrap();
+        assert!(p.capabilities().supports_images);
+    }
+
+    #[test]
+    fn anthropic_supports_images_can_be_disabled() {
+        let cfg = ProviderConfig {
+            r#type: Some(ProviderKind::Anthropic),
+            api_key: Some("sk-test".into()),
+            supports_images: Some(false),
+            ..Default::default()
+        };
+        let p = build_provider(&cfg).unwrap();
+        assert!(!p.capabilities().supports_images);
     }
 
     #[test]
