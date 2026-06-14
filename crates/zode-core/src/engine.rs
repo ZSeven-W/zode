@@ -75,6 +75,8 @@ pub struct ZodeEngine {
     pub skills: Arc<SkillRegistry>,
     /// MCP lifecycle, if any servers were configured (`/mcp` reports state).
     pub mcp: Option<Arc<agent::mcp::Lifecycle>>,
+    /// LSP manager, if any language server is enabled (`lsp_*` tools).
+    pub lsp: Option<Arc<crate::lsp::LspManager>>,
     /// Token/cost tracking (fed Usage events by the consumer; `/cost`).
     pub cost: Arc<CostState>,
     /// Plugin enable/disable state (`/plugin`).
@@ -121,7 +123,11 @@ impl ZodeEngine {
         // Plugin manager: which tool groups / MCP servers / skills / LSP
         // servers are enabled (the `/plugin` picker toggles these).
         let plugins = PluginManager::from_config(cfg);
-        let mut lsp_langs: Vec<String> = cfg.lsp.servers.keys().cloned().collect();
+        // LSP servers: those auto-detected on PATH ∪ the user's config. All of
+        // them are listed by the /plugin picker (each toggleable as lsp:<lang>);
+        // only the enabled ones get a running server + registered tools below.
+        let lsp_servers = crate::lsp::effective_servers(&cfg.lsp.servers);
+        let mut lsp_langs: Vec<String> = lsp_servers.keys().cloned().collect();
         lsp_langs.sort();
 
         // 1. Default tools (fs/search/shell/web/notebook/todo) + the
@@ -180,6 +186,31 @@ impl ZodeEngine {
                 }
             }
             None => None,
+        };
+
+        // LSP: register the lsp_* tools when at least one language server is
+        // enabled. Servers spawn lazily (on first tool use), so this is cheap
+        // even with rust-analyzer configured. Disabled languages are still
+        // listed by /plugin (via `lsp_langs`) so they can be re-enabled.
+        let lsp = {
+            let enabled: std::collections::HashMap<String, crate::config::LspServerConfig> =
+                lsp_servers
+                    .iter()
+                    .filter(|(lang, _)| plugins.lsp_enabled(lang))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+            if enabled.is_empty() {
+                None
+            } else {
+                let mgr = Arc::new(crate::lsp::LspManager::new(
+                    crate::config::LspConfig { servers: enabled },
+                    cwd.clone(),
+                ));
+                for tool in crate::lsp::lsp_tools(&mgr) {
+                    base.register(tool);
+                }
+                Some(mgr)
+            }
         };
 
         // File cache + edit-history + background-shell tracker + hook runner.
@@ -288,6 +319,7 @@ impl ZodeEngine {
             bg_shells_meta,
             skills,
             mcp,
+            lsp,
             cost: Arc::new(CostState::new(model_for_cost)),
             plugins,
             all_mcp_servers,

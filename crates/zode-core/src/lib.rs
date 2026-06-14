@@ -16,6 +16,7 @@ pub mod gated_tool;
 pub mod history;
 pub mod hooks_config;
 pub mod instructions;
+pub mod lsp;
 pub mod mcp;
 pub mod plugin;
 pub mod provider;
