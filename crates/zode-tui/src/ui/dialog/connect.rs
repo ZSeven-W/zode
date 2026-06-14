@@ -131,12 +131,6 @@ impl ConnectDialog {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme) {
-        f.render_widget(Clear, area);
-        f.render_widget(
-            Paragraph::new("").style(Style::default().bg(theme.bg_primary)),
-            area,
-        );
-
         match self.stage {
             ConnectStage::Provider => self.render_provider_stage(f, area, theme),
             ConnectStage::ApiKey => self.render_api_key_stage(f, area, theme),
@@ -665,6 +659,34 @@ mod tests {
             .cell((inner.x, first_provider_y))
             .unwrap();
         assert_eq!(selected_cell.bg, theme.accent);
+    }
+
+    #[test]
+    fn provider_modal_preserves_screen_behind_dialog() {
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("minimal"));
+        let backend = ratatui::backend::TestBackend::new(100, 34);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let dialog = ConnectDialog::new();
+
+        terminal
+            .draw(|f| {
+                f.render_widget(
+                    Paragraph::new("CHAT_FRAME_VISIBLE").style(Style::default().fg(theme.fg_text)),
+                    f.area(),
+                );
+                dialog.render(f, f.area(), &theme);
+            })
+            .unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("CHAT_FRAME_VISIBLE"));
+        assert!(content.contains("Connect a provider"));
     }
 
     #[test]

@@ -158,12 +158,6 @@ impl SettingsDialog {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
-        f.render_widget(Clear, area);
-        f.render_widget(
-            Paragraph::new("").style(Style::default().bg(theme.bg_primary)),
-            area,
-        );
-
         let items: Vec<ListItem> = self
             .items()
             .into_iter()
@@ -401,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn render_clears_screen_behind_dialog() {
+    fn render_preserves_screen_behind_dialog() {
         let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("cyberpunk"));
         let backend = ratatui::backend::TestBackend::new(80, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -425,7 +419,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(!content.contains("LEAK_OUTSIDE_SETTINGS"));
+        assert!(content.contains("LEAK_OUTSIDE_SETTINGS"));
         assert!(content.contains("Select theme"));
         assert!(content.contains("esc"));
         assert!(content.contains("Search"));
