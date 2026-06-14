@@ -10,7 +10,10 @@ use agent::abort::AbortController;
 use agent::message::{ContentBlock, Message, MessageStore};
 use agent::session::Session;
 use agent::stream::Event;
-use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode, KeyModifiers,
+    MouseEvent, MouseEventKind,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -693,8 +696,13 @@ impl TuiApp {
     }
 
     async fn handle_term(&mut self, ev: CtEvent, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
-        let CtEvent::Key(key) = ev else {
-            return;
+        let key = match ev {
+            CtEvent::Key(key) => key,
+            CtEvent::Mouse(mouse) => {
+                self.handle_mouse(mouse);
+                return;
+            }
+            _ => return,
         };
         // Ignore key-release events (crossterm reports them on some terminals).
         if key.kind == crossterm::event::KeyEventKind::Release {
@@ -900,6 +908,33 @@ impl TuiApp {
         }
         // 7. Refresh the autocomplete popup from the new input text.
         self.autocomplete.update(&self.input.text());
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.active_dialog.is_some()
+            || self.active_question.is_some()
+            || self.settings.is_some()
+            || self.connect.is_some()
+            || self.plugin_picker.is_some()
+            || self.session_picker.is_some()
+            || self.tasks_panel.is_some()
+            || self.show_help
+        {
+            return;
+        }
+
+        let Ok((width, height)) = crossterm::terminal::size() else {
+            return;
+        };
+        let area = Rect::new(0, 0, width, height);
+        let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_visibility);
+        let areas = split_main(area, show_sidebar);
+
+        match chat_scroll_from_mouse(mouse.kind, mouse.column, mouse.row, areas.chat) {
+            Some(ChatMouseScroll::Up(n)) => self.tabs[self.active].chat.scroll_up(n),
+            Some(ChatMouseScroll::Down(n)) => self.tabs[self.active].chat.scroll_down(n),
+            None => {}
+        }
     }
 
     fn open_settings(&mut self) {
@@ -1644,6 +1679,14 @@ enum SidebarVisibility {
     Hidden,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatMouseScroll {
+    Up(u16),
+    Down(u16),
+}
+
+const CHAT_MOUSE_SCROLL_LINES: u16 = 5;
+
 fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Ready => "ready",
@@ -1659,6 +1702,30 @@ fn should_show_sidebar(tab_count: usize, visibility: SidebarVisibility) -> bool 
         SidebarVisibility::Visible => true,
         SidebarVisibility::Hidden => false,
     }
+}
+
+fn chat_scroll_from_mouse(
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+    chat_area: Rect,
+) -> Option<ChatMouseScroll> {
+    if !rect_contains(chat_area, column, row) {
+        return None;
+    }
+
+    match kind {
+        MouseEventKind::ScrollUp => Some(ChatMouseScroll::Up(CHAT_MOUSE_SCROLL_LINES)),
+        MouseEventKind::ScrollDown => Some(ChatMouseScroll::Down(CHAT_MOUSE_SCROLL_LINES)),
+        _ => None,
+    }
+}
+
+fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
 }
 
 fn process_line_for_event(event: &Event, known_tool: Option<&str>) -> Option<String> {
@@ -1684,16 +1751,18 @@ fn process_line_for_event(event: &Event, known_tool: Option<&str>) -> Option<Str
             cache_read,
             cache_create,
         } => {
-            // Show cache utilization as a hit-rate. `cache_read` = prompt tokens
-            // served from the prefix cache; `cache_create` = tokens written to
-            // it this turn (Anthropic only). DeepSeek reports just cache_read,
-            // so the old `+{create}/{read}` rendered as "+0/N" and read like a
-            // miss even at 98% — show the percent of the prompt that was cached.
-            let cached = cache_read.saturating_add(*cache_create);
-            let note = if cached > 0 && *input_tokens > 0 {
+            // Cache hit-rate over the TOTAL prompt. `input_tokens` is the
+            // non-cached (full-rate) portion, `cache_read` the cached read,
+            // `cache_create` written this turn — so total = the sum and the
+            // hit rate is cache_read/total. (Both providers report input as
+            // non-cached, so this is consistent.)
+            let total = input_tokens
+                .saturating_add(*cache_read)
+                .saturating_add(*cache_create);
+            let note = if (*cache_read > 0 || *cache_create > 0) && total > 0 {
                 format!(
-                    " · cache {}% ({cached})",
-                    cached.saturating_mul(100) / *input_tokens
+                    " · cache {}% ({cache_read})",
+                    cache_read.saturating_mul(100) / total
                 )
             } else {
                 String::new()
@@ -1911,12 +1980,18 @@ fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
         let _ = disable_raw_mode();
         return Err(e);
     }
-    match Terminal::new(CrosstermBackend::new(std::io::stdout())) {
+    if let Err(e) = stdout.execute(EnableMouseCapture) {
+        let _ = stdout.execute(LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+        return Err(e);
+    }
+    match Terminal::new(CrosstermBackend::new(stdout)) {
         Ok(term) => {
             install_panic_hook();
             Ok(term)
         }
         Err(e) => {
+            let _ = std::io::stdout().execute(DisableMouseCapture);
             let _ = std::io::stdout().execute(LeaveAlternateScreen);
             let _ = disable_raw_mode();
             Err(e)
@@ -1926,6 +2001,7 @@ fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> std::io::Result<()> {
     disable_raw_mode()?;
+    terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
@@ -1936,6 +2012,7 @@ fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
+        let _ = std::io::stdout().execute(DisableMouseCapture);
         let _ = std::io::stdout().execute(LeaveAlternateScreen);
         original(info);
     }));
@@ -2015,6 +2092,28 @@ mod tests {
         assert_eq!(
             resolve_sidebar_visibility("wat", SidebarVisibility::Auto, 1),
             Err("usage: /sidebar [on|off|toggle|auto]".to_string())
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_only_the_chat_area() {
+        let chat = Rect::new(0, 1, 80, 20);
+
+        assert_eq!(
+            chat_scroll_from_mouse(crossterm::event::MouseEventKind::ScrollUp, 10, 5, chat),
+            Some(ChatMouseScroll::Up(5))
+        );
+        assert_eq!(
+            chat_scroll_from_mouse(crossterm::event::MouseEventKind::ScrollDown, 10, 5, chat),
+            Some(ChatMouseScroll::Down(5))
+        );
+        assert_eq!(
+            chat_scroll_from_mouse(crossterm::event::MouseEventKind::ScrollDown, 10, 25, chat),
+            None
+        );
+        assert_eq!(
+            chat_scroll_from_mouse(crossterm::event::MouseEventKind::ScrollUp, 85, 5, chat),
+            None
         );
     }
 
@@ -2116,8 +2215,8 @@ mod tests {
         };
         assert_eq!(
             process_line_for_event(&usage, None).as_deref(),
-            // cached = read(2)+create(1) = 3; 3*100/10 = 30%.
-            Some("Usage ↑10 ↓3 · cache 30% (3)")
+            // total = input(10)+read(2)+create(1) = 13; hit = 2*100/13 = 15%.
+            Some("Usage ↑10 ↓3 · cache 15% (2)")
         );
 
         let end_turn = Event::Result {

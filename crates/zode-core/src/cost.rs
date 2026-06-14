@@ -69,7 +69,9 @@ impl CostState {
             output += t.output_tokens;
             cache += t.cache_read_tokens;
         }
-        let hit = match (100 * cache).checked_div(input) {
+        // input_tokens is the non-cached (full-rate) prompt; cache is the
+        // cached read. Hit rate is over the TOTAL prompt = input + cache.
+        let hit = match (100 * cache).checked_div(input + cache) {
             Some(pct) => format!(" cache:{cache} ({pct}%)"),
             None => String::new(),
         };
