@@ -73,6 +73,14 @@ impl ZodeTaskFactory {
         Arc::new(reg)
     }
 
+    /// The sub-agent types the Task tool can spawn: (name, one-line summary).
+    /// Source of truth for `/agents` and the `system_for` prompts below.
+    pub const AGENT_TYPES: &'static [(&'static str, &'static str)] = &[
+        ("general", "Focused sub-task; returns a concise result"),
+        ("researcher", "Investigates and reports findings; read-only"),
+        ("reviewer", "Reviews code and reports issues; read-only"),
+    ];
+
     fn system_for(agent_type: &str) -> Option<String> {
         let prompt = match agent_type {
             "general" => {

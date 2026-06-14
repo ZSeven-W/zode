@@ -449,6 +449,40 @@ impl ZodeEngine {
         self
     }
 
+    /// Render the conversation to a Markdown transcript (`/export`). Returns an
+    /// empty header-only document if the store mutex is poisoned.
+    pub fn export_markdown(&self) -> String {
+        match self.store.lock() {
+            Ok(store) => crate::export::store_to_markdown(&store),
+            Err(_) => "# Conversation\n\n".to_string(),
+        }
+    }
+
+    /// The text of the most recent assistant message (`/copy`), or `None` if
+    /// there is no assistant turn yet.
+    pub fn last_assistant_text(&self) -> Option<String> {
+        use agent::message::{ContentBlock, Message};
+        let store = self.store.lock().ok()?;
+        // `store.iter()` is forward-only; keep the most recent non-empty hit.
+        let mut last = None;
+        for m in store.iter() {
+            if let Message::Assistant { content, .. } = m {
+                let text: String = content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.trim().is_empty() {
+                    last = Some(text);
+                }
+            }
+        }
+        last
+    }
+
     /// Run one turn. Rebuilds a QueryLoop from the shared Arcs.
     pub async fn turn(
         &self,
@@ -650,6 +684,63 @@ impl EngineTemplate {
         t.cfg.plugins.disabled = disabled;
         t
     }
+
+    /// The persistent goal injected into the system prompt (`/goal`).
+    pub fn goal(&self) -> Option<&str> {
+        self.cfg.goal.as_deref().filter(|g| !g.trim().is_empty())
+    }
+
+    /// Clone with the goal set/cleared (`/goal [text]`). Empty → cleared.
+    pub fn with_goal(&self, goal: Option<String>) -> Self {
+        let mut t = self.clone();
+        t.cfg.goal = goal.filter(|g| !g.trim().is_empty());
+        t
+    }
+
+    /// The effort level ("low" | "medium" | "high") (`/effort`).
+    pub fn effort(&self) -> Option<&str> {
+        self.cfg.effort.as_deref()
+    }
+
+    /// Clone with the effort level set/cleared (`/effort [level]`).
+    pub fn with_effort(&self, effort: Option<String>) -> Self {
+        let mut t = self.clone();
+        t.cfg.effort = effort;
+        t
+    }
+
+    /// Human-readable permission rules (`/permissions`): allow / ask / deny.
+    pub fn permissions_summary(&self) -> Vec<String> {
+        let p = &self.cfg.permissions;
+        let mut out = Vec::new();
+        let mut section = |label: &str, rules: &[String]| {
+            if rules.is_empty() {
+                out.push(format!("{label}: (none)"));
+            } else {
+                out.push(format!("{label}: {}", rules.join(", ")));
+            }
+        };
+        section("allow", &p.allow);
+        section("ask", &p.ask);
+        section("deny", &p.deny);
+        out
+    }
+
+    /// Configured hooks (`/hooks`), read fresh from disk (global ⊕ project).
+    pub fn hooks_summary(&self) -> Vec<String> {
+        crate::hooks_config::load_hook_entries(&self.cwd)
+            .iter()
+            .map(|e| match &e.tool {
+                Some(tool) => format!("{} [{}] → {}", e.event, tool, e.script),
+                None => format!("{} → {}", e.event, e.script),
+            })
+            .collect()
+    }
+}
+
+/// The sub-agent types the Task tool can spawn (`/agents`): (name, summary).
+pub fn agent_types() -> &'static [(&'static str, &'static str)] {
+    crate::task_factory::ZodeTaskFactory::AGENT_TYPES
 }
 
 /// Re-register only the tools whose plugin group is enabled. Tools outside any

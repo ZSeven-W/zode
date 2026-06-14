@@ -11,6 +11,7 @@ pub mod commands;
 pub mod config;
 pub mod cost;
 pub mod currency;
+pub mod diff;
 pub mod engine;
 pub mod error;
 pub mod export;

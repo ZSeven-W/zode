@@ -227,6 +227,36 @@ async fn dispatch_command(
                 }
             }
         },
+        "diff" => println!("{}", zode_core::diff::working_tree_diff(&engine.cwd).await),
+        "agents" => {
+            for (n, desc) in zode_core::engine::agent_types() {
+                println!("  {n:<12} {desc}");
+            }
+        }
+        "hooks" => {
+            let entries = zode_core::hooks_config::load_hook_entries(&engine.cwd);
+            if entries.is_empty() {
+                println!("(no hooks configured)");
+            } else {
+                for e in entries {
+                    match &e.tool {
+                        Some(t) => println!("  {} [{}] → {}", e.event, t, e.script),
+                        None => println!("  {} → {}", e.event, e.script),
+                    }
+                }
+            }
+        }
+        "export" => {
+            let path = if args.is_empty() {
+                engine.cwd.join("zode-conversation.md")
+            } else {
+                std::path::PathBuf::from(args)
+            };
+            match std::fs::write(&path, engine.export_markdown()) {
+                Ok(()) => println!("(exported to {})", path.display()),
+                Err(e) => println!("(export failed: {e})"),
+            }
+        }
         _ => match cmd.action {
             CommandAction::Ui => println!("/{name} is available in the TUI only"),
             _ => println!("/{name}: not handled in the REPL yet"),

@@ -90,8 +90,9 @@ fn expand_tilde(p: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
-/// Load hooks.json (global ⊕ project) into handlers ready to register.
-pub fn load_hook_handlers(cwd: &std::path::Path) -> Vec<Arc<dyn HookHandler>> {
+/// Load the raw hook entries from hooks.json (global ⊕ project), for display
+/// (`/hooks`) and for building handlers.
+pub fn load_hook_entries(cwd: &std::path::Path) -> Vec<HookEntry> {
     let mut entries: Vec<HookEntry> = Vec::new();
     let candidates = [
         ConfigManager::config_dir()
@@ -108,6 +109,11 @@ pub fn load_hook_handlers(cwd: &std::path::Path) -> Vec<Arc<dyn HookHandler>> {
         }
     }
     entries
+}
+
+/// Load hooks.json (global ⊕ project) into handlers ready to register.
+pub fn load_hook_handlers(cwd: &std::path::Path) -> Vec<Arc<dyn HookHandler>> {
+    load_hook_entries(cwd)
         .into_iter()
         .map(|e| Arc::new(ConfiguredHookHandler::new(e)) as Arc<dyn HookHandler>)
         .collect()
