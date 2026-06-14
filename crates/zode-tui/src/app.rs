@@ -1597,6 +1597,116 @@ impl TuiApp {
                     }
                 }
             }
+            "goal" => {
+                let trimmed = args.trim();
+                if trimmed.is_empty() {
+                    let msg = match self.template.goal() {
+                        Some(g) => format!("current goal: {g}\n(clear with /goal clear)"),
+                        None => "no goal set — use /goal <text> to set one".to_string(),
+                    };
+                    self.active_tab_mut().chat.push_system(&msg);
+                } else {
+                    // "clear"/"none" wipes the goal; anything else sets it.
+                    let new_goal = (!trimmed.eq_ignore_ascii_case("clear")
+                        && !trimmed.eq_ignore_ascii_case("none"))
+                    .then(|| trimmed.to_string());
+                    let t = self.template.with_goal(new_goal.clone());
+                    if self.reassemble_active(t.clone()).await {
+                        self.template = t;
+                        let msg = match &new_goal {
+                            Some(g) => format!("goal set: {g}"),
+                            None => "goal cleared".to_string(),
+                        };
+                        self.active_tab_mut().chat.push_system(&msg);
+                    }
+                }
+            }
+            "effort" => {
+                let level = args.trim().to_ascii_lowercase();
+                if level.is_empty() {
+                    let msg = match self.template.effort() {
+                        Some(e) => format!("current effort: {e}"),
+                        None => "effort: medium (default) — use /effort low|medium|high".to_string(),
+                    };
+                    self.active_tab_mut().chat.push_system(&msg);
+                } else if !matches!(level.as_str(), "low" | "medium" | "high" | "clear" | "reset") {
+                    self.toast = Some(Toast::info("usage: /effort low|medium|high"));
+                } else {
+                    let new_effort =
+                        matches!(level.as_str(), "low" | "medium" | "high").then(|| level.clone());
+                    let t = self.template.with_effort(new_effort.clone());
+                    if self.reassemble_active(t.clone()).await {
+                        self.template = t;
+                        let msg = match &new_effort {
+                            Some(e) => format!("effort set: {e}"),
+                            None => "effort reset to medium (default)".to_string(),
+                        };
+                        self.active_tab_mut().chat.push_system(&msg);
+                    }
+                }
+            }
+            "copy" => match self.active_tab().engine.last_assistant_text() {
+                Some(text) => match zode_core::clipboard::copy_to_clipboard(&text) {
+                    Ok(_) => self.toast = Some(Toast::info("copied last response to clipboard")),
+                    Err(e) => self.toast = Some(Toast::error(format!("copy failed: {e}"))),
+                },
+                None => self.toast = Some(Toast::info("nothing to copy yet")),
+            },
+            "export" => {
+                let path = if args.trim().is_empty() {
+                    self.active_tab().engine.cwd.join("zode-conversation.md")
+                } else {
+                    std::path::PathBuf::from(args.trim())
+                };
+                let md = self.active_tab().engine.export_markdown();
+                match std::fs::write(&path, md) {
+                    Ok(()) => {
+                        let msg = format!("exported conversation to {}", path.display());
+                        self.active_tab_mut().chat.push_system(&msg);
+                    }
+                    Err(e) => self.toast = Some(Toast::error(format!("export failed: {e}"))),
+                }
+            }
+            "diff" => {
+                let cwd = self.active_tab().engine.cwd.clone();
+                let out = zode_core::diff::working_tree_diff(&cwd).await;
+                self.active_tab_mut().chat.push_system(&out);
+            }
+            "agents" => {
+                for (n, desc) in zode_core::engine::agent_types() {
+                    let line = format!("{n} — {desc}");
+                    self.active_tab_mut().chat.push_system(&line);
+                }
+            }
+            "permissions" => {
+                for line in self.template.permissions_summary() {
+                    self.active_tab_mut().chat.push_system(&line);
+                }
+            }
+            "hooks" => {
+                let lines = self.template.hooks_summary();
+                if lines.is_empty() {
+                    self.active_tab_mut().chat.push_system("(no hooks configured)");
+                } else {
+                    for line in lines {
+                        self.active_tab_mut().chat.push_system(&line);
+                    }
+                }
+            }
+            "reload-plugins" => {
+                if self.reassemble_active(self.template.clone()).await {
+                    self.active_tab_mut()
+                        .chat
+                        .push_system("reloaded — tools, MCP, skills, and LSP re-discovered");
+                }
+            }
+            "reload-skills" => {
+                if self.reassemble_active(self.template.clone()).await {
+                    let n = self.active_tab().engine.skills.list().len();
+                    let msg = format!("reloaded skills ({n} loaded)");
+                    self.active_tab_mut().chat.push_system(&msg);
+                }
+            }
             other => {
                 self.toast = Some(Toast::info(format!("/{other} lands in a later phase")));
             }
