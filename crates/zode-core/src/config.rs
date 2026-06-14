@@ -175,6 +175,12 @@ pub struct ZodeConfig {
     /// Effort level: "low" | "medium" | "high". Injects a thoroughness
     /// directive into the system prompt. Set via `/effort`. `None` → balanced.
     pub effort: Option<String>,
+    /// Show the agent's thinking/reasoning output in the chat. `None` → shown.
+    /// Toggled by `/thinking`.
+    pub show_thinking: Option<bool>,
+    /// Show tool-call detail lines in the chat. `None` → shown. Toggled by
+    /// `/tool-details`.
+    pub show_tool_details: Option<bool>,
     pub permissions: PermissionsConfig,
     pub max_output_tokens: Option<u32>,
     /// Sampling temperature. `None` uses the provider default; a low value
@@ -323,6 +329,12 @@ impl ZodeConfig {
         }
         if other.effort.is_some() {
             self.effort = other.effort;
+        }
+        if other.show_thinking.is_some() {
+            self.show_thinking = other.show_thinking;
+        }
+        if other.show_tool_details.is_some() {
+            self.show_tool_details = other.show_tool_details;
         }
         if other.temperature.is_some() {
             self.temperature = other.temperature;

@@ -759,6 +759,16 @@ impl EngineTemplate {
         t
     }
 
+    /// Whether the chat shows thinking/reasoning output (`/thinking`). Default on.
+    pub fn show_thinking(&self) -> bool {
+        self.cfg.show_thinking.unwrap_or(true)
+    }
+
+    /// Whether the chat shows tool-call detail (`/tool-details`). Default on.
+    pub fn show_tool_details(&self) -> bool {
+        self.cfg.show_tool_details.unwrap_or(true)
+    }
+
     /// Human-readable permission rules (`/permissions`): allow / ask / deny.
     pub fn permissions_summary(&self) -> Vec<String> {
         let p = &self.cfg.permissions;

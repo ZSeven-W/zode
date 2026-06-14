@@ -113,6 +113,10 @@ pub struct TuiApp {
     show_help: bool,
     toast: Option<Toast>,
     provider_names: Vec<String>,
+    /// Chat display prefs (`/thinking`, `/tool-details`), persisted in config
+    /// and applied to the active tab's chat each frame.
+    show_thinking: bool,
+    show_tool_details: bool,
 }
 
 impl TuiApp {
@@ -154,6 +158,10 @@ impl TuiApp {
             }
         }
 
+        // Read display prefs before `template` is moved into the struct.
+        let show_thinking = template.show_thinking();
+        let show_tool_details = template.show_tool_details();
+
         Self {
             tabs: vec![tab0],
             active: 0,
@@ -182,6 +190,8 @@ impl TuiApp {
             show_help: false,
             toast: None,
             provider_names: ui.provider_names,
+            show_thinking,
+            show_tool_details,
         }
     }
 
@@ -643,9 +653,10 @@ impl TuiApp {
             model: &active_model,
             cwd: &active_cwd,
         };
-        self.tabs[self.active]
-            .chat
-            .render(f, areas.chat, &theme, chat_meta);
+        let (show_thinking, show_tool_details) = (self.show_thinking, self.show_tool_details);
+        let active_chat = &mut self.tabs[self.active].chat;
+        active_chat.set_display_prefs(show_thinking, show_tool_details);
+        active_chat.render(f, areas.chat, &theme, chat_meta);
         let mut input_area: Rect = areas.composer;
         if !self.tabs[self.active].pending_images.is_empty() && input_area.height > 2 {
             let chips_area = Rect::new(input_area.x, input_area.y, input_area.width, 1);
@@ -1958,6 +1969,22 @@ impl TuiApp {
                     let msg = format!("reloaded skills ({n} loaded)");
                     self.active_tab_mut().chat.push_system(&msg);
                 }
+            }
+            "thinking" => {
+                self.show_thinking = !self.show_thinking;
+                self.persist_show_thinking(self.show_thinking);
+                self.toast = Some(Toast::info(format!(
+                    "thinking output {}",
+                    on_off(self.show_thinking)
+                )));
+            }
+            "tool-details" => {
+                self.show_tool_details = !self.show_tool_details;
+                self.persist_show_tool_details(self.show_tool_details);
+                self.toast = Some(Toast::info(format!(
+                    "tool details {}",
+                    on_off(self.show_tool_details)
+                )));
             }
             other => {
                 self.toast = Some(Toast::info(format!("/{other} lands in a later phase")));
