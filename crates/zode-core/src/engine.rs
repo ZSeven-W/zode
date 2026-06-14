@@ -323,6 +323,30 @@ impl ZodeEngine {
         result
     }
 
+    /// Full plugin list (incl. disabled) for `/plugin` and the picker — tool
+    /// groups, MCP servers (with live connection state), skills, LSP servers.
+    pub fn plugin_list(&self) -> Vec<crate::plugin::Plugin> {
+        let mcp_servers: Vec<(String, bool)> = self
+            .all_mcp_servers
+            .iter()
+            .map(|s| {
+                let connected = self
+                    .mcp
+                    .as_ref()
+                    .map(|lc| {
+                        lc.registry
+                            .snapshot()
+                            .iter()
+                            .any(|sv| &sv.name == s && sv.state.is_connected())
+                    })
+                    .unwrap_or(false);
+                (s.clone(), connected)
+            })
+            .collect();
+        self.plugins
+            .list(&mcp_servers, &self.all_skill_meta, &self.lsp_langs)
+    }
+
     /// Inject a pre-loaded MessageStore (for `--continue` / `--resume`).
     pub fn with_store(mut self, store: MessageStore) -> Self {
         self.store = Arc::new(Mutex::new(store));
@@ -471,6 +495,14 @@ impl EngineTemplate {
         t.cfg.provider = provider;
         Some(t)
     }
+
+    /// Clone with the active provider replaced by a complete provider config
+    /// (for `/connect`, which writes a fresh provider into the global config).
+    pub fn with_provider_config(&self, provider: crate::config::ProviderConfig) -> Self {
+        let mut t = self.clone();
+        t.cfg.provider = provider;
+        t
+    }
 }
 
 /// Re-register only the tools whose plugin group is enabled. Tools outside any
@@ -549,6 +581,28 @@ mod tests {
             template.model_ids(),
             vec!["MiniMax-M1".to_string(), "deepseek-chat".to_string()]
         );
+    }
+
+    #[test]
+    fn template_with_provider_config_replaces_active_provider() {
+        let template = EngineTemplate::new(
+            test_cfg(),
+            std::path::PathBuf::from("/tmp/zode"),
+            None,
+            false,
+            None,
+            "2026-06-14".into(),
+        );
+        let switched = template.with_provider_config(ProviderConfig {
+            r#type: Some(ProviderKind::Openai),
+            api_key: Some("sk".into()),
+            base_url: Some("https://api.deepseek.com/v1".into()),
+            model: Some("deepseek-v4-pro".into()),
+            dialect: Some("deepseek".into()),
+        });
+
+        assert_eq!(switched.model(), Some("deepseek-v4-pro"));
+        assert_eq!(template.model(), Some("MiniMax-M1"));
     }
 
     #[tokio::test]

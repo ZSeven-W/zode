@@ -189,6 +189,26 @@ async fn dispatch_command(
                 }
             }
         }
+        "plugin" => {
+            let plugins = engine.plugin_list();
+            if args.is_empty() {
+                for p in &plugins {
+                    let mark = if p.enabled { "[on] " } else { "[off]" };
+                    println!("  {mark} {:<22} {}", p.id, p.description);
+                }
+                println!("(toggle with /plugin <id>; applies on restart)");
+            } else if !plugins.iter().any(|p| p.id == args) {
+                println!("unknown plugin: {args}");
+            } else {
+                match toggle_plugin(args) {
+                    Ok(on) => println!(
+                        "{args} {} (restart to apply)",
+                        if on { "enabled" } else { "disabled" }
+                    ),
+                    Err(e) => println!("({e})"),
+                }
+            }
+        }
         "mcp" => match &engine.mcp {
             None => println!("(no MCP servers configured)"),
             Some(lc) => {
@@ -299,6 +319,21 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Flip a plugin id in the global config's `plugins.disabled` list and persist
+/// it. Returns the new enabled state. Applies on the next launch (the running
+/// engine's tool set is already assembled).
+fn toggle_plugin(id: &str) -> Result<bool, zode_core::CoreError> {
+    let mut cfg = ConfigManager::load_global()?;
+    let was_disabled = cfg.plugins.disabled.iter().any(|d| d == id);
+    if was_disabled {
+        cfg.plugins.disabled.retain(|d| d != id);
+    } else {
+        cfg.plugins.disabled.push(id.to_string());
+    }
+    ConfigManager::save_global(&cfg)?;
+    Ok(was_disabled)
 }
 
 fn history_path() -> Option<std::path::PathBuf> {
