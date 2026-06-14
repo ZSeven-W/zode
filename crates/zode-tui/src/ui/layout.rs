@@ -131,15 +131,15 @@ pub fn render_header(f: &mut Frame, area: Rect, theme: &Theme, info: HeaderInfo<
                 .fg(theme.fg_white)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" / ", Style::default().fg(theme.separator)),
+        Span::styled("  /  ", Style::default().fg(theme.separator)),
         Span::styled(info.theme_name, Style::default().fg(theme.accent)),
-        Span::styled(" / ", Style::default().fg(theme.separator)),
+        Span::styled("  /  ", Style::default().fg(theme.separator)),
         Span::styled(info.model, Style::default().fg(theme.fg_text)),
-        Span::styled(" / ", Style::default().fg(theme.separator)),
+        Span::styled("  /  ", Style::default().fg(theme.separator)),
         Span::styled(compact_path(info.cwd), Style::default().fg(theme.fg_subtle)),
-        Span::styled(" / ", Style::default().fg(theme.separator)),
+        Span::styled("  /  ", Style::default().fg(theme.separator)),
         Span::styled(info.tab_title, Style::default().fg(theme.fg_subtle)),
-        Span::styled(" · ", Style::default().fg(theme.separator)),
+        Span::styled("  ·  ", Style::default().fg(theme.separator)),
         Span::styled(
             state,
             Style::default()
@@ -239,5 +239,32 @@ mod tests {
         assert!(text.contains("ZSeven-W/zode"));
         assert!(text.contains("tab 1"));
         assert!(text.contains("running"));
+    }
+
+    #[test]
+    fn header_uses_roomy_breadcrumb_spacing() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let backend = TestBackend::new(120, 3);
+        let mut term = Terminal::new(backend).unwrap();
+        let cwd = Path::new("/Users/kayshen/Workspace/ZSeven-W/zode");
+        term.draw(|f| {
+            render_header(
+                f,
+                f.area(),
+                &theme,
+                HeaderInfo {
+                    theme_name: &theme.name,
+                    model: "deepseek-v4-pro",
+                    cwd,
+                    tab_title: "nihao",
+                    busy: false,
+                },
+            )
+        })
+        .unwrap();
+
+        let text = content(&term);
+        assert!(text.contains("zode  /  Minimal  /  deepseek-v4-pro"));
+        assert!(text.contains("nihao  ·  idle"));
     }
 }
