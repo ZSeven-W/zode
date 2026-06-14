@@ -246,10 +246,10 @@ impl ChatView {
         out
     }
 
-    fn role_header(&self, icon: &str, label: &str, color: Color) -> Line<'static> {
+    fn role_header(&self, _icon: &str, label: &str, color: Color) -> Line<'static> {
         Line::from(vec![
             Span::styled(
-                format!("{icon} "),
+                "│ ",
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -482,6 +482,31 @@ mod tests {
         assert_eq!(assistant[1].spans[0].content, "│ ");
         assert_eq!(user[1].spans[0].style.fg, Some(theme.user));
         assert_eq!(assistant[1].spans[0].style.fg, Some(theme.assistant));
+    }
+
+    #[test]
+    fn role_headers_and_bodies_share_the_same_rail_prefix() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let view = ChatView::new();
+        for (role, color) in [
+            (Role::User, theme.user),
+            (Role::Assistant, theme.assistant),
+            (Role::System, theme.system),
+        ] {
+            let lines = view.render_message(
+                &ChatMessage {
+                    role,
+                    text: "hello".into(),
+                },
+                &theme,
+                80,
+            );
+
+            assert_eq!(lines[0].spans[0].content, "│ ");
+            assert_eq!(lines[1].spans[0].content, "│ ");
+            assert_eq!(lines[0].spans[0].style.fg, Some(color));
+            assert_eq!(lines[1].spans[0].style.fg, Some(color));
+        }
     }
 
     #[test]
