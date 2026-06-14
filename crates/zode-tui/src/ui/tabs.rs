@@ -1,6 +1,4 @@
-//! Right session rail: one row per session tab. The active tab is highlighted;
-//! a busy tab (turn in flight) is marked with a dot. Rendered only when more
-//! than one tab exists, so single-tab use looks unchanged.
+//! Right session sidebar: current session metadata plus one row per open tab.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -11,6 +9,19 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tab::SessionTab;
 use crate::theme::Theme;
+use crate::ui::layout::compact_path;
+
+pub struct SidebarInfo<'a> {
+    pub session_title: &'a str,
+    pub theme_name: &'a str,
+    pub model: &'a str,
+    pub cwd: &'a std::path::Path,
+    pub mode: &'a str,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub yolo: bool,
+    pub sandbox: bool,
+}
 
 pub fn tab_label(index: usize, title: &str, busy: bool) -> String {
     if busy {
@@ -87,14 +98,68 @@ fn truncate_to_width(text: &str, max_width: usize) -> String {
 }
 
 pub fn render_tabs(f: &mut Frame, area: Rect, tabs: &[SessionTab], active: usize, theme: &Theme) {
+    render_tab_list(f, area, tabs, active, theme, 0);
+}
+
+pub fn render_sidebar(
+    f: &mut Frame,
+    area: Rect,
+    tabs: &[SessionTab],
+    active: usize,
+    info: SidebarInfo<'_>,
+    theme: &Theme,
+) {
     let row_width = area.width.saturating_sub(1) as usize;
+    let mut lines = sidebar_summary_lines(&info, row_width)
+        .into_iter()
+        .map(|line| styled_sidebar_line(&line, row_width, theme))
+        .collect::<Vec<_>>();
+    lines.push(header_line(row_width, theme));
+    append_tab_rows(
+        &mut lines,
+        row_width,
+        area.height as usize,
+        tabs,
+        active,
+        theme,
+    );
+    render_sidebar_block(f, area, lines, theme);
+}
+
+fn render_tab_list(
+    f: &mut Frame,
+    area: Rect,
+    tabs: &[SessionTab],
+    active: usize,
+    theme: &Theme,
+    top_padding: usize,
+) {
+    let row_width = area.width.saturating_sub(1) as usize;
+    let mut lines = Vec::new();
+    lines.extend((0..top_padding).map(|_| Line::from("")));
+    lines.push(header_line(row_width, theme));
+    append_tab_rows(
+        &mut lines,
+        row_width,
+        area.height as usize,
+        tabs,
+        active,
+        theme,
+    );
+    render_sidebar_block(f, area, lines, theme);
+}
+
+fn append_tab_rows(
+    lines: &mut Vec<Line<'static>>,
+    row_width: usize,
+    area_height: usize,
+    tabs: &[SessionTab],
+    active: usize,
+    theme: &Theme,
+) {
     let content_width = row_width.saturating_sub(2);
-    let mut lines = vec![header_line(row_width, theme)];
-    for (i, tab) in tabs
-        .iter()
-        .enumerate()
-        .take(area.height.saturating_sub(1) as usize)
-    {
+    let remaining_rows = area_height.saturating_sub(lines.len());
+    for (i, tab) in tabs.iter().enumerate().take(remaining_rows) {
         let row_active = i == active;
         let row_bg = if row_active {
             theme.bg_input
@@ -138,6 +203,9 @@ pub fn render_tabs(f: &mut Frame, area: Rect, tabs: &[SessionTab], active: usize
             Span::styled(parts.padding, Style::default().bg(row_bg)),
         ]));
     }
+}
+
+fn render_sidebar_block(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>, theme: &Theme) {
     f.render_widget(
         Paragraph::new(lines)
             .block(
@@ -148,6 +216,67 @@ pub fn render_tabs(f: &mut Frame, area: Rect, tabs: &[SessionTab], active: usize
             .style(Style::default().bg(theme.bg_secondary)),
         area,
     );
+}
+
+fn sidebar_summary_lines(info: &SidebarInfo<'_>, width: usize) -> Vec<String> {
+    let flags = match (info.yolo, info.sandbox) {
+        (true, true) => "yolo · sandbox".to_string(),
+        (true, false) => "yolo".to_string(),
+        (false, true) => "sandbox".to_string(),
+        (false, false) => "standard".to_string(),
+    };
+    vec![
+        sidebar_line("session", width),
+        sidebar_line(info.session_title, width),
+        String::new(),
+        sidebar_line("context", width),
+        sidebar_line(
+            &format!("↑{} ↓{} tokens", info.input_tokens, info.output_tokens),
+            width,
+        ),
+        sidebar_line(&format!("{} · {}", info.mode, flags), width),
+        String::new(),
+        sidebar_line("model", width),
+        sidebar_line(info.model, width),
+        sidebar_line(&format!("theme {}", info.theme_name), width),
+        String::new(),
+        sidebar_line("workspace", width),
+        sidebar_line(&compact_path(info.cwd), width),
+        String::new(),
+    ]
+}
+
+fn sidebar_line(text: &str, width: usize) -> String {
+    let content_width = width.saturating_sub(1);
+    let content = truncate_to_width(text, content_width);
+    let used = UnicodeWidthStr::width(content.as_str());
+    format!(
+        " {content}{}",
+        " ".repeat(content_width.saturating_sub(used))
+    )
+}
+
+fn styled_sidebar_line(line: &str, width: usize, theme: &Theme) -> Line<'static> {
+    let text = pad_to_width(line, width);
+    let trimmed = text.trim();
+    let style = match trimmed {
+        "session" | "context" | "model" | "workspace" => Style::default()
+            .fg(theme.accent)
+            .bg(theme.bg_secondary)
+            .add_modifier(Modifier::BOLD),
+        "" => Style::default().bg(theme.bg_secondary),
+        _ => Style::default().fg(theme.fg_text).bg(theme.bg_secondary),
+    };
+    Line::from(Span::styled(text, style))
+}
+
+fn pad_to_width(text: &str, width: usize) -> String {
+    let used = UnicodeWidthStr::width(text);
+    if used >= width {
+        truncate_to_width(text, width)
+    } else {
+        format!("{text}{}", " ".repeat(width - used))
+    }
 }
 
 fn header_line(width: usize, theme: &Theme) -> Line<'static> {
@@ -180,5 +309,30 @@ mod tests {
             format_tab_row(12, "very-long-session-title", true, 14),
             "12 ● very-lon…"
         );
+    }
+
+    #[test]
+    fn sidebar_summary_contains_workspace_context_and_sessions() {
+        let info = SidebarInfo {
+            session_title: "implement tui sidebar",
+            theme_name: "Minimal",
+            model: "deepseek-v4-pro",
+            cwd: std::path::Path::new("/Users/kayshen/Workspace/ZSeven-W/zode/target/debug"),
+            mode: "ready",
+            input_tokens: 120,
+            output_tokens: 80,
+            yolo: false,
+            sandbox: true,
+        };
+        let lines = sidebar_summary_lines(&info, 34);
+        let joined = lines.join("\n");
+        assert!(joined.contains("session"));
+        assert!(joined.contains("implement tui sidebar"));
+        assert!(joined.contains("context"));
+        assert!(joined.contains("↑120 ↓80"));
+        assert!(joined.contains("deepseek-v4-pro"));
+        assert!(joined.contains("Minimal"));
+        assert!(joined.contains("target/debug"));
+        assert!(joined.contains("sandbox"));
     }
 }

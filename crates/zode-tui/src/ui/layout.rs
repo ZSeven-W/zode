@@ -19,8 +19,8 @@ pub struct ChromeAreas {
     pub status: Rect,
 }
 
-const TAB_RAIL_WIDTH: u16 = 30;
-const MIN_WIDTH_FOR_TAB_RAIL: u16 = 80;
+const TAB_RAIL_WIDTH: u16 = 36;
+const MIN_WIDTH_FOR_TAB_RAIL: u16 = 96;
 
 #[derive(Debug, Clone, Copy)]
 pub struct HeaderInfo<'a> {
@@ -178,20 +178,20 @@ mod tests {
         let area = Rect::new(0, 0, 100, 30);
         let split = split_main(area, true);
         assert_eq!(split.header, Some(Rect::new(0, 0, 100, 1)));
-        assert_eq!(split.tabs, Some(Rect::new(70, 1, 30, 29)));
-        assert_eq!(split.chat, Rect::new(0, 1, 70, 24));
-        assert_eq!(split.composer, Rect::new(0, 25, 70, 4));
-        assert_eq!(split.status, Rect::new(0, 29, 70, 1));
+        assert_eq!(split.tabs, Some(Rect::new(64, 1, 36, 29)));
+        assert_eq!(split.chat, Rect::new(0, 1, 64, 24));
+        assert_eq!(split.composer, Rect::new(0, 25, 64, 4));
+        assert_eq!(split.status, Rect::new(0, 29, 64, 1));
     }
 
     #[test]
     fn split_main_hides_right_tabs_when_width_is_tight() {
-        let area = Rect::new(0, 0, 79, 30);
+        let area = Rect::new(0, 0, 95, 30);
         let split = split_main(area, true);
         assert_eq!(split.tabs, None);
-        assert_eq!(split.chat, Rect::new(0, 1, 79, 24));
-        assert_eq!(split.composer, Rect::new(0, 25, 79, 4));
-        assert_eq!(split.status, Rect::new(0, 29, 79, 1));
+        assert_eq!(split.chat, Rect::new(0, 1, 95, 24));
+        assert_eq!(split.composer, Rect::new(0, 25, 95, 4));
+        assert_eq!(split.status, Rect::new(0, 29, 95, 1));
     }
 
     #[test]

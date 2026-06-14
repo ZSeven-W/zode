@@ -12,7 +12,6 @@ use zode_core::commands::{CommandRegistry, SlashCommand};
 use crate::theme::Theme;
 
 const MAX_VISIBLE: usize = 8;
-const POPUP_WIDTH: u16 = 96;
 const COMMAND_COLUMN_WIDTH: usize = 15;
 
 pub struct Autocomplete {
@@ -134,22 +133,11 @@ impl Autocomplete {
             })
             .collect();
         f.render_widget(Clear, area);
-        let title = format!(" Commands · {} matches ", self.matches.len());
         let list = List::new(items)
             .block(
                 Block::default()
-                    .title(Line::styled(
-                        title,
-                        Style::default()
-                            .fg(theme.accent_secondary)
-                            .add_modifier(Modifier::BOLD),
-                    ))
-                    .title_bottom(Line::styled(
-                        " ↑↓ navigate · Enter run · Tab fill · Esc close ",
-                        Style::default().fg(theme.fg_subtle),
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.accent_secondary))
+                    .borders(Borders::LEFT | Borders::RIGHT)
+                    .border_style(Style::default().fg(theme.separator))
                     .style(Style::default().bg(theme.bg_secondary)),
             )
             .highlight_style(
@@ -163,11 +151,11 @@ impl Autocomplete {
 }
 
 fn popup_area(input_area: Rect, visible_rows: u16) -> Rect {
-    let h = visible_rows + 2; // borders
+    let h = visible_rows;
     Rect {
         x: input_area.x,
         y: input_area.y.saturating_sub(h),
-        width: input_area.width.min(POPUP_WIDTH),
+        width: input_area.width,
         height: h,
     }
 }
@@ -205,17 +193,17 @@ mod tests {
     }
 
     #[test]
-    fn popup_uses_wider_command_palette_area() {
+    fn popup_uses_attached_full_width_palette_area() {
         let input_area = Rect::new(2, 20, 100, 4);
         let area = popup_area(input_area, 8);
         assert_eq!(area.x, 2);
-        assert_eq!(area.width, 96);
-        assert_eq!(area.height, 10);
-        assert_eq!(area.y, 10);
+        assert_eq!(area.width, 100);
+        assert_eq!(area.height, 8);
+        assert_eq!(area.y, 12);
     }
 
     #[test]
-    fn render_uses_command_palette_chrome() {
+    fn render_uses_attached_command_palette_chrome() {
         let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("cyberpunk"));
         let backend = ratatui::backend::TestBackend::new(110, 24);
         let mut term = ratatui::Terminal::new(backend).unwrap();
@@ -232,9 +220,9 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(content.contains("Commands ·"));
-        assert!(content.contains("↑↓ navigate"));
-        assert!(content.contains("Tab fill"));
+        assert!(content.contains("/theme"));
+        assert!(content.contains("Switch the TUI theme"));
+        assert!(!content.contains("Commands ·"));
     }
 
     #[test]

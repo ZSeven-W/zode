@@ -40,7 +40,7 @@ use crate::ui::dialog::tasks_panel::TasksPanel;
 use crate::ui::input::InputBox;
 use crate::ui::layout::{render_header, split_main, HeaderInfo};
 use crate::ui::status::{Mode, StatusBar};
-use crate::ui::tabs::render_tabs;
+use crate::ui::tabs::{render_sidebar, SidebarInfo};
 use crate::ui::toast::Toast;
 
 pub struct UiConfig {
@@ -499,9 +499,9 @@ impl TuiApp {
         let active_model = self.tabs[self.active].engine.model.clone();
         let active_cwd = self.tabs[self.active].engine.cwd.clone();
         let active_busy = self.tabs[self.active].is_busy();
-        let show_tabs = self.tabs.len() > 1;
+        let show_sidebar = true;
 
-        let areas = split_main(area, show_tabs);
+        let areas = split_main(area, show_sidebar);
         if let Some(header) = areas.header {
             render_header(
                 f,
@@ -517,7 +517,25 @@ impl TuiApp {
             );
         }
         if let Some(tab_area) = areas.tabs {
-            render_tabs(f, tab_area, &self.tabs, self.active, &theme);
+            let mode = mode_label(self.status.mode);
+            render_sidebar(
+                f,
+                tab_area,
+                &self.tabs,
+                self.active,
+                SidebarInfo {
+                    session_title: &active_title,
+                    theme_name: &theme.name,
+                    model: &active_model,
+                    cwd: &active_cwd,
+                    mode,
+                    input_tokens: self.status.input_tokens,
+                    output_tokens: self.status.output_tokens,
+                    yolo: self.status.yolo,
+                    sandbox: self.status.sandbox,
+                },
+                &theme,
+            );
         }
 
         let chat_meta = ChatRenderMeta {
@@ -1167,6 +1185,15 @@ impl TuiApp {
                 .chat
                 .push_system(&format!("unknown theme: {args}"));
         }
+    }
+}
+
+fn mode_label(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Ready => "ready",
+        Mode::Thinking => "thinking",
+        Mode::Streaming => "streaming",
+        Mode::Error => "error",
     }
 }
 
