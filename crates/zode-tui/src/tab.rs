@@ -50,6 +50,9 @@ pub struct SessionTab {
     /// deltas and map tool results back to their visible tool call names.
     pub thinking_process_shown: bool,
     pub active_tool_names: HashMap<String, String>,
+    /// Messages typed while a turn was in flight, held FIFO and sent one per
+    /// turn once this tab goes idle (Claude-style input queueing).
+    pub queued_input: std::collections::VecDeque<String>,
 }
 
 impl SessionTab {
@@ -70,6 +73,7 @@ impl SessionTab {
             cost_label: "$0.00".into(),
             thinking_process_shown: false,
             active_tool_names: HashMap::new(),
+            queued_input: std::collections::VecDeque::new(),
         }
     }
 

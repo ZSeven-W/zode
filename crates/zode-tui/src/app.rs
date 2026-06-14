@@ -204,6 +204,23 @@ impl TuiApp {
         self.autocomplete.dismiss();
     }
 
+    /// Abort the active tab's in-flight turn, if any. Returns true when a turn
+    /// was actually interrupted (false when the tab was already idle). Shared
+    /// by Ctrl+C and Esc.
+    fn interrupt_active_turn(&mut self) -> bool {
+        let tab = &mut self.tabs[self.active];
+        if let Some(abort) = tab.turn_abort.take() {
+            abort.abort_with_reason("user interrupted");
+            tab.active_turn_id = 0;
+            tab.chat.end_turn();
+            tab.chat.push_system("(interrupted)");
+            tab.mode = Mode::Ready;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Focus the tab at position `idx` (Ctrl+digit), if it exists.
     fn switch_to(&mut self, idx: usize) {
         if idx < self.tabs.len() {
@@ -463,6 +480,8 @@ impl TuiApp {
                 }
                 Some(app_ev) = agent_rx.recv() => {
                     self.handle_agent_event(app_ev);
+                    // A turn may have just finished — flush any queued input.
+                    self.dispatch_queued_input(&agent_tx).await;
                 }
                 Some(req) = self.approval_rx.next() => {
                     // An approval is the highest-priority modal: dismiss any
@@ -689,16 +708,19 @@ impl TuiApp {
         // 4. Global chords.
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                let tab = &mut self.tabs[self.active];
-                if let Some(abort) = tab.turn_abort.take() {
-                    abort.abort_with_reason("user interrupted");
-                    tab.active_turn_id = 0;
-                    tab.chat.end_turn();
-                    tab.chat.push_system("(interrupted)");
-                    tab.mode = Mode::Ready;
-                } else {
+                // Interrupt a running turn; quit when idle.
+                if !self.interrupt_active_turn() {
                     self.should_quit = true;
                 }
+                return;
+            }
+            // Esc interrupts a running turn. An open autocomplete popup gets
+            // Esc first (to dismiss) — that's handled later, so only steal Esc
+            // here when the popup is closed and a turn is actually in flight.
+            (KeyCode::Esc, _)
+                if self.tabs[self.active].is_busy() && !self.autocomplete.is_active() =>
+            {
+                self.interrupt_active_turn();
                 return;
             }
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
@@ -1133,17 +1155,33 @@ impl TuiApp {
         }
     }
 
+    /// When the active tab goes idle, send the next queued message (one per
+    /// turn, FIFO). Called after each agent event, so it fires as soon as a
+    /// turn's `TurnDone` clears the busy flag.
+    async fn dispatch_queued_input(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        if self.active_tab().is_busy() {
+            return;
+        }
+        let next = self.active_tab_mut().queued_input.pop_front();
+        if let Some(text) = next {
+            self.submit(&text, agent_tx).await;
+        }
+    }
+
     async fn submit(&mut self, text: &str, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         if let Some((name, args)) = parse_slash(text) {
             self.handle_slash(name, args, agent_tx).await;
             return;
         }
-        // One turn per tab. A second turn on the same engine would run a second
-        // QueryLoop mutating the same MessageStore concurrently — reject it and
-        // restore the draft so the user can resend after the turn (or Ctrl+C).
+        // One turn per tab (a second QueryLoop would mutate the same store
+        // concurrently). Instead of rejecting, QUEUE the message and send it
+        // when this tab goes idle — see `dispatch_queued_input`.
         if self.active_tab().is_busy() {
-            self.input.insert_str(text);
-            self.toast = Some(Toast::info("turn in progress — Ctrl+C to interrupt"));
+            self.active_tab_mut().queued_input.push_back(text.to_string());
+            let n = self.active_tab().queued_input.len();
+            self.toast = Some(Toast::info(format!(
+                "queued ({n}) — sends when the turn finishes (Esc to interrupt now)"
+            )));
             return;
         }
         // Stamp the session title from the first user prompt of this tab.
