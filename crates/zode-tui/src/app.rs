@@ -45,6 +45,12 @@ use crate::ui::status::{Mode, StatusBar};
 use crate::ui::tabs::{render_sidebar, SidebarInfo};
 use crate::ui::toast::Toast;
 
+#[derive(Debug, Clone)]
+struct CompletionHint {
+    prefix: String,
+    placeholder: String,
+}
+
 pub struct UiConfig {
     pub theme_id: Option<String>,
     pub yolo: bool,
@@ -74,6 +80,7 @@ pub struct TuiApp {
     active_dialog: Option<PermissionDialog>,
     pending_requests: VecDeque<ApprovalRequest>,
     autocomplete: Autocomplete,
+    completion_hint: Option<CompletionHint>,
     settings: Option<SettingsDialog>,
     connect: Option<ConnectDialog>,
     plugin_picker: Option<PluginPicker>,
@@ -141,6 +148,7 @@ impl TuiApp {
             active_dialog: None,
             pending_requests: VecDeque::new(),
             autocomplete: Autocomplete::new(),
+            completion_hint: None,
             settings: None,
             connect: None,
             plugin_picker: None,
@@ -559,7 +567,18 @@ impl TuiApp {
             .chat
             .render(f, areas.chat, &theme, chat_meta);
         let input_area: Rect = areas.composer;
-        self.input.render(f, input_area, &theme, self.status.mode);
+        let input_text = self.input.text();
+        let completion_placeholder = self
+            .completion_hint
+            .as_ref()
+            .and_then(|hint| (input_text == hint.prefix).then_some(hint.placeholder.as_str()));
+        self.input.render(
+            f,
+            input_area,
+            &theme,
+            self.status.mode,
+            completion_placeholder,
+        );
         self.status.render(f, areas.status, &theme);
         // Autocomplete popup floats above the input row.
         self.autocomplete.render(f, input_area, &theme);
@@ -744,24 +763,28 @@ impl TuiApp {
                 }
                 KeyCode::Enter if self.autocomplete.selected_name() == Some("theme") => {
                     self.input.take();
+                    self.completion_hint = None;
                     self.autocomplete.dismiss();
                     self.open_theme_picker();
                     return;
                 }
                 KeyCode::Enter if self.autocomplete.selected_name() == Some("model") => {
                     self.input.take();
+                    self.completion_hint = None;
                     self.autocomplete.dismiss();
                     self.open_model_picker();
                     return;
                 }
                 KeyCode::Enter if self.autocomplete.selected_name() == Some("connect") => {
                     self.input.take();
+                    self.completion_hint = None;
                     self.autocomplete.dismiss();
                     self.open_connect_dialog();
                     return;
                 }
                 KeyCode::Enter if self.autocomplete.selected_name() == Some("plugin") => {
                     self.input.take();
+                    self.completion_hint = None;
                     self.autocomplete.dismiss();
                     self.open_plugin_picker();
                     return;
@@ -784,6 +807,7 @@ impl TuiApp {
                 if !m.contains(KeyModifiers::SHIFT) && !m.contains(KeyModifiers::ALT) =>
             {
                 let text = self.input.take();
+                self.completion_hint = None;
                 self.autocomplete.dismiss();
                 if !text.trim().is_empty() {
                     self.submit(&text, agent_tx).await;
@@ -1000,7 +1024,8 @@ impl TuiApp {
                     return;
                 };
                 if picker.is_dirty() {
-                    self.apply_plugins(picker.disabled_ids()).await;
+                    self.apply_plugins(picker.disabled_ids(), picker.all_ids())
+                        .await;
                 }
             }
             KeyCode::Up => {
@@ -1038,29 +1063,47 @@ impl TuiApp {
     }
 
     /// Persist the disabled-plugin set to the global config and reassemble the
-    /// active tab so the change (tools dropped, MCP disconnected, skills/LSP
-    /// hidden) applies to the running conversation.
-    async fn apply_plugins(&mut self, disabled: Vec<String>) {
+    /// active tab so the change (tools dropped, MCP disconnected, skills hidden)
+    /// applies to the running conversation.
+    ///
+    /// `disabled` is the off-set the picker showed; `owned` is every id it
+    /// presented. Disabled ids in config but NOT in `owned` (e.g. a
+    /// project-scoped MCP server or skill from a different workspace, or the
+    /// not-yet-shown `lsp:*` rows) are preserved verbatim — replacing the whole
+    /// list with just `disabled` would silently re-enable them.
+    async fn apply_plugins(&mut self, disabled: Vec<String>, owned: Vec<String>) {
         if self.active_tab().is_busy() {
             self.toast = Some(Toast::info(
                 "can't change plugins during a turn — Ctrl+C first",
             ));
             return;
         }
-        match ConfigManager::load_global() {
+        let owned: std::collections::HashSet<String> = owned.into_iter().collect();
+        let merged = match ConfigManager::load_global() {
             Ok(mut cfg) => {
-                cfg.plugins.disabled = disabled.clone();
+                let mut next: Vec<String> = cfg
+                    .plugins
+                    .disabled
+                    .iter()
+                    .filter(|id| !owned.contains(id.as_str()))
+                    .cloned()
+                    .collect();
+                next.extend(disabled);
+                next.sort();
+                next.dedup();
+                cfg.plugins.disabled = next.clone();
                 if let Err(e) = ConfigManager::save_global(&cfg) {
                     self.toast = Some(Toast::error(format!("save config failed: {e}")));
                     return;
                 }
+                next
             }
             Err(e) => {
                 self.toast = Some(Toast::error(format!("load config failed: {e}")));
                 return;
             }
-        }
-        let t = self.template.with_plugins_disabled(disabled);
+        };
+        let t = self.template.with_plugins_disabled(merged);
         if self.reassemble_active(t.clone()).await {
             self.template = t;
             self.toast = Some(Toast::info("plugins updated"));
@@ -1068,9 +1111,14 @@ impl TuiApp {
     }
 
     fn apply_completion(&mut self) {
-        if let Some(usage) = self.autocomplete.confirm() {
+        self.completion_hint = None;
+        if let Some(completion) = self.autocomplete.confirm() {
             self.input.take();
-            self.input.insert_str(usage);
+            self.input.insert_str(&completion.insert);
+            self.completion_hint = completion.placeholder.map(|placeholder| CompletionHint {
+                prefix: completion.insert,
+                placeholder: placeholder.to_string(),
+            });
         }
         self.autocomplete.dismiss();
     }
