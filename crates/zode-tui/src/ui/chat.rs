@@ -131,10 +131,12 @@ impl ChatView {
         let mut lines: Vec<Line<'static>> = if self.messages.is_empty() {
             self.render_empty(theme, meta)
         } else {
-            let mut out = Vec::new();
-            for msg in &self.messages {
+            let mut out = vec![Line::from("")];
+            for (idx, msg) in self.messages.iter().enumerate() {
+                if idx > 0 {
+                    out.push(Line::from(""));
+                }
                 out.extend(self.render_message(msg, theme, area.width));
-                out.push(Line::from(""));
             }
             out
         };
@@ -195,14 +197,7 @@ impl ChatView {
 
     fn render_message(&self, msg: &ChatMessage, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         match msg.role {
-            Role::User => self.render_role_block(
-                &theme.icon_user,
-                "You",
-                &msg.text,
-                theme.user,
-                Style::default().fg(theme.fg_white),
-                width,
-            ),
+            Role::User => self.render_user_block(&theme.icon_user, "You", &msg.text, theme, width),
             Role::Assistant => {
                 let mut out =
                     vec![self.role_header(&theme.icon_assistant, "Assistant", theme.assistant)];
@@ -222,6 +217,42 @@ impl ChatView {
                 Span::styled(msg.text.clone(), Style::default().fg(theme.fg_subtle)),
             ])],
         }
+    }
+
+    fn render_user_block(
+        &self,
+        icon: &str,
+        label: &str,
+        text: &str,
+        theme: &Theme,
+        width: u16,
+    ) -> Vec<Line<'static>> {
+        let mut out = vec![self.user_header(icon, label, theme)];
+        for line in text.lines().chain((text.is_empty()).then_some("")) {
+            out.extend(indent_line(
+                vec![Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.fg_white),
+                )],
+                width,
+            ));
+        }
+        out
+    }
+
+    fn user_header(&self, icon: &str, label: &str, theme: &Theme) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(
+                format!("{icon} "),
+                Style::default().fg(theme.user).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                label.to_string(),
+                Style::default()
+                    .fg(theme.fg_white)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
     }
 
     fn render_role_block(
@@ -272,6 +303,11 @@ fn rail_markdown(src: &str, theme: &Theme, rail_color: Color, width: u16) -> Vec
 fn rail_line(spans: Vec<Span<'static>>, rail_color: Color, width: u16) -> Vec<Line<'static>> {
     let rail = Span::styled("│ ", Style::default().fg(rail_color));
     wrap_spans_with_prefix(spans, rail.clone(), rail, width)
+}
+
+fn indent_line(spans: Vec<Span<'static>>, width: u16) -> Vec<Line<'static>> {
+    let indent = Span::raw("  ");
+    wrap_spans_with_prefix(spans, indent.clone(), indent, width)
 }
 
 fn wrap_spans_with_prefix(
@@ -425,8 +461,79 @@ mod tests {
         assert!(content.contains("You"));
         assert!(content.contains("Assistant"));
         assert!(content.contains("System"));
-        assert!(content.contains("│ hello"));
+        assert!(content.contains("  hello"));
         assert!(content.contains("· Bash"));
+    }
+
+    #[test]
+    fn rendered_chat_has_top_padding_before_first_message() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let mut view = ChatView::new();
+        view.push_user("hello");
+        let backend = TestBackend::new(40, 6);
+        let mut term = Terminal::new(backend).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "deepseek-v4-pro",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
+
+        let buf = term.backend().buffer();
+        let row0: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+        let row1: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
+        assert!(row0.trim().is_empty(), "first row should breathe: {row0:?}");
+        assert!(
+            row1.contains("You"),
+            "second row should start the message: {row1:?}"
+        );
+    }
+
+    #[test]
+    fn user_messages_use_compact_indent_not_assistant_rail() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let view = ChatView::new();
+        let msg = ChatMessage {
+            role: Role::User,
+            text: "hello".into(),
+        };
+
+        let lines = view.render_message(&msg, &theme, 80);
+        let joined: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect();
+        assert!(joined.contains("You"));
+        assert!(joined.contains("  hello"));
+        assert!(!joined.contains("│ hello"));
+    }
+
+    #[test]
+    fn user_header_label_uses_stronger_style_than_assistant_header() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let view = ChatView::new();
+
+        let user = view.render_message(
+            &ChatMessage {
+                role: Role::User,
+                text: "hello".into(),
+            },
+            &theme,
+            80,
+        );
+        let assistant = view.render_message(
+            &ChatMessage {
+                role: Role::Assistant,
+                text: "hello".into(),
+            },
+            &theme,
+            80,
+        );
+
+        assert_eq!(user[0].spans[1].style.fg, Some(theme.fg_white));
+        assert_eq!(assistant[0].spans[1].style.fg, Some(theme.assistant));
     }
 
     #[test]
