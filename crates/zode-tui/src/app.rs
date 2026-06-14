@@ -506,6 +506,7 @@ impl TuiApp {
         let active_model = self.tabs[self.active].engine.model.clone();
         let active_cwd = self.tabs[self.active].engine.cwd.clone();
         let active_busy = self.tabs[self.active].is_busy();
+        let active_cost = self.tabs[self.active].cost_label.clone();
         let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_hidden);
 
         let areas = split_main(area, show_sidebar);
@@ -538,6 +539,7 @@ impl TuiApp {
                     mode,
                     input_tokens: self.status.input_tokens,
                     output_tokens: self.status.output_tokens,
+                    cost_label: &active_cost,
                     yolo: self.status.yolo,
                     sandbox: self.status.sandbox,
                 },
@@ -1023,10 +1025,19 @@ impl TuiApp {
                             Ok(event) => {
                                 // Feed the cost tracker (counts only Usage events).
                                 engine.cost.observe(&event).await;
+                                let cost_label = if matches!(
+                                    event,
+                                    Event::Usage { .. } | Event::ToolResult { .. }
+                                ) {
+                                    Some(engine.cost.sidebar_label().await)
+                                } else {
+                                    None
+                                };
                                 if tx
                                     .send(AppEvent::Agent {
                                         tab_id,
                                         turn_id,
+                                        cost_label,
                                         event,
                                     })
                                     .is_err()
@@ -1089,26 +1100,33 @@ impl TuiApp {
             return;
         }
         match ev {
-            AppEvent::Agent { event, .. } => match event {
-                Event::TextDelta { delta } => {
-                    tab.mode = Mode::Streaming;
-                    tab.chat.push_delta(&delta);
+            AppEvent::Agent {
+                event, cost_label, ..
+            } => {
+                if let Some(label) = cost_label {
+                    tab.cost_label = label;
                 }
-                Event::ToolUse { name, .. } => tab.chat.push_tool(&name),
-                Event::Usage {
-                    input_tokens,
-                    output_tokens,
-                    ..
-                } => {
-                    tab.input_tokens = tab.input_tokens.saturating_add(input_tokens);
-                    tab.output_tokens = tab.output_tokens.saturating_add(output_tokens);
+                match event {
+                    Event::TextDelta { delta } => {
+                        tab.mode = Mode::Streaming;
+                        tab.chat.push_delta(&delta);
+                    }
+                    Event::ToolUse { name, .. } => tab.chat.push_tool(&name),
+                    Event::Usage {
+                        input_tokens,
+                        output_tokens,
+                        ..
+                    } => {
+                        tab.input_tokens = tab.input_tokens.saturating_add(input_tokens);
+                        tab.output_tokens = tab.output_tokens.saturating_add(output_tokens);
+                    }
+                    Event::Error { code, message } => {
+                        tab.chat.push_system(&format!("error [{code}]: {message}"));
+                        tab.mode = Mode::Error;
+                    }
+                    _ => {}
                 }
-                Event::Error { code, message } => {
-                    tab.chat.push_system(&format!("error [{code}]: {message}"));
-                    tab.mode = Mode::Error;
-                }
-                _ => {}
-            },
+            }
             AppEvent::TurnDone { result, .. } => {
                 tab.chat.end_turn();
                 tab.turn_abort = None;

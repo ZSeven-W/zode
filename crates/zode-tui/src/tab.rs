@@ -44,6 +44,7 @@ pub struct SessionTab {
     pub mode: Mode,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    pub cost_label: String,
 }
 
 impl SessionTab {
@@ -61,6 +62,7 @@ impl SessionTab {
             mode: Mode::Ready,
             input_tokens: 0,
             output_tokens: 0,
+            cost_label: "$0.00".into(),
         }
     }
 

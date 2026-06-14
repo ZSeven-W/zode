@@ -86,6 +86,17 @@ impl CostState {
             )
         }
     }
+
+    /// Short cost label for compact UI surfaces. Unknown priced models return
+    /// `n/a` once they have usage so the UI does not imply a zero bill.
+    pub async fn sidebar_label(&self) -> String {
+        let snap = self.tracker.lock().await.snapshot();
+        if snap.has_unknown_models() {
+            "n/a".to_string()
+        } else {
+            snap.format_total_usd()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -157,5 +168,19 @@ mod tests {
         // the token fallback; both are valid. Assert it doesn't panic and
         // names the model.
         assert!(report.contains("claude-3-5-sonnet-20241022"));
+    }
+
+    #[tokio::test]
+    async fn sidebar_label_formats_known_model_usd() {
+        let cost = CostState::new("gpt-4o-mini".into());
+        cost.observe(&usage(1000, 1000)).await;
+        assert_eq!(cost.sidebar_label().await, "$0.0008");
+    }
+
+    #[tokio::test]
+    async fn sidebar_label_marks_unknown_model_unavailable() {
+        let cost = CostState::new("model-not-in-catalog".into());
+        cost.observe(&usage(1000, 1000)).await;
+        assert_eq!(cost.sidebar_label().await, "n/a");
     }
 }

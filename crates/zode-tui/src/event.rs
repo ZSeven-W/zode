@@ -15,6 +15,7 @@ pub enum AppEvent {
     Agent {
         tab_id: usize,
         turn_id: u64,
+        cost_label: Option<String>,
         event: Event,
     },
     /// Turn `turn_id` in tab `tab_id` finished (Ok) or errored.

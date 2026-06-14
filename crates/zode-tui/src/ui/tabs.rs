@@ -19,6 +19,7 @@ pub struct SidebarInfo<'a> {
     pub mode: &'a str,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    pub cost_label: &'a str,
     pub yolo: bool,
     pub sandbox: bool,
 }
@@ -234,6 +235,7 @@ fn sidebar_summary_lines(info: &SidebarInfo<'_>, width: usize) -> Vec<String> {
             &format!("↑{} ↓{} tokens", info.input_tokens, info.output_tokens),
             width,
         ),
+        sidebar_line(&format!("cost {}", info.cost_label), width),
         sidebar_line(&format!("{} · {}", info.mode, flags), width),
         String::new(),
         sidebar_line("model", width),
@@ -321,6 +323,7 @@ mod tests {
             mode: "ready",
             input_tokens: 120,
             output_tokens: 80,
+            cost_label: "$0.0008",
             yolo: false,
             sandbox: true,
         };
@@ -330,6 +333,7 @@ mod tests {
         assert!(joined.contains("implement tui sidebar"));
         assert!(joined.contains("context"));
         assert!(joined.contains("↑120 ↓80"));
+        assert!(joined.contains("cost $0.0008"));
         assert!(joined.contains("deepseek-v4-pro"));
         assert!(joined.contains("Minimal"));
         assert!(joined.contains("target/debug"));
