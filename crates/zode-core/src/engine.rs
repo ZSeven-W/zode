@@ -781,6 +781,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_mode_keeps_only_read_only_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = ZodeEngine::assemble(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-06-13",
+            None,
+            true, // plan_mode
+        )
+        .await
+        .unwrap();
+        let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
+        // Read-only research tools survive.
+        assert!(names.contains(&"FileRead".to_string()), "{names:?}");
+        assert!(names.contains(&"Glob".to_string()), "{names:?}");
+        // Mutating/destructive tools and sub-agents are dropped.
+        assert!(!names.contains(&"FileWrite".to_string()), "{names:?}");
+        assert!(!names.contains(&"Bash".to_string()), "{names:?}");
+        assert!(!names.contains(&"Task".to_string()), "{names:?}");
+        // The plan-mode preamble is in the system prompt.
+        assert!(eng.system.as_deref().unwrap_or("").contains("PLAN MODE"));
+    }
+
+    #[tokio::test]
     async fn unconfigured_tool_resolves_to_allow_so_the_gate_runs() {
         // BLOCK regression: under Bypass the loop must NOT pre-empt an
         // unconfigured mutating tool with Ask — it must reach Allow so the
