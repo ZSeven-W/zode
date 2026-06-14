@@ -60,6 +60,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Ui,
     },
     SlashCommand {
+        name: "tab",
+        description: "Switch session tab",
+        usage: "/tab [n|next|prev]",
+        action: CommandAction::Ui,
+    },
+    SlashCommand {
         name: "resume",
         description: "Resume a session by id",
         usage: "/resume <id>",

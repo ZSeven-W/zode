@@ -97,6 +97,14 @@ mod tests {
     }
 
     #[test]
+    fn builtins_include_tab_switch_command() {
+        let reg = CommandRegistry::with_builtins();
+        let tab = reg.get("tab").expect("/tab command should be registered");
+        assert_eq!(tab.usage, "/tab [n|next|prev]");
+        assert_eq!(tab.description, "Switch session tab");
+    }
+
+    #[test]
     fn parse_input_splits_name_and_args() {
         assert_eq!(
             parse_slash("/model MiniMax-M1"),

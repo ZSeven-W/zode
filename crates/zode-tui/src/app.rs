@@ -1060,6 +1060,7 @@ impl TuiApp {
                 self.active_tab_mut().chat.push_system(&report);
             }
             "sessions" | "resume" => self.open_session_picker(),
+            "tab" => self.handle_tab_command(args),
             "tasks" => self.open_tasks_panel().await,
             "config" => {
                 let msg = format!(
@@ -1186,6 +1187,13 @@ impl TuiApp {
                 .push_system(&format!("unknown theme: {args}"));
         }
     }
+
+    fn handle_tab_command(&mut self, args: &str) {
+        match resolve_tab_target(args, self.active, self.tabs.len()) {
+            Ok(idx) => self.switch_to(idx),
+            Err(msg) => self.active_tab_mut().chat.push_system(&msg),
+        }
+    }
 }
 
 fn mode_label(mode: Mode) -> &'static str {
@@ -1199,6 +1207,26 @@ fn mode_label(mode: Mode) -> &'static str {
 
 fn should_show_sidebar(tab_count: usize) -> bool {
     tab_count > 1
+}
+
+fn resolve_tab_target(args: &str, active: usize, len: usize) -> Result<usize, String> {
+    if len == 0 {
+        return Err("no tabs open".to_string());
+    }
+    let value = args.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("next") {
+        return Ok((active + 1) % len);
+    }
+    if value.eq_ignore_ascii_case("prev") || value.eq_ignore_ascii_case("previous") {
+        return Ok(active.checked_sub(1).unwrap_or(len - 1));
+    }
+    let n = value
+        .parse::<usize>()
+        .map_err(|_| "usage: /tab [n|next|prev]".to_string())?;
+    if n == 0 || n > len {
+        return Err(format!("tab {n} is out of range (1..{len})"));
+    }
+    Ok(n - 1)
 }
 
 /// Rebuild a ChatView from a resumed MessageStore so the conversation history
@@ -1289,5 +1317,21 @@ mod tests {
         assert!(!should_show_sidebar(0));
         assert!(!should_show_sidebar(1));
         assert!(should_show_sidebar(2));
+    }
+
+    #[test]
+    fn tab_command_resolves_numbers_and_cycle_targets() {
+        assert_eq!(resolve_tab_target("2", 0, 3), Ok(1));
+        assert_eq!(resolve_tab_target("next", 2, 3), Ok(0));
+        assert_eq!(resolve_tab_target("", 0, 3), Ok(1));
+        assert_eq!(resolve_tab_target("prev", 0, 3), Ok(2));
+        assert_eq!(
+            resolve_tab_target("9", 0, 3),
+            Err("tab 9 is out of range (1..3)".to_string())
+        );
+        assert_eq!(
+            resolve_tab_target("abc", 0, 3),
+            Err("usage: /tab [n|next|prev]".to_string())
+        );
     }
 }
