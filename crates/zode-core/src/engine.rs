@@ -329,6 +329,25 @@ impl ZodeEngine {
         if plan_mode {
             system.push_str(PLAN_MODE_PROMPT);
         }
+        // A persistent goal (`/goal`) keeps the agent focused on one objective.
+        if let Some(goal) = cfg.goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+            system.push_str(&format!(
+                "\n\n# Current goal\nKeep this objective in focus for every turn; \
+                 if a request is ambiguous, resolve it toward the goal:\n{goal}"
+            ));
+        }
+        // Effort level (`/effort`) tunes thoroughness vs. speed.
+        match cfg.effort.as_deref().map(|e| e.trim().to_ascii_lowercase()).as_deref() {
+            Some("high") => system.push_str(
+                "\n\n# Effort: high\nBe thorough and exhaustive — explore broadly, \
+                 verify carefully, and prefer completeness over brevity.",
+            ),
+            Some("low") => system.push_str(
+                "\n\n# Effort: low\nBe fast and concise — minimal exploration, direct \
+                 answers, and skip non-essential detail.",
+            ),
+            _ => {} // medium / unset → balanced default, no directive.
+        }
         let system = Some(system);
 
         // Clone before `model` is moved into the struct's `model` field below.
@@ -820,6 +839,29 @@ mod tests {
         assert!(!names.contains(&"Task".to_string()), "{names:?}");
         // The plan-mode preamble is in the system prompt.
         assert!(eng.system.as_deref().unwrap_or("").contains("PLAN MODE"));
+    }
+
+    #[tokio::test]
+    async fn goal_and_effort_inject_into_system_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_cfg();
+        cfg.goal = Some("ship v1 of the parser".into());
+        cfg.effort = Some("high".into());
+        let eng = ZodeEngine::assemble(
+            &cfg,
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-06-13",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let sys = eng.system.as_deref().unwrap_or("");
+        assert!(sys.contains("Current goal"), "{sys}");
+        assert!(sys.contains("ship v1 of the parser"), "{sys}");
+        assert!(sys.contains("Effort: high"), "{sys}");
     }
 
     #[tokio::test]

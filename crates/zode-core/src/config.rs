@@ -125,6 +125,12 @@ pub struct ZodeConfig {
     /// UI language code (e.g. "en", "zh"). `None` → English. (Settings picker
     /// + full UI translation land in a follow-up; the value is read here.)
     pub language: Option<String>,
+    /// A persistent objective injected into the system prompt so the agent
+    /// keeps it in focus. Set/cleared via `/goal`. `None`/empty → no goal.
+    pub goal: Option<String>,
+    /// Effort level: "low" | "medium" | "high". Injects a thoroughness
+    /// directive into the system prompt. Set via `/effort`. `None` → balanced.
+    pub effort: Option<String>,
     pub permissions: PermissionsConfig,
     pub max_output_tokens: Option<u32>,
     /// Sampling temperature. `None` uses the provider default; a low value
