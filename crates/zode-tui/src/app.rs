@@ -1256,7 +1256,6 @@ impl TuiApp {
         // No begin_assistant(): push_delta lazily opens an assistant segment,
         // so text after a tool card starts a fresh segment.
         tab.mode = Mode::Thinking;
-        tab.thinking_process_shown = false;
         tab.active_tool_names.clear();
 
         tab.turn_seq += 1;
@@ -1363,14 +1362,9 @@ impl TuiApp {
                         tab.mode = Mode::Streaming;
                         tab.chat.push_delta(&delta);
                     }
-                    Event::Thinking { .. } => {
+                    Event::Thinking { delta } => {
                         tab.mode = Mode::Thinking;
-                        if !tab.thinking_process_shown {
-                            if let Some(line) = process_line_for_event(&event, None) {
-                                tab.chat.push_tool(&line);
-                            }
-                            tab.thinking_process_shown = true;
-                        }
+                        tab.chat.push_thinking_delta(&delta);
                     }
                     Event::ToolUse {
                         ref id,
@@ -1420,7 +1414,6 @@ impl TuiApp {
                 tab.chat.end_turn();
                 tab.turn_abort = None;
                 tab.active_turn_id = 0;
-                tab.thinking_process_shown = false;
                 tab.active_tool_names.clear();
                 tab.mode = match result {
                     Ok(()) => Mode::Ready,
@@ -1671,7 +1664,7 @@ fn should_show_sidebar(tab_count: usize, visibility: SidebarVisibility) -> bool 
 fn process_line_for_event(event: &Event, known_tool: Option<&str>) -> Option<String> {
     match event {
         Event::TextDelta { .. } => None,
-        Event::Thinking { delta } => (!delta.is_empty()).then(|| "Thinking…".to_string()),
+        Event::Thinking { delta } => (!delta.is_empty()).then(|| format!("Thinking: {delta}")),
         Event::ToolUse { name, input, .. } => {
             let title = tool_call_title(name, input);
             let summary = tool_input_summary(name, input);
@@ -1690,11 +1683,28 @@ fn process_line_for_event(event: &Event, known_tool: Option<&str>) -> Option<Str
             output_tokens,
             cache_read,
             cache_create,
-        } => Some(format!(
-            "Usage ↑{input_tokens} ↓{output_tokens} cache +{cache_create}/{cache_read}"
-        )),
+        } => {
+            // Show cache utilization as a hit-rate. `cache_read` = prompt tokens
+            // served from the prefix cache; `cache_create` = tokens written to
+            // it this turn (Anthropic only). DeepSeek reports just cache_read,
+            // so the old `+{create}/{read}` rendered as "+0/N" and read like a
+            // miss even at 98% — show the percent of the prompt that was cached.
+            let cached = cache_read.saturating_add(*cache_create);
+            let note = if cached > 0 && *input_tokens > 0 {
+                format!(
+                    " · cache {}% ({cached})",
+                    cached.saturating_mul(100) / *input_tokens
+                )
+            } else {
+                String::new()
+            };
+            Some(format!("Usage ↑{input_tokens} ↓{output_tokens}{note}"))
+        }
         Event::Result { data } => {
             let stop = data.stop_reason.as_deref().unwrap_or("complete");
+            if is_quiet_result_stop_reason(stop) {
+                return None;
+            }
             let model = data
                 .model
                 .as_deref()
@@ -1707,6 +1717,10 @@ fn process_line_for_event(event: &Event, known_tool: Option<&str>) -> Option<Str
         Event::Unknown => Some("Event unknown".to_string()),
         _ => Some("Event unknown".to_string()),
     }
+}
+
+fn is_quiet_result_stop_reason(stop: &str) -> bool {
+    matches!(stop, "end_turn" | "stop" | "complete")
 }
 
 fn tool_call_title(name: &str, input: &serde_json::Value) -> String {
@@ -1855,15 +1869,11 @@ fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
                 }
             }
             Message::Assistant { content, .. } => {
-                let mut thinking_shown = false;
                 for block in content {
                     match block {
                         ContentBlock::Text { text } => chat.push_delta(text),
-                        ContentBlock::Thinking { thinking, .. }
-                            if !thinking_shown && !thinking.is_empty() =>
-                        {
-                            chat.push_tool("Thinking…");
-                            thinking_shown = true;
+                        ContentBlock::Thinking { thinking, .. } => {
+                            chat.push_thinking_delta(thinking);
                         }
                         ContentBlock::ToolUse { name, input, .. } => {
                             let title = tool_call_title(name, input);
@@ -2009,6 +2019,34 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_chat_preserves_thinking_content() {
+        let mut store = MessageStore::new();
+        store
+            .push(Message::Assistant {
+                header: agent::message::Header::new(),
+                content: vec![
+                    ContentBlock::Text {
+                        text: "I wrote hello.rs.".into(),
+                    },
+                    ContentBlock::Thinking {
+                        thinking: "The user asked for a file.".into(),
+                        signature: None,
+                    },
+                ],
+            })
+            .unwrap();
+
+        let chat = rebuild_chat_from_store(&store);
+
+        assert_eq!(chat.messages().len(), 2);
+        assert_eq!(
+            chat.messages()[0].text,
+            "Thinking: The user asked for a file."
+        );
+        assert_eq!(chat.messages()[1].text, "I wrote hello.rs.");
+    }
+
+    #[test]
     fn process_line_formats_tool_use_sources() {
         let tool = Event::ToolUse {
             id: "t1".into(),
@@ -2058,7 +2096,7 @@ mod tests {
         };
         assert_eq!(
             process_line_for_event(&thinking, None).as_deref(),
-            Some("Thinking…")
+            Some("Thinking: hidden reasoning")
         );
 
         let notice = Event::Notice {
@@ -2078,7 +2116,29 @@ mod tests {
         };
         assert_eq!(
             process_line_for_event(&usage, None).as_deref(),
-            Some("Usage ↑10 ↓3 cache +1/2")
+            // cached = read(2)+create(1) = 3; 3*100/10 = 30%.
+            Some("Usage ↑10 ↓3 · cache 30% (3)")
+        );
+
+        let end_turn = Event::Result {
+            data: agent::stream::ResultData {
+                stop_reason: Some("end_turn".into()),
+                model: Some("deepseek-v4-pro".into()),
+                ..Default::default()
+            },
+        };
+        assert_eq!(process_line_for_event(&end_turn, None), None);
+
+        let tool_use_result = Event::Result {
+            data: agent::stream::ResultData {
+                stop_reason: Some("tool_use".into()),
+                model: Some("deepseek-v4-pro".into()),
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            process_line_for_event(&tool_use_result, None).as_deref(),
+            Some("Result tool_use · deepseek-v4-pro")
         );
     }
 }
