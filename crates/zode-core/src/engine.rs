@@ -320,7 +320,10 @@ impl ZodeEngine {
 
         // System prompt: identity + env + three-level instructions + skills,
         // plus a plan-mode preamble when only read-only tools are available.
-        let env = gather_env(&cwd, date);
+        let mut env = gather_env(&cwd, date);
+        // Tell the agent which model it's running on (so "what model are you?"
+        // is answerable). Stable across a session, so it doesn't hurt caching.
+        env.model = model.clone();
         let instructions = discover_instructions(&cwd);
         let mut system = build_system_prompt(&instructions, &skills_idx, &env);
         if plan_mode {

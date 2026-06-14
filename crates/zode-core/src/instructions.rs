@@ -132,10 +132,14 @@ pub struct EnvInfo {
     pub platform: String,
     pub date: String,
     pub git_branch: Option<String>,
+    /// The active model id (e.g. "deepseek-v4-pro"), so the agent can answer
+    /// "what model are you?". Set by the engine after `gather_env`.
+    pub model: String,
 }
 
 const IDENTITY: &str = "\
-You are Zode, an AI-native coding assistant running in a terminal. You help \
+You are Zode, an AI-native coding assistant developed by ZSeven-W, running in \
+a terminal. You help \
 with software engineering tasks: reading and editing code, running shell \
 commands, searching, and using git. Be concise and precise. Prefer the \
 provided tools over guessing. Confirm before destructive actions. When you \
@@ -167,6 +171,9 @@ pub fn build_system_prompt(
     s.push_str(&format!("- cwd: {}\n", env.cwd));
     s.push_str(&format!("- platform: {}\n", env.platform));
     s.push_str(&format!("- date: {}\n", env.date));
+    if !env.model.is_empty() {
+        s.push_str(&format!("- model: {}\n", env.model));
+    }
     if let Some(b) = &env.git_branch {
         s.push_str(&format!("- git branch: {b}\n"));
     }
@@ -202,6 +209,8 @@ pub fn gather_env(cwd: &Path, date: &str) -> EnvInfo {
         platform: std::env::consts::OS.to_string(),
         date: date.to_string(),
         git_branch,
+        // Filled in by the engine, which knows the resolved model.
+        model: String::new(),
     }
 }
 
@@ -277,6 +286,7 @@ mod tests {
             platform: "macos".into(),
             date: "2026-06-13".into(),
             git_branch: Some("main".into()),
+            model: "deepseek-v4-pro".into(),
         };
         let prompt = build_system_prompt(&files, "- code-review: review code", &env);
         assert!(prompt.contains("Zode"));
@@ -285,6 +295,8 @@ mod tests {
         assert!(prompt.contains("code-review"));
         assert!(prompt.contains("AGENTS.md"));
         assert!(prompt.contains("main"));
+        // The active model is surfaced so the agent can answer "what model?".
+        assert!(prompt.contains("deepseek-v4-pro"));
     }
 
     #[test]
@@ -294,9 +306,12 @@ mod tests {
             platform: "linux".into(),
             date: "2026-06-13".into(),
             git_branch: None,
+            model: String::new(),
         };
         let prompt = build_system_prompt(&[], "", &env);
         assert!(!prompt.contains("Available Skills"));
+        // An empty model is omitted from the Environment block.
+        assert!(!prompt.contains("- model:"));
         assert!(!prompt.contains("Project Instructions"));
     }
 }
