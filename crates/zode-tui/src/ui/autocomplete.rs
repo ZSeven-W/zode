@@ -255,8 +255,11 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(content.contains("/theme"));
-        assert!(content.contains("Switch the TUI theme"));
+        // Assert on the first command, which is always in the rendered viewport
+        // regardless of how many commands the registry grows to (the palette is
+        // height-clipped, so a mid-list item like /theme can scroll out).
+        assert!(content.contains("/help"));
+        assert!(content.contains("Show commands and keybindings"));
         assert!(!content.contains("Commands ·"));
     }
 
