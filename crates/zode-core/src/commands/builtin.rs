@@ -74,7 +74,7 @@ pub static BUILTINS: &[SlashCommand] = &[
     SlashCommand {
         name: "sidebar",
         description: "Show or hide the sidebar",
-        usage: "/sidebar [on|off|toggle]",
+        usage: "/sidebar [on|off|toggle|auto]",
         action: CommandAction::Ui,
     },
     SlashCommand {

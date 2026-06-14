@@ -62,8 +62,8 @@ pub struct TuiApp {
     next_tab_id: usize,
     /// Assembly context for spinning up a fresh engine on Ctrl+T / resume.
     template: EngineTemplate,
-    /// User override for hiding the right session sidebar.
-    sidebar_hidden: bool,
+    /// User visibility preference for the right session sidebar.
+    sidebar_visibility: SidebarVisibility,
     input: InputBox,
     status: StatusBar,
     theme_store: ThemeStore,
@@ -131,7 +131,7 @@ impl TuiApp {
             active: 0,
             next_tab_id: 1,
             template,
-            sidebar_hidden: false,
+            sidebar_visibility: SidebarVisibility::Auto,
             input: InputBox::new(),
             status,
             theme_store,
@@ -510,7 +510,7 @@ impl TuiApp {
         let active_cwd = self.tabs[self.active].engine.cwd.clone();
         let active_busy = self.tabs[self.active].is_busy();
         let active_cost = self.tabs[self.active].cost_label.clone();
-        let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_hidden);
+        let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_visibility);
 
         let areas = split_main(area, show_sidebar);
         if let Some(header) = areas.header {
@@ -1422,10 +1422,14 @@ impl TuiApp {
     }
 
     fn handle_sidebar_command(&mut self, args: &str) {
-        match resolve_sidebar_hidden(args, self.sidebar_hidden) {
-            Ok(hidden) => {
-                self.sidebar_hidden = hidden;
-                let state = if hidden { "hidden" } else { "visible" };
+        match resolve_sidebar_visibility(args, self.sidebar_visibility, self.tabs.len()) {
+            Ok(visibility) => {
+                self.sidebar_visibility = visibility;
+                let state = match visibility {
+                    SidebarVisibility::Auto => "auto",
+                    SidebarVisibility::Visible => "visible",
+                    SidebarVisibility::Hidden => "hidden",
+                };
                 self.active_tab_mut()
                     .chat
                     .push_system(&format!("sidebar -> {state}"));
@@ -1433,6 +1437,13 @@ impl TuiApp {
             Err(msg) => self.active_tab_mut().chat.push_system(&msg),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarVisibility {
+    Auto,
+    Visible,
+    Hidden,
 }
 
 fn mode_label(mode: Mode) -> &'static str {
@@ -1444,8 +1455,12 @@ fn mode_label(mode: Mode) -> &'static str {
     }
 }
 
-fn should_show_sidebar(tab_count: usize, sidebar_hidden: bool) -> bool {
-    tab_count > 1 && !sidebar_hidden
+fn should_show_sidebar(tab_count: usize, visibility: SidebarVisibility) -> bool {
+    match visibility {
+        SidebarVisibility::Auto => tab_count > 1,
+        SidebarVisibility::Visible => true,
+        SidebarVisibility::Hidden => false,
+    }
 }
 
 fn resolve_tab_target(args: &str, active: usize, len: usize) -> Result<usize, String> {
@@ -1468,12 +1483,23 @@ fn resolve_tab_target(args: &str, active: usize, len: usize) -> Result<usize, St
     Ok(n - 1)
 }
 
-fn resolve_sidebar_hidden(args: &str, currently_hidden: bool) -> Result<bool, String> {
+fn resolve_sidebar_visibility(
+    args: &str,
+    current: SidebarVisibility,
+    tab_count: usize,
+) -> Result<SidebarVisibility, String> {
     match args.trim().to_ascii_lowercase().as_str() {
-        "" | "toggle" => Ok(!currently_hidden),
-        "off" | "hide" | "close" => Ok(true),
-        "on" | "show" | "open" => Ok(false),
-        _ => Err("usage: /sidebar [on|off|toggle]".to_string()),
+        "" | "toggle" => {
+            if should_show_sidebar(tab_count, current) {
+                Ok(SidebarVisibility::Hidden)
+            } else {
+                Ok(SidebarVisibility::Visible)
+            }
+        }
+        "off" | "hide" | "close" => Ok(SidebarVisibility::Hidden),
+        "on" | "show" | "open" => Ok(SidebarVisibility::Visible),
+        "auto" | "default" => Ok(SidebarVisibility::Auto),
+        _ => Err("usage: /sidebar [on|off|toggle|auto]".to_string()),
     }
 }
 
@@ -1562,10 +1588,11 @@ mod tests {
 
     #[test]
     fn sidebar_is_hidden_until_multiple_tabs_exist() {
-        assert!(!should_show_sidebar(0, false));
-        assert!(!should_show_sidebar(1, false));
-        assert!(should_show_sidebar(2, false));
-        assert!(!should_show_sidebar(2, true));
+        assert!(!should_show_sidebar(0, SidebarVisibility::Auto));
+        assert!(!should_show_sidebar(1, SidebarVisibility::Auto));
+        assert!(should_show_sidebar(2, SidebarVisibility::Auto));
+        assert!(should_show_sidebar(1, SidebarVisibility::Visible));
+        assert!(!should_show_sidebar(2, SidebarVisibility::Hidden));
     }
 
     #[test]
@@ -1586,17 +1613,49 @@ mod tests {
 
     #[test]
     fn sidebar_command_resolves_visibility_targets() {
-        assert_eq!(resolve_sidebar_hidden("", false), Ok(true));
-        assert_eq!(resolve_sidebar_hidden("toggle", true), Ok(false));
-        assert_eq!(resolve_sidebar_hidden("off", false), Ok(true));
-        assert_eq!(resolve_sidebar_hidden("hide", false), Ok(true));
-        assert_eq!(resolve_sidebar_hidden("close", false), Ok(true));
-        assert_eq!(resolve_sidebar_hidden("on", true), Ok(false));
-        assert_eq!(resolve_sidebar_hidden("show", true), Ok(false));
-        assert_eq!(resolve_sidebar_hidden("open", true), Ok(false));
         assert_eq!(
-            resolve_sidebar_hidden("wat", false),
-            Err("usage: /sidebar [on|off|toggle]".to_string())
+            resolve_sidebar_visibility("", SidebarVisibility::Auto, 1),
+            Ok(SidebarVisibility::Visible)
+        );
+        assert_eq!(
+            resolve_sidebar_visibility("toggle", SidebarVisibility::Auto, 2),
+            Ok(SidebarVisibility::Hidden)
+        );
+        assert_eq!(
+            resolve_sidebar_visibility("toggle", SidebarVisibility::Hidden, 1),
+            Ok(SidebarVisibility::Visible)
+        );
+        assert_eq!(
+            resolve_sidebar_visibility("off", SidebarVisibility::Auto, 2),
+            Ok(SidebarVisibility::Hidden)
+        );
+        assert_eq!(
+            resolve_sidebar_visibility("hide", SidebarVisibility::Visible, 1),
+            Ok(SidebarVisibility::Hidden)
+        );
+        assert_eq!(
+            resolve_sidebar_visibility("close", SidebarVisibility::Visible, 1),
+            Ok(SidebarVisibility::Hidden)
+        );
+        assert_eq!(
+            resolve_sidebar_visibility("on", SidebarVisibility::Auto, 1),
+            Ok(SidebarVisibility::Visible)
+        );
+        assert_eq!(
+            resolve_sidebar_visibility("show", SidebarVisibility::Hidden, 1),
+            Ok(SidebarVisibility::Visible)
+        );
+        assert_eq!(
+            resolve_sidebar_visibility("open", SidebarVisibility::Hidden, 1),
+            Ok(SidebarVisibility::Visible)
+        );
+        assert_eq!(
+            resolve_sidebar_visibility("auto", SidebarVisibility::Hidden, 1),
+            Ok(SidebarVisibility::Auto)
+        );
+        assert_eq!(
+            resolve_sidebar_visibility("wat", SidebarVisibility::Auto, 1),
+            Err("usage: /sidebar [on|off|toggle|auto]".to_string())
         );
     }
 }
