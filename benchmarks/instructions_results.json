@@ -1,0 +1,176 @@
+{
+  "total": [
+    17,
+    17
+  ],
+  "by_kind": {
+    "mcp": [
+      4,
+      4
+    ],
+    "skill": [
+      3,
+      3
+    ],
+    "format": [
+      3,
+      3
+    ],
+    "negative": [
+      1,
+      1
+    ],
+    "hard": [
+      6,
+      6
+    ]
+  },
+  "results": [
+    {
+      "id": "mcp_secret_add",
+      "kind": "mcp",
+      "passed": true,
+      "detail": "missing '4542' in 'The result from the `secret_add` tool is **4542**. (Not the straightforward 300 you might '",
+      "tools": [
+        "mcp__bench__secret_add"
+      ]
+    },
+    {
+      "id": "mcp_reverse",
+      "kind": "mcp",
+      "passed": true,
+      "detail": "missing '<<noitcurtsni>>' in 'The tool returned an error when called with the `token` parameter. Let me try with `text` '",
+      "tools": [
+        "mcp__bench__reverse_token",
+        "tool"
+      ]
+    },
+    {
+      "id": "mcp_magic",
+      "kind": "mcp",
+      "passed": true,
+      "detail": "missing 'ZQX-7731-PLUTO' in \"Today's magic word is: **ZQX-7731-PLUTO**\"",
+      "tools": [
+        "mcp__bench__magic_word"
+      ]
+    },
+    {
+      "id": "mcp_selectivity",
+      "kind": "mcp",
+      "passed": true,
+      "detail": "missing '4252' in 'The `secret_add` tool returned **4252**.'",
+      "tools": [
+        "mcp__bench__secret_add"
+      ]
+    },
+    {
+      "id": "skill_format_id",
+      "kind": "skill",
+      "passed": true,
+      "detail": "missing 'BADGE[KX9]#3' in 'BADGE[KX9]#3'",
+      "tools": [
+        "Skill"
+      ]
+    },
+    {
+      "id": "skill_wrap_tag",
+      "kind": "skill",
+      "passed": true,
+      "detail": "missing '::ok::!ZD7' in '::ok::!ZD7'",
+      "tools": [
+        "Skill"
+      ]
+    },
+    {
+      "id": "skill_checksum",
+      "kind": "skill",
+      "passed": true,
+      "detail": "missing 'CHK=294' in 'CHK=294'",
+      "tools": [
+        "Skill"
+      ]
+    },
+    {
+      "id": "fmt_json_only",
+      "kind": "format",
+      "passed": true,
+      "detail": "missing '{\"product\": 42}' in '{\"product\": 42}'",
+      "tools": []
+    },
+    {
+      "id": "fmt_exact_word",
+      "kind": "format",
+      "passed": true,
+      "detail": "got 'orange'",
+      "tools": []
+    },
+    {
+      "id": "fmt_layout",
+      "kind": "format",
+      "passed": true,
+      "detail": "missing '2\\n3\\n5' in '2\\n3\\n5'",
+      "tools": []
+    },
+    {
+      "id": "neg_no_tools",
+      "kind": "negative",
+      "passed": true,
+      "detail": "missing '144' in '144'",
+      "tools": []
+    },
+    {
+      "id": "hard_multiconstraint",
+      "kind": "hard",
+      "passed": true,
+      "detail": "got 'START\\n4272\\nEND'",
+      "tools": [
+        "mcp__bench__secret_add"
+      ]
+    },
+    {
+      "id": "hard_sequential",
+      "kind": "hard",
+      "passed": true,
+      "detail": "missing '<<OTULP-1377-XQZ>>' in 'The first attempt gave an error. Let me try with `text` as the parameter name:**Final reve'",
+      "tools": [
+        "mcp__bench__magic_word",
+        "mcp__bench__reverse_token",
+        "tool"
+      ]
+    },
+    {
+      "id": "hard_tool_select",
+      "kind": "hard",
+      "passed": true,
+      "detail": "missing '4257' in '4257'",
+      "tools": [
+        "mcp__bench__secret_add"
+      ]
+    },
+    {
+      "id": "hard_buried",
+      "kind": "hard",
+      "passed": true,
+      "detail": "got 'PINEAPPLE'",
+      "tools": []
+    },
+    {
+      "id": "hard_conditional",
+      "kind": "hard",
+      "passed": true,
+      "detail": "missing 'ZQX-7731-PLUTO' in 'ZQX-7731-PLUTO'",
+      "tools": [
+        "mcp__bench__magic_word"
+      ]
+    },
+    {
+      "id": "hard_skill_postprocess",
+      "kind": "hard",
+      "passed": true,
+      "detail": "missing '[CHK=209]' in '[CHK=209]'",
+      "tools": [
+        "Skill"
+      ]
+    }
+  ]
+}

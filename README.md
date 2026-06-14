@@ -177,6 +177,27 @@ exploring (`Grep`/`Glob`/`ListDir`), reproducing with the test harness, then
 editing and re-running to verify — the same loop Claude uses. The harder and
 more agentic the task, the more decisive the harness is.
 
+### Instruction-following — MCP, Skills, and constraints
+
+A separate suite measures whether the agent actually *obeys* — invoking the
+right MCP tool, loading a skill and following its body's exact rule, and
+respecting output-format and negative ("don't use any tool") constraints. The
+checks are objective: each MCP tool returns an **unguessable** value (a hidden
+offset / a secret token) and each skill produces an **unguessable signature**,
+so a correct answer *proves* the tool/skill was actually used as instructed.
+
+| Kind | Examples | Tasks | Claude (ref.) | Zode + DeepSeek-v4-pro |
+|------|----------|:-----:|:-------------:|:----------------------:|
+| MCP tools | call the named tool; use it even for trivial math | 4 | 100% | **100%** |
+| Skills | load skill + obey its rule exactly | 3 | 100% | **100%** |
+| Format / negative | JSON-only, exact word, layout, "use no tools" | 4 | 100% | **100%** |
+| Hard | multi-tool **sequencing**, **buried** requirement, conditional tool use, skill + post-processing | 6 | 100% | **100%** |
+| **Total** | | **17** | **100%** | **100%** (51/51, 3 runs) |
+
+Zode + DeepSeek invoked the correct MCP tool / skill and obeyed every format and
+negative constraint in all 3 runs — including chaining two MCP tools in order
+and pulling the one real instruction out of a paragraph of distractor text.
+
 **Efficiency.** Because Zode keeps the system-prompt + tool-schema prefix
 byte-stable, DeepSeek serves it from its prompt cache: a steady-state session
 measured a **93% input-token cache-hit rate** (`/cost` reports it live). The
@@ -195,6 +216,7 @@ ZODE_CONFIG_DIR=~/.zode python3 benchmarks/agentic.py    --track both   # agenti
 ZODE_CONFIG_DIR=~/.zode python3 benchmarks/hardbugs.py   --track both   # tricky bugs
 ZODE_CONFIG_DIR=~/.zode python3 benchmarks/complex.py    --track both   # complex multi-file
 ZODE_CONFIG_DIR=~/.zode python3 benchmarks/selfverify.py                # one-shot gap → agentic
+ZODE_CONFIG_DIR=~/.zode python3 benchmarks/instructions.py              # MCP / Skills / constraints
 ```
 
 The suites, hidden graders, Claude's reference solutions, and the runners live in
