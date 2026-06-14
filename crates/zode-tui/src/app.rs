@@ -22,6 +22,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use zode_core::approval::{ApprovalReceiver, ApprovalRequest};
+use zode_core::question::{QuestionReceiver, QuestionRequest};
 use zode_core::bg_shells::BgShell;
 use zode_core::commands::parse_slash;
 use zode_core::config::ConfigManager;
@@ -36,6 +37,7 @@ use crate::ui::chat::{ChatRenderMeta, ChatView};
 use crate::ui::dialog::connect::{ConnectAction, ConnectDialog, ConnectStage};
 use crate::ui::dialog::permission::PermissionDialog;
 use crate::ui::dialog::plugin_picker::PluginPicker;
+use crate::ui::dialog::question::QuestionDialog;
 use crate::ui::dialog::session_picker::SessionPicker;
 use crate::ui::dialog::settings::{SettingsAction, SettingsDialog, SettingsLevel};
 use crate::ui::dialog::tasks_panel::TasksPanel;
@@ -79,6 +81,10 @@ pub struct TuiApp {
     approval_rx: ApprovalReceiver,
     active_dialog: Option<PermissionDialog>,
     pending_requests: VecDeque<ApprovalRequest>,
+    /// AskUserQuestion channel + its modal (parallel to the approval path).
+    question_rx: QuestionReceiver,
+    active_question: Option<QuestionDialog>,
+    pending_questions: VecDeque<QuestionRequest>,
     autocomplete: Autocomplete,
     completion_hint: Option<CompletionHint>,
     settings: Option<SettingsDialog>,
@@ -101,6 +107,7 @@ impl TuiApp {
         template: EngineTemplate,
         ui: UiConfig,
         approval_rx: ApprovalReceiver,
+        question_rx: QuestionReceiver,
         resumed_id: Option<String>,
     ) -> Self {
         let mut theme_store = ThemeStore::with_builtins();
@@ -147,6 +154,9 @@ impl TuiApp {
             approval_rx,
             active_dialog: None,
             pending_requests: VecDeque::new(),
+            question_rx,
+            active_question: None,
+            pending_questions: VecDeque::new(),
             autocomplete: Autocomplete::new(),
             completion_hint: None,
             settings: None,
@@ -254,6 +264,16 @@ impl TuiApp {
         }
         let cwd = self.active_tab().engine.cwd.clone();
         PermissionDialog::new(req, cwd)
+    }
+
+    /// Show a question modal, focusing the tab that asked (its `source` id).
+    fn open_question(&mut self, req: QuestionRequest) {
+        if let Some(src) = req.source.as_deref().and_then(|s| s.parse::<usize>().ok()) {
+            if let Some(pos) = self.tabs.iter().position(|t| t.id == src) {
+                self.active = pos;
+            }
+        }
+        self.active_question = Some(QuestionDialog::new(req));
     }
 
     /// Rebuild the active tab's engine from `template` (a model / provider /
@@ -505,6 +525,20 @@ impl TuiApp {
                         self.pending_requests.push_back(req);
                     }
                 }
+                Some(req) = self.question_rx.next() => {
+                    // A question is a modal like an approval: clear overlays so
+                    // it can't be hidden, then show it (or queue if one's up).
+                    self.settings = None;
+                    self.connect = None;
+                    self.session_picker = None;
+                    self.tasks_panel = None;
+                    self.show_help = false;
+                    if self.active_question.is_none() {
+                        self.open_question(req);
+                    } else {
+                        self.pending_questions.push_back(req);
+                    }
+                }
                 _ = ticker.tick() => {
                     self.status.tick();
                     if let Some(t) = &mut self.toast {
@@ -641,6 +675,9 @@ impl TuiApp {
         if let Some(toast) = &self.toast {
             toast.render(f, area, &theme);
         }
+        if let Some(q) = &self.active_question {
+            q.render(f, area, &theme);
+        }
         if let Some(dialog) = &self.active_dialog {
             dialog.render(f, area, &theme);
         }
@@ -666,6 +703,17 @@ impl TuiApp {
                 // Show the next queued request, focusing ITS source tab/cwd.
                 let next = self.pending_requests.pop_front();
                 self.active_dialog = next.map(|r| self.open_approval(r));
+            }
+            return;
+        }
+
+        // 1b. Question modal captures input until answered/dismissed.
+        if let Some(q) = &mut self.active_question {
+            if q.on_key(key.code) {
+                self.active_question = None;
+                if let Some(next) = self.pending_questions.pop_front() {
+                    self.open_question(next);
+                }
             }
             return;
         }

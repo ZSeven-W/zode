@@ -107,6 +107,7 @@ impl ZodeEngine {
         gate: Arc<dyn ApprovalGate>,
         sandbox: Option<crate::sandbox::SandboxConfig>,
         date: &str,
+        question_tool: Option<Arc<dyn Tool>>,
     ) -> Result<Self, CoreError> {
         let provider = build_provider(&cfg.provider)?;
         let model = cfg
@@ -147,6 +148,12 @@ impl ZodeEngine {
 
         // Git tools (Zode product tools, not in agent-tools-code).
         for tool in crate::tools::git::all_git_tools() {
+            base.register(tool);
+        }
+
+        // AskUserQuestion, only when a UI question channel is wired. Read-only
+        // (never permission-gated) and not in any plugin group (always-on).
+        if let Some(tool) = question_tool {
             base.register(tool);
         }
 
@@ -425,6 +432,9 @@ pub struct EngineTemplate {
     cwd: PathBuf,
     /// Interactive approval channel (TUI). `None` → always bypass.
     queue: Option<ApprovalQueue>,
+    /// Interactive question channel (TUI) for `AskUserQuestion`. `None` → the
+    /// tool isn't registered (no UI to answer it).
+    question_queue: Option<crate::question::QuestionQueue>,
     /// When true, tools auto-approve (BypassGate) regardless of `queue`.
     yolo: bool,
     sandbox: Option<crate::sandbox::SandboxConfig>,
@@ -444,10 +454,21 @@ impl EngineTemplate {
             cfg,
             cwd,
             queue,
+            question_queue: None,
             yolo,
             sandbox,
             date,
         }
+    }
+
+    /// Wire the interactive question channel (TUI). Carried across reassembly
+    /// clones, so `AskUserQuestion` survives provider/model/plugin swaps.
+    pub fn with_question_queue(
+        mut self,
+        queue: Option<crate::question::QuestionQueue>,
+    ) -> Self {
+        self.question_queue = queue;
+        self
     }
 
     /// Assemble a fresh engine using the template's default cwd and no source
@@ -466,11 +487,24 @@ impl EngineTemplate {
         label: Option<String>,
     ) -> Result<ZodeEngine, CoreError> {
         let gate: Arc<dyn ApprovalGate> = match (&self.queue, self.yolo) {
-            (Some(q), false) => Arc::new(QueueGate::with_label(q.clone(), label)),
+            (Some(q), false) => Arc::new(QueueGate::with_label(q.clone(), label.clone())),
             _ => Arc::new(BypassGate),
         };
+        // AskUserQuestion is registered only when a UI question channel exists.
+        let question_tool: Option<Arc<dyn Tool>> = self.question_queue.as_ref().map(|q| {
+            Arc::new(crate::question::AskUserQuestionTool::new(q.clone(), label.clone()))
+                as Arc<dyn Tool>
+        });
         let cwd = cwd_override.unwrap_or_else(|| self.cwd.clone());
-        ZodeEngine::assemble(&self.cfg, cwd, gate, self.sandbox.clone(), &self.date).await
+        ZodeEngine::assemble(
+            &self.cfg,
+            cwd,
+            gate,
+            self.sandbox.clone(),
+            &self.date,
+            question_tool,
+        )
+        .await
     }
 
     pub fn cwd(&self) -> &std::path::Path {
@@ -654,6 +688,7 @@ mod tests {
             Arc::new(BypassGate),
             None,
             "2026-06-13",
+            None,
         )
         .await
         .unwrap();
@@ -680,6 +715,7 @@ mod tests {
             Arc::new(BypassGate),
             None,
             "2026-06-13",
+            None,
         )
         .await
         .unwrap();
@@ -701,6 +737,7 @@ mod tests {
             Arc::new(BypassGate),
             None,
             "2026-06-13",
+            None,
         )
         .await
         .unwrap();
@@ -719,6 +756,7 @@ mod tests {
             Arc::new(BypassGate),
             None,
             "2026-06-13",
+            None,
         )
         .await
         .unwrap();
@@ -737,6 +775,7 @@ mod tests {
             Arc::new(BypassGate),
             None,
             "2026-06-13",
+            None,
         )
         .await
         .unwrap();

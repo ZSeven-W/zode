@@ -96,9 +96,13 @@ async fn run(args: Args) -> i32 {
     // over this one channel; --yolo makes the gate bypass. The queue is kept
     // even under --yolo so `/yolo` can be toggled back off at runtime.
     let (queue, approval_rx) = zode_core::approval::approval_queue();
+    // Parallel channel for the AskUserQuestion tool — the UI drains it like the
+    // approval channel, but it carries a single-choice question, not an allow/deny.
+    let (question_queue, question_rx) = zode_core::question::question_queue();
     // The TUI keeps a template so Ctrl+T / resume / hot-switch can (re)assemble
     // engines.
-    let template = EngineTemplate::new(cfg.clone(), cwd, Some(queue), args.yolo, sandbox, today);
+    let template = EngineTemplate::new(cfg.clone(), cwd, Some(queue), args.yolo, sandbox, today)
+        .with_question_queue(Some(question_queue));
     // Tab 0 is assembled here; the app assigns it id 0, so label it "0".
     // Resume in the session's original directory when it still exists.
     let resume_meta = resolve_resume_target(&args);
@@ -119,7 +123,7 @@ async fn run(args: Args) -> i32 {
         sandbox: args.sandbox,
         provider_names: cfg.providers.keys().cloned().collect(),
     };
-    match zode_tui::TuiApp::new(engine, template, ui, approval_rx, resumed_id)
+    match zode_tui::TuiApp::new(engine, template, ui, approval_rx, question_rx, resumed_id)
         .run()
         .await
     {
@@ -148,7 +152,9 @@ async fn build(
     sandbox: Option<zode_core::sandbox::SandboxConfig>,
     date: &str,
 ) -> Option<ZodeEngine> {
-    match ZodeEngine::assemble(cfg, cwd, gate, sandbox, date).await {
+    // Headless surfaces have no UI to answer questions, so AskUserQuestion is
+    // not registered (last arg None).
+    match ZodeEngine::assemble(cfg, cwd, gate, sandbox, date, None).await {
         Ok(e) => Some(e),
         Err(e) => {
             eprintln!("zode: {e}");

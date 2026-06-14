@@ -20,6 +20,7 @@ pub mod lsp;
 pub mod mcp;
 pub mod plugin;
 pub mod provider;
+pub mod question;
 pub mod sandbox;
 pub mod session_meta;
 pub mod skills;
