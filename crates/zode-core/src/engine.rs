@@ -333,6 +333,16 @@ impl ZodeEngine {
 
         // Clone before `model` is moved into the struct's `model` field below.
         let model_for_cost = model.clone();
+        // Seed the price catalog with the active provider's configured prices
+        // (keyed on the exact model id) so models the built-ins don't know —
+        // e.g. DeepSeek — get a real cost instead of "n/a". Display in the
+        // configured currency (USD default).
+        let mut catalog = agent::cost::ModelPriceCatalog::with_defaults();
+        if let Some(prices) = cfg.provider.price_overrides() {
+            catalog.insert(model_for_cost.clone(), prices);
+        }
+        let currency_code = cfg.currency.as_deref().unwrap_or("USD");
+        let cost = Arc::new(CostState::new_with(model_for_cost, catalog, currency_code));
 
         Ok(Self {
             provider,
@@ -355,7 +365,7 @@ impl ZodeEngine {
             skills,
             mcp,
             lsp,
-            cost: Arc::new(CostState::new(model_for_cost)),
+            cost,
             plugins,
             all_mcp_servers,
             all_skill_meta,
@@ -677,6 +687,7 @@ mod tests {
                 base_url: Some("https://api.minimaxi.com/anthropic/v1".into()),
                 model: Some("MiniMax-M1".into()),
                 dialect: None,
+                ..Default::default()
             },
             ..Default::default()
         }
@@ -730,6 +741,7 @@ mod tests {
             base_url: Some("https://api.deepseek.com/v1".into()),
             model: Some("deepseek-v4-pro".into()),
             dialect: Some("deepseek".into()),
+            ..Default::default()
         });
 
         assert_eq!(switched.model(), Some("deepseek-v4-pro"));

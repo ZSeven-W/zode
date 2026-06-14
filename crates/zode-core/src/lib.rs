@@ -10,6 +10,7 @@ pub mod bg_shells;
 pub mod commands;
 pub mod config;
 pub mod cost;
+pub mod currency;
 pub mod engine;
 pub mod error;
 pub mod gated_tool;

@@ -109,6 +109,7 @@ mod tests {
             base_url: Some("https://api.minimaxi.com/anthropic/v1".into()),
             model: Some("MiniMax-M1".into()),
             dialect: None,
+            ..Default::default()
         };
         let p = build_provider(&cfg).unwrap();
         assert_eq!(p.id(), "anthropic");

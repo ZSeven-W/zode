@@ -131,6 +131,7 @@ mod tests {
             base_url: Some("https://api.minimaxi.com/anthropic/v1".into()),
             model: Some("MiniMax-M1".into()),
             dialect: None,
+            ..Default::default()
         })
         .unwrap()
     }

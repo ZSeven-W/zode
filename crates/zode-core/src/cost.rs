@@ -7,17 +7,30 @@ use agent::cost::{CostTracker, ModelPriceCatalog};
 use agent::stream::Event;
 use tokio::sync::Mutex;
 
+use crate::currency::Currency;
+
 pub struct CostState {
     model: String,
     tracker: Mutex<CostTracker>,
+    /// Display currency; the USD total is converted for `/cost` + the sidebar.
+    currency: Currency,
 }
 
 impl CostState {
+    /// Default catalog (Anthropic/OpenAI built-ins), USD display.
     pub fn new(model: String) -> Self {
-        let catalog = Arc::new(ModelPriceCatalog::with_defaults());
+        Self::new_with(model, ModelPriceCatalog::with_defaults(), "USD")
+    }
+
+    /// Build with a (possibly price-overridden) catalog and a display currency.
+    /// The engine seeds the catalog with the active provider's configured
+    /// prices so models the built-ins don't know (e.g. DeepSeek) still get a
+    /// cost instead of "n/a".
+    pub fn new_with(model: String, catalog: ModelPriceCatalog, currency_code: &str) -> Self {
         Self {
             model,
-            tracker: Mutex::new(CostTracker::new(catalog)),
+            tracker: Mutex::new(CostTracker::new(Arc::new(catalog))),
+            currency: Currency::from_code(currency_code),
         }
     }
 
@@ -84,7 +97,7 @@ impl CostState {
             format!(
                 "model: {}\ntokens: ↑{input} ↓{output}{hit}\ncost: {}",
                 self.model,
-                snap.format_total_usd()
+                self.currency.format(snap.total_usd())
             )
         }
     }
@@ -96,7 +109,7 @@ impl CostState {
         if snap.has_unknown_models() {
             "n/a".to_string()
         } else {
-            snap.format_total_usd()
+            self.currency.format(snap.total_usd())
         }
     }
 }
@@ -124,6 +137,39 @@ mod tests {
         assert!(report.to_lowercase().contains("token"), "{report}");
         assert!(report.contains("100"));
         assert!(report.contains("50"));
+    }
+
+    #[tokio::test]
+    async fn priced_override_yields_real_cost_not_na() {
+        use agent::cost::{ModelPriceCatalog, ModelPrices};
+        // A model the built-ins don't know, with config-supplied prices.
+        let mut catalog = ModelPriceCatalog::with_defaults();
+        catalog.insert(
+            "deepseek-v4-pro",
+            ModelPrices::from_usd_per_mtok(0.3, 1.2, 0.0, 0.0),
+        );
+        let cost = CostState::new_with("deepseek-v4-pro".into(), catalog, "USD");
+        cost.observe(&usage(1_000_000, 1_000_000)).await; // 1M in + 1M out
+        let report = cost.report().await;
+        // 1M*$0.30/MTok + 1M*$1.20/MTok = $1.50.
+        assert!(report.contains("cost: $1.50"), "{report}");
+        assert!(!report.contains("n/a"), "{report}");
+        assert!(!report.contains("no price data"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn cost_converts_to_configured_currency() {
+        use agent::cost::{ModelPriceCatalog, ModelPrices};
+        let mut catalog = ModelPriceCatalog::with_defaults();
+        catalog.insert(
+            "deepseek-v4-pro",
+            ModelPrices::from_usd_per_mtok(0.3, 1.2, 0.0, 0.0),
+        );
+        let cost = CostState::new_with("deepseek-v4-pro".into(), catalog, "CNY");
+        cost.observe(&usage(1_000_000, 1_000_000)).await;
+        let report = cost.report().await;
+        // $1.50 * 7.2 = ¥10.80.
+        assert!(report.contains("¥10.80"), "{report}");
     }
 
     #[tokio::test]

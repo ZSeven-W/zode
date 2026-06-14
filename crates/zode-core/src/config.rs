@@ -32,12 +32,43 @@ pub struct ProviderConfig {
     pub model: Option<String>,
     /// openai dialect: standard | deepseek | moonshot | openrouter
     pub dialect: Option<String>,
+    /// Per-provider token prices in USD per million tokens ($/MTok — the form
+    /// providers publish). Optional so cost is computed for models the built-in
+    /// catalog doesn't know (e.g. DeepSeek), instead of showing "cost n/a". The
+    /// displayed cost is converted to the configured `currency` (see config).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_price: Option<f64>,
 }
 
 impl ProviderConfig {
     /// Effective provider kind (defaults to Anthropic when unset).
     pub fn kind(&self) -> ProviderKind {
         self.r#type.unwrap_or_default()
+    }
+
+    /// Per-provider price overrides as agent-rs `ModelPrices`, if any price
+    /// field is set. Unset rates default to 0 (e.g. no cache pricing given →
+    /// cache tokens are free). Units are $/MTok.
+    pub fn price_overrides(&self) -> Option<agent::cost::ModelPrices> {
+        if self.input_price.is_none()
+            && self.output_price.is_none()
+            && self.cache_read_price.is_none()
+            && self.cache_write_price.is_none()
+        {
+            return None;
+        }
+        Some(agent::cost::ModelPrices::from_usd_per_mtok(
+            self.input_price.unwrap_or(0.0),
+            self.output_price.unwrap_or(0.0),
+            self.cache_read_price.unwrap_or(0.0),
+            self.cache_write_price.unwrap_or(0.0),
+        ))
     }
 }
 
@@ -88,6 +119,12 @@ pub struct ZodeConfig {
     /// Named providers; `--provider <name>` selects one into `provider`.
     pub providers: HashMap<String, ProviderConfig>,
     pub theme: Option<String>,
+    /// Display currency for cost (e.g. "USD", "CNY", "EUR"). `None` → USD.
+    /// Per-provider prices are in USD/MTok; the total is converted for display.
+    pub currency: Option<String>,
+    /// UI language code (e.g. "en", "zh"). `None` → English. (Settings picker
+    /// + full UI translation land in a follow-up; the value is read here.)
+    pub language: Option<String>,
     pub permissions: PermissionsConfig,
     pub max_output_tokens: Option<u32>,
     /// Sampling temperature. `None` uses the provider default; a low value
