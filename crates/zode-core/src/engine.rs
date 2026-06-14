@@ -380,6 +380,26 @@ impl EngineTemplate {
         self.cfg.provider.model.as_deref()
     }
 
+    pub fn model_ids(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(model) = self.cfg.provider.model.as_deref() {
+            out.push(model.to_string());
+        }
+
+        let mut provider_models: Vec<String> = self
+            .cfg
+            .providers
+            .values()
+            .filter_map(|p| p.model.as_deref())
+            .filter(|model| !out.iter().any(|existing| existing == model))
+            .map(str::to_string)
+            .collect();
+        provider_models.sort();
+        provider_models.dedup();
+        out.extend(provider_models);
+        out
+    }
+
     pub fn yolo(&self) -> bool {
         self.yolo
     }
@@ -440,6 +460,38 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn template_model_ids_include_current_and_named_provider_models() {
+        let mut cfg = test_cfg();
+        cfg.providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                model: Some("deepseek-chat".into()),
+                ..Default::default()
+            },
+        );
+        cfg.providers.insert(
+            "duplicate".into(),
+            ProviderConfig {
+                model: Some("MiniMax-M1".into()),
+                ..Default::default()
+            },
+        );
+        let template = EngineTemplate::new(
+            cfg,
+            std::path::PathBuf::from("/tmp/zode"),
+            None,
+            false,
+            None,
+            "2026-06-14".into(),
+        );
+
+        assert_eq!(
+            template.model_ids(),
+            vec!["MiniMax-M1".to_string(), "deepseek-chat".to_string()]
+        );
     }
 
     #[tokio::test]

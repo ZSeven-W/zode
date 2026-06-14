@@ -700,6 +700,12 @@ impl TuiApp {
                     self.open_theme_picker();
                     return;
                 }
+                KeyCode::Enter if self.autocomplete.selected_name() == Some("model") => {
+                    self.input.take();
+                    self.autocomplete.dismiss();
+                    self.open_model_picker();
+                    return;
+                }
                 KeyCode::Tab | KeyCode::Enter => {
                     self.apply_completion();
                     return;
@@ -739,12 +745,20 @@ impl TuiApp {
         self.settings = Some(SettingsDialog::theme_picker(self.theme_ids()));
     }
 
+    fn open_model_picker(&mut self) {
+        self.settings = Some(SettingsDialog::model_picker(self.model_ids()));
+    }
+
     fn theme_ids(&self) -> Vec<String> {
         self.theme_store
             .list()
             .iter()
             .map(|t| t.id.clone())
             .collect()
+    }
+
+    fn model_ids(&self) -> Vec<String> {
+        self.template.model_ids()
     }
 
     async fn handle_settings_key(&mut self, code: KeyCode) {
@@ -798,6 +812,7 @@ impl TuiApp {
                 }
                 self.toast = Some(Toast::info(format!("theme → {id}")));
             }
+            SettingsAction::SetModel(id) => self.apply_model(&id).await,
             SettingsAction::SetProvider(name) => {
                 // Real hot switch: reassemble the active tab from the named
                 // provider, carrying the conversation over. Commit only on
@@ -833,6 +848,16 @@ impl TuiApp {
             self.input.insert_str(usage);
         }
         self.autocomplete.dismiss();
+    }
+
+    async fn apply_model(&mut self, id: &str) {
+        let t = self.template.with_model(id.to_string());
+        if self.reassemble_active(t.clone()).await {
+            self.template = t;
+            self.active_tab_mut()
+                .chat
+                .push_system(&format!("model → {id}"));
+        }
     }
 
     async fn submit(&mut self, text: &str, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
@@ -1033,18 +1058,9 @@ impl TuiApp {
             }
             "model" => {
                 if args.is_empty() {
-                    let m = self.active_tab().engine.model.clone();
-                    self.active_tab_mut()
-                        .chat
-                        .push_system(&format!("model: {m}"));
+                    self.open_model_picker();
                 } else {
-                    let t = self.template.with_model(args.to_string());
-                    if self.reassemble_active(t.clone()).await {
-                        self.template = t;
-                        self.active_tab_mut()
-                            .chat
-                            .push_system(&format!("model → {args}"));
-                    }
+                    self.apply_model(args).await;
                 }
             }
             "yolo" => {

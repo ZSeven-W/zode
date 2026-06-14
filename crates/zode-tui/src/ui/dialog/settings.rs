@@ -14,6 +14,7 @@ use crate::ui::centered;
 pub enum SettingsLevel {
     Top,
     Theme,
+    Model,
     Provider,
     Mode,
 }
@@ -21,6 +22,7 @@ pub enum SettingsLevel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsAction {
     SetTheme(String),
+    SetModel(String),
     SetProvider(String),
     SetMode(String),
 }
@@ -30,6 +32,7 @@ pub struct SettingsDialog {
     root_level: SettingsLevel,
     state: ListState,
     theme_ids: Vec<String>,
+    model_ids: Vec<String>,
     provider_names: Vec<String>,
     modes: Vec<String>,
 }
@@ -45,6 +48,7 @@ impl SettingsDialog {
             root_level: SettingsLevel::Top,
             state,
             theme_ids,
+            model_ids: Vec::new(),
             provider_names,
             modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
         }
@@ -58,6 +62,21 @@ impl SettingsDialog {
             root_level: SettingsLevel::Theme,
             state,
             theme_ids,
+            model_ids: Vec::new(),
+            provider_names: Vec::new(),
+            modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
+        }
+    }
+
+    pub fn model_picker(model_ids: Vec<String>) -> Self {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        Self {
+            level: SettingsLevel::Model,
+            root_level: SettingsLevel::Model,
+            state,
+            theme_ids: Vec::new(),
+            model_ids,
             provider_names: Vec::new(),
             modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
         }
@@ -75,6 +94,7 @@ impl SettingsDialog {
         match self.level {
             SettingsLevel::Top => TOP_ITEMS.iter().map(|s| s.to_string()).collect(),
             SettingsLevel::Theme => self.theme_ids.clone(),
+            SettingsLevel::Model => self.model_ids.clone(),
             SettingsLevel::Provider => self.provider_names.clone(),
             SettingsLevel::Mode => self.modes.clone(),
         }
@@ -123,6 +143,10 @@ impl SettingsDialog {
                 .theme_ids
                 .get(idx)
                 .map(|s| SettingsAction::SetTheme(s.clone())),
+            SettingsLevel::Model => self
+                .model_ids
+                .get(idx)
+                .map(|s| SettingsAction::SetModel(s.clone())),
             SettingsLevel::Provider => self
                 .provider_names
                 .get(idx)
@@ -151,7 +175,9 @@ impl SettingsDialog {
         let title = match self.level {
             SettingsLevel::Top => " Settings ",
             SettingsLevel::Theme if self.root_level == SettingsLevel::Theme => " Theme ",
+            SettingsLevel::Model if self.root_level == SettingsLevel::Model => " Model ",
             SettingsLevel::Theme => " Settings › Theme ",
+            SettingsLevel::Model => " Settings › Model ",
             SettingsLevel::Provider => " Settings › Provider ",
             SettingsLevel::Mode => " Settings › Permission mode ",
         };
@@ -209,6 +235,17 @@ mod tests {
         assert_eq!(
             d.confirm(),
             Some(SettingsAction::SetTheme("catppuccin-mocha".into()))
+        );
+    }
+
+    #[test]
+    fn model_picker_starts_at_model_root() {
+        let d = SettingsDialog::model_picker(vec!["MiniMax-M1".into(), "deepseek-chat".into()]);
+        assert_eq!(d.level(), SettingsLevel::Model);
+        assert!(d.is_root_level());
+        assert_eq!(
+            d.confirm(),
+            Some(SettingsAction::SetModel("MiniMax-M1".into()))
         );
     }
 
