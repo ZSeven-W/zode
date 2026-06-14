@@ -19,6 +19,8 @@ pub mod export;
 pub mod gated_tool;
 pub mod history;
 pub mod hooks_config;
+pub mod i18n;
+pub mod i18n_data;
 pub mod images;
 pub mod instructions;
 pub mod lsp;
