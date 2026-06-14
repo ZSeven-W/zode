@@ -247,11 +247,7 @@ async fn dispatch_command(
             }
         }
         "export" => {
-            let path = if args.is_empty() {
-                engine.cwd.join("zode-conversation.md")
-            } else {
-                std::path::PathBuf::from(args)
-            };
+            let path = zode_core::export::resolve_export_path(&engine.cwd, args);
             match std::fs::write(&path, engine.export_markdown()) {
                 Ok(()) => println!("(exported to {})", path.display()),
                 Err(e) => println!("(export failed: {e})"),

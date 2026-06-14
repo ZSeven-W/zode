@@ -20,12 +20,28 @@ async fn git_diff(cwd: &Path, extra: &[&str]) -> String {
     }
 }
 
+/// List untracked (and not-ignored) files, one per line. Empty if none / not a
+/// repo. `git diff` never shows these, so `/diff` would otherwise hide new
+/// files entirely.
+async fn untracked_files(cwd: &Path) -> String {
+    match tokio::process::Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(cwd)
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        _ => String::new(),
+    }
+}
+
 /// Combined working-tree diff: staged changes first (what a commit would
-/// record), then unstaged. Returns a friendly message when the tree is clean
-/// or the directory is not a git repository.
+/// record), then unstaged, then a list of untracked files. Returns a friendly
+/// message when the tree is clean or the directory is not a git repository.
 pub async fn working_tree_diff(cwd: &Path) -> String {
     let staged = git_diff(cwd, &["--staged"]).await;
     let unstaged = git_diff(cwd, &[]).await;
+    let untracked = untracked_files(cwd).await;
 
     let mut out = String::new();
     if !staged.trim().is_empty() {
@@ -41,6 +57,17 @@ pub async fn working_tree_diff(cwd: &Path) -> String {
         }
         out.push_str("# Unstaged changes\n");
         out.push_str(&unstaged);
+    }
+    if !untracked.trim().is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("# Untracked files\n");
+        for f in untracked.lines() {
+            out.push_str("  ");
+            out.push_str(f);
+            out.push('\n');
+        }
     }
     if out.trim().is_empty() {
         "(working tree clean — no changes to diff)".to_string()

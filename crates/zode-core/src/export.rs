@@ -3,7 +3,26 @@
 //! export: user/assistant turns become sections, tool calls + results are
 //! summarized inline, thinking is included as a blockquote.
 
+use std::path::{Path, PathBuf};
+
 use agent::message::{ContentBlock, Message, MessageStore, ToolResultContent};
+
+/// Resolve the `/export [path]` argument to a target file. Empty → a default
+/// file in `cwd`; a relative path → joined onto `cwd` (the active workspace,
+/// which may differ from the process launch dir for resumed/`--cwd` sessions);
+/// an absolute path → used as-is.
+pub fn resolve_export_path(cwd: &Path, arg: &str) -> PathBuf {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return cwd.join("zode-conversation.md");
+    }
+    let p = PathBuf::from(arg);
+    if p.is_absolute() {
+        p
+    } else {
+        cwd.join(p)
+    }
+}
 
 /// Truncate a one-line preview of a tool result / value for readability.
 fn preview(s: &str, max: usize) -> String {
@@ -122,5 +141,22 @@ mod tests {
     #[test]
     fn empty_store_is_just_the_header() {
         assert_eq!(store_to_markdown(&MessageStore::new()), "# Conversation\n\n");
+    }
+
+    #[test]
+    fn export_path_resolves_relative_to_cwd() {
+        let cwd = Path::new("/work/proj");
+        assert_eq!(
+            resolve_export_path(cwd, ""),
+            PathBuf::from("/work/proj/zode-conversation.md")
+        );
+        assert_eq!(
+            resolve_export_path(cwd, "out.md"),
+            PathBuf::from("/work/proj/out.md")
+        );
+        assert_eq!(
+            resolve_export_path(cwd, "/tmp/x.md"),
+            PathBuf::from("/tmp/x.md")
+        );
     }
 }

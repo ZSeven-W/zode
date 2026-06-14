@@ -256,6 +256,18 @@ impl ZodeConfig {
         if other.max_output_tokens.is_some() {
             self.max_output_tokens = other.max_output_tokens;
         }
+        if other.currency.is_some() {
+            self.currency = other.currency;
+        }
+        if other.language.is_some() {
+            self.language = other.language;
+        }
+        if other.goal.is_some() {
+            self.goal = other.goal;
+        }
+        if other.effort.is_some() {
+            self.effort = other.effort;
+        }
     }
 }
 

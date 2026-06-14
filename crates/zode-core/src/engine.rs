@@ -685,6 +685,17 @@ impl EngineTemplate {
         t
     }
 
+    /// Clone with the plugin enable/disable set re-read from disk (`/reload-plugins`).
+    /// Re-loads the effective config (global ⊕ project) for `cwd` and adopts its
+    /// `plugins.disabled`; all other in-session state is preserved. Falls back to
+    /// the current template unchanged if the config can't be loaded.
+    pub fn reload_plugins_from_disk(&self) -> Self {
+        match crate::config::ConfigManager::load(&self.cwd) {
+            Ok(fresh) => self.with_plugins_disabled(fresh.plugins.disabled),
+            Err(_) => self.clone(),
+        }
+    }
+
     /// The persistent goal injected into the system prompt (`/goal`).
     pub fn goal(&self) -> Option<&str> {
         self.cfg.goal.as_deref().filter(|g| !g.trim().is_empty())

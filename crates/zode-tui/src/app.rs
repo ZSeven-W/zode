@@ -1653,11 +1653,8 @@ impl TuiApp {
                 None => self.toast = Some(Toast::info("nothing to copy yet")),
             },
             "export" => {
-                let path = if args.trim().is_empty() {
-                    self.active_tab().engine.cwd.join("zode-conversation.md")
-                } else {
-                    std::path::PathBuf::from(args.trim())
-                };
+                let path =
+                    zode_core::export::resolve_export_path(&self.active_tab().engine.cwd, args);
                 let md = self.active_tab().engine.export_markdown();
                 match std::fs::write(&path, md) {
                     Ok(()) => {
@@ -1694,7 +1691,11 @@ impl TuiApp {
                 }
             }
             "reload-plugins" => {
-                if self.reassemble_active(self.template.clone()).await {
+                // Re-read plugins.disabled from disk (global ⊕ project) so
+                // out-of-band config edits take effect, then reassemble.
+                let t = self.template.reload_plugins_from_disk();
+                if self.reassemble_active(t.clone()).await {
+                    self.template = t;
                     self.active_tab_mut()
                         .chat
                         .push_system("reloaded — tools, MCP, skills, and LSP re-discovered");
