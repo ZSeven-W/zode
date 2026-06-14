@@ -19,7 +19,7 @@ pub struct ChromeAreas {
     pub status: Rect,
 }
 
-const TAB_RAIL_WIDTH: u16 = 18;
+const TAB_RAIL_WIDTH: u16 = 22;
 const MIN_WIDTH_FOR_TAB_RAIL: u16 = 60;
 
 #[derive(Debug, Clone, Copy)]
@@ -178,10 +178,10 @@ mod tests {
         let area = Rect::new(0, 0, 100, 30);
         let split = split_main(area, true);
         assert_eq!(split.header, Some(Rect::new(0, 0, 100, 1)));
-        assert_eq!(split.tabs, Some(Rect::new(82, 1, 18, 29)));
-        assert_eq!(split.chat, Rect::new(0, 1, 82, 24));
-        assert_eq!(split.composer, Rect::new(0, 25, 82, 4));
-        assert_eq!(split.status, Rect::new(0, 29, 82, 1));
+        assert_eq!(split.tabs, Some(Rect::new(78, 1, 22, 29)));
+        assert_eq!(split.chat, Rect::new(0, 1, 78, 24));
+        assert_eq!(split.composer, Rect::new(0, 25, 78, 4));
+        assert_eq!(split.status, Rect::new(0, 29, 78, 1));
     }
 
     #[test]
