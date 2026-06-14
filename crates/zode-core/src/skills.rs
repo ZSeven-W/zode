@@ -29,6 +29,12 @@ pub fn skills_dirs(cwd: &Path) -> Vec<PathBuf> {
 /// skipped; same-name skills from later dirs override earlier ones (insert
 /// replaces). Load warnings are logged via tracing.
 pub fn load_skills_from(dirs: &[PathBuf]) -> SkillRegistry {
+    load_skills_filtered(dirs, |_| true)
+}
+
+/// Like [`load_skills_from`], but only inserts skills for which `keep(name)`
+/// returns true — used to drop skills disabled via the plugin manager.
+pub fn load_skills_filtered(dirs: &[PathBuf], keep: impl Fn(&str) -> bool) -> SkillRegistry {
     let registry = SkillRegistry::new();
     for dir in dirs {
         if !dir.exists() {
@@ -40,7 +46,9 @@ pub fn load_skills_from(dirs: &[PathBuf]) -> SkillRegistry {
                     tracing::warn!("skill load warning in {}: {w:?}", dir.display());
                 }
                 for skill in outcome.skills {
-                    registry.insert(skill);
+                    if keep(&skill.name) {
+                        registry.insert(skill);
+                    }
                 }
             }
             Err(e) => tracing::warn!("skip skills dir {}: {e}", dir.display()),

@@ -52,6 +52,35 @@ pub struct PermissionsConfig {
     pub ask: Vec<String>,
 }
 
+/// Plugin enable/disable state. Plugins are on by default, so only the
+/// disabled ids are stored (e.g. `["tools:git", "mcp:foo", "lsp:rust"]`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PluginsConfig {
+    pub disabled: Vec<String>,
+}
+
+/// Configuration for the built-in LSP plugin: a language server per language
+/// key. The key (e.g. "rust", "python") is also the plugin id suffix
+/// (`lsp:rust`). `extensions` maps the server to the file types it handles.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LspConfig {
+    pub servers: HashMap<String, LspServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LspServerConfig {
+    /// Executable to spawn (e.g. "rust-analyzer", "pyright-langserver").
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// File extensions this server handles (e.g. ["rs"], ["py"]).
+    #[serde(default)]
+    pub extensions: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ZodeConfig {
@@ -69,6 +98,11 @@ pub struct ZodeConfig {
     /// cached across turns instead of re-billed every turn; OpenAI-compatible
     /// providers cache automatically.
     pub prompt_cache: Option<bool>,
+    /// Plugin enable/disable state (`/plugin` manages MCP, skills, tool groups,
+    /// LSP). Default-on, so this only records the disabled ones.
+    pub plugins: PluginsConfig,
+    /// Language-server configuration for the built-in LSP plugin.
+    pub lsp: LspConfig,
 
     // --- Legacy (Zig/TS-era) flat fields, read-only for backward compat.
     // Mapped into `provider` by `normalize_legacy()` and dropped on save

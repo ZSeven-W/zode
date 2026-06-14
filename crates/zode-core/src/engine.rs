@@ -35,8 +35,9 @@ use crate::gated_tool::PermissionGatedTool;
 use crate::history::{EditHistory, EditHistoryHook};
 use crate::hooks_config::load_hook_handlers;
 use crate::instructions::{build_system_prompt, discover_instructions, gather_env};
+use crate::plugin::PluginManager;
 use crate::provider::build_provider;
-use crate::skills::{load_skills_from, skills_dirs, skills_index, SkillTool};
+use crate::skills::{load_skills_filtered, load_skills_from, skills_dirs, skills_index, SkillTool};
 use crate::task_factory::{ParentToolsCell, ZodeTaskFactory};
 
 const EDIT_HISTORY_CAPACITY: usize = 50;
@@ -76,6 +77,14 @@ pub struct ZodeEngine {
     pub mcp: Option<Arc<agent::mcp::Lifecycle>>,
     /// Token/cost tracking (fed Usage events by the consumer; `/cost`).
     pub cost: Arc<CostState>,
+    /// Plugin enable/disable state (`/plugin`).
+    pub plugins: PluginManager,
+    /// All MCP server names discovered (incl. disabled), for the picker.
+    pub all_mcp_servers: Vec<String>,
+    /// All skills discovered (name, description; incl. disabled), for the picker.
+    pub all_skill_meta: Vec<(String, String)>,
+    /// Configured LSP language keys (for the picker).
+    pub lsp_langs: Vec<String>,
 }
 
 impl ZodeEngine {
@@ -109,6 +118,12 @@ impl ZodeEngine {
             .map_err(|e| CoreError::Other(format!("workspace policy: {e}")))?
             .into_arc();
 
+        // Plugin manager: which tool groups / MCP servers / skills / LSP
+        // servers are enabled (the `/plugin` picker toggles these).
+        let plugins = PluginManager::from_config(cfg);
+        let mut lsp_langs: Vec<String> = cfg.lsp.servers.keys().cloned().collect();
+        lsp_langs.sort();
+
         // 1. Default tools (fs/search/shell/web/notebook/todo) + the
         //    background-shell trio (not part of register_default). We pass
         //    a TodoState so we keep the handle (Phase 07) and avoid the
@@ -129,22 +144,40 @@ impl ZodeEngine {
             base.register(tool);
         }
 
-        // Skills: load the three-level SKILL.md tree, register the read-only
-        // Skill tool, and capture the index for the system prompt.
-        let skills = Arc::new(load_skills_from(&skills_dirs(&cwd)));
+        // Skills: load the three-level SKILL.md tree. Disabled skills are
+        // dropped from the registry + index, but the full list is kept for the
+        // /plugin picker.
+        let skill_dirs = skills_dirs(&cwd);
+        let mut all_skill_meta: Vec<(String, String)> = load_skills_from(&skill_dirs)
+            .list()
+            .iter()
+            .map(|s| (s.name.clone(), s.description.clone()))
+            .collect();
+        all_skill_meta.sort();
+        let skills = Arc::new(load_skills_filtered(&skill_dirs, |n| {
+            plugins.skill_enabled(n)
+        }));
         let skills_idx = skills_index(&skills);
         base.register(Arc::new(SkillTool::new(skills.clone())));
 
-        // MCP: connect configured servers (blocking at startup) and register
-        // a ZodeMcpTool per discovered tool. MCP tools are SafetyClass::Unknown
-        // so they go through the approval gate like other mutating tools.
+        // MCP: discover configured servers; connect only the enabled ones
+        // (disabled ones are still listed by /plugin). Register a ZodeMcpTool
+        // per discovered tool — they go through the approval gate.
+        let mut all_mcp_servers: Vec<String> = Vec::new();
         let mcp = match crate::mcp::discover_mcp_config(&cwd) {
-            Some(config) => {
-                let lifecycle = crate::mcp::connect(config).await;
-                for tool in crate::mcp::mcp_tools(&lifecycle) {
-                    base.register(tool);
+            Some(mut config) => {
+                all_mcp_servers = config.servers.keys().cloned().collect();
+                all_mcp_servers.sort();
+                config.servers.retain(|name, _| plugins.mcp_enabled(name));
+                if config.servers.is_empty() {
+                    None
+                } else {
+                    let lifecycle = crate::mcp::connect(config).await;
+                    for tool in crate::mcp::mcp_tools(&lifecycle) {
+                        base.register(tool);
+                    }
+                    Some(lifecycle)
                 }
-                Some(lifecycle)
             }
             None => None,
         };
@@ -202,6 +235,10 @@ impl ZodeEngine {
         ));
         base.register(Arc::new(TaskTool::new(task_factory)));
 
+        // Drop tools whose plugin group is disabled (Skill / ToolSearch / MCP
+        // tools are always-on and pass through).
+        let base = filter_enabled_tools(base, &plugins);
+
         // --sandbox: wrap Bash/BashRun so writes are confined to cwd. Done
         // before gate-wrapping so the final shape is
         // PermissionGatedTool(SandboxedBashTool(Bash)).
@@ -252,6 +289,10 @@ impl ZodeEngine {
             skills,
             mcp,
             cost: Arc::new(CostState::new(model_for_cost)),
+            plugins,
+            all_mcp_servers,
+            all_skill_meta,
+            lsp_langs,
         })
     }
 
@@ -430,6 +471,18 @@ impl EngineTemplate {
         t.cfg.provider = provider;
         Some(t)
     }
+}
+
+/// Re-register only the tools whose plugin group is enabled. Tools outside any
+/// group (Skill, ToolSearch, MCP tools) are always kept.
+fn filter_enabled_tools(src: ToolRegistry, plugins: &PluginManager) -> ToolRegistry {
+    let mut out = ToolRegistry::new();
+    for tool in src.list() {
+        if plugins.tool_enabled(tool.name()) {
+            out.register(tool);
+        }
+    }
+    out
 }
 
 /// Re-register every tool, wrapping mutating/destructive ones in a
