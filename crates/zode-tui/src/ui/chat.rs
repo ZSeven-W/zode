@@ -197,7 +197,14 @@ impl ChatView {
 
     fn render_message(&self, msg: &ChatMessage, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         match msg.role {
-            Role::User => self.render_user_block(&theme.icon_user, "You", &msg.text, theme, width),
+            Role::User => self.render_role_block(
+                &theme.icon_user,
+                "You",
+                &msg.text,
+                theme.user,
+                Style::default().fg(theme.fg_text),
+                width,
+            ),
             Role::Assistant => {
                 let mut out =
                     vec![self.role_header(&theme.icon_assistant, "Assistant", theme.assistant)];
@@ -217,42 +224,6 @@ impl ChatView {
                 Span::styled(msg.text.clone(), Style::default().fg(theme.fg_subtle)),
             ])],
         }
-    }
-
-    fn render_user_block(
-        &self,
-        icon: &str,
-        label: &str,
-        text: &str,
-        theme: &Theme,
-        width: u16,
-    ) -> Vec<Line<'static>> {
-        let mut out = vec![self.user_header(icon, label, theme)];
-        for line in text.lines().chain((text.is_empty()).then_some("")) {
-            out.extend(indent_line(
-                vec![Span::styled(
-                    line.to_string(),
-                    Style::default().fg(theme.fg_white),
-                )],
-                width,
-            ));
-        }
-        out
-    }
-
-    fn user_header(&self, icon: &str, label: &str, theme: &Theme) -> Line<'static> {
-        Line::from(vec![
-            Span::styled(
-                format!("{icon} "),
-                Style::default().fg(theme.user).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                label.to_string(),
-                Style::default()
-                    .fg(theme.fg_white)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])
     }
 
     fn render_role_block(
@@ -303,11 +274,6 @@ fn rail_markdown(src: &str, theme: &Theme, rail_color: Color, width: u16) -> Vec
 fn rail_line(spans: Vec<Span<'static>>, rail_color: Color, width: u16) -> Vec<Line<'static>> {
     let rail = Span::styled("│ ", Style::default().fg(rail_color));
     wrap_spans_with_prefix(spans, rail.clone(), rail, width)
-}
-
-fn indent_line(spans: Vec<Span<'static>>, width: u16) -> Vec<Line<'static>> {
-    let indent = Span::raw("  ");
-    wrap_spans_with_prefix(spans, indent.clone(), indent, width)
 }
 
 fn wrap_spans_with_prefix(
@@ -461,7 +427,7 @@ mod tests {
         assert!(content.contains("You"));
         assert!(content.contains("Assistant"));
         assert!(content.contains("System"));
-        assert!(content.contains("  hello"));
+        assert!(content.contains("│ hello"));
         assert!(content.contains("· Bash"));
     }
 
@@ -492,26 +458,34 @@ mod tests {
     }
 
     #[test]
-    fn user_messages_use_compact_indent_not_assistant_rail() {
+    fn user_messages_use_same_rail_layout_as_assistant() {
         let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
         let view = ChatView::new();
-        let msg = ChatMessage {
-            role: Role::User,
-            text: "hello".into(),
-        };
+        let user = view.render_message(
+            &ChatMessage {
+                role: Role::User,
+                text: "hello".into(),
+            },
+            &theme,
+            80,
+        );
+        let assistant = view.render_message(
+            &ChatMessage {
+                role: Role::Assistant,
+                text: "hello".into(),
+            },
+            &theme,
+            80,
+        );
 
-        let lines = view.render_message(&msg, &theme, 80);
-        let joined: String = lines
-            .iter()
-            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
-            .collect();
-        assert!(joined.contains("You"));
-        assert!(joined.contains("  hello"));
-        assert!(!joined.contains("│ hello"));
+        assert_eq!(user[1].spans[0].content, "│ ");
+        assert_eq!(assistant[1].spans[0].content, "│ ");
+        assert_eq!(user[1].spans[0].style.fg, Some(theme.user));
+        assert_eq!(assistant[1].spans[0].style.fg, Some(theme.assistant));
     }
 
     #[test]
-    fn user_header_label_uses_stronger_style_than_assistant_header() {
+    fn user_and_assistant_headers_use_matching_role_styles() {
         let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
         let view = ChatView::new();
 
@@ -532,8 +506,15 @@ mod tests {
             80,
         );
 
-        assert_eq!(user[0].spans[1].style.fg, Some(theme.fg_white));
+        assert_eq!(user[0].spans[1].style.fg, Some(theme.user));
         assert_eq!(assistant[0].spans[1].style.fg, Some(theme.assistant));
+    }
+
+    #[test]
+    fn minimal_theme_distinguishes_user_and_assistant_colors() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+
+        assert_ne!(theme.user, theme.assistant);
     }
 
     #[test]

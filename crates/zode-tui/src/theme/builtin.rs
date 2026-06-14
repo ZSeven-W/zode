@@ -86,7 +86,7 @@ pub fn minimal() -> Theme {
         accent: Color::Indexed(111),
         accent_secondary: Color::Indexed(60),
         user: Color::Indexed(111),
-        assistant: Color::Indexed(111),
+        assistant: Color::Indexed(147),
         system: Color::Indexed(221),
         separator: Color::Indexed(111),
         icon_logo: "⟢".into(),
