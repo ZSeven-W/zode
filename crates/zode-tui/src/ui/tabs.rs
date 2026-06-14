@@ -1,4 +1,4 @@
-//! Left session rail: one row per session tab. The active tab is highlighted;
+//! Right session rail: one row per session tab. The active tab is highlighted;
 //! a busy tab (turn in flight) is marked with a dot. Rendered only when more
 //! than one tab exists, so single-tab use looks unchanged.
 
@@ -52,7 +52,7 @@ pub fn render_tabs(f: &mut Frame, area: Rect, tabs: &[SessionTab], active: usize
         Paragraph::new(lines)
             .block(
                 Block::default()
-                    .borders(Borders::RIGHT)
+                    .borders(Borders::LEFT)
                     .border_style(Style::default().fg(theme.separator)),
             )
             .style(Style::default().bg(theme.bg_secondary)),

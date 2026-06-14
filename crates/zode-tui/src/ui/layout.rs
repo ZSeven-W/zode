@@ -65,13 +65,18 @@ pub fn split_main(area: Rect, show_tabs: bool) -> ChromeAreas {
     let header = Some(Rect::new(area.x, y, area.width, header_h));
     y = y.saturating_add(header_h);
 
-    let content_x = area.x.saturating_add(tabs_w);
+    let content_x = area.x;
     let content_w = area.width.saturating_sub(tabs_w);
     let content_y = y;
     let content_h = area.height.saturating_sub(header_h);
 
     let tabs = if tabs_w > 0 {
-        Some(Rect::new(area.x, content_y, tabs_w, content_h))
+        Some(Rect::new(
+            area.x.saturating_add(content_w),
+            content_y,
+            tabs_w,
+            content_h,
+        ))
     } else {
         None
     };
@@ -169,14 +174,14 @@ mod tests {
     }
 
     #[test]
-    fn split_main_allocates_header_tabs_chat_composer_status() {
+    fn split_main_allocates_header_right_tabs_chat_composer_status() {
         let area = Rect::new(0, 0, 100, 30);
         let split = split_main(area, true);
         assert_eq!(split.header, Some(Rect::new(0, 0, 100, 1)));
-        assert_eq!(split.tabs, Some(Rect::new(0, 1, 18, 29)));
-        assert_eq!(split.chat, Rect::new(18, 1, 82, 24));
-        assert_eq!(split.composer, Rect::new(18, 25, 82, 4));
-        assert_eq!(split.status, Rect::new(18, 29, 82, 1));
+        assert_eq!(split.tabs, Some(Rect::new(82, 1, 18, 29)));
+        assert_eq!(split.chat, Rect::new(0, 1, 82, 24));
+        assert_eq!(split.composer, Rect::new(0, 25, 82, 4));
+        assert_eq!(split.status, Rect::new(0, 29, 82, 1));
     }
 
     #[test]
