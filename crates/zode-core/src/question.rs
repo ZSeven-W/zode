@@ -115,6 +115,11 @@ impl AskUserQuestionTool {
                 "AskUserQuestion: 'options' must have at least 2 choices",
             ));
         }
+        if options.len() > 6 {
+            return Err(AgentError::other(
+                "AskUserQuestion: 'options' must have at most 6 choices",
+            ));
+        }
         Ok((question, options))
     }
 }
@@ -221,5 +226,20 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("at least 2"));
+    }
+
+    #[tokio::test]
+    async fn tool_rejects_too_many_options() {
+        let (queue, _rx) = question_queue();
+        let tool = AskUserQuestionTool::new(queue, None);
+        let ctx = ToolUseContext::new(std::env::temp_dir());
+        let err = tool
+            .call(
+                &ctx,
+                json!({ "question": "q", "options": ["1","2","3","4","5","6","7"] }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("at most 6"));
     }
 }
