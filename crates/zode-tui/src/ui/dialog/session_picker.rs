@@ -86,6 +86,27 @@ impl SessionPicker {
         self.state.select(Some(i));
     }
 
+    pub fn scroll_down(&mut self, rows: usize) {
+        let len = self.visible().len();
+        if len == 0 {
+            self.state.select(Some(0));
+            return;
+        }
+        let selected = self.state.selected().unwrap_or(0);
+        self.state
+            .select(Some(selected.saturating_add(rows).min(len - 1)));
+    }
+
+    pub fn scroll_up(&mut self, rows: usize) {
+        let len = self.visible().len();
+        if len == 0 {
+            self.state.select(Some(0));
+            return;
+        }
+        let selected = self.state.selected().unwrap_or(0).min(len - 1);
+        self.state.select(Some(selected.saturating_sub(rows)));
+    }
+
     /// Drop the given session id from the in-memory list (after the app has
     /// deleted the file), keeping the selection in range.
     pub fn remove(&mut self, id: &str) {
@@ -181,6 +202,17 @@ mod tests {
         p.next(); // select bbbb (index 1)
         p.remove("bbbbbbbb2");
         assert_eq!(p.visible().len(), 1);
+        assert_eq!(p.selected().unwrap().id, "aaaaaaaa1");
+    }
+
+    #[test]
+    fn wheel_scroll_clamps_without_wrapping() {
+        let mut p = SessionPicker::new(metas());
+
+        p.scroll_down(10);
+        assert_eq!(p.selected().unwrap().id, "bbbbbbbb2");
+
+        p.scroll_up(10);
         assert_eq!(p.selected().unwrap().id, "aaaaaaaa1");
     }
 }

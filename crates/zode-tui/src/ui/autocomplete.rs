@@ -150,8 +150,8 @@ impl Autocomplete {
             )
             .highlight_style(
                 Style::default()
-                    .bg(theme.system)
-                    .fg(theme.bg_primary)
+                    .bg(theme.accent)
+                    .fg(theme.bg_secondary)
                     .add_modifier(Modifier::BOLD),
             );
         f.render_stateful_widget(list, area, &mut self.state);
@@ -258,6 +258,28 @@ mod tests {
         assert!(content.contains("/theme"));
         assert!(content.contains("Switch the TUI theme"));
         assert!(!content.contains("Commands ·"));
+    }
+
+    #[test]
+    fn selected_row_uses_theme_accent_background() {
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("minimal"));
+        assert_ne!(theme.accent, theme.system);
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let input_area = Rect::new(0, 20, 100, 4);
+        let mut ac = Autocomplete::new();
+
+        ac.update("/plugin");
+        term.draw(|f| ac.render(f, input_area, &theme)).unwrap();
+
+        let buf = term.backend().buffer();
+        let (row, col) = (0..buf.area.height)
+            .find_map(|y| {
+                let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                row.find("/plugin").map(|x| (y, x as u16))
+            })
+            .expect("selected plugin row should render");
+        assert_eq!(buf[(col, row)].bg, theme.accent);
     }
 
     #[test]

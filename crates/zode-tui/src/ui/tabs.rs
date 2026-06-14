@@ -160,7 +160,8 @@ fn append_tab_rows(
 ) {
     let content_width = row_width.saturating_sub(2);
     let remaining_rows = area_height.saturating_sub(lines.len());
-    for (i, tab) in tabs.iter().enumerate().take(remaining_rows) {
+    let start = tab_window_start(active, tabs.len(), remaining_rows);
+    for (i, tab) in tabs.iter().enumerate().skip(start).take(remaining_rows) {
         let row_active = i == active;
         let row_bg = if row_active {
             theme.bg_input
@@ -204,6 +205,16 @@ fn append_tab_rows(
             Span::styled(parts.padding, Style::default().bg(row_bg)),
         ]));
     }
+}
+
+fn tab_window_start(active: usize, total: usize, visible_rows: usize) -> usize {
+    if total <= visible_rows || visible_rows == 0 {
+        return 0;
+    }
+    let active = active.min(total - 1);
+    active
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(total - visible_rows)
 }
 
 fn render_sidebar_block(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>, theme: &Theme) {
@@ -338,5 +349,14 @@ mod tests {
         assert!(joined.contains("Minimal"));
         assert!(joined.contains("target/debug"));
         assert!(joined.contains("sandbox"));
+    }
+
+    #[test]
+    fn tab_window_start_keeps_active_tab_visible() {
+        assert_eq!(tab_window_start(0, 8, 4), 0);
+        assert_eq!(tab_window_start(3, 8, 4), 0);
+        assert_eq!(tab_window_start(4, 8, 4), 1);
+        assert_eq!(tab_window_start(7, 8, 4), 4);
+        assert_eq!(tab_window_start(7, 8, 12), 0);
     }
 }

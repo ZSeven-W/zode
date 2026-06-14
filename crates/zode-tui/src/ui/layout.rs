@@ -49,6 +49,7 @@ pub fn split_main(area: Rect, show_tabs: bool) -> ChromeAreas {
         0
     };
     let status_h = 1;
+    let gutter_h = u16::from(area.height >= 8);
     let reserved_without_chat = header_h + status_h;
     let remaining = area.height.saturating_sub(reserved_without_chat);
     let composer_h = if area.height >= 8 {
@@ -58,7 +59,7 @@ pub fn split_main(area: Rect, show_tabs: bool) -> ChromeAreas {
     };
     let chat_h = area
         .height
-        .saturating_sub(header_h + composer_h + status_h)
+        .saturating_sub(header_h + composer_h + gutter_h + status_h)
         .max(1);
 
     let mut y = area.y;
@@ -83,6 +84,7 @@ pub fn split_main(area: Rect, show_tabs: bool) -> ChromeAreas {
 
     let chat = Rect::new(content_x, y, content_w, chat_h);
     y = y.saturating_add(chat_h);
+    y = y.saturating_add(gutter_h);
     let composer = Rect::new(content_x, y, content_w, composer_h);
     y = y.saturating_add(composer_h);
     let status = Rect::new(content_x, y, content_w, status_h);
@@ -179,9 +181,21 @@ mod tests {
         let split = split_main(area, true);
         assert_eq!(split.header, Some(Rect::new(0, 0, 100, 1)));
         assert_eq!(split.tabs, Some(Rect::new(64, 1, 36, 29)));
-        assert_eq!(split.chat, Rect::new(0, 1, 64, 24));
+        assert_eq!(split.chat, Rect::new(0, 1, 64, 23));
         assert_eq!(split.composer, Rect::new(0, 25, 64, 4));
         assert_eq!(split.status, Rect::new(0, 29, 64, 1));
+    }
+
+    #[test]
+    fn split_main_leaves_gutter_between_chat_and_composer() {
+        let area = Rect::new(0, 0, 100, 30);
+        let split = split_main(area, true);
+        let chat_bottom = split.chat.y.saturating_add(split.chat.height);
+        assert_eq!(
+            split.composer.y.saturating_sub(chat_bottom),
+            1,
+            "chat and composer should not touch"
+        );
     }
 
     #[test]
@@ -189,7 +203,7 @@ mod tests {
         let area = Rect::new(0, 0, 95, 30);
         let split = split_main(area, true);
         assert_eq!(split.tabs, None);
-        assert_eq!(split.chat, Rect::new(0, 1, 95, 24));
+        assert_eq!(split.chat, Rect::new(0, 1, 95, 23));
         assert_eq!(split.composer, Rect::new(0, 25, 95, 4));
         assert_eq!(split.status, Rect::new(0, 29, 95, 1));
     }

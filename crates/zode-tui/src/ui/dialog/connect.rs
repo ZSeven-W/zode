@@ -431,6 +431,7 @@ fn provider(
         base_url: base_url.map(str::to_string),
         model: model.map(str::to_string),
         dialect: dialect.map(str::to_string),
+        ..Default::default()
     }
 }
 

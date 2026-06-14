@@ -50,6 +50,12 @@ impl CommandRegistry {
     }
 }
 
+impl Default for CommandRegistry {
+    fn default() -> Self {
+        Self::with_builtins()
+    }
+}
+
 /// True if `needle` is a subsequence of `haystack` (case-insensitive).
 fn subsequence(needle: &str, haystack: &str) -> bool {
     let mut hi = haystack.chars().map(|c| c.to_ascii_lowercase());
@@ -122,6 +128,19 @@ mod tests {
             .expect("/sidebar command should be registered");
         assert_eq!(sidebar.usage, "/sidebar [on|off|toggle|auto]");
         assert_eq!(sidebar.description, "Show or hide the sidebar");
+    }
+
+    #[test]
+    fn image_and_vision_commands_are_registered() {
+        let reg = CommandRegistry::default();
+        assert_eq!(
+            reg.get("image").unwrap().usage,
+            "/image <path>|list|remove <n>|clear"
+        );
+        assert_eq!(
+            reg.get("vision").unwrap().usage,
+            "/vision [mode|provider|model|prompt]"
+        );
     }
 
     #[test]

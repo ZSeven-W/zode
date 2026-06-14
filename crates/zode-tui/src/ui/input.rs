@@ -3,7 +3,7 @@
 //! keys here.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
@@ -66,32 +66,41 @@ impl InputBox {
         mode: Mode,
         completion_placeholder: Option<&str>,
     ) {
-        let border_color = match mode {
+        let status_color = match mode {
             Mode::Ready => theme.accent_secondary,
             Mode::Thinking => theme.system,
             Mode::Streaming => theme.accent,
             Mode::Error => Color::Red,
         };
-        let title = Line::styled(
-            " prompt ",
-            Style::default()
-                .fg(border_color)
-                .add_modifier(Modifier::BOLD),
+        f.render_widget(
+            Paragraph::new("").style(Style::default().bg(theme.bg_input)),
+            area,
         );
-        let hint = Line::styled(
-            " Enter send · Shift/Alt+Enter newline ",
-            Style::default().fg(theme.fg_subtle),
-        );
+        if area.width > 0 && area.height > 0 {
+            let rail_lines: Vec<Line<'static>> = (0..area.height)
+                .map(|_| {
+                    Line::from(Span::styled(
+                        "▌",
+                        Style::default().bg(theme.bg_input).fg(status_color),
+                    ))
+                })
+                .collect();
+            f.render_widget(
+                Paragraph::new(rail_lines).style(Style::default().bg(theme.bg_input)),
+                Rect::new(area.x, area.y, 1, area.height),
+            );
+        }
+
+        let body = input_body_area(area);
         let mut ta = self.area.clone();
+        ta.set_cursor_line_style(Style::default().bg(theme.bg_input).fg(theme.fg_text));
         ta.set_block(
             Block::default()
-                .title(title)
-                .title_bottom(hint)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color))
+                .borders(Borders::NONE)
+                .border_style(Style::default().fg(status_color))
                 .style(Style::default().bg(theme.bg_input).fg(theme.fg_text)),
         );
-        f.render_widget(&ta, area);
+        f.render_widget(&ta, body);
         self.render_completion_placeholder(f, area, theme, completion_placeholder);
     }
 
@@ -113,16 +122,11 @@ impl InputBox {
         if row != 0 || col != lines[0].chars().count() {
             return;
         }
-        let inner = Rect {
-            x: area.x.saturating_add(1),
-            y: area.y.saturating_add(1),
-            width: area.width.saturating_sub(2),
-            height: area.height.saturating_sub(2),
-        };
+        let inner = input_body_area(area);
         if inner.width == 0 || inner.height == 0 {
             return;
         }
-        let offset = UnicodeWidthStr::width(lines[0].as_str()).saturating_add(1);
+        let offset = UnicodeWidthStr::width(lines[0].as_str());
         if offset >= inner.width as usize {
             return;
         }
@@ -136,11 +140,26 @@ impl InputBox {
     }
 }
 
+fn input_body_area(area: Rect) -> Rect {
+    let top_padding = u16::from(area.height > 1);
+    let bottom_padding = u16::from(area.height > 2);
+    Rect {
+        x: area.x.saturating_add(2),
+        y: area.y.saturating_add(top_padding),
+        width: area.width.saturating_sub(2),
+        height: area
+            .height
+            .saturating_sub(top_padding)
+            .saturating_sub(bottom_padding),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::theme::ThemeStore;
     use crate::ui::status::Mode;
+    use ratatui::style::Modifier;
     use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
@@ -160,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_composer_title_hint_and_text() {
+    fn renders_composer_text_without_inline_metadata() {
         let theme = ThemeStore::with_builtins().resolve(None);
         let mut ib = InputBox::new();
         ib.insert_str("hello");
@@ -175,9 +194,60 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(content.contains("prompt"));
-        assert!(content.contains("Enter send"));
+        assert!(!content.contains("prompt"));
+        assert!(!content.contains("Enter send"));
         assert!(content.contains("hello"));
+        assert!(!content.contains("zode"));
+        assert!(!content.contains("deepseek-v4-pro"));
+        assert!(!content.contains("─"));
+        assert!(!content.contains("│"));
+        let buf = term.backend().buffer();
+        assert_eq!(buf[(0, 0)].symbol(), "▌");
+        assert_eq!(buf[(0, 0)].fg, theme.accent_secondary);
+    }
+
+    #[test]
+    fn input_text_does_not_use_cursor_line_underline() {
+        let theme = ThemeStore::with_builtins().resolve(Some("cyberpunk"));
+        let mut ib = InputBox::new();
+        ib.insert_str("hello");
+        let backend = TestBackend::new(40, 4);
+        let mut term = Terminal::new(backend).unwrap();
+
+        term.draw(|f| ib.render(f, f.area(), &theme, Mode::Ready, None))
+            .unwrap();
+
+        let buf = term.backend().buffer();
+        assert_eq!(buf[(2, 0)].symbol(), " ");
+        assert_eq!(buf[(2, 1)].symbol(), "h");
+        assert_eq!(buf[(2, 3)].symbol(), " ");
+        assert!(
+            !buf[(2, 1)].modifier.contains(Modifier::UNDERLINED),
+            "input text should not inherit tui-textarea's default cursor-line underline"
+        );
+    }
+
+    #[test]
+    fn composer_keeps_bottom_padding_for_multiline_input() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let mut ib = InputBox::new();
+        ib.insert_str("one");
+        ib.insert_newline();
+        ib.insert_str("two");
+        ib.insert_newline();
+        ib.insert_str("three");
+        let backend = TestBackend::new(40, 4);
+        let mut term = Terminal::new(backend).unwrap();
+
+        term.draw(|f| ib.render(f, f.area(), &theme, Mode::Ready, None))
+            .unwrap();
+
+        let buf = term.backend().buffer();
+        let bottom_row: String = (0..buf.area.width).map(|x| buf[(x, 3)].symbol()).collect();
+        assert!(
+            bottom_row.starts_with("▌") && !bottom_row.contains("three"),
+            "composer bottom row should stay as rail-only padding: {bottom_row:?}"
+        );
     }
 
     #[test]

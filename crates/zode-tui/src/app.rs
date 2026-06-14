@@ -911,12 +911,20 @@ impl TuiApp {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if let Some(picker) = &mut self.session_picker {
+            match session_picker_scroll_from_mouse(mouse.kind) {
+                Some(SessionPickerMouseScroll::Up(n)) => picker.scroll_up(n),
+                Some(SessionPickerMouseScroll::Down(n)) => picker.scroll_down(n),
+                None => {}
+            }
+            return;
+        }
+
         if self.active_dialog.is_some()
             || self.active_question.is_some()
             || self.settings.is_some()
             || self.connect.is_some()
             || self.plugin_picker.is_some()
-            || self.session_picker.is_some()
             || self.tasks_panel.is_some()
             || self.show_help
         {
@@ -1801,7 +1809,14 @@ enum ChatMouseScroll {
     Down(u16),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionPickerMouseScroll {
+    Up(usize),
+    Down(usize),
+}
+
 const CHAT_MOUSE_SCROLL_LINES: u16 = 5;
+const SESSION_PICKER_MOUSE_SCROLL_ROWS: usize = 1;
 
 fn mode_label(mode: Mode) -> &'static str {
     match mode {
@@ -1833,6 +1848,18 @@ fn chat_scroll_from_mouse(
     match kind {
         MouseEventKind::ScrollUp => Some(ChatMouseScroll::Up(CHAT_MOUSE_SCROLL_LINES)),
         MouseEventKind::ScrollDown => Some(ChatMouseScroll::Down(CHAT_MOUSE_SCROLL_LINES)),
+        _ => None,
+    }
+}
+
+fn session_picker_scroll_from_mouse(kind: MouseEventKind) -> Option<SessionPickerMouseScroll> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(SessionPickerMouseScroll::Up(
+            SESSION_PICKER_MOUSE_SCROLL_ROWS,
+        )),
+        MouseEventKind::ScrollDown => Some(SessionPickerMouseScroll::Down(
+            SESSION_PICKER_MOUSE_SCROLL_ROWS,
+        )),
         _ => None,
     }
 }
@@ -2229,6 +2256,22 @@ mod tests {
         );
         assert_eq!(
             chat_scroll_from_mouse(crossterm::event::MouseEventKind::ScrollUp, 85, 5, chat),
+            None
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_session_picker_one_row() {
+        assert_eq!(
+            session_picker_scroll_from_mouse(crossterm::event::MouseEventKind::ScrollUp),
+            Some(SessionPickerMouseScroll::Up(1))
+        );
+        assert_eq!(
+            session_picker_scroll_from_mouse(crossterm::event::MouseEventKind::ScrollDown),
+            Some(SessionPickerMouseScroll::Down(1))
+        );
+        assert_eq!(
+            session_picker_scroll_from_mouse(crossterm::event::MouseEventKind::Moved),
             None
         );
     }

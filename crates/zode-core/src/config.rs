@@ -32,6 +32,10 @@ pub struct ProviderConfig {
     pub model: Option<String>,
     /// openai dialect: standard | deepseek | moonshot | openrouter
     pub dialect: Option<String>,
+    /// Explicitly allow or block image input for this provider config.
+    /// When unset, provider defaults decide.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_images: Option<bool>,
     /// Per-provider token prices in USD per million tokens ($/MTok — the form
     /// providers publish). Optional so cost is computed for models the built-in
     /// catalog doesn't know (e.g. DeepSeek), instead of showing "cost n/a". The
@@ -71,6 +75,45 @@ impl ProviderConfig {
         ))
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImageMode {
+    Auto,
+    Direct,
+    VisionModel,
+}
+
+impl Default for ImageMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImagesConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ImageMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision_prompt: Option<String>,
+}
+
+impl ImagesConfig {
+    pub fn effective_mode(&self) -> ImageMode {
+        self.mode.unwrap_or_default()
+    }
+
+    pub fn effective_prompt(&self) -> &str {
+        self.vision_prompt
+            .as_deref()
+            .unwrap_or(DEFAULT_VISION_PROMPT)
+    }
+}
+
+pub const DEFAULT_VISION_PROMPT: &str = "Describe the image precisely for a coding assistant. Mention UI layout, visible text, colors, and error states.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -118,6 +161,7 @@ pub struct ZodeConfig {
     pub provider: ProviderConfig,
     /// Named providers; `--provider <name>` selects one into `provider`.
     pub providers: HashMap<String, ProviderConfig>,
+    pub images: ImagesConfig,
     pub theme: Option<String>,
     /// Display currency for cost (e.g. "USD", "CNY", "EUR"). `None` → USD.
     /// Per-provider prices are in USD/MTok; the total is converted for display.
@@ -240,7 +284,19 @@ impl ZodeConfig {
         if op.dialect.is_some() {
             self.provider.dialect = op.dialect;
         }
+        if op.supports_images.is_some() {
+            self.provider.supports_images = op.supports_images;
+        }
         self.providers.extend(other.providers);
+        if other.images.mode.is_some() {
+            self.images.mode = other.images.mode;
+        }
+        if other.images.vision_provider.is_some() {
+            self.images.vision_provider = other.images.vision_provider;
+        }
+        if other.images.vision_prompt.is_some() {
+            self.images.vision_prompt = other.images.vision_prompt;
+        }
         if other.theme.is_some() {
             self.theme = other.theme;
         }
@@ -564,5 +620,75 @@ mod tests {
         cfg.apply_env_fallbacks();
         assert_eq!(cfg.provider.api_key.as_deref(), Some("env-key"));
         std::env::remove_var("ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn image_config_parses_and_serializes() {
+        let cfg: ZodeConfig = serde_json::from_str(
+            r#"{
+                "images": {
+                    "mode": "vision-model",
+                    "visionProvider": "openai-vision",
+                    "visionPrompt": "Describe UI screenshots."
+                },
+                "providers": {
+                    "openai-vision": {
+                        "type": "openai",
+                        "apiKey": "sk-test",
+                        "baseUrl": "https://api.openai.com/v1",
+                        "model": "gpt-4.1",
+                        "supportsImages": true
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(cfg.images.mode, Some(ImageMode::VisionModel));
+        assert_eq!(cfg.images.vision_provider.as_deref(), Some("openai-vision"));
+        assert_eq!(
+            cfg.images.vision_prompt.as_deref(),
+            Some("Describe UI screenshots.")
+        );
+        assert_eq!(cfg.providers["openai-vision"].supports_images, Some(true));
+
+        let out = serde_json::to_string(&cfg).unwrap();
+        assert!(out.contains("\"supportsImages\":true"));
+        assert!(out.contains("\"visionProvider\":\"openai-vision\""));
+    }
+
+    #[test]
+    fn image_config_merges_field_by_field() {
+        let mut global: ZodeConfig = serde_json::from_str(
+            r#"{
+                "images": {
+                    "mode": "auto",
+                    "visionProvider": "openai-vision",
+                    "visionPrompt": "Global prompt"
+                }
+            }"#,
+        )
+        .unwrap();
+        let project: ZodeConfig = serde_json::from_str(
+            r#"{
+                "images": {
+                    "mode": "direct",
+                    "visionPrompt": "Project prompt"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        global.merge_from(project);
+
+        assert_eq!(global.images.mode, Some(ImageMode::Direct));
+        assert_eq!(
+            global.images.vision_provider.as_deref(),
+            Some("openai-vision")
+        );
+        assert_eq!(
+            global.images.vision_prompt.as_deref(),
+            Some("Project prompt")
+        );
     }
 }

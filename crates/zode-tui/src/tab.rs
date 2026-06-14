@@ -46,9 +46,8 @@ pub struct SessionTab {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cost_label: String,
-    /// Per-turn process UI state: avoid repeating high-frequency thinking
-    /// deltas and map tool results back to their visible tool call names.
-    pub thinking_process_shown: bool,
+    /// Per-turn process UI state: map tool results back to their visible tool
+    /// call names.
     pub active_tool_names: HashMap<String, String>,
     /// Messages typed while a turn was in flight, held FIFO and sent one per
     /// turn once this tab goes idle (Claude-style input queueing).
@@ -75,7 +74,6 @@ impl SessionTab {
             input_tokens: 0,
             output_tokens: 0,
             cost_label: "$0.00".into(),
-            thinking_process_shown: false,
             active_tool_names: HashMap::new(),
             queued_input: std::collections::VecDeque::new(),
             plan_mode: false,

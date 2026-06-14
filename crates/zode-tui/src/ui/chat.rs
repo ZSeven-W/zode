@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
@@ -42,6 +42,9 @@ pub struct ChatMessage {
     pub text: String,
 }
 
+const THINKING_PREFIX: &str = "Thinking: ";
+const ASSISTANT_BODY_INDENT: &str = "  ";
+
 #[derive(Debug, Clone, Copy)]
 pub struct ChatRenderMeta<'a> {
     pub theme_name: &'a str,
@@ -53,8 +56,10 @@ pub struct ChatRenderMeta<'a> {
 pub struct ChatView {
     messages: Vec<ChatMessage>,
     streaming: bool,
+    active_assistant_index: Option<usize>,
     /// Lines scrolled up from the bottom (0 = following the tail).
-    scroll_back: u16,
+    scroll_back: usize,
+    last_render_total_rows: usize,
 }
 
 impl ChatView {
@@ -67,6 +72,8 @@ impl ChatView {
     }
 
     pub fn push_user(&mut self, text: &str) {
+        self.streaming = false;
+        self.active_assistant_index = None;
         self.messages.push(ChatMessage {
             role: Role::User,
             text: text.to_string(),
@@ -82,10 +89,31 @@ impl ChatView {
     }
 
     pub fn push_tool(&mut self, text: &str) {
-        self.messages.push(ChatMessage {
+        self.push_process_message(ChatMessage {
             role: Role::Tool,
             text: text.to_string(),
         });
+    }
+
+    pub fn push_thinking_delta(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let tail_is_thinking = matches!(
+            self.process_tail(),
+            Some(m) if m.role == Role::Tool && m.text.starts_with(THINKING_PREFIX)
+        );
+        let thinking_idx = if tail_is_thinking {
+            self.process_tail_index().expect("process tail exists")
+        } else {
+            self.push_process_message(ChatMessage {
+                role: Role::Tool,
+                text: THINKING_PREFIX.to_string(),
+            })
+        };
+        if let Some(msg) = self.messages.get_mut(thinking_idx) {
+            msg.text.push_str(delta);
+        }
     }
 
     pub fn begin_assistant(&mut self) {
@@ -93,47 +121,94 @@ impl ChatView {
             role: Role::Assistant,
             text: String::new(),
         });
+        self.active_assistant_index = self.messages.len().checked_sub(1);
         self.streaming = true;
     }
 
     pub fn push_delta(&mut self, delta: &str) {
-        // Only a trailing assistant message accepts deltas; if a tool/system
-        // card was pushed mid-stream, start a fresh assistant segment so the
-        // text doesn't append to the tool card.
-        let tail_is_assistant =
-            matches!(self.messages.last(), Some(m) if m.role == Role::Assistant);
-        if !tail_is_assistant {
-            self.messages.push(ChatMessage {
-                role: Role::Assistant,
-                text: String::new(),
-            });
-        }
+        let idx = match self.active_assistant_index {
+            Some(idx) if matches!(self.messages.get(idx), Some(m) if m.role == Role::Assistant) => {
+                idx
+            }
+            _ => {
+                self.messages.push(ChatMessage {
+                    role: Role::Assistant,
+                    text: String::new(),
+                });
+                self.messages.len() - 1
+            }
+        };
+        self.active_assistant_index = Some(idx);
         self.streaming = true;
-        if let Some(last) = self.messages.last_mut() {
-            last.text.push_str(delta);
+        if let Some(msg) = self.messages.get_mut(idx) {
+            msg.text.push_str(delta);
         }
+    }
+
+    fn push_process_message(&mut self, msg: ChatMessage) -> usize {
+        if self.streaming {
+            if let Some(idx) = self.active_assistant_index {
+                self.messages.insert(idx, msg);
+                let shifted_idx = idx + 1;
+                self.active_assistant_index = Some(shifted_idx);
+                return idx;
+            }
+        }
+
+        self.messages.push(msg);
+        self.messages.len() - 1
+    }
+
+    fn process_tail_index(&self) -> Option<usize> {
+        match self.active_assistant_index {
+            Some(idx) if self.streaming && idx > 0 => Some(idx - 1),
+            _ => self.messages.len().checked_sub(1),
+        }
+    }
+
+    fn process_tail(&self) -> Option<&ChatMessage> {
+        self.process_tail_index()
+            .and_then(|idx| self.messages.get(idx))
     }
 
     pub fn end_turn(&mut self) {
         self.streaming = false;
+        self.active_assistant_index = None;
     }
 
     pub fn scroll_up(&mut self, n: u16) {
-        self.scroll_back = self.scroll_back.saturating_add(n);
+        self.scroll_back = self.scroll_back.saturating_add(n as usize);
     }
 
     pub fn scroll_down(&mut self, n: u16) {
-        self.scroll_back = self.scroll_back.saturating_sub(n);
+        self.scroll_back = self.scroll_back.saturating_sub(n as usize);
+    }
+
+    fn scroll_offset_for_render(&mut self, total_rows: usize, viewport_rows: usize) -> u16 {
+        if self.scroll_back > 0
+            && self.last_render_total_rows > 0
+            && total_rows > self.last_render_total_rows
+        {
+            self.scroll_back = self
+                .scroll_back
+                .saturating_add(total_rows - self.last_render_total_rows);
+        }
+
+        let max_scroll = total_rows.saturating_sub(viewport_rows);
+        let back = self.scroll_back.min(max_scroll);
+        self.scroll_back = back;
+        self.last_render_total_rows = total_rows;
+        u16::try_from(max_scroll.saturating_sub(back)).unwrap_or(u16::MAX)
     }
 
     /// Build all lines, then render the visible window into `area`.
-    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme, meta: ChatRenderMeta<'_>) {
+    pub fn render(&mut self, f: &mut Frame, area: Rect, theme: &Theme, meta: ChatRenderMeta<'_>) {
         let mut lines: Vec<Line<'static>> = if self.messages.is_empty() {
             self.render_empty(theme, meta)
         } else {
             let mut out = vec![Line::from("")];
             for (idx, msg) in self.messages.iter().enumerate() {
-                if idx > 0 {
+                if idx > 0 && should_insert_message_gap(&self.messages[idx - 1].role, &msg.role) {
                     out.push(Line::from(""));
                 }
                 out.extend(self.render_message(msg, theme, area.width));
@@ -150,9 +225,7 @@ impl ChatView {
         // before `lines` moves into the Paragraph.
         let total: usize = lines.iter().map(|l| wrapped_rows(l, area.width)).sum();
         let viewport = area.height as usize;
-        let max_scroll = total.saturating_sub(viewport);
-        let back = (self.scroll_back as usize).min(max_scroll);
-        let offset = u16::try_from(max_scroll - back).unwrap_or(u16::MAX);
+        let offset = self.scroll_offset_for_render(total, viewport);
 
         let para = Paragraph::new(lines)
             .block(Block::default().borders(Borders::NONE))
@@ -163,117 +236,211 @@ impl ChatView {
     }
 
     fn render_empty(&self, theme: &Theme, _meta: ChatRenderMeta<'_>) -> Vec<Line<'static>> {
+        let panel = Style::default().bg(theme.bg_secondary);
+        let rail = Style::default().bg(theme.bg_secondary).fg(theme.accent);
+        let title = Style::default()
+            .bg(theme.bg_secondary)
+            .fg(theme.fg_white)
+            .add_modifier(Modifier::BOLD);
+        let muted = Style::default().bg(theme.bg_secondary).fg(theme.fg_subtle);
+        let accent = Style::default()
+            .bg(theme.bg_secondary)
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let accent2 = Style::default()
+            .bg(theme.bg_secondary)
+            .fg(theme.accent_secondary);
         vec![
             Line::from(vec![
                 Span::styled(
-                    format!("{} ", theme.icon_logo),
+                    "▌ ",
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    "zode",
-                    Style::default()
-                        .fg(theme.fg_white)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" workbench", Style::default().fg(theme.fg_subtle)),
+                Span::styled(format!("{} ", theme.icon_logo), rail),
+                Span::styled("zode", title),
+                Span::styled(" workbench ", muted),
+                Span::styled(":: command deck", accent2),
             ]),
-            Line::from(""),
             Line::from(vec![
-                Span::styled("/help", Style::default().fg(theme.accent)),
-                Span::styled(" commands   ", Style::default().fg(theme.fg_subtle)),
-                Span::styled("/model", Style::default().fg(theme.accent)),
-                Span::styled(" switch   ", Style::default().fg(theme.fg_subtle)),
-                Span::styled("/theme", Style::default().fg(theme.accent)),
-                Span::styled(" switch   ", Style::default().fg(theme.fg_subtle)),
-                Span::styled("/sessions", Style::default().fg(theme.accent)),
-                Span::styled(" resume   ", Style::default().fg(theme.fg_subtle)),
-                Span::styled("/tasks", Style::default().fg(theme.accent)),
-                Span::styled(" shells", Style::default().fg(theme.fg_subtle)),
+                Span::styled("  ", panel),
+                Span::styled(" /help ", accent),
+                Span::styled("commands", muted),
+                Span::styled("  ╱  ", accent2),
+                Span::styled(" /model ", accent),
+                Span::styled("engines", muted),
+                Span::styled("  ╱  ", accent2),
+                Span::styled(" /theme ", accent),
+                Span::styled("palettes", muted),
+                Span::styled("  ╱  ", accent2),
+                Span::styled(" /sessions ", accent),
+                Span::styled("timeline", muted),
+                Span::styled("  ╱  ", accent2),
+                Span::styled(" /tasks ", accent),
+                Span::styled("jobs", muted),
+            ]),
+            Line::from(vec![
+                Span::styled("  ", panel),
+                Span::styled("neon rails online", accent2),
+                Span::styled("  •  ", muted),
+                Span::styled("slash commands are hot", muted),
             ]),
         ]
     }
 
     fn render_message(&self, msg: &ChatMessage, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         match msg.role {
-            Role::User => self.render_role_block(
-                &theme.icon_user,
-                "You",
+            Role::User => render_user_bar(&msg.text, theme, width),
+            Role::Assistant => render_plain_markdown(&msg.text, theme, width),
+            Role::System => render_process_line(
+                "⚡ ",
                 &msg.text,
-                theme.user,
-                Style::default().fg(theme.fg_text),
-                width,
-            ),
-            Role::Assistant => {
-                let mut out =
-                    vec![self.role_header(&theme.icon_assistant, "Assistant", theme.assistant)];
-                out.extend(rail_markdown(&msg.text, theme, theme.assistant, width));
-                out
-            }
-            Role::System => self.render_role_block(
-                &theme.icon_system,
-                "System",
-                &msg.text,
-                theme.system,
+                Style::default()
+                    .fg(theme.system)
+                    .add_modifier(Modifier::BOLD),
                 Style::default().fg(theme.fg_subtle),
                 width,
             ),
-            Role::Tool => vec![Line::from(vec![
-                Span::styled("  · ", Style::default().fg(theme.accent_secondary)),
-                Span::styled(msg.text.clone(), Style::default().fg(theme.fg_subtle)),
-            ])],
+            Role::Tool => render_tool_line(&msg.text, theme, width),
         }
-    }
-
-    fn render_role_block(
-        &self,
-        icon: &str,
-        label: &str,
-        text: &str,
-        color: Color,
-        body_style: Style,
-        width: u16,
-    ) -> Vec<Line<'static>> {
-        let mut out = vec![self.role_header(icon, label, color)];
-        for line in text.lines().chain((text.is_empty()).then_some("")) {
-            out.extend(rail_line(
-                vec![Span::styled(line.to_string(), body_style)],
-                color,
-                width,
-            ));
-        }
-        out
-    }
-
-    fn role_header(&self, _icon: &str, label: &str, color: Color) -> Line<'static> {
-        Line::from(vec![
-            Span::styled(
-                "│ ",
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                label.to_string(),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-        ])
     }
 }
 
-fn rail_markdown(src: &str, theme: &Theme, rail_color: Color, width: u16) -> Vec<Line<'static>> {
+fn should_insert_message_gap(prev: &Role, next: &Role) -> bool {
+    !matches!((prev, next), (Role::Tool, Role::Assistant))
+}
+
+fn render_user_bar(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    let style = Style::default().bg(theme.bg_secondary).fg(theme.fg_white);
+    let rail = Span::styled("▌ ", Style::default().bg(theme.bg_secondary).fg(theme.user));
+    let mut out = vec![blank_user_bar_line(theme, width)];
+    out.extend(
+        text.lines()
+            .chain((text.is_empty()).then_some(""))
+            .flat_map(|line| {
+                wrap_spans_with_prefix(
+                    vec![Span::styled(line.to_string(), style)],
+                    rail.clone(),
+                    Span::styled("  ", style),
+                    width,
+                )
+            })
+            .map(|line| pad_line_to_width(line, width, style)),
+    );
+    out.push(blank_user_bar_line(theme, width));
+    out
+}
+
+fn blank_user_bar_line(theme: &Theme, width: u16) -> Line<'static> {
+    let style = Style::default().bg(theme.bg_secondary).fg(theme.fg_white);
+    let rail = Span::styled("▌ ", Style::default().bg(theme.bg_secondary).fg(theme.user));
+    pad_line_to_width(Line::from(vec![rail]), width, style)
+}
+
+fn render_plain_markdown(src: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     let rendered = render_markdown(src, theme);
     if rendered.is_empty() {
-        return rail_line(Vec::new(), rail_color, width);
+        return vec![Line::from("")];
     }
     rendered
         .into_iter()
-        .flat_map(|line| rail_line(line.spans, rail_color, width))
+        .filter(line_has_content)
+        .flat_map(|line| {
+            wrap_spans_with_prefix(
+                line.spans,
+                Span::raw(ASSISTANT_BODY_INDENT),
+                Span::raw(ASSISTANT_BODY_INDENT),
+                width,
+            )
+        })
         .collect()
 }
 
-fn rail_line(spans: Vec<Span<'static>>, rail_color: Color, width: u16) -> Vec<Line<'static>> {
-    let rail = Span::styled("│ ", Style::default().fg(rail_color));
-    wrap_spans_with_prefix(spans, rail.clone(), rail, width)
+fn line_has_content(line: &Line<'static>) -> bool {
+    line.spans
+        .iter()
+        .any(|span| !span.content.as_ref().is_empty())
+}
+
+fn render_tool_line(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    if text == "Thinking…" {
+        return render_tool_process_line(
+            "Thinking: ",
+            "",
+            Style::default()
+                .fg(theme.system)
+                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(theme.fg_subtle),
+            width,
+        );
+    }
+    if let Some(thinking) = text.strip_prefix(THINKING_PREFIX) {
+        return render_tool_process_line(
+            "Thinking: ",
+            thinking,
+            Style::default()
+                .fg(theme.system)
+                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(theme.fg_subtle),
+            width,
+        );
+    }
+    render_tool_process_line(
+        "▪ ",
+        text,
+        Style::default().fg(theme.accent_secondary),
+        Style::default().fg(theme.fg_subtle),
+        width,
+    )
+}
+
+fn render_tool_process_line(
+    prefix: &str,
+    text: &str,
+    prefix_style: Style,
+    body_style: Style,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let first_prefix = format!("  {prefix}");
+    let continuation = format!("  {}", " ".repeat(UnicodeWidthStr::width(prefix)));
+    wrap_spans_with_prefix(
+        vec![Span::styled(text.to_string(), body_style)],
+        Span::styled(first_prefix, prefix_style),
+        Span::styled(continuation, prefix_style),
+        width,
+    )
+}
+
+fn render_process_line(
+    prefix: &str,
+    text: &str,
+    prefix_style: Style,
+    body_style: Style,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let first_prefix = format!("│  {prefix}");
+    let continuation = format!("│  {}", " ".repeat(UnicodeWidthStr::width(prefix)));
+    wrap_spans_with_prefix(
+        vec![Span::styled(text.to_string(), body_style)],
+        Span::styled(first_prefix, prefix_style),
+        Span::styled(continuation, prefix_style),
+        width,
+    )
+}
+
+fn pad_line_to_width(mut line: Line<'static>, width: u16, style: Style) -> Line<'static> {
+    let current_width: usize = line
+        .spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    let target = width as usize;
+    if current_width < target {
+        line.spans
+            .push(Span::styled(" ".repeat(target - current_width), style));
+    }
+    line
 }
 
 fn wrap_spans_with_prefix(
@@ -335,20 +502,55 @@ mod tests {
     }
 
     #[test]
-    fn delta_after_tool_starts_new_assistant_segment() {
-        // BLOCK regression: a tool card pushed mid-stream must not become the
-        // append target for subsequent assistant text.
+    fn delta_after_tool_stays_in_active_assistant_answer() {
+        // Process rows belong above the current answer, but they must not
+        // become the append target for subsequent assistant text.
         let mut view = ChatView::new();
         view.push_user("hi");
         view.push_delta("part1 ");
         view.push_tool("Bash");
         view.push_delta("part2");
         let msgs = view.messages();
-        assert_eq!(msgs.len(), 4); // user, assistant(part1), tool, assistant(part2)
+        assert_eq!(msgs.len(), 3); // user, tool, assistant(part1+part2)
+        assert_eq!(msgs[1].role, Role::Tool);
+        assert_eq!(msgs[1].text, "Bash");
+        assert_eq!(msgs[2].role, Role::Assistant);
+        assert_eq!(msgs[2].text, "part1 part2");
+    }
+
+    #[test]
+    fn thinking_deltas_append_to_one_process_message() {
+        let mut view = ChatView::new();
+        view.push_thinking_delta("The user asked ");
+        view.push_thinking_delta("for a file.");
+
+        let msgs = view.messages();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::Tool);
+        assert_eq!(msgs[0].text, "Thinking: The user asked for a file.");
+    }
+
+    #[test]
+    fn process_events_stay_above_active_assistant_answer() {
+        let mut view = ChatView::new();
+        view.push_user("why did clone timeout?");
+        view.push_delta("It timed out because ");
+        view.push_thinking_delta("Checking clone duration.");
+        view.push_tool("Tool Bash git status");
+        view.push_delta("the first attempt hit the shorter timeout.");
+
+        let msgs = view.messages();
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[1].role, Role::Tool);
+        assert_eq!(msgs[1].text, "Thinking: Checking clone duration.");
         assert_eq!(msgs[2].role, Role::Tool);
-        assert_eq!(msgs[2].text, "Bash");
+        assert_eq!(msgs[2].text, "Tool Bash git status");
         assert_eq!(msgs[3].role, Role::Assistant);
-        assert_eq!(msgs[3].text, "part2");
+        assert_eq!(
+            msgs[3].text,
+            "It timed out because the first attempt hit the shorter timeout."
+        );
     }
 
     #[test]
@@ -375,7 +577,7 @@ mod tests {
     #[test]
     fn empty_state_renders_minimal_workbench_shortcuts() {
         let theme = ThemeStore::with_builtins().resolve(Some("hacker"));
-        let view = ChatView::new();
+        let mut view = ChatView::new();
         let backend = TestBackend::new(80, 10);
         let mut term = Terminal::new(backend).unwrap();
         let meta = ChatRenderMeta {
@@ -398,13 +600,16 @@ mod tests {
         assert!(content.contains("/help"));
         assert!(content.contains("/model"));
         assert!(content.contains("/theme"));
+        assert!(content.contains("command deck"));
+        assert!(content.contains("engines"));
+        assert!(content.contains("palettes"));
     }
 
     #[test]
-    fn messages_render_role_headers_and_rails() {
+    fn messages_render_as_transcript_rows() {
         let theme = ThemeStore::with_builtins().resolve(None);
         let mut view = ChatView::new();
-        view.push_user("hello");
+        view.push_user("search opencode");
         view.push_delta("**bold** reply");
         view.push_tool("Bash");
         view.push_system("done");
@@ -424,11 +629,11 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(content.contains("You"));
-        assert!(content.contains("Assistant"));
-        assert!(content.contains("System"));
-        assert!(content.contains("│ hello"));
-        assert!(content.contains("· Bash"));
+        assert!(!content.contains("You"));
+        assert!(!content.contains("Assistant"));
+        assert!(content.contains("search opencode"));
+        assert!(content.contains("bold"));
+        assert!(content.contains("Bash"));
     }
 
     #[test]
@@ -450,26 +655,157 @@ mod tests {
         let buf = term.backend().buffer();
         let row0: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
         let row1: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
+        let row2: String = (0..buf.area.width).map(|x| buf[(x, 2)].symbol()).collect();
         assert!(row0.trim().is_empty(), "first row should breathe: {row0:?}");
         assert!(
-            row1.contains("You"),
-            "second row should start the message: {row1:?}"
+            row1.starts_with("▌") && !row1.contains("hello"),
+            "user block should have rail-only top padding: {row1:?}"
+        );
+        assert!(
+            row2.contains("hello"),
+            "third row should contain the user message after padding: {row2:?}"
         );
     }
 
     #[test]
-    fn user_messages_use_same_rail_layout_as_assistant() {
+    fn user_messages_render_with_vertical_padding() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let mut view = ChatView::new();
+        view.push_user("hello");
+        view.push_thinking_delta("thinking");
+        let backend = TestBackend::new(44, 9);
+        let mut term = Terminal::new(backend).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "deepseek-v4-pro",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
+
+        let buf = term.backend().buffer();
+        let user_row = (0..buf.area.height)
+            .find(|&y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("hello")
+            })
+            .expect("user row should be rendered");
+        let top = user_row.saturating_sub(1);
+        let bottom = user_row.saturating_add(1);
+        assert!(
+            (0..buf.area.width).all(|x| buf[(x, top)].bg == theme.bg_secondary),
+            "user top padding should use panel background"
+        );
+        assert!(
+            (0..buf.area.width).all(|x| buf[(x, bottom)].bg == theme.bg_secondary),
+            "user bottom padding should use panel background"
+        );
+        assert_eq!(buf[(0, top)].symbol(), "▌");
+        assert_eq!(buf[(0, bottom)].symbol(), "▌");
+    }
+
+    #[test]
+    fn assistant_answer_sits_right_under_process_tail() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let mut view = ChatView::new();
+        view.push_tool("Usage ↑378 ↓46");
+        view.push_delta("我是 DeepSeek-V4-Pro 模型。");
+        let backend = TestBackend::new(50, 6);
+        let mut term = Terminal::new(backend).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "deepseek-v4-pro",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
+
+        let buf = term.backend().buffer();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        let usage_row = rows
+            .iter()
+            .position(|row| row.contains("Usage"))
+            .expect("usage row");
+        assert!(
+            rows.get(usage_row + 1)
+                .is_some_and(|row| row.contains("DeepSeek")),
+            "assistant row should immediately follow usage row: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn scroll_position_stays_stable_while_streaming_content_grows() {
+        let mut view = ChatView::new();
+        view.scroll_back = 4;
+
+        let first_offset = view.scroll_offset_for_render(40, 10);
+        let second_offset = view.scroll_offset_for_render(45, 10);
+
+        assert_eq!(first_offset, 26);
+        assert_eq!(second_offset, first_offset);
+        assert_eq!(view.scroll_back, 9);
+    }
+
+    #[test]
+    fn tail_following_stays_at_bottom_while_streaming_content_grows() {
+        let mut view = ChatView::new();
+
+        let first_offset = view.scroll_offset_for_render(40, 10);
+        let second_offset = view.scroll_offset_for_render(45, 10);
+
+        assert_eq!(first_offset, 30);
+        assert_eq!(second_offset, 35);
+        assert_eq!(view.scroll_back, 0);
+    }
+
+    #[test]
+    fn user_messages_render_with_left_agent_rail() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let mut view = ChatView::new();
+        view.push_user("search opencode");
+        let backend = TestBackend::new(40, 6);
+        let mut term = Terminal::new(backend).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "deepseek-v4-pro",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
+
+        let buf = term.backend().buffer();
+        let user_row = (0..buf.area.height)
+            .find(|&y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("search opencode")
+            })
+            .expect("user row should be rendered");
+        assert!(
+            (0..buf.area.width).all(|x| buf[(x, user_row)].bg == theme.bg_secondary),
+            "user row should use a full-width background"
+        );
+        assert_eq!(buf[(0, user_row)].symbol(), "▌");
+        assert_eq!(buf[(0, user_row)].fg, theme.user);
+    }
+
+    #[test]
+    fn assistant_messages_render_without_role_rails() {
         let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
         let view = ChatView::new();
-        let user = view.render_message(
-            &ChatMessage {
-                role: Role::User,
-                text: "hello".into(),
-            },
-            &theme,
-            80,
-        );
-        let assistant = view.render_message(
+        let lines = view.render_message(
             &ChatMessage {
                 role: Role::Assistant,
                 text: "hello".into(),
@@ -478,51 +814,20 @@ mod tests {
             80,
         );
 
-        assert_eq!(user[1].spans[0].content, "│ ");
-        assert_eq!(assistant[1].spans[0].content, "│ ");
-        assert_eq!(user[1].spans[0].style.fg, Some(theme.user));
-        assert_eq!(assistant[1].spans[0].style.fg, Some(theme.assistant));
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert_eq!(joined.trim(), "hello");
+        assert!(!joined.contains("Assistant"));
+        assert!(!joined.contains("│"));
     }
 
     #[test]
-    fn role_headers_and_bodies_share_the_same_rail_prefix() {
+    fn assistant_messages_render_with_left_padding() {
         let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
         let view = ChatView::new();
-        for (role, color) in [
-            (Role::User, theme.user),
-            (Role::Assistant, theme.assistant),
-            (Role::System, theme.system),
-        ] {
-            let lines = view.render_message(
-                &ChatMessage {
-                    role,
-                    text: "hello".into(),
-                },
-                &theme,
-                80,
-            );
-
-            assert_eq!(lines[0].spans[0].content, "│ ");
-            assert_eq!(lines[1].spans[0].content, "│ ");
-            assert_eq!(lines[0].spans[0].style.fg, Some(color));
-            assert_eq!(lines[1].spans[0].style.fg, Some(color));
-        }
-    }
-
-    #[test]
-    fn user_and_assistant_headers_use_matching_role_styles() {
-        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
-        let view = ChatView::new();
-
-        let user = view.render_message(
-            &ChatMessage {
-                role: Role::User,
-                text: "hello".into(),
-            },
-            &theme,
-            80,
-        );
-        let assistant = view.render_message(
+        let lines = view.render_message(
             &ChatMessage {
                 role: Role::Assistant,
                 text: "hello".into(),
@@ -531,8 +836,82 @@ mod tests {
             80,
         );
 
-        assert_eq!(user[0].spans[1].style.fg, Some(theme.user));
-        assert_eq!(assistant[0].spans[1].style.fg, Some(theme.assistant));
+        let first_row: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(first_row.starts_with("  hello"));
+    }
+
+    #[test]
+    fn assistant_markdown_compacts_empty_paragraph_gap() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let view = ChatView::new();
+        let lines = view.render_message(
+            &ChatMessage {
+                role: Role::Assistant,
+                text: "第一段\n\n第二段".into(),
+            },
+            &theme,
+            80,
+        );
+
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(rows, vec!["  第一段".to_string(), "  第二段".to_string()]);
+    }
+
+    #[test]
+    fn process_lines_are_muted_not_role_blocks() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let view = ChatView::new();
+        let lines = view.render_message(
+            &ChatMessage {
+                role: Role::Tool,
+                text: "Bash cargo build".into(),
+            },
+            &theme,
+            80,
+        );
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.accent_secondary));
+        assert_eq!(lines[0].spans[1].style.fg, Some(theme.fg_subtle));
+        let joined: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(!joined.contains("│"));
+    }
+
+    #[test]
+    fn thinking_lines_render_without_left_process_rail() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let view = ChatView::new();
+        let lines = view.render_message(
+            &ChatMessage {
+                role: Role::Tool,
+                text: "Thinking: checking context".into(),
+            },
+            &theme,
+            80,
+        );
+
+        let joined: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(joined.contains("Thinking: "));
+        assert!(!joined.contains("│"));
     }
 
     #[test]
@@ -543,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_assistant_cjk_lines_keep_the_body_rail() {
+    fn wrapped_assistant_cjk_lines_keep_body_indent() {
         let theme = ThemeStore::with_builtins().resolve(Some("cyberpunk"));
         let mut view = ChatView::new();
         view.push_delta(
@@ -575,8 +954,8 @@ mod tests {
 
         assert!(body_rows.len() > 1, "expected wrapped body rows");
         assert!(
-            body_rows.iter().all(|row| row.starts_with("│ ")),
-            "all wrapped body rows should keep the rail prefix: {body_rows:?}"
+            body_rows.iter().all(|row| !row.starts_with("│ ")),
+            "wrapped body rows should not use role rails: {body_rows:?}"
         );
     }
 }
