@@ -20,6 +20,7 @@ pub enum SettingsLevel {
     Sidebar,
     Thinking,
     ToolDetails,
+    Language,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +33,8 @@ pub enum SettingsAction {
     SetSidebar(String),
     SetThinking(String),
     SetToolDetails(String),
+    /// Carries the language code (e.g. "zh-tw").
+    SetLanguage(String),
 }
 
 pub struct SettingsDialog {
@@ -45,6 +48,8 @@ pub struct SettingsDialog {
     efforts: Vec<String>,
     sidebars: Vec<String>,
     toggles: Vec<String>,
+    /// Language codes (Lang::ALL); displayed by native name, confirmed as code.
+    language_codes: Vec<String>,
 }
 
 const TOP_ITEMS: &[&str] = &[
@@ -55,7 +60,15 @@ const TOP_ITEMS: &[&str] = &[
     "Sidebar",
     "Thinking",
     "Tool details",
+    "Language",
 ];
+
+fn default_language_codes() -> Vec<String> {
+    zode_core::i18n::Lang::ALL
+        .iter()
+        .map(|l| l.code().to_string())
+        .collect()
+}
 
 fn default_efforts() -> Vec<String> {
     vec!["low".into(), "medium".into(), "high".into()]
@@ -84,6 +97,7 @@ impl SettingsDialog {
             efforts: default_efforts(),
             sidebars: default_sidebars(),
             toggles: default_toggles(),
+            language_codes: default_language_codes(),
         }
     }
 
@@ -101,6 +115,7 @@ impl SettingsDialog {
             efforts: default_efforts(),
             sidebars: default_sidebars(),
             toggles: default_toggles(),
+            language_codes: default_language_codes(),
         }
     }
 
@@ -118,6 +133,7 @@ impl SettingsDialog {
             efforts: default_efforts(),
             sidebars: default_sidebars(),
             toggles: default_toggles(),
+            language_codes: default_language_codes(),
         }
     }
 
@@ -135,6 +151,25 @@ impl SettingsDialog {
             efforts: default_efforts(),
             sidebars: default_sidebars(),
             toggles: default_toggles(),
+            language_codes: default_language_codes(),
+        }
+    }
+
+    pub fn language_picker() -> Self {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        Self {
+            level: SettingsLevel::Language,
+            root_level: SettingsLevel::Language,
+            state,
+            theme_ids: Vec::new(),
+            model_ids: Vec::new(),
+            provider_names: Vec::new(),
+            modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
+            efforts: default_efforts(),
+            sidebars: default_sidebars(),
+            toggles: default_toggles(),
+            language_codes: default_language_codes(),
         }
     }
 
@@ -152,6 +187,7 @@ impl SettingsDialog {
             efforts: default_efforts(),
             sidebars: default_sidebars(),
             toggles: default_toggles(),
+            language_codes: default_language_codes(),
         }
     }
 
@@ -165,7 +201,10 @@ impl SettingsDialog {
 
     fn items(&self) -> Vec<String> {
         match self.level {
-            SettingsLevel::Top => TOP_ITEMS.iter().map(|s| s.to_string()).collect(),
+            SettingsLevel::Top => TOP_ITEMS
+                .iter()
+                .map(|s| zode_core::i18n::t(s).to_string())
+                .collect(),
             SettingsLevel::Theme => self.theme_ids.clone(),
             SettingsLevel::Model => self.model_ids.clone(),
             SettingsLevel::Provider => self.provider_names.clone(),
@@ -173,6 +212,16 @@ impl SettingsDialog {
             SettingsLevel::Effort => self.efforts.clone(),
             SettingsLevel::Sidebar => self.sidebars.clone(),
             SettingsLevel::Thinking | SettingsLevel::ToolDetails => self.toggles.clone(),
+            // Show each language by its endonym; the code is carried on confirm.
+            SettingsLevel::Language => self
+                .language_codes
+                .iter()
+                .map(|c| {
+                    zode_core::i18n::Lang::from_code(c)
+                        .map(|l| l.native_name().to_string())
+                        .unwrap_or_else(|| c.clone())
+                })
+                .collect(),
         }
     }
 
@@ -203,7 +252,8 @@ impl SettingsDialog {
                 3 => SettingsLevel::Effort,
                 4 => SettingsLevel::Sidebar,
                 5 => SettingsLevel::Thinking,
-                _ => SettingsLevel::ToolDetails,
+                6 => SettingsLevel::ToolDetails,
+                _ => SettingsLevel::Language,
             };
             self.state.select(Some(0));
         }
@@ -251,6 +301,10 @@ impl SettingsDialog {
                 .toggles
                 .get(idx)
                 .map(|s| SettingsAction::SetToolDetails(s.clone())),
+            SettingsLevel::Language => self
+                .language_codes
+                .get(idx)
+                .map(|c| SettingsAction::SetLanguage(c.clone())),
         }
     }
 
@@ -274,12 +328,16 @@ impl SettingsDialog {
 
         let inner = inner_area(popup);
         f.render_widget(
-            header_line(title_text(self.level, self.root_level), inner.width, theme),
+            header_line(
+                zode_core::i18n::t(title_text(self.level, self.root_level)),
+                inner.width,
+                theme,
+            ),
             header_rect(inner),
         );
         f.render_widget(search_line(theme), search_rect(inner));
         f.render_widget(
-            Paragraph::new(section_title(self.level, self.root_level)).style(
+            Paragraph::new(zode_core::i18n::t(section_title(self.level, self.root_level))).style(
                 Style::default()
                     .fg(theme.accent)
                     .bg(theme.bg_secondary)
@@ -368,6 +426,7 @@ fn title_text(level: SettingsLevel, root: SettingsLevel) -> &'static str {
         SettingsLevel::Sidebar => "Sidebar",
         SettingsLevel::Thinking => "Thinking output",
         SettingsLevel::ToolDetails => "Tool details",
+        SettingsLevel::Language => "Select language",
     }
 }
 
@@ -382,6 +441,7 @@ fn section_title(level: SettingsLevel, root: SettingsLevel) -> &'static str {
         (SettingsLevel::Sidebar, _) => "Sidebar",
         (SettingsLevel::Thinking, _) => "Thinking",
         (SettingsLevel::ToolDetails, _) => "Tool details",
+        (SettingsLevel::Language, _) => "Language",
     }
 }
 

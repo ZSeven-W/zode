@@ -198,6 +198,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Engine,
     },
     SlashCommand {
+        name: "language",
+        description: "Switch the UI language",
+        usage: "/language",
+        action: CommandAction::Ui,
+    },
+    SlashCommand {
         name: "thinking",
         description: "Toggle showing the agent's thinking output",
         usage: "/thinking",

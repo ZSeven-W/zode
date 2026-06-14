@@ -769,6 +769,11 @@ impl EngineTemplate {
         self.cfg.show_tool_details.unwrap_or(true)
     }
 
+    /// The configured UI language code (`language` in config / Settings).
+    pub fn language(&self) -> Option<&str> {
+        self.cfg.language.as_deref()
+    }
+
     /// Human-readable permission rules (`/permissions`): allow / ask / deny.
     pub fn permissions_summary(&self) -> Vec<String> {
         let p = &self.cfg.permissions;

@@ -161,6 +161,10 @@ impl TuiApp {
         // Read display prefs before `template` is moved into the struct.
         let show_thinking = template.show_thinking();
         let show_tool_details = template.show_tool_details();
+        // Apply the configured UI language so the chrome renders localized.
+        if let Some(lang) = template.language() {
+            zode_core::i18n::set_language_code(lang);
+        }
 
         Self {
             tabs: vec![tab0],
@@ -1046,6 +1050,10 @@ impl TuiApp {
         self.settings = Some(SettingsDialog::sidebar_picker());
     }
 
+    fn open_language_picker(&mut self) {
+        self.settings = Some(SettingsDialog::language_picker());
+    }
+
     fn open_connect_dialog(&mut self) {
         self.connect = Some(ConnectDialog::new());
     }
@@ -1222,6 +1230,18 @@ impl TuiApp {
                     "tool details {}",
                     on_off(self.show_tool_details)
                 )));
+            }
+            SettingsAction::SetLanguage(code) => {
+                if zode_core::i18n::set_language_code(&code) {
+                    if let Ok(mut cfg) = ConfigManager::load_global() {
+                        cfg.language = Some(code.clone());
+                        let _ = ConfigManager::save_global(&cfg);
+                    }
+                    let name = zode_core::i18n::Lang::from_code(&code)
+                        .map(|l| l.native_name())
+                        .unwrap_or(code.as_str());
+                    self.toast = Some(Toast::info(format!("language → {name}")));
+                }
             }
         }
     }
@@ -1986,6 +2006,7 @@ impl TuiApp {
                     self.active_tab_mut().chat.push_system(&msg);
                 }
             }
+            "language" => self.open_language_picker(),
             "thinking" => {
                 self.show_thinking = !self.show_thinking;
                 self.persist_show_thinking(self.show_thinking);
