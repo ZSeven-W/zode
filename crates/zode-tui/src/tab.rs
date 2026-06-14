@@ -53,6 +53,10 @@ pub struct SessionTab {
     /// Messages typed while a turn was in flight, held FIFO and sent one per
     /// turn once this tab goes idle (Claude-style input queueing).
     pub queued_input: std::collections::VecDeque<String>,
+    /// Whether THIS tab is in plan mode (read-only tools). Per-tab, not global:
+    /// the status badge reads it for the active tab, and reassembly re-applies
+    /// it so a model/provider/yolo swap doesn't drop or leak plan mode.
+    pub plan_mode: bool,
 }
 
 impl SessionTab {
@@ -74,6 +78,7 @@ impl SessionTab {
             thinking_process_shown: false,
             active_tool_names: HashMap::new(),
             queued_input: std::collections::VecDeque::new(),
+            plan_mode: false,
         }
     }
 

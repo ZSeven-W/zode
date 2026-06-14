@@ -22,10 +22,10 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use zode_core::approval::{ApprovalReceiver, ApprovalRequest};
-use zode_core::question::{QuestionReceiver, QuestionRequest};
 use zode_core::bg_shells::BgShell;
 use zode_core::commands::parse_slash;
 use zode_core::config::ConfigManager;
+use zode_core::question::{QuestionReceiver, QuestionRequest};
 use zode_core::session_meta::{SessionIndex, SessionMeta};
 use zode_core::{EngineTemplate, ZodeEngine};
 
@@ -292,6 +292,9 @@ impl TuiApp {
             self.toast = Some(Toast::info("can't switch during a turn — Ctrl+C first"));
             return false;
         }
+        // Plan mode is per-tab: re-apply THIS tab's mode to whatever template a
+        // caller passed (a model/provider/yolo swap must not drop or leak it).
+        let template = template.with_plan_mode(self.active_tab().plan_mode);
         let (store, cwd, id) = {
             let tab = self.active_tab();
             let store = match tab.engine.store.lock() {
@@ -572,6 +575,8 @@ impl TuiApp {
             self.status.mode = tab.mode;
             self.status.input_tokens = tab.input_tokens;
             self.status.output_tokens = tab.output_tokens;
+            // Plan mode is per-tab, so the badge always reflects the active tab.
+            self.status.plan_mode = tab.plan_mode;
         }
         let active_title = self.tabs[self.active].title.clone();
         let active_model = self.tabs[self.active].engine.model.clone();
@@ -1232,7 +1237,9 @@ impl TuiApp {
         // concurrently). Instead of rejecting, QUEUE the message and send it
         // when this tab goes idle — see `dispatch_queued_input`.
         if self.active_tab().is_busy() {
-            self.active_tab_mut().queued_input.push_back(text.to_string());
+            self.active_tab_mut()
+                .queued_input
+                .push_back(text.to_string());
             let n = self.active_tab().queued_input.len();
             self.toast = Some(Toast::info(format!(
                 "queued ({n}) — sends when the turn finishes (Esc to interrupt now)"
@@ -1504,16 +1511,19 @@ impl TuiApp {
                 }
             }
             "plan" => {
-                let on = !self.template.plan_mode();
-                let t = self.template.with_plan_mode(on);
-                if self.reassemble_active(t.clone()).await {
-                    self.template = t;
-                    self.status.plan_mode = on;
+                // Per-tab: flip THIS tab's flag, then reassemble (which re-applies
+                // it). The status badge syncs from the active tab on render.
+                let on = !self.active_tab().plan_mode;
+                self.active_tab_mut().plan_mode = on;
+                if self.reassemble_active(self.template.clone()).await {
                     self.active_tab_mut().chat.push_system(if on {
                         "plan mode: ON — read-only tools only; research and present a plan, then /plan to execute"
                     } else {
                         "plan mode: OFF — full tools restored"
                     });
+                } else {
+                    // Reassembly refused (busy) — revert the flag.
+                    self.active_tab_mut().plan_mode = !on;
                 }
             }
             "mcp" => {

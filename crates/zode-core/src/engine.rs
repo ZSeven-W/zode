@@ -192,7 +192,9 @@ impl ZodeEngine {
                 all_mcp_servers = config.servers.keys().cloned().collect();
                 all_mcp_servers.sort();
                 config.servers.retain(|name, _| plugins.mcp_enabled(name));
-                if config.servers.is_empty() {
+                // In plan mode, MCP tools (SafetyClass::Unknown) get filtered
+                // out anyway — skip the connection (process spawn / network).
+                if plan_mode || config.servers.is_empty() {
                     None
                 } else {
                     let lifecycle = crate::mcp::connect(config).await;
@@ -490,10 +492,7 @@ impl EngineTemplate {
 
     /// Wire the interactive question channel (TUI). Carried across reassembly
     /// clones, so `AskUserQuestion` survives provider/model/plugin swaps.
-    pub fn with_question_queue(
-        mut self,
-        queue: Option<crate::question::QuestionQueue>,
-    ) -> Self {
+    pub fn with_question_queue(mut self, queue: Option<crate::question::QuestionQueue>) -> Self {
         self.question_queue = queue;
         self
     }
@@ -519,8 +518,10 @@ impl EngineTemplate {
         };
         // AskUserQuestion is registered only when a UI question channel exists.
         let question_tool: Option<Arc<dyn Tool>> = self.question_queue.as_ref().map(|q| {
-            Arc::new(crate::question::AskUserQuestionTool::new(q.clone(), label.clone()))
-                as Arc<dyn Tool>
+            Arc::new(crate::question::AskUserQuestionTool::new(
+                q.clone(),
+                label.clone(),
+            )) as Arc<dyn Tool>
         });
         let cwd = cwd_override.unwrap_or_else(|| self.cwd.clone());
         ZodeEngine::assemble(
