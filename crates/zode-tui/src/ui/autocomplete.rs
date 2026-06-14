@@ -14,6 +14,12 @@ use crate::theme::Theme;
 const MAX_VISIBLE: usize = 8;
 const COMMAND_COLUMN_WIDTH: usize = 15;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandCompletion {
+    pub insert: String,
+    pub placeholder: Option<&'static str>,
+}
+
 pub struct Autocomplete {
     registry: CommandRegistry,
     matches: Vec<SlashCommand>,
@@ -100,9 +106,11 @@ impl Autocomplete {
         self.state.select(Some(i));
     }
 
-    /// The selected command's usage template, to fill the input.
-    pub fn confirm(&self) -> Option<&'static str> {
-        self.matches.get(self.selected_index()).map(|c| c.usage)
+    /// The selected command split into real input and optional ghost args.
+    pub fn confirm(&self) -> Option<CommandCompletion> {
+        self.matches
+            .get(self.selected_index())
+            .map(|c| completion_from_usage(c.usage))
     }
 
     pub fn dismiss(&mut self) {
@@ -150,6 +158,22 @@ impl Autocomplete {
     }
 }
 
+fn completion_from_usage(usage: &'static str) -> CommandCompletion {
+    match usage.split_once(char::is_whitespace) {
+        Some((command, args)) => {
+            let args = args.trim_start();
+            CommandCompletion {
+                insert: format!("{command} "),
+                placeholder: (!args.is_empty()).then_some(args),
+            }
+        }
+        None => CommandCompletion {
+            insert: usage.to_string(),
+            placeholder: None,
+        },
+    }
+}
+
 fn popup_area(input_area: Rect, visible_rows: u16) -> Rect {
     let h = visible_rows;
     Rect {
@@ -190,6 +214,17 @@ mod tests {
         ac.prev();
         assert_eq!(ac.selected_index(), 0);
         assert!(ac.confirm().is_some());
+    }
+
+    #[test]
+    fn confirm_splits_usage_args_into_placeholder() {
+        let mut ac = Autocomplete::new();
+        ac.update("/sidebar");
+
+        let completion = ac.confirm().expect("sidebar command completion");
+
+        assert_eq!(completion.insert, "/sidebar ");
+        assert_eq!(completion.placeholder, Some("[on|off|toggle|auto]"));
     }
 
     #[test]

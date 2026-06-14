@@ -4,10 +4,11 @@
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use tui_textarea::TextArea;
+use unicode_width::UnicodeWidthStr;
 
 use crate::theme::Theme;
 use crate::ui::status::Mode;
@@ -57,7 +58,14 @@ impl InputBox {
         text
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme, mode: Mode) {
+    pub fn render(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        mode: Mode,
+        completion_placeholder: Option<&str>,
+    ) {
         let border_color = match mode {
             Mode::Ready => theme.accent_secondary,
             Mode::Thinking => theme.system,
@@ -84,6 +92,47 @@ impl InputBox {
                 .style(Style::default().bg(theme.bg_input).fg(theme.fg_text)),
         );
         f.render_widget(&ta, area);
+        self.render_completion_placeholder(f, area, theme, completion_placeholder);
+    }
+
+    fn render_completion_placeholder(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        completion_placeholder: Option<&str>,
+    ) {
+        let Some(placeholder) = completion_placeholder.filter(|p| !p.is_empty()) else {
+            return;
+        };
+        let lines = self.area.lines();
+        if lines.len() != 1 {
+            return;
+        }
+        let (row, col) = self.area.cursor();
+        if row != 0 || col != lines[0].chars().count() {
+            return;
+        }
+        let inner = Rect {
+            x: area.x.saturating_add(1),
+            y: area.y.saturating_add(1),
+            width: area.width.saturating_sub(2),
+            height: area.height.saturating_sub(2),
+        };
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        let offset = UnicodeWidthStr::width(lines[0].as_str()).saturating_add(1);
+        if offset >= inner.width as usize {
+            return;
+        }
+        let x = inner.x.saturating_add(offset as u16);
+        let width = inner.width.saturating_sub(offset as u16);
+        let hint = Paragraph::new(Line::from(vec![Span::styled(
+            placeholder.to_string(),
+            Style::default().bg(theme.bg_input).fg(theme.fg_subtle),
+        )]));
+        f.render_widget(hint, Rect::new(x, inner.y, width, 1));
     }
 }
 
@@ -117,7 +166,7 @@ mod tests {
         ib.insert_str("hello");
         let backend = TestBackend::new(80, 4);
         let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| ib.render(f, f.area(), &theme, Mode::Ready))
+        term.draw(|f| ib.render(f, f.area(), &theme, Mode::Ready, None))
             .unwrap();
         let content: String = term
             .backend()
@@ -129,5 +178,36 @@ mod tests {
         assert!(content.contains("prompt"));
         assert!(content.contains("Enter send"));
         assert!(content.contains("hello"));
+    }
+
+    #[test]
+    fn renders_completion_placeholder_without_changing_text() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let mut ib = InputBox::new();
+        ib.insert_str("/sidebar ");
+        let backend = TestBackend::new(80, 4);
+        let mut term = Terminal::new(backend).unwrap();
+
+        term.draw(|f| {
+            ib.render(
+                f,
+                f.area(),
+                &theme,
+                Mode::Ready,
+                Some("[on|off|toggle|auto]"),
+            )
+        })
+        .unwrap();
+
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert_eq!(ib.text(), "/sidebar ");
+        assert!(content.contains("/sidebar "));
+        assert!(content.contains("[on|off|toggle|auto]"));
     }
 }
