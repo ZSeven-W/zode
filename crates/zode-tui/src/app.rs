@@ -33,6 +33,7 @@ use crate::tab::SessionTab;
 use crate::theme::{Theme, ThemeStore};
 use crate::ui::autocomplete::Autocomplete;
 use crate::ui::chat::{ChatRenderMeta, ChatView};
+use crate::ui::dialog::connect::{ConnectAction, ConnectDialog, ConnectStage};
 use crate::ui::dialog::permission::PermissionDialog;
 use crate::ui::dialog::session_picker::SessionPicker;
 use crate::ui::dialog::settings::{SettingsAction, SettingsDialog, SettingsLevel};
@@ -71,6 +72,7 @@ pub struct TuiApp {
     pending_requests: VecDeque<ApprovalRequest>,
     autocomplete: Autocomplete,
     settings: Option<SettingsDialog>,
+    connect: Option<ConnectDialog>,
     session_picker: Option<SessionPicker>,
     tasks_panel: Option<TasksPanel>,
     /// Snapshot of the active tab's background shells, refreshed while the
@@ -135,6 +137,7 @@ impl TuiApp {
             pending_requests: VecDeque::new(),
             autocomplete: Autocomplete::new(),
             settings: None,
+            connect: None,
             session_picker: None,
             tasks_panel: None,
             bg_shells: Vec::new(),
@@ -452,6 +455,7 @@ impl TuiApp {
                     // settings/help/picker/panel overlay so it can't hide the
                     // prompt that is now capturing input.
                     self.settings = None;
+                    self.connect = None;
                     self.session_picker = None;
                     self.tasks_panel = None;
                     self.show_help = false;
@@ -557,6 +561,9 @@ impl TuiApp {
         if let Some(settings) = &mut self.settings {
             settings.render(f, area, &theme);
         }
+        if let Some(connect) = &self.connect {
+            connect.render(f, area, &theme);
+        }
         if let Some(picker) = &mut self.session_picker {
             picker.render(f, area, &theme);
         }
@@ -614,6 +621,12 @@ impl TuiApp {
         // 2. Settings dialog captures input.
         if self.settings.is_some() {
             self.handle_settings_key(key.code).await;
+            return;
+        }
+
+        // 2a. Connect dialog captures provider search and API key entry.
+        if self.connect.is_some() {
+            self.handle_connect_key(key.code).await;
             return;
         }
 
@@ -724,6 +737,12 @@ impl TuiApp {
                     self.open_model_picker();
                     return;
                 }
+                KeyCode::Enter if self.autocomplete.selected_name() == Some("connect") => {
+                    self.input.take();
+                    self.autocomplete.dismiss();
+                    self.open_connect_dialog();
+                    return;
+                }
                 KeyCode::Tab | KeyCode::Enter => {
                     self.apply_completion();
                     return;
@@ -765,6 +784,10 @@ impl TuiApp {
 
     fn open_model_picker(&mut self) {
         self.settings = Some(SettingsDialog::model_picker(self.model_ids()));
+    }
+
+    fn open_connect_dialog(&mut self) {
+        self.connect = Some(ConnectDialog::new());
     }
 
     fn theme_ids(&self) -> Vec<String> {
@@ -820,6 +843,51 @@ impl TuiApp {
         }
     }
 
+    async fn handle_connect_key(&mut self, code: KeyCode) {
+        let action = {
+            let Some(dialog) = &mut self.connect else {
+                return;
+            };
+            match code {
+                KeyCode::Esc => {
+                    self.connect = None;
+                    None
+                }
+                KeyCode::Up if dialog.stage() == ConnectStage::Provider => {
+                    dialog.prev();
+                    None
+                }
+                KeyCode::Down if dialog.stage() == ConnectStage::Provider => {
+                    dialog.next();
+                    None
+                }
+                KeyCode::Backspace if dialog.stage() == ConnectStage::Provider => {
+                    dialog.pop_filter_char();
+                    None
+                }
+                KeyCode::Backspace if dialog.stage() == ConnectStage::ApiKey => {
+                    dialog.pop_api_key_char();
+                    None
+                }
+                KeyCode::Enter => dialog.confirm(),
+                KeyCode::Char(c) if dialog.stage() == ConnectStage::Provider => {
+                    dialog.push_filter_char(c);
+                    None
+                }
+                KeyCode::Char(c) if dialog.stage() == ConnectStage::ApiKey => {
+                    dialog.push_api_key_char(c);
+                    None
+                }
+                _ => None,
+            }
+        };
+
+        if let Some(action) = action {
+            self.connect = None;
+            self.apply_connect(action).await;
+        }
+    }
+
     async fn apply_settings(&mut self, action: SettingsAction) {
         match action {
             SettingsAction::SetTheme(id) => {
@@ -857,6 +925,38 @@ impl TuiApp {
                     self.toast = Some(Toast::info(format!("mode → {m}")));
                 }
             }
+        }
+    }
+
+    async fn apply_connect(&mut self, action: ConnectAction) {
+        if self.active_tab().is_busy() {
+            self.toast = Some(Toast::info(
+                "can't switch provider during a turn - Ctrl+C first",
+            ));
+            return;
+        }
+
+        let mut cfg = match ConfigManager::load_global() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.toast = Some(Toast::error(format!("load config failed: {e}")));
+                return;
+            }
+        };
+        cfg.provider = action.provider.clone();
+        if let Err(e) = ConfigManager::save_global(&cfg) {
+            self.toast = Some(Toast::error(format!("save config failed: {e}")));
+            return;
+        }
+
+        let provider_name = action.name;
+        let t = self.template.with_provider_config(action.provider);
+        if self.reassemble_active(t.clone()).await {
+            self.template = t;
+            self.toast = Some(Toast::info(format!("provider -> {provider_name}")));
+            self.active_tab_mut()
+                .chat
+                .push_system(&format!("provider -> {provider_name}"));
         }
     }
 
@@ -1061,6 +1161,7 @@ impl TuiApp {
             }
             "sessions" | "resume" => self.open_session_picker(),
             "tab" => self.handle_tab_command(args),
+            "connect" => self.open_connect_dialog(),
             "tasks" => self.open_tasks_panel().await,
             "config" => {
                 let msg = format!(

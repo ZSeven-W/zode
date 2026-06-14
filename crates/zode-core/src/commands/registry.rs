@@ -105,6 +105,16 @@ mod tests {
     }
 
     #[test]
+    fn builtins_include_connect_command() {
+        let reg = CommandRegistry::with_builtins();
+        let connect = reg
+            .get("connect")
+            .expect("/connect command should be registered");
+        assert_eq!(connect.usage, "/connect");
+        assert_eq!(connect.description, "Connect a provider");
+    }
+
+    #[test]
     fn parse_input_splits_name_and_args() {
         assert_eq!(
             parse_slash("/model MiniMax-M1"),
