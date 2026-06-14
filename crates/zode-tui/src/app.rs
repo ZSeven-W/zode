@@ -1691,14 +1691,19 @@ impl TuiApp {
                 }
             }
             "reload-plugins" => {
-                // Re-read plugins.disabled from disk (global ⊕ project) so
-                // out-of-band config edits take effect, then reassemble.
-                let t = self.template.reload_plugins_from_disk();
-                if self.reassemble_active(t.clone()).await {
-                    self.template = t;
-                    self.active_tab_mut()
-                        .chat
-                        .push_system("reloaded — tools, MCP, skills, and LSP re-discovered");
+                // Re-read plugins.disabled from disk (global ⊕ project) for the
+                // active tab's cwd so out-of-band config edits take effect.
+                let cwd = self.active_tab().engine.cwd.clone();
+                match self.template.reload_plugins_from_disk(&cwd) {
+                    Ok(t) => {
+                        if self.reassemble_active(t.clone()).await {
+                            self.template = t;
+                            self.active_tab_mut().chat.push_system(
+                                "reloaded — tools, MCP, skills, and LSP re-discovered",
+                            );
+                        }
+                    }
+                    Err(e) => self.toast = Some(Toast::error(format!("reload failed: {e}"))),
                 }
             }
             "reload-skills" => {

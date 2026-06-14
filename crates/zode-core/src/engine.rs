@@ -686,14 +686,13 @@ impl EngineTemplate {
     }
 
     /// Clone with the plugin enable/disable set re-read from disk (`/reload-plugins`).
-    /// Re-loads the effective config (global ⊕ project) for `cwd` and adopts its
-    /// `plugins.disabled`; all other in-session state is preserved. Falls back to
-    /// the current template unchanged if the config can't be loaded.
-    pub fn reload_plugins_from_disk(&self) -> Self {
-        match crate::config::ConfigManager::load(&self.cwd) {
-            Ok(fresh) => self.with_plugins_disabled(fresh.plugins.disabled),
-            Err(_) => self.clone(),
-        }
+    /// Re-loads the effective config (global ⊕ project) for `cwd` — the active
+    /// tab's working directory, which may differ from the template's launch cwd —
+    /// and adopts its `plugins.disabled`; all other in-session state is preserved.
+    /// Errors propagate so the caller can tell the user the reload failed.
+    pub fn reload_plugins_from_disk(&self, cwd: &std::path::Path) -> Result<Self, CoreError> {
+        let fresh = crate::config::ConfigManager::load(cwd)?;
+        Ok(self.with_plugins_disabled(fresh.plugins.disabled))
     }
 
     /// The persistent goal injected into the system prompt (`/goal`).

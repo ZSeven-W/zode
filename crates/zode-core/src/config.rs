@@ -268,6 +268,17 @@ impl ZodeConfig {
         if other.effort.is_some() {
             self.effort = other.effort;
         }
+        if other.temperature.is_some() {
+            self.temperature = other.temperature;
+        }
+        if other.prompt_cache.is_some() {
+            self.prompt_cache = other.prompt_cache;
+        }
+        if !other.plugins.disabled.is_empty() {
+            self.plugins.disabled = other.plugins.disabled;
+        }
+        // Project LSP servers extend (and override same-key) the global set.
+        self.lsp.servers.extend(other.lsp.servers);
     }
 }
 
@@ -470,6 +481,46 @@ mod tests {
         // api key / model inherited from global (project omitted them).
         assert_eq!(global.provider.api_key.as_deref(), Some("sk"));
         assert_eq!(global.provider.model.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn merge_adopts_project_session_and_plugin_fields() {
+        let mut global = ZodeConfig {
+            goal: Some("global goal".into()),
+            effort: Some("low".into()),
+            ..Default::default()
+        };
+        let project: ZodeConfig = serde_json::from_str(
+            r#"{
+                "currency":"CNY","language":"zh","goal":"ship it","effort":"high",
+                "temperature":0.2,"promptCache":false,
+                "plugins":{"disabled":["tools:git"]},
+                "lsp":{"servers":{"rust":{"command":"rust-analyzer","args":[]}}}
+            }"#,
+        )
+        .unwrap();
+        global.merge_from(project);
+        assert_eq!(global.currency.as_deref(), Some("CNY"));
+        assert_eq!(global.language.as_deref(), Some("zh"));
+        assert_eq!(global.goal.as_deref(), Some("ship it"));
+        assert_eq!(global.effort.as_deref(), Some("high"));
+        assert_eq!(global.temperature, Some(0.2));
+        assert_eq!(global.prompt_cache, Some(false));
+        assert_eq!(global.plugins.disabled, vec!["tools:git".to_string()]);
+        assert!(global.lsp.servers.contains_key("rust"));
+    }
+
+    #[test]
+    fn merge_keeps_global_session_fields_when_project_omits_them() {
+        let mut global = ZodeConfig {
+            goal: Some("keep me".into()),
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        let project: ZodeConfig = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        global.merge_from(project);
+        assert_eq!(global.goal.as_deref(), Some("keep me"));
+        assert_eq!(global.effort.as_deref(), Some("high"));
     }
 
     #[test]
