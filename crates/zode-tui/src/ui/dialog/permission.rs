@@ -7,11 +7,16 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 use zode_core::approval::{Approval, ApprovalRequest};
 
 use crate::theme::Theme;
-use crate::ui::centered;
-use crate::ui::diff::{diff_from_tool_input, MAX_DIFF_LINES};
+use crate::ui::diff::diff_from_tool_input;
+
+const MIN_POPUP_WIDTH: u16 = 48;
+const MAX_POPUP_WIDTH: u16 = 96;
+const MAX_POPUP_HEIGHT: u16 = 18;
+const MAX_PERMISSION_DIFF_LINES: usize = 8;
 
 /// State for the active approval prompt. Holds the request until the user
 /// answers, then responds and reports done. `cwd` resolves the diff
@@ -50,7 +55,14 @@ impl PermissionDialog {
         };
         let mut lines = vec![Line::from(req.summary()), Line::from("")];
         if let Some(diff) = diff_from_tool_input(&req.input, &self.cwd, theme) {
-            lines.extend(diff.into_iter().take(MAX_DIFF_LINES));
+            let truncated = diff.len() > MAX_PERMISSION_DIFF_LINES;
+            lines.extend(diff.into_iter().take(MAX_PERMISSION_DIFF_LINES));
+            if truncated {
+                lines.push(Line::styled(
+                    "… diff preview truncated",
+                    Style::default().fg(theme.fg_subtle),
+                ));
+            }
             lines.push(Line::from(""));
         }
         lines.push(Line::styled(
@@ -60,7 +72,7 @@ impl PermissionDialog {
                 .add_modifier(Modifier::BOLD),
         ));
 
-        let popup = centered(area, 70, 60);
+        let popup = permission_popup_area(area, &lines);
         f.render_widget(Clear, popup);
         let block = Block::default()
             .title(format!(" Permission: {} ", req.tool))
@@ -73,6 +85,35 @@ impl PermissionDialog {
             .wrap(Wrap { trim: false });
         f.render_widget(para, popup);
     }
+}
+
+fn permission_popup_area(area: Rect, lines: &[Line<'_>]) -> Rect {
+    if area.width <= 4 || area.height <= 4 {
+        return area;
+    }
+    let max_width = area.width.saturating_sub(4).clamp(1, MAX_POPUP_WIDTH);
+    let min_width = MIN_POPUP_WIDTH.min(max_width);
+    let content_width = lines.iter().map(line_width).max().unwrap_or(0);
+    let width = (content_width as u16)
+        .saturating_add(4)
+        .clamp(min_width, max_width);
+
+    let max_height = area.height.saturating_sub(4).clamp(1, MAX_POPUP_HEIGHT);
+    let height = (lines.len() as u16).saturating_add(2).clamp(3, max_height);
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn line_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
 }
 
 pub(crate) fn approval_for_key(c: char) -> Option<Approval> {
@@ -109,5 +150,40 @@ mod tests {
         assert!(!dialog.on_key('x')); // not a decision key
         assert!(dialog.on_key('y')); // responded
         assert_eq!(join.await.unwrap(), Approval::AllowOnce);
+    }
+
+    #[test]
+    fn popup_area_is_compact_on_wide_terminals() {
+        let lines = vec![
+            Line::from("FileWrite /Users/kayshen/Workspace/ZSeven-W/zode/target/debug/hello.py"),
+            Line::from(""),
+            Line::from("+print(\"Hello, World!\")"),
+            Line::from(""),
+            Line::from("[y] allow once   [a] allow always   [N] deny"),
+        ];
+
+        let popup = permission_popup_area(Rect::new(0, 0, 220, 70), &lines);
+
+        assert!(
+            popup.width <= 96,
+            "popup width should be compact: {popup:?}"
+        );
+        assert!(
+            popup.height <= 12,
+            "popup height should be compact: {popup:?}"
+        );
+        assert!(popup.width >= 48, "popup should remain readable: {popup:?}");
+    }
+
+    #[test]
+    fn popup_area_stays_inside_tight_terminals() {
+        let lines = vec![Line::from("[y] allow once   [a] allow always   [N] deny")];
+
+        let popup = permission_popup_area(Rect::new(0, 0, 52, 12), &lines);
+
+        assert!(popup.x > 0);
+        assert!(popup.y > 0);
+        assert!(popup.x + popup.width <= 52);
+        assert!(popup.y + popup.height <= 12);
     }
 }
