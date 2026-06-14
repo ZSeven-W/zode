@@ -499,7 +499,7 @@ impl TuiApp {
         let active_model = self.tabs[self.active].engine.model.clone();
         let active_cwd = self.tabs[self.active].engine.cwd.clone();
         let active_busy = self.tabs[self.active].is_busy();
-        let show_sidebar = true;
+        let show_sidebar = should_show_sidebar(self.tabs.len());
 
         let areas = split_main(area, show_sidebar);
         if let Some(header) = areas.header {
@@ -1197,6 +1197,10 @@ fn mode_label(mode: Mode) -> &'static str {
     }
 }
 
+fn should_show_sidebar(tab_count: usize) -> bool {
+    tab_count > 1
+}
+
 /// Rebuild a ChatView from a resumed MessageStore so the conversation history
 /// is visible after /resume. User messages that carry only tool results are
 /// skipped (their tool card already shows under the assistant turn); System /
@@ -1274,4 +1278,16 @@ fn install_panic_hook() {
         let _ = std::io::stdout().execute(LeaveAlternateScreen);
         original(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_is_hidden_until_multiple_tabs_exist() {
+        assert!(!should_show_sidebar(0));
+        assert!(!should_show_sidebar(1));
+        assert!(should_show_sidebar(2));
+    }
 }

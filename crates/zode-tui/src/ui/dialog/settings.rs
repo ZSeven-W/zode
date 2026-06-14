@@ -3,12 +3,11 @@
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::theme::Theme;
-use crate::ui::centered;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsLevel {
@@ -168,35 +167,187 @@ impl SettingsDialog {
         let items: Vec<ListItem> = self
             .items()
             .into_iter()
-            .map(|s| ListItem::new(Line::from(s)))
+            .map(|s| {
+                ListItem::new(Line::styled(
+                    format!("  {s}"),
+                    Style::default().fg(theme.fg_text).bg(theme.bg_secondary),
+                ))
+            })
             .collect();
-        let popup = centered(area, 50, 50);
+        let popup = modal_area(area);
         f.render_widget(Clear, popup);
-        let title = match self.level {
-            SettingsLevel::Top => " Settings ",
-            SettingsLevel::Theme if self.root_level == SettingsLevel::Theme => " Theme ",
-            SettingsLevel::Model if self.root_level == SettingsLevel::Model => " Model ",
-            SettingsLevel::Theme => " Settings › Theme ",
-            SettingsLevel::Model => " Settings › Model ",
-            SettingsLevel::Provider => " Settings › Provider ",
-            SettingsLevel::Mode => " Settings › Permission mode ",
-        };
+        f.render_widget(
+            Paragraph::new("").style(Style::default().bg(theme.bg_secondary)),
+            popup,
+        );
+
+        let inner = inner_area(popup);
+        f.render_widget(
+            header_line(title_text(self.level, self.root_level), inner.width, theme),
+            header_rect(inner),
+        );
+        f.render_widget(search_line(theme), search_rect(inner));
+        f.render_widget(
+            Paragraph::new(section_title(self.level, self.root_level)).style(
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.bg_secondary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            section_rect(inner),
+        );
+
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.accent))
-                    .style(Style::default().bg(theme.bg_secondary).fg(theme.fg_text)),
-            )
+            .style(Style::default().bg(theme.bg_secondary).fg(theme.fg_text))
             .highlight_style(
                 Style::default()
-                    .bg(theme.accent)
+                    .bg(theme.system)
                     .fg(theme.bg_primary)
                     .add_modifier(Modifier::BOLD),
             );
-        f.render_stateful_widget(list, popup, &mut self.state);
+        f.render_stateful_widget(list, list_rect(inner), &mut self.state);
+        f.render_widget(footer_line(theme), footer_rect(inner));
     }
+}
+
+fn modal_area(area: Rect) -> Rect {
+    let max_w = area.width.saturating_sub(4);
+    let max_h = area.height.saturating_sub(4);
+    let width = max_w.min(58).max(max_w.min(40));
+    let height = max_h.min(22).max(max_h.min(14));
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn inner_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(3),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(6),
+        height: area.height.saturating_sub(2),
+    }
+}
+
+fn header_rect(inner: Rect) -> Rect {
+    Rect::new(inner.x, inner.y, inner.width, 1)
+}
+
+fn search_rect(inner: Rect) -> Rect {
+    Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1)
+}
+
+fn section_rect(inner: Rect) -> Rect {
+    Rect::new(inner.x, inner.y.saturating_add(4), inner.width, 1)
+}
+
+fn list_rect(inner: Rect) -> Rect {
+    Rect::new(
+        inner.x,
+        inner.y.saturating_add(5),
+        inner.width,
+        inner.height.saturating_sub(7),
+    )
+}
+
+fn footer_rect(inner: Rect) -> Rect {
+    Rect::new(
+        inner.x,
+        inner.y.saturating_add(inner.height.saturating_sub(1)),
+        inner.width,
+        1,
+    )
+}
+
+fn title_text(level: SettingsLevel, root: SettingsLevel) -> &'static str {
+    match level {
+        SettingsLevel::Top => "Settings",
+        SettingsLevel::Theme if root == SettingsLevel::Theme => "Select theme",
+        SettingsLevel::Model if root == SettingsLevel::Model => "Select model",
+        SettingsLevel::Provider if root == SettingsLevel::Provider => "Select provider",
+        SettingsLevel::Mode if root == SettingsLevel::Mode => "Permission mode",
+        SettingsLevel::Theme => "Select theme",
+        SettingsLevel::Model => "Select model",
+        SettingsLevel::Provider => "Select provider",
+        SettingsLevel::Mode => "Permission mode",
+    }
+}
+
+fn section_title(level: SettingsLevel, root: SettingsLevel) -> &'static str {
+    match (level, root) {
+        (SettingsLevel::Top, _) => "Suggested",
+        (SettingsLevel::Theme, _) => "Themes",
+        (SettingsLevel::Model, _) => "Models",
+        (SettingsLevel::Provider, _) => "Providers",
+        (SettingsLevel::Mode, _) => "Permission",
+    }
+}
+
+fn header_line(title: &'static str, width: u16, theme: &Theme) -> Paragraph<'static> {
+    let title_width = title.chars().count() as u16;
+    let gap = width.saturating_sub(title_width.saturating_add(3)) as usize;
+    Paragraph::new(Line::from(vec![
+        Span::styled(
+            title,
+            Style::default()
+                .fg(theme.fg_white)
+                .bg(theme.bg_secondary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ".repeat(gap), Style::default().bg(theme.bg_secondary)),
+        Span::styled(
+            "esc",
+            Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary),
+        ),
+    ]))
+    .style(Style::default().bg(theme.bg_secondary))
+}
+
+fn search_line(theme: &Theme) -> Paragraph<'static> {
+    Paragraph::new(Line::from(vec![
+        Span::styled(
+            "S",
+            Style::default()
+                .fg(theme.accent_secondary)
+                .bg(theme.bg_secondary),
+        ),
+        Span::styled(
+            "earch",
+            Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary),
+        ),
+    ]))
+    .style(Style::default().bg(theme.bg_secondary))
+}
+
+fn footer_line(theme: &Theme) -> Paragraph<'static> {
+    Paragraph::new(Line::from(vec![
+        Span::styled(
+            "Enter",
+            Style::default()
+                .fg(theme.fg_white)
+                .bg(theme.bg_secondary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " select  ",
+            Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary),
+        ),
+        Span::styled(
+            "Esc",
+            Style::default()
+                .fg(theme.fg_white)
+                .bg(theme.bg_secondary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " close",
+            Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary),
+        ),
+    ]))
+    .style(Style::default().bg(theme.bg_secondary))
 }
 
 #[cfg(test)]
@@ -275,7 +426,37 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(!content.contains("LEAK_OUTSIDE_SETTINGS"));
-        assert!(content.contains("Theme"));
+        assert!(content.contains("Select theme"));
+        assert!(content.contains("esc"));
+        assert!(content.contains("Search"));
         assert!(content.contains("hacker"));
+        assert!(!content.contains("┌"));
+    }
+
+    #[test]
+    fn model_picker_uses_opencode_style_modal() {
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("minimal"));
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut dialog =
+            SettingsDialog::model_picker(vec!["deepseek-v4-pro".into(), "MiniMax-M1".into()]);
+
+        terminal
+            .draw(|f| dialog.render(f, f.area(), &theme))
+            .unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("Select model"));
+        assert!(content.contains("esc"));
+        assert!(content.contains("Search"));
+        assert!(content.contains("deepseek-v4-pro"));
+        assert!(!content.contains("┌"));
+        assert!(!content.contains("Settings ›"));
     }
 }

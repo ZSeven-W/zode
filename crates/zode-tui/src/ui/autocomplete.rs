@@ -142,7 +142,7 @@ impl Autocomplete {
             )
             .highlight_style(
                 Style::default()
-                    .bg(theme.accent)
+                    .bg(theme.system)
                     .fg(theme.bg_primary)
                     .add_modifier(Modifier::BOLD),
             );
