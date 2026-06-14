@@ -476,6 +476,9 @@ impl TuiApp {
                 maybe_ev = term_events.next() => {
                     if let Some(Ok(ev)) = maybe_ev {
                         self.handle_term(ev, &agent_tx).await;
+                        // Switching to a tab that has queued input (and is now
+                        // idle) flushes it here, not just on its own turn-done.
+                        self.dispatch_queued_input(&agent_tx).await;
                     }
                 }
                 Some(app_ev) = agent_rx.recv() => {
