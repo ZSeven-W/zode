@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::config::{LspConfig, LspServerConfig};
 use crate::lsp::client::LspClient;
+use crate::lsp::install;
 
 #[derive(Debug)]
 pub struct LspManager {
@@ -73,8 +74,24 @@ impl LspManager {
         let cfg = self
             .servers
             .get(&lang)
-            .ok_or_else(|| format!("server config for {lang} missing"))?;
-        let client = Arc::new(LspClient::start(lang.clone(), cfg, self.root.clone()).await?);
+            .ok_or_else(|| format!("server config for {lang} missing"))?
+            .clone();
+        // For a built-in language, resolve the runnable command — installing it
+        // on demand into ~/.zode/lsp if needed (blocking, hence spawn_blocking).
+        // User-defined languages use their configured command as-is.
+        let resolved = match install::spec_for_lang(&lang) {
+            Some(spec) => {
+                let path = tokio::task::spawn_blocking(move || install::ensure(spec))
+                    .await
+                    .map_err(|e| format!("install task failed: {e}"))??;
+                LspServerConfig {
+                    command: path.to_string_lossy().into_owned(),
+                    ..cfg
+                }
+            }
+            None => cfg,
+        };
+        let client = Arc::new(LspClient::start(lang.clone(), &resolved, self.root.clone()).await?);
         clients.insert(lang, client.clone());
         Ok(client)
     }

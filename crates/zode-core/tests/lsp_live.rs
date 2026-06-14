@@ -79,3 +79,64 @@ async fn clangd_diagnostics_hover_symbols() {
     assert!(names.contains(&"greet"), "symbols include greet: {names:?}");
     assert!(names.contains(&"bad"), "symbols include bad: {names:?}");
 }
+
+/// Auto-install path: with no server preinstalled, the first tool call should
+/// `npm install` bash-language-server into a throwaway `<config>/lsp` dir and
+/// then drive it. Needs npm + network. Run with:
+///   cargo test -p zode-core --test lsp_live -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn auto_installs_bash_language_server_via_npm() {
+    let cfgdir = tempfile::tempdir().unwrap();
+    std::env::set_var("ZODE_CONFIG_DIR", cfgdir.path());
+
+    let proj = tempfile::tempdir().unwrap();
+    let root = proj.path().to_path_buf();
+    std::fs::write(
+        root.join("script.sh"),
+        "#!/bin/bash\ngreet() {\n  echo hi\n}\ngreet\n",
+    )
+    .unwrap();
+
+    // "bash" has an npm install recipe; nothing is preinstalled in cfgdir.
+    let mut servers = HashMap::new();
+    servers.insert(
+        "bash".to_string(),
+        LspServerConfig {
+            command: "bash-language-server".into(),
+            args: vec!["start".into()],
+            extensions: vec!["sh".into()],
+        },
+    );
+    let mgr = Arc::new(LspManager::new(LspConfig { servers }, root.clone()));
+    let tools = lsp_tools(&mgr);
+    let ctx = ToolUseContext::new(root);
+
+    // First call triggers the npm install into <cfgdir>/lsp, then spawns.
+    let syms = tool(&tools, "lsp_symbols")
+        .call(&ctx, json!({ "file": "script.sh" }))
+        .await
+        .expect("symbols call ok (installs server on demand)");
+    println!("symbols: {}", serde_json::to_string_pretty(&syms).unwrap());
+    let names: Vec<String> = syms
+        .get("symbols")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.get("name").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        names.iter().any(|n| n.contains("greet")),
+        "symbols include greet: {names:?}"
+    );
+
+    // The server binary now lives in the managed dir.
+    let bin = cfgdir
+        .path()
+        .join("lsp/node_modules/.bin/bash-language-server");
+    assert!(bin.exists(), "installed bin at {}", bin.display());
+
+    std::env::remove_var("ZODE_CONFIG_DIR");
+}

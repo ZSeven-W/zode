@@ -21,8 +21,12 @@ use tokio::sync::{oneshot, Mutex, Notify};
 
 use crate::config::LspServerConfig;
 
-/// How long to wait for a response to a request before giving up.
+/// How long to wait for a response to a normal request before giving up.
 const REQUEST_TIMEOUT_SECS: u64 = 15;
+/// `initialize` gets a longer budget: a cold server (rust-analyzer indexing,
+/// bash-language-server loading tree-sitter) can take far longer to hand back
+/// its first response than steady-state queries.
+const INIT_TIMEOUT_SECS: u64 = 45;
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>;
 type Diagnostics = Arc<Mutex<HashMap<String, Vec<Value>>>>;
@@ -105,13 +109,24 @@ impl LspClient {
             },
             "clientInfo": { "name": "zode", "version": env!("CARGO_PKG_VERSION") }
         });
-        self.request("initialize", params).await?;
+        self.request_with_timeout("initialize", params, INIT_TIMEOUT_SECS)
+            .await?;
         self.notify("initialized", json!({})).await;
         Ok(())
     }
 
     /// Send a request and await its result (or a mapped error).
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.request_with_timeout(method, params, REQUEST_TIMEOUT_SECS)
+            .await
+    }
+
+    async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout_secs: u64,
+    ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
@@ -122,7 +137,7 @@ impl LspClient {
             return Err(format!("lsp write {method}: {e}"));
         }
 
-        let resp = match tokio::time::timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), rx).await {
+        let resp = match tokio::time::timeout(Duration::from_secs(timeout_secs), rx).await {
             Ok(Ok(v)) => v,
             Ok(Err(_)) => return Err(format!("lsp {method}: server closed the connection")),
             Err(_) => {
