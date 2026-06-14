@@ -7,6 +7,7 @@
 
 pub mod approval;
 pub mod bg_shells;
+pub mod clipboard;
 pub mod commands;
 pub mod config;
 pub mod cost;
