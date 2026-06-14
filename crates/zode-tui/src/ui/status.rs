@@ -93,7 +93,9 @@ impl StatusBar {
         if self.plan_mode {
             spans.push(Span::styled(
                 "  PLAN",
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         spans.extend([

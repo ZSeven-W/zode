@@ -53,10 +53,7 @@ fn position(input: &Value) -> Result<Value, AgentError> {
 }
 
 /// Resolve `file`, open it, and hand back (client, uri).
-async fn open(
-    mgr: &Arc<LspManager>,
-    file: &str,
-) -> Result<(Arc<LspClient>, String), AgentError> {
+async fn open(mgr: &Arc<LspManager>, file: &str) -> Result<(Arc<LspClient>, String), AgentError> {
     let path = mgr.resolve(file);
     let client = mgr.client_for(&path).await.map_err(AgentError::other)?;
     let uri = client.ensure_open(&path).await.map_err(AgentError::other)?;
@@ -385,9 +382,32 @@ impl Tool for LspFormatTool {
 }
 
 const SYMBOL_KIND: [&str; 27] = [
-    "", "file", "module", "namespace", "package", "class", "method", "property", "field",
-    "constructor", "enum", "interface", "function", "variable", "constant", "string", "number",
-    "boolean", "array", "object", "key", "null", "enum-member", "struct", "event", "operator",
+    "",
+    "file",
+    "module",
+    "namespace",
+    "package",
+    "class",
+    "method",
+    "property",
+    "field",
+    "constructor",
+    "enum",
+    "interface",
+    "function",
+    "variable",
+    "constant",
+    "string",
+    "number",
+    "boolean",
+    "array",
+    "object",
+    "key",
+    "null",
+    "enum-member",
+    "struct",
+    "event",
+    "operator",
     "type-parameter",
 ];
 
@@ -427,7 +447,8 @@ mod tests {
 
     #[test]
     fn normalizes_single_location_and_array() {
-        let single = json!({ "uri": "file:///x.rs", "range": { "start": { "line": 3, "character": 2 } } });
+        let single =
+            json!({ "uri": "file:///x.rs", "range": { "start": { "line": 3, "character": 2 } } });
         let locs = normalize_locations(&single);
         assert_eq!(locs.len(), 1);
         assert_eq!(locs[0]["file"], "/x.rs");

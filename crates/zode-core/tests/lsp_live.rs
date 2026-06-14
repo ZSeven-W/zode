@@ -17,7 +17,10 @@ use zode_core::config::{LspConfig, LspServerConfig};
 use zode_core::lsp::{lsp_tools, LspManager};
 
 fn tool<'a>(tools: &'a [Arc<dyn Tool>], name: &str) -> &'a Arc<dyn Tool> {
-    tools.iter().find(|t| t.name() == name).expect("tool present")
+    tools
+        .iter()
+        .find(|t| t.name() == name)
+        .expect("tool present")
 }
 
 #[tokio::test]
@@ -50,12 +53,21 @@ async fn clangd_diagnostics_hover_symbols() {
         .call(&ctx, json!({ "file": "probe.c" }))
         .await
         .expect("diagnostics call ok");
-    println!("diagnostics: {}", serde_json::to_string_pretty(&diags).unwrap());
-    assert!(diags.get("diagnostics").is_some(), "has a diagnostics array");
+    println!(
+        "diagnostics: {}",
+        serde_json::to_string_pretty(&diags).unwrap()
+    );
+    assert!(
+        diags.get("diagnostics").is_some(),
+        "has a diagnostics array"
+    );
 
     // Hover over `greet` (line 0, the `g` of greet at column 4).
     let hover = tool(&tools, "lsp_hover")
-        .call(&ctx, json!({ "file": "probe.c", "line": 0, "character": 4 }))
+        .call(
+            &ctx,
+            json!({ "file": "probe.c", "line": 0, "character": 4 }),
+        )
         .await
         .expect("hover call ok");
     println!("hover: {hover}");
@@ -74,7 +86,11 @@ async fn clangd_diagnostics_hover_symbols() {
     let names: Vec<&str> = syms
         .get("symbols")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|s| s.get("name").and_then(Value::as_str)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.get("name").and_then(Value::as_str))
+                .collect()
+        })
         .unwrap_or_default();
     assert!(names.contains(&"greet"), "symbols include greet: {names:?}");
     assert!(names.contains(&"bad"), "symbols include bad: {names:?}");
@@ -97,7 +113,11 @@ fn auto_installs_bash_language_server_via_npm() {
     // `npm install --prefix <cfgdir>/lsp bash-language-server`.
     let path = install::ensure(spec).expect("npm install + resolve bash-language-server");
     println!("resolved server at {}", path.display());
-    assert!(path.exists(), "installed binary exists at {}", path.display());
+    assert!(
+        path.exists(),
+        "installed binary exists at {}",
+        path.display()
+    );
     assert!(
         path.to_string_lossy()
             .contains("node_modules/.bin/bash-language-server"),

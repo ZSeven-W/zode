@@ -133,7 +133,10 @@ impl QuestionDialog {
             } else {
                 Style::default().fg(theme.fg_text).bg(theme.bg_secondary)
             };
-            f.render_widget(Paragraph::new(row).style(style), Rect::new(inner.x, y, inner.width, 1));
+            f.render_widget(
+                Paragraph::new(row).style(style),
+                Rect::new(inner.x, y, inner.width, 1),
+            );
             y = y.saturating_add(1);
         }
 
@@ -205,7 +208,8 @@ mod tests {
         let (q, mut rx) = question_queue();
         // The tool side awaits the answer.
         let asker = tokio::spawn(async move {
-            q.ask("pick", &["a".into(), "b".into(), "c".into()], None).await
+            q.ask("pick", &["a".into(), "b".into(), "c".into()], None)
+                .await
         });
         let req = rx.next().await.unwrap();
         let mut d = QuestionDialog::new(req);
@@ -217,7 +221,8 @@ mod tests {
     #[tokio::test]
     async fn esc_dismisses_with_none() {
         let (q, mut rx) = question_queue();
-        let asker = tokio::spawn(async move { q.ask("pick", &["a".into(), "b".into()], None).await });
+        let asker =
+            tokio::spawn(async move { q.ask("pick", &["a".into(), "b".into()], None).await });
         let req = rx.next().await.unwrap();
         let mut d = QuestionDialog::new(req);
         assert!(d.on_key(KeyCode::Esc));
@@ -228,7 +233,8 @@ mod tests {
     async fn number_key_picks_directly() {
         let (q, mut rx) = question_queue();
         let asker = tokio::spawn(async move {
-            q.ask("pick", &["a".into(), "b".into(), "c".into()], None).await
+            q.ask("pick", &["a".into(), "b".into(), "c".into()], None)
+                .await
         });
         let req = rx.next().await.unwrap();
         let mut d = QuestionDialog::new(req);

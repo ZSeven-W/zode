@@ -325,7 +325,8 @@ pub fn ensure(spec: &ServerSpec) -> Result<PathBuf, String> {
         ));
     }
     run_install(spec)?;
-    resolve(spec).ok_or_else(|| format!("installed {} but could not locate the binary", spec.command))
+    resolve(spec)
+        .ok_or_else(|| format!("installed {} but could not locate the binary", spec.command))
 }
 
 fn run_install(spec: &ServerSpec) -> Result<(), String> {

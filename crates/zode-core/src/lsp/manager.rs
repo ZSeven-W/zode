@@ -117,7 +117,10 @@ mod tests {
     #[test]
     fn routes_extension_to_language() {
         let m = LspManager::new(cfg(), PathBuf::from("/proj"));
-        assert_eq!(m.lang_for(Path::new("/proj/src/main.rs")).as_deref(), Some("rust"));
+        assert_eq!(
+            m.lang_for(Path::new("/proj/src/main.rs")).as_deref(),
+            Some("rust")
+        );
         assert_eq!(m.lang_for(Path::new("/proj/README.md")), None);
     }
 

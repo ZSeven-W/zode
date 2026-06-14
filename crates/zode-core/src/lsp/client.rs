@@ -381,10 +381,22 @@ mod tests {
     #[test]
     fn language_id_disambiguates_by_extension() {
         // One server (typescript-language-server) hosts four ids.
-        assert_eq!(language_id_for(Path::new("a.js"), "typescript"), "javascript");
-        assert_eq!(language_id_for(Path::new("a.jsx"), "typescript"), "javascriptreact");
-        assert_eq!(language_id_for(Path::new("a.ts"), "typescript"), "typescript");
-        assert_eq!(language_id_for(Path::new("a.tsx"), "typescript"), "typescriptreact");
+        assert_eq!(
+            language_id_for(Path::new("a.js"), "typescript"),
+            "javascript"
+        );
+        assert_eq!(
+            language_id_for(Path::new("a.jsx"), "typescript"),
+            "javascriptreact"
+        );
+        assert_eq!(
+            language_id_for(Path::new("a.ts"), "typescript"),
+            "typescript"
+        );
+        assert_eq!(
+            language_id_for(Path::new("a.tsx"), "typescript"),
+            "typescriptreact"
+        );
         // clangd hosts c/cpp; `.c` is C even when the server key is cpp.
         assert_eq!(language_id_for(Path::new("a.c"), "cpp"), "c");
         assert_eq!(language_id_for(Path::new("a.cpp"), "cpp"), "cpp");

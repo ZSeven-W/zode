@@ -108,7 +108,11 @@ impl AskUserQuestionTool {
         let options: Vec<String> = input
             .get("options")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         if options.len() < 2 {
             return Err(AgentError::other(
@@ -153,10 +157,12 @@ impl Tool for AskUserQuestionTool {
     }
     async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let (question, options) = Self::parse(&input)?;
-        match self.queue.ask(&question, &options, self.source.clone()).await {
-            Some(i) if i < options.len() => {
-                Ok(json!({ "selected": options[i], "index": i }))
-            }
+        match self
+            .queue
+            .ask(&question, &options, self.source.clone())
+            .await
+        {
+            Some(i) if i < options.len() => Ok(json!({ "selected": options[i], "index": i })),
             // Dismissed (Esc) or no UI: report it so the agent can proceed
             // sensibly rather than treating the turn as failed.
             _ => Ok(json!({ "selected": null, "dismissed": true })),
