@@ -323,6 +323,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn price_overrides_from_config_fields() {
+        // No price fields → None (cost falls back to the built-in catalog).
+        assert!(ProviderConfig::default().price_overrides().is_none());
+        // Any field set → Some, parsed from a camelCase config.
+        let cfg: ProviderConfig =
+            serde_json::from_str(r#"{"inputPrice":0.28,"outputPrice":1.1}"#).unwrap();
+        assert_eq!(cfg.input_price, Some(0.28));
+        assert_eq!(cfg.output_price, Some(1.1));
+        assert!(cfg.price_overrides().is_some());
+    }
+
+    #[test]
     fn parse_minimax_anthropic_config() {
         let json = r#"{
             "provider": {
