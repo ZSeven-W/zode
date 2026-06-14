@@ -131,10 +131,26 @@ hooks in `~/.zode/hooks.json` ⊕ `.zode/hooks.json`.
 
 ## Benchmark
 
-Can a Zode harness driving an open model keep up with Claude on real coding
-problems? On a 31-task suite spanning six dimensions (algorithms, strings,
-data-structures, math, parsing, edge-cases), each task scored by a hidden test,
-**Zode + DeepSeek-v4-pro matches Claude**:
+Can a Zode harness driving an *open* model keep up with Claude? Across five
+dimensions — from one-shot code generation to multi-file agentic work to
+instruction-following — **Zode + DeepSeek-v4-pro matches Claude**, every task
+scored by a *hidden* grader, head-to-head against Claude solving the same tasks:
+
+| Dimension | Tasks | Claude | Zode + DeepSeek-v4-pro |
+|-----------|:-----:|:------:|:----------------------:|
+| Code generation (one-shot) | 31 | 100% | 97.8% — model edge; **→ 100% agentic** |
+| Agentic harness (read/run/edit/fix) | 6 | 100% | **100%** |
+| Tricky bugs (疑难杂症) | 9 | 100% | **100%** |
+| Complex multi-file | 5 | 100% | **100%** |
+| Instruction-following (MCP / Skills / constraints) | 25 | 100% | **100%** |
+
+Details, methodology, and reproduction below; all suites live in
+[`benchmarks/`](benchmarks/).
+
+### Code generation
+
+On a 31-task suite spanning six dimensions (algorithms, strings,
+data-structures, math, parsing, edge-cases), each task scored by a hidden test:
 
 | Dimension       | Tasks | Claude | Zode + DeepSeek-v4-pro |
 |-----------------|:-----:|:------:|:----------------------:|
@@ -192,18 +208,23 @@ so a correct answer *proves* the tool/skill was actually used as instructed.
 | Skills | load skill + obey its rule exactly | 3 | 100% | **100%** |
 | Format / negative | JSON-only, exact word, layout, "use no tools" | 4 | 100% | **100%** |
 | Hard | multi-tool **sequencing**, **buried** requirement, conditional tool use, skill + post-processing | 6 | 100% | **100%** |
-| **Total** | | **17** | **100%** | **100%** (51/51, 3 runs) |
+| Adversarial | override ("ignore that, do X"), no-explanation, JSON-no-markdown, ignore-the-distractor, tool + transform | 8 | 100% | **100%** |
+| **Total** | | **25** | **100%** | **100%** |
 
-Zode + DeepSeek invoked the correct MCP tool / skill and obeyed every format and
-negative constraint in all 3 runs — including chaining two MCP tools in order
-and pulling the one real instruction out of a paragraph of distractor text.
+Zode + DeepSeek invoked the correct MCP tool / skill and obeyed every format,
+negative, and adversarial constraint — chaining two MCP tools in order, pulling
+the one real instruction out of a paragraph of distractor text, and following
+overrides ("reply RED — actually, reply BLUE"). The system prompt also carries
+an explicit instruction-adherence clause for robustness on the long tail.
 
-**Efficiency.** Because Zode keeps the system-prompt + tool-schema prefix
-byte-stable, DeepSeek serves it from its prompt cache: a steady-state session
-measured a **93% input-token cache-hit rate** (`/cost` reports it live). The
-harness lever that closed the code-gen gap was the system prompt — general
-"check the edge cases, trace the examples before answering" guidance, not
-task-specific hints — plus a configurable low `temperature` for determinism.
+**Efficiency.** Zode keeps the system-prompt + tool-schema prefix byte-stable
+and **requests prompt caching on every turn** (`promptCache`, on by default):
+for Anthropic / MiniMax it sends `cache_control` breakpoints so the prefix
+isn't re-billed each turn; OpenAI-compatible providers (DeepSeek, OpenAI, …)
+cache that prefix automatically. A steady-state DeepSeek session measured a
+**93% input-token cache-hit rate** (`/cost` reports it live). Other knobs: a
+configurable low `temperature` for determinism, and a system prompt with
+general edge-case + instruction-adherence guidance (no task-specific hints).
 
 **Methodology.** Zode runs headless (`zode -p "<task>" --yolo`,
 `deepseek-v4-pro`, `temperature: 0`) in an isolated working directory; Claude's

@@ -64,6 +64,11 @@ pub struct ZodeConfig {
     /// Sampling temperature. `None` uses the provider default; a low value
     /// (e.g. 0) makes coding output deterministic and more reliably correct.
     pub temperature: Option<f32>,
+    /// Request provider prompt caching (`None` defaults to true). For Anthropic/
+    /// MiniMax this adds `cache_control` so the stable system+tools prefix is
+    /// cached across turns instead of re-billed every turn; OpenAI-compatible
+    /// providers cache automatically.
+    pub prompt_cache: Option<bool>,
 
     // --- Legacy (Zig/TS-era) flat fields, read-only for backward compat.
     // Mapped into `provider` by `normalize_legacy()` and dropped on save

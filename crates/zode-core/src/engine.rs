@@ -60,6 +60,8 @@ pub struct ZodeEngine {
     pub max_output_tokens: u32,
     /// Sampling temperature (None = provider default).
     pub temperature: Option<f32>,
+    /// Whether to request provider prompt caching (default on).
+    pub prompt_cache: bool,
     /// Background shell registry (Phase 03/07 inspect this).
     pub bash_sessions: BashSessionRegistry,
     /// Shared TodoWrite state handle (Phase 07 reads the list for the UI).
@@ -242,6 +244,7 @@ impl ZodeEngine {
             cwd,
             max_output_tokens: cfg.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
             temperature: cfg.temperature,
+            prompt_cache: cfg.prompt_cache.unwrap_or(true),
             bash_sessions,
             todo_state,
             history,
@@ -301,7 +304,8 @@ impl ZodeEngine {
             .max_output_tokens(self.max_output_tokens)
             .model_max_tokens(DEFAULT_MODEL_MAX_TOKENS)
             .cwd(self.cwd.clone())
-            .auto_compact(true);
+            .auto_compact(true)
+            .use_prompt_cache(self.prompt_cache);
         if let Some(t) = self.temperature {
             builder = builder.temperature(t);
         }

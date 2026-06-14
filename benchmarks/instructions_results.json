@@ -1,7 +1,7 @@
 {
   "total": [
-    17,
-    17
+    25,
+    25
   ],
   "by_kind": {
     "mcp": [
@@ -23,6 +23,10 @@
     "hard": [
       6,
       6
+    ],
+    "adversarial": [
+      8,
+      8
     ]
   },
   "results": [
@@ -30,7 +34,7 @@
       "id": "mcp_secret_add",
       "kind": "mcp",
       "passed": true,
-      "detail": "missing '4542' in 'The result from the `secret_add` tool is **4542**. (Not the straightforward 300 you might '",
+      "detail": "missing '4542' in 'The resulting number is **4542**.'",
       "tools": [
         "mcp__bench__secret_add"
       ]
@@ -39,7 +43,7 @@
       "id": "mcp_reverse",
       "kind": "mcp",
       "passed": true,
-      "detail": "missing '<<noitcurtsni>>' in 'The tool returned an error when called with the `token` parameter. Let me try with `text` '",
+      "detail": "missing '<<noitcurtsni>>' in \"The first call returned an error referencing `'text'`. Let me try with `text` as the param\"",
       "tools": [
         "mcp__bench__reverse_token",
         "tool"
@@ -58,7 +62,7 @@
       "id": "mcp_selectivity",
       "kind": "mcp",
       "passed": true,
-      "detail": "missing '4252' in 'The `secret_add` tool returned **4252**.'",
+      "detail": "missing '4252' in '4252'",
       "tools": [
         "mcp__bench__secret_add"
       ]
@@ -131,7 +135,7 @@
       "id": "hard_sequential",
       "kind": "hard",
       "passed": true,
-      "detail": "missing '<<OTULP-1377-XQZ>>' in 'The first attempt gave an error. Let me try with `text` as the parameter name:**Final reve'",
+      "detail": "missing '<<OTULP-1377-XQZ>>' in '<<OTULP-1377-XQZ>>'",
       "tools": [
         "mcp__bench__magic_word",
         "mcp__bench__reverse_token",
@@ -144,7 +148,8 @@
       "passed": true,
       "detail": "missing '4257' in '4257'",
       "tools": [
-        "mcp__bench__secret_add"
+        "mcp__bench__secret_add",
+        "tool"
       ]
     },
     {
@@ -171,6 +176,64 @@
       "tools": [
         "Skill"
       ]
+    },
+    {
+      "id": "adv_override",
+      "kind": "adversarial",
+      "passed": true,
+      "detail": "got 'BLUE'",
+      "tools": []
+    },
+    {
+      "id": "adv_no_explain",
+      "kind": "adversarial",
+      "passed": true,
+      "detail": "got 'Paris'",
+      "tools": []
+    },
+    {
+      "id": "adv_multi_negative",
+      "kind": "adversarial",
+      "passed": true,
+      "detail": "got '4'",
+      "tools": []
+    },
+    {
+      "id": "adv_buried_counter",
+      "kind": "adversarial",
+      "passed": true,
+      "detail": "got 'NO'",
+      "tools": []
+    },
+    {
+      "id": "adv_json_no_md",
+      "kind": "adversarial",
+      "passed": true,
+      "detail": "got '{\"result\": 81}'",
+      "tools": []
+    },
+    {
+      "id": "adv_tool_then_transform",
+      "kind": "adversarial",
+      "passed": true,
+      "detail": "missing 'zqx-7731-pluto' in 'zqx-7731-pluto'",
+      "tools": [
+        "mcp__bench__magic_word"
+      ]
+    },
+    {
+      "id": "adv_strict_prefix",
+      "kind": "adversarial",
+      "passed": true,
+      "detail": "got 'ANS:42'",
+      "tools": []
+    },
+    {
+      "id": "adv_ignore_first",
+      "kind": "adversarial",
+      "passed": true,
+      "detail": "got '100'",
+      "tools": []
     }
   ]
 }
