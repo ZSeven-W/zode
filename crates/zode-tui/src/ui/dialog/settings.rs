@@ -16,6 +16,8 @@ pub enum SettingsLevel {
     Model,
     Provider,
     Mode,
+    Effort,
+    Sidebar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +26,8 @@ pub enum SettingsAction {
     SetModel(String),
     SetProvider(String),
     SetMode(String),
+    SetEffort(String),
+    SetSidebar(String),
 }
 
 pub struct SettingsDialog {
@@ -34,9 +38,25 @@ pub struct SettingsDialog {
     model_ids: Vec<String>,
     provider_names: Vec<String>,
     modes: Vec<String>,
+    efforts: Vec<String>,
+    sidebars: Vec<String>,
 }
 
-const TOP_ITEMS: &[&str] = &["Theme", "Provider", "Permission mode"];
+const TOP_ITEMS: &[&str] = &[
+    "Theme",
+    "Provider",
+    "Permission mode",
+    "Effort",
+    "Sidebar",
+];
+
+fn default_efforts() -> Vec<String> {
+    vec!["low".into(), "medium".into(), "high".into()]
+}
+
+fn default_sidebars() -> Vec<String> {
+    vec!["auto".into(), "visible".into(), "hidden".into()]
+}
 
 impl SettingsDialog {
     pub fn new(theme_ids: Vec<String>, provider_names: Vec<String>) -> Self {
@@ -50,6 +70,8 @@ impl SettingsDialog {
             model_ids: Vec::new(),
             provider_names,
             modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
+            efforts: default_efforts(),
+            sidebars: default_sidebars(),
         }
     }
 
@@ -64,6 +86,8 @@ impl SettingsDialog {
             model_ids: Vec::new(),
             provider_names: Vec::new(),
             modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
+            efforts: default_efforts(),
+            sidebars: default_sidebars(),
         }
     }
 
@@ -78,6 +102,40 @@ impl SettingsDialog {
             model_ids,
             provider_names: Vec::new(),
             modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
+            efforts: default_efforts(),
+            sidebars: default_sidebars(),
+        }
+    }
+
+    pub fn effort_picker() -> Self {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        Self {
+            level: SettingsLevel::Effort,
+            root_level: SettingsLevel::Effort,
+            state,
+            theme_ids: Vec::new(),
+            model_ids: Vec::new(),
+            provider_names: Vec::new(),
+            modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
+            efforts: default_efforts(),
+            sidebars: default_sidebars(),
+        }
+    }
+
+    pub fn sidebar_picker() -> Self {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        Self {
+            level: SettingsLevel::Sidebar,
+            root_level: SettingsLevel::Sidebar,
+            state,
+            theme_ids: Vec::new(),
+            model_ids: Vec::new(),
+            provider_names: Vec::new(),
+            modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
+            efforts: default_efforts(),
+            sidebars: default_sidebars(),
         }
     }
 
@@ -96,6 +154,8 @@ impl SettingsDialog {
             SettingsLevel::Model => self.model_ids.clone(),
             SettingsLevel::Provider => self.provider_names.clone(),
             SettingsLevel::Mode => self.modes.clone(),
+            SettingsLevel::Effort => self.efforts.clone(),
+            SettingsLevel::Sidebar => self.sidebars.clone(),
         }
     }
 
@@ -122,7 +182,9 @@ impl SettingsDialog {
             self.level = match self.state.selected().unwrap_or(0) {
                 0 => SettingsLevel::Theme,
                 1 => SettingsLevel::Provider,
-                _ => SettingsLevel::Mode,
+                2 => SettingsLevel::Mode,
+                3 => SettingsLevel::Effort,
+                _ => SettingsLevel::Sidebar,
             };
             self.state.select(Some(0));
         }
@@ -154,6 +216,14 @@ impl SettingsDialog {
                 .modes
                 .get(idx)
                 .map(|s| SettingsAction::SetMode(s.clone())),
+            SettingsLevel::Effort => self
+                .efforts
+                .get(idx)
+                .map(|s| SettingsAction::SetEffort(s.clone())),
+            SettingsLevel::Sidebar => self
+                .sidebars
+                .get(idx)
+                .map(|s| SettingsAction::SetSidebar(s.clone())),
         }
     }
 
@@ -267,6 +337,8 @@ fn title_text(level: SettingsLevel, root: SettingsLevel) -> &'static str {
         SettingsLevel::Model => "Select model",
         SettingsLevel::Provider => "Select provider",
         SettingsLevel::Mode => "Permission mode",
+        SettingsLevel::Effort => "Effort level",
+        SettingsLevel::Sidebar => "Sidebar",
     }
 }
 
@@ -277,6 +349,8 @@ fn section_title(level: SettingsLevel, root: SettingsLevel) -> &'static str {
         (SettingsLevel::Model, _) => "Models",
         (SettingsLevel::Provider, _) => "Providers",
         (SettingsLevel::Mode, _) => "Permission",
+        (SettingsLevel::Effort, _) => "Effort",
+        (SettingsLevel::Sidebar, _) => "Sidebar",
     }
 }
 

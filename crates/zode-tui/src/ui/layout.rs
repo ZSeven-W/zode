@@ -29,6 +29,8 @@ pub struct HeaderInfo<'a> {
     pub cwd: &'a Path,
     pub tab_title: &'a str,
     pub busy: bool,
+    /// Effort level ("low"/"medium"/"high"), shown after the run state.
+    pub effort: &'a str,
 }
 
 pub fn split_main(area: Rect, show_tabs: bool) -> ChromeAreas {
@@ -152,6 +154,12 @@ pub fn render_header(f: &mut Frame, area: Rect, theme: &Theme, info: HeaderInfo<
                 })
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled("  ·  ", Style::default().fg(theme.separator)),
+        Span::styled("effort: ", Style::default().fg(theme.fg_subtle)),
+        Span::styled(
+            info.effort,
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ),
     ]);
 
     f.render_widget(
@@ -242,6 +250,7 @@ mod tests {
                     cwd,
                     tab_title: "tab 1",
                     busy: true,
+                    effort: "high",
                 },
             )
         })
@@ -272,6 +281,7 @@ mod tests {
                     cwd,
                     tab_title: "nihao",
                     busy: false,
+                    effort: "medium",
                 },
             )
         })

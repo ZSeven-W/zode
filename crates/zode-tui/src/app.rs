@@ -600,6 +600,7 @@ impl TuiApp {
                     cwd: &active_cwd,
                     tab_title: &active_title,
                     busy: active_busy,
+                    effort: self.template.effort().unwrap_or("medium"),
                 },
             );
         }
@@ -958,6 +959,14 @@ impl TuiApp {
         self.settings = Some(SettingsDialog::model_picker(self.model_ids()));
     }
 
+    fn open_effort_picker(&mut self) {
+        self.settings = Some(SettingsDialog::effort_picker());
+    }
+
+    fn open_sidebar_picker(&mut self) {
+        self.settings = Some(SettingsDialog::sidebar_picker());
+    }
+
     fn open_connect_dialog(&mut self) {
         self.connect = Some(ConnectDialog::new());
     }
@@ -1103,6 +1112,21 @@ impl TuiApp {
                     self.status.yolo = yolo;
                     self.toast = Some(Toast::info(format!("mode → {m}")));
                 }
+            }
+            SettingsAction::SetEffort(level) => {
+                let t = self.template.with_effort(Some(level.clone()));
+                if self.reassemble_active(t.clone()).await {
+                    self.template = t;
+                    self.toast = Some(Toast::info(format!("effort → {level}")));
+                }
+            }
+            SettingsAction::SetSidebar(choice) => {
+                self.sidebar_visibility = match choice.as_str() {
+                    "visible" => SidebarVisibility::Visible,
+                    "hidden" => SidebarVisibility::Hidden,
+                    _ => SidebarVisibility::Auto,
+                };
+                self.toast = Some(Toast::info(format!("sidebar → {choice}")));
             }
         }
     }
@@ -1511,7 +1535,13 @@ impl TuiApp {
             "tab" => self.handle_tab_command(args),
             "connect" => self.open_connect_dialog(),
             "plugin" => self.open_plugin_picker(),
-            "sidebar" => self.handle_sidebar_command(args),
+            "sidebar" => {
+                if args.trim().is_empty() {
+                    self.open_sidebar_picker();
+                } else {
+                    self.handle_sidebar_command(args);
+                }
+            }
             "tasks" => self.open_tasks_panel().await,
             "config" => {
                 let msg = format!(
@@ -1632,11 +1662,8 @@ impl TuiApp {
             "effort" => {
                 let level = args.trim().to_ascii_lowercase();
                 if level.is_empty() {
-                    let msg = match self.template.effort() {
-                        Some(e) => format!("current effort: {e}"),
-                        None => "effort: medium (default) — use /effort low|medium|high".to_string(),
-                    };
-                    self.active_tab_mut().chat.push_system(&msg);
+                    // No arg → open the picker (low/medium/high).
+                    self.open_effort_picker();
                 } else if !matches!(level.as_str(), "low" | "medium" | "high" | "clear" | "reset") {
                     self.toast = Some(Toast::info("usage: /effort low|medium|high"));
                 } else {
