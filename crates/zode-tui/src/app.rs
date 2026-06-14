@@ -61,6 +61,8 @@ pub struct TuiApp {
     next_tab_id: usize,
     /// Assembly context for spinning up a fresh engine on Ctrl+T / resume.
     template: EngineTemplate,
+    /// User override for hiding the right session sidebar.
+    sidebar_hidden: bool,
     input: InputBox,
     status: StatusBar,
     theme_store: ThemeStore,
@@ -127,6 +129,7 @@ impl TuiApp {
             active: 0,
             next_tab_id: 1,
             template,
+            sidebar_hidden: false,
             input: InputBox::new(),
             status,
             theme_store,
@@ -503,7 +506,7 @@ impl TuiApp {
         let active_model = self.tabs[self.active].engine.model.clone();
         let active_cwd = self.tabs[self.active].engine.cwd.clone();
         let active_busy = self.tabs[self.active].is_busy();
-        let show_sidebar = should_show_sidebar(self.tabs.len());
+        let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_hidden);
 
         let areas = split_main(area, show_sidebar);
         if let Some(header) = areas.header {
@@ -1162,6 +1165,7 @@ impl TuiApp {
             "sessions" | "resume" => self.open_session_picker(),
             "tab" => self.handle_tab_command(args),
             "connect" => self.open_connect_dialog(),
+            "sidebar" => self.handle_sidebar_command(args),
             "tasks" => self.open_tasks_panel().await,
             "config" => {
                 let msg = format!(
@@ -1295,6 +1299,19 @@ impl TuiApp {
             Err(msg) => self.active_tab_mut().chat.push_system(&msg),
         }
     }
+
+    fn handle_sidebar_command(&mut self, args: &str) {
+        match resolve_sidebar_hidden(args, self.sidebar_hidden) {
+            Ok(hidden) => {
+                self.sidebar_hidden = hidden;
+                let state = if hidden { "hidden" } else { "visible" };
+                self.active_tab_mut()
+                    .chat
+                    .push_system(&format!("sidebar -> {state}"));
+            }
+            Err(msg) => self.active_tab_mut().chat.push_system(&msg),
+        }
+    }
 }
 
 fn mode_label(mode: Mode) -> &'static str {
@@ -1306,8 +1323,8 @@ fn mode_label(mode: Mode) -> &'static str {
     }
 }
 
-fn should_show_sidebar(tab_count: usize) -> bool {
-    tab_count > 1
+fn should_show_sidebar(tab_count: usize, sidebar_hidden: bool) -> bool {
+    tab_count > 1 && !sidebar_hidden
 }
 
 fn resolve_tab_target(args: &str, active: usize, len: usize) -> Result<usize, String> {
@@ -1328,6 +1345,15 @@ fn resolve_tab_target(args: &str, active: usize, len: usize) -> Result<usize, St
         return Err(format!("tab {n} is out of range (1..{len})"));
     }
     Ok(n - 1)
+}
+
+fn resolve_sidebar_hidden(args: &str, currently_hidden: bool) -> Result<bool, String> {
+    match args.trim().to_ascii_lowercase().as_str() {
+        "" | "toggle" => Ok(!currently_hidden),
+        "off" | "hide" | "close" => Ok(true),
+        "on" | "show" | "open" => Ok(false),
+        _ => Err("usage: /sidebar [on|off|toggle]".to_string()),
+    }
 }
 
 /// Rebuild a ChatView from a resumed MessageStore so the conversation history
@@ -1415,9 +1441,10 @@ mod tests {
 
     #[test]
     fn sidebar_is_hidden_until_multiple_tabs_exist() {
-        assert!(!should_show_sidebar(0));
-        assert!(!should_show_sidebar(1));
-        assert!(should_show_sidebar(2));
+        assert!(!should_show_sidebar(0, false));
+        assert!(!should_show_sidebar(1, false));
+        assert!(should_show_sidebar(2, false));
+        assert!(!should_show_sidebar(2, true));
     }
 
     #[test]
@@ -1433,6 +1460,22 @@ mod tests {
         assert_eq!(
             resolve_tab_target("abc", 0, 3),
             Err("usage: /tab [n|next|prev]".to_string())
+        );
+    }
+
+    #[test]
+    fn sidebar_command_resolves_visibility_targets() {
+        assert_eq!(resolve_sidebar_hidden("", false), Ok(true));
+        assert_eq!(resolve_sidebar_hidden("toggle", true), Ok(false));
+        assert_eq!(resolve_sidebar_hidden("off", false), Ok(true));
+        assert_eq!(resolve_sidebar_hidden("hide", false), Ok(true));
+        assert_eq!(resolve_sidebar_hidden("close", false), Ok(true));
+        assert_eq!(resolve_sidebar_hidden("on", true), Ok(false));
+        assert_eq!(resolve_sidebar_hidden("show", true), Ok(false));
+        assert_eq!(resolve_sidebar_hidden("open", true), Ok(false));
+        assert_eq!(
+            resolve_sidebar_hidden("wat", false),
+            Err("usage: /sidebar [on|off|toggle]".to_string())
         );
     }
 }

@@ -72,6 +72,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Ui,
     },
     SlashCommand {
+        name: "sidebar",
+        description: "Show or hide the sidebar",
+        usage: "/sidebar [on|off|toggle]",
+        action: CommandAction::Ui,
+    },
+    SlashCommand {
         name: "resume",
         description: "Resume a session by id",
         usage: "/resume <id>",

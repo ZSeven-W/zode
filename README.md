@@ -98,6 +98,7 @@ matching key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …); for Ollama the
 | `/theme [id]` | Switch theme (`catppuccin-mocha`, `cyberpunk`, `minimal`, `hacker`) |
 | `/sessions`, `/resume` | Session picker — resume into a new tab with history |
 | `/connect` | Connect and switch the active provider |
+| `/sidebar [on|off|toggle]` | Show or hide the right sidebar |
 | `/tasks` | Background shells + running turns panel |
 | `/undo`, `/redo` | Undo / redo the last file edit |
 | `/mcp` | List configured MCP servers |

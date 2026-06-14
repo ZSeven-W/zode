@@ -115,6 +115,16 @@ mod tests {
     }
 
     #[test]
+    fn builtins_include_sidebar_command() {
+        let reg = CommandRegistry::with_builtins();
+        let sidebar = reg
+            .get("sidebar")
+            .expect("/sidebar command should be registered");
+        assert_eq!(sidebar.usage, "/sidebar [on|off|toggle]");
+        assert_eq!(sidebar.description, "Show or hide the sidebar");
+    }
+
+    #[test]
     fn parse_input_splits_name_and_args() {
         assert_eq!(
             parse_slash("/model MiniMax-M1"),
