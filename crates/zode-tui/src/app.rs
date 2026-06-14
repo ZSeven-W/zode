@@ -1156,6 +1156,8 @@ impl TuiApp {
         // No begin_assistant(): push_delta lazily opens an assistant segment,
         // so text after a tool card starts a fresh segment.
         tab.mode = Mode::Thinking;
+        tab.thinking_process_shown = false;
+        tab.active_tool_names.clear();
 
         tab.turn_seq += 1;
         let turn_id = tab.turn_seq;
@@ -1261,7 +1263,32 @@ impl TuiApp {
                         tab.mode = Mode::Streaming;
                         tab.chat.push_delta(&delta);
                     }
-                    Event::ToolUse { name, .. } => tab.chat.push_tool(&name),
+                    Event::Thinking { .. } => {
+                        tab.mode = Mode::Thinking;
+                        if !tab.thinking_process_shown {
+                            if let Some(line) = process_line_for_event(&event, None) {
+                                tab.chat.push_tool(&line);
+                            }
+                            tab.thinking_process_shown = true;
+                        }
+                    }
+                    Event::ToolUse {
+                        ref id,
+                        ref name,
+                        ref input,
+                    } => {
+                        let title = tool_call_title(name, input);
+                        tab.active_tool_names.insert(id.clone(), title);
+                        if let Some(line) = process_line_for_event(&event, None) {
+                            tab.chat.push_tool(&line);
+                        }
+                    }
+                    Event::ToolResult { ref id, .. } => {
+                        let known_tool = tab.active_tool_names.remove(id);
+                        if let Some(line) = process_line_for_event(&event, known_tool.as_deref()) {
+                            tab.chat.push_tool(&line);
+                        }
+                    }
                     Event::Usage {
                         input_tokens,
                         output_tokens,
@@ -1269,18 +1296,32 @@ impl TuiApp {
                     } => {
                         tab.input_tokens = tab.input_tokens.saturating_add(input_tokens);
                         tab.output_tokens = tab.output_tokens.saturating_add(output_tokens);
+                        if let Some(line) = process_line_for_event(&event, None) {
+                            tab.chat.push_tool(&line);
+                        }
+                    }
+                    Event::Notice { .. } | Event::Result { .. } | Event::Unknown => {
+                        if let Some(line) = process_line_for_event(&event, None) {
+                            tab.chat.push_tool(&line);
+                        }
                     }
                     Event::Error { code, message } => {
                         tab.chat.push_system(&format!("error [{code}]: {message}"));
                         tab.mode = Mode::Error;
                     }
-                    _ => {}
+                    _ => {
+                        if let Some(line) = process_line_for_event(&event, None) {
+                            tab.chat.push_tool(&line);
+                        }
+                    }
                 }
             }
             AppEvent::TurnDone { result, .. } => {
                 tab.chat.end_turn();
                 tab.turn_abort = None;
                 tab.active_turn_id = 0;
+                tab.thinking_process_shown = false;
+                tab.active_tool_names.clear();
                 tab.mode = match result {
                     Ok(()) => Mode::Ready,
                     Err(e) => {
@@ -1511,6 +1552,135 @@ fn should_show_sidebar(tab_count: usize, visibility: SidebarVisibility) -> bool 
     }
 }
 
+fn process_line_for_event(event: &Event, known_tool: Option<&str>) -> Option<String> {
+    match event {
+        Event::TextDelta { .. } => None,
+        Event::Thinking { delta } => (!delta.is_empty()).then(|| "Thinking…".to_string()),
+        Event::ToolUse { name, input, .. } => {
+            let title = tool_call_title(name, input);
+            let summary = tool_input_summary(name, input);
+            Some(if summary.is_empty() {
+                title
+            } else {
+                format!("{title} {summary}")
+            })
+        }
+        Event::ToolResult { ok, .. } => {
+            let status = if *ok { "done" } else { "failed" };
+            Some(format!("{} {status}", tool_result_title(known_tool)))
+        }
+        Event::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read,
+            cache_create,
+        } => Some(format!(
+            "Usage ↑{input_tokens} ↓{output_tokens} cache +{cache_create}/{cache_read}"
+        )),
+        Event::Result { data } => {
+            let stop = data.stop_reason.as_deref().unwrap_or("complete");
+            let model = data
+                .model
+                .as_deref()
+                .map(|m| format!(" · {m}"))
+                .unwrap_or_default();
+            Some(format!("Result {stop}{model}"))
+        }
+        Event::Notice { code, message } => Some(format!("Notice {code}: {message}")),
+        Event::Error { code, message } => Some(format!("Error {code}: {message}")),
+        Event::Unknown => Some("Event unknown".to_string()),
+        _ => Some("Event unknown".to_string()),
+    }
+}
+
+fn tool_call_title(name: &str, input: &serde_json::Value) -> String {
+    if name == "Skill" {
+        let skill = input
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        return format!("Skill {skill}");
+    }
+    if let Some(rest) = name.strip_prefix("mcp__") {
+        let mut parts = rest.splitn(2, "__");
+        if let (Some(server), Some(tool)) = (parts.next(), parts.next()) {
+            return format!("MCP {server}.{tool}");
+        }
+    }
+    format!("Tool {name}")
+}
+
+fn tool_result_title(known_tool: Option<&str>) -> String {
+    let Some(name) = known_tool else {
+        return "Tool result".to_string();
+    };
+    if name.starts_with("Tool ") || name.starts_with("Skill ") || name.starts_with("MCP ") {
+        name.to_string()
+    } else {
+        format!("Tool {name}")
+    }
+}
+
+fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
+    if name == "Skill" {
+        return String::new();
+    }
+    let Some(obj) = input.as_object() else {
+        return String::new();
+    };
+
+    for key in [
+        "path",
+        "file",
+        "command",
+        "query",
+        "pattern",
+        "url",
+        "title",
+        "agent_type",
+    ] {
+        if let Some(value) = obj.get(key).and_then(simple_value_summary) {
+            return if key == "path" || key == "file" || key == "command" || key == "url" {
+                value
+            } else {
+                format!("{key}={value}")
+            };
+        }
+    }
+
+    obj.iter()
+        .filter(|(key, _)| !is_sensitive_key(key))
+        .filter_map(|(key, value)| simple_value_summary(value).map(|v| format!("{key}={v}")))
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn simple_value_summary(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(truncate_process_value(s)),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn truncate_process_value(value: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    if value.chars().count() <= MAX_CHARS {
+        return value.to_string();
+    }
+    format!("{}…", value.chars().take(MAX_CHARS).collect::<String>())
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower.contains("key")
+        || lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("password")
+}
+
 fn resolve_tab_target(args: &str, active: usize, len: usize) -> Result<usize, String> {
     if len == 0 {
         return Err("no tabs open".to_string());
@@ -1569,10 +1739,25 @@ fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
                 }
             }
             Message::Assistant { content, .. } => {
+                let mut thinking_shown = false;
                 for block in content {
                     match block {
                         ContentBlock::Text { text } => chat.push_delta(text),
-                        ContentBlock::ToolUse { name, .. } => chat.push_tool(name),
+                        ContentBlock::Thinking { thinking, .. }
+                            if !thinking_shown && !thinking.is_empty() =>
+                        {
+                            chat.push_tool("Thinking…");
+                            thinking_shown = true;
+                        }
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            let title = tool_call_title(name, input);
+                            let summary = tool_input_summary(name, input);
+                            if summary.is_empty() {
+                                chat.push_tool(&title);
+                            } else {
+                                chat.push_tool(&format!("{title} {summary}"));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1704,6 +1889,80 @@ mod tests {
         assert_eq!(
             resolve_sidebar_visibility("wat", SidebarVisibility::Auto, 1),
             Err("usage: /sidebar [on|off|toggle|auto]".to_string())
+        );
+    }
+
+    #[test]
+    fn process_line_formats_tool_use_sources() {
+        let tool = Event::ToolUse {
+            id: "t1".into(),
+            name: "FileRead".into(),
+            input: serde_json::json!({"path": "src/main.rs"}),
+        };
+        assert_eq!(
+            process_line_for_event(&tool, None).as_deref(),
+            Some("Tool FileRead src/main.rs")
+        );
+
+        let skill = Event::ToolUse {
+            id: "t2".into(),
+            name: "Skill".into(),
+            input: serde_json::json!({"name": "code-review"}),
+        };
+        assert_eq!(
+            process_line_for_event(&skill, None).as_deref(),
+            Some("Skill code-review")
+        );
+
+        let mcp = Event::ToolUse {
+            id: "t3".into(),
+            name: "mcp__github__create_issue".into(),
+            input: serde_json::json!({"title": "bug"}),
+        };
+        assert_eq!(
+            process_line_for_event(&mcp, None).as_deref(),
+            Some("MCP github.create_issue title=bug")
+        );
+    }
+
+    #[test]
+    fn process_line_formats_runtime_events() {
+        let result = Event::ToolResult {
+            id: "t1".into(),
+            ok: true,
+            output: serde_json::json!({"status": "ok"}),
+        };
+        assert_eq!(
+            process_line_for_event(&result, Some("FileRead")).as_deref(),
+            Some("Tool FileRead done")
+        );
+
+        let thinking = Event::Thinking {
+            delta: "hidden reasoning".into(),
+        };
+        assert_eq!(
+            process_line_for_event(&thinking, None).as_deref(),
+            Some("Thinking…")
+        );
+
+        let notice = Event::Notice {
+            code: "retry".into(),
+            message: "provider retry".into(),
+        };
+        assert_eq!(
+            process_line_for_event(&notice, None).as_deref(),
+            Some("Notice retry: provider retry")
+        );
+
+        let usage = Event::Usage {
+            input_tokens: 10,
+            output_tokens: 3,
+            cache_read: 2,
+            cache_create: 1,
+        };
+        assert_eq!(
+            process_line_for_event(&usage, None).as_deref(),
+            Some("Usage ↑10 ↓3 cache +1/2")
         );
     }
 }

@@ -3,6 +3,7 @@
 //! owns those); everything conversation-scoped lives here so two tabs can run
 //! turns concurrently without crossing streams.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -45,6 +46,10 @@ pub struct SessionTab {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cost_label: String,
+    /// Per-turn process UI state: avoid repeating high-frequency thinking
+    /// deltas and map tool results back to their visible tool call names.
+    pub thinking_process_shown: bool,
+    pub active_tool_names: HashMap<String, String>,
 }
 
 impl SessionTab {
@@ -63,6 +68,8 @@ impl SessionTab {
             input_tokens: 0,
             output_tokens: 0,
             cost_label: "$0.00".into(),
+            thinking_process_shown: false,
+            active_tool_names: HashMap::new(),
         }
     }
 
