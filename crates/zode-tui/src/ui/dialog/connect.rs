@@ -262,7 +262,7 @@ impl ConnectDialog {
                 let style = if selected {
                     Style::default()
                         .fg(theme.bg_primary)
-                        .bg(theme.system)
+                        .bg(theme.accent)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.fg_text).bg(theme.bg_secondary)
@@ -340,7 +340,7 @@ fn provider_templates() -> Vec<ProviderTemplate> {
     vec![
         ProviderTemplate {
             name: "MiniMax Token Plan",
-            description: "Anthropic-compatible endpoint",
+            description: "MiniMax M1 long-context AI",
             section: ProviderSection::Popular,
             requires_api_key: true,
             provider: provider(
@@ -352,7 +352,7 @@ fn provider_templates() -> Vec<ProviderTemplate> {
         },
         ProviderTemplate {
             name: "DeepSeek",
-            description: "OpenAI-compatible coding models",
+            description: "Fast coding and reasoning models",
             section: ProviderSection::Popular,
             requires_api_key: true,
             provider: provider(
@@ -364,7 +364,7 @@ fn provider_templates() -> Vec<ProviderTemplate> {
         },
         ProviderTemplate {
             name: "OpenAI",
-            description: "ChatGPT Plus/Pro or API key",
+            description: "OpenAI API and ChatGPT models",
             section: ProviderSection::Popular,
             requires_api_key: true,
             provider: provider(
@@ -376,7 +376,7 @@ fn provider_templates() -> Vec<ProviderTemplate> {
         },
         ProviderTemplate {
             name: "Anthropic",
-            description: "Claude API key",
+            description: "Claude models via Anthropic API",
             section: ProviderSection::Popular,
             requires_api_key: true,
             provider: provider(
@@ -388,7 +388,7 @@ fn provider_templates() -> Vec<ProviderTemplate> {
         },
         ProviderTemplate {
             name: "Moonshot AI",
-            description: "Kimi models",
+            description: "Kimi and K2 models",
             section: ProviderSection::Providers,
             requires_api_key: true,
             provider: provider(
@@ -400,7 +400,7 @@ fn provider_templates() -> Vec<ProviderTemplate> {
         },
         ProviderTemplate {
             name: "OpenRouter",
-            description: "OpenAI-compatible router",
+            description: "Multi-provider model router",
             section: ProviderSection::Providers,
             requires_api_key: true,
             provider: provider(
@@ -412,7 +412,7 @@ fn provider_templates() -> Vec<ProviderTemplate> {
         },
         ProviderTemplate {
             name: "Ollama",
-            description: "Local models",
+            description: "Local models on your machine",
             section: ProviderSection::Providers,
             requires_api_key: false,
             provider: provider(
@@ -639,8 +639,32 @@ mod tests {
         assert!(content.contains("Search"));
         assert!(content.contains("Popular"));
         assert!(content.contains("MiniMax Token Plan"));
+        assert!(content.contains("MiniMax M1 long-context AI"));
         assert!(content.contains("DeepSeek"));
+        assert!(!content.contains("Anthropic-compatible endpoint"));
         assert!(!content.contains("┌"));
+    }
+
+    #[test]
+    fn provider_modal_highlights_selection_with_theme_accent() {
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("minimal"));
+        let backend = ratatui::backend::TestBackend::new(100, 34);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let dialog = ConnectDialog::new();
+
+        terminal
+            .draw(|f| dialog.render(f, f.area(), &theme))
+            .unwrap();
+
+        let popup = modal_area(Rect::new(0, 0, 100, 34), 76, 28);
+        let inner = inner_area(popup);
+        let first_provider_y = inner.y + 5;
+        let selected_cell = terminal
+            .backend()
+            .buffer()
+            .cell((inner.x, first_provider_y))
+            .unwrap();
+        assert_eq!(selected_cell.bg, theme.accent);
     }
 
     #[test]
