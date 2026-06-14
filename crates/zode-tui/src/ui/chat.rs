@@ -11,7 +11,6 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
-use crate::ui::layout::compact_path;
 use crate::ui::markdown::render_markdown;
 
 /// Approximate the number of wrapped rows a line occupies at `width`
@@ -161,7 +160,7 @@ impl ChatView {
         f.render_widget(para, area);
     }
 
-    fn render_empty(&self, theme: &Theme, meta: ChatRenderMeta<'_>) -> Vec<Line<'static>> {
+    fn render_empty(&self, theme: &Theme, _meta: ChatRenderMeta<'_>) -> Vec<Line<'static>> {
         vec![
             Line::from(vec![
                 Span::styled(
@@ -180,22 +179,10 @@ impl ChatView {
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("theme ", Style::default().fg(theme.fg_subtle)),
-                Span::styled(
-                    meta.theme_name.to_string(),
-                    Style::default().fg(theme.accent),
-                ),
-                Span::styled("  model ", Style::default().fg(theme.fg_subtle)),
-                Span::styled(meta.model.to_string(), Style::default().fg(theme.fg_text)),
-            ]),
-            Line::from(vec![
-                Span::styled("cwd   ", Style::default().fg(theme.fg_subtle)),
-                Span::styled(compact_path(meta.cwd), Style::default().fg(theme.fg_text)),
-            ]),
-            Line::from(""),
-            Line::from(vec![
                 Span::styled("/help", Style::default().fg(theme.accent)),
                 Span::styled(" commands   ", Style::default().fg(theme.fg_subtle)),
+                Span::styled("/model", Style::default().fg(theme.accent)),
+                Span::styled(" switch   ", Style::default().fg(theme.fg_subtle)),
                 Span::styled("/theme", Style::default().fg(theme.accent)),
                 Span::styled(" switch   ", Style::default().fg(theme.fg_subtle)),
                 Span::styled("/sessions", Style::default().fg(theme.accent)),
@@ -384,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_state_renders_workbench_metadata() {
+    fn empty_state_renders_minimal_workbench_shortcuts() {
         let theme = ThemeStore::with_builtins().resolve(Some("hacker"));
         let view = ChatView::new();
         let backend = TestBackend::new(80, 10);
@@ -404,9 +391,10 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(content.contains("zode"));
-        assert!(content.contains("Hacker"));
-        assert!(content.contains("MiniMax-M1"));
+        assert!(!content.contains("Hacker"));
+        assert!(!content.contains("MiniMax-M1"));
         assert!(content.contains("/help"));
+        assert!(content.contains("/model"));
         assert!(content.contains("/theme"));
     }
 

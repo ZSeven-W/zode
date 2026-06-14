@@ -42,7 +42,7 @@ pub fn split_main(area: Rect, show_tabs: bool) -> ChromeAreas {
         };
     }
 
-    let header_h = if area.height >= 7 { 2 } else { 1 };
+    let header_h = 1;
     let tabs_w = if show_tabs && area.height >= 8 && area.width >= MIN_WIDTH_FOR_TAB_RAIL {
         TAB_RAIL_WIDTH
     } else {
@@ -113,7 +113,7 @@ pub fn render_header(f: &mut Frame, area: Rect, theme: &Theme, info: HeaderInfo<
     }
 
     let state = if info.busy { "running" } else { "idle" };
-    let title = Line::from(vec![
+    let line = Line::from(vec![
         Span::styled(
             format!("{} ", theme.icon_logo),
             Style::default()
@@ -132,10 +132,9 @@ pub fn render_header(f: &mut Frame, area: Rect, theme: &Theme, info: HeaderInfo<
         Span::styled(info.model, Style::default().fg(theme.fg_text)),
         Span::styled(" / ", Style::default().fg(theme.separator)),
         Span::styled(compact_path(info.cwd), Style::default().fg(theme.fg_subtle)),
-    ]);
-    let meta = Line::from(vec![
+        Span::styled(" / ", Style::default().fg(theme.separator)),
         Span::styled(info.tab_title, Style::default().fg(theme.fg_subtle)),
-        Span::raw("  "),
+        Span::styled(" · ", Style::default().fg(theme.separator)),
         Span::styled(
             state,
             Style::default()
@@ -148,27 +147,8 @@ pub fn render_header(f: &mut Frame, area: Rect, theme: &Theme, info: HeaderInfo<
         ),
     ]);
 
-    let lines = if area.height > 1 {
-        vec![title, meta]
-    } else {
-        vec![Line::from(vec![
-            Span::styled(
-                format!("{} zode", theme.icon_logo),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" / ", Style::default().fg(theme.separator)),
-            Span::styled(info.theme_name, Style::default().fg(theme.accent)),
-            Span::styled(" / ", Style::default().fg(theme.separator)),
-            Span::styled(info.model, Style::default().fg(theme.fg_text)),
-            Span::styled(" / ", Style::default().fg(theme.separator)),
-            Span::styled(state, Style::default().fg(theme.accent_secondary)),
-        ])]
-    };
-
     f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme.bg_primary)),
+        Paragraph::new(line).style(Style::default().bg(theme.bg_primary)),
         area,
     );
 }
@@ -192,9 +172,9 @@ mod tests {
     fn split_main_allocates_header_tabs_chat_composer_status() {
         let area = Rect::new(0, 0, 100, 30);
         let split = split_main(area, true);
-        assert_eq!(split.header, Some(Rect::new(0, 0, 100, 2)));
-        assert_eq!(split.tabs, Some(Rect::new(0, 2, 18, 28)));
-        assert_eq!(split.chat, Rect::new(18, 2, 82, 23));
+        assert_eq!(split.header, Some(Rect::new(0, 0, 100, 1)));
+        assert_eq!(split.tabs, Some(Rect::new(0, 1, 18, 29)));
+        assert_eq!(split.chat, Rect::new(18, 1, 82, 24));
         assert_eq!(split.composer, Rect::new(18, 25, 82, 4));
         assert_eq!(split.status, Rect::new(18, 29, 82, 1));
     }
@@ -242,6 +222,7 @@ mod tests {
         assert!(text.contains("Cyberpunk"));
         assert!(text.contains("MiniMax-M1"));
         assert!(text.contains("ZSeven-W/zode"));
+        assert!(text.contains("tab 1"));
         assert!(text.contains("running"));
     }
 }
