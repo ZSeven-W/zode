@@ -19,6 +19,9 @@ pub struct ChromeAreas {
     pub status: Rect,
 }
 
+const TAB_RAIL_WIDTH: u16 = 18;
+const MIN_WIDTH_FOR_TAB_RAIL: u16 = 60;
+
 #[derive(Debug, Clone, Copy)]
 pub struct HeaderInfo<'a> {
     pub theme_name: &'a str,
@@ -40,9 +43,13 @@ pub fn split_main(area: Rect, show_tabs: bool) -> ChromeAreas {
     }
 
     let header_h = if area.height >= 7 { 2 } else { 1 };
-    let tabs_h = u16::from(show_tabs && area.height >= 8);
+    let tabs_w = if show_tabs && area.height >= 8 && area.width >= MIN_WIDTH_FOR_TAB_RAIL {
+        TAB_RAIL_WIDTH
+    } else {
+        0
+    };
     let status_h = 1;
-    let reserved_without_chat = header_h + tabs_h + status_h;
+    let reserved_without_chat = header_h + status_h;
     let remaining = area.height.saturating_sub(reserved_without_chat);
     let composer_h = if area.height >= 8 {
         4.min(remaining.saturating_sub(1))
@@ -51,26 +58,29 @@ pub fn split_main(area: Rect, show_tabs: bool) -> ChromeAreas {
     };
     let chat_h = area
         .height
-        .saturating_sub(header_h + tabs_h + composer_h + status_h)
+        .saturating_sub(header_h + composer_h + status_h)
         .max(1);
 
     let mut y = area.y;
     let header = Some(Rect::new(area.x, y, area.width, header_h));
     y = y.saturating_add(header_h);
 
-    let tabs = if tabs_h > 0 {
-        let rect = Rect::new(area.x, y, area.width, tabs_h);
-        y = y.saturating_add(tabs_h);
-        Some(rect)
+    let content_x = area.x.saturating_add(tabs_w);
+    let content_w = area.width.saturating_sub(tabs_w);
+    let content_y = y;
+    let content_h = area.height.saturating_sub(header_h);
+
+    let tabs = if tabs_w > 0 {
+        Some(Rect::new(area.x, content_y, tabs_w, content_h))
     } else {
         None
     };
 
-    let chat = Rect::new(area.x, y, area.width, chat_h);
+    let chat = Rect::new(content_x, y, content_w, chat_h);
     y = y.saturating_add(chat_h);
-    let composer = Rect::new(area.x, y, area.width, composer_h);
+    let composer = Rect::new(content_x, y, content_w, composer_h);
     y = y.saturating_add(composer_h);
-    let status = Rect::new(area.x, y, area.width, status_h);
+    let status = Rect::new(content_x, y, content_w, status_h);
 
     ChromeAreas {
         header,
@@ -183,10 +193,10 @@ mod tests {
         let area = Rect::new(0, 0, 100, 30);
         let split = split_main(area, true);
         assert_eq!(split.header, Some(Rect::new(0, 0, 100, 2)));
-        assert_eq!(split.tabs, Some(Rect::new(0, 2, 100, 1)));
-        assert_eq!(split.chat, Rect::new(0, 3, 100, 22));
-        assert_eq!(split.composer, Rect::new(0, 25, 100, 4));
-        assert_eq!(split.status, Rect::new(0, 29, 100, 1));
+        assert_eq!(split.tabs, Some(Rect::new(0, 2, 18, 28)));
+        assert_eq!(split.chat, Rect::new(18, 2, 82, 23));
+        assert_eq!(split.composer, Rect::new(18, 25, 82, 4));
+        assert_eq!(split.status, Rect::new(18, 29, 82, 1));
     }
 
     #[test]
