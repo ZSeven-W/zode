@@ -158,10 +158,15 @@ impl LspClient {
         let text = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| format!("read {}: {e}", path.display()))?;
+        // The `languageId` is per-file (derived from its extension), not per
+        // server: one server can host several languages — typescript-language-
+        // server serves js/jsx/ts/tsx, clangd serves c/cpp/objc — and the
+        // server applies different rules per id. Falls back to the server key.
+        let language_id = language_id_for(path, &self.lang);
         self.notify(
             "textDocument/didOpen",
             json!({ "textDocument": {
-                "uri": uri, "languageId": self.lang, "version": 1, "text": text
+                "uri": uri, "languageId": language_id, "version": 1, "text": text
             }}),
         )
         .await;
@@ -300,6 +305,36 @@ async fn write_message(stdin: &Arc<Mutex<ChildStdin>>, msg: &Value) -> std::io::
     guard.flush().await
 }
 
+/// LSP `languageId` for a file, by extension. Disambiguates the languages a
+/// single server hosts (js vs ts, c vs cpp); unknown extensions fall back to
+/// the server's own key.
+fn language_id_for(path: &Path, fallback: &str) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let id = match ext.as_str() {
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" => "javascriptreact",
+        "ts" => "typescript",
+        "tsx" => "typescriptreact",
+        "c" => "c",
+        "cpp" | "cc" | "cxx" | "c++" => "cpp",
+        "hpp" | "hh" | "hxx" => "cpp",
+        // `.h` is ambiguous (C or C++ header) — defer to the server's key.
+        "h" => fallback,
+        "m" => "objective-c",
+        "mm" => "objective-cpp",
+        "scss" => "scss",
+        "less" => "less",
+        "yml" => "yaml",
+        "" => fallback,
+        _ => return fallback.to_string(),
+    };
+    id.to_string()
+}
+
 /// `file://` URI for an absolute path. Spaces are percent-encoded (the common
 /// case); other reserved characters are left as-is for simplicity.
 pub fn path_to_uri(path: &Path) -> String {
@@ -326,5 +361,21 @@ mod tests {
     fn uri_encodes_spaces() {
         let uri = path_to_uri(Path::new("/a b/c.rs"));
         assert_eq!(uri, "file:///a%20b/c.rs");
+    }
+
+    #[test]
+    fn language_id_disambiguates_by_extension() {
+        // One server (typescript-language-server) hosts four ids.
+        assert_eq!(language_id_for(Path::new("a.js"), "typescript"), "javascript");
+        assert_eq!(language_id_for(Path::new("a.jsx"), "typescript"), "javascriptreact");
+        assert_eq!(language_id_for(Path::new("a.ts"), "typescript"), "typescript");
+        assert_eq!(language_id_for(Path::new("a.tsx"), "typescript"), "typescriptreact");
+        // clangd hosts c/cpp; `.c` is C even when the server key is cpp.
+        assert_eq!(language_id_for(Path::new("a.c"), "cpp"), "c");
+        assert_eq!(language_id_for(Path::new("a.cpp"), "cpp"), "cpp");
+        // Ambiguous `.h` and unknown extensions defer to the server key.
+        assert_eq!(language_id_for(Path::new("a.h"), "cpp"), "cpp");
+        assert_eq!(language_id_for(Path::new("a.rs"), "rust"), "rust");
+        assert_eq!(language_id_for(Path::new("a.weird"), "go"), "go");
     }
 }

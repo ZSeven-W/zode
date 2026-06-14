@@ -41,15 +41,6 @@ pub struct PluginPicker {
 
 impl PluginPicker {
     pub fn new(plugins: Vec<Plugin>) -> Self {
-        // LSP runtime gating isn't wired into the engine yet (the `lsp_*` tools
-        // land in a later phase), so an LSP toggle would persist but do nothing.
-        // Hide those rows until they're actionable rather than ship an inert
-        // control; their `lsp:*` disabled state in config is left untouched
-        // because `all_ids()` won't claim ownership of an id it never showed.
-        let plugins: Vec<Plugin> = plugins
-            .into_iter()
-            .filter(|p| p.kind != PluginKind::Lsp)
-            .collect();
         Self {
             original_disabled: disabled_of(&plugins),
             plugins,
@@ -60,7 +51,8 @@ impl PluginPicker {
 
     /// Every plugin id the picker presents — the set it can authoritatively set
     /// on/off. Ids in config but outside this set (e.g. a project-scoped MCP
-    /// server from another workspace) must be preserved, not clobbered, on save.
+    /// server, or an `lsp:*` for a server not available on this machine) must be
+    /// preserved, not clobbered, on save.
     pub fn all_ids(&self) -> Vec<String> {
         self.plugins.iter().map(|p| p.id.clone()).collect()
     }
@@ -408,11 +400,11 @@ mod tests {
     }
 
     #[test]
-    fn lsp_rows_are_suppressed_until_wired() {
+    fn lists_lsp_rows_alongside_other_kinds() {
         let p = PluginPicker::new(sample());
-        // The sample includes an `lsp:rust` plugin; the picker hides it (and so
-        // never claims ownership of its id, which protects it on save).
-        assert!(!p.all_ids().iter().any(|id| id.starts_with("lsp:")));
+        // LSP servers are real plugins now: they appear and are owned (so a
+        // toggle persists), next to tool groups, MCP, and skills.
+        assert!(p.all_ids().iter().any(|id| id == "lsp:rust"));
         assert!(p.all_ids().iter().any(|id| id == "mcp:deepwiki"));
         assert!(p.all_ids().iter().any(|id| id.starts_with("tools:")));
     }

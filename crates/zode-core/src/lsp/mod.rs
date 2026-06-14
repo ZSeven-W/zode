@@ -25,15 +25,37 @@ pub fn lsp_tools(mgr: &Arc<LspManager>) -> Vec<Arc<dyn Tool>> {
 
 /// Known language servers, probed on `PATH`. Tuple: (LSP languageId, command,
 /// args, file extensions). The languageId doubles as the plugin key (`lsp:rust`).
+/// Covers mainstream languages; only servers actually installed on `PATH` are
+/// surfaced, so a long list costs nothing when a server isn't present. The user
+/// can override or add entries via `lsp.servers` in config.
 const KNOWN_SERVERS: &[(&str, &str, &[&str], &[&str])] = &[
+    // Systems / compiled
     ("rust", "rust-analyzer", &[], &["rs"]),
     ("go", "gopls", &[], &["go"]),
     (
         "cpp",
         "clangd",
         &[],
-        &["c", "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx"],
+        &["c", "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "m", "mm"],
     ),
+    ("zig", "zls", &[], &["zig"]),
+    ("swift", "sourcekit-lsp", &[], &["swift"]),
+    (
+        "haskell",
+        "haskell-language-server-wrapper",
+        &["--lsp"],
+        &["hs", "lhs"],
+    ),
+    ("ocaml", "ocamllsp", &[], &["ml", "mli"]),
+    // JVM
+    ("java", "jdtls", &[], &["java"]),
+    ("kotlin", "kotlin-language-server", &[], &["kt", "kts"]),
+    ("scala", "metals", &[], &["scala", "sbt", "sc"]),
+    ("clojure", "clojure-lsp", &[], &["clj", "cljs", "cljc", "edn"]),
+    // .NET
+    ("csharp", "csharp-ls", &[], &["cs"]),
+    ("fsharp", "fsautocomplete", &[], &["fs", "fsi", "fsx"]),
+    // Scripting / dynamic
     ("python", "pyright-langserver", &["--stdio"], &["py", "pyi"]),
     (
         "typescript",
@@ -41,7 +63,30 @@ const KNOWN_SERVERS: &[(&str, &str, &[&str], &[&str])] = &[
         &["--stdio"],
         &["ts", "tsx", "js", "jsx", "mjs", "cjs"],
     ),
-    ("zig", "zls", &[], &["zig"]),
+    ("ruby", "solargraph", &["stdio"], &["rb", "rake", "gemspec"]),
+    ("php", "intelephense", &["--stdio"], &["php"]),
+    ("lua", "lua-language-server", &[], &["lua"]),
+    ("dart", "dart", &["language-server"], &["dart"]),
+    ("elixir", "elixir-ls", &[], &["ex", "exs"]),
+    ("bash", "bash-language-server", &["start"], &["sh", "bash"]),
+    // Markup / config / infra (commonly worked alongside code)
+    ("json", "vscode-json-language-server", &["--stdio"], &["json", "jsonc"]),
+    ("yaml", "yaml-language-server", &["--stdio"], &["yaml", "yml"]),
+    (
+        "html",
+        "vscode-html-language-server",
+        &["--stdio"],
+        &["html", "htm"],
+    ),
+    (
+        "css",
+        "vscode-css-language-server",
+        &["--stdio"],
+        &["css", "scss", "less"],
+    ),
+    ("toml", "taplo", &["lsp", "stdio"], &["toml"]),
+    ("terraform", "terraform-ls", &["serve"], &["tf", "tfvars"]),
+    ("markdown", "marksman", &[], &["md", "markdown"]),
 ];
 
 /// Auto-detect language servers present on `PATH`. Returns config entries for
