@@ -515,12 +515,24 @@ mod tests {
         let mut global = ZodeConfig {
             goal: Some("keep me".into()),
             effort: Some("high".into()),
+            temperature: Some(0.7),
+            prompt_cache: Some(true),
             ..Default::default()
         };
+        global.plugins.disabled = vec!["tools:web".into()];
+        global.lsp.servers.insert(
+            "rust".into(),
+            serde_json::from_str(r#"{"command":"rust-analyzer","args":[]}"#).unwrap(),
+        );
+        // Project sets only an unrelated field; everything above must survive.
         let project: ZodeConfig = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
         global.merge_from(project);
         assert_eq!(global.goal.as_deref(), Some("keep me"));
         assert_eq!(global.effort.as_deref(), Some("high"));
+        assert_eq!(global.temperature, Some(0.7));
+        assert_eq!(global.prompt_cache, Some(true));
+        assert_eq!(global.plugins.disabled, vec!["tools:web".to_string()]);
+        assert!(global.lsp.servers.contains_key("rust"));
     }
 
     #[test]
