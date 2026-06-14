@@ -197,4 +197,16 @@ pub static BUILTINS: &[SlashCommand] = &[
         usage: "/reload-skills",
         action: CommandAction::Engine,
     },
+    SlashCommand {
+        name: "thinking",
+        description: "Toggle showing the agent's thinking output",
+        usage: "/thinking",
+        action: CommandAction::Ui,
+    },
+    SlashCommand {
+        name: "tool-details",
+        description: "Toggle showing tool-call detail in the chat",
+        usage: "/tool-details",
+        action: CommandAction::Ui,
+    },
 ];

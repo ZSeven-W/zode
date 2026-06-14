@@ -18,6 +18,8 @@ pub enum SettingsLevel {
     Mode,
     Effort,
     Sidebar,
+    Thinking,
+    ToolDetails,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +30,8 @@ pub enum SettingsAction {
     SetMode(String),
     SetEffort(String),
     SetSidebar(String),
+    SetThinking(String),
+    SetToolDetails(String),
 }
 
 pub struct SettingsDialog {
@@ -40,6 +44,7 @@ pub struct SettingsDialog {
     modes: Vec<String>,
     efforts: Vec<String>,
     sidebars: Vec<String>,
+    toggles: Vec<String>,
 }
 
 const TOP_ITEMS: &[&str] = &[
@@ -48,6 +53,8 @@ const TOP_ITEMS: &[&str] = &[
     "Permission mode",
     "Effort",
     "Sidebar",
+    "Thinking",
+    "Tool details",
 ];
 
 fn default_efforts() -> Vec<String> {
@@ -56,6 +63,10 @@ fn default_efforts() -> Vec<String> {
 
 fn default_sidebars() -> Vec<String> {
     vec!["auto".into(), "visible".into(), "hidden".into()]
+}
+
+fn default_toggles() -> Vec<String> {
+    vec!["on".into(), "off".into()]
 }
 
 impl SettingsDialog {
@@ -72,6 +83,7 @@ impl SettingsDialog {
             modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
             efforts: default_efforts(),
             sidebars: default_sidebars(),
+            toggles: default_toggles(),
         }
     }
 
@@ -88,6 +100,7 @@ impl SettingsDialog {
             modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
             efforts: default_efforts(),
             sidebars: default_sidebars(),
+            toggles: default_toggles(),
         }
     }
 
@@ -104,6 +117,7 @@ impl SettingsDialog {
             modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
             efforts: default_efforts(),
             sidebars: default_sidebars(),
+            toggles: default_toggles(),
         }
     }
 
@@ -120,6 +134,7 @@ impl SettingsDialog {
             modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
             efforts: default_efforts(),
             sidebars: default_sidebars(),
+            toggles: default_toggles(),
         }
     }
 
@@ -136,6 +151,7 @@ impl SettingsDialog {
             modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
             efforts: default_efforts(),
             sidebars: default_sidebars(),
+            toggles: default_toggles(),
         }
     }
 
@@ -156,6 +172,7 @@ impl SettingsDialog {
             SettingsLevel::Mode => self.modes.clone(),
             SettingsLevel::Effort => self.efforts.clone(),
             SettingsLevel::Sidebar => self.sidebars.clone(),
+            SettingsLevel::Thinking | SettingsLevel::ToolDetails => self.toggles.clone(),
         }
     }
 
@@ -184,7 +201,9 @@ impl SettingsDialog {
                 1 => SettingsLevel::Provider,
                 2 => SettingsLevel::Mode,
                 3 => SettingsLevel::Effort,
-                _ => SettingsLevel::Sidebar,
+                4 => SettingsLevel::Sidebar,
+                5 => SettingsLevel::Thinking,
+                _ => SettingsLevel::ToolDetails,
             };
             self.state.select(Some(0));
         }
@@ -224,6 +243,14 @@ impl SettingsDialog {
                 .sidebars
                 .get(idx)
                 .map(|s| SettingsAction::SetSidebar(s.clone())),
+            SettingsLevel::Thinking => self
+                .toggles
+                .get(idx)
+                .map(|s| SettingsAction::SetThinking(s.clone())),
+            SettingsLevel::ToolDetails => self
+                .toggles
+                .get(idx)
+                .map(|s| SettingsAction::SetToolDetails(s.clone())),
         }
     }
 
@@ -339,6 +366,8 @@ fn title_text(level: SettingsLevel, root: SettingsLevel) -> &'static str {
         SettingsLevel::Mode => "Permission mode",
         SettingsLevel::Effort => "Effort level",
         SettingsLevel::Sidebar => "Sidebar",
+        SettingsLevel::Thinking => "Thinking output",
+        SettingsLevel::ToolDetails => "Tool details",
     }
 }
 
@@ -351,6 +380,8 @@ fn section_title(level: SettingsLevel, root: SettingsLevel) -> &'static str {
         (SettingsLevel::Mode, _) => "Permission",
         (SettingsLevel::Effort, _) => "Effort",
         (SettingsLevel::Sidebar, _) => "Sidebar",
+        (SettingsLevel::Thinking, _) => "Thinking",
+        (SettingsLevel::ToolDetails, _) => "Tool details",
     }
 }
 

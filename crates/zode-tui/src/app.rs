@@ -1207,6 +1207,22 @@ impl TuiApp {
                 };
                 self.toast = Some(Toast::info(format!("sidebar → {choice}")));
             }
+            SettingsAction::SetThinking(choice) => {
+                self.show_thinking = choice == "on";
+                self.persist_show_thinking(self.show_thinking);
+                self.toast = Some(Toast::info(format!(
+                    "thinking output {}",
+                    on_off(self.show_thinking)
+                )));
+            }
+            SettingsAction::SetToolDetails(choice) => {
+                self.show_tool_details = choice == "on";
+                self.persist_show_tool_details(self.show_tool_details);
+                self.toast = Some(Toast::info(format!(
+                    "tool details {}",
+                    on_off(self.show_tool_details)
+                )));
+            }
         }
     }
 
@@ -1992,6 +2008,20 @@ impl TuiApp {
         }
     }
 
+    fn persist_show_thinking(&self, value: bool) {
+        if let Ok(mut cfg) = ConfigManager::load_global() {
+            cfg.show_thinking = Some(value);
+            let _ = ConfigManager::save_global(&cfg);
+        }
+    }
+
+    fn persist_show_tool_details(&self, value: bool) {
+        if let Ok(mut cfg) = ConfigManager::load_global() {
+            cfg.show_tool_details = Some(value);
+            let _ = ConfigManager::save_global(&cfg);
+        }
+    }
+
     fn spawn_history_op(&self, agent_tx: &mpsc::UnboundedSender<AppEvent>, undo: bool) {
         let engine = self.active_tab().engine.clone();
         let tx = agent_tx.clone();
@@ -2175,6 +2205,14 @@ fn mode_label(mode: Mode) -> &'static str {
         Mode::Thinking => "thinking",
         Mode::Streaming => "streaming",
         Mode::Error => "error",
+    }
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value {
+        "ON"
+    } else {
+        "OFF"
     }
 }
 
