@@ -119,4 +119,10 @@ pub static BUILTINS: &[SlashCommand] = &[
         usage: "/skills",
         action: CommandAction::Engine,
     },
+    SlashCommand {
+        name: "plugin",
+        description: "Manage plugins (tools, MCP, skills, LSP): list / toggle",
+        usage: "/plugin [id]",
+        action: CommandAction::Ui,
+    },
 ];

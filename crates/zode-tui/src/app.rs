@@ -34,6 +34,7 @@ use crate::theme::{Theme, ThemeStore};
 use crate::ui::autocomplete::Autocomplete;
 use crate::ui::chat::{ChatRenderMeta, ChatView};
 use crate::ui::dialog::connect::{ConnectAction, ConnectDialog, ConnectStage};
+use crate::ui::dialog::plugin_picker::PluginPicker;
 use crate::ui::dialog::permission::PermissionDialog;
 use crate::ui::dialog::session_picker::SessionPicker;
 use crate::ui::dialog::settings::{SettingsAction, SettingsDialog, SettingsLevel};
@@ -75,6 +76,7 @@ pub struct TuiApp {
     autocomplete: Autocomplete,
     settings: Option<SettingsDialog>,
     connect: Option<ConnectDialog>,
+    plugin_picker: Option<PluginPicker>,
     session_picker: Option<SessionPicker>,
     tasks_panel: Option<TasksPanel>,
     /// Snapshot of the active tab's background shells, refreshed while the
@@ -141,6 +143,7 @@ impl TuiApp {
             autocomplete: Autocomplete::new(),
             settings: None,
             connect: None,
+            plugin_picker: None,
             session_picker: None,
             tasks_panel: None,
             bg_shells: Vec::new(),
@@ -569,6 +572,9 @@ impl TuiApp {
         if let Some(connect) = &self.connect {
             connect.render(f, area, &theme);
         }
+        if let Some(picker) = &self.plugin_picker {
+            picker.render(f, area, &theme);
+        }
         if let Some(picker) = &mut self.session_picker {
             picker.render(f, area, &theme);
         }
@@ -632,6 +638,12 @@ impl TuiApp {
         // 2a. Connect dialog captures provider search and API key entry.
         if self.connect.is_some() {
             self.handle_connect_key(key.code).await;
+            return;
+        }
+
+        // 2a2. Plugin picker captures toggle + filter input.
+        if self.plugin_picker.is_some() {
+            self.handle_plugin_key(key.code).await;
             return;
         }
 
@@ -748,6 +760,12 @@ impl TuiApp {
                     self.open_connect_dialog();
                     return;
                 }
+                KeyCode::Enter if self.autocomplete.selected_name() == Some("plugin") => {
+                    self.input.take();
+                    self.autocomplete.dismiss();
+                    self.open_plugin_picker();
+                    return;
+                }
                 KeyCode::Tab | KeyCode::Enter => {
                     self.apply_completion();
                     return;
@@ -793,6 +811,13 @@ impl TuiApp {
 
     fn open_connect_dialog(&mut self) {
         self.connect = Some(ConnectDialog::new());
+    }
+
+    /// Open the `/plugin` picker over the active tab's discovered plugins
+    /// (tool groups, MCP servers with live state, skills, LSP servers).
+    fn open_plugin_picker(&mut self) {
+        let plugins = self.active_tab().engine.plugin_list();
+        self.plugin_picker = Some(PluginPicker::new(plugins));
     }
 
     fn theme_ids(&self) -> Vec<String> {
@@ -962,6 +987,83 @@ impl TuiApp {
             self.active_tab_mut()
                 .chat
                 .push_system(&format!("provider -> {provider_name}"));
+        }
+    }
+
+    /// Drive the plugin picker. Space/Enter flips the selected plugin in place;
+    /// Esc closes and, if anything changed, persists the new disabled set and
+    /// reassembles the active tab once so it takes effect live.
+    async fn handle_plugin_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => {
+                let Some(picker) = self.plugin_picker.take() else {
+                    return;
+                };
+                if picker.is_dirty() {
+                    self.apply_plugins(picker.disabled_ids()).await;
+                }
+            }
+            KeyCode::Up => {
+                if let Some(p) = &mut self.plugin_picker {
+                    p.prev();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(p) = &mut self.plugin_picker {
+                    p.next();
+                }
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                if let Some((name, on)) = self
+                    .plugin_picker
+                    .as_mut()
+                    .and_then(PluginPicker::toggle_selected)
+                {
+                    let state = if on { "on" } else { "off" };
+                    self.toast = Some(Toast::info(format!("{name}: {state}")));
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(p) = &mut self.plugin_picker {
+                    p.pop_filter_char();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(p) = &mut self.plugin_picker {
+                    p.push_filter_char(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Persist the disabled-plugin set to the global config and reassemble the
+    /// active tab so the change (tools dropped, MCP disconnected, skills/LSP
+    /// hidden) applies to the running conversation.
+    async fn apply_plugins(&mut self, disabled: Vec<String>) {
+        if self.active_tab().is_busy() {
+            self.toast = Some(Toast::info(
+                "can't change plugins during a turn — Ctrl+C first",
+            ));
+            return;
+        }
+        match ConfigManager::load_global() {
+            Ok(mut cfg) => {
+                cfg.plugins.disabled = disabled.clone();
+                if let Err(e) = ConfigManager::save_global(&cfg) {
+                    self.toast = Some(Toast::error(format!("save config failed: {e}")));
+                    return;
+                }
+            }
+            Err(e) => {
+                self.toast = Some(Toast::error(format!("load config failed: {e}")));
+                return;
+            }
+        }
+        let t = self.template.with_plugins_disabled(disabled);
+        if self.reassemble_active(t.clone()).await {
+            self.template = t;
+            self.toast = Some(Toast::info("plugins updated"));
         }
     }
 
@@ -1183,6 +1285,7 @@ impl TuiApp {
             "sessions" | "resume" => self.open_session_picker(),
             "tab" => self.handle_tab_command(args),
             "connect" => self.open_connect_dialog(),
+            "plugin" => self.open_plugin_picker(),
             "sidebar" => self.handle_sidebar_command(args),
             "tasks" => self.open_tasks_panel().await,
             "config" => {

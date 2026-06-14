@@ -503,6 +503,14 @@ impl EngineTemplate {
         t.cfg.provider = provider;
         t
     }
+
+    /// Clone with the disabled-plugin set replaced (for the `/plugin` picker,
+    /// which reassembles so the new tool/MCP/skill/LSP set takes effect live).
+    pub fn with_plugins_disabled(&self, disabled: Vec<String>) -> Self {
+        let mut t = self.clone();
+        t.cfg.plugins.disabled = disabled;
+        t
+    }
 }
 
 /// Re-register only the tools whose plugin group is enabled. Tools outside any
