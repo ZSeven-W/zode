@@ -95,6 +95,7 @@ pub const TOOL_GROUPS: &[(&str, &str, &[&str])] = &[
             "GitCheckout",
             "GitStash",
             "GitBlame",
+            "GitWorktree",
         ],
     ),
     (

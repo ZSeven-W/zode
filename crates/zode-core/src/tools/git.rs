@@ -317,7 +317,61 @@ impl Tool for GitStash {
     }
 }
 
-/// All eight git tools, ready to register.
+#[derive(Debug)]
+pub struct GitWorktree;
+#[async_trait]
+impl Tool for GitWorktree {
+    fn name(&self) -> &str {
+        "GitWorktree"
+    }
+    fn description(&self) -> &str {
+        "Manage git worktrees. `op`: list (default) | add | remove. `add` needs `path` (+ optional `branch` to create & check out); `remove` needs `path`."
+    }
+    fn input_schema(&self) -> Value {
+        json!({"type": "object", "properties": {
+            "op": {"type": "string", "enum": ["list", "add", "remove"]},
+            "path": {"type": "string", "description": "Worktree path (add/remove)."},
+            "branch": {"type": "string", "description": "Branch to create & check out in the new worktree (add only)."}
+        }})
+    }
+    fn safety_class(&self) -> SafetyClass {
+        // add/remove create or delete a working tree → gated. (list is benign,
+        // but one class per tool; the conservative choice is to confirm.)
+        SafetyClass::Mutating
+    }
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+        let op = match str_field(&input, "op").unwrap_or("list") {
+            valid @ ("list" | "add" | "remove") => valid,
+            other => {
+                return Err(AgentError::other(format!(
+                    "GitWorktree op must be list | add | remove, got {other:?}"
+                )))
+            }
+        };
+        let mut args = vec!["worktree".to_string(), op.to_string()];
+        match op {
+            "list" => {}
+            "add" => {
+                let path = str_field(&input, "path")
+                    .ok_or_else(|| AgentError::other("GitWorktree add requires 'path'"))?;
+                if let Some(branch) = str_field(&input, "branch") {
+                    args.push("-b".to_string());
+                    args.push(branch.to_string());
+                }
+                args.push(path.to_string());
+            }
+            "remove" => {
+                let path = str_field(&input, "path")
+                    .ok_or_else(|| AgentError::other("GitWorktree remove requires 'path'"))?;
+                args.push(path.to_string());
+            }
+            _ => unreachable!(),
+        }
+        run_git(&ctx.cwd, &args).await
+    }
+}
+
+/// All nine git tools, ready to register.
 pub fn all_git_tools() -> Vec<std::sync::Arc<dyn Tool>> {
     use std::sync::Arc;
     vec![
@@ -329,6 +383,7 @@ pub fn all_git_tools() -> Vec<std::sync::Arc<dyn Tool>> {
         Arc::new(GitBranch),
         Arc::new(GitCheckout),
         Arc::new(GitStash),
+        Arc::new(GitWorktree),
     ]
 }
 
@@ -427,7 +482,7 @@ mod tests {
 
     #[test]
     fn all_eight_tools() {
-        assert_eq!(all_git_tools().len(), 8);
+        assert_eq!(all_git_tools().len(), 9);
     }
 
     #[tokio::test]
