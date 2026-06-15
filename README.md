@@ -15,13 +15,14 @@
 
 ## Highlights
 
-- **Multi-provider** — Anthropic, OpenAI, and any OpenAI-compatible API (DeepSeek, Moonshot, OpenRouter dialects), plus local Ollama
+- **Multi-provider** — Anthropic, OpenAI, and any OpenAI-compatible API (DeepSeek, Moonshot, OpenRouter dialects), plus local Ollama. Supports large-output and **1M-context** models (`contextWindow` / `maxOutputTokens` are configurable)
 - **Rich tool surface** — file read/write/edit, code & content search, foreground and background shells, git, web fetch, notebooks, TODO tracking
-- **Interactive permissions** — every mutating tool is gated: allow once / allow always / deny, with hard-deny rules and a `--sandbox` mode that confines writes to the working dir
-- **Full-screen TUI** — streaming markdown with syntax highlighting, diff previews, slash-command autocomplete, 4 built-in themes, settings & help overlays
+- **Non-blocking permissions** — every mutating tool is gated (allow once / always / deny), but the prompt docks inline and never blocks you: keep typing to queue a follow-up while a tool waits, with hard-deny rules and a `--sandbox` mode that confines writes to the working dir
+- **Full-screen TUI** — streaming markdown with syntax highlighting, diff previews, slash-command autocomplete, prompt history (Up/Down), 4 built-in themes, settings & help overlays, **15-language UI** (`/language`)
 - **Multi-session tabs** — run several conversations side by side (`Ctrl+T`), each an isolated agent; resume past sessions with full history replay
-- **Sub-agents** — delegate scoped work to `researcher` / `reviewer` / `general` child agents via the Task tool (they inherit the same gate, sandbox, and hooks)
-- **Skills & MCP** — load `SKILL.md` instruction packs on demand and connect MCP servers (`mcp__<server>__<tool>`)
+- **Sub-agents & workflows** — delegate scoped work to child agents via the Task tool (they inherit the same gate, sandbox, and hooks), manage them with `/agents` / `/workflows`, and toggle autonomous orchestration
+- **Cross-agent ecosystem** — discovers skills, slash commands, and MCP servers from Claude / Codex / opencode / antigravity / pi / kilo / cursor (plus their plugin trees), with zode's own taking precedence; foreign integrations are off by default and non-portable ones are filtered out
+- **Skills & MCP** — load `SKILL.md` instruction packs on demand and connect MCP servers (`mcp__<server>__<tool>`); created agents, skills, and MCP tools surface as slash commands
 - **Hooks** — run external scripts on tool events (e.g. block dangerous commands, lint after edits)
 - **Three-level instructions** — global (`~/.zode/`) → project root → cwd (`AGENTS.md` / `CLAUDE.md`)
 
@@ -85,6 +86,23 @@ You can also point at any provider without editing the config by exporting the
 matching key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …); for Ollama the
 `baseUrl` is taken from the environment when unset.
 
+Optional top-level config keys (all have sensible defaults):
+
+```jsonc
+{
+  "maxOutputTokens": 16384,      // per-turn output cap (raise for big file writes)
+  "contextWindow": 1000000,      // model context window — set 1000000 for a 1M model
+  "temperature": 0,              // lower = more deterministic
+  "language": "zh-CN",           // UI language (15 locales); also via /language
+  "effort": "medium",            // default reasoning effort; also via /effort
+  "autonomousOrchestration": true // sub-agent + workflow orchestration (default on)
+}
+```
+
+> `contextWindow` drives auto-compaction — set it to your model's real window
+> (e.g. `1000000`). Do **not** set it above the real window: overestimating
+> makes requests overflow and the provider rejects the turn.
+
 ## Slash Commands
 
 | Command | What it does |
@@ -101,27 +119,44 @@ matching key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …); for Ollama the
 | `/sidebar [on|off|toggle]` | Show or hide the right sidebar |
 | `/tasks` | Background shells + running turns panel |
 | `/undo`, `/redo` | Undo / redo the last file edit |
-| `/mcp` | List configured MCP servers |
+| `/mcp` | Manage MCP servers — enable / disable in a dialog |
 | `/skills` | List available skills |
+| `/agents` | Manage sub-agents — create (AI-assisted or manual) / delete |
+| `/workflows` | Manage & run deterministic multi-step workflows |
+| `/effort` | Pick the reasoning effort level |
+| `/thinking`, `/tool-details` | Toggle showing reasoning / tool-call detail |
+| `/orchestration` | Toggle autonomous sub-agent + workflow orchestration |
+| `/language` | Switch the UI language (15 locales) |
+| `/export [path]` | Export the transcript to Markdown (a dir gets a default name) |
 | `/yolo` | Bypass-approval mode |
 | `/exit` | Quit |
 
+Created agents and skills, and connected MCP tools, also appear as dynamic
+slash commands (e.g. `/<name>`) and can be invoked directly.
+
 ## Keybindings
+
+> On macOS the app chords below use **`Cmd`** (⌘); on Windows/Linux they use
+> `Ctrl`. `Ctrl+C/D/L/V` stay `Ctrl` everywhere (terminal conventions).
 
 | Key | Action |
 |---|---|
-| `Enter` | Send message |
+| `Enter` | Send message (queues if a turn is running) |
 | `Shift`/`Alt`+`Enter` | Newline |
+| `Up` / `Down` | Recall previous / next submitted prompt (or move the autocomplete selection) |
 | `Ctrl+C` | Interrupt the turn (quit when idle) |
 | `Ctrl+D` | Quit |
-| `Ctrl+L` | Clear the screen |
-| `Ctrl+O` | Settings |
-| `Ctrl+T` / `Ctrl+W` | New tab / close tab |
-| `Ctrl+1`–`9` / `Ctrl+Tab` | Jump to / cycle tabs |
-| `Ctrl+B` | Background tasks panel |
+| `Ctrl+L` | Redraw the conversation from the store (recovers a blanked view; use `/clear` to discard) |
+| `Ctrl+V` | Paste (text or image paths) |
+| `Cmd/Ctrl+O` | Settings |
+| `Cmd/Ctrl+T` / `Cmd/Ctrl+W` | New tab / close tab |
+| `Cmd/Ctrl+1`–`9` / `Cmd/Ctrl+Tab` | Jump to / cycle tabs |
+| `Cmd/Ctrl+B` | Background tasks panel |
+| `Cmd/Ctrl+G` | Toggle the sidebar |
 | `F1` | Help |
-| `PgUp` / `PgDn` | Scroll |
-| `Esc` | Close the current overlay |
+| `PgUp` / `PgDn` | Scroll the conversation |
+| `Home` / `End` | Jump to the top / latest of the conversation |
+| `Esc` | Close the current overlay (or interrupt a running turn) |
 
 ## Project Instructions
 
@@ -130,6 +165,15 @@ global `~/.zode/AGENTS.md` (or `instructions.md`) → project root → cwd. In e
 directory it prefers `AGENTS.md` over `CLAUDE.md`. Skills live under
 `.zode/skills/**/SKILL.md`; MCP servers in `~/.zode/mcp.json` ⊕ `.mcp.json`;
 hooks in `~/.zode/hooks.json` ⊕ `.zode/hooks.json`.
+
+**Cross-agent compatibility.** Zode also discovers skills, slash commands, and
+MCP servers already installed for other coding agents — Claude (`~/.claude`),
+Codex (`~/.codex`), opencode, antigravity, pi, kilo, cursor — including their
+plugin trees. Zode's own definitions take precedence on a name clash. Foreign
+MCP servers and foreign-plugin commands are **off by default** (copy one into a
+`.zode/` dir to opt in), and skills/commands that hard-code another agent's host
+variables (e.g. `${CLAUDE_PLUGIN_ROOT}`) are filtered out since they can't run
+here. Hooks are **not** imported from other agents (they execute shell commands).
 
 ## Benchmark
 
