@@ -16,3 +16,7 @@ docs/
 # Python
 __pycache__/
 *.pyc
+docs/superpowers
+
+# `/export` default output (conversation transcripts are local artifacts)
+/zode-conversation.md

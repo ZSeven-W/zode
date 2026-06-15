@@ -35,6 +35,9 @@ pub struct ZodeTaskFactory {
     /// The parent's FINAL gated+sandboxed registry, set by the engine after
     /// assembly. The child gets these tools minus "Task".
     parent_tools: ParentToolsCell,
+    /// User-defined agent definitions (`~/.zode/agents` etc.). Consulted before
+    /// the built-in types so users can add/override sub-agents.
+    defs: Vec<crate::agents::AgentDef>,
 }
 
 impl ZodeTaskFactory {
@@ -47,6 +50,7 @@ impl ZodeTaskFactory {
         file_cache: Arc<FileStateCache>,
         hooks: Arc<HookRunner>,
         parent_tools: ParentToolsCell,
+        defs: Vec<crate::agents::AgentDef>,
     ) -> Self {
         Self {
             provider,
@@ -56,6 +60,7 @@ impl ZodeTaskFactory {
             file_cache,
             hooks,
             parent_tools,
+            defs,
         }
     }
 
@@ -81,7 +86,7 @@ impl ZodeTaskFactory {
         ("reviewer", "Reviews code and reports issues; read-only"),
     ];
 
-    fn system_for(agent_type: &str) -> Option<String> {
+    fn builtin_system_for(agent_type: &str) -> Option<String> {
         let prompt = match agent_type {
             "general" => {
                 "You are a focused sub-agent. Complete the assigned sub-task and return a concise result."
@@ -96,19 +101,49 @@ impl ZodeTaskFactory {
         };
         Some(prompt.to_string())
     }
+
+    /// All spawnable agent types (name, summary): user definitions first
+    /// (overriding same-named built-ins), then the remaining built-ins.
+    pub fn agent_types(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .defs
+            .iter()
+            .map(|d| (d.name.clone(), d.description.clone()))
+            .collect();
+        for (name, desc) in Self::AGENT_TYPES {
+            if !out.iter().any(|(n, _)| n == name) {
+                out.push((name.to_string(), desc.to_string()));
+            }
+        }
+        out
+    }
 }
 
 #[async_trait]
 impl TaskAgentFactory for ZodeTaskFactory {
     async fn build(&self, agent_type: &str) -> Result<TaskAgentConfig, AgentError> {
-        let system = Self::system_for(agent_type).ok_or_else(|| {
-            AgentError::other(format!(
-                "unknown agent_type '{agent_type}' (try: general, researcher, reviewer)"
-            ))
-        })?;
+        // User definitions take precedence over the built-in types, and may
+        // override the model.
+        let (system, model) = match self.defs.iter().find(|d| d.name == agent_type) {
+            Some(def) => (
+                def.system.clone(),
+                def.model.clone().unwrap_or_else(|| self.model.clone()),
+            ),
+            None => {
+                let system = Self::builtin_system_for(agent_type).ok_or_else(|| {
+                    let known: Vec<String> =
+                        self.agent_types().into_iter().map(|(n, _)| n).collect();
+                    AgentError::other(format!(
+                        "unknown agent_type '{agent_type}' (try: {})",
+                        known.join(", ")
+                    ))
+                })?;
+                (system, self.model.clone())
+            }
+        };
         Ok(TaskAgentConfig {
             provider: self.provider.clone(),
-            model: self.model.clone(),
+            model,
             tools: self.child_tools(),
             system: Some(system),
             max_iterations: Some(20),
@@ -179,6 +214,7 @@ mod tests {
             file_cache,
             Arc::new(HookRunner::new()),
             cell,
+            Vec::new(),
         )
     }
 

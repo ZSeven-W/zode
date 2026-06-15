@@ -51,7 +51,15 @@ Do NOT attempt to make changes; there are no tools to do so. When the plan is \
 ready, present it and tell the user to review it and run /plan to leave plan \
 mode and execute.";
 
-const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
+// A coding agent routinely emits large tool inputs (whole-file writes, big
+// diffs). At ~4 chars/token, the old 8192 cap truncated a single FileWrite
+// mid-JSON and failed the turn ("tool_use input JSON parse error … EOF").
+// 16384 roughly doubles the headroom while staying within the output cap of
+// current models (it is exactly GPT-4o's max; Claude 4.x / deepseek-v4 allow
+// more). Models with a LOWER output cap (legacy Claude 3/3.5 at 4k–8k) will
+// 400 on this — pin a smaller `max_output_tokens` in config for those; a turn
+// that still hits the cap mid-tool-call now reports an actionable message.
+const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_384;
 const DEFAULT_MODEL_MAX_TOKENS: u32 = 200_000;
 const FILE_CACHE_ENTRIES: usize = 1024;
 const FILE_CACHE_BYTES: usize = 16 * 1024 * 1024;
@@ -68,6 +76,10 @@ pub struct ZodeEngine {
     pub system: Option<String>,
     pub cwd: PathBuf,
     pub max_output_tokens: u32,
+    /// The model's context window in tokens, driving auto-compaction / context
+    /// thresholds. Configurable so 1M-context models use their full window
+    /// instead of compacting at the conservative 200K default.
+    pub model_max_tokens: u32,
     /// Sampling temperature (None = provider default).
     pub temperature: Option<f32>,
     /// Whether to request provider prompt caching (default on).
@@ -96,6 +108,14 @@ pub struct ZodeEngine {
     pub all_skill_meta: Vec<(String, String)>,
     /// Configured LSP language keys (for the picker).
     pub lsp_langs: Vec<String>,
+    /// Spawnable sub-agent types (name, summary): user defs + built-ins.
+    /// Surfaced by `/agents`.
+    pub agent_types: Vec<(String, String)>,
+    /// Saved workflows (name, description). Surfaced by `/workflows`.
+    pub workflows: Vec<(String, String)>,
+    /// User/plugin slash commands (`commands/<name>.md`) — dynamic commands
+    /// whose body is submitted as a turn.
+    pub user_commands: Vec<crate::user_commands::UserCommand>,
 }
 
 impl ZodeEngine {
@@ -274,6 +294,9 @@ impl ZodeEngine {
         // after wrapping, so it is late-bound through a OnceLock the engine
         // populates below. Registered LAST among base tools.
         let task_tools: ParentToolsCell = Arc::new(OnceLock::new());
+        // User-defined sub-agents (~/.zode/agents etc.), available alongside the
+        // built-in types for the Task tool and listed by `/agents`.
+        let agent_defs = crate::agents::load_agent_defs(&cwd);
         let task_factory = Arc::new(ZodeTaskFactory::new(
             provider.clone(),
             model.clone(),
@@ -282,8 +305,22 @@ impl ZodeEngine {
             file_cache.clone(),
             hooks.clone(),
             task_tools.clone(),
+            agent_defs,
         ));
+        let agent_type_list = task_factory.agent_types();
         base.register(Arc::new(TaskTool::new(task_factory)));
+
+        // Autonomous orchestration: let the agent define new sub-agent types
+        // and workflows. Default ON (unset → enabled); toggle off via Settings.
+        let orchestration = cfg.autonomous_orchestration.unwrap_or(true);
+        if orchestration {
+            base.register(Arc::new(crate::agents::DefineAgentTool));
+            base.register(Arc::new(crate::workflows::DefineWorkflowTool));
+        }
+        // Saved workflows (~/.zode/workflows etc.), for `/workflows` + the
+        // orchestration directive. Loaded regardless of the toggle so listing
+        // works; only advertised in the prompt when orchestration is on.
+        let workflow_defs = crate::workflows::load_workflow_defs(&cwd);
 
         // Drop tools whose plugin group is disabled (Skill / ToolSearch / MCP
         // tools are always-on and pass through).
@@ -353,6 +390,45 @@ impl ZodeEngine {
             ),
             _ => {} // medium / unset → balanced default, no directive.
         }
+        // Autonomous orchestration directive: encourage task decomposition via
+        // sub-agents and advertise the available types + the define_agent tool.
+        if orchestration {
+            let types = agent_type_list
+                .iter()
+                .map(|(n, d)| format!("  - {n}: {d}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            system.push_str(&format!(
+                "\n\n# Autonomous orchestration\nFor multi-part or large tasks, decompose the \
+                 work and delegate independent sub-tasks to sub-agents with the Task tool \
+                 instead of doing everything in one context. Available sub-agent types:\n{types}\n\
+                 If no existing type fits, create one with the define_agent tool, then spawn it. \
+                 Keep the main thread focused on planning and integrating the results.",
+            ));
+            // Workflows: always advertise that the agent can CREATE reusable
+            // multi-step workflows (define_workflow), and list any saved ones.
+            system.push_str(
+                "\nFor a repeatable multi-step process, capture it as a reusable workflow \
+                 with the define_workflow tool (ordered steps, each with a sub-agent type), \
+                 then follow it by running each step via Task.",
+            );
+            if !workflow_defs.is_empty() {
+                let wfs = workflow_defs
+                    .iter()
+                    .map(|w| {
+                        let steps = w
+                            .steps
+                            .iter()
+                            .map(|s| format!("[{}] {}", s.agent_type, s.prompt))
+                            .collect::<Vec<_>>()
+                            .join(" → ");
+                        format!("  - {} ({}): {}", w.name, w.description, steps)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                system.push_str(&format!("\nSaved workflows:\n{wfs}"));
+            }
+        }
         let system = Some(system);
 
         // Clone before `model` is moved into the struct's `model` field below.
@@ -378,8 +454,9 @@ impl ZodeEngine {
             compact_state: Arc::new(Mutex::new(AutoCompactState::default())),
             model,
             system,
-            cwd,
+            cwd: cwd.clone(),
             max_output_tokens: cfg.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
+            model_max_tokens: cfg.context_window.unwrap_or(DEFAULT_MODEL_MAX_TOKENS),
             temperature: cfg.temperature,
             prompt_cache: cfg.prompt_cache.unwrap_or(true),
             bash_sessions,
@@ -394,6 +471,12 @@ impl ZodeEngine {
             all_mcp_servers,
             all_skill_meta,
             lsp_langs,
+            agent_types: agent_type_list,
+            workflows: workflow_defs
+                .into_iter()
+                .map(|w| (w.name, w.description))
+                .collect(),
+            user_commands: crate::user_commands::load_user_commands(&cwd),
         })
     }
 
@@ -517,7 +600,7 @@ impl ZodeEngine {
             .file_cache(self.file_cache.clone())
             .compact_state(self.compact_state.clone())
             .max_output_tokens(self.max_output_tokens)
-            .model_max_tokens(DEFAULT_MODEL_MAX_TOKENS)
+            .model_max_tokens(self.model_max_tokens)
             .cwd(self.cwd.clone())
             .auto_compact(true)
             .use_prompt_cache(self.prompt_cache);
@@ -774,6 +857,19 @@ impl EngineTemplate {
         self.cfg.language.as_deref()
     }
 
+    /// Whether autonomous orchestration is on (`/orchestration`). Default ON
+    /// (unset → enabled); toggle off via Settings / `/orchestration`.
+    pub fn autonomous_orchestration(&self) -> bool {
+        self.cfg.autonomous_orchestration.unwrap_or(true)
+    }
+
+    /// Clone with autonomous orchestration toggled.
+    pub fn with_autonomous_orchestration(&self, on: bool) -> Self {
+        let mut t = self.clone();
+        t.cfg.autonomous_orchestration = Some(on);
+        t
+    }
+
     /// Human-readable permission rules (`/permissions`): allow / ask / deny.
     pub fn permissions_summary(&self) -> Vec<String> {
         let p = &self.cfg.permissions;
@@ -887,6 +983,7 @@ mod tests {
             system: None,
             cwd: PathBuf::from("."),
             max_output_tokens: 128,
+            model_max_tokens: DEFAULT_MODEL_MAX_TOKENS,
             temperature: None,
             prompt_cache: false,
             bash_sessions: BashSessionRegistry::new(),
@@ -901,6 +998,9 @@ mod tests {
             all_mcp_servers: Vec::new(),
             all_skill_meta: Vec::new(),
             lsp_langs: Vec::new(),
+            agent_types: Vec::new(),
+            workflows: Vec::new(),
+            user_commands: Vec::new(),
         }
     }
 
@@ -1088,6 +1188,33 @@ mod tests {
         assert!(sys.contains("Current goal"), "{sys}");
         assert!(sys.contains("ship v1 of the parser"), "{sys}");
         assert!(sys.contains("Effort: high"), "{sys}");
+    }
+
+    #[tokio::test]
+    async fn orchestration_is_on_by_default() {
+        // Unset autonomous_orchestration → ON: define_agent registered + the
+        // orchestration directive injected into the system prompt.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_cfg();
+        assert!(cfg.autonomous_orchestration.is_none());
+        let eng = ZodeEngine::assemble(
+            &cfg,
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-06-13",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
+        assert!(names.contains(&"define_agent".to_string()), "{names:?}");
+        assert!(eng
+            .system
+            .as_deref()
+            .unwrap_or("")
+            .contains("Autonomous orchestration"));
     }
 
     #[tokio::test]

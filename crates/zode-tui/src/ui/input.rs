@@ -5,10 +5,10 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use tui_textarea::TextArea;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
 use crate::ui::status::Mode;
@@ -58,6 +58,26 @@ impl InputBox {
         text
     }
 
+    /// True if the cursor sits on the first line — Up then recalls history
+    /// instead of moving the cursor up within multi-line text.
+    pub fn cursor_on_first_line(&self) -> bool {
+        self.area.cursor().0 == 0
+    }
+
+    /// True if the cursor sits on the last line — Down then advances history.
+    pub fn cursor_on_last_line(&self) -> bool {
+        self.area.cursor().0 + 1 >= self.area.lines().len().max(1)
+    }
+
+    /// Replace the whole input with `s`, leaving the cursor at the end. Used to
+    /// recall a prompt from history.
+    pub fn set_text(&mut self, s: &str) {
+        let mut area = TextArea::from(s.split('\n').map(str::to_string).collect::<Vec<_>>());
+        area.move_cursor(tui_textarea::CursorMove::Bottom);
+        area.move_cursor(tui_textarea::CursorMove::End);
+        self.area = area;
+    }
+
     pub fn render(
         &self,
         f: &mut Frame,
@@ -92,16 +112,35 @@ impl InputBox {
         }
 
         let body = input_body_area(area);
-        let mut ta = self.area.clone();
-        ta.set_cursor_line_style(Style::default().bg(theme.bg_input).fg(theme.fg_text));
-        ta.set_block(
-            Block::default()
-                .borders(Borders::NONE)
-                .border_style(Style::default().fg(status_color))
-                .style(Style::default().bg(theme.bg_input).fg(theme.fg_text)),
-        );
-        f.render_widget(&ta, body);
+        self.render_wrapped_text(f, body, theme);
         self.render_completion_placeholder(f, area, theme, completion_placeholder);
+    }
+
+    fn render_wrapped_text(&self, f: &mut Frame, body: Rect, theme: &Theme) {
+        if body.width == 0 || body.height == 0 {
+            return;
+        }
+        let style = Style::default().bg(theme.bg_input).fg(theme.fg_text);
+        let rows = wrap_input_lines(self.area.lines(), body.width);
+        let (cursor_row, cursor_col) =
+            wrapped_cursor_position(&rows, self.area.cursor(), body.width).unwrap_or((0, 0));
+        let visible_height = body.height as usize;
+        let start = cursor_row.saturating_add(1).saturating_sub(visible_height);
+        let visible_rows: Vec<Line<'static>> = rows
+            .iter()
+            .skip(start)
+            .take(visible_height)
+            .map(|row| Line::from(Span::styled(row.text.clone(), style)))
+            .collect();
+
+        f.render_widget(Paragraph::new(visible_rows).style(style), body);
+        if cursor_row >= start && cursor_row < start.saturating_add(visible_height) {
+            let max_x = body.width.saturating_sub(1) as usize;
+            f.set_cursor_position((
+                body.x.saturating_add(cursor_col.min(max_x) as u16),
+                body.y.saturating_add((cursor_row - start) as u16),
+            ));
+        }
     }
 
     fn render_completion_placeholder(
@@ -138,6 +177,118 @@ impl InputBox {
         )]));
         f.render_widget(hint, Rect::new(x, inner.y, width, 1));
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WrappedInputLine {
+    text: String,
+    source_row: usize,
+    start_col: usize,
+    end_col: usize,
+    display_width: usize,
+}
+
+fn wrap_input_lines(lines: &[String], width: u16) -> Vec<WrappedInputLine> {
+    let max_width = usize::from(width.max(1));
+    let mut rows = Vec::new();
+
+    for (source_row, line) in lines.iter().enumerate() {
+        if line.is_empty() {
+            rows.push(WrappedInputLine {
+                text: String::new(),
+                source_row,
+                start_col: 0,
+                end_col: 0,
+                display_width: 0,
+            });
+            continue;
+        }
+
+        let mut text = String::new();
+        let mut display_width: usize = 0;
+        let mut start_col = 0;
+        let mut col = 0;
+
+        for ch in line.chars() {
+            let ch_width = char_width(ch);
+            if !text.is_empty() && display_width.saturating_add(ch_width) > max_width {
+                rows.push(WrappedInputLine {
+                    text,
+                    source_row,
+                    start_col,
+                    end_col: col,
+                    display_width,
+                });
+                text = String::new();
+                display_width = 0;
+                start_col = col;
+            }
+            text.push(ch);
+            display_width = display_width.saturating_add(ch_width);
+            col += 1;
+        }
+
+        rows.push(WrappedInputLine {
+            text,
+            source_row,
+            start_col,
+            end_col: col,
+            display_width,
+        });
+    }
+
+    if rows.is_empty() {
+        rows.push(WrappedInputLine {
+            text: String::new(),
+            source_row: 0,
+            start_col: 0,
+            end_col: 0,
+            display_width: 0,
+        });
+    }
+
+    rows
+}
+
+fn wrapped_cursor_position(
+    rows: &[WrappedInputLine],
+    cursor: (usize, usize),
+    width: u16,
+) -> Option<(usize, usize)> {
+    let max_x = usize::from(width.saturating_sub(1));
+    let mut fallback = None;
+    for (idx, row) in rows.iter().enumerate() {
+        if row.source_row != cursor.0 {
+            continue;
+        }
+
+        let is_last_for_source = rows
+            .get(idx + 1)
+            .map_or(true, |next| next.source_row != row.source_row);
+        if row.start_col == row.end_col && cursor.1 == row.start_col {
+            return Some((idx, 0));
+        }
+        if cursor.1 >= row.start_col
+            && (cursor.1 < row.end_col || (is_last_for_source && cursor.1 == row.end_col))
+        {
+            let rel_col = cursor.1.saturating_sub(row.start_col);
+            let cursor_x = row
+                .text
+                .chars()
+                .take(rel_col)
+                .map(char_width)
+                .sum::<usize>();
+            return Some((idx, cursor_x.min(max_x)));
+        }
+        if cursor.1 >= row.end_col {
+            fallback = Some((idx, row.display_width.min(max_x)));
+        }
+    }
+    fallback
+}
+
+fn char_width(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
 fn input_body_area(area: Rect) -> Rect {
@@ -207,6 +358,27 @@ mod tests {
     }
 
     #[test]
+    fn set_text_replaces_content_and_edge_detection_works() {
+        let mut ib = InputBox::new();
+        // Empty box: cursor is on the one (empty) line — both first and last.
+        assert!(ib.cursor_on_first_line());
+        assert!(ib.cursor_on_last_line());
+
+        // Recall a single-line prompt: cursor lands at the end, still the only
+        // line, so Up/Down history nav stays available.
+        ib.set_text("recalled prompt");
+        assert_eq!(ib.text(), "recalled prompt");
+        assert!(ib.cursor_on_first_line());
+        assert!(ib.cursor_on_last_line());
+
+        // Multi-line recall: cursor at the end (last line), not the first.
+        ib.set_text("line one\nline two");
+        assert_eq!(ib.text(), "line one\nline two");
+        assert!(!ib.cursor_on_first_line());
+        assert!(ib.cursor_on_last_line());
+    }
+
+    #[test]
     fn input_text_does_not_use_cursor_line_underline() {
         let theme = ThemeStore::with_builtins().resolve(Some("cyberpunk"));
         let mut ib = InputBox::new();
@@ -247,6 +419,35 @@ mod tests {
         assert!(
             bottom_row.starts_with("▌") && !bottom_row.contains("three"),
             "composer bottom row should stay as rail-only padding: {bottom_row:?}"
+        );
+    }
+
+    #[test]
+    fn long_prompt_soft_wraps_inside_composer_width() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let mut ib = InputBox::new();
+        ib.insert_str("abcdefghijklmnop");
+        let backend = TestBackend::new(12, 5);
+        let mut term = Terminal::new(backend).unwrap();
+
+        term.draw(|f| ib.render(f, f.area(), &theme, Mode::Ready, None))
+            .unwrap();
+
+        let buf = term.backend().buffer();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            rows.iter().any(|row| row.contains("abcdefghij")),
+            "first wrapped segment should remain visible: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("klmnop")),
+            "overflow should wrap onto the next visual line: {rows:?}"
         );
     }
 

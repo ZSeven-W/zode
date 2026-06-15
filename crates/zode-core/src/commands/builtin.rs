@@ -84,6 +84,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Ui,
     },
     SlashCommand {
+        name: "selection",
+        description: "Toggle mouse text selection mode",
+        usage: "/selection [on|off|toggle]",
+        action: CommandAction::Ui,
+    },
+    SlashCommand {
         name: "resume",
         description: "Resume a session by id",
         usage: "/resume <id>",
@@ -121,9 +127,9 @@ pub static BUILTINS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "mcp",
-        description: "List MCP servers",
+        description: "Manage MCP servers: enable / disable",
         usage: "/mcp",
-        action: CommandAction::Engine,
+        action: CommandAction::Ui,
     },
     SlashCommand {
         name: "skills",
@@ -169,9 +175,9 @@ pub static BUILTINS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "agents",
-        description: "List sub-agent types the Task tool can spawn",
+        description: "Manage sub-agents: list / create / delete",
         usage: "/agents",
-        action: CommandAction::Engine,
+        action: CommandAction::Ui,
     },
     SlashCommand {
         name: "permissions",
@@ -201,6 +207,18 @@ pub static BUILTINS: &[SlashCommand] = &[
         name: "language",
         description: "Switch the UI language",
         usage: "/language",
+        action: CommandAction::Ui,
+    },
+    SlashCommand {
+        name: "workflows",
+        description: "Manage workflows: list / create / delete",
+        usage: "/workflows",
+        action: CommandAction::Ui,
+    },
+    SlashCommand {
+        name: "orchestration",
+        description: "Toggle autonomous orchestration (auto sub-agents)",
+        usage: "/orchestration",
         action: CommandAction::Ui,
     },
     SlashCommand {

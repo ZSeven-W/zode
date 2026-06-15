@@ -20,6 +20,7 @@ pub enum SettingsLevel {
     Sidebar,
     Thinking,
     ToolDetails,
+    Orchestration,
     Language,
 }
 
@@ -33,6 +34,7 @@ pub enum SettingsAction {
     SetSidebar(String),
     SetThinking(String),
     SetToolDetails(String),
+    SetOrchestration(String),
     /// Carries the language code (e.g. "zh-tw").
     SetLanguage(String),
 }
@@ -60,6 +62,7 @@ const TOP_ITEMS: &[&str] = &[
     "Sidebar",
     "Thinking",
     "Tool details",
+    "Orchestration",
     "Language",
 ];
 
@@ -211,7 +214,9 @@ impl SettingsDialog {
             SettingsLevel::Mode => self.modes.clone(),
             SettingsLevel::Effort => self.efforts.clone(),
             SettingsLevel::Sidebar => self.sidebars.clone(),
-            SettingsLevel::Thinking | SettingsLevel::ToolDetails => self.toggles.clone(),
+            SettingsLevel::Thinking | SettingsLevel::ToolDetails | SettingsLevel::Orchestration => {
+                self.toggles.clone()
+            }
             // Show each language by its endonym; the code is carried on confirm.
             SettingsLevel::Language => self
                 .language_codes
@@ -253,6 +258,7 @@ impl SettingsDialog {
                 4 => SettingsLevel::Sidebar,
                 5 => SettingsLevel::Thinking,
                 6 => SettingsLevel::ToolDetails,
+                7 => SettingsLevel::Orchestration,
                 _ => SettingsLevel::Language,
             };
             self.state.select(Some(0));
@@ -301,6 +307,10 @@ impl SettingsDialog {
                 .toggles
                 .get(idx)
                 .map(|s| SettingsAction::SetToolDetails(s.clone())),
+            SettingsLevel::Orchestration => self
+                .toggles
+                .get(idx)
+                .map(|s| SettingsAction::SetOrchestration(s.clone())),
             SettingsLevel::Language => self
                 .language_codes
                 .get(idx)
@@ -337,7 +347,11 @@ impl SettingsDialog {
         );
         f.render_widget(search_line(theme), search_rect(inner));
         f.render_widget(
-            Paragraph::new(zode_core::i18n::t(section_title(self.level, self.root_level))).style(
+            Paragraph::new(zode_core::i18n::t(section_title(
+                self.level,
+                self.root_level,
+            )))
+            .style(
                 Style::default()
                     .fg(theme.accent)
                     .bg(theme.bg_secondary)
@@ -426,6 +440,7 @@ fn title_text(level: SettingsLevel, root: SettingsLevel) -> &'static str {
         SettingsLevel::Sidebar => "Sidebar",
         SettingsLevel::Thinking => "Thinking output",
         SettingsLevel::ToolDetails => "Tool details",
+        SettingsLevel::Orchestration => "Autonomous orchestration",
         SettingsLevel::Language => "Select language",
     }
 }
@@ -441,6 +456,7 @@ fn section_title(level: SettingsLevel, root: SettingsLevel) -> &'static str {
         (SettingsLevel::Sidebar, _) => "Sidebar",
         (SettingsLevel::Thinking, _) => "Thinking",
         (SettingsLevel::ToolDetails, _) => "Tool details",
+        (SettingsLevel::Orchestration, _) => "Orchestration",
         (SettingsLevel::Language, _) => "Language",
     }
 }
@@ -491,7 +507,7 @@ fn footer_line(theme: &Theme) -> Paragraph<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " select  ",
+            format!(" {}  ", zode_core::i18n::t("select")),
             Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary),
         ),
         Span::styled(
@@ -502,7 +518,7 @@ fn footer_line(theme: &Theme) -> Paragraph<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " close",
+            format!(" {}", zode_core::i18n::t("close")),
             Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary),
         ),
     ]))

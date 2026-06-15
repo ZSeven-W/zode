@@ -2,7 +2,9 @@
 //! terminal input + agent events + a tick, and drives one turn at a time.
 
 use std::collections::VecDeque;
+use std::fs;
 use std::io::Stdout;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +14,7 @@ use agent::session::Session;
 use agent::stream::Event;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event as CtEvent, EventStream, KeyCode, KeyModifiers, MouseEvent, MouseEventKind,
+    Event as CtEvent, EventStream, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -27,7 +29,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use zode_core::approval::{ApprovalReceiver, ApprovalRequest};
+use zode_core::approval::{Approval, ApprovalReceiver, ApprovalRequest};
 use zode_core::bg_shells::BgShell;
 use zode_core::commands::parse_slash;
 use zode_core::config::{ConfigManager, ImageMode, ImagesConfig};
@@ -39,20 +41,91 @@ use zode_core::{EngineTemplate, ZodeEngine};
 use crate::event::AppEvent;
 use crate::tab::SessionTab;
 use crate::theme::{Theme, ThemeStore};
-use crate::ui::autocomplete::Autocomplete;
-use crate::ui::chat::{ChatRenderMeta, ChatView, ImagePreview};
+use crate::ui::autocomplete::{Autocomplete, DynCmd};
+use crate::ui::chat::{ChatRenderMeta, ChatSelection, ChatSelectionPoint, ChatView, ImagePreview};
+use crate::ui::dialog::agents_dialog::{AgentKind, AgentRow, AgentsAction, AgentsDialog};
 use crate::ui::dialog::connect::{ConnectAction, ConnectDialog, ConnectStage};
+use crate::ui::dialog::mcp_dialog::McpDialog;
 use crate::ui::dialog::permission::PermissionDialog;
 use crate::ui::dialog::plugin_picker::PluginPicker;
 use crate::ui::dialog::question::QuestionDialog;
 use crate::ui::dialog::session_picker::SessionPicker;
 use crate::ui::dialog::settings::{SettingsAction, SettingsDialog, SettingsLevel};
 use crate::ui::dialog::tasks_panel::TasksPanel;
+use crate::ui::dialog::workflows_dialog::{WorkflowRow, WorkflowsAction, WorkflowsDialog};
 use crate::ui::input::InputBox;
 use crate::ui::layout::{render_header, split_main, HeaderInfo};
 use crate::ui::status::{Mode, StatusBar};
 use crate::ui::tabs::{render_sidebar, SidebarInfo};
 use crate::ui::toast::Toast;
+
+const PROMPT_HISTORY_FILE: &str = "prompt_history.json";
+const PROMPT_HISTORY_LIMIT: usize = 200;
+
+fn prompt_history_path() -> Option<std::path::PathBuf> {
+    ConfigManager::config_dir()
+        .ok()
+        .map(|dir| dir.join(PROMPT_HISTORY_FILE))
+}
+
+fn load_prompt_history() -> Vec<String> {
+    prompt_history_path()
+        .as_deref()
+        .map(load_prompt_history_from_path)
+        .unwrap_or_default()
+}
+
+fn save_prompt_history(history: &[String]) {
+    let Some(path) = prompt_history_path() else {
+        return;
+    };
+    if let Err(e) = save_prompt_history_to_path(&path, history) {
+        tracing::warn!(error = %e, path = %path.display(), "failed to save prompt history");
+    }
+}
+
+fn load_prompt_history_from_path(path: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    match serde_json::from_str::<Vec<String>>(&text) {
+        Ok(entries) => sanitize_prompt_history(entries),
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "failed to parse prompt history");
+            Vec::new()
+        }
+    }
+}
+
+fn save_prompt_history_to_path(path: &Path, history: &[String]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let history = sanitize_prompt_history(history.to_vec());
+    let json = serde_json::to_string_pretty(&history).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| e.to_string())
+}
+
+fn sanitize_prompt_history(entries: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in entries {
+        record_prompt_history_entry(&mut out, &entry);
+    }
+    out
+}
+
+fn record_prompt_history_entry(history: &mut Vec<String>, text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || history.last().map(String::as_str) == Some(text) {
+        return false;
+    }
+    history.push(text.to_string());
+    if history.len() > PROMPT_HISTORY_LIMIT {
+        let excess = history.len() - PROMPT_HISTORY_LIMIT;
+        history.drain(0..excess);
+    }
+    true
+}
 
 #[derive(Debug, Clone)]
 struct CompletionHint {
@@ -86,7 +159,12 @@ pub struct TuiApp {
     template: EngineTemplate,
     /// User visibility preference for the right session sidebar.
     sidebar_visibility: SidebarVisibility,
+    /// App-managed text selection. When enabled, zode captures mouse drag
+    /// events so selecting can auto-scroll and copy to the system clipboard.
+    selection_mode: bool,
+    active_selection: Option<ChatSelection>,
     input: InputBox,
+    pending_cursor_seq: Option<FragmentedCursorSeqState>,
     status: StatusBar,
     theme_store: ThemeStore,
     theme: Theme,
@@ -104,6 +182,9 @@ pub struct TuiApp {
     settings: Option<SettingsDialog>,
     connect: Option<ConnectDialog>,
     plugin_picker: Option<PluginPicker>,
+    agents_dialog: Option<AgentsDialog>,
+    workflows_dialog: Option<WorkflowsDialog>,
+    mcp_dialog: Option<McpDialog>,
     session_picker: Option<SessionPicker>,
     tasks_panel: Option<TasksPanel>,
     /// Snapshot of the active tab's background shells, refreshed while the
@@ -117,6 +198,13 @@ pub struct TuiApp {
     /// and applied to the active tab's chat each frame.
     show_thinking: bool,
     show_tool_details: bool,
+    /// Submitted prompts, oldest first, for Up/Down recall in the input box.
+    prompt_history: Vec<String>,
+    /// Cursor into `prompt_history` while browsing (None = editing live text).
+    history_pos: Option<usize>,
+    /// The in-progress text saved when history browsing began, restored when
+    /// the user pages back down past the newest entry.
+    history_draft: String,
 }
 
 impl TuiApp {
@@ -172,7 +260,10 @@ impl TuiApp {
             next_tab_id: 1,
             template,
             sidebar_visibility: SidebarVisibility::Auto,
+            selection_mode: true,
+            active_selection: None,
             input: InputBox::new(),
+            pending_cursor_seq: None,
             status,
             theme_store,
             theme,
@@ -188,6 +279,9 @@ impl TuiApp {
             settings: None,
             connect: None,
             plugin_picker: None,
+            agents_dialog: None,
+            workflows_dialog: None,
+            mcp_dialog: None,
             session_picker: None,
             tasks_panel: None,
             bg_shells: Vec::new(),
@@ -196,6 +290,54 @@ impl TuiApp {
             provider_names: ui.provider_names,
             show_thinking,
             show_tool_details,
+            prompt_history: load_prompt_history(),
+            history_pos: None,
+            history_draft: String::new(),
+        }
+    }
+
+    /// Record a submitted prompt for Up/Down recall (skips blanks and exact
+    /// consecutive duplicates), and reset the browse cursor.
+    fn record_prompt_history(&mut self, text: &str) {
+        if record_prompt_history_entry(&mut self.prompt_history, text) {
+            save_prompt_history(&self.prompt_history);
+        }
+        self.history_pos = None;
+        self.history_draft.clear();
+    }
+
+    /// Recall the previous (older) prompt into the input box. On first step it
+    /// stashes the current draft so Down can restore it.
+    fn history_prev(&mut self) {
+        if self.prompt_history.is_empty() {
+            return;
+        }
+        let next = match self.history_pos {
+            None => {
+                self.history_draft = self.input.text();
+                self.prompt_history.len() - 1
+            }
+            Some(0) => 0,
+            Some(p) => p - 1,
+        };
+        self.history_pos = Some(next);
+        let entry = self.prompt_history[next].clone();
+        self.input.set_text(&entry);
+    }
+
+    /// Step to a newer prompt; past the newest, restore the stashed draft.
+    fn history_next(&mut self) {
+        let Some(p) = self.history_pos else {
+            return;
+        };
+        if p + 1 < self.prompt_history.len() {
+            self.history_pos = Some(p + 1);
+            let entry = self.prompt_history[p + 1].clone();
+            self.input.set_text(&entry);
+        } else {
+            self.history_pos = None;
+            let draft = std::mem::take(&mut self.history_draft);
+            self.input.set_text(&draft);
         }
     }
 
@@ -294,6 +436,20 @@ impl TuiApp {
         PermissionDialog::new(req, cwd)
     }
 
+    /// Respond to the active permission prompt, then surface the next queued
+    /// request (if any), focusing its source tab/cwd.
+    fn answer_permission(&mut self, approval: Approval) {
+        let responded = self
+            .active_dialog
+            .as_mut()
+            .map(|d| d.answer(approval))
+            .unwrap_or(false);
+        if responded {
+            let next = self.pending_requests.pop_front();
+            self.active_dialog = next.map(|r| self.open_approval(r));
+        }
+    }
+
     /// Show a question modal, focusing the tab that asked (its `source` id) —
     /// but not while a permission dialog is up (which captures input on top and
     /// is about a different tab), so we don't disorient by switching away.
@@ -337,12 +493,256 @@ impl TuiApp {
                 let model = engine.model.clone();
                 self.active_tab_mut().engine = Arc::new(engine);
                 self.status.model = model;
+                self.refresh_dynamic_commands();
                 true
             }
             Err(e) => {
                 self.toast = Some(Toast::error(format!("switch failed: {e}")));
                 false
             }
+        }
+    }
+
+    /// Rebuild the autocomplete's dynamic command set from the active engine:
+    /// user+built-in sub-agents, skills, and MCP tools. Call after assembly and
+    /// each reassemble (these change with provider/plugin switches).
+    fn refresh_dynamic_commands(&mut self) {
+        let mut cmds: Vec<DynCmd> = Vec::new();
+        {
+            let eng = &self.active_tab().engine;
+            for (name, desc) in &eng.agent_types {
+                cmds.push(DynCmd {
+                    name: name.clone(),
+                    kind: "agent",
+                    description: desc.clone(),
+                });
+            }
+            for s in eng.skills.list() {
+                cmds.push(DynCmd {
+                    name: s.name.clone(),
+                    kind: "skill",
+                    description: s.description.clone(),
+                });
+            }
+            if let Some(lc) = &eng.mcp {
+                for server in lc.registry.snapshot() {
+                    for tool in server.state.tool_names() {
+                        cmds.push(DynCmd {
+                            name: tool.clone(),
+                            kind: "MCP",
+                            description: format!("{} tool", server.name),
+                        });
+                    }
+                }
+            }
+            for c in &eng.user_commands {
+                cmds.push(DynCmd {
+                    name: c.name.clone(),
+                    kind: "command",
+                    description: c.description.clone(),
+                });
+            }
+        }
+        self.autocomplete.set_dynamic(cmds);
+    }
+
+    /// If `/name` is a dynamic command (agent / skill / MCP tool, not a
+    /// built-in), expand it to a templated turn that directs the agent to use
+    /// it. Returns None for built-ins (handled by `handle_slash`) and unknowns.
+    fn expand_dynamic_command(&self, name: &str, args: &str) -> Option<String> {
+        if zode_core::commands::CommandRegistry::with_builtins()
+            .get(name)
+            .is_some()
+        {
+            return None;
+        }
+        let eng = &self.active_tab().engine;
+        if eng.agent_types.iter().any(|(n, _)| n == name) {
+            return Some(format!(
+                "Use the `{name}` sub-agent (via the Task tool) for the following task:\n\n{args}"
+            ));
+        }
+        if eng.skills.list().iter().any(|s| s.name == name) {
+            return Some(format!(
+                "Use the `{name}` skill for the following:\n\n{args}"
+            ));
+        }
+        if let Some(lc) = &eng.mcp {
+            let is_tool = lc
+                .registry
+                .snapshot()
+                .iter()
+                .any(|s| s.state.tool_names().iter().any(|t| t == name));
+            if is_tool {
+                return Some(format!(
+                    "Use the MCP tool `{name}` for the following:\n\n{args}"
+                ));
+            }
+        }
+        // User/plugin command: submit its prompt body (with any args appended).
+        if let Some(cmd) = eng.user_commands.iter().find(|c| c.name == name) {
+            return Some(if args.trim().is_empty() {
+                cmd.body.clone()
+            } else {
+                format!("{}\n\n{args}", cmd.body)
+            });
+        }
+        None
+    }
+
+    fn open_workflows_dialog(&mut self) {
+        self.workflows_dialog = Some(WorkflowsDialog::new(self.workflow_rows()));
+    }
+
+    fn open_mcp_dialog(&mut self) {
+        let plugins = self.active_tab().engine.plugin_list();
+        self.mcp_dialog = Some(McpDialog::new(plugins));
+    }
+
+    /// Apply staged MCP enable/disable on close (reuses the plugin apply path,
+    /// scoped to MCP ids so other plugins' disabled state is preserved).
+    async fn close_mcp_dialog(&mut self) {
+        let Some(dialog) = self.mcp_dialog.take() else {
+            return;
+        };
+        if dialog.is_dirty() {
+            self.apply_plugins(dialog.disabled_ids(), dialog.all_ids())
+                .await;
+        }
+    }
+
+    async fn handle_mcp_dialog_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.close_mcp_dialog().await,
+            KeyCode::Up => {
+                if let Some(d) = &mut self.mcp_dialog {
+                    d.prev();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(d) = &mut self.mcp_dialog {
+                    d.next();
+                }
+            }
+            KeyCode::Char(' ') => {
+                if let Some(d) = &mut self.mcp_dialog {
+                    if let Some((name, on)) = d.toggle_selected() {
+                        let state = if on { "enabled" } else { "disabled" };
+                        self.toast = Some(Toast::info(format!("{name} {state} (esc to apply)")));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn workflow_rows(&self) -> Vec<WorkflowRow> {
+        let cwd = self.active_tab().engine.cwd.clone();
+        zode_core::workflows::load_workflow_defs(&cwd)
+            .into_iter()
+            .map(|w| WorkflowRow {
+                name: w.name,
+                description: w.description,
+            })
+            .collect()
+    }
+
+    async fn handle_workflows_dialog_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let Some(dialog) = &mut self.workflows_dialog else {
+            return;
+        };
+        let action: Option<WorkflowsAction> = if dialog.is_input_mode() {
+            match code {
+                KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => dialog.submit(),
+                KeyCode::Char(c) => {
+                    dialog.form_push(c);
+                    None
+                }
+                KeyCode::Backspace => {
+                    dialog.form_backspace();
+                    None
+                }
+                KeyCode::Enter => dialog.submit(),
+                KeyCode::Esc => dialog.on_esc(),
+                _ => None,
+            }
+        } else {
+            match code {
+                KeyCode::Up => {
+                    dialog.prev();
+                    None
+                }
+                KeyCode::Down => {
+                    dialog.next();
+                    None
+                }
+                KeyCode::Enter => dialog.on_enter(),
+                KeyCode::Char('d') => dialog.on_delete(),
+                KeyCode::Esc => dialog.on_esc(),
+                _ => None,
+            }
+        };
+        match action {
+            Some(WorkflowsAction::Close) => self.workflows_dialog = None,
+            Some(WorkflowsAction::Run { name }) => {
+                self.workflows_dialog = None;
+                let cwd = self.active_tab().engine.cwd.clone();
+                let def = zode_core::workflows::load_workflow_defs(&cwd)
+                    .into_iter()
+                    .find(|w| w.name == name);
+                match def {
+                    Some(def) if !def.steps.is_empty() => {
+                        // Deterministic execution: zode runs each step as its
+                        // OWN sequential turn (queued so step N+1 only fires when
+                        // step N's turn finishes — the model can't skip, reorder,
+                        // or merge steps). Each step is directed at its sub-agent.
+                        let n = def.steps.len();
+                        for (i, s) in def.steps.iter().enumerate() {
+                            let turn = format!(
+                                "[workflow \"{name}\" — step {}/{n}] Use the `{}` sub-agent (via \
+                                 the Task tool) for exactly this step, then report its result:\n\n{}",
+                                i + 1,
+                                s.agent_type,
+                                s.prompt
+                            );
+                            self.active_tab_mut().queued_input.push_back(turn);
+                        }
+                        self.toast = Some(Toast::info(format!(
+                            "running workflow '{name}' ({n} steps)"
+                        )));
+                        // Kick off step 1; the rest auto-chain as each turn ends.
+                        self.dispatch_queued_input(agent_tx).await;
+                    }
+                    _ => self.toast = Some(Toast::error(format!("workflow '{name}' has no steps"))),
+                }
+            }
+            Some(WorkflowsAction::AiCreate { brief }) => {
+                self.workflows_dialog = None;
+                let prompt = format!(
+                    "Create a reusable workflow for me using the `define_workflow` tool. \
+                     Here is what it should accomplish:\n\n{brief}\n\nBreak it into ordered \
+                     steps, each with a fitting sub-agent type and a precise instruction, so \
+                     the workflow runs the same way every time, then call define_workflow."
+                );
+                self.submit(&prompt, agent_tx).await;
+            }
+            Some(WorkflowsAction::Delete { name }) => {
+                match zode_core::workflows::delete_workflow_def(&name) {
+                    Ok(true) => {
+                        let _ = self.reassemble_active(self.template.clone()).await;
+                        self.toast = Some(Toast::info(format!("workflow deleted: {name}")));
+                        self.workflows_dialog = Some(WorkflowsDialog::new(self.workflow_rows()));
+                    }
+                    Ok(false) => self.toast = Some(Toast::info(format!("{name} not found"))),
+                    Err(e) => self.toast = Some(Toast::error(format!("delete failed: {e}"))),
+                }
+            }
+            None => {}
         }
     }
 
@@ -507,10 +907,35 @@ impl TuiApp {
     }
 
     pub async fn run(mut self) -> std::io::Result<()> {
+        // Seed the autocomplete with the initial tab's agents/skills/MCP tools.
+        self.refresh_dynamic_commands();
         let mut terminal = setup_terminal()?;
         let result = self.event_loop(&mut terminal).await;
         restore_terminal(&mut terminal)?;
+        self.print_resume_hint();
         result
+    }
+
+    /// On exit, print how to continue this session (like opencode/codex). Only
+    /// for sessions that were actually used (a real title or some history).
+    fn print_resume_hint(&self) {
+        let tab = self.active_tab();
+        let used = tab.titled || !tab.chat.messages().is_empty();
+        if tab.session_id.is_empty() || !used {
+            return;
+        }
+        let title = if tab.title.is_empty() {
+            "untitled"
+        } else {
+            tab.title.as_str()
+        };
+        println!();
+        println!("  {}   {title}", crate::tr("Session"));
+        println!(
+            "  {}  zode --resume {}",
+            crate::tr("Continue"),
+            tab.session_id
+        );
     }
 
     async fn event_loop(
@@ -605,6 +1030,7 @@ impl TuiApp {
             self.status.output_tokens = tab.output_tokens;
             // Plan mode is per-tab, so the badge always reflects the active tab.
             self.status.plan_mode = tab.plan_mode;
+            self.status.selection_mode = self.selection_mode;
         }
         let active_title = self.tabs[self.active].title.clone();
         let active_model = self.tabs[self.active].engine.model.clone();
@@ -657,10 +1083,35 @@ impl TuiApp {
             model: &active_model,
             cwd: &active_cwd,
         };
+        // A pending permission prompt docks INLINE, between the conversation
+        // and the input — carve its rows off the bottom of the chat area so it
+        // never covers the conversation (Claude-Code-style). On a terminal too
+        // short to dock it, `perm_inline` stays None and we fall back to a
+        // centered popup below.
+        let mut chat_area = areas.chat;
+        let mut perm_inline: Option<Rect> = None;
+        if let Some(dialog) = &self.active_dialog {
+            let want = dialog.desired_height(chat_area.width, &theme);
+            // Keep at least 3 rows of conversation visible above the card.
+            if chat_area.height > want + 3 {
+                let strip = Rect::new(
+                    chat_area.x,
+                    chat_area.y + chat_area.height - want,
+                    chat_area.width,
+                    want,
+                );
+                chat_area.height -= want;
+                perm_inline = Some(strip);
+            }
+        }
         let (show_thinking, show_tool_details) = (self.show_thinking, self.show_tool_details);
+        let selection = self.active_selection;
         let active_chat = &mut self.tabs[self.active].chat;
         active_chat.set_display_prefs(show_thinking, show_tool_details);
-        active_chat.render(f, areas.chat, &theme, chat_meta);
+        active_chat.render_with_selection(f, chat_area, &theme, chat_meta, selection);
+        if let (Some(strip), Some(dialog)) = (perm_inline, &self.active_dialog) {
+            dialog.render_inline(f, strip, &theme);
+        }
         let mut input_area: Rect = areas.composer;
         if !self.tabs[self.active].pending_images.is_empty() && input_area.height > 2 {
             let chips_area = Rect::new(input_area.x, input_area.y, input_area.width, 1);
@@ -700,6 +1151,15 @@ impl TuiApp {
         if let Some(picker) = &self.plugin_picker {
             picker.render(f, area, &theme);
         }
+        if let Some(dialog) = &self.agents_dialog {
+            dialog.render(f, area, &theme);
+        }
+        if let Some(dialog) = &self.workflows_dialog {
+            dialog.render(f, area, &theme);
+        }
+        if let Some(dialog) = &self.mcp_dialog {
+            dialog.render(f, area, &theme);
+        }
         if let Some(picker) = &mut self.session_picker {
             picker.render(f, area, &theme);
         }
@@ -720,16 +1180,21 @@ impl TuiApp {
         if self.show_help {
             crate::ui::help::render_help(f, area, &theme);
         }
-        // Toast renders before the permission dialog so it can never cover an
-        // active approval prompt; the dialog is the true top layer.
+        // Toast renders before the question modal so it can never cover it.
         if let Some(toast) = &self.toast {
             toast.render(f, area, &theme);
         }
         if let Some(q) = &self.active_question {
             q.render(f, area, &theme);
         }
-        if let Some(dialog) = &self.active_dialog {
-            dialog.render(f, area, &theme);
+        // The permission prompt normally renders INLINE above the input (see
+        // `perm_inline` above) so it never blocks the view or the input box.
+        // Only fall back to the centered popup when the terminal was too short
+        // to dock it inline.
+        if perm_inline.is_none() {
+            if let Some(dialog) = &self.active_dialog {
+                dialog.render(f, area, &theme);
+            }
         }
     }
 
@@ -751,19 +1216,23 @@ impl TuiApp {
             return;
         }
 
-        // 1. Permission dialog captures input until it's answered.
-        if let Some(dialog) = &mut self.active_dialog {
-            let answer = match key.code {
-                KeyCode::Char(c) => c,
-                KeyCode::Esc => 'n', // Esc denies
-                _ => return,
+        // 1. Permission prompt — NON-BLOCKING (modeled on Claude Code). The
+        // prompt docks inline above the input and does NOT capture the
+        // keyboard: the user can keep typing to queue a follow-up while a tool
+        // waits for approval ("插队"). Only while the input is EMPTY do the
+        // numbered options (1/2/3) and Esc answer it — so prose that starts
+        // with a letter is never swallowed. Anything else falls through to the
+        // normal input handling below (typing, Enter→queue, …).
+        if self.active_dialog.is_some() && self.input.text().is_empty() {
+            let decision = match key.code {
+                KeyCode::Char(c) => crate::ui::dialog::permission::approval_for_key(c),
+                KeyCode::Esc => Some(Approval::Deny),
+                _ => None,
             };
-            if dialog.on_key(answer) {
-                // Show the next queued request, focusing ITS source tab/cwd.
-                let next = self.pending_requests.pop_front();
-                self.active_dialog = next.map(|r| self.open_approval(r));
+            if let Some(approval) = decision {
+                self.answer_permission(approval);
+                return;
             }
-            return;
         }
 
         // 1b. Question modal captures input until answered/dismissed.
@@ -795,6 +1264,26 @@ impl TuiApp {
             return;
         }
 
+        // 2a3. Agents manager captures list nav + create-form input.
+        if self.agents_dialog.is_some() {
+            self.handle_agents_dialog_key(key.code, key.modifiers, agent_tx)
+                .await;
+            return;
+        }
+
+        // 2a4. Workflows manager captures list nav + create-form input.
+        if self.workflows_dialog.is_some() {
+            self.handle_workflows_dialog_key(key.code, key.modifiers, agent_tx)
+                .await;
+            return;
+        }
+
+        // 2a5. MCP manager captures nav + space-toggle.
+        if self.mcp_dialog.is_some() {
+            self.handle_mcp_dialog_key(key.code).await;
+            return;
+        }
+
         // 2b. Session picker captures input (typing filters the list).
         if self.session_picker.is_some() {
             self.handle_picker_key(key.code).await;
@@ -818,7 +1307,16 @@ impl TuiApp {
         // 4. Global chords.
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                // Interrupt a running turn; quit when idle.
+                // Clear a prompt draft first; with an empty prompt, interrupt a
+                // running turn or quit when idle.
+                if !self.input.is_empty() {
+                    self.input.take();
+                    self.completion_hint = None;
+                    self.autocomplete.dismiss();
+                    self.history_pos = None;
+                    self.history_draft.clear();
+                    return;
+                }
                 if !self.interrupt_active_turn() {
                     self.should_quit = true;
                 }
@@ -838,7 +1336,21 @@ impl TuiApp {
                 return;
             }
             (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
-                self.tabs[self.active].chat = ChatView::new();
+                // Ctrl+L REDRAWS the conversation from the persisted store
+                // rather than wiping it to empty: it clears transient render
+                // state and RECOVERS a view that has gone blank, without losing
+                // any messages (the store is the source of truth). Use `/clear`
+                // to actually discard the conversation.
+                let tab = &mut self.tabs[self.active];
+                let rebuilt = tab
+                    .engine
+                    .store
+                    .lock()
+                    .ok()
+                    .map(|store| rebuild_chat_from_store(&store));
+                if let Some(chat) = rebuilt {
+                    tab.chat = chat;
+                }
                 return;
             }
             (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
@@ -848,29 +1360,35 @@ impl TuiApp {
                 }
                 return;
             }
-            (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
+            // App chords use the platform primary modifier: Cmd (⌘) on macOS,
+            // Ctrl elsewhere (see `is_primary_mod`).
+            (KeyCode::Char('o'), m) if is_primary_mod(m) => {
                 self.open_settings();
                 return;
             }
-            (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+            (KeyCode::Char('t'), m) if is_primary_mod(m) => {
                 self.new_tab().await;
                 return;
             }
-            (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+            (KeyCode::Char('w'), m) if is_primary_mod(m) => {
                 self.close_active_tab();
                 return;
             }
-            (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+            (KeyCode::Char('b'), m) if is_primary_mod(m) => {
                 self.open_tasks_panel().await;
                 return;
             }
-            // Ctrl+1..9 jump to a tab by position.
-            (KeyCode::Char(c), KeyModifiers::CONTROL) if c.is_ascii_digit() && c != '0' => {
+            (KeyCode::Char('g'), m) if is_primary_mod(m) => {
+                self.handle_sidebar_command("toggle");
+                return;
+            }
+            // ⌘/Ctrl + 1..9 jump to a tab by position.
+            (KeyCode::Char(c), m) if is_primary_mod(m) && c.is_ascii_digit() && c != '0' => {
                 let n = (c as u8 - b'1') as usize;
                 self.switch_to(n);
                 return;
             }
-            (KeyCode::Tab, KeyModifiers::CONTROL) => {
+            (KeyCode::Tab, m) if is_primary_mod(m) => {
                 self.cycle_tab();
                 return;
             }
@@ -886,7 +1404,27 @@ impl TuiApp {
                 self.tabs[self.active].chat.scroll_down(5);
                 return;
             }
+            // End jumps to the latest output ("render to the bottom"); Home to
+            // the start of the conversation.
+            (KeyCode::End, _) => {
+                self.tabs[self.active].chat.scroll_to_bottom();
+                return;
+            }
+            (KeyCode::Home, _) => {
+                self.tabs[self.active].chat.scroll_to_top();
+                return;
+            }
             _ => {}
+        }
+
+        if let Some(scroll) =
+            chat_scroll_from_alt_scroll_key(key.code, key.modifiers, self.input.text().is_empty())
+        {
+            match scroll {
+                ChatMouseScroll::Up(n) => self.tabs[self.active].chat.scroll_up(n),
+                ChatMouseScroll::Down(n) => self.tabs[self.active].chat.scroll_down(n),
+            }
+            return;
         }
 
         // 5. Autocomplete interception (when the popup is open).
@@ -940,7 +1478,30 @@ impl TuiApp {
             }
         }
 
-        // 6. Enter submits; Shift/Alt+Enter newline; else feed the input box.
+        match fragmented_cursor_sequence_action(
+            &mut self.pending_cursor_seq,
+            key.code,
+            key.modifiers,
+            self.input.text().is_empty(),
+        ) {
+            FragmentedCursorAction::None => {}
+            FragmentedCursorAction::ReplayBareO(count) => self.input.insert_str(&"O".repeat(count)),
+            FragmentedCursorAction::Consumed => return,
+            FragmentedCursorAction::Scroll(scroll) => {
+                if self.input.text().is_empty() {
+                    match scroll {
+                        ChatMouseScroll::Up(n) => self.tabs[self.active].chat.scroll_up(n),
+                        ChatMouseScroll::Down(n) => self.tabs[self.active].chat.scroll_down(n),
+                    }
+                }
+                return;
+            }
+        }
+
+        // 6. Enter submits; Shift/Alt+Enter newline; Up/Down recall submitted
+        //    prompts (shell-style) when the cursor is at the input's edge; else
+        //    feed the input box. (Autocomplete already claimed Up/Down above
+        //    when its popup is open, so history only triggers otherwise.)
         match (key.code, key.modifiers) {
             (KeyCode::Enter, m)
                 if !m.contains(KeyModifiers::SHIFT) && !m.contains(KeyModifiers::ALT) =>
@@ -949,22 +1510,39 @@ impl TuiApp {
                 self.completion_hint = None;
                 self.autocomplete.dismiss();
                 if !text.trim().is_empty() {
+                    self.record_prompt_history(&text);
                     self.submit(&text, agent_tx).await;
                 }
             }
             (KeyCode::Enter, _) => self.input.insert_newline(),
-            _ => self.input.input(key),
+            (KeyCode::Up, m) if m.is_empty() && self.input.cursor_on_first_line() => {
+                self.history_prev();
+            }
+            (KeyCode::Down, m) if m.is_empty() && self.input.cursor_on_last_line() => {
+                self.history_next();
+            }
+            _ => {
+                self.input.input(key);
+                // Editing the text exits history-browse mode.
+                self.history_pos = None;
+            }
         }
         // 7. Refresh the autocomplete popup from the new input text.
         self.autocomplete.update(&self.input.text());
     }
 
     fn handle_paste(&mut self, text: &str) {
-        if self.active_dialog.is_some()
-            || self.active_question.is_some()
+        // NOTE: `active_dialog` (the permission prompt) is intentionally NOT in
+        // this block-list. The permission prompt is non-blocking — the user can
+        // type/queue a follow-up while a tool waits for approval — so paste must
+        // reach the input box too. The remaining entries are truly modal.
+        if self.active_question.is_some()
             || self.settings.is_some()
             || self.connect.is_some()
             || self.plugin_picker.is_some()
+            || self.agents_dialog.is_some()
+            || self.workflows_dialog.is_some()
+            || self.mcp_dialog.is_some()
             || self.session_picker.is_some()
             || self.tasks_panel.is_some()
             || self.show_help
@@ -1009,6 +1587,9 @@ impl TuiApp {
             || self.settings.is_some()
             || self.connect.is_some()
             || self.plugin_picker.is_some()
+            || self.agents_dialog.is_some()
+            || self.workflows_dialog.is_some()
+            || self.mcp_dialog.is_some()
             || self.tasks_panel.is_some()
             || self.show_help
         {
@@ -1022,10 +1603,100 @@ impl TuiApp {
         let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_visibility);
         let areas = split_main(area, show_sidebar);
 
+        if self.selection_mode && self.handle_selection_mouse(mouse, areas.chat) {
+            return;
+        }
+
         match chat_scroll_from_mouse(mouse.kind, mouse.column, mouse.row, areas.chat) {
             Some(ChatMouseScroll::Up(n)) => self.tabs[self.active].chat.scroll_up(n),
             Some(ChatMouseScroll::Down(n)) => self.tabs[self.active].chat.scroll_down(n),
             None => {}
+        }
+    }
+
+    fn handle_selection_mouse(&mut self, mouse: MouseEvent, chat_area: Rect) -> bool {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !rect_contains(chat_area, mouse.column, mouse.row) {
+                    self.active_selection = None;
+                    return false;
+                }
+                if let Some(point) = self.chat_selection_point(chat_area, mouse.column, mouse.row) {
+                    self.active_selection = Some(ChatSelection::new(point, point));
+                    return true;
+                }
+                false
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(selection) = self.active_selection else {
+                    return false;
+                };
+                if let Some(scroll) =
+                    selection_scroll_from_drag(mouse.kind, mouse.column, mouse.row, chat_area)
+                {
+                    match scroll {
+                        ChatMouseScroll::Up(n) => self.tabs[self.active].chat.scroll_up(n),
+                        ChatMouseScroll::Down(n) => self.tabs[self.active].chat.scroll_down(n),
+                    }
+                }
+                if let Some(point) = self.chat_selection_point(chat_area, mouse.column, mouse.row) {
+                    self.active_selection = Some(ChatSelection::new(selection.anchor, point));
+                }
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(selection) = self.active_selection else {
+                    return false;
+                };
+                let selection = self
+                    .chat_selection_point(chat_area, mouse.column, mouse.row)
+                    .map(|point| ChatSelection::new(selection.anchor, point))
+                    .unwrap_or(selection);
+                self.active_selection = Some(selection);
+                self.copy_chat_selection(selection, chat_area);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn chat_selection_point(
+        &mut self,
+        chat_area: Rect,
+        column: u16,
+        row: u16,
+    ) -> Option<ChatSelectionPoint> {
+        let theme = self.theme.clone();
+        let active_model = self.tabs[self.active].engine.model.clone();
+        let active_cwd = self.tabs[self.active].engine.cwd.clone();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: &active_model,
+            cwd: &active_cwd,
+        };
+        self.tabs[self.active]
+            .chat
+            .selection_point_at(&theme, meta, chat_area, column, row)
+    }
+
+    fn copy_chat_selection(&mut self, selection: ChatSelection, chat_area: Rect) {
+        let theme = self.theme.clone();
+        let active_model = self.tabs[self.active].engine.model.clone();
+        let active_cwd = self.tabs[self.active].engine.cwd.clone();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: &active_model,
+            cwd: &active_cwd,
+        };
+        let text = self.tabs[self.active]
+            .chat
+            .selected_text(selection, &theme, meta, chat_area);
+        if text.trim().is_empty() {
+            return;
+        }
+        match zode_core::clipboard::copy_to_clipboard(&text) {
+            Ok(_) => self.toast = Some(Toast::info("copied selection to clipboard")),
+            Err(e) => self.toast = Some(Toast::error(format!("copy failed: {e}"))),
         }
     }
 
@@ -1063,6 +1734,132 @@ impl TuiApp {
     fn open_plugin_picker(&mut self) {
         let plugins = self.active_tab().engine.plugin_list();
         self.plugin_picker = Some(PluginPicker::new(plugins));
+    }
+
+    fn open_agents_dialog(&mut self) {
+        self.agents_dialog = Some(AgentsDialog::new(self.agent_rows()));
+    }
+
+    /// Build the agent list for the dialog: user-defined agents (deletable)
+    /// first, then the built-ins. User defs are read fresh from disk.
+    fn agent_rows(&self) -> Vec<AgentRow> {
+        let cwd = self.active_tab().engine.cwd.clone();
+        let user_defs = zode_core::agents::load_agent_defs(&cwd);
+        let user_names: std::collections::HashSet<String> =
+            user_defs.iter().map(|d| d.name.clone()).collect();
+        let mut rows: Vec<AgentRow> = user_defs
+            .into_iter()
+            .map(|d| AgentRow {
+                name: d.name,
+                description: d.description,
+                kind: AgentKind::User,
+            })
+            .collect();
+        for (n, desc) in &self.active_tab().engine.agent_types {
+            if !user_names.contains(n) {
+                rows.push(AgentRow {
+                    name: n.clone(),
+                    description: desc.clone(),
+                    kind: AgentKind::BuiltIn,
+                });
+            }
+        }
+        rows
+    }
+
+    async fn handle_agents_dialog_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let Some(dialog) = &mut self.agents_dialog else {
+            return;
+        };
+        let action: Option<AgentsAction> = if dialog.is_input_mode() {
+            match code {
+                KeyCode::Tab => {
+                    dialog.form_next_field();
+                    None
+                }
+                KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => dialog.submit(),
+                KeyCode::Char(c) => {
+                    dialog.form_push(c);
+                    None
+                }
+                KeyCode::Backspace => {
+                    dialog.form_backspace();
+                    None
+                }
+                KeyCode::Enter => dialog.form_enter(),
+                KeyCode::Esc => dialog.on_esc(),
+                _ => None,
+            }
+        } else {
+            match code {
+                KeyCode::Up => {
+                    dialog.prev();
+                    None
+                }
+                KeyCode::Down => {
+                    dialog.next();
+                    None
+                }
+                KeyCode::Enter => {
+                    dialog.on_enter();
+                    None
+                }
+                KeyCode::Char('d') => dialog.on_delete(),
+                KeyCode::Esc => dialog.on_esc(),
+                _ => None,
+            }
+        };
+        match action {
+            Some(AgentsAction::Close) => self.agents_dialog = None,
+            Some(AgentsAction::Create {
+                name,
+                description,
+                system,
+            }) => {
+                match zode_core::agents::write_agent_def(&name, &description, &system) {
+                    Ok(_) => {
+                        self.agents_dialog = None;
+                        // Reload so the new agent is spawnable + in autocomplete.
+                        let _ = self.reassemble_active(self.template.clone()).await;
+                        self.toast = Some(Toast::info(format!("agent created: {name}")));
+                    }
+                    Err(e) => self.toast = Some(Toast::error(format!("create failed: {e}"))),
+                }
+            }
+            Some(AgentsAction::AiCreate { brief }) => {
+                // Close the dialog and ask the main agent to build the agent via
+                // the define_agent tool (requires orchestration, default on).
+                self.agents_dialog = None;
+                let prompt = format!(
+                    "Create a new sub-agent for me using the `define_agent` tool. \
+                     Here is what it should do:\n\n{brief}\n\nChoose a concise \
+                     kebab-case name, a one-line description, and a clear system \
+                     prompt, then call define_agent with them."
+                );
+                self.submit(&prompt, agent_tx).await;
+            }
+            Some(AgentsAction::Delete { name }) => {
+                match zode_core::agents::delete_agent_def(&name) {
+                    Ok(true) => {
+                        let _ = self.reassemble_active(self.template.clone()).await;
+                        self.toast = Some(Toast::info(format!("agent deleted: {name}")));
+                        // Rebuild the dialog's rows to drop the deleted entry.
+                        self.agents_dialog = Some(AgentsDialog::new(self.agent_rows()));
+                    }
+                    Ok(false) => {
+                        self.toast =
+                            Some(Toast::info(format!("{name} is built-in (not deletable)")))
+                    }
+                    Err(e) => self.toast = Some(Toast::error(format!("delete failed: {e}"))),
+                }
+            }
+            None => {}
+        }
     }
 
     fn theme_ids(&self) -> Vec<String> {
@@ -1230,6 +2027,21 @@ impl TuiApp {
                     "tool details {}",
                     on_off(self.show_tool_details)
                 )));
+            }
+            SettingsAction::SetOrchestration(choice) => {
+                let on = choice == "on";
+                let t = self.template.with_autonomous_orchestration(on);
+                if self.reassemble_active(t.clone()).await {
+                    self.template = t;
+                    if let Ok(mut cfg) = ConfigManager::load_global() {
+                        cfg.autonomous_orchestration = Some(on);
+                        let _ = ConfigManager::save_global(&cfg);
+                    }
+                    self.toast = Some(Toast::info(format!(
+                        "autonomous orchestration {}",
+                        on_off(on)
+                    )));
+                }
             }
             SettingsAction::SetLanguage(code) => {
                 if zode_core::i18n::set_language_code(&code) {
@@ -1423,9 +2235,18 @@ impl TuiApp {
         let pasted_images = parsed.images;
 
         if pasted_images.is_empty() {
-            if let Some((name, args)) = parse_slash(&submitted_text) {
-                self.handle_slash(name, args, agent_tx).await;
-                return;
+            let expanded = match parse_slash(&submitted_text) {
+                Some((name, args)) => match self.expand_dynamic_command(name, args) {
+                    Some(e) => Some(e),
+                    None => {
+                        self.handle_slash(name, args, agent_tx).await;
+                        return;
+                    }
+                },
+                None => None,
+            };
+            if let Some(e) = expanded {
+                submitted_text = e; // dynamic command → run as a templated turn
             }
         }
 
@@ -1445,9 +2266,18 @@ impl TuiApp {
             submitted_text.clear();
         }
 
-        if let Some((name, args)) = parse_slash(&submitted_text) {
-            self.handle_slash(name, args, agent_tx).await;
-            return;
+        let expanded = match parse_slash(&submitted_text) {
+            Some((name, args)) => match self.expand_dynamic_command(name, args) {
+                Some(e) => Some(e),
+                None => {
+                    self.handle_slash(name, args, agent_tx).await;
+                    return;
+                }
+            },
+            None => None,
+        };
+        if let Some(e) = expanded {
+            submitted_text = e; // dynamic command → run as a templated turn
         }
         // One turn per tab (a second QueryLoop would mutate the same store
         // concurrently). Instead of rejecting, QUEUE the message and send it
@@ -1788,6 +2618,7 @@ impl TuiApp {
             "connect" => self.open_connect_dialog(),
             "plugin" => self.open_plugin_picker(),
             "vision" => self.handle_vision(args),
+            "selection" => self.handle_selection_command(args),
             "sidebar" => {
                 if args.trim().is_empty() {
                     self.open_sidebar_picker();
@@ -1845,32 +2676,7 @@ impl TuiApp {
                     self.active_tab_mut().plan_mode = !on;
                 }
             }
-            "mcp" => {
-                let lines: Vec<String> = match &self.active_tab().engine.mcp {
-                    None => vec!["(no MCP servers configured)".to_string()],
-                    Some(lc) => lc
-                        .registry
-                        .snapshot()
-                        .iter()
-                        .map(|s| {
-                            let status = if s.state.is_connected() {
-                                "connected"
-                            } else {
-                                "not connected"
-                            };
-                            format!(
-                                "{} — {} ({} tools)",
-                                s.name,
-                                status,
-                                s.state.tool_names().len()
-                            )
-                        })
-                        .collect(),
-                };
-                for l in lines {
-                    self.active_tab_mut().chat.push_system(&l);
-                }
-            }
+            "mcp" => self.open_mcp_dialog(),
             "skills" => {
                 let list: Vec<String> = self
                     .active_tab()
@@ -1960,12 +2766,8 @@ impl TuiApp {
                 let out = zode_core::diff::working_tree_diff(&cwd).await;
                 self.active_tab_mut().chat.push_system(&out);
             }
-            "agents" => {
-                for (n, desc) in zode_core::engine::agent_types() {
-                    let line = format!("{n} — {desc}");
-                    self.active_tab_mut().chat.push_system(&line);
-                }
-            }
+            "agents" => self.open_agents_dialog(),
+            "workflows" => self.open_workflows_dialog(),
             "permissions" => {
                 for line in self.template.permissions_summary() {
                     self.active_tab_mut().chat.push_system(&line);
@@ -2007,6 +2809,22 @@ impl TuiApp {
                 }
             }
             "language" => self.open_language_picker(),
+            "orchestration" => {
+                let on = !self.template.autonomous_orchestration();
+                let t = self.template.with_autonomous_orchestration(on);
+                if self.reassemble_active(t.clone()).await {
+                    self.template = t;
+                    if let Ok(mut cfg) = ConfigManager::load_global() {
+                        cfg.autonomous_orchestration = Some(on);
+                        let _ = ConfigManager::save_global(&cfg);
+                    }
+                    self.active_tab_mut().chat.push_system(if on {
+                        "autonomous orchestration: ON — the agent may decompose tasks, spawn sub-agents, and define new ones"
+                    } else {
+                        "autonomous orchestration: OFF"
+                    });
+                }
+            }
             "thinking" => {
                 self.show_thinking = !self.show_thinking;
                 self.persist_show_thinking(self.show_thinking);
@@ -2196,6 +3014,40 @@ impl TuiApp {
             Err(msg) => self.active_tab_mut().chat.push_system(&msg),
         }
     }
+
+    fn handle_selection_command(&mut self, args: &str) {
+        match resolve_selection_mode(args, self.selection_mode) {
+            Ok(enabled) => self.set_selection_mode(enabled),
+            Err(msg) => self.active_tab_mut().chat.push_system(&msg),
+        }
+    }
+
+    fn set_selection_mode(&mut self, enabled: bool) {
+        if self.selection_mode == enabled {
+            self.toast = Some(Toast::info(format!(
+                "selection mode {}",
+                on_off(self.selection_mode)
+            )));
+            return;
+        }
+        self.selection_mode = enabled;
+        self.active_selection = None;
+        let mut stdout = std::io::stdout();
+        let result = if enabled {
+            stdout.execute(EnableMouseCapture)
+        } else {
+            stdout.execute(DisableMouseCapture)
+        };
+        match result {
+            Ok(_) => {
+                self.toast = Some(Toast::info(format!("selection mode {}", on_off(enabled))));
+            }
+            Err(e) => {
+                self.selection_mode = !enabled;
+                self.toast = Some(Toast::error(format!("selection mode failed: {e}")));
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2212,12 +3064,28 @@ enum ChatMouseScroll {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FragmentedCursorSeqState {
+    AfterEsc,
+    AfterEscO,
+    AfterEscBracket,
+    MaybeBareO { count: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FragmentedCursorAction {
+    None,
+    ReplayBareO(usize),
+    Consumed,
+    Scroll(ChatMouseScroll),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionPickerMouseScroll {
     Up(usize),
     Down(usize),
 }
 
-const CHAT_MOUSE_SCROLL_LINES: u16 = 5;
+const CHAT_WHEEL_SCROLL_LINES: u16 = 1;
 const SESSION_PICKER_MOUSE_SCROLL_ROWS: usize = 1;
 
 fn mode_label(mode: Mode) -> &'static str {
@@ -2226,6 +3094,17 @@ fn mode_label(mode: Mode) -> &'static str {
         Mode::Thinking => "thinking",
         Mode::Streaming => "streaming",
         Mode::Error => "error",
+    }
+}
+
+/// The primary chord modifier for app shortcuts: Cmd (⌘ / SUPER) on macOS,
+/// Ctrl elsewhere. On macOS Ctrl is also accepted as a fallback, since many
+/// terminals don't deliver the Cmd modifier to TUI apps.
+fn is_primary_mod(m: KeyModifiers) -> bool {
+    if cfg!(target_os = "macos") {
+        m.contains(KeyModifiers::SUPER) || m.contains(KeyModifiers::CONTROL)
+    } else {
+        m.contains(KeyModifiers::CONTROL)
     }
 }
 
@@ -2256,9 +3135,131 @@ fn chat_scroll_from_mouse(
     }
 
     match kind {
-        MouseEventKind::ScrollUp => Some(ChatMouseScroll::Up(CHAT_MOUSE_SCROLL_LINES)),
-        MouseEventKind::ScrollDown => Some(ChatMouseScroll::Down(CHAT_MOUSE_SCROLL_LINES)),
+        MouseEventKind::ScrollUp => Some(ChatMouseScroll::Up(CHAT_WHEEL_SCROLL_LINES)),
+        MouseEventKind::ScrollDown => Some(ChatMouseScroll::Down(CHAT_WHEEL_SCROLL_LINES)),
         _ => None,
+    }
+}
+
+fn selection_scroll_from_drag(
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+    chat_area: Rect,
+) -> Option<ChatMouseScroll> {
+    if !matches!(kind, MouseEventKind::Drag(MouseButton::Left)) || chat_area.height == 0 {
+        return None;
+    }
+    let left = chat_area.x;
+    let right = chat_area.x.saturating_add(chat_area.width);
+    if column < left || column >= right {
+        return None;
+    }
+    let top = chat_area.y;
+    let bottom = chat_area
+        .y
+        .saturating_add(chat_area.height.saturating_sub(1));
+    if row <= top {
+        Some(ChatMouseScroll::Up(CHAT_WHEEL_SCROLL_LINES))
+    } else if row >= bottom {
+        Some(ChatMouseScroll::Down(CHAT_WHEEL_SCROLL_LINES))
+    } else {
+        None
+    }
+}
+
+fn chat_scroll_from_alt_scroll_key(
+    _code: KeyCode,
+    _modifiers: KeyModifiers,
+    _input_is_empty: bool,
+) -> Option<ChatMouseScroll> {
+    // Once crossterm has parsed an arrow key, a terminal-generated
+    // alternate-scroll arrow is indistinguishable from the user pressing
+    // Up/Down. Prefer prompt history; fragmented raw OA/OB sequences are
+    // still handled by `fragmented_cursor_sequence_action`.
+    None
+}
+
+fn fragmented_cursor_sequence_action(
+    state: &mut Option<FragmentedCursorSeqState>,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    input_is_empty: bool,
+) -> FragmentedCursorAction {
+    if !modifiers.is_empty() {
+        if let Some(FragmentedCursorSeqState::MaybeBareO { count }) = *state {
+            *state = None;
+            return FragmentedCursorAction::ReplayBareO(count);
+        }
+        *state = None;
+        return FragmentedCursorAction::None;
+    }
+
+    match *state {
+        Some(FragmentedCursorSeqState::AfterEsc) => match code {
+            KeyCode::Char('O') => {
+                *state = Some(FragmentedCursorSeqState::AfterEscO);
+                FragmentedCursorAction::Consumed
+            }
+            KeyCode::Char('[') => {
+                *state = Some(FragmentedCursorSeqState::AfterEscBracket);
+                FragmentedCursorAction::Consumed
+            }
+            _ => {
+                *state = None;
+                FragmentedCursorAction::None
+            }
+        },
+        Some(FragmentedCursorSeqState::MaybeBareO { count }) => {
+            *state = None;
+            match code {
+                KeyCode::Up => {
+                    FragmentedCursorAction::Scroll(ChatMouseScroll::Up(CHAT_WHEEL_SCROLL_LINES))
+                }
+                KeyCode::Down => {
+                    FragmentedCursorAction::Scroll(ChatMouseScroll::Down(CHAT_WHEEL_SCROLL_LINES))
+                }
+                KeyCode::Char('A') => {
+                    FragmentedCursorAction::Scroll(ChatMouseScroll::Up(CHAT_WHEEL_SCROLL_LINES))
+                }
+                KeyCode::Char('B') => {
+                    FragmentedCursorAction::Scroll(ChatMouseScroll::Down(CHAT_WHEEL_SCROLL_LINES))
+                }
+                KeyCode::Char('C') | KeyCode::Char('D') => FragmentedCursorAction::Consumed,
+                KeyCode::Char('O') if input_is_empty => {
+                    *state = Some(FragmentedCursorSeqState::MaybeBareO {
+                        count: count.saturating_add(1),
+                    });
+                    FragmentedCursorAction::Consumed
+                }
+                _ => FragmentedCursorAction::ReplayBareO(count),
+            }
+        }
+        Some(FragmentedCursorSeqState::AfterEscO)
+        | Some(FragmentedCursorSeqState::AfterEscBracket) => {
+            *state = None;
+            match code {
+                KeyCode::Char('A') => {
+                    FragmentedCursorAction::Scroll(ChatMouseScroll::Up(CHAT_WHEEL_SCROLL_LINES))
+                }
+                KeyCode::Char('B') => {
+                    FragmentedCursorAction::Scroll(ChatMouseScroll::Down(CHAT_WHEEL_SCROLL_LINES))
+                }
+                KeyCode::Char('C') | KeyCode::Char('D') => FragmentedCursorAction::Consumed,
+                _ => FragmentedCursorAction::None,
+            }
+        }
+        None => match code {
+            KeyCode::Esc => {
+                *state = Some(FragmentedCursorSeqState::AfterEsc);
+                FragmentedCursorAction::Consumed
+            }
+            KeyCode::Char('O') if input_is_empty => {
+                *state = Some(FragmentedCursorSeqState::MaybeBareO { count: 1 });
+                FragmentedCursorAction::Consumed
+            }
+            _ => FragmentedCursorAction::None,
+        },
     }
 }
 
@@ -2470,6 +3471,15 @@ fn resolve_sidebar_visibility(
         "on" | "show" | "open" => Ok(SidebarVisibility::Visible),
         "auto" | "default" => Ok(SidebarVisibility::Auto),
         _ => Err("usage: /sidebar [on|off|toggle|auto]".to_string()),
+    }
+}
+
+fn resolve_selection_mode(args: &str, current: bool) -> Result<bool, String> {
+    match args.trim().to_ascii_lowercase().as_str() {
+        "" | "toggle" => Ok(!current),
+        "on" | "show" | "open" | "enable" | "enabled" => Ok(true),
+        "off" | "hide" | "close" | "disable" | "disabled" => Ok(false),
+        _ => Err("usage: /selection [on|off|toggle]".to_string()),
     }
 }
 
@@ -2792,6 +3802,48 @@ fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zode_core::config::{ProviderConfig, ProviderKind, ZodeConfig};
+
+    async fn make_test_app() -> (TuiApp, mpsc::UnboundedSender<AppEvent>) {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().to_path_buf();
+        let cfg = ZodeConfig {
+            provider: ProviderConfig {
+                r#type: Some(ProviderKind::Ollama),
+                base_url: Some("http://localhost:11434".to_string()),
+                model: Some("test-model".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (approval_queue, approval_rx) = zode_core::approval::approval_queue();
+        let (question_queue, question_rx) = zode_core::question::question_queue();
+        let template = EngineTemplate::new(
+            cfg,
+            cwd.clone(),
+            Some(approval_queue),
+            false,
+            None,
+            "2026-06-15".to_string(),
+        )
+        .with_question_queue(Some(question_queue));
+        let engine = template.assemble().await.unwrap();
+        let app = TuiApp::new(
+            engine,
+            template,
+            UiConfig {
+                theme_id: None,
+                yolo: false,
+                sandbox: false,
+                provider_names: Vec::new(),
+            },
+            approval_rx,
+            question_rx,
+            None,
+        );
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        (app, agent_tx)
+    }
 
     #[test]
     fn sidebar_is_hidden_until_multiple_tabs_exist() {
@@ -2867,6 +3919,134 @@ mod tests {
     }
 
     #[test]
+    fn selection_command_resolves_mode_targets() {
+        assert_eq!(resolve_selection_mode("", false), Ok(true));
+        assert_eq!(resolve_selection_mode("toggle", true), Ok(false));
+        assert_eq!(resolve_selection_mode("on", false), Ok(true));
+        assert_eq!(resolve_selection_mode("enable", false), Ok(true));
+        assert_eq!(resolve_selection_mode("off", true), Ok(false));
+        assert_eq!(resolve_selection_mode("disable", true), Ok(false));
+        assert_eq!(
+            resolve_selection_mode("wat", false),
+            Err("usage: /selection [on|off|toggle]".to_string())
+        );
+    }
+
+    #[test]
+    fn prompt_history_persists_and_loads_from_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PROMPT_HISTORY_FILE);
+        let mut history = Vec::new();
+
+        assert!(record_prompt_history_entry(
+            &mut history,
+            "  first prompt  "
+        ));
+        assert!(record_prompt_history_entry(&mut history, "second prompt"));
+        save_prompt_history_to_path(&path, &history).unwrap();
+
+        assert_eq!(
+            load_prompt_history_from_path(&path),
+            vec!["first prompt".to_string(), "second prompt".to_string()]
+        );
+    }
+
+    #[test]
+    fn tui_initialization_loads_local_prompt_history() {
+        let source = include_str!("app.rs");
+        let init = source
+            .split("pub fn new(")
+            .nth(1)
+            .and_then(|tail| tail.split("history_pos: None").next())
+            .expect("TuiApp::new initialization block should exist");
+        assert!(init.contains("prompt_history: load_prompt_history()"));
+    }
+
+    #[test]
+    fn prompt_history_skips_blanks_consecutive_duplicates_and_keeps_recent_limit() {
+        let mut history = Vec::new();
+        assert!(!record_prompt_history_entry(&mut history, "   "));
+        assert!(record_prompt_history_entry(&mut history, "same"));
+        assert!(!record_prompt_history_entry(&mut history, "same"));
+
+        for i in 0..(PROMPT_HISTORY_LIMIT + 5) {
+            assert!(record_prompt_history_entry(
+                &mut history,
+                &format!("prompt {i}")
+            ));
+        }
+
+        assert_eq!(history.len(), PROMPT_HISTORY_LIMIT);
+        assert_eq!(history.first().map(String::as_str), Some("prompt 5"));
+        assert_eq!(
+            history.last().map(String::as_str),
+            Some(format!("prompt {}", PROMPT_HISTORY_LIMIT + 4).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_clears_prompt_text_before_quitting_when_idle() {
+        let (mut app, agent_tx) = make_test_app().await;
+        app.input.set_text("draft prompt");
+
+        app.handle_term(
+            CtEvent::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )),
+            &agent_tx,
+        )
+        .await;
+
+        assert_eq!(app.input.text(), "");
+        assert!(!app.should_quit);
+
+        app.handle_term(
+            CtEvent::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )),
+            &agent_tx,
+        )
+        .await;
+
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn dragging_selection_to_chat_edges_scrolls_one_line() {
+        let chat = Rect::new(0, 1, 80, 20);
+
+        assert_eq!(
+            selection_scroll_from_drag(
+                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                10,
+                1,
+                chat,
+            ),
+            Some(ChatMouseScroll::Up(1))
+        );
+        assert_eq!(
+            selection_scroll_from_drag(
+                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                10,
+                20,
+                chat,
+            ),
+            Some(ChatMouseScroll::Down(1))
+        );
+        assert_eq!(
+            selection_scroll_from_drag(
+                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                10,
+                8,
+                chat,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn image_submit_route_prefers_direct_in_auto_when_supported() {
         assert_eq!(
             resolve_image_submit_route(true, ImageMode::Auto, true, true),
@@ -2896,11 +4076,11 @@ mod tests {
 
         assert_eq!(
             chat_scroll_from_mouse(crossterm::event::MouseEventKind::ScrollUp, 10, 5, chat),
-            Some(ChatMouseScroll::Up(5))
+            Some(ChatMouseScroll::Up(1))
         );
         assert_eq!(
             chat_scroll_from_mouse(crossterm::event::MouseEventKind::ScrollDown, 10, 5, chat),
-            Some(ChatMouseScroll::Down(5))
+            Some(ChatMouseScroll::Down(1))
         );
         assert_eq!(
             chat_scroll_from_mouse(crossterm::event::MouseEventKind::ScrollDown, 10, 25, chat),
@@ -2926,6 +4106,368 @@ mod tests {
             session_picker_scroll_from_mouse(crossterm::event::MouseEventKind::Moved),
             None
         );
+    }
+
+    #[test]
+    fn parsed_arrow_keys_do_not_steal_prompt_history() {
+        assert_eq!(
+            chat_scroll_from_alt_scroll_key(KeyCode::Up, KeyModifiers::NONE, true),
+            None
+        );
+        assert_eq!(
+            chat_scroll_from_alt_scroll_key(KeyCode::Down, KeyModifiers::NONE, true),
+            None
+        );
+        assert_eq!(
+            chat_scroll_from_alt_scroll_key(KeyCode::Up, KeyModifiers::NONE, false),
+            None
+        );
+        assert_eq!(
+            chat_scroll_from_alt_scroll_key(KeyCode::Up, KeyModifiers::CONTROL, true),
+            None
+        );
+    }
+
+    #[test]
+    fn fragmented_application_cursor_sequence_scrolls_instead_of_inserting_ob() {
+        let mut state = None;
+
+        assert_eq!(
+            fragmented_cursor_sequence_action(&mut state, KeyCode::Esc, KeyModifiers::NONE, true),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(state, Some(FragmentedCursorSeqState::AfterEsc));
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('O'),
+                KeyModifiers::NONE,
+                true,
+            ),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(state, Some(FragmentedCursorSeqState::AfterEscO));
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('B'),
+                KeyModifiers::NONE,
+                true,
+            ),
+            FragmentedCursorAction::Scroll(ChatMouseScroll::Down(1))
+        );
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn fragmented_bracket_cursor_sequence_scrolls_instead_of_inserting_text() {
+        let mut state = None;
+
+        assert_eq!(
+            fragmented_cursor_sequence_action(&mut state, KeyCode::Esc, KeyModifiers::NONE, true),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('['),
+                KeyModifiers::NONE,
+                true,
+            ),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('A'),
+                KeyModifiers::NONE,
+                true,
+            ),
+            FragmentedCursorAction::Scroll(ChatMouseScroll::Up(1))
+        );
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn bare_application_cursor_sequence_scrolls_instead_of_inserting_oa() {
+        let mut state = None;
+
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('O'),
+                KeyModifiers::NONE,
+                true,
+            ),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(
+            state,
+            Some(FragmentedCursorSeqState::MaybeBareO { count: 1 })
+        );
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('A'),
+                KeyModifiers::NONE,
+                true,
+            ),
+            FragmentedCursorAction::Scroll(ChatMouseScroll::Up(1))
+        );
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn repeated_bare_o_waits_for_scroll_final_instead_of_replaying_into_input() {
+        let mut state = None;
+
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('O'),
+                KeyModifiers::NONE,
+                true,
+            ),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('O'),
+                KeyModifiers::NONE,
+                true,
+            ),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('B'),
+                KeyModifiers::NONE,
+                true,
+            ),
+            FragmentedCursorAction::Scroll(ChatMouseScroll::Down(1))
+        );
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn pending_bare_o_followed_by_parsed_arrow_scrolls_without_replay() {
+        let mut state = None;
+
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('O'),
+                KeyModifiers::NONE,
+                true,
+            ),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(
+            fragmented_cursor_sequence_action(&mut state, KeyCode::Down, KeyModifiers::NONE, true),
+            FragmentedCursorAction::Scroll(ChatMouseScroll::Down(1))
+        );
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn fragmented_cursor_sequence_does_not_consume_plain_text() {
+        let mut state = None;
+
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('O'),
+                KeyModifiers::NONE,
+                false,
+            ),
+            FragmentedCursorAction::None
+        );
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn bare_o_is_replayed_when_the_next_key_is_normal_text() {
+        let mut state = None;
+
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('O'),
+                KeyModifiers::NONE,
+                true,
+            ),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('p'),
+                KeyModifiers::NONE,
+                true,
+            ),
+            FragmentedCursorAction::ReplayBareO(1)
+        );
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn setup_uses_mouse_capture_without_scroll_key_emulation() {
+        let source = include_str!("app.rs");
+        let setup = source
+            .split("fn setup_terminal")
+            .nth(1)
+            .and_then(|tail| tail.split("fn restore_terminal").next())
+            .expect("setup_terminal source block should exist");
+        let restore = source
+            .split("fn restore_terminal")
+            .nth(1)
+            .and_then(|tail| tail.split("fn install_panic_hook").next())
+            .expect("restore_terminal source block should exist");
+        let alternate_scroll_mode = 1000 + 7;
+        assert!(!setup.contains(&format!("?{alternate_scroll_mode}h")));
+        assert!(!setup.contains(&format!("?{alternate_scroll_mode}l")));
+        assert!(!setup.contains(concat!("Alternate", "Scroll")));
+        assert!(!restore.contains(concat!("Alternate", "Scroll")));
+        assert!(setup.contains(concat!("Enable", "Mouse", "Capture")));
+        assert!(source.contains(concat!("Disable", "Mouse", "Capture")));
+    }
+
+    #[test]
+    fn app_managed_selection_defaults_on_with_mouse_capture() {
+        let source = include_str!("app.rs");
+        let init = source
+            .split("pub fn new(")
+            .nth(1)
+            .and_then(|tail| tail.split("input: InputBox::new()").next())
+            .expect("TuiApp::new initialization block should exist");
+        assert!(init.contains("selection_mode: true"));
+    }
+
+    #[test]
+    fn resumed_conversation_renders_visibly() {
+        use crate::theme::ThemeStore;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        // Mirror a real resumed session: many turns, each with thinking + a
+        // tool call + a long markdown answer (code fence, box-drawing, CJK) —
+        // the shape that triggered "recovered but didn't render correctly".
+        let mut store = MessageStore::new();
+        // Long session: 80 turns, each a multi-paragraph markdown answer, so
+        // the total wrapped-row count is in the thousands ("内容一长").
+        let long_body: String = (0..25)
+            .map(|n| format!("- 记忆条目 {n}：append-only 写入，定期压缩、生成 snapshot 快照\n"))
+            .collect();
+        for i in 0..80 {
+            store
+                .push(Message::User {
+                    header: agent::message::Header::new(),
+                    content: vec![ContentBlock::Text {
+                        text: format!("问题 {i}：设计一下记忆系统"),
+                    }],
+                })
+                .unwrap();
+            store
+                .push(Message::Assistant {
+                    header: agent::message::Header::new(),
+                    content: vec![
+                        ContentBlock::Thinking {
+                            thinking: format!("Turn {i}: the user wants a memory design; weigh options at length so the thinking block itself wraps over several rows of the terminal."),
+                            signature: None,
+                        },
+                        ContentBlock::Text {
+                            text: format!(
+                                "### 方案 {i}\n\n```\n~/.zode/memory/\n├── global.jsonl\n└── projects/<hash>/\n```\n\n{long_body}\nTAILMARK{i}END 你倾向哪个？"
+                            ),
+                        },
+                    ],
+                })
+                .unwrap();
+        }
+
+        let chat = rebuild_chat_from_store(&store);
+        assert!(chat.messages().len() > 10, "rebuild produced messages");
+
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let backend = TestBackend::new(120, 30);
+        let mut term = Terminal::new(backend).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "m",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+        let mut chat = chat;
+        // Render twice — the first frame seeds last_render_total_rows, the
+        // second exercises the growth-compensation path on a long history.
+        term.draw(|f| chat.render(f, f.area(), &theme, meta))
+            .unwrap();
+        term.draw(|f| chat.render(f, f.area(), &theme, meta))
+            .unwrap();
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        let non_space = content.chars().filter(|c| !c.is_whitespace()).count();
+        assert!(non_space > 0, "resumed conversation rendered BLANK");
+        assert!(
+            content.contains("TAILMARK79END"),
+            "tail of resumed conversation must be visible; got:\n{content}"
+        );
+    }
+
+    /// Diagnostic (not run in CI): load a REAL session file and render it the
+    /// way resume does, dumping the buffer so we can see any garble/blank with
+    /// the user's actual content. Run with:
+    ///   ZODE_DIAG_SESSION=~/.zode/sessions/<id>.jsonl \
+    ///     cargo test -p zode-tui diag_render_real_session -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn diag_render_real_session() {
+        use crate::theme::ThemeStore;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let path = std::env::var("ZODE_DIAG_SESSION").expect("set ZODE_DIAG_SESSION");
+        let path = shellexpand_tilde(&path);
+        let store = agent::session::Session::load(&path)
+            .await
+            .expect("load session");
+        eprintln!("loaded {} messages", store.iter().count());
+        let mut chat = rebuild_chat_from_store(&store);
+        eprintln!("rebuilt {} chat rows", chat.messages().len());
+        for (i, m) in chat.messages().iter().enumerate() {
+            let preview: String = m.text.chars().take(46).collect();
+            eprintln!("MSG[{i:02}] {:?} | {}", m.role, preview.replace('\n', "⏎"));
+        }
+
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let (w, h) = (150u16, 40u16); // a realistic terminal
+        let backend = TestBackend::new(w, h);
+        let mut term = Terminal::new(backend).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "m",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+        term.draw(|f| chat.render(f, f.area(), &theme, meta))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        for y in 0..h {
+            let row: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            eprintln!("{y:02}|{}", row.trim_end());
+        }
+    }
+
+    fn shellexpand_tilde(p: &str) -> std::path::PathBuf {
+        if let Some(rest) = p.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                return std::path::PathBuf::from(home).join(rest);
+            }
+        }
+        std::path::PathBuf::from(p)
     }
 
     #[test]

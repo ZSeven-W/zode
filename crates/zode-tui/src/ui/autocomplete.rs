@@ -13,6 +13,9 @@ use crate::theme::Theme;
 
 const MAX_VISIBLE: usize = 8;
 const COMMAND_COLUMN_WIDTH: usize = 15;
+/// Upper bound for the auto-sized name column, so one very long name can't push
+/// every description off-screen.
+const NAME_COLUMN_MAX: usize = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandCompletion {
@@ -20,9 +23,24 @@ pub struct CommandCompletion {
     pub placeholder: Option<&'static str>,
 }
 
+/// A dynamic slash command surfaced alongside the built-ins: a user-defined
+/// sub-agent, a skill, or an MCP tool. Selecting one submits a templated turn
+/// (see app.rs `expand_dynamic_command`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynCmd {
+    pub name: String,
+    /// Short tag shown after the description: "agent" | "skill" | "MCP".
+    pub kind: &'static str,
+    pub description: String,
+}
+
 pub struct Autocomplete {
     registry: CommandRegistry,
     matches: Vec<SlashCommand>,
+    /// All known dynamic commands (refreshed from the engine on assembly).
+    dynamic: Vec<DynCmd>,
+    /// Dynamic commands matching the current prefix (shown after builtins).
+    dyn_matches: Vec<DynCmd>,
     state: ListState,
     active: bool,
 }
@@ -38,9 +56,22 @@ impl Autocomplete {
         Self {
             registry: CommandRegistry::with_builtins(),
             matches: Vec::new(),
+            dynamic: Vec::new(),
+            dyn_matches: Vec::new(),
             state: ListState::default(),
             active: false,
         }
+    }
+
+    /// Replace the dynamic command set (user agents, skills, MCP tools). Called
+    /// after the engine assembles/reassembles, since those change.
+    pub fn set_dynamic(&mut self, dynamic: Vec<DynCmd>) {
+        self.dynamic = dynamic;
+    }
+
+    /// Total navigable rows: builtins then dynamics.
+    fn total(&self) -> usize {
+        self.matches.len() + self.dyn_matches.len()
     }
 
     /// Recompute matches from the current input text.
@@ -49,15 +80,23 @@ impl Autocomplete {
             // Only while typing the command word (no space yet).
             Some(rest) if !rest.contains(char::is_whitespace) => {
                 self.matches = self.registry.lookup(input).into_iter().copied().collect();
-                self.active = !self.matches.is_empty();
+                let q = rest.to_ascii_lowercase();
+                self.dyn_matches = self
+                    .dynamic
+                    .iter()
+                    .filter(|d| {
+                        q.is_empty()
+                            || d.name.to_ascii_lowercase().contains(&q)
+                            || d.description.to_ascii_lowercase().contains(&q)
+                    })
+                    .cloned()
+                    .collect();
+                let total = self.total();
+                self.active = total > 0;
                 if self.active {
-                    // Clamp the selection into the new (possibly shorter)
-                    // match list so confirm()/prev() never point past the end.
-                    let sel = self
-                        .state
-                        .selected()
-                        .unwrap_or(0)
-                        .min(self.matches.len() - 1);
+                    // Clamp the selection into the new (possibly shorter) list
+                    // so confirm()/prev() never point past the end.
+                    let sel = self.state.selected().unwrap_or(0).min(total - 1);
                     self.state.select(Some(sel));
                 } else {
                     self.state.select(None);
@@ -66,6 +105,7 @@ impl Autocomplete {
             _ => {
                 self.active = false;
                 self.matches.clear();
+                self.dyn_matches.clear();
                 self.state.select(None);
             }
         }
@@ -83,34 +123,50 @@ impl Autocomplete {
         self.state.selected().unwrap_or(0)
     }
 
-    pub fn selected_name(&self) -> Option<&'static str> {
-        self.matches.get(self.selected_index()).map(|c| c.name)
+    /// The selected command's name (builtin or dynamic), if any.
+    pub fn selected_name(&self) -> Option<&str> {
+        let i = self.selected_index();
+        if i < self.matches.len() {
+            Some(self.matches[i].name)
+        } else {
+            self.dyn_matches
+                .get(i - self.matches.len())
+                .map(|d| d.name.as_str())
+        }
     }
 
     pub fn next(&mut self) {
-        if self.matches.is_empty() {
+        let total = self.total();
+        if total == 0 {
             return;
         }
-        let i = (self.selected_index() + 1) % self.matches.len();
+        let i = (self.selected_index() + 1) % total;
         self.state.select(Some(i));
     }
 
     pub fn prev(&mut self) {
-        if self.matches.is_empty() {
+        let total = self.total();
+        if total == 0 {
             return;
         }
-        let i = self
-            .selected_index()
-            .checked_sub(1)
-            .unwrap_or(self.matches.len() - 1);
+        let i = self.selected_index().checked_sub(1).unwrap_or(total - 1);
         self.state.select(Some(i));
     }
 
     /// The selected command split into real input and optional ghost args.
+    /// Dynamic commands insert `/name ` (no placeholder).
     pub fn confirm(&self) -> Option<CommandCompletion> {
-        self.matches
-            .get(self.selected_index())
-            .map(|c| completion_from_usage(c.usage))
+        let i = self.selected_index();
+        if i < self.matches.len() {
+            self.matches.get(i).map(|c| completion_from_usage(c.usage))
+        } else {
+            self.dyn_matches
+                .get(i - self.matches.len())
+                .map(|d| CommandCompletion {
+                    insert: format!("/{} ", d.name),
+                    placeholder: None,
+                })
+        }
     }
 
     pub fn dismiss(&mut self) {
@@ -122,24 +178,59 @@ impl Autocomplete {
         if !self.active {
             return;
         }
-        let n = self.matches.len().min(MAX_VISIBLE) as u16;
+        let n = self.total().min(MAX_VISIBLE) as u16;
         let area = popup_area(input_area, n);
-        let items: Vec<ListItem> = self
+        // Shared name column so descriptions align with a gap, sized to the
+        // longest visible command name (clamped) — long skill names no longer
+        // collide with their description.
+        let name_col = self
+            .matches
+            .iter()
+            .map(|c| c.name.chars().count())
+            .chain(self.dyn_matches.iter().map(|d| d.name.chars().count()))
+            .max()
+            .unwrap_or(0)
+            .clamp(COMMAND_COLUMN_WIDTH, NAME_COLUMN_MAX);
+        let mut items: Vec<ListItem> = self
             .matches
             .iter()
             .map(|c| {
                 ListItem::new(Line::from(vec![
                     Span::raw("  "),
                     Span::styled(
-                        format!("/{:<width$}", c.name, width = COMMAND_COLUMN_WIDTH),
+                        format!("/{:<name_col$} ", c.name),
                         Style::default()
                             .fg(theme.accent)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(c.description, Style::default().fg(theme.fg_text)),
+                    Span::styled(
+                        zode_core::i18n::t(c.description),
+                        Style::default().fg(theme.fg_text),
+                    ),
                 ]))
             })
             .collect();
+        // Dynamic commands (agents / skills / MCP) after the builtins, each
+        // tagged with its kind.
+        for d in &self.dyn_matches {
+            items.push(ListItem::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!("/{:<name_col$} ", d.name),
+                    Style::default()
+                        .fg(theme.accent_secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{} ", d.description),
+                    Style::default().fg(theme.fg_text),
+                ),
+                Span::styled(
+                    format!("({})", d.kind),
+                    Style::default().fg(theme.fg_subtle),
+                ),
+            ])));
+        }
         f.render_widget(Clear, area);
         let list = List::new(items)
             .block(
@@ -194,6 +285,23 @@ mod tests {
         ac.update("/th");
         assert!(ac.is_active());
         assert!(ac.matches().iter().any(|c| c.name == "theme"));
+    }
+
+    #[test]
+    fn dynamic_commands_match_and_confirm() {
+        let mut ac = Autocomplete::new();
+        ac.set_dynamic(vec![DynCmd {
+            name: "refactorer".into(),
+            kind: "agent",
+            description: "Refactors".into(),
+        }]);
+        ac.update("/refac");
+        assert!(ac.is_active());
+        // The dynamic match is selectable past the (zero) builtin matches.
+        assert_eq!(ac.selected_name(), Some("refactorer"));
+        let c = ac.confirm().expect("dynamic completion");
+        assert_eq!(c.insert, "/refactorer ");
+        assert_eq!(c.placeholder, None);
     }
 
     #[test]

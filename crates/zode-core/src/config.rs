@@ -76,18 +76,13 @@ impl ProviderConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ImageMode {
+    #[default]
     Auto,
     Direct,
     VisionModel,
-}
-
-impl Default for ImageMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -181,8 +176,20 @@ pub struct ZodeConfig {
     /// Show tool-call detail lines in the chat. `None` → shown. Toggled by
     /// `/tool-details`.
     pub show_tool_details: Option<bool>,
+    /// Autonomous orchestration: when on, the agent is told it may decompose a
+    /// task and spawn sub-agents (Task tool) on its own, and the `define_agent`
+    /// tool is registered so it can create new sub-agent types. `None` → ON
+    /// (enabled by default). Toggled off via Settings / `/orchestration`.
+    pub autonomous_orchestration: Option<bool>,
     pub permissions: PermissionsConfig,
     pub max_output_tokens: Option<u32>,
+    /// The model's context window in tokens, used for auto-compaction /
+    /// context-left math. `None` defaults to a conservative 200K. Set this to
+    /// `1000000` for a 1M-context model (e.g. `claude-opus-4-8[1m]`) so zode
+    /// uses the full window instead of compacting at 200K. Do NOT set it ABOVE
+    /// the model's real window — overestimating makes the request overflow and
+    /// the API reject the turn; underestimating only compacts earlier.
+    pub context_window: Option<u32>,
     /// Sampling temperature. `None` uses the provider default; a low value
     /// (e.g. 0) makes coding output deterministic and more reliably correct.
     pub temperature: Option<f32>,
@@ -318,6 +325,9 @@ impl ZodeConfig {
         if other.max_output_tokens.is_some() {
             self.max_output_tokens = other.max_output_tokens;
         }
+        if other.context_window.is_some() {
+            self.context_window = other.context_window;
+        }
         if other.currency.is_some() {
             self.currency = other.currency;
         }
@@ -335,6 +345,9 @@ impl ZodeConfig {
         }
         if other.show_tool_details.is_some() {
             self.show_tool_details = other.show_tool_details;
+        }
+        if other.autonomous_orchestration.is_some() {
+            self.autonomous_orchestration = other.autonomous_orchestration;
         }
         if other.temperature.is_some() {
             self.temperature = other.temperature;

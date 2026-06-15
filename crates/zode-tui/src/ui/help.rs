@@ -31,11 +31,25 @@ pub fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
     let cmd_lines: Vec<Line> = reg
         .all()
         .iter()
-        .map(|c| Line::from(format!("/{:<10} {}", c.name, c.description)))
+        .map(|c| {
+            Line::from(format!(
+                "/{:<16} {}",
+                c.name,
+                zode_core::i18n::t(c.description)
+            ))
+        })
         .collect();
+    // Key labels use ⌘ on macOS (replace the "Ctrl+" in the static table).
+    let mod_prefix = crate::primary_key_prefix();
     let key_lines: Vec<Line> = KEYMAP
         .iter()
-        .map(|b| Line::from(format!("{:<18} {}", b.keys, b.help)))
+        .map(|b| {
+            Line::from(format!(
+                "{:<18} {}",
+                b.keys.replace("Ctrl+", mod_prefix),
+                zode_core::i18n::t(b.help)
+            ))
+        })
         .collect();
 
     let style = Style::default().bg(theme.bg_secondary).fg(theme.fg_text);
@@ -44,7 +58,7 @@ pub fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
         Paragraph::new(cmd_lines).block(
             Block::default()
                 .title(Line::styled(
-                    " Commands ",
+                    format!(" {} ", zode_core::i18n::t("Commands")),
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
@@ -59,7 +73,7 @@ pub fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
         Paragraph::new(key_lines).block(
             Block::default()
                 .title(Line::styled(
-                    " Keys (Esc to close) ",
+                    format!(" {} ", zode_core::i18n::t("Keys (Esc to close)")),
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),

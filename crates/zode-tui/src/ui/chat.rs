@@ -1,12 +1,13 @@
 //! Conversation view: holds the message list, the streaming delta buffer,
 //! and scroll state. Renders into a ratatui Frame.
 
+use std::ops::Range;
 use std::path::Path;
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -16,16 +17,21 @@ use crate::ui::markdown::render_markdown;
 /// Approximate the number of wrapped rows a line occupies at `width`
 /// columns (ratatui wraps on words, so this char-width estimate is close
 /// enough for scroll math and, crucially, never overflows).
+#[cfg(test)]
 fn wrapped_rows(line: &Line, width: u16) -> usize {
     if width == 0 {
         return 1;
     }
-    let w: usize = line
-        .spans
+    let w = line_disp_width(line);
+    w.div_ceil(width as usize).max(1)
+}
+
+#[cfg(test)]
+fn line_disp_width(line: &Line) -> usize {
+    line.spans
         .iter()
         .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-        .sum();
-    w.div_ceil(width as usize).max(1)
+        .sum()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +66,32 @@ pub struct ChatRenderMeta<'a> {
     pub cwd: &'a Path,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatSelectionPoint {
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatSelection {
+    pub anchor: ChatSelectionPoint,
+    pub focus: ChatSelectionPoint,
+}
+
+impl ChatSelection {
+    pub fn new(anchor: ChatSelectionPoint, focus: ChatSelectionPoint) -> Self {
+        Self { anchor, focus }
+    }
+
+    fn normalized(self) -> (ChatSelectionPoint, ChatSelectionPoint) {
+        if (self.focus.line, self.focus.column) < (self.anchor.line, self.anchor.column) {
+            (self.focus, self.anchor)
+        } else {
+            (self.anchor, self.focus)
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ChatView {
     messages: Vec<ChatMessage>,
@@ -73,6 +105,25 @@ pub struct ChatView {
     /// live at render time.
     hide_thinking: bool,
     hide_tool_details: bool,
+    revision: u64,
+    render_cache: Option<RenderCache>,
+    #[cfg(test)]
+    cache_builds: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderCacheKey {
+    revision: u64,
+    width: u16,
+    theme_name: String,
+    hide_thinking: bool,
+    hide_tool_details: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RenderCache {
+    key: RenderCacheKey,
+    lines: Vec<Line<'static>>,
 }
 
 impl ChatView {
@@ -105,6 +156,7 @@ impl ChatView {
             images,
         });
         self.scroll_back = 0;
+        self.bump_revision();
     }
 
     pub fn push_system(&mut self, text: &str) {
@@ -113,6 +165,7 @@ impl ChatView {
             text: text.to_string(),
             images: Vec::new(),
         });
+        self.bump_revision();
     }
 
     pub fn push_tool(&mut self, text: &str) {
@@ -121,6 +174,7 @@ impl ChatView {
             text: text.to_string(),
             images: Vec::new(),
         });
+        self.bump_revision();
     }
 
     pub fn push_thinking_delta(&mut self, delta: &str) {
@@ -143,6 +197,7 @@ impl ChatView {
         if let Some(msg) = self.messages.get_mut(thinking_idx) {
             msg.text.push_str(delta);
         }
+        self.bump_revision();
     }
 
     pub fn begin_assistant(&mut self) {
@@ -153,6 +208,7 @@ impl ChatView {
         });
         self.active_assistant_index = self.messages.len().checked_sub(1);
         self.streaming = true;
+        self.bump_revision();
     }
 
     pub fn push_delta(&mut self, delta: &str) {
@@ -174,6 +230,12 @@ impl ChatView {
         if let Some(msg) = self.messages.get_mut(idx) {
             msg.text.push_str(delta);
         }
+        self.bump_revision();
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.render_cache = None;
     }
 
     fn push_process_message(&mut self, msg: ChatMessage) -> usize {
@@ -215,7 +277,18 @@ impl ChatView {
         self.scroll_back = self.scroll_back.saturating_sub(n as usize);
     }
 
-    fn scroll_offset_for_render(&mut self, total_rows: usize, viewport_rows: usize) -> u16 {
+    /// Jump to the latest output (follow the tail). End key / new turns.
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_back = 0;
+    }
+
+    /// Jump to the top of the conversation. Clamped to the real maximum on the
+    /// next render (we don't know the row count here). Home key.
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_back = usize::MAX;
+    }
+
+    fn scroll_offset_for_render(&mut self, total_rows: usize, viewport_rows: usize) -> usize {
         if self.scroll_back > 0
             && self.last_render_total_rows > 0
             && total_rows > self.last_render_total_rows
@@ -229,11 +302,169 @@ impl ChatView {
         let back = self.scroll_back.min(max_scroll);
         self.scroll_back = back;
         self.last_render_total_rows = total_rows;
-        u16::try_from(max_scroll.saturating_sub(back)).unwrap_or(u16::MAX)
+        max_scroll.saturating_sub(back)
     }
 
     /// Build all lines, then render the visible window into `area`.
     pub fn render(&mut self, f: &mut Frame, area: Rect, theme: &Theme, meta: ChatRenderMeta<'_>) {
+        self.render_with_selection(f, area, theme, meta, None);
+    }
+
+    pub fn render_with_selection(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        meta: ChatRenderMeta<'_>,
+        selection: Option<ChatSelection>,
+    ) {
+        self.ensure_render_cache(theme, meta, area.width);
+        let total = self
+            .render_cache
+            .as_ref()
+            .expect("cache populated")
+            .lines
+            .len();
+        let viewport = area.height as usize;
+        let offset = self.scroll_offset_for_render(total, viewport);
+        let range = visible_line_window(total, viewport, offset);
+        let cache = self.render_cache.as_ref().expect("cache populated");
+        let mut visible_lines: Vec<Line<'static>> = cache.lines[range.clone()]
+            .iter()
+            .enumerate()
+            .map(|(idx, line)| {
+                let line_idx = range.start + idx;
+                match selection {
+                    Some(selection) => {
+                        apply_selection_to_line(line.clone(), line_idx, selection, theme)
+                    }
+                    None => line.clone(),
+                }
+            })
+            .collect();
+        if visible_lines.is_empty() {
+            visible_lines.push(Line::from(""));
+        }
+
+        let para = Paragraph::new(visible_lines)
+            .block(Block::default().borders(Borders::NONE))
+            .style(Style::default().bg(theme.bg_primary).fg(theme.fg_text));
+        f.render_widget(para, area);
+    }
+
+    pub fn selection_point_at(
+        &mut self,
+        theme: &Theme,
+        meta: ChatRenderMeta<'_>,
+        area: Rect,
+        column: u16,
+        row: u16,
+    ) -> Option<ChatSelectionPoint> {
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        self.ensure_render_cache(theme, meta, area.width);
+        let total = self
+            .render_cache
+            .as_ref()
+            .expect("cache populated")
+            .lines
+            .len();
+        if total == 0 {
+            return None;
+        }
+        let line = self.visible_start(area.height as usize)
+            + usize::from(
+                row.saturating_sub(area.y)
+                    .min(area.height.saturating_sub(1)),
+            );
+        let column = usize::from(
+            column
+                .saturating_sub(area.x)
+                .min(area.width.saturating_sub(1)),
+        );
+        Some(ChatSelectionPoint {
+            line: line.min(total.saturating_sub(1)),
+            column,
+        })
+    }
+
+    pub fn selected_text(
+        &mut self,
+        selection: ChatSelection,
+        theme: &Theme,
+        meta: ChatRenderMeta<'_>,
+        area: Rect,
+    ) -> String {
+        self.ensure_render_cache(theme, meta, area.width);
+        let Some(cache) = &self.render_cache else {
+            return String::new();
+        };
+        let (start, end) = selection.normalized();
+        if start == end {
+            return String::new();
+        }
+        let last_line = cache.lines.len().saturating_sub(1);
+        let start_line = start.line.min(last_line);
+        let end_line = end.line.min(last_line);
+        let mut out = Vec::new();
+        for line_idx in start_line..=end_line {
+            let text = plain_line_text(&cache.lines[line_idx]);
+            let row_text = if start_line == end_line {
+                slice_display_cols(&text, start.column, end.column)
+            } else if line_idx == start_line {
+                slice_display_cols(&text, start.column, usize::MAX)
+            } else if line_idx == end_line {
+                slice_display_cols(&text, 0, end.column)
+            } else {
+                text
+            };
+            out.push(row_text.trim_end().to_string());
+        }
+        out.join("\n")
+    }
+
+    fn ensure_render_cache(&mut self, theme: &Theme, meta: ChatRenderMeta<'_>, width: u16) {
+        let cache_key = RenderCacheKey {
+            revision: self.revision,
+            width,
+            theme_name: meta.theme_name.to_string(),
+            hide_thinking: self.hide_thinking,
+            hide_tool_details: self.hide_tool_details,
+        };
+        if self
+            .render_cache
+            .as_ref()
+            .map_or(true, |cache| cache.key != cache_key)
+        {
+            let lines = self.build_lines(theme, meta, width);
+            self.render_cache = Some(RenderCache {
+                key: cache_key,
+                lines,
+            });
+            #[cfg(test)]
+            {
+                self.cache_builds += 1;
+            }
+        }
+    }
+
+    fn visible_start(&self, viewport_rows: usize) -> usize {
+        let total = self
+            .render_cache
+            .as_ref()
+            .map(|cache| cache.lines.len())
+            .unwrap_or_default();
+        let max_scroll = total.saturating_sub(viewport_rows);
+        max_scroll.saturating_sub(self.scroll_back.min(max_scroll))
+    }
+
+    fn build_lines(
+        &self,
+        theme: &Theme,
+        meta: ChatRenderMeta<'_>,
+        width: u16,
+    ) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = if self.messages.is_empty() {
             self.render_empty(theme, meta)
         } else {
@@ -255,7 +486,7 @@ impl ChatView {
                         out.push(Line::from(""));
                     }
                 }
-                out.extend(self.render_message(msg, theme, area.width));
+                out.extend(self.render_message(msg, theme, width));
                 prev_role = Some(&msg.role);
             }
             out
@@ -265,19 +496,23 @@ impl ChatView {
             lines.push(Line::from(""));
         }
 
-        // Count POST-wrap rows so scrolling is correct for wrapped content,
-        // and clamp into u16 so a huge history can't overflow. Computed
-        // before `lines` moves into the Paragraph.
-        let total: usize = lines.iter().map(|l| wrapped_rows(l, area.width)).sum();
-        let viewport = area.height as usize;
-        let offset = self.scroll_offset_for_render(total, viewport);
-
-        let para = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::NONE))
-            .style(Style::default().bg(theme.bg_primary).fg(theme.fg_text))
-            .wrap(Wrap { trim: false })
-            .scroll((offset, 0));
-        f.render_widget(para, area);
+        // If the conversation is non-empty but the display filters
+        // (`/thinking`, `/tool-details`) hid every visible message, the screen
+        // would otherwise go completely blank — show why instead.
+        if !self.messages.is_empty()
+            && !lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| !s.content.trim().is_empty()))
+        {
+            lines.push(Line::styled(
+                "  (thinking & tool details are hidden — /thinking or /tool-details to show them)",
+                Style::default().fg(theme.fg_subtle),
+            ));
+        }
+        if !self.messages.is_empty() {
+            lines.push(Line::from(""));
+        }
+        lines
     }
 
     fn render_empty(&self, theme: &Theme, _meta: ChatRenderMeta<'_>) -> Vec<Line<'static>> {
@@ -297,17 +532,25 @@ impl ChatView {
             .fg(theme.accent_secondary);
         vec![
             Line::from(vec![
-                Span::styled(
-                    "▌ ",
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("{} ", theme.icon_logo), rail),
+                Span::styled("   ▗▄▄▄▄▖   ", rail),
                 Span::styled("zode", title),
                 Span::styled(" workbench ", muted),
-                Span::styled(":: command deck", accent2),
+                Span::styled(":: terminal coding agent", accent2),
             ]),
+            Line::from(vec![
+                Span::styled("  ▐  ◕ ◕ ▌  ", rail),
+                Span::styled("ready for code, shells, and agents", muted),
+            ]),
+            Line::from(vec![
+                Span::styled("  ▐   ▿  ▌  ", rail),
+                Span::styled("small mascot, serious tools", accent2),
+            ]),
+            Line::from(vec![
+                Span::styled("   ▝▜██▛▘   ", rail),
+                Span::styled("command deck online", muted),
+            ]),
+            Line::from(vec![Span::styled("    ▝▘▝▘    ", rail)]),
+            Line::from(vec![Span::styled("          ", panel)]),
             Line::from(vec![
                 Span::styled("  ", panel),
                 Span::styled(" /help ", accent),
@@ -352,8 +595,92 @@ impl ChatView {
     }
 }
 
-fn should_insert_message_gap(prev: &Role, next: &Role) -> bool {
-    !matches!((prev, next), (Role::Tool, Role::Assistant))
+fn should_insert_message_gap(_prev: &Role, _next: &Role) -> bool {
+    true
+}
+
+fn visible_line_window(total_rows: usize, viewport_rows: usize, offset: usize) -> Range<usize> {
+    if total_rows == 0 || viewport_rows == 0 {
+        return 0..0;
+    }
+    let max_start = total_rows.saturating_sub(viewport_rows);
+    let start = offset.min(max_start);
+    let end = total_rows.min(start.saturating_add(viewport_rows));
+    start..end
+}
+
+fn apply_selection_to_line(
+    line: Line<'static>,
+    line_idx: usize,
+    selection: ChatSelection,
+    theme: &Theme,
+) -> Line<'static> {
+    let Some((start_col, end_col)) = selection_cols_for_line(line_idx, selection) else {
+        return line;
+    };
+    if start_col == end_col {
+        return line;
+    }
+    let selected_style = Style::default()
+        .bg(theme.accent)
+        .fg(theme.bg_primary)
+        .add_modifier(Modifier::BOLD);
+    let mut out = Vec::new();
+    let mut display_col = 0usize;
+    for span in line.spans {
+        for ch in span.content.chars() {
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+            let next_col = display_col.saturating_add(width);
+            let selected = display_col < end_col && next_col > start_col;
+            out.push(Span::styled(
+                ch.to_string(),
+                if selected { selected_style } else { span.style },
+            ));
+            display_col = next_col;
+        }
+    }
+    Line::from(out)
+}
+
+fn selection_cols_for_line(line_idx: usize, selection: ChatSelection) -> Option<(usize, usize)> {
+    let (start, end) = selection.normalized();
+    if start == end || line_idx < start.line || line_idx > end.line {
+        return None;
+    }
+    if start.line == end.line {
+        return Some((start.column, end.column));
+    }
+    if line_idx == start.line {
+        Some((start.column, usize::MAX))
+    } else if line_idx == end.line {
+        Some((0, end.column))
+    } else {
+        Some((0, usize::MAX))
+    }
+}
+
+fn plain_line_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
+fn slice_display_cols(text: &str, start_col: usize, end_col: usize) -> String {
+    let mut out = String::new();
+    let mut display_col = 0usize;
+    for ch in text.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        let next_col = display_col.saturating_add(width);
+        if display_col >= end_col {
+            break;
+        }
+        if next_col > start_col && display_col < end_col {
+            out.push(ch);
+        }
+        display_col = next_col;
+    }
+    out
 }
 
 fn render_user_bar(
@@ -555,10 +882,27 @@ fn wrap_spans_with_prefix(
 
     for span in spans {
         for ch in span.content.chars() {
+            // A literal newline is a HARD break: finalize this row and start a
+            // fresh one. Never embed `\n` in a Line's span — ratatui renders a
+            // `Line` as a single row and mis-measures embedded newlines, which
+            // desyncs our scroll-row count from ratatui's and scrolls the view
+            // past the content (the "long session renders blank" bug). Callers
+            // like tool/thinking/process lines pass raw multi-line text here.
+            if ch == '\n' {
+                out.push(Line::from(std::mem::take(&mut current)));
+                prefix = continuation_prefix.clone();
+                current = vec![prefix.clone()];
+                current_width = continuation_width;
+                saw_content = true;
+                continue;
+            }
+            if ch == '\r' {
+                continue; // drop CR from CRLF; the \n above did the break
+            }
             let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
             let has_body = current.len() > 1;
             if has_body && current_width + ch_width > max_width {
-                out.push(Line::from(current));
+                out.push(Line::from(std::mem::take(&mut current)));
                 prefix = continuation_prefix.clone();
                 current_width = continuation_width;
                 current = vec![prefix.clone()];
@@ -683,6 +1027,132 @@ mod tests {
     }
 
     #[test]
+    fn streaming_keeps_the_newest_line_at_the_bottom() {
+        use crate::theme::ThemeStore;
+        use ratatui::{backend::TestBackend, Terminal};
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut view = ChatView::new();
+        view.push_user("design something");
+        view.begin_assistant();
+        // Stream well past the viewport, rendering each step — the freshest
+        // line must always be visible (no manual scroll → follow the tail).
+        for i in 0..200 {
+            view.push_delta(&format!("streamed reasoning line number {i}\n"));
+            let backend = TestBackend::new(60, 12);
+            let mut term = Terminal::new(backend).unwrap();
+            let meta = ChatRenderMeta {
+                theme_name: &theme.name,
+                model: "m",
+                cwd: std::path::Path::new("/tmp"),
+            };
+            term.draw(|f| view.render(f, f.area(), &theme, meta))
+                .unwrap();
+            let content: String = term
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(
+                content.contains(&format!("number {i}")),
+                "newest streamed line {i} must stay visible at the bottom"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_breaks_on_embedded_newlines() {
+        // Multi-line text (e.g. a thinking/tool message) must become several
+        // Lines, NONE embedding a literal '\n' and each within the width — so
+        // our scroll-row count matches ratatui's and the view can't go blank.
+        let spans = vec![Span::raw(
+            "line one\nline two is a bit longer\nthree".to_string(),
+        )];
+        let lines = wrap_spans_with_prefix(spans, Span::raw(""), Span::raw(""), 40);
+        assert!(
+            lines.len() >= 3,
+            "three source lines → ≥3 rows: {}",
+            lines.len()
+        );
+        for l in &lines {
+            for s in &l.spans {
+                assert!(!s.content.contains('\n'), "a Line must not embed a newline");
+            }
+            assert!(line_disp_width(l) <= 40, "each row must fit the width");
+        }
+    }
+
+    #[test]
+    fn multiline_tool_message_total_rows_match_line_count() {
+        // The exact invariant that broke "long session renders blank": after
+        // building, every Line is one visual row, so summed wrapped_rows equals
+        // the line count (no overcount → scroll offset can't overshoot).
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut view = ChatView::new();
+        view.push_user("hi");
+        view.push_thinking_delta("first paragraph of reasoning\nsecond line\nthird line here");
+        view.push_tool("Tool Bash\nmulti-line\ntool output");
+        let mut lines = 0usize;
+        let mut rows = 0usize;
+        for msg in view.messages() {
+            for line in view.render_message(msg, &theme, 60) {
+                assert!(line_disp_width(&line) <= 60, "every line fits the width");
+                assert!(
+                    !line.spans.iter().any(|s| s.content.contains('\n')),
+                    "no rendered line embeds a newline"
+                );
+                lines += 1;
+                rows += wrapped_rows(&line, 60);
+            }
+        }
+        assert!(lines > 0);
+        assert_eq!(rows, lines, "each line must be exactly one visual row");
+    }
+
+    #[test]
+    fn long_conversation_shows_the_tail_not_blank() {
+        // Reproduces the "chat goes blank after a while" report: with far more
+        // content than the viewport and following the tail (scroll_back == 0),
+        // the LAST message must be on screen — never scrolled past into blank.
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut view = ChatView::new();
+        for i in 0..60 {
+            view.push_user(&format!("question number {i} about the codebase"));
+            view.begin_assistant();
+            view.push_delta(&format!(
+                "answer {i}: here is a fairly long reply that will wrap across \
+                 multiple terminal rows so the wrapped-row math is exercised, \
+                 including some 中文字符 for width handling"
+            ));
+            view.end_turn();
+        }
+        view.push_user("FINAL_TAIL_MARKER question");
+        let backend = TestBackend::new(40, 12);
+        let mut term = Terminal::new(backend).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "m",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        let non_space = content.chars().filter(|c| !c.is_whitespace()).count();
+        assert!(non_space > 0, "chat rendered completely blank");
+        assert!(
+            content.contains("FINAL_TAIL_MARKER"),
+            "tail message must be visible when following the bottom; got:\n{content}"
+        );
+    }
+
+    #[test]
     fn renders_user_image_preview_without_panic() {
         let theme = ThemeStore::with_builtins().resolve(None);
         let mut view = ChatView::new();
@@ -735,6 +1205,8 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(content.contains("zode"));
+        assert!(content.contains("◕ ◕"));
+        assert!(content.contains("▿"));
         assert!(!content.contains("Hacker"));
         assert!(!content.contains("MiniMax-M1"));
         assert!(content.contains("/help"));
@@ -808,6 +1280,35 @@ mod tests {
     }
 
     #[test]
+    fn rendered_chat_has_bottom_padding_after_last_message() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let mut view = ChatView::new();
+        view.push_delta("answer");
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "deepseek-v4-pro",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+
+        let lines = view.build_lines(&theme, meta, 40);
+        let last = lines.last().expect("chat should render lines");
+
+        assert!(
+            last.spans.iter().all(|span| span.content.trim().is_empty()),
+            "last chat line should be internal bottom padding: {last:?}"
+        );
+        assert!(
+            lines.iter().rev().skip(1).any(|line| line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .contains("answer")),
+            "assistant answer should render above bottom padding"
+        );
+    }
+
+    #[test]
     fn user_messages_render_with_vertical_padding() {
         let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
         let mut view = ChatView::new();
@@ -848,7 +1349,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_answer_sits_right_under_process_tail() {
+    fn assistant_answer_has_breathing_room_after_process_tail() {
         let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
         let mut view = ChatView::new();
         view.push_tool("Usage ↑378 ↓46");
@@ -878,8 +1379,13 @@ mod tests {
             .expect("usage row");
         assert!(
             rows.get(usage_row + 1)
+                .is_some_and(|row| row.trim().is_empty()),
+            "assistant answer should leave one blank row after process tail: {rows:?}"
+        );
+        assert!(
+            rows.get(usage_row + 2)
                 .is_some_and(|row| row.contains("DeepSeek")),
-            "assistant row should immediately follow usage row: {rows:?}"
+            "assistant row should follow the process gap: {rows:?}"
         );
     }
 
@@ -906,6 +1412,51 @@ mod tests {
         assert_eq!(first_offset, 30);
         assert_eq!(second_offset, 35);
         assert_eq!(view.scroll_back, 0);
+    }
+
+    #[test]
+    fn visible_line_window_slices_to_the_viewport() {
+        assert_eq!(visible_line_window(100, 10, 0), 0..10);
+        assert_eq!(visible_line_window(100, 10, 90), 90..100);
+        assert_eq!(visible_line_window(5, 10, 0), 0..5);
+        assert_eq!(visible_line_window(100, 10, 250), 90..100);
+    }
+
+    #[test]
+    fn render_cache_reuses_built_lines_when_only_scroll_changes() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let mut view = ChatView::new();
+        for i in 0..80 {
+            view.push_user(&format!("question {i}"));
+            view.push_delta(&format!(
+                "answer {i} with enough content to wrap over several rows and make rendering non-trivial"
+            ));
+            view.end_turn();
+        }
+        let backend = TestBackend::new(60, 12);
+        let mut term = Terminal::new(backend).unwrap();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "deepseek-v4-pro",
+            cwd: std::path::Path::new("/tmp/zode"),
+        };
+
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
+        assert_eq!(view.cache_builds, 1);
+
+        view.scroll_up(1);
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
+        assert_eq!(
+            view.cache_builds, 1,
+            "scrolling should only slice cached lines, not rebuild full history"
+        );
+
+        view.push_delta("new text invalidates the cache");
+        term.draw(|f| view.render(f, f.area(), &theme, meta))
+            .unwrap();
+        assert_eq!(view.cache_builds, 2);
     }
 
     #[test]
@@ -1010,6 +1561,86 @@ mod tests {
             })
             .collect();
         assert_eq!(rows, vec!["  第一段".to_string(), "  第二段".to_string()]);
+    }
+
+    #[test]
+    fn assistant_markdown_table_renders_as_terminal_table() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let view = ChatView::new();
+        let lines = view.render_message(
+            &ChatMessage {
+                role: Role::Assistant,
+                text: "| Type | 示例 |\n|---|---|\n| Fact | API 地址 |\n".into(),
+                images: Vec::new(),
+            },
+            &theme,
+            80,
+        );
+
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(rows.iter().any(|row| row.contains("│ Type")));
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("├") && row.contains("─")));
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Fact") && row.contains("API 地址")));
+    }
+
+    #[test]
+    fn selected_text_extracts_visible_chat_range() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let cwd = std::path::Path::new("/tmp");
+        let mut chat = ChatView::new();
+        chat.push_delta("alpha\nbeta\ngamma");
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "test-model",
+            cwd,
+        };
+        let area = Rect::new(0, 0, 40, 6);
+        let selection = ChatSelection::new(
+            ChatSelectionPoint { line: 1, column: 2 },
+            ChatSelectionPoint { line: 2, column: 6 },
+        );
+
+        let text = chat.selected_text(selection, &theme, meta, area);
+
+        assert_eq!(text, "alpha\n  beta");
+    }
+
+    #[test]
+    fn selection_highlights_visible_chat_cells() {
+        let theme = ThemeStore::with_builtins().resolve(Some("cyberpunk"));
+        let cwd = std::path::Path::new("/tmp");
+        let mut chat = ChatView::new();
+        chat.push_delta("alpha");
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "test-model",
+            cwd,
+        };
+        let selection = ChatSelection::new(
+            ChatSelectionPoint { line: 1, column: 2 },
+            ChatSelectionPoint { line: 1, column: 7 },
+        );
+        let backend = TestBackend::new(40, 6);
+        let mut term = Terminal::new(backend).unwrap();
+
+        term.draw(|f| chat.render_with_selection(f, f.area(), &theme, meta, Some(selection)))
+            .unwrap();
+
+        let buf = term.backend().buffer();
+        assert_eq!(buf[(2, 1)].bg, theme.accent);
+        assert_eq!(buf[(6, 1)].bg, theme.accent);
     }
 
     #[test]

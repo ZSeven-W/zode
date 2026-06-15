@@ -13,16 +13,80 @@ use serde_json::{json, Value};
 
 use crate::config::ConfigManager;
 
-/// Standard skills dirs (low → high precedence): global ~/.zode/skills,
-/// project .zode/skills, project .claude/skills (compat).
+/// Skills dirs, low → high precedence (later dirs override same-named earlier
+/// skills). Cross-agent compat sources (opencode / Claude / agents.md / codex,
+/// each global then project) come first, then zode's own (global then project)
+/// last — so a zode skill always wins a name clash, per "zode highest priority".
 pub fn skills_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+    let home = dirs::home_dir();
+
+    // 1. Global cross-agent sources (lowest precedence).
+    if let Some(h) = &home {
+        dirs.push(h.join(".config").join("opencode").join("skills")); // opencode
+        dirs.push(h.join(".claude").join("skills")); // Claude
+        dirs.push(h.join(".agents").join("skills")); // agents.md ecosystem
+        dirs.push(h.join(".codex").join("skills")); // codex
+        dirs.push(h.join(".gemini").join("antigravity-cli").join("skills")); // antigravity
+        dirs.push(h.join(".pi").join("agent").join("skills")); // pi coding agent
+        dirs.push(h.join(".kilo").join("skills")); // kilo
+        dirs.push(h.join(".cursor").join("skills")); // cursor
+    }
+    // 1b. Skills bundled in installed plugins (e.g. Claude's `superpowers`
+    // lives at ~/.claude/plugins/cache/<mp>/<plugin>/<ver>/skills). load_dir
+    // only looks one level deep, so each `skills` dir must be listed; scan the
+    // plugin trees (claude / codex / opencode) for them.
+    if let Some(h) = &home {
+        collect_plugin_skill_dirs(&h.join(".claude").join("plugins"), &mut dirs);
+        collect_plugin_skill_dirs(&h.join(".codex").join("plugins"), &mut dirs);
+        collect_plugin_skill_dirs(
+            &h.join(".config").join("opencode").join("plugin"),
+            &mut dirs,
+        );
+    }
+    // 2. Project cross-agent sources (incl. their plugin trees).
+    dirs.push(cwd.join(".opencode").join("skills"));
+    dirs.push(cwd.join(".claude").join("skills"));
+    dirs.push(cwd.join(".agents").join("skills"));
+    dirs.push(cwd.join(".codex").join("skills"));
+    collect_plugin_skill_dirs(&cwd.join(".claude").join("plugins"), &mut dirs);
+    collect_plugin_skill_dirs(&cwd.join(".codex").join("plugins"), &mut dirs);
+    // 3. zode's own (highest precedence): global then project, including its
+    // own plugins folder (~/.zode/plugins, .zode/plugins) scanned for skills.
     if let Ok(global) = ConfigManager::config_dir() {
+        collect_plugin_skill_dirs(&global.join("plugins"), &mut dirs);
         dirs.push(global.join("skills"));
     }
+    collect_plugin_skill_dirs(&cwd.join(".zode").join("plugins"), &mut dirs);
     dirs.push(cwd.join(".zode").join("skills"));
-    dirs.push(cwd.join(".claude").join("skills"));
     dirs
+}
+
+/// Recursively find every directory named `skills` under `root` (a plugin
+/// tree), bounded in depth so a deep/cyclic layout can't run away. Each found
+/// dir is one `load_dir` target (its subdirs hold `SKILL.md`). A `skills` dir
+/// is not descended into. No-op if `root` doesn't exist.
+fn collect_plugin_skill_dirs(root: &Path, out: &mut Vec<PathBuf>) {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > 6 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_dir() {
+                continue;
+            }
+            if p.file_name().and_then(|n| n.to_str()) == Some("skills") {
+                out.push(p);
+            } else {
+                walk(&p, depth + 1, out);
+            }
+        }
+    }
+    walk(root, 0, out);
 }
 
 /// Load all skills from the given dirs into one registry. Missing dirs are
@@ -36,22 +100,44 @@ pub fn load_skills_from(dirs: &[PathBuf]) -> SkillRegistry {
 /// returns true — used to drop skills disabled via the plugin manager.
 pub fn load_skills_filtered(dirs: &[PathBuf], keep: impl Fn(&str) -> bool) -> SkillRegistry {
     let registry = SkillRegistry::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for dir in dirs {
         if !dir.exists() {
+            continue;
+        }
+        // A dir can be reached via more than one source (e.g. a plugin's skills
+        // dir under both cache/ and marketplaces/) — load each once.
+        let key = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+        if !seen.insert(key) {
             continue;
         }
         match load_dir(dir) {
             Ok(outcome) => {
                 for w in &outcome.warnings {
-                    tracing::warn!("skill load warning in {}: {w:?}", dir.display());
+                    // Foreign/plugin skills we don't own (e.g. a missing
+                    // description) aren't user-actionable here — keep it quiet.
+                    tracing::debug!("skill load warning in {}: {w:?}", dir.display());
                 }
                 for skill in outcome.skills {
-                    if keep(&skill.name) {
-                        registry.insert(skill);
+                    if !keep(&skill.name) {
+                        continue;
                     }
+                    // Drop skills whose body hard-codes another agent's host
+                    // variables (e.g. `${CLAUDE_PLUGIN_ROOT}/scripts/…`): they
+                    // resolve to nothing under zode and would fail if invoked.
+                    if let Some(var) = crate::portability::foreign_host_var(&skill.prompt) {
+                        tracing::debug!(
+                            "skip non-portable skill {} in {}: references ${}",
+                            skill.name,
+                            dir.display(),
+                            var
+                        );
+                        continue;
+                    }
+                    registry.insert(skill);
                 }
             }
-            Err(e) => tracing::warn!("skip skills dir {}: {e}", dir.display()),
+            Err(e) => tracing::debug!("skip skills dir {}: {e}", dir.display()),
         }
     }
     registry
@@ -140,6 +226,25 @@ mod tests {
         let idx = skills_index(&reg);
         assert!(idx.contains("code-review"));
         assert!(idx.contains("review code"));
+    }
+
+    #[test]
+    fn drops_non_portable_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(dir.path(), "portable", "ok", "Run `cargo build`.");
+        write_skill(
+            dir.path(),
+            "claude-only",
+            "broken",
+            "Run ${CLAUDE_PLUGIN_ROOT}/scripts/go.sh now.",
+        );
+        let reg = load_skills_from(&[dir.path().to_path_buf()]);
+        let idx = skills_index(&reg);
+        assert!(idx.contains("portable"));
+        assert!(
+            !idx.contains("claude-only"),
+            "skill referencing a foreign host var must be filtered out"
+        );
     }
 
     #[tokio::test]

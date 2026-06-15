@@ -15,6 +15,7 @@ pub enum ActionId {
     OpenSettings,
     OpenHelp,
     OpenTasks,
+    ToggleSidebar,
     NewTab,
     CloseTab,
     SwitchTab,
@@ -79,6 +80,11 @@ pub static KEYMAP: &[Binding] = &[
         keys: "Ctrl+B",
         action: ActionId::OpenTasks,
         help: "Background tasks panel",
+    },
+    Binding {
+        keys: "Ctrl+G",
+        action: ActionId::ToggleSidebar,
+        help: "Toggle the sidebar",
     },
     Binding {
         keys: "Ctrl+T",

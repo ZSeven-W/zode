@@ -131,6 +131,16 @@ mod tests {
     }
 
     #[test]
+    fn builtins_include_selection_command() {
+        let reg = CommandRegistry::with_builtins();
+        let selection = reg
+            .get("selection")
+            .expect("/selection command should be registered");
+        assert_eq!(selection.usage, "/selection [on|off|toggle]");
+        assert_eq!(selection.description, "Toggle mouse text selection mode");
+    }
+
+    #[test]
     fn vision_is_registered_but_image_command_is_not() {
         let reg = CommandRegistry::default();
         assert!(reg.get("image").is_none());

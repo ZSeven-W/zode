@@ -17,15 +17,51 @@ pub struct Currency {
 /// affect the displayed estimate; for an exact figure, set the provider's
 /// prices in USD and read in USD.
 pub const CURRENCIES: &[Currency] = &[
-    Currency { code: "USD", symbol: "$", per_usd: 1.0 },
-    Currency { code: "CNY", symbol: "¥", per_usd: 7.2 },
-    Currency { code: "EUR", symbol: "€", per_usd: 0.92 },
-    Currency { code: "GBP", symbol: "£", per_usd: 0.79 },
-    Currency { code: "JPY", symbol: "¥", per_usd: 155.0 },
-    Currency { code: "KRW", symbol: "₩", per_usd: 1350.0 },
-    Currency { code: "INR", symbol: "₹", per_usd: 83.0 },
-    Currency { code: "TWD", symbol: "NT$", per_usd: 32.0 },
-    Currency { code: "HKD", symbol: "HK$", per_usd: 7.8 },
+    Currency {
+        code: "USD",
+        symbol: "$",
+        per_usd: 1.0,
+    },
+    Currency {
+        code: "CNY",
+        symbol: "¥",
+        per_usd: 7.2,
+    },
+    Currency {
+        code: "EUR",
+        symbol: "€",
+        per_usd: 0.92,
+    },
+    Currency {
+        code: "GBP",
+        symbol: "£",
+        per_usd: 0.79,
+    },
+    Currency {
+        code: "JPY",
+        symbol: "¥",
+        per_usd: 155.0,
+    },
+    Currency {
+        code: "KRW",
+        symbol: "₩",
+        per_usd: 1350.0,
+    },
+    Currency {
+        code: "INR",
+        symbol: "₹",
+        per_usd: 83.0,
+    },
+    Currency {
+        code: "TWD",
+        symbol: "NT$",
+        per_usd: 32.0,
+    },
+    Currency {
+        code: "HKD",
+        symbol: "HK$",
+        per_usd: 7.8,
+    },
 ];
 
 impl Currency {

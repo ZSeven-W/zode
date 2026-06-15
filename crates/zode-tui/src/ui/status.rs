@@ -24,6 +24,7 @@ pub struct StatusBar {
     pub yolo: bool,
     pub sandbox: bool,
     pub plan_mode: bool,
+    pub selection_mode: bool,
     spinner_frame: usize,
 }
 
@@ -37,6 +38,7 @@ impl StatusBar {
             yolo: false,
             sandbox: false,
             plan_mode: false,
+            selection_mode: false,
             spinner_frame: 0,
         }
     }
@@ -65,7 +67,7 @@ impl StatusBar {
         let mut spans = vec![
             Span::styled(spin, Style::default().fg(color)),
             Span::styled(
-                label,
+                zode_core::i18n::t(label),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" │ ", Style::default().fg(theme.separator)),
@@ -98,11 +100,36 @@ impl StatusBar {
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        if self.selection_mode {
+            spans.push(Span::styled(
+                "  SELECT",
+                Style::default()
+                    .fg(theme.accent_secondary)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         spans.extend([
             Span::styled(" │ ", Style::default().fg(theme.separator)),
-            Span::styled("F1 help", Style::default().fg(theme.fg_subtle)),
-            Span::styled(" · Ctrl+O settings", Style::default().fg(theme.fg_subtle)),
-            Span::styled(" · Ctrl+B tasks", Style::default().fg(theme.fg_subtle)),
+            Span::styled(
+                zode_core::i18n::t("F1 help"),
+                Style::default().fg(theme.fg_subtle),
+            ),
+            Span::styled(
+                format!(
+                    " · {}",
+                    zode_core::i18n::t("Ctrl+O settings")
+                        .replace("Ctrl+", crate::primary_key_prefix())
+                ),
+                Style::default().fg(theme.fg_subtle),
+            ),
+            Span::styled(
+                format!(
+                    " · {}",
+                    zode_core::i18n::t("Ctrl+B tasks")
+                        .replace("Ctrl+", crate::primary_key_prefix())
+                ),
+                Style::default().fg(theme.fg_subtle),
+            ),
         ]);
 
         let para = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg_secondary));

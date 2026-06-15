@@ -1,10 +1,15 @@
-//! Permission approval dialog. Shows the pending tool call (with a diff
-//! preview for file edits) and collects y/a/n. Multiple requests queue and
-//! are shown one at a time by the app.
+//! Permission approval prompt. Shows the pending tool call (with a diff
+//! preview for file edits) and its options. Modeled on Claude Code's
+//! non-blocking permission UX: the prompt docks inline just above the input
+//! (it never covers the conversation), and it does NOT capture the keyboard —
+//! the user can keep typing to queue a follow-up message ("插队"). Numbered
+//! options (1/2/3) + Esc answer it only while the input is empty, so prose
+//! that happens to start with a letter is never swallowed. Multiple requests
+//! queue and are shown one at a time by the app.
 
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
@@ -17,6 +22,8 @@ const MIN_POPUP_WIDTH: u16 = 48;
 const MAX_POPUP_WIDTH: u16 = 96;
 const MAX_POPUP_HEIGHT: u16 = 18;
 const MAX_PERMISSION_DIFF_LINES: usize = 8;
+/// Hard cap on the inline card height so a huge diff can't swallow the chat.
+const MAX_INLINE_HEIGHT: u16 = 14;
 
 /// State for the active approval prompt. Holds the request until the user
 /// answers, then responds and reports done. `cwd` resolves the diff
@@ -38,20 +45,31 @@ impl PermissionDialog {
         self.request.as_ref().map(|r| r.tool.as_str()).unwrap_or("")
     }
 
-    /// Handle a key; returns true if the dialog responded and is done.
-    pub fn on_key(&mut self, c: char) -> bool {
-        if let Some(approval) = approval_for_key(c) {
-            if let Some(req) = self.request.take() {
-                let _ = req.respond(approval);
-            }
-            return true;
+    /// Respond with `approval` and report done. Returns true if a pending
+    /// request was answered (false if it had already been taken).
+    pub fn answer(&mut self, approval: Approval) -> bool {
+        if let Some(req) = self.request.take() {
+            let _ = req.respond(approval);
+            true
+        } else {
+            false
         }
-        false
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+    /// The card's body lines (summary + optional diff preview + options hint).
+    /// All card lines (body + footer), used only for height/width estimation.
+    fn lines(&self, theme: &Theme) -> Vec<Line<'static>> {
+        let mut lines = self.body_lines(theme);
+        lines.extend(self.footer_lines(theme));
+        lines
+    }
+
+    /// The scrollable/clippable upper part: what the tool wants to do and a
+    /// diff preview. May be long (e.g. a big file write) — it gets truncated
+    /// so the footer (the action keys) is never pushed off the card.
+    fn body_lines(&self, theme: &Theme) -> Vec<Line<'static>> {
         let Some(req) = &self.request else {
-            return;
+            return Vec::new();
         };
         let mut lines = vec![Line::from(req.summary()), Line::from("")];
         if let Some(diff) = diff_from_tool_input(&req.input, &self.cwd, theme) {
@@ -63,27 +81,105 @@ impl PermissionDialog {
                     Style::default().fg(theme.fg_subtle),
                 ));
             }
-            lines.push(Line::from(""));
         }
-        lines.push(Line::styled(
-            "[y] allow once   [a] allow always   [N] deny",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
+        lines
+    }
 
-        let popup = permission_popup_area(area, &lines);
-        f.render_widget(Clear, popup);
+    /// The PINNED footer: the answer keys (always row 0 so they survive a tight
+    /// card) plus the non-blocking hint (row 1, dropped first if space is short).
+    fn footer_lines(&self, theme: &Theme) -> Vec<Line<'static>> {
+        vec![
+            Line::from(vec![Span::styled(
+                "[1] allow once   [2] allow always   [3] deny   (Esc deny)",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::styled(
+                "…or just keep typing to queue a message — this prompt won't block you.",
+                Style::default().fg(theme.fg_subtle),
+            ),
+        ]
+    }
+
+    /// Rows the inline card wants, given the available `width` (accounts for a
+    /// long summary wrapping). Clamped so it never dominates the chat area.
+    pub fn desired_height(&self, width: u16, theme: &Theme) -> u16 {
+        let inner = width.saturating_sub(2).max(1) as usize;
+        let body: u16 = self
+            .lines(theme)
+            .iter()
+            .map(|l| {
+                let w = line_width(l);
+                // How many rows this logical line occupies once wrapped.
+                w.max(1).div_ceil(inner) as u16
+            })
+            .sum();
+        body.saturating_add(2).clamp(5, MAX_INLINE_HEIGHT)
+    }
+
+    /// Render the prompt as an inline card filling `area` (docked above the
+    /// input). Does not center; does not cover the conversation.
+    pub fn render_inline(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        if self.request.is_none() || area.height == 0 {
+            return;
+        }
+        self.render_card(f, area, theme);
+    }
+
+    /// Fallback centered popup, used only when the terminal is too short to
+    /// dock the card inline above the input.
+    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        if self.request.is_none() {
+            return;
+        }
+        let popup = permission_popup_area(area, &self.lines(theme));
+        self.render_card(f, popup, theme);
+    }
+
+    /// Draw the bordered card into `area`, with the body (summary + diff) on
+    /// top and the answer-key footer PINNED to the bottom rows so a long file
+    /// write can never push the `[1] [2] [3]` keys off the card. The body
+    /// clips/truncates instead.
+    fn render_card(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        f.render_widget(Clear, area);
         let block = Block::default()
-            .title(format!(" Permission: {} ", req.tool))
+            .title(format!(" Permission: {} ", self.tool()))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.accent))
             .style(Style::default().bg(theme.bg_secondary).fg(theme.fg_text));
-        let para = Paragraph::new(lines)
-            .block(block)
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: false });
-        f.render_widget(para, popup);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        if inner.height == 0 || inner.width == 0 {
+            return;
+        }
+
+        // Reserve the bottom rows for the footer (≤2; at least the keys row).
+        let footer = self.footer_lines(theme);
+        let footer_h = (footer.len() as u16).min(inner.height);
+        let body_h = inner.height.saturating_sub(footer_h);
+
+        if body_h > 0 {
+            let body_area = Rect::new(inner.x, inner.y, inner.width, body_h);
+            f.render_widget(
+                Paragraph::new(self.body_lines(theme))
+                    .alignment(Alignment::Left)
+                    .wrap(Wrap { trim: false }),
+                body_area,
+            );
+        }
+        let footer_area = Rect::new(
+            inner.x,
+            inner.y.saturating_add(body_h),
+            inner.width,
+            footer_h,
+        );
+        f.render_widget(
+            Paragraph::new(footer)
+                .alignment(Alignment::Left)
+                .wrap(Wrap { trim: false }),
+            footer_area,
+        );
     }
 }
 
@@ -116,11 +212,14 @@ fn line_width(line: &Line<'_>) -> usize {
         .sum()
 }
 
+/// Map a numeric option key (`1`/`2`/`3`) to its approval. Letters are NOT
+/// mapped: while a permission is pending the input box stays live, so prose
+/// keystrokes (incl. ones starting "y"/"a"/"n") must reach the input untouched.
 pub(crate) fn approval_for_key(c: char) -> Option<Approval> {
-    match c.to_ascii_lowercase() {
-        'y' => Some(Approval::AllowOnce),
-        'a' => Some(Approval::AllowAlways),
-        'n' => Some(Approval::Deny),
+    match c {
+        '1' => Some(Approval::AllowOnce),
+        '2' => Some(Approval::AllowAlways),
+        '3' => Some(Approval::Deny),
         _ => None,
     }
 }
@@ -128,28 +227,81 @@ pub(crate) fn approval_for_key(c: char) -> Option<Approval> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::ThemeStore;
+    use ratatui::{backend::TestBackend, Terminal};
     use zode_core::approval::approval_queue;
+
+    #[tokio::test]
+    async fn answer_keys_stay_visible_with_huge_params() {
+        // A file write with a very long parameter must NOT push the [1][2][3]
+        // keys off the card — they are pinned to the bottom (user report:
+        // "参数内容太多了，把权限的 1 2 3 挤掉").
+        let (queue, mut rx) = approval_queue();
+        let q = queue.clone();
+        let huge = "x".repeat(8000);
+        tokio::spawn(async move {
+            q.request("Bash", &serde_json::json!({ "command": huge }), None)
+                .await
+        });
+        let req = rx.next().await.unwrap();
+        let dialog = PermissionDialog::new(req, std::env::temp_dir());
+        let theme = ThemeStore::with_builtins().resolve(None);
+        // A deliberately short card so a long body would otherwise overflow it.
+        let backend = TestBackend::new(70, 8);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| dialog.render_inline(f, f.area(), &theme))
+            .unwrap();
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            content.contains("[1] allow once"),
+            "answer keys must stay visible even with huge params; got:\n{content}"
+        );
+        drop(queue);
+    }
 
     #[test]
     fn key_maps_to_approval() {
-        assert_eq!(approval_for_key('y'), Some(Approval::AllowOnce));
-        assert_eq!(approval_for_key('a'), Some(Approval::AllowAlways));
-        assert_eq!(approval_for_key('n'), Some(Approval::Deny));
-        assert_eq!(approval_for_key('x'), None);
+        assert_eq!(approval_for_key('1'), Some(Approval::AllowOnce));
+        assert_eq!(approval_for_key('2'), Some(Approval::AllowAlways));
+        assert_eq!(approval_for_key('3'), Some(Approval::Deny));
+        // Letters must NOT answer — they belong to the live input box.
+        assert_eq!(approval_for_key('y'), None);
+        assert_eq!(approval_for_key('a'), None);
+        assert_eq!(approval_for_key('n'), None);
     }
 
     #[tokio::test]
-    async fn on_key_responds_and_reports_done() {
+    async fn answer_responds_and_reports_done() {
         let (queue, mut rx) = approval_queue();
-        // Tool side requests; we capture the request to feed the dialog.
         let q = queue.clone();
         let join =
             tokio::spawn(async move { q.request("Bash", &serde_json::json!({}), None).await });
         let req = rx.next().await.unwrap();
         let mut dialog = PermissionDialog::new(req, std::env::temp_dir());
-        assert!(!dialog.on_key('x')); // not a decision key
-        assert!(dialog.on_key('y')); // responded
+        assert!(dialog.answer(Approval::AllowOnce)); // responded
+        assert!(!dialog.answer(Approval::AllowOnce)); // request already taken
         assert_eq!(join.await.unwrap(), Approval::AllowOnce);
+    }
+
+    #[tokio::test]
+    async fn inline_height_is_bounded() {
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(None);
+        let (queue, mut rx) = approval_queue();
+        let q = queue.clone();
+        tokio::spawn(async move { q.request("Bash", &serde_json::json!({}), None).await });
+        let req = rx.next().await.unwrap();
+        let dialog = PermissionDialog::new(req, std::env::temp_dir());
+        let h = dialog.desired_height(80, &theme);
+        assert!(
+            (5..=MAX_INLINE_HEIGHT).contains(&h),
+            "height {h} out of range"
+        );
     }
 
     #[test]
@@ -159,7 +311,7 @@ mod tests {
             Line::from(""),
             Line::from("+print(\"Hello, World!\")"),
             Line::from(""),
-            Line::from("[y] allow once   [a] allow always   [N] deny"),
+            Line::from("[1] allow once   [2] allow always   [3] deny   (Esc deny)"),
         ];
 
         let popup = permission_popup_area(Rect::new(0, 0, 220, 70), &lines);
@@ -177,7 +329,7 @@ mod tests {
 
     #[test]
     fn popup_area_stays_inside_tight_terminals() {
-        let lines = vec![Line::from("[y] allow once   [a] allow always   [N] deny")];
+        let lines = vec![Line::from("[1] allow once   [2] allow always   [3] deny")];
 
         let popup = permission_popup_area(Rect::new(0, 0, 52, 12), &lines);
 

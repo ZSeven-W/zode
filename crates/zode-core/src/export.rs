@@ -7,21 +7,32 @@ use std::path::{Path, PathBuf};
 
 use agent::message::{ContentBlock, Message, MessageStore, ToolResultContent};
 
+/// Default file name used when `/export` is given no file (or a directory).
+const DEFAULT_EXPORT_NAME: &str = "zode-conversation.md";
+
 /// Resolve the `/export [path]` argument to a target file. Empty → a default
 /// file in `cwd`; a relative path → joined onto `cwd` (the active workspace,
 /// which may differ from the process launch dir for resumed/`--cwd` sessions);
 /// an absolute path → used as-is.
+///
+/// When the argument points at a directory — either an existing dir, or a path
+/// written with a trailing separator (e.g. `~/notes/`) — the default file name
+/// is appended inside it. Without this, `std::fs::write` would fail with
+/// "Is a directory (os error 21)" (the user's `导出聊天记录失败`).
 pub fn resolve_export_path(cwd: &Path, arg: &str) -> PathBuf {
     let arg = arg.trim();
     if arg.is_empty() {
-        return cwd.join("zode-conversation.md");
+        return cwd.join(DEFAULT_EXPORT_NAME);
     }
+    // A trailing separator means "into this directory" even if it doesn't exist
+    // yet; detect it before `PathBuf` normalizes the slash away.
+    let looks_like_dir = arg.ends_with('/') || arg.ends_with(std::path::MAIN_SEPARATOR);
     let p = PathBuf::from(arg);
-    if p.is_absolute() {
-        p
-    } else {
-        cwd.join(p)
+    let mut target = if p.is_absolute() { p } else { cwd.join(p) };
+    if looks_like_dir || target.is_dir() {
+        target.push(DEFAULT_EXPORT_NAME);
     }
+    target
 }
 
 /// Truncate a one-line preview of a tool result / value for readability.
@@ -140,7 +151,10 @@ mod tests {
 
     #[test]
     fn empty_store_is_just_the_header() {
-        assert_eq!(store_to_markdown(&MessageStore::new()), "# Conversation\n\n");
+        assert_eq!(
+            store_to_markdown(&MessageStore::new()),
+            "# Conversation\n\n"
+        );
     }
 
     #[test]
@@ -158,5 +172,23 @@ mod tests {
             resolve_export_path(cwd, "/tmp/x.md"),
             PathBuf::from("/tmp/x.md")
         );
+    }
+
+    #[test]
+    fn export_path_appends_default_for_trailing_separator() {
+        // A trailing slash means "into this directory" even before it exists.
+        assert_eq!(
+            resolve_export_path(Path::new("/work/proj"), "notes/"),
+            PathBuf::from("/work/proj/notes/zode-conversation.md")
+        );
+    }
+
+    #[test]
+    fn export_path_appends_default_for_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // Passing an existing directory must resolve to a file inside it, not
+        // the directory itself (which would fail with EISDIR on write).
+        let resolved = resolve_export_path(dir.path(), dir.path().to_str().unwrap());
+        assert_eq!(resolved, dir.path().join("zode-conversation.md"));
     }
 }

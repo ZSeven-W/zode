@@ -109,10 +109,7 @@ impl Lang {
         match self {
             Lang::En => None,
             // Order matches LOCALES rows below.
-            other => Lang::ALL
-                .iter()
-                .skip(1)
-                .position(|l| *l == other),
+            other => Lang::ALL.iter().skip(1).position(|l| *l == other),
         }
     }
 }
@@ -185,7 +182,10 @@ mod tests {
         set_language(Lang::En);
         assert_eq!(t("Settings"), "Settings");
         set_language(Lang::Zh);
-        assert_eq!(t("a string that is not in the table"), "a string that is not in the table");
+        assert_eq!(
+            t("a string that is not in the table"),
+            "a string that is not in the table"
+        );
         set_language(Lang::En);
     }
 

@@ -229,8 +229,17 @@ async fn dispatch_command(
         },
         "diff" => println!("{}", zode_core::diff::working_tree_diff(&engine.cwd).await),
         "agents" => {
-            for (n, desc) in zode_core::engine::agent_types() {
+            for (n, desc) in &engine.agent_types {
                 println!("  {n:<12} {desc}");
+            }
+        }
+        "workflows" => {
+            if engine.workflows.is_empty() {
+                println!("(no workflows; add ~/.zode/workflows/<name>.md or use define_workflow)");
+            } else {
+                for (n, desc) in &engine.workflows {
+                    println!("  {n:<16} {desc}");
+                }
             }
         }
         "hooks" => {
