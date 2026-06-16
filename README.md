@@ -17,7 +17,8 @@
 
 - **Multi-provider** — Anthropic, OpenAI, and any OpenAI-compatible API (DeepSeek, Moonshot, OpenRouter dialects), plus local Ollama. Supports large-output and **1M-context** models (`contextWindow` / `maxOutputTokens` are configurable)
 - **Rich tool surface** — file read/write/edit, code & content search, foreground and background shells, git, web fetch, notebooks, TODO tracking
-- **Non-blocking permissions** — every mutating tool is gated (allow once / always / deny), but the prompt docks inline and never blocks you: keep typing to queue a follow-up while a tool waits, with hard-deny rules and a `--sandbox` mode that confines writes to the working dir
+- **Non-blocking permissions** — every mutating tool is gated (allow once / always / deny), but the prompt docks inline and never blocks you: keep typing to queue a follow-up while a tool waits, with hard-deny rules
+- **OS sandbox, on by default** — shell commands run under sandbox-exec (macOS) / bwrap (Linux) in `read-only` or `workspace-write` mode, with **outbound network denied by default**. Toggle live with `/sandbox`; the model can request an escape for a single command (`dangerouslyDisableSandbox`) which **you authorize** at the prompt
 - **Full-screen TUI** — streaming markdown with syntax highlighting, diff previews, slash-command autocomplete, prompt history (Up/Down), 4 built-in themes, settings & help overlays, **15-language UI** (`/language`)
 - **Multi-session tabs** — run several conversations side by side (`Ctrl+T`), each an isolated agent; resume past sessions with full history replay
 - **Sub-agents & workflows** — delegate scoped work to child agents via the Task tool (they inherit the same gate, sandbox, and hooks), manage them with `/agents` / `/workflows`, and toggle autonomous orchestration
@@ -77,7 +78,9 @@ zode --no-tui              # plain readline REPL
 zode -c                    # continue the most recent session
 zode -r <id>               # resume a session by id prefix
 zode --yolo                # bypass approval prompts (deny rules still apply)
-zode --sandbox             # confine mutating tools to the working directory
+zode --no-sandbox          # disable the OS sandbox (it is ON by default)
+zode --sandbox-read-only   # sandbox in read-only mode (deny all writes)
+zode --sandbox-allow-network  # allow outbound network inside the sandbox
 zode --model <id>          # override the model
 zode --provider <name>     # pick a named provider from config.providers
 ```
@@ -95,9 +98,21 @@ Optional top-level config keys (all have sensible defaults):
   "temperature": 0,              // lower = more deterministic
   "language": "zh-CN",           // UI language (15 locales); also via /language
   "effort": "medium",            // default reasoning effort; also via /effort
-  "autonomousOrchestration": true // sub-agent + workflow orchestration (default on)
+  "autonomousOrchestration": true, // sub-agent + workflow orchestration (default on)
+  "sandbox": {
+    "enabled": true,             // OS sandbox for shell commands (default on)
+    "mode": "workspace-write",   // "workspace-write" | "read-only"
+    "network": false,            // allow outbound network inside the sandbox
+    "writableRoots": []          // extra writable dirs (workspace-write)
+  }
 }
 ```
+
+> The sandbox confines shell commands (macOS: sandbox-exec; Linux: `bwrap`,
+> which must be installed — otherwise it degrades to off with a warning).
+> Network is denied by default. If a command genuinely needs to escape, the
+> model sets `dangerouslyDisableSandbox: true` and **you** authorize it at the
+> approval prompt — or toggle the whole sandbox live with `/sandbox`.
 
 > `contextWindow` drives auto-compaction — set it to your model's real window
 > (e.g. `1000000`). Do **not** set it above the real window: overestimating
@@ -126,6 +141,7 @@ Optional top-level config keys (all have sensible defaults):
 | `/effort` | Pick the reasoning effort level |
 | `/thinking`, `/tool-details` | Toggle showing reasoning / tool-call detail |
 | `/orchestration` | Toggle autonomous sub-agent + workflow orchestration |
+| `/sandbox [on\|off\|read-only\|workspace-write\|network on\|network off]` | Show / control the OS sandbox at runtime |
 | `/language` | Switch the UI language (15 locales) |
 | `/export [path]` | Export the transcript to Markdown (a dir gets a default name) |
 | `/yolo` | Bypass-approval mode |

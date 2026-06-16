@@ -56,16 +56,46 @@ async fn run(args: Args) -> i32 {
     }
     cfg.apply_env_fallbacks();
 
-    let sandbox = if args.sandbox {
-        match zode_core::sandbox::SandboxConfig::for_current_os(&cwd) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                eprintln!("zode: {e}");
-                return 1;
-            }
-        }
-    } else {
-        None
+    // The OS sandbox for shell commands is ON BY DEFAULT (workspace-write,
+    // network denied). `--no-sandbox` disables it; `--sandbox` forces it on;
+    // otherwise config decides (default true). `resolve` degrades gracefully
+    // (returns None) on an unsupported OS or a missing backend.
+    let sandbox = {
+        use zode_core::sandbox::SandboxMode;
+        let enabled = if args.no_sandbox {
+            false
+        } else if args.sandbox {
+            true
+        } else {
+            cfg.sandbox.enabled.unwrap_or(true)
+        };
+        let mode = if args.sandbox_read_only {
+            SandboxMode::ReadOnly
+        } else {
+            cfg.sandbox
+                .mode
+                .as_deref()
+                .map(SandboxMode::parse)
+                .unwrap_or_default()
+        };
+        let allow_network = args.sandbox_allow_network || cfg.sandbox.network.unwrap_or(false);
+        let roots: Vec<std::path::PathBuf> = cfg
+            .sandbox
+            .writable_roots
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        let exclude_slash_tmp = cfg.sandbox.exclude_slash_tmp.unwrap_or(false);
+        let exclude_tmpdir_env_var = cfg.sandbox.exclude_tmpdir_env_var.unwrap_or(false);
+        zode_core::sandbox::resolve(
+            &cwd,
+            enabled,
+            mode,
+            allow_network,
+            &roots,
+            exclude_slash_tmp,
+            exclude_tmpdir_env_var,
+        )
     };
 
     let today = today_date();

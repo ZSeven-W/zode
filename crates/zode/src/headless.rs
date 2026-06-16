@@ -101,6 +101,10 @@ pub async fn run_repl(engine: ZodeEngine, resumed_id: Option<String>) -> i32 {
                     match dispatch_command(&registry, &engine, name, cmd_args).await {
                         CmdFlow::Exit => break,
                         CmdFlow::Continue => continue,
+                        CmdFlow::Save => {
+                            save_session(&engine, &session_id).await;
+                            continue;
+                        }
                     }
                 }
 
@@ -131,6 +135,9 @@ pub async fn run_repl(engine: ZodeEngine, resumed_id: Option<String>) -> i32 {
 enum CmdFlow {
     Exit,
     Continue,
+    /// The command mutated the message store (e.g. /compact); persist the
+    /// session before continuing so the change survives a resume.
+    Save,
 }
 
 async fn dispatch_command(
@@ -165,11 +172,19 @@ async fn dispatch_command(
             }
         }
         "config" => println!("model={} cwd={}", engine.model, engine.cwd.display()),
-        "compact" => {
-            // Auto-compaction is enabled per turn (QueryLoop auto_compact).
-            // A manual, hook-driven /compact lands in a later phase.
-            println!("(auto-compaction is enabled; manual /compact lands later)");
-        }
+        "compact" => match engine.compact(AbortController::new()).await {
+            Ok(o) => {
+                println!(
+                    "(compacted {} message{} · ~{} → ~{} tokens)",
+                    o.replaced,
+                    if o.replaced == 1 { "" } else { "s" },
+                    o.pre_tokens,
+                    o.post_tokens,
+                );
+                return CmdFlow::Save;
+            }
+            Err(e) => println!("(compact failed: {e})"),
+        },
         "cost" => println!("{}", engine.cost.report().await),
         "undo" => match engine.undo().await {
             Ok(p) => println!("(undid edit to {})", p.display()),

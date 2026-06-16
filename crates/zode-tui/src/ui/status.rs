@@ -22,7 +22,12 @@ pub struct StatusBar {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub yolo: bool,
+    /// OS sandbox active for shell + file writes.
     pub sandbox: bool,
+    /// Sandbox is in read-only mode (no writes at all).
+    pub sandbox_read_only: bool,
+    /// Outbound network is allowed inside the sandbox.
+    pub sandbox_network: bool,
     pub plan_mode: bool,
     pub selection_mode: bool,
     spinner_frame: usize,
@@ -37,6 +42,8 @@ impl StatusBar {
             output_tokens: 0,
             yolo: false,
             sandbox: false,
+            sandbox_read_only: false,
+            sandbox_network: false,
             plan_mode: false,
             selection_mode: false,
             spinner_frame: 0,
@@ -78,18 +85,38 @@ impl StatusBar {
                 Style::default().fg(theme.fg_subtle),
             ),
         ];
+        // Approval mode: YOLO (auto-approve, risky) in red, otherwise the safe
+        // default is implicit (no badge).
         if self.yolo {
             spans.push(Span::styled(
                 "  YOLO",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ));
         }
+        // Sandbox: always shown so the confinement state is visible. OFF is a
+        // warning (writes unconfined); ON shows the mode + network.
         if self.sandbox {
+            let label = if self.sandbox_read_only {
+                "  SANDBOX:RO"
+            } else {
+                "  SANDBOX"
+            };
             spans.push(Span::styled(
-                "  SANDBOX",
+                label,
                 Style::default()
                     .fg(theme.accent_secondary)
                     .add_modifier(Modifier::BOLD),
+            ));
+            if self.sandbox_network {
+                spans.push(Span::styled(
+                    " +NET",
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ));
+            }
+        } else {
+            spans.push(Span::styled(
+                "  UNSANDBOXED",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ));
         }
         if self.plan_mode {
@@ -188,5 +215,40 @@ mod tests {
         assert!(content.contains("YOLO"));
         assert!(content.contains("SANDBOX"));
         assert!(content.contains("F1 help"));
+    }
+
+    fn render_to_string(sb: &StatusBar) -> String {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let backend = TestBackend::new(120, 1);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| sb.render(f, f.area(), &theme)).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn sandbox_badge_shows_off_mode_and_network() {
+        let mut sb = StatusBar::new("m".into());
+        // off → unconfined warning
+        sb.sandbox = false;
+        assert!(render_to_string(&sb).contains("UNSANDBOXED"));
+        // read-only + network
+        sb.sandbox = true;
+        sb.sandbox_read_only = true;
+        sb.sandbox_network = true;
+        let s = render_to_string(&sb);
+        assert!(s.contains("SANDBOX:RO"), "{s}");
+        assert!(s.contains("+NET"), "{s}");
+        // workspace-write, no network
+        sb.sandbox_read_only = false;
+        sb.sandbox_network = false;
+        let s = render_to_string(&sb);
+        assert!(s.contains("SANDBOX"));
+        assert!(!s.contains(":RO"));
+        assert!(!s.contains("+NET"));
     }
 }

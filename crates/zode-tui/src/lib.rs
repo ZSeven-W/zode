@@ -16,15 +16,16 @@ pub fn tr(s: &'static str) -> &'static str {
     zode_core::i18n::t(s)
 }
 
-/// Display prefix for the primary chord modifier: `Cmd+` on macOS, `Ctrl+`
-/// elsewhere. Used to render key hints (replace `"Ctrl+"` in label strings).
+/// Display prefix for the primary chord modifier: `Cmd+` on macOS, `Ctrl+` on
+/// Windows/Linux — matching each platform's native convention. The key handler
+/// (`is_primary_mod`) accepts the Command (⌘ / SUPER) key on macOS and Ctrl
+/// elsewhere (it also still accepts Ctrl on macOS as a fallback for terminals
+/// that don't forward ⌘).
 ///
-/// We deliberately spell the macOS modifier `Cmd+` rather than the `⌘` glyph:
-/// `⌘` (U+2318) is East-Asian-Width *Ambiguous*, so `unicode-width` (and thus
-/// ratatui's layout) counts it as 1 column while a CJK-configured terminal
-/// renders it 2 columns wide. That 1-column drift makes every following glyph
-/// overlap in fixed-width chrome (status bar, help columns). `Cmd+` is plain
-/// ASCII, so its rendered width always matches the measured width.
+/// We spell the macOS modifier `Cmd+` rather than the `⌘` glyph: `⌘` (U+2318)
+/// is East-Asian-Width *Ambiguous*, so `unicode-width` counts it as 1 column
+/// while a CJK-configured terminal renders it 2 — that drift overlaps following
+/// glyphs in fixed-width chrome. `Cmd+` is plain ASCII, width always correct.
 pub fn primary_key_prefix() -> &'static str {
     if cfg!(target_os = "macos") {
         "Cmd+"

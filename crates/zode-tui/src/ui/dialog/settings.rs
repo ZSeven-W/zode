@@ -22,6 +22,9 @@ pub enum SettingsLevel {
     ToolDetails,
     Orchestration,
     Language,
+    Sandbox,
+    /// Pick the provider that handles image understanding (`/vision`).
+    VisionProvider,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +40,10 @@ pub enum SettingsAction {
     SetOrchestration(String),
     /// Carries the language code (e.g. "zh-tw").
     SetLanguage(String),
+    /// Carries a sandbox action: off / read-only / workspace-write / network on|off.
+    SetSandbox(String),
+    /// Carries a provider name for image understanding, or "off" to disable.
+    SetVisionProvider(String),
 }
 
 pub struct SettingsDialog {
@@ -64,6 +71,7 @@ const TOP_ITEMS: &[&str] = &[
     "Tool details",
     "Orchestration",
     "Language",
+    "Vision",
 ];
 
 fn default_language_codes() -> Vec<String> {
@@ -83,6 +91,17 @@ fn default_sidebars() -> Vec<String> {
 
 fn default_toggles() -> Vec<String> {
     vec!["on".into(), "off".into()]
+}
+
+/// Sandbox actions offered by the `/sandbox` picker.
+fn default_sandboxes() -> Vec<String> {
+    vec![
+        "read-only".into(),
+        "workspace-write".into(),
+        "network on".into(),
+        "network off".into(),
+        "off".into(),
+    ]
 }
 
 impl SettingsDialog {
@@ -194,6 +213,51 @@ impl SettingsDialog {
         }
     }
 
+    pub fn sandbox_picker() -> Self {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        Self {
+            level: SettingsLevel::Sandbox,
+            root_level: SettingsLevel::Sandbox,
+            state,
+            theme_ids: Vec::new(),
+            model_ids: Vec::new(),
+            provider_names: Vec::new(),
+            modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
+            efforts: default_efforts(),
+            sidebars: default_sidebars(),
+            toggles: default_toggles(),
+            language_codes: default_language_codes(),
+        }
+    }
+
+    /// Focused picker for the image-understanding provider (`/vision`).
+    pub fn vision_provider_picker(provider_names: Vec<String>) -> Self {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        Self {
+            level: SettingsLevel::VisionProvider,
+            root_level: SettingsLevel::VisionProvider,
+            state,
+            theme_ids: Vec::new(),
+            model_ids: Vec::new(),
+            provider_names,
+            modes: vec!["default".into(), "acceptEdits".into(), "dontAsk".into()],
+            efforts: default_efforts(),
+            sidebars: default_sidebars(),
+            toggles: default_toggles(),
+            language_codes: default_language_codes(),
+        }
+    }
+
+    /// Items for the vision-provider level: configured providers + an explicit
+    /// "off" to disable image understanding via a vision model.
+    fn vision_items(&self) -> Vec<String> {
+        let mut v = self.provider_names.clone();
+        v.push("off".into());
+        v
+    }
+
     pub fn level(&self) -> SettingsLevel {
         self.level
     }
@@ -214,6 +278,8 @@ impl SettingsDialog {
             SettingsLevel::Mode => self.modes.clone(),
             SettingsLevel::Effort => self.efforts.clone(),
             SettingsLevel::Sidebar => self.sidebars.clone(),
+            SettingsLevel::Sandbox => default_sandboxes(),
+            SettingsLevel::VisionProvider => self.vision_items(),
             SettingsLevel::Thinking | SettingsLevel::ToolDetails | SettingsLevel::Orchestration => {
                 self.toggles.clone()
             }
@@ -259,7 +325,8 @@ impl SettingsDialog {
                 5 => SettingsLevel::Thinking,
                 6 => SettingsLevel::ToolDetails,
                 7 => SettingsLevel::Orchestration,
-                _ => SettingsLevel::Language,
+                8 => SettingsLevel::Language,
+                _ => SettingsLevel::VisionProvider,
             };
             self.state.select(Some(0));
         }
@@ -315,6 +382,13 @@ impl SettingsDialog {
                 .language_codes
                 .get(idx)
                 .map(|c| SettingsAction::SetLanguage(c.clone())),
+            SettingsLevel::Sandbox => default_sandboxes()
+                .get(idx)
+                .map(|s| SettingsAction::SetSandbox(s.clone())),
+            SettingsLevel::VisionProvider => self
+                .vision_items()
+                .get(idx)
+                .map(|s| SettingsAction::SetVisionProvider(s.clone())),
         }
     }
 
@@ -442,6 +516,8 @@ fn title_text(level: SettingsLevel, root: SettingsLevel) -> &'static str {
         SettingsLevel::ToolDetails => "Tool details",
         SettingsLevel::Orchestration => "Autonomous orchestration",
         SettingsLevel::Language => "Select language",
+        SettingsLevel::Sandbox => "Sandbox",
+        SettingsLevel::VisionProvider => "Vision provider",
     }
 }
 
@@ -458,6 +534,8 @@ fn section_title(level: SettingsLevel, root: SettingsLevel) -> &'static str {
         (SettingsLevel::ToolDetails, _) => "Tool details",
         (SettingsLevel::Orchestration, _) => "Orchestration",
         (SettingsLevel::Language, _) => "Language",
+        (SettingsLevel::Sandbox, _) => "Sandbox",
+        (SettingsLevel::VisionProvider, _) => "Vision",
     }
 }
 
@@ -482,15 +560,21 @@ fn header_line(title: &'static str, width: u16, theme: &Theme) -> Paragraph<'sta
 }
 
 fn search_line(theme: &Theme) -> Paragraph<'static> {
+    // Localized placeholder; accent the first character (works for multi-byte
+    // scripts like 搜索 / 検索, not just ASCII "Search").
+    let label = zode_core::i18n::t("Search");
+    let mut chars = label.chars();
+    let first: String = chars.next().map(|c| c.to_string()).unwrap_or_default();
+    let rest: String = chars.collect();
     Paragraph::new(Line::from(vec![
         Span::styled(
-            "S",
+            first,
             Style::default()
                 .fg(theme.accent_secondary)
                 .bg(theme.bg_secondary),
         ),
         Span::styled(
-            "earch",
+            rest,
             Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary),
         ),
     ]))

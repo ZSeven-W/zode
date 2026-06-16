@@ -1,6 +1,6 @@
 //! Generated locale data for [`crate::i18n`]. SOURCE_STRINGS (English keys) and the 14 LOCALES rows are aligned by index. Do not edit by hand.
 
-pub const N: usize = 122;
+pub const N: usize = 126;
 
 pub static SOURCE_STRINGS: [&str; N] = [
     "Show commands and keybindings",
@@ -125,6 +125,10 @@ pub static SOURCE_STRINGS: [&str; N] = [
     "Toggle autonomous orchestration (auto sub-agents)",
     "Toggle showing the agent's thinking output",
     "Toggle showing tool-call detail in the chat",
+    "Show / control the OS sandbox for shell commands",
+    "Vision",
+    "Thinking",
+    "Orchestration",
 ];
 
 pub static LOCALES: [[&str; N]; 14] = [
@@ -143,7 +147,7 @@ pub static LOCALES: [[&str; N]; 14] = [
         "连接服务商",
         "显示或隐藏侧边栏",
         "按 id 恢复会话",
-        "Background shells + running turns",
+        "后台 shell + 运行中的回合",
         "撤销上一次文件编辑",
         "重做上一次撤销的编辑",
         "切换 bypass-approval 模式",
@@ -251,6 +255,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "切换自主编排（自动子代理）",
         "切换显示代理的 thinking 输出",
         "切换在聊天中显示工具调用详情",
+        "查看 / 控制 shell 命令的操作系统沙箱",
+        "图像理解",
+        "思考输出",
+        "编排",
     ],
     [
         "顯示指令與快捷鍵",
@@ -375,6 +383,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "切換自主協調（auto sub-agents）",
         "切換顯示 agent 的 thinking 輸出",
         "切換在聊天中顯示工具呼叫的細節",
+        "檢視 / 控制 shell 命令的作業系統沙箱",
+        "圖像理解",
+        "思考輸出",
+        "編排",
     ],
     [
         "コマンドとキーバインドを表示",
@@ -499,6 +511,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "自律オーケストレーションを切り替え（自動サブエージェント）",
         "エージェントの thinking 出力の表示を切り替え",
         "チャット内のツール呼び出し詳細の表示を切り替え",
+        "シェルコマンドの OS サンドボックスを表示／制御",
+        "画像認識",
+        "思考出力",
+        "オーケストレーション",
     ],
     [
         "명령어 및 단축키 표시",
@@ -515,7 +531,7 @@ pub static LOCALES: [[&str; N]; 14] = [
         "프로바이더 연결",
         "사이드바 표시 또는 숨기기",
         "id로 세션 재개",
-        "Background shells + running turns",
+        "백그라운드 셸 + 실행 중인 턴",
         "마지막 파일 편집 실행 취소",
         "마지막으로 취소한 편집 다시 실행",
         "승인 우회 모드 전환",
@@ -623,6 +639,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "자율 오케스트레이션 전환 (자동 서브에이전트)",
         "에이전트의 thinking 출력 표시 전환",
         "채팅에서 도구 호출 세부 정보 표시 전환",
+        "셸 명령용 OS 샌드박스 보기 / 제어",
+        "이미지 이해",
+        "사고 출력",
+        "오케스트레이션",
     ],
     [
         "Mostrar comandos y atajos de teclado",
@@ -747,6 +767,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Alternar la orquestación autónoma (subagentes automáticos)",
         "Alternar la visualización de la salida de pensamiento del agente",
         "Alternar la visualización del detalle de llamadas a herramientas en el chat",
+        "Ver / controlar el sandbox del SO para comandos de shell",
+        "Visión",
+        "Razonamiento",
+        "Orquestación",
     ],
     [
         "Afficher les commandes et raccourcis",
@@ -871,6 +895,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Activer/désactiver l'orchestration autonome (sous-agents auto)",
         "Activer/désactiver l'affichage de la sortie de réflexion de l'agent",
         "Activer/désactiver l'affichage du détail des appels de tools dans le chat",
+        "Afficher / contrôler le bac à sable de l'OS pour les commandes shell",
+        "Vision",
+        "Raisonnement",
+        "Orchestration",
     ],
     [
         "Befehle und Tastenkürzel anzeigen",
@@ -995,6 +1023,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Autonome Orchestrierung umschalten (automatische Sub-Agenten)",
         "Anzeige der Thinking-Ausgabe des Agenten umschalten",
         "Anzeige der Tool-Aufruf-Details im Chat umschalten",
+        "OS-Sandbox für Shell-Befehle anzeigen / steuern",
+        "Bildanalyse",
+        "Denkausgabe",
+        "Orchestrierung",
     ],
     [
         "Mostrar comandos e atalhos de teclado",
@@ -1011,7 +1043,7 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Conectar um provedor",
         "Mostrar ou ocultar a barra lateral",
         "Retomar uma sessão por id",
-        "Background shells + running turns",
+        "Shells em segundo plano + turnos em execução",
         "Desfazer a última edição de arquivo",
         "Refazer a última edição desfeita",
         "Alternar modo de bypass de aprovação",
@@ -1119,6 +1151,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Alternar orquestração autônoma (sub-agentes automáticos)",
         "Alternar exibição da saída de raciocínio do agente",
         "Alternar exibição dos detalhes de chamadas de ferramentas no chat",
+        "Ver / controlar o sandbox do SO para comandos de shell",
+        "Visão",
+        "Raciocínio",
+        "Orquestração",
     ],
     [
         "Показать команды и сочетания клавиш",
@@ -1243,6 +1279,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Переключить автономную оркестрацию (авто суб-агенты)",
         "Переключить отображение вывода размышлений агента",
         "Переключить отображение деталей вызовов инструментов в чате",
+        "Показать / управлять ОС-песочницей для shell-команд",
+        "Зрение",
+        "Размышления",
+        "Оркестрация",
     ],
     [
         "कमांड और कीबाइंडिंग दिखाएँ",
@@ -1259,7 +1299,7 @@ pub static LOCALES: [[&str; N]; 14] = [
         "कोई प्रदाता कनेक्ट करें",
         "साइडबार दिखाएँ या छिपाएँ",
         "id द्वारा सत्र फिर से शुरू करें",
-        "Background shells + running turns",
+        "बैकग्राउंड शेल + चल रहे टर्न",
         "अंतिम फ़ाइल संपादन पूर्ववत करें",
         "अंतिम पूर्ववत किए गए संपादन को फिर से करें",
         "bypass-approval मोड टॉगल करें",
@@ -1367,6 +1407,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "स्वायत्त ऑर्केस्ट्रेशन टॉगल करें (auto सब-एजेंट)",
         "एजेंट का thinking आउटपुट दिखाना टॉगल करें",
         "चैट में टूल-कॉल विवरण दिखाना टॉगल करें",
+        "शेल कमांड के लिए OS सैंडबॉक्स देखें / नियंत्रित करें",
+        "विज़न",
+        "सोच",
+        "ऑर्केस्ट्रेशन",
     ],
     [
         "Tampilkan perintah dan pintasan keyboard",
@@ -1491,6 +1535,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Alihkan orkestrasi otonom (sub-agen otomatis)",
         "Alihkan tampilan output thinking agen",
         "Alihkan tampilan detail tool-call di chat",
+        "Tampilkan / kontrol sandbox OS untuk perintah shell",
+        "Visi",
+        "Pemikiran",
+        "Orkestrasi",
     ],
     [
         "แสดงคำสั่งและคีย์ลัด",
@@ -1615,6 +1663,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "เปิด/ปิดการประสานงานอัตโนมัติ (auto sub-agents)",
         "เปิด/ปิดการแสดงผลลัพธ์การคิดของเอเจนต์",
         "เปิด/ปิดการแสดงรายละเอียดการเรียกเครื่องมือในแชต",
+        "แสดง / ควบคุมแซนด์บ็อกซ์ OS สำหรับคำสั่งเชลล์",
+        "การเข้าใจภาพ",
+        "การแสดงความคิด",
+        "การจัดวาง",
     ],
     [
         "Komutları ve kısayolları göster",
@@ -1739,6 +1791,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Özerk düzenlemeyi aç/kapat (otomatik alt-ajanlar)",
         "Ajanın düşünme çıktısını göstermeyi aç/kapat",
         "Sohbette araç-çağrısı ayrıntılarını göstermeyi aç/kapat",
+        "Kabuk komutları için işletim sistemi korumalı alanını görüntüle / denetle",
+        "Görüntü anlama",
+        "Düşünme",
+        "Orkestrasyon",
     ],
     [
         "Hiển thị lệnh và phím tắt",
@@ -1863,6 +1919,10 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Bật/tắt điều phối tự chủ (auto sub-agent)",
         "Bật/tắt hiển thị kết quả thinking của agent",
         "Bật/tắt hiển thị chi tiết tool-call trong cuộc trò chuyện",
+        "Xem / kiểm soát sandbox hệ điều hành cho lệnh shell",
+        "Thị giác",
+        "Suy nghĩ",
+        "Điều phối",
     ],
 ];
 

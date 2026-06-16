@@ -27,4 +27,12 @@ pub enum AppEvent {
     /// A transient toast, posted from off-loop work (e.g. /undo running on a
     /// spawned task) so the event loop is never blocked. Not tab-scoped.
     Toast { text: String, error: bool },
+    /// A manual `/compact` run (spawned off-loop) finished. `result` is a
+    /// ready-to-show summary line on success, or an error message. Routed to
+    /// the originating tab so its busy state is cleared and the note lands in
+    /// the right transcript.
+    CompactDone {
+        tab_id: usize,
+        result: Result<String, String>,
+    },
 }

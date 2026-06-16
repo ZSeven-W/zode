@@ -1,7 +1,7 @@
 //! TUI main loop. Initializes the terminal, runs a tokio::select! over
 //! terminal input + agent events + a tick, and drives one turn at a time.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::Stdout;
 use std::path::Path;
@@ -14,7 +14,8 @@ use agent::session::Session;
 use agent::stream::Event;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event as CtEvent, EventStream, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -53,14 +54,16 @@ use crate::ui::dialog::session_picker::SessionPicker;
 use crate::ui::dialog::settings::{SettingsAction, SettingsDialog, SettingsLevel};
 use crate::ui::dialog::tasks_panel::TasksPanel;
 use crate::ui::dialog::workflows_dialog::{WorkflowRow, WorkflowsAction, WorkflowsDialog};
-use crate::ui::input::InputBox;
+use crate::ui::input::{InputBox, InputSelection};
 use crate::ui::layout::{render_header, split_main, HeaderInfo};
 use crate::ui::status::{Mode, StatusBar};
 use crate::ui::tabs::{render_sidebar, SidebarInfo};
 use crate::ui::toast::Toast;
 
 const PROMPT_HISTORY_FILE: &str = "prompt_history.json";
-const PROMPT_HISTORY_LIMIT: usize = 200;
+/// Cap on persisted prompt-history entries. When exceeded, the OLDEST are
+/// dropped first (FIFO) — see `record_prompt_history_entry`.
+const PROMPT_HISTORY_LIMIT: usize = 100;
 
 fn prompt_history_path() -> Option<std::path::PathBuf> {
     ConfigManager::config_dir()
@@ -116,7 +119,13 @@ fn sanitize_prompt_history(entries: Vec<String>) -> Vec<String> {
 
 fn record_prompt_history_entry(history: &mut Vec<String>, text: &str) -> bool {
     let text = text.trim();
-    if text.is_empty() || history.last().map(String::as_str) == Some(text) {
+    // Skip blanks, consecutive dups, and a bare single-line slash command
+    // (e.g. `/sandbox`, `/model x`) — those are UI actions, not prompts worth
+    // recalling. A multi-line message that happens to start with `/` is kept.
+    if text.is_empty()
+        || (text.starts_with('/') && !text.contains('\n'))
+        || history.last().map(String::as_str) == Some(text)
+    {
         return false;
     }
     history.push(text.to_string());
@@ -163,12 +172,29 @@ pub struct TuiApp {
     /// events so selecting can auto-scroll and copy to the system clipboard.
     selection_mode: bool,
     active_selection: Option<ChatSelection>,
+    active_input_selection: Option<InputSelection>,
     input: InputBox,
     pending_cursor_seq: Option<FragmentedCursorSeqState>,
     status: StatusBar,
     theme_store: ThemeStore,
     theme: Theme,
     should_quit: bool,
+    /// True after the first idle Esc on a non-empty draft: a second Esc then
+    /// clears it. Any other key disarms it (so a stray Esc never wipes a draft).
+    esc_clear_armed: bool,
+    /// Index of the pending image chip currently selected for delete/view (↑ to
+    /// select). `None` = no chip selected. Always points into the ACTIVE tab's
+    /// `pending_images`; cleared on submit / tab switch / when it empties.
+    selected_image: Option<usize>,
+    /// Click hitboxes for the rendered image chips: `(col_start, col_end, index)`
+    /// in absolute terminal columns, all on row `image_chip_row`. Rebuilt each
+    /// frame so a (Cmd/Ctrl)+left-click can open the chip under the cursor.
+    image_chip_hits: Vec<(u16, u16, usize)>,
+    image_chip_row: u16,
+    /// Clipboard preview temp files THIS process created (for the chip "view").
+    /// Only paths in this set are ever deleted, so a real user-supplied image
+    /// (even one that happens to live in the temp dir) is never removed.
+    clipboard_temps: HashSet<std::path::PathBuf>,
     /// Approval requests from gated tools (one dialog shown at a time).
     approval_rx: ApprovalReceiver,
     active_dialog: Option<PermissionDialog>,
@@ -205,6 +231,8 @@ pub struct TuiApp {
     /// The in-progress text saved when history browsing began, restored when
     /// the user pages back down past the newest entry.
     history_draft: String,
+    /// Index of the queued follow-up currently mirrored in the prompt editor.
+    queued_edit_index: Option<usize>,
 }
 
 impl TuiApp {
@@ -246,6 +274,17 @@ impl TuiApp {
             }
         }
 
+        // Seed input-line history with the conversation's prompts so Up/Down
+        // recalls them immediately — even on a fresh/resumed session before
+        // anything is typed. Persisted entries (prompt_history.json) come
+        // first; then this conversation's user messages (deduped, in order).
+        let mut prompt_history = load_prompt_history();
+        for msg in tab0.chat.messages() {
+            if msg.role == crate::ui::chat::Role::User {
+                record_prompt_history_entry(&mut prompt_history, &msg.text);
+            }
+        }
+
         // Read display prefs before `template` is moved into the struct.
         let show_thinking = template.show_thinking();
         let show_tool_details = template.show_tool_details();
@@ -262,12 +301,18 @@ impl TuiApp {
             sidebar_visibility: SidebarVisibility::Auto,
             selection_mode: true,
             active_selection: None,
+            active_input_selection: None,
             input: InputBox::new(),
             pending_cursor_seq: None,
             status,
             theme_store,
             theme,
             should_quit: false,
+            esc_clear_armed: false,
+            selected_image: None,
+            image_chip_hits: Vec::new(),
+            image_chip_row: 0,
+            clipboard_temps: HashSet::new(),
             approval_rx,
             active_dialog: None,
             pending_requests: VecDeque::new(),
@@ -290,9 +335,10 @@ impl TuiApp {
             provider_names: ui.provider_names,
             show_thinking,
             show_tool_details,
-            prompt_history: load_prompt_history(),
+            prompt_history,
             history_pos: None,
             history_draft: String::new(),
+            queued_edit_index: None,
         }
     }
 
@@ -341,6 +387,96 @@ impl TuiApp {
         }
     }
 
+    fn reset_input_browse_state(&mut self) {
+        self.completion_hint = None;
+        self.autocomplete.dismiss();
+        self.history_pos = None;
+        self.history_draft.clear();
+        self.active_input_selection = None;
+    }
+
+    fn save_queued_edit_text(&mut self, text: String) -> Option<usize> {
+        let index = self.queued_edit_index?;
+        self.queued_edit_index = None;
+        let queue = &mut self.tabs[self.active].queued_input;
+        if index >= queue.len() {
+            return None;
+        }
+        if text.trim().is_empty() {
+            queue.remove(index);
+            Some(index.min(queue.len()))
+        } else {
+            queue[index] = text;
+            self.queued_edit_index = Some(index);
+            Some(index)
+        }
+    }
+
+    fn save_current_queued_edit(&mut self) -> Option<usize> {
+        let text = self.input.text();
+        self.save_queued_edit_text(text)
+    }
+
+    fn select_queued_edit(&mut self, index: usize) -> bool {
+        let Some(text) = self.active_tab().queued_input.get(index).cloned() else {
+            self.queued_edit_index = None;
+            return false;
+        };
+        self.queued_edit_index = Some(index);
+        self.input.set_text(&text);
+        self.reset_input_browse_state();
+        true
+    }
+
+    fn edit_previous_queued_input(&mut self) -> bool {
+        if !self.active_tab().is_busy() {
+            return false;
+        }
+        let current = if self.queued_edit_index.is_some() {
+            self.save_current_queued_edit()
+                .unwrap_or_else(|| self.active_tab().queued_input.len())
+        } else {
+            self.active_tab().queued_input.len()
+        };
+        let len = self.active_tab().queued_input.len();
+        if len == 0 {
+            return false;
+        }
+        let target = current.saturating_sub(1).min(len - 1);
+        self.select_queued_edit(target)
+    }
+
+    fn edit_next_queued_input(&mut self) -> bool {
+        let Some(_) = self.queued_edit_index else {
+            return false;
+        };
+        let current = self.save_current_queued_edit().unwrap_or(0);
+        let len = self.active_tab().queued_input.len();
+        if len == 0 || current + 1 >= len {
+            self.queued_edit_index = None;
+            self.input.take();
+            self.reset_input_browse_state();
+            return true;
+        }
+        self.select_queued_edit(current + 1)
+    }
+
+    fn finish_queued_edit(&mut self, text: String) -> bool {
+        if self.queued_edit_index.is_none() {
+            return false;
+        }
+        let removed = text.trim().is_empty();
+        self.save_queued_edit_text(text);
+        self.queued_edit_index = None;
+        self.reset_input_browse_state();
+        self.toast = Some(Toast::info(if removed {
+            "queued message removed"
+        } else {
+            "queued message updated"
+        }));
+        true
+    }
+
     fn active_tab(&self) -> &SessionTab {
         &self.tabs[self.active]
     }
@@ -360,6 +496,7 @@ impl TuiApp {
                     .push(SessionTab::new(id, Arc::new(engine), session_id));
                 self.active = self.tabs.len() - 1;
                 self.autocomplete.dismiss();
+                self.queued_edit_index = None;
             }
             Err(e) => {
                 self.toast = Some(Toast::error(format!("new tab failed: {e}")));
@@ -370,6 +507,15 @@ impl TuiApp {
     /// Close the active tab (Ctrl+W). Aborts its in-flight turn first; closing
     /// the last tab quits.
     fn close_active_tab(&mut self) {
+        // Drop the tab's clipboard preview temp files before it goes away.
+        let temps: Vec<std::path::PathBuf> = self.tabs[self.active]
+            .pending_images
+            .iter()
+            .map(|i| i.path.clone())
+            .collect();
+        for path in &temps {
+            cleanup_clipboard_temp(&mut self.clipboard_temps, path);
+        }
         if self.tabs.len() == 1 {
             self.should_quit = true;
             return;
@@ -382,6 +528,7 @@ impl TuiApp {
             self.active = self.tabs.len() - 1;
         }
         self.autocomplete.dismiss();
+        self.queued_edit_index = None;
     }
 
     /// Abort the active tab's in-flight turn, if any. Returns true when a turn
@@ -406,6 +553,9 @@ impl TuiApp {
         if idx < self.tabs.len() {
             self.active = idx;
             self.autocomplete.dismiss();
+            self.queued_edit_index = None;
+            // The chip selection indexes the previous tab's images.
+            self.selected_image = None;
         }
     }
 
@@ -414,6 +564,7 @@ impl TuiApp {
         if !self.tabs.is_empty() {
             self.active = (self.active + 1) % self.tabs.len();
             self.autocomplete.dismiss();
+            self.queued_edit_index = None;
         }
     }
 
@@ -430,6 +581,7 @@ impl TuiApp {
         if let Some(src) = req.source.as_deref().and_then(|s| s.parse::<usize>().ok()) {
             if let Some(pos) = self.tabs.iter().position(|t| t.id == src) {
                 self.active = pos;
+                self.queued_edit_index = None;
             }
         }
         let cwd = self.active_tab().engine.cwd.clone();
@@ -439,15 +591,48 @@ impl TuiApp {
     /// Respond to the active permission prompt, then surface the next queued
     /// request (if any), focusing its source tab/cwd.
     fn answer_permission(&mut self, approval: Approval) {
+        // Capture the tool before answering (responding consumes the request).
+        let tool = self.active_dialog.as_ref().map(|d| d.tool().to_string());
         let responded = self
             .active_dialog
             .as_mut()
             .map(|d| d.answer(approval))
             .unwrap_or(false);
         if responded {
+            // Persist an "allow always" decision to the project state so the
+            // tool is auto-allowed (no prompt) in future sessions here.
+            if approval == Approval::AllowAlways {
+                if let Some(tool) = tool {
+                    self.persist_allow_always(&tool);
+                }
+            }
             let next = self.pending_requests.pop_front();
             self.active_dialog = next.map(|r| self.open_approval(r));
         }
+    }
+
+    /// Record a tool name into `<cwd>/.zode/state.json` `permissions.allow`
+    /// (deduped) so an "allow always" choice survives restarts.
+    fn persist_allow_always(&self, tool: &str) {
+        let cwd = self.active_tab().engine.cwd.clone();
+        let tool = tool.to_string();
+        // Best-effort: a failed persist must not interrupt the turn.
+        let _ = zode_core::config::ConfigManager::update_project_state(&cwd, |s| {
+            let perms = s
+                .entry("permissions")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(perms) = perms.as_object_mut() {
+                let allow = perms
+                    .entry("allow")
+                    .or_insert_with(|| serde_json::json!([]));
+                if let Some(arr) = allow.as_array_mut() {
+                    let val = serde_json::Value::String(tool);
+                    if !arr.contains(&val) {
+                        arr.push(val);
+                    }
+                }
+            }
+        });
     }
 
     /// Show a question modal, focusing the tab that asked (its `source` id) —
@@ -458,6 +643,7 @@ impl TuiApp {
             if let Some(src) = req.source.as_deref().and_then(|s| s.parse::<usize>().ok()) {
                 if let Some(pos) = self.tabs.iter().position(|t| t.id == src) {
                     self.active = pos;
+                    self.queued_edit_index = None;
                 }
             }
         }
@@ -949,6 +1135,15 @@ impl TuiApp {
         loop {
             terminal.draw(|f| self.draw(f))?;
             if self.should_quit {
+                // Sweep any clipboard preview temp files still held by any tab.
+                let temps: Vec<std::path::PathBuf> = self
+                    .tabs
+                    .iter()
+                    .flat_map(|t| t.pending_images.iter().map(|i| i.path.clone()))
+                    .collect();
+                for path in &temps {
+                    cleanup_clipboard_temp(&mut self.clipboard_temps, path);
+                }
                 break;
             }
 
@@ -1032,6 +1227,15 @@ impl TuiApp {
             self.status.plan_mode = tab.plan_mode;
             self.status.selection_mode = self.selection_mode;
         }
+        // Keep the approval + sandbox badges in sync with the live template
+        // (single source of truth across startup / toggles / tab switches).
+        self.status.yolo = self.template.yolo();
+        let sandbox = self.template.sandbox();
+        self.status.sandbox = sandbox.is_some();
+        self.status.sandbox_read_only = sandbox
+            .map(|c| c.mode() == zode_core::sandbox::SandboxMode::ReadOnly)
+            .unwrap_or(false);
+        self.status.sandbox_network = sandbox.map(|c| c.allow_network()).unwrap_or(false);
         let active_title = self.tabs[self.active].title.clone();
         let active_model = self.tabs[self.active].engine.model.clone();
         let active_cwd = self.tabs[self.active].engine.cwd.clone();
@@ -1115,26 +1319,33 @@ impl TuiApp {
         let mut input_area: Rect = areas.composer;
         if !self.tabs[self.active].pending_images.is_empty() && input_area.height > 2 {
             let chips_area = Rect::new(input_area.x, input_area.y, input_area.width, 1);
-            render_pending_image_chips(
+            let hits = render_pending_image_chips(
                 f,
                 chips_area,
                 &self.tabs[self.active].pending_images,
+                self.selected_image,
                 &theme,
             );
+            // Remember where each chip sits so a (Cmd/Ctrl)+click can open it.
+            self.image_chip_row = chips_area.y;
+            self.image_chip_hits = hits;
             input_area.y = input_area.y.saturating_add(1);
             input_area.height = input_area.height.saturating_sub(1);
+        } else {
+            self.image_chip_hits.clear();
         }
         let input_text = self.input.text();
         let completion_placeholder = self
             .completion_hint
             .as_ref()
             .and_then(|hint| (input_text == hint.prefix).then_some(hint.placeholder.as_str()));
-        self.input.render(
+        self.input.render_with_selection(
             f,
             input_area,
             &theme,
             self.status.mode,
             completion_placeholder,
+            self.active_input_selection,
         );
         self.status.render(f, areas.status, &theme);
         // Autocomplete popup floats above the input row.
@@ -1304,6 +1515,18 @@ impl TuiApp {
             return;
         }
 
+        // Any key other than Esc disarms the two-Esc "clear draft" gesture, so
+        // a single stray Esc never wipes a draft on its own.
+        if key.code != KeyCode::Esc {
+            self.esc_clear_armed = false;
+        }
+
+        // 3b. Pending-image chips: ↑ selects, ←/→/↑/↓ move, Backspace/Delete
+        // removes, Enter (or Cmd/Ctrl+Enter) views, Esc/typing exit selection.
+        if self.handle_image_chip_key(key) {
+            return;
+        }
+
         // 4. Global chords.
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
@@ -1311,10 +1534,8 @@ impl TuiApp {
                 // running turn or quit when idle.
                 if !self.input.is_empty() {
                     self.input.take();
-                    self.completion_hint = None;
-                    self.autocomplete.dismiss();
-                    self.history_pos = None;
-                    self.history_draft.clear();
+                    self.queued_edit_index = None;
+                    self.reset_input_browse_state();
                     return;
                 }
                 if !self.interrupt_active_turn() {
@@ -1329,6 +1550,24 @@ impl TuiApp {
                 if self.tabs[self.active].is_busy() && !self.autocomplete.is_active() =>
             {
                 self.interrupt_active_turn();
+                return;
+            }
+            // Idle with a non-empty draft (and no autocomplete to dismiss): two
+            // Escs clear it. The first arms + hints; the second wipes the draft.
+            (KeyCode::Esc, _)
+                if !self.tabs[self.active].is_busy()
+                    && !self.autocomplete.is_active()
+                    && !self.input.is_empty() =>
+            {
+                if self.esc_clear_armed {
+                    self.input.take();
+                    self.queued_edit_index = None;
+                    self.reset_input_browse_state();
+                    self.esc_clear_armed = false;
+                } else {
+                    self.esc_clear_armed = true;
+                    self.toast = Some(Toast::info("press Esc again to clear the input"));
+                }
                 return;
             }
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
@@ -1353,11 +1592,10 @@ impl TuiApp {
                 }
                 return;
             }
-            (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
-                match zode_core::clipboard::read_from_clipboard() {
-                    Ok(text) => self.handle_paste(&text),
-                    Err(e) => self.toast = Some(Toast::error(format!("paste failed: {e}"))),
-                }
+            // Paste uses the platform primary modifier (Cmd on macOS, Ctrl on
+            // Windows/Linux), like the other app chords — not Ctrl-only.
+            (KeyCode::Char('v'), m) if is_primary_mod(m) => {
+                self.paste_from_clipboard();
                 return;
             }
             // App chords use the platform primary modifier: Cmd (⌘) on macOS,
@@ -1507,8 +1745,10 @@ impl TuiApp {
                 if !m.contains(KeyModifiers::SHIFT) && !m.contains(KeyModifiers::ALT) =>
             {
                 let text = self.input.take();
-                self.completion_hint = None;
-                self.autocomplete.dismiss();
+                self.reset_input_browse_state();
+                if self.finish_queued_edit(text.clone()) {
+                    return;
+                }
                 if !text.trim().is_empty() {
                     self.record_prompt_history(&text);
                     self.submit(&text, agent_tx).await;
@@ -1516,19 +1756,182 @@ impl TuiApp {
             }
             (KeyCode::Enter, _) => self.input.insert_newline(),
             (KeyCode::Up, m) if m.is_empty() && self.input.cursor_on_first_line() => {
-                self.history_prev();
+                if !self.edit_previous_queued_input() {
+                    self.history_prev();
+                }
             }
             (KeyCode::Down, m) if m.is_empty() && self.input.cursor_on_last_line() => {
-                self.history_next();
+                if !self.edit_next_queued_input() {
+                    self.history_next();
+                }
             }
             _ => {
+                self.active_input_selection = None;
                 self.input.input(key);
                 // Editing the text exits history-browse mode.
                 self.history_pos = None;
+                // A file dragged into the terminal arrives as typed keystrokes
+                // (not a bracketed paste), so handle_paste never sees it. Once a
+                // complete, existing image path lands in the input, lift it into
+                // an image chip — same display as a pasted/clipboard image.
+                self.absorb_image_paths_from_input();
             }
         }
         // 7. Refresh the autocomplete popup from the new input text.
         self.autocomplete.update(&self.input.text());
+    }
+
+    /// If the current input text contains a complete, existing image path (e.g.
+    /// a file dragged into the terminal), move it into a pending image chip and
+    /// strip it from the text. Cheap-guards on an image extension so ordinary
+    /// typing doesn't hit the filesystem; silently leaves the text unchanged if
+    /// nothing resolves (a half-typed path is not an error here).
+    fn absorb_image_paths_from_input(&mut self) {
+        let text = self.input.text();
+        let lower = text.to_ascii_lowercase();
+        let has_image_ext = [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+            .iter()
+            .any(|ext| lower.contains(ext));
+        if !has_image_ext {
+            return;
+        }
+        let cwd = self.active_tab().engine.cwd.clone();
+        if let Ok(parsed) = split_pasted_image_paths(&cwd, &text) {
+            if !parsed.images.is_empty() {
+                let n = parsed.images.len();
+                self.active_tab_mut().pending_images.extend(parsed.images);
+                self.input.set_text(&parsed.remaining_text);
+                self.toast = Some(Toast::info(format!(
+                    "attached {n} image{}",
+                    if n == 1 { "" } else { "s" }
+                )));
+            }
+        }
+    }
+
+    /// Handle keys for the pending-image chips. Returns `true` if the key was
+    /// consumed. ↑ enters/moves selection (only when the input is empty, so it
+    /// doesn't fight history/cursor); ←/→/↑/↓ move; Backspace/Delete removes the
+    /// selected image; Enter (or the platform primary modifier + Enter) views
+    /// it; Esc or any other key exits selection.
+    fn handle_image_chip_key(&mut self, key: KeyEvent) -> bool {
+        let len = self.active_tab().pending_images.len();
+        if len == 0 {
+            self.selected_image = None;
+            return false;
+        }
+        // Only the first MAX_VISIBLE_CHIPS chips are rendered (+N for the rest),
+        // so selection is capped to what's actually shown/highlighted.
+        let visible = len.min(MAX_VISIBLE_CHIPS);
+        // Keep a stale index in range.
+        if let Some(i) = self.selected_image {
+            if i >= visible {
+                self.selected_image = Some(visible - 1);
+            }
+        }
+        let selected = self.selected_image;
+        match key.code {
+            // Enter selection from the empty input; once selecting, move toward
+            // earlier chips.
+            KeyCode::Up if key.modifiers.is_empty() && self.input.is_empty() => {
+                self.selected_image = Some(match selected {
+                    None => visible - 1,
+                    Some(i) => i.saturating_sub(1),
+                });
+                true
+            }
+            KeyCode::Left if selected.is_some() => {
+                self.selected_image = Some(selected.unwrap().saturating_sub(1));
+                true
+            }
+            KeyCode::Right | KeyCode::Down if selected.is_some() => {
+                let i = selected.unwrap();
+                // Past the last visible chip → leave selection.
+                self.selected_image = if i + 1 < visible { Some(i + 1) } else { None };
+                true
+            }
+            KeyCode::Backspace | KeyCode::Delete if selected.is_some() => {
+                let i = selected.unwrap();
+                let removed = self.active_tab_mut().pending_images.remove(i);
+                cleanup_clipboard_temp(&mut self.clipboard_temps, &removed.path);
+                let remaining = self.active_tab().pending_images.len();
+                self.selected_image = (remaining > 0).then(|| i.min(remaining - 1));
+                self.toast = Some(Toast::info("removed attached image"));
+                true
+            }
+            KeyCode::Enter if selected.is_some() => {
+                self.view_selected_image();
+                true
+            }
+            KeyCode::Esc if selected.is_some() => {
+                self.selected_image = None;
+                true
+            }
+            // Any other key leaves selection and is handled normally.
+            _ => {
+                if selected.is_some()
+                    && !matches!(key.code, KeyCode::Up | KeyCode::Left | KeyCode::Right)
+                {
+                    self.selected_image = None;
+                }
+                false
+            }
+        }
+    }
+
+    /// Open the selected pending image in the OS image viewer (`open` on macOS,
+    /// `xdg-open` on Linux, `start` on Windows). Clipboard images are backed by
+    /// a temp file at attach time, so every chip has a path to open.
+    fn view_selected_image(&mut self) {
+        let Some(i) = self.selected_image else { return };
+        let path = match self.active_tab().pending_images.get(i) {
+            Some(img) if !img.path.as_os_str().is_empty() => img.path.clone(),
+            _ => {
+                self.toast = Some(Toast::error("no file to view for this image"));
+                return;
+            }
+        };
+        match open_in_os_viewer(&path) {
+            Ok(()) => self.toast = Some(Toast::info("opening image…")),
+            Err(e) => self.toast = Some(Toast::error(format!("view failed: {e}"))),
+        }
+    }
+
+    /// Ctrl+V: prefer an IMAGE on the clipboard (a screenshot or copied image),
+    /// then fall back to text. Terminals only deliver pastes as text and never
+    /// hand image data to a TUI, so we query the OS clipboard directly.
+    fn paste_from_clipboard(&mut self) {
+        match zode_core::clipboard::read_image_from_clipboard() {
+            Ok(Some(bytes)) => self.attach_clipboard_image(bytes),
+            // No image (or the image read failed) → treat it as a text paste.
+            Ok(None) | Err(_) => self.paste_clipboard_text(),
+        }
+    }
+
+    fn paste_clipboard_text(&mut self) {
+        match zode_core::clipboard::read_from_clipboard() {
+            Ok(text) => self.handle_paste(&text),
+            Err(e) => self.toast = Some(Toast::error(format!("paste failed: {e}"))),
+        }
+    }
+
+    /// Attach raw image bytes from the clipboard as a pending image (same queue
+    /// as a pasted image path), so the next prompt sends it.
+    fn attach_clipboard_image(&mut self, bytes: Vec<u8>) {
+        match zode_core::images::image_attachment_from_bytes(&bytes, "clipboard image") {
+            Ok(mut image) => {
+                // Back the clipboard image with a temp file so it can be VIEWED
+                // (Enter on the chip opens this path). The content_block (base64)
+                // is still what gets sent to the model.
+                if let Some(path) = write_clipboard_temp_image(&bytes, &image.media_type) {
+                    self.clipboard_temps.insert(path.clone());
+                    image.path = path;
+                }
+                self.active_tab_mut().pending_images.push(image);
+                self.toast = Some(Toast::info("attached image from clipboard"));
+            }
+            Err(e) => self.toast = Some(Toast::error(format!("paste image failed: {e}"))),
+        }
     }
 
     fn handle_paste(&mut self, text: &str) {
@@ -1547,6 +1950,17 @@ impl TuiApp {
             || self.tasks_panel.is_some()
             || self.show_help
         {
+            return;
+        }
+
+        // An empty paste usually means the terminal's own ⌘V (Edit▸Paste) fired
+        // on an IMAGE clipboard — it had no text to send. Probe for an image so
+        // ⌘V attaches it even in terminals that intercept ⌘V (Terminal.app,
+        // iTerm2) instead of forwarding the key event to the app.
+        if text.trim().is_empty() {
+            if let Ok(Some(bytes)) = zode_core::clipboard::read_image_from_clipboard() {
+                self.attach_clipboard_image(bytes);
+            }
             return;
         }
 
@@ -1570,6 +1984,30 @@ impl TuiApp {
                 self.toast = Some(Toast::error(e.to_string()));
             }
         }
+    }
+
+    /// (Cmd/Ctrl)+left-click on a pending-image chip → select + open it in the
+    /// OS viewer. Returns true if the click hit a chip. Note: terminals only
+    /// report Shift/Alt/Ctrl modifiers on mouse events (the mouse protocol
+    /// can't carry ⌘), so on macOS this is effectively Ctrl-click.
+    fn try_view_image_chip_click(&mut self, mouse: &MouseEvent) -> bool {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            || !is_primary_mod(mouse.modifiers)
+            || mouse.row != self.image_chip_row
+        {
+            return false;
+        }
+        let hit = self
+            .image_chip_hits
+            .iter()
+            .find(|(start, end, _)| mouse.column >= *start && mouse.column < *end)
+            .map(|(_, _, idx)| *idx);
+        if let Some(idx) = hit {
+            self.selected_image = Some(idx);
+            self.view_selected_image();
+            return true;
+        }
+        false
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -1596,21 +2034,83 @@ impl TuiApp {
             return;
         }
 
+        // (Cmd/Ctrl)+left-click on an image chip opens it in the OS viewer.
+        if self.try_view_image_chip_click(&mouse) {
+            return;
+        }
+
         let Ok((width, height)) = crossterm::terminal::size() else {
             return;
         };
         let area = Rect::new(0, 0, width, height);
         let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_visibility);
         let areas = split_main(area, show_sidebar);
+        let input_area = self.input_area_for_composer(areas.composer);
 
-        if self.selection_mode && self.handle_selection_mouse(mouse, areas.chat) {
-            return;
+        if self.selection_mode {
+            if self.handle_input_selection_mouse(mouse, input_area) {
+                return;
+            }
+            if self.handle_selection_mouse(mouse, areas.chat) {
+                return;
+            }
         }
 
         match chat_scroll_from_mouse(mouse.kind, mouse.column, mouse.row, areas.chat) {
             Some(ChatMouseScroll::Up(n)) => self.tabs[self.active].chat.scroll_up(n),
             Some(ChatMouseScroll::Down(n)) => self.tabs[self.active].chat.scroll_down(n),
             None => {}
+        }
+    }
+
+    fn input_area_for_composer(&self, mut input_area: Rect) -> Rect {
+        if !self.tabs[self.active].pending_images.is_empty() && input_area.height > 2 {
+            input_area.y = input_area.y.saturating_add(1);
+            input_area.height = input_area.height.saturating_sub(1);
+        }
+        input_area
+    }
+
+    fn handle_input_selection_mouse(&mut self, mouse: MouseEvent, input_area: Rect) -> bool {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.active_input_selection = None;
+                let Some(point) =
+                    self.input
+                        .selection_point_at(input_area, mouse.column, mouse.row)
+                else {
+                    return false;
+                };
+                self.active_selection = None;
+                self.active_input_selection = Some(InputSelection::new(point, point));
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(selection) = self.active_input_selection else {
+                    return false;
+                };
+                if let Some(point) =
+                    self.input
+                        .selection_point_at(input_area, mouse.column, mouse.row)
+                {
+                    self.active_input_selection = Some(InputSelection::new(selection.anchor, point));
+                }
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(selection) = self.active_input_selection else {
+                    return false;
+                };
+                let selection = self
+                    .input
+                    .selection_point_at(input_area, mouse.column, mouse.row)
+                    .map(|point| InputSelection::new(selection.anchor, point))
+                    .unwrap_or(selection);
+                self.active_input_selection = Some(selection);
+                self.copy_input_selection(selection);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1700,6 +2200,17 @@ impl TuiApp {
         }
     }
 
+    fn copy_input_selection(&mut self, selection: InputSelection) {
+        let text = self.input.selected_text(selection);
+        if text.trim().is_empty() {
+            return;
+        }
+        match zode_core::clipboard::copy_to_clipboard(&text) {
+            Ok(_) => self.toast = Some(Toast::info("copied input selection to clipboard")),
+            Err(e) => self.toast = Some(Toast::error(format!("copy failed: {e}"))),
+        }
+    }
+
     fn open_settings(&mut self) {
         let theme_ids = self.theme_ids();
         self.settings = Some(SettingsDialog::new(theme_ids, self.provider_names.clone()));
@@ -1723,6 +2234,97 @@ impl TuiApp {
 
     fn open_language_picker(&mut self) {
         self.settings = Some(SettingsDialog::language_picker());
+    }
+
+    fn open_sandbox_picker(&mut self) {
+        self.settings = Some(SettingsDialog::sandbox_picker());
+    }
+
+    /// Open the image-understanding provider picker (`/vision`). With no named
+    /// providers configured there's nothing to pick, so fall back to a hint.
+    fn open_vision_picker(&mut self) {
+        let providers = self.template.provider_names();
+        if providers.is_empty() {
+            self.active_tab_mut().chat.push_system(
+                "no named providers configured — add one under `providers` in your config, \
+                 then pick it here to handle image understanding",
+            );
+            return;
+        }
+        self.settings = Some(SettingsDialog::vision_provider_picker(providers));
+    }
+
+    /// Apply a `/sandbox` action (also used by the sandbox picker): toggle the
+    /// sandbox on/off, switch mode, or toggle network, then rebuild the active
+    /// tab's engine and report the new state.
+    async fn apply_sandbox_action(&mut self, action: &str) {
+        use zode_core::sandbox::{resolve, SandboxConfig, SandboxMode};
+        let cwd = self.active_tab().engine.cwd.clone();
+        let current = self.template.sandbox().cloned();
+        let arg = action
+            .trim()
+            .to_ascii_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let target: Option<Option<SandboxConfig>> = match arg.as_str() {
+            "off" | "disable" => Some(None),
+            "on" | "enable" => {
+                let mode = current.as_ref().map(|c| c.mode()).unwrap_or_default();
+                let net = current.as_ref().map(|c| c.allow_network()).unwrap_or(false);
+                // Codex defaults: /tmp + $TMPDIR writable (re-enabling from off).
+                Some(resolve(&cwd, true, mode, net, &[], false, false))
+            }
+            "read-only" | "readonly" | "ro" => Some(match current.clone() {
+                Some(c) => Some(c.with_mode(SandboxMode::ReadOnly)),
+                None => resolve(&cwd, true, SandboxMode::ReadOnly, false, &[], false, false),
+            }),
+            "workspace-write" | "write" | "ww" => Some(match current.clone() {
+                Some(c) => Some(c.with_mode(SandboxMode::WorkspaceWrite)),
+                None => resolve(&cwd, true, SandboxMode::WorkspaceWrite, false, &[], false, false),
+            }),
+            "network on" | "net on" | "network" => Some(match current.clone() {
+                Some(c) => Some(c.with_network(true)),
+                None => resolve(&cwd, true, SandboxMode::default(), true, &[], false, false),
+            }),
+            "network off" | "net off" => Some(current.clone().map(|c| c.with_network(false))),
+            _ => {
+                let line = sandbox_status_line(current.as_ref());
+                self.active_tab_mut().chat.push_system(&line);
+                return;
+            }
+        };
+        if let Some(new_sandbox) = target {
+            let t = self.template.with_sandbox(new_sandbox.clone());
+            if self.reassemble_active(t.clone()).await {
+                self.template = t;
+                self.status.sandbox = new_sandbox.is_some();
+                // Remember the sandbox state for this project (.zode/state.json).
+                let cwd = self.active_tab().engine.cwd.clone();
+                let mode = new_sandbox.as_ref().map(|c| match c.mode() {
+                    SandboxMode::ReadOnly => "read-only",
+                    SandboxMode::WorkspaceWrite => "workspace-write",
+                });
+                let network = new_sandbox.as_ref().map(|c| c.allow_network());
+                let enabled = new_sandbox.is_some();
+                let _ = zode_core::config::ConfigManager::update_project_state(&cwd, |s| {
+                    s.insert(
+                        "sandbox".into(),
+                        serde_json::json!({
+                            "enabled": enabled,
+                            "mode": mode,
+                            "network": network,
+                        }),
+                    );
+                });
+                let line = sandbox_status_line(new_sandbox.as_ref());
+                self.active_tab_mut().chat.push_system(&line);
+            } else {
+                self.active_tab_mut()
+                    .chat
+                    .push_system("sandbox: unavailable on this host (need sandbox-exec / bwrap)");
+            }
+        }
     }
 
     fn open_connect_dialog(&mut self) {
@@ -2055,6 +2657,12 @@ impl TuiApp {
                     self.toast = Some(Toast::info(format!("language → {name}")));
                 }
             }
+            SettingsAction::SetSandbox(action) => {
+                self.apply_sandbox_action(&action).await;
+            }
+            SettingsAction::SetVisionProvider(provider) => {
+                self.apply_vision_provider(&provider);
+            }
         }
     }
 
@@ -2216,8 +2824,14 @@ impl TuiApp {
         if self.active_tab().is_busy() {
             return;
         }
+        if self.queued_edit_index == Some(0) {
+            return;
+        }
         let next = self.active_tab_mut().queued_input.pop_front();
         if let Some(text) = next {
+            if let Some(index) = self.queued_edit_index.as_mut() {
+                *index = index.saturating_sub(1);
+            }
             self.submit(&text, agent_tx).await;
         }
     }
@@ -2367,10 +2981,17 @@ impl TuiApp {
             self.active_tab_mut().stamp_title(&title_source).await;
         }
 
+        // The pending images are about to be consumed; drop any chip selection.
+        self.selected_image = None;
         let tab = &mut self.tabs[self.active];
         let images = std::mem::take(&mut tab.pending_images);
         let previews = image_previews(&images);
         let content = user_content_blocks(&submitted_text, &images);
+        // The image bytes are now in `content` (base64); the clipboard preview
+        // temp files are no longer needed — clean them up.
+        for image in &images {
+            cleanup_clipboard_temp(&mut self.clipboard_temps, &image.path);
+        }
         tab.chat.push_user_with_images(&submitted_text, previews);
         // No begin_assistant(): push_delta lazily opens an assistant segment,
         // so text after a tool card starts a fresh segment.
@@ -2482,6 +3103,28 @@ impl TuiApp {
             });
             return;
         }
+        // A manual /compact finished: clear the tab's busy state and post the
+        // outcome. Routed by tab id only (it isn't a turn).
+        if let AppEvent::CompactDone { tab_id, result } = ev {
+            let Some(tab) = self.tab_by_id(tab_id) else {
+                return;
+            };
+            tab.turn_abort = None;
+            tab.active_turn_id = 0;
+            let ok = result.is_ok();
+            match result {
+                Ok(summary) => tab.chat.push_system(&summary),
+                Err(e) => tab.chat.push_system(&format!("compact failed: {e}")),
+            }
+            // Compaction rewrote the message store; persist it so the compacted
+            // transcript survives a resume (mirrors the post-turn save).
+            if ok {
+                let (session_id, engine, title) =
+                    (tab.session_id.clone(), tab.engine.clone(), tab.title.clone());
+                tokio::spawn(crate::tab::persist_session(session_id, engine, title));
+            }
+            return;
+        }
         // Route to the originating tab; drop events from a closed tab.
         let (tab_id, turn_id) = match &ev {
             AppEvent::Agent {
@@ -2490,7 +3133,9 @@ impl TuiApp {
             | AppEvent::TurnDone {
                 tab_id, turn_id, ..
             } => (*tab_id, *turn_id),
-            AppEvent::Toast { .. } => unreachable!("handled above"),
+            AppEvent::Toast { .. } | AppEvent::CompactDone { .. } => {
+                unreachable!("handled above")
+            }
         };
         let Some(tab) = self.tab_by_id(tab_id) else {
             return;
@@ -2579,7 +3224,9 @@ impl TuiApp {
                 );
                 tokio::spawn(crate::tab::persist_session(session_id, engine, title));
             }
-            AppEvent::Toast { .. } => unreachable!("handled above"),
+            AppEvent::Toast { .. } | AppEvent::CompactDone { .. } => {
+                unreachable!("handled above")
+            }
         }
     }
 
@@ -2618,7 +3265,6 @@ impl TuiApp {
             "connect" => self.open_connect_dialog(),
             "plugin" => self.open_plugin_picker(),
             "vision" => self.handle_vision(args),
-            "selection" => self.handle_selection_command(args),
             "sidebar" => {
                 if args.trim().is_empty() {
                     self.open_sidebar_picker();
@@ -2635,11 +3281,7 @@ impl TuiApp {
                 );
                 self.active_tab_mut().chat.push_system(&msg);
             }
-            "compact" => {
-                self.active_tab_mut()
-                    .chat
-                    .push_system("(auto-compaction is enabled; manual /compact lands later)");
-            }
+            "compact" => self.spawn_compact(agent_tx),
             "model" => {
                 if args.is_empty() {
                     self.open_model_picker();
@@ -2658,6 +3300,15 @@ impl TuiApp {
                     } else {
                         "yolo: OFF — tools prompt for approval"
                     });
+                }
+            }
+            "sandbox" => {
+                // No args → open the picker (the options are too many to type);
+                // a direct arg (`/sandbox off`) still applies immediately.
+                if args.trim().is_empty() {
+                    self.open_sandbox_picker();
+                } else {
+                    self.apply_sandbox_action(args).await;
                 }
             }
             "plan" => {
@@ -2884,6 +3535,43 @@ impl TuiApp {
         });
     }
 
+    /// Manually compact the active tab's conversation (`/compact`). Runs the
+    /// summarization off-loop (it calls the provider) and reuses the turn-busy
+    /// machinery so the UI shows progress and Esc can interrupt it. The result
+    /// lands back as a `CompactDone` event.
+    fn spawn_compact(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        if self.active_tab().is_busy() {
+            self.active_tab_mut()
+                .chat
+                .push_system("busy — finish or interrupt the current turn before /compact");
+            return;
+        }
+        let tab_id = self.active_tab().id;
+        let engine = self.active_tab().engine.clone();
+        let abort = AbortController::new();
+        self.active_tab_mut().turn_abort = Some(abort.clone());
+        self.active_tab_mut()
+            .chat
+            .push_system("compacting the conversation…");
+        let tx = agent_tx.clone();
+        tokio::spawn(async move {
+            let result = engine
+                .compact(abort)
+                .await
+                .map(|o| {
+                    format!(
+                        "compacted {} message{} · ~{} → ~{} tokens",
+                        o.replaced,
+                        if o.replaced == 1 { "" } else { "s" },
+                        o.pre_tokens,
+                        o.post_tokens,
+                    )
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::CompactDone { tab_id, result });
+        });
+    }
+
     fn handle_theme(&mut self, args: &str) {
         if args.is_empty() {
             self.open_theme_picker();
@@ -2908,11 +3596,14 @@ impl TuiApp {
     fn handle_vision(&mut self, args: &str) {
         let trimmed = args.trim();
         if trimmed.is_empty() {
+            // Show the current config, then open the provider picker so the user
+            // has an interactive place to configure image understanding.
             let msg = vision_summary(
                 self.template.images(),
                 self.active_tab().engine.supports_images(),
             );
             self.active_tab_mut().chat.push_system(&msg);
+            self.open_vision_picker();
             return;
         }
 
@@ -2973,21 +3664,53 @@ impl TuiApp {
             }
         };
 
+        if !self.persist_images_config(images) {
+            return;
+        }
+        self.active_tab_mut().chat.push_system(&message);
+    }
+
+    /// Save `images` to the global config and update the live template. Returns
+    /// false (after toasting) on an IO error. Shared by `/vision` and the vision
+    /// provider picker.
+    fn persist_images_config(&mut self, images: ImagesConfig) -> bool {
         match ConfigManager::load_global() {
             Ok(mut cfg) => {
                 cfg.images = images.clone();
                 if let Err(e) = ConfigManager::save_global(&cfg) {
                     self.toast = Some(Toast::error(format!("save config failed: {e}")));
-                    return;
+                    return false;
                 }
             }
             Err(e) => {
                 self.toast = Some(Toast::error(format!("load config failed: {e}")));
-                return;
+                return false;
             }
         }
-
         self.template = self.template.with_images_config(images);
+        true
+    }
+
+    /// Set (or clear, on "off") the image-understanding provider — from the
+    /// vision picker or the settings dialog. Mirrors `/vision provider <name>`.
+    fn apply_vision_provider(&mut self, provider: &str) {
+        let mut images = self.template.images().clone();
+        let message = if provider == "off" || provider.is_empty() {
+            images.vision_provider = None;
+            images.mode = Some(ImageMode::Auto);
+            "vision model disabled (image mode → auto)".to_string()
+        } else {
+            if !self.template.provider_names().iter().any(|n| n == provider) {
+                self.toast = Some(Toast::error(format!("no provider '{provider}' in config")));
+                return;
+            }
+            images.vision_provider = Some(provider.to_string());
+            images.mode = Some(ImageMode::VisionModel);
+            format!("vision provider → {provider}")
+        };
+        if !self.persist_images_config(images) {
+            return;
+        }
         self.active_tab_mut().chat.push_system(&message);
     }
 
@@ -3015,39 +3738,6 @@ impl TuiApp {
         }
     }
 
-    fn handle_selection_command(&mut self, args: &str) {
-        match resolve_selection_mode(args, self.selection_mode) {
-            Ok(enabled) => self.set_selection_mode(enabled),
-            Err(msg) => self.active_tab_mut().chat.push_system(&msg),
-        }
-    }
-
-    fn set_selection_mode(&mut self, enabled: bool) {
-        if self.selection_mode == enabled {
-            self.toast = Some(Toast::info(format!(
-                "selection mode {}",
-                on_off(self.selection_mode)
-            )));
-            return;
-        }
-        self.selection_mode = enabled;
-        self.active_selection = None;
-        let mut stdout = std::io::stdout();
-        let result = if enabled {
-            stdout.execute(EnableMouseCapture)
-        } else {
-            stdout.execute(DisableMouseCapture)
-        };
-        match result {
-            Ok(_) => {
-                self.toast = Some(Toast::info(format!("selection mode {}", on_off(enabled))));
-            }
-            Err(e) => {
-                self.selection_mode = !enabled;
-                self.toast = Some(Toast::error(format!("selection mode failed: {e}")));
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3474,15 +4164,6 @@ fn resolve_sidebar_visibility(
     }
 }
 
-fn resolve_selection_mode(args: &str, current: bool) -> Result<bool, String> {
-    match args.trim().to_ascii_lowercase().as_str() {
-        "" | "toggle" => Ok(!current),
-        "on" | "show" | "open" | "enable" | "enabled" => Ok(true),
-        "off" | "hide" | "close" | "disable" | "disabled" => Ok(false),
-        _ => Err("usage: /selection [on|off|toggle]".to_string()),
-    }
-}
-
 fn parse_image_mode(value: &str) -> Option<ImageMode> {
     match value.trim().to_ascii_lowercase().as_str() {
         "auto" => Some(ImageMode::Auto),
@@ -3614,6 +4295,26 @@ fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
     chat
 }
 
+/// One-line human summary of the sandbox state for `/sandbox`.
+fn sandbox_status_line(sandbox: Option<&zode_core::sandbox::SandboxConfig>) -> String {
+    use zode_core::sandbox::SandboxMode;
+    match sandbox {
+        None => "sandbox: OFF — shell commands AND file writes run unconfined".to_string(),
+        Some(c) => {
+            let mode = match c.mode() {
+                SandboxMode::ReadOnly => "read-only (no file writes — shell or tools)",
+                SandboxMode::WorkspaceWrite => "workspace-write (writes confined to the workspace)",
+            };
+            let net = if c.allow_network() {
+                "network allowed"
+            } else {
+                "network denied"
+            };
+            format!("sandbox: ON — {mode}; {net}  ·  toggle with /sandbox [off|read-only|workspace-write|network on|network off]")
+        }
+    }
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3621,44 +4322,145 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Write clipboard image `bytes` to a uniquely-named temp file so the chip can
+/// be opened in a viewer. Returns the path, or `None` on IO error (the image is
+/// still usable — it just won't be openable).
+/// Filename prefix for clipboard preview temp files created by THIS process.
+fn clipboard_temp_prefix() -> String {
+    format!("zode-clip-{}-", std::process::id())
+}
+
+fn write_clipboard_temp_image(bytes: &[u8], media_type: &str) -> Option<std::path::PathBuf> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let ext = match media_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "img",
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("{}{nanos}-{n}.{ext}", clipboard_temp_prefix()));
+    // create_new (O_EXCL) refuses to follow or clobber a symlink planted at the
+    // path, closing the predictable-temp-path redirect; the bytes are written
+    // only if WE created the file.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .ok()?;
+    if f.write_all(bytes).is_err() {
+        drop(f);
+        let _ = std::fs::remove_file(&path); // don't leave an empty orphan
+        return None;
+    }
+    Some(path)
+}
+
+/// Delete a clipboard preview temp file — but ONLY if it's one we created and
+/// tracked (in `temps`). A real user-supplied image path is never in the set,
+/// so it's never removed, even if it happens to live in the temp dir.
+fn cleanup_clipboard_temp(temps: &mut HashSet<std::path::PathBuf>, path: &std::path::Path) {
+    if temps.remove(path) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Open `path` in the OS default image viewer.
+fn open_in_os_viewer(path: &std::path::Path) -> Result<(), String> {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    } else if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]).arg(path);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// How many image chips render before collapsing the rest into a `+N` marker.
+/// Keyboard/mouse selection is capped to this so it never targets a hidden chip.
+const MAX_VISIBLE_CHIPS: usize = 4;
+
+/// Render the pending-image chips and return per-chip click hitboxes
+/// `(col_start, col_end, index)` in absolute terminal columns, so the mouse
+/// handler can open the chip under a (Cmd/Ctrl)+click.
 fn render_pending_image_chips(
     f: &mut ratatui::Frame,
     area: Rect,
     images: &[ImageAttachment],
+    selected: Option<usize>,
     theme: &Theme,
-) {
+) -> Vec<(u16, u16, usize)> {
+    use unicode_width::UnicodeWidthStr;
+    let mut hits: Vec<(u16, u16, usize)> = Vec::new();
     if area.width == 0 || area.height == 0 {
-        return;
+        return hits;
     }
+    const PREFIX: &str = "▣ ";
+    const SEP: &str = "  ";
     let mut spans = vec![Span::styled(
-        "▣ ",
+        PREFIX,
         Style::default()
             .bg(theme.bg_input)
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
     )];
-    for (idx, image) in images.iter().take(4).enumerate() {
+    // Track the absolute column as spans are laid out, to record hitboxes.
+    let mut col = area.x.saturating_add(UnicodeWidthStr::width(PREFIX) as u16);
+    for (idx, image) in images.iter().take(MAX_VISIBLE_CHIPS).enumerate() {
         if idx > 0 {
             spans.push(Span::styled(
-                "  ",
+                SEP,
                 Style::default().bg(theme.bg_input).fg(theme.fg_subtle),
             ));
+            col = col.saturating_add(UnicodeWidthStr::width(SEP) as u16);
         }
-        spans.push(Span::styled(
-            image.display_name.clone(),
+        // The selected chip is reverse-highlighted (↑ to select; Backspace to
+        // remove; Enter or Cmd/Ctrl+click to view).
+        let is_selected = selected == Some(idx);
+        let name_style = if is_selected {
+            Style::default()
+                .bg(theme.accent)
+                .fg(theme.bg_input)
+                .add_modifier(Modifier::BOLD)
+        } else {
             Style::default()
                 .bg(theme.bg_input)
                 .fg(theme.fg_white)
-                .add_modifier(Modifier::BOLD),
-        ));
+                .add_modifier(Modifier::BOLD)
+        };
+        let meta = format!(" {}", image.media_type);
+        let start = col;
+        col = col.saturating_add(UnicodeWidthStr::width(image.display_name.as_str()) as u16);
+        col = col.saturating_add(UnicodeWidthStr::width(meta.as_str()) as u16);
+        hits.push((start, col, idx));
+        spans.push(Span::styled(image.display_name.clone(), name_style));
         spans.push(Span::styled(
-            format!(" {}", image.media_type),
+            meta,
             Style::default().bg(theme.bg_input).fg(theme.fg_subtle),
         ));
     }
-    if images.len() > 4 {
+    if images.len() > MAX_VISIBLE_CHIPS {
         spans.push(Span::styled(
-            format!("  +{}", images.len() - 4),
+            format!("  +{}", images.len() - MAX_VISIBLE_CHIPS),
             Style::default()
                 .bg(theme.bg_input)
                 .fg(theme.accent_secondary),
@@ -3668,6 +4470,7 @@ fn render_pending_image_chips(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg_input)),
         area,
     );
+    hits
 }
 
 fn image_previews(images: &[ImageAttachment]) -> Vec<ImagePreview> {
@@ -3802,6 +4605,7 @@ fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::chat::Role;
     use zode_core::config::{ProviderConfig, ProviderKind, ZodeConfig};
 
     async fn make_test_app() -> (TuiApp, mpsc::UnboundedSender<AppEvent>) {
@@ -3843,6 +4647,19 @@ mod tests {
         );
         let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
         (app, agent_tx)
+    }
+
+    async fn send_key(
+        app: &mut TuiApp,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) {
+        app.handle_term(
+            CtEvent::Key(crossterm::event::KeyEvent::new(code, modifiers)),
+            agent_tx,
+        )
+        .await;
     }
 
     #[test]
@@ -3919,20 +4736,6 @@ mod tests {
     }
 
     #[test]
-    fn selection_command_resolves_mode_targets() {
-        assert_eq!(resolve_selection_mode("", false), Ok(true));
-        assert_eq!(resolve_selection_mode("toggle", true), Ok(false));
-        assert_eq!(resolve_selection_mode("on", false), Ok(true));
-        assert_eq!(resolve_selection_mode("enable", false), Ok(true));
-        assert_eq!(resolve_selection_mode("off", true), Ok(false));
-        assert_eq!(resolve_selection_mode("disable", true), Ok(false));
-        assert_eq!(
-            resolve_selection_mode("wat", false),
-            Err("usage: /selection [on|off|toggle]".to_string())
-        );
-    }
-
-    #[test]
     fn prompt_history_persists_and_loads_from_json() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(PROMPT_HISTORY_FILE);
@@ -3951,6 +4754,169 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn up_down_recalls_prompt_history_when_idle() {
+        let (mut app, agent_tx) = make_test_app().await;
+        app.prompt_history = vec!["first prompt".into(), "写个 /tmp/hello.txt".into()];
+        app.history_pos = None;
+        app.input.take(); // empty input, idle, no queued messages
+        assert!(!app.active_tab().is_busy());
+
+        send_key(&mut app, &agent_tx, KeyCode::Up, KeyModifiers::NONE).await;
+        assert_eq!(app.input.text(), "写个 /tmp/hello.txt", "Up → latest prompt");
+
+        send_key(&mut app, &agent_tx, KeyCode::Up, KeyModifiers::NONE).await;
+        assert_eq!(app.input.text(), "first prompt", "Up again → earlier prompt");
+
+        send_key(&mut app, &agent_tx, KeyCode::Down, KeyModifiers::NONE).await;
+        assert_eq!(app.input.text(), "写个 /tmp/hello.txt", "Down → newer prompt");
+    }
+
+    #[tokio::test]
+    async fn two_escs_clear_a_non_empty_draft_when_idle() {
+        let (mut app, agent_tx) = make_test_app().await;
+        app.input.set_text("a long draft I don't want to lose by accident");
+        assert!(!app.active_tab().is_busy());
+
+        // First Esc only arms (draft preserved).
+        send_key(&mut app, &agent_tx, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert!(app.esc_clear_armed, "first Esc arms");
+        assert!(!app.input.is_empty(), "first Esc keeps the draft");
+
+        // Second Esc clears it.
+        send_key(&mut app, &agent_tx, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert!(app.input.is_empty(), "second Esc clears the draft");
+        assert!(!app.esc_clear_armed, "clearing disarms");
+    }
+
+    #[tokio::test]
+    async fn a_keystroke_between_escs_disarms_the_clear_gesture() {
+        let (mut app, agent_tx) = make_test_app().await;
+        app.input.set_text("draft");
+
+        send_key(&mut app, &agent_tx, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert!(app.esc_clear_armed, "armed after first Esc");
+
+        // Typing a character disarms; the next Esc must NOT wipe the draft.
+        send_key(&mut app, &agent_tx, KeyCode::Char('x'), KeyModifiers::NONE).await;
+        assert!(!app.esc_clear_armed, "a non-Esc key disarms");
+
+        send_key(&mut app, &agent_tx, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert!(!app.input.is_empty(), "lone Esc after typing keeps the draft");
+    }
+
+    #[tokio::test]
+    async fn up_selects_image_chip_and_backspace_removes_it() {
+        let (mut app, agent_tx) = make_test_app().await;
+        app.input.take(); // empty input → ↑ drives chip selection, not history
+        let png = [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
+        for _ in 0..2 {
+            let img =
+                zode_core::images::image_attachment_from_bytes(&png, "clipboard image").unwrap();
+            app.active_tab_mut().pending_images.push(img);
+        }
+        assert_eq!(app.selected_image, None);
+
+        // ↑ selects the last chip, ↑ again steps to the earlier one.
+        send_key(&mut app, &agent_tx, KeyCode::Up, KeyModifiers::NONE).await;
+        assert_eq!(app.selected_image, Some(1));
+        send_key(&mut app, &agent_tx, KeyCode::Up, KeyModifiers::NONE).await;
+        assert_eq!(app.selected_image, Some(0));
+
+        // Backspace removes the selected image; selection clamps to what's left.
+        send_key(&mut app, &agent_tx, KeyCode::Backspace, KeyModifiers::NONE).await;
+        assert_eq!(app.active_tab().pending_images.len(), 1);
+        assert_eq!(app.selected_image, Some(0));
+
+        // Removing the last image clears the selection.
+        send_key(&mut app, &agent_tx, KeyCode::Backspace, KeyModifiers::NONE).await;
+        assert!(app.active_tab().pending_images.is_empty());
+        assert_eq!(app.selected_image, None);
+    }
+
+    #[test]
+    fn image_chip_hitboxes_cover_each_chip() {
+        use crate::theme::ThemeStore;
+        use ratatui::{backend::TestBackend, Terminal};
+        use unicode_width::UnicodeWidthStr;
+
+        let png = [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
+        let images: Vec<_> = (0..2)
+            .map(|_| zode_core::images::image_attachment_from_bytes(&png, "clipboard image").unwrap())
+            .collect();
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut term = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        let mut hits = Vec::new();
+        term.draw(|f| {
+            hits = render_pending_image_chips(f, Rect::new(0, 0, 80, 1), &images, None, &theme);
+        })
+        .unwrap();
+
+        assert_eq!(hits.len(), 2, "one hitbox per shown chip");
+        // First chip begins just after the "▣ " prefix (2 cols).
+        assert_eq!(hits[0].0, 2);
+        let chip_w = (UnicodeWidthStr::width("clipboard image")
+            + UnicodeWidthStr::width(" image/png")) as u16;
+        assert_eq!(hits[0].1 - hits[0].0, chip_w, "hitbox spans name + media type");
+        // The second chip starts after the first plus the 2-col separator.
+        assert_eq!(hits[1].0, hits[0].1 + 2);
+        assert_eq!(hits[1].2, 1, "carries the image index");
+    }
+
+    #[tokio::test]
+    async fn dragged_image_path_in_input_becomes_a_chip() {
+        let (mut app, _tx) = make_test_app().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        std::fs::write(&path, [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])
+            .unwrap();
+        // A dragged path lands in the input as text; absorbing lifts it to a chip.
+        app.input.set_text(&path.display().to_string());
+        app.absorb_image_paths_from_input();
+        assert_eq!(app.active_tab().pending_images.len(), 1, "path lifted to a chip");
+        assert!(app.input.text().trim().is_empty(), "path stripped from input");
+    }
+
+    #[tokio::test]
+    async fn plain_text_mentioning_jpg_does_not_attach() {
+        let (mut app, _tx) = make_test_app().await;
+        app.input.set_text("see foo.jpg please");
+        app.absorb_image_paths_from_input();
+        assert!(app.active_tab().pending_images.is_empty(), "non-existent path ignored");
+        assert_eq!(app.input.text(), "see foo.jpg please", "text left untouched");
+    }
+
+    #[tokio::test]
+    async fn typing_exits_image_chip_selection() {
+        let (mut app, agent_tx) = make_test_app().await;
+        app.input.take();
+        let png = [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
+        let img = zode_core::images::image_attachment_from_bytes(&png, "clipboard image").unwrap();
+        app.active_tab_mut().pending_images.push(img);
+
+        send_key(&mut app, &agent_tx, KeyCode::Up, KeyModifiers::NONE).await;
+        assert_eq!(app.selected_image, Some(0));
+        // A normal character exits selection AND types (image is kept).
+        send_key(&mut app, &agent_tx, KeyCode::Char('h'), KeyModifiers::NONE).await;
+        assert_eq!(app.selected_image, None);
+        assert_eq!(app.input.text(), "h");
+        assert_eq!(app.active_tab().pending_images.len(), 1, "image not removed by typing");
+    }
+
+    #[test]
+    fn prompt_history_skips_bare_slash_commands() {
+        let mut history = Vec::new();
+        // Single-line slash commands are NOT recorded.
+        assert!(!record_prompt_history_entry(&mut history, "/sandbox"));
+        assert!(!record_prompt_history_entry(&mut history, "/model gpt"));
+        assert!(!record_prompt_history_entry(&mut history, "  /help  "));
+        assert!(history.is_empty(), "no slash commands recorded: {history:?}");
+        // Real prompts (incl. ones that merely contain a slash) ARE recorded.
+        assert!(record_prompt_history_entry(&mut history, "写个 /tmp/hello.txt"));
+        assert!(record_prompt_history_entry(&mut history, "/note\nmulti-line body"));
+        assert_eq!(history.len(), 2);
+    }
+
     #[test]
     fn tui_initialization_loads_local_prompt_history() {
         let source = include_str!("app.rs");
@@ -3959,7 +4925,7 @@ mod tests {
             .nth(1)
             .and_then(|tail| tail.split("history_pos: None").next())
             .expect("TuiApp::new initialization block should exist");
-        assert!(init.contains("prompt_history: load_prompt_history()"));
+        assert!(init.contains("load_prompt_history()"));
     }
 
     #[test]
@@ -3989,28 +4955,116 @@ mod tests {
         let (mut app, agent_tx) = make_test_app().await;
         app.input.set_text("draft prompt");
 
-        app.handle_term(
-            CtEvent::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Char('c'),
-                KeyModifiers::CONTROL,
-            )),
+        send_key(
+            &mut app,
             &agent_tx,
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
         )
         .await;
 
         assert_eq!(app.input.text(), "");
         assert!(!app.should_quit);
 
-        app.handle_term(
-            CtEvent::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Char('c'),
-                KeyModifiers::CONTROL,
-            )),
+        send_key(
+            &mut app,
             &agent_tx,
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
         )
         .await;
 
         assert!(app.should_quit);
+    }
+
+    #[tokio::test]
+    async fn up_down_edit_queued_messages_while_turn_is_busy() {
+        let (mut app, agent_tx) = make_test_app().await;
+        app.prompt_history.clear();
+        app.active_tab_mut().turn_abort = Some(AbortController::new());
+        app.active_tab_mut().queued_input.push_back("first".into());
+        app.active_tab_mut().queued_input.push_back("second".into());
+
+        send_key(&mut app, &agent_tx, KeyCode::Up, KeyModifiers::NONE).await;
+        assert_eq!(app.input.text(), "second");
+
+        app.input.set_text("second edited");
+        send_key(&mut app, &agent_tx, KeyCode::Up, KeyModifiers::NONE).await;
+        assert_eq!(app.input.text(), "first");
+        assert_eq!(app.active_tab().queued_input[1], "second edited");
+
+        app.input.set_text("first edited");
+        send_key(&mut app, &agent_tx, KeyCode::Down, KeyModifiers::NONE).await;
+        assert_eq!(app.input.text(), "second edited");
+        assert_eq!(app.active_tab().queued_input[0], "first edited");
+
+        app.input.set_text("second final");
+        send_key(&mut app, &agent_tx, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert_eq!(app.input.text(), "");
+        assert_eq!(
+            app.active_tab()
+                .queued_input
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["first edited".to_string(), "second final".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_input_dispatches_as_new_user_turn_after_current_turn_finishes() {
+        let (mut app, agent_tx) = make_test_app().await;
+        let count_store_user_text = |app: &TuiApp, needle: &str| {
+            let store = app.active_tab().engine.store.lock().unwrap();
+            store
+                .iter()
+                .filter(|msg| {
+                    matches!(msg, Message::User { content, .. } if content.iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text } if text == needle)
+                    }))
+                })
+                .count()
+        };
+
+        app.prompt_history.clear();
+        app.active_tab_mut().titled = true;
+        app.active_tab_mut().turn_seq = 1;
+        app.active_tab_mut().active_turn_id = 1;
+        app.active_tab_mut().turn_abort = Some(AbortController::new());
+
+        app.input.set_text("queued follow-up");
+        send_key(&mut app, &agent_tx, KeyCode::Enter, KeyModifiers::NONE).await;
+
+        assert_eq!(app.active_tab().queued_input.len(), 1);
+        assert!(!app
+            .active_tab()
+            .chat
+            .messages()
+            .iter()
+            .any(|msg| msg.role == Role::User && msg.text == "queued follow-up"));
+        assert_eq!(count_store_user_text(&app, "queued follow-up"), 0);
+        assert_eq!(app.active_tab().active_turn_id, 1);
+
+        app.active_tab_mut().turn_abort = None;
+        app.active_tab_mut().active_turn_id = 0;
+        app.dispatch_queued_input(&agent_tx).await;
+
+        assert!(app.active_tab().queued_input.is_empty());
+        assert_eq!(app.active_tab().active_turn_id, 2);
+        assert!(app.active_tab().is_busy());
+        assert!(app
+            .active_tab()
+            .chat
+            .messages()
+            .iter()
+            .any(|msg| msg.role == Role::User && msg.text == "queued follow-up"));
+        for _ in 0..20 {
+            if count_store_user_text(&app, "queued follow-up") == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(count_store_user_text(&app, "queued follow-up"), 1);
     }
 
     #[test]

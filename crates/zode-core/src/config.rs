@@ -121,6 +121,28 @@ pub struct PermissionsConfig {
     pub ask: Vec<String>,
 }
 
+/// OS-sandbox settings for shell commands. The sandbox is **on by default**
+/// (workspace-write, network denied); these refine or disable it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SandboxSettings {
+    /// Run shell commands in an OS sandbox. `None` → enabled (default on).
+    pub enabled: Option<bool>,
+    /// `"workspace-write"` (default) confines writes to cwd + tmp + roots;
+    /// `"read-only"` denies all writes.
+    pub mode: Option<String>,
+    /// Allow outbound network inside the sandbox. `None`/false → denied.
+    pub network: Option<bool>,
+    /// Extra writable roots in workspace-write mode (absolute paths).
+    pub writable_roots: Vec<String>,
+    /// Drop `/tmp` from the default writable roots (Codex `exclude_slash_tmp`).
+    /// `None`/false → `/tmp` is writable in workspace-write.
+    pub exclude_slash_tmp: Option<bool>,
+    /// Drop `$TMPDIR` from the default writable roots (Codex
+    /// `exclude_tmpdir_env_var`). `None`/false → `$TMPDIR` is writable.
+    pub exclude_tmpdir_env_var: Option<bool>,
+}
+
 /// Plugin enable/disable state. Plugins are on by default, so only the
 /// disabled ids are stored (e.g. `["tools:git", "mcp:foo", "lsp:rust"]`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -182,6 +204,7 @@ pub struct ZodeConfig {
     /// (enabled by default). Toggled off via Settings / `/orchestration`.
     pub autonomous_orchestration: Option<bool>,
     pub permissions: PermissionsConfig,
+    pub sandbox: SandboxSettings,
     pub max_output_tokens: Option<u32>,
     /// The model's context window in tokens, used for auto-compaction /
     /// context-left math. `None` defaults to a conservative 200K. Set this to
@@ -313,14 +336,23 @@ impl ZodeConfig {
         if other.theme.is_some() {
             self.theme = other.theme;
         }
-        if !other.permissions.allow.is_empty() {
-            self.permissions.allow = other.permissions.allow;
+        // Permission lists ACCUMULATE across layers (global → project →
+        // project state) — a deeper layer adds rules, it doesn't drop the
+        // outer ones. Dedup so repeated entries don't pile up.
+        extend_dedup(&mut self.permissions.allow, other.permissions.allow);
+        extend_dedup(&mut self.permissions.deny, other.permissions.deny);
+        extend_dedup(&mut self.permissions.ask, other.permissions.ask);
+        if other.sandbox.enabled.is_some() {
+            self.sandbox.enabled = other.sandbox.enabled;
         }
-        if !other.permissions.deny.is_empty() {
-            self.permissions.deny = other.permissions.deny;
+        if other.sandbox.mode.is_some() {
+            self.sandbox.mode = other.sandbox.mode;
         }
-        if !other.permissions.ask.is_empty() {
-            self.permissions.ask = other.permissions.ask;
+        if other.sandbox.network.is_some() {
+            self.sandbox.network = other.sandbox.network;
+        }
+        if !other.sandbox.writable_roots.is_empty() {
+            self.sandbox.writable_roots = other.sandbox.writable_roots;
         }
         if other.max_output_tokens.is_some() {
             self.max_output_tokens = other.max_output_tokens;
@@ -405,16 +437,58 @@ impl ConfigManager {
     }
 
     /// Effective config: global + project (`<cwd>/.zode/config.json`) +
-    /// env api-key fallback. Project overrides global.
+    /// project STATE (`<cwd>/.zode/state.json`, machine-managed) + env api-key
+    /// fallback. Later layers override / accumulate over earlier ones.
     pub fn load(cwd: &Path) -> Result<ZodeConfig, CoreError> {
         let mut cfg = Self::load_global()?;
         let project = cwd.join(".zode").join("config.json");
         if project.exists() {
             cfg.merge_from(Self::load_file(&project)?);
         }
+        // Project state: zode writes this (sandbox toggles, allow-always
+        // permissions) — read it last so it reflects the user's latest choices.
+        let state = Self::project_state_path(cwd);
+        if state.exists() {
+            cfg.merge_from(Self::load_file(&state)?);
+        }
         cfg.normalize_legacy();
         cfg.apply_env_fallbacks();
         Ok(cfg)
+    }
+
+    /// Machine-managed project state file (separate from the user-edited
+    /// `config.json`, like Claude Code's `settings.local.json`).
+    pub fn project_state_path(cwd: &Path) -> PathBuf {
+        cwd.join(".zode").join("state.json")
+    }
+
+    /// Read the project state file as a JSON object (empty object if missing
+    /// or unparseable, so a corrupt file never blocks an update).
+    fn read_project_state(cwd: &Path) -> serde_json::Value {
+        std::fs::read_to_string(Self::project_state_path(cwd))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .filter(|v| v.is_object())
+            .unwrap_or_else(|| serde_json::json!({}))
+    }
+
+    /// Update `<cwd>/.zode/state.json` via a closure on its JSON object,
+    /// creating `.zode/` as needed. Used to persist sandbox state and
+    /// allow-always tool permissions per project so they survive restarts.
+    pub fn update_project_state(
+        cwd: &Path,
+        f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+    ) -> Result<(), CoreError> {
+        std::fs::create_dir_all(cwd.join(".zode"))?;
+        let mut state = Self::read_project_state(cwd);
+        if let Some(obj) = state.as_object_mut() {
+            f(obj);
+        }
+        std::fs::write(
+            Self::project_state_path(cwd),
+            serde_json::to_string_pretty(&state)?,
+        )?;
+        Ok(())
     }
 
     /// Persist to the global config path (creates the dir if needed).
@@ -428,9 +502,54 @@ impl ConfigManager {
     }
 }
 
+/// Append `add` to `target`, skipping values already present (preserves order).
+fn extend_dedup(target: &mut Vec<String>, add: Vec<String>) {
+    for v in add {
+        if !target.contains(&v) {
+            target.push(v);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_unions_permission_lists() {
+        let mut a = ZodeConfig::default();
+        a.permissions.allow = vec!["A".into()];
+        let mut b = ZodeConfig::default();
+        b.permissions.allow = vec!["A".into(), "B".into()]; // overlaps A
+        a.merge_from(b);
+        // Accumulated + deduped (not replaced, not duplicated).
+        assert_eq!(a.permissions.allow, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn project_state_persists_sandbox_and_permissions() {
+        let global = tempfile::tempdir().unwrap(); // empty global config
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("ZODE_CONFIG_DIR", global.path());
+
+        ConfigManager::update_project_state(cwd.path(), |s| {
+            s.insert("sandbox".into(), serde_json::json!({"enabled": false}));
+            s.insert(
+                "permissions".into(),
+                serde_json::json!({"allow": ["Bash", "FileWrite"]}),
+            );
+        })
+        .unwrap();
+        assert!(ConfigManager::project_state_path(cwd.path()).exists());
+
+        let cfg = ConfigManager::load(cwd.path()).unwrap();
+        std::env::remove_var("ZODE_CONFIG_DIR");
+
+        assert_eq!(cfg.sandbox.enabled, Some(false), "sandbox state loaded");
+        assert!(cfg.permissions.allow.contains(&"Bash".to_string()));
+        assert!(cfg.permissions.allow.contains(&"FileWrite".to_string()));
+    }
 
     #[test]
     fn price_overrides_from_config_fields() {

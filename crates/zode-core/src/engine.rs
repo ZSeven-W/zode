@@ -64,6 +64,87 @@ const DEFAULT_MODEL_MAX_TOKENS: u32 = 200_000;
 const FILE_CACHE_ENTRIES: usize = 1024;
 const FILE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Build the file-tool [`WorkspacePolicy`] from the active sandbox so file
+/// writes obey the SAME policy as shell commands (Codex-style — the sandbox
+/// governs all writes):
+/// - **off** (no sandbox) → writes allowed anywhere (still gated by approval);
+/// - **read-only** → every file write denied (reads stay allowed);
+/// - **workspace-write** → writes confined to cwd + the extra writable roots.
+fn build_workspace_policy(
+    cwd: &std::path::Path,
+    sandbox: &Option<crate::sandbox::SandboxConfig>,
+) -> Result<WorkspacePolicy, CoreError> {
+    let err = |e| CoreError::Other(format!("workspace policy: {e}"));
+    let mut p = WorkspacePolicy::new(cwd).map_err(err)?;
+    match sandbox {
+        // Sandbox off: every absolute path is under "/", so writes are
+        // unconfined (relative paths still resolve against cwd).
+        None => p = p.with_allowed_root("/").map_err(err)?,
+        // Read-only: no writable root → every write fails the inside-check.
+        Some(sb) if sb.mode() == crate::sandbox::SandboxMode::ReadOnly => {
+            p.allowed_roots.clear();
+        }
+        // Workspace-write: cwd (already a root) plus the configured roots, with
+        // `.git` / `.zode` carved back out read-only — the policy-layer twin of
+        // the shell sandbox's protected paths, so file tools can't rewrite git
+        // history or edit `.zode/state.json` to self-escalate either.
+        Some(sb) => {
+            for root in sb.writable_roots() {
+                p = p.with_allowed_root(root).map_err(err)?;
+            }
+            for denied in sb.protected_paths() {
+                p = p.with_denied_subpath(denied);
+            }
+        }
+    }
+    // When an OS sandbox is active, route the file tools' mutating syscalls
+    // through it too (Codex parity): the kernel — not just this in-process
+    // policy check — enforces the write boundary. Off → keep the direct sink.
+    if let Some(sb) = sandbox {
+        p = p.with_fs_sink(std::sync::Arc::new(crate::sandbox::SandboxedFsSink::new(
+            sb.clone(),
+        )));
+    }
+    Ok(p)
+}
+
+/// System-prompt section declaring the current sandbox / write policy, so the
+/// agent knows what it may do and retries when the policy is relaxed.
+fn sandbox_prompt_note(sandbox: &Option<crate::sandbox::SandboxConfig>) -> String {
+    use crate::sandbox::SandboxMode;
+    match sandbox {
+        None => "\n\n# Sandbox\nThe OS sandbox is OFF. Shell commands and file \
+            writes are UNCONFINED — you may read, write, and execute ANYWHERE on \
+            the filesystem (e.g. /tmp) and use the network, subject only to \
+            per-tool approval. If an earlier action failed because of the \
+            sandbox, RETRY it now — it will succeed."
+            .to_string(),
+        Some(sb) => {
+            let mode = match sb.mode() {
+                SandboxMode::ReadOnly => {
+                    "READ-ONLY — file writes are denied everywhere (reads are fine)"
+                }
+                SandboxMode::WorkspaceWrite => {
+                    "workspace-write — file writes are confined to the workspace directory (+ tmp)"
+                }
+            };
+            let net = if sb.allow_network() {
+                "Network is allowed."
+            } else {
+                "Outbound network is DENIED."
+            };
+            format!(
+                "\n\n# Sandbox\nShell commands and file writes run in an OS sandbox: {mode}. {net} \
+                 To write outside the workspace or reach the network, either ask the user to relax it \
+                 with `/sandbox` (e.g. off / workspace-write / network on), or — for a shell command — \
+                 set `dangerouslyDisableSandbox: true` to request running it outside the sandbox (the \
+                 user will be asked to authorize the escape). Do not claim something is impossible \
+                 without trying these."
+            )
+        }
+    }
+}
+
 pub struct ZodeEngine {
     pub provider: Arc<dyn Provider>,
     pub tools: Arc<ToolRegistry>,
@@ -118,6 +199,17 @@ pub struct ZodeEngine {
     pub user_commands: Vec<crate::user_commands::UserCommand>,
 }
 
+/// What a manual `/compact` run accomplished, for the UI to report.
+#[derive(Debug, Clone, Copy)]
+pub struct CompactOutcome {
+    /// Estimated token total of the transcript BEFORE compaction.
+    pub pre_tokens: u32,
+    /// Estimated token total of (boundary + summary) AFTER compaction.
+    pub post_tokens: u32,
+    /// How many messages were folded into the summary.
+    pub replaced: usize,
+}
+
 impl ZodeEngine {
     /// Build all shared state. `gate` is `BypassGate` for `--yolo`,
     /// `StdinGate` for headless, `QueueGate` for the TUI — that is the ONLY
@@ -146,10 +238,10 @@ impl ZodeEngine {
             .clone()
             .ok_or_else(|| CoreError::Other("no model set in config".into()))?;
 
-        // Writes are constrained to cwd by default (WorkspacePolicy).
-        let policy = WorkspacePolicy::new(&cwd)
-            .map_err(|e| CoreError::Other(format!("workspace policy: {e}")))?
-            .into_arc();
+        // File-tool write confinement (WorkspacePolicy) follows the SAME sandbox
+        // policy as shell commands, so `/sandbox off` actually lets file writes
+        // escape cwd (matching Codex, where the sandbox governs ALL writes).
+        let policy = build_workspace_policy(&cwd, &sandbox)?.into_arc();
 
         // Plugin manager: which tool groups / MCP servers / skills / LSP
         // servers are enabled (the `/plugin` picker toggles these).
@@ -338,12 +430,12 @@ impl ZodeEngine {
         // before gate-wrapping so the final shape is
         // PermissionGatedTool(SandboxedBashTool(Bash)).
         let base = match &sandbox {
-            Some(sb) => crate::sandbox::apply_sandbox(base, sb),
+            Some(sb) => crate::sandbox::apply_sandbox(base, sb, &gate),
             None => base,
         };
 
         // 2. Wrap mutating/destructive tools with the approval gate.
-        let mut gated = wrap_mutating_tools(base, &gate);
+        let mut gated = wrap_mutating_tools(base, &gate, &cfg.permissions.allow);
 
         // 3. ToolSearch over the full set (candidates = snapshot of the
         //    gated registry, taken before ToolSearch itself is added).
@@ -363,6 +455,11 @@ impl ZodeEngine {
         env.model = model.clone();
         let instructions = discover_instructions(&cwd);
         let mut system = build_system_prompt(&instructions, &skills_idx, &env);
+        // Declare the live sandbox / write policy so the agent knows whether it
+        // may write outside cwd or reach the network — and, crucially, RETRIES
+        // when the policy changed (e.g. the user ran `/sandbox off`) instead of
+        // giving up on a stale earlier failure.
+        system.push_str(&sandbox_prompt_note(&sandbox));
         if plan_mode {
             system.push_str(PLAN_MODE_PROMPT);
         }
@@ -571,6 +668,51 @@ impl ZodeEngine {
         last
     }
 
+    /// Manually compact the conversation (the `/compact` command).
+    ///
+    /// Summarizes the whole transcript into a single boundary + summary pair
+    /// via the model, then splices it back into the shared store — tombstoning
+    /// the replaced messages so later turns send the compact summary instead of
+    /// the full history. This is the same machinery the QueryLoop runs
+    /// automatically near the context limit, exposed on demand. Returns the
+    /// before/after token estimate so the UI can report what was reclaimed.
+    pub async fn compact(&self, abort: AbortController) -> Result<CompactOutcome, CoreError> {
+        use agent::compact::{
+            apply_compaction_to_store, compact_conversation, PartialCompactDirection,
+        };
+        // Snapshot the transcript so the store lock is never held across the
+        // provider await below.
+        let messages: Vec<agent::message::Message> = {
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| CoreError::Other("compact: message store poisoned".into()))?;
+            store.iter().cloned().collect()
+        };
+        let result = compact_conversation(
+            &messages,
+            self.provider.as_ref(),
+            self.model.clone(),
+            None,
+            PartialCompactDirection::Full,
+            abort,
+        )
+        .await
+        .map_err(|e| CoreError::Other(e.to_string()))?;
+        {
+            let mut store = self
+                .store
+                .lock()
+                .map_err(|_| CoreError::Other("compact: message store poisoned".into()))?;
+            apply_compaction_to_store(&mut store, &result)?;
+        }
+        Ok(CompactOutcome {
+            pre_tokens: result.pre_compact_tokens,
+            post_tokens: result.post_compact_tokens,
+            replaced: result.replaced_uuids.len(),
+        })
+    }
+
     /// Run one turn. Rebuilds a QueryLoop from the shared Arcs.
     pub async fn turn(
         &self,
@@ -697,11 +839,15 @@ impl EngineTemplate {
             )) as Arc<dyn Tool>
         });
         let cwd = cwd_override.unwrap_or_else(|| self.cwd.clone());
+        // Rebase the sandbox onto this tab's cwd: a resumed session can run in a
+        // different repo, and the sandbox must confine to THAT directory (its
+        // writable roots + .git/.zode carveouts), not the launch cwd.
+        let sandbox = self.sandbox.as_ref().map(|sb| sb.clone().with_cwd(&cwd));
         ZodeEngine::assemble(
             &self.cfg,
             cwd,
             gate,
-            self.sandbox.clone(),
+            sandbox,
             &self.date,
             question_tool,
             self.plan_mode,
@@ -774,6 +920,19 @@ impl EngineTemplate {
     pub fn with_yolo(&self, yolo: bool) -> Self {
         let mut t = self.clone();
         t.yolo = yolo;
+        t
+    }
+
+    /// The current sandbox config (for the `/sandbox` command to show + toggle).
+    pub fn sandbox(&self) -> Option<&crate::sandbox::SandboxConfig> {
+        self.sandbox.as_ref()
+    }
+
+    /// Clone with the sandbox replaced (for runtime `/sandbox` toggles). The
+    /// next `reassemble_active` re-wraps Bash/BashRun accordingly.
+    pub fn with_sandbox(&self, sandbox: Option<crate::sandbox::SandboxConfig>) -> Self {
+        let mut t = self.clone();
+        t.sandbox = sandbox;
         t
     }
 
@@ -931,10 +1090,20 @@ fn filter_read_only(src: ToolRegistry) -> ToolRegistry {
 
 /// Re-register every tool, wrapping mutating/destructive ones in a
 /// PermissionGatedTool. Read-only tools pass through unwrapped.
-fn wrap_mutating_tools(src: ToolRegistry, gate: &Arc<dyn ApprovalGate>) -> ToolRegistry {
+/// Gate every mutating tool behind the approval gate, EXCEPT those the user
+/// has permanently allowed (`permissions.allow` — e.g. a persisted
+/// "allow always" decision), which run un-prompted. Hard-deny rules are
+/// enforced separately by the `PermissionManager`, so an allowed-but-denied
+/// tool is still blocked.
+fn wrap_mutating_tools(
+    src: ToolRegistry,
+    gate: &Arc<dyn ApprovalGate>,
+    allow: &[String],
+) -> ToolRegistry {
     let mut out = ToolRegistry::new();
     for tool in src.list() {
-        if matches!(tool.safety_class(), SafetyClass::ReadOnly) {
+        let auto_allowed = allow.iter().any(|a| a == tool.name());
+        if matches!(tool.safety_class(), SafetyClass::ReadOnly) || auto_allowed {
             out.register(tool);
         } else {
             out.register(Arc::new(PermissionGatedTool::new(tool, gate.clone())));
@@ -948,6 +1117,81 @@ mod tests {
     use super::*;
     use crate::approval::BypassGate;
     use crate::config::{ProviderConfig, ProviderKind, ZodeConfig};
+
+    #[test]
+    fn sandbox_prompt_note_tells_model_the_policy() {
+        use crate::sandbox::{SandboxConfig, SandboxMode};
+        // OFF: explicitly tells the model writes are unconfined and to retry.
+        let off = sandbox_prompt_note(&None);
+        assert!(off.contains("OFF"));
+        assert!(off.to_uppercase().contains("RETRY"), "{off}");
+        assert!(off.contains("ANYWHERE"));
+        // workspace-write: says writes confined + how to escape.
+        if let Ok(ww) = SandboxConfig::new(std::path::Path::new("/tmp"), SandboxMode::WorkspaceWrite, false, &[]) {
+            let note = sandbox_prompt_note(&Some(ww));
+            assert!(note.contains("workspace-write"));
+            assert!(note.contains("dangerouslyDisableSandbox"));
+            assert!(note.contains("DENIED"), "network denied by default: {note}");
+        }
+    }
+
+    #[test]
+    fn workspace_policy_follows_sandbox_mode() {
+        use crate::sandbox::{SandboxConfig, SandboxMode};
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+
+        // Sandbox OFF → writes allowed anywhere (the user's `/sandbox off` bug).
+        let off = build_workspace_policy(cwd, &None).unwrap();
+        assert!(
+            off.resolve("/tmp/hello.txt", false).is_ok(),
+            "off: /tmp must be writable"
+        );
+
+        // workspace-write → cwd writable, outside the workspace denied.
+        let ww = SandboxConfig::new(cwd, SandboxMode::WorkspaceWrite, false, &[]).unwrap();
+        let ww = build_workspace_policy(cwd, &Some(ww)).unwrap();
+        assert!(ww.resolve("inside.txt", false).is_ok(), "ww: cwd writable");
+        assert!(
+            ww.resolve("/tmp/outside.txt", false).is_err(),
+            "ww: /tmp denied"
+        );
+
+        // read-only → every write denied; reads still resolve.
+        let ro = SandboxConfig::new(cwd, SandboxMode::ReadOnly, false, &[]).unwrap();
+        let ro = build_workspace_policy(cwd, &Some(ro)).unwrap();
+        assert!(
+            ro.resolve("inside.txt", false).is_err(),
+            "ro: cwd write denied"
+        );
+        assert!(
+            ro.resolve("/tmp/x.txt", false).is_err(),
+            "ro: /tmp write denied"
+        );
+    }
+
+    #[test]
+    fn workspace_policy_protects_git_and_zode_from_file_tools() {
+        use crate::sandbox::{SandboxConfig, SandboxMode};
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        let ww = SandboxConfig::new(cwd, SandboxMode::WorkspaceWrite, false, &[]).unwrap();
+        let p = build_workspace_policy(cwd, &Some(ww)).unwrap();
+        // Normal workspace writes are fine...
+        assert!(p.resolve("src/main.rs", false).is_ok());
+        // ...but .git / .zode are read-only even though they sit inside cwd
+        // (the file-tool twin of the shell-sandbox carveout). Blocked even
+        // before the dirs exist, so the agent can't create state.json to
+        // self-escalate.
+        assert!(
+            p.resolve(".git/config", false).is_err(),
+            ".git write must be denied by the policy"
+        );
+        assert!(
+            p.resolve(".zode/state.json", false).is_err(),
+            ".zode write must be denied by the policy"
+        );
+    }
     use agent::message::{ContentBlock, ImageSource, Message};
     use agent::provider::ProviderCapabilities;
     use futures::StreamExt;
@@ -1091,6 +1335,66 @@ mod tests {
             panic!("expected first message to be user content");
         };
         assert_eq!(observed, &content);
+    }
+
+    #[tokio::test]
+    async fn compact_folds_transcript_into_summary() {
+        use agent::message::Header;
+        use agent::stream::Event;
+
+        // A valid summarization response: <analysis> then <summary>.
+        let response =
+            "<analysis>covered the basics</analysis>\n<summary>We set up the project.</summary>";
+        let provider = agent::testing::MockProvider::new(vec![Event::TextDelta {
+            delta: response.into(),
+        }]);
+        let eng = minimal_engine(Arc::new(provider));
+        {
+            let mut store = eng.store.lock().unwrap();
+            store
+                .push(Message::User {
+                    header: Header::new(),
+                    content: vec![ContentBlock::Text {
+                        text: "set up the project".into(),
+                    }],
+                })
+                .unwrap();
+            store
+                .push(Message::Assistant {
+                    header: Header::new(),
+                    content: vec![ContentBlock::Text {
+                        text: "done, here is the scaffold".into(),
+                    }],
+                })
+                .unwrap();
+        }
+
+        let outcome = eng.compact(AbortController::new()).await.unwrap();
+        assert_eq!(outcome.replaced, 2, "both messages folded in");
+        assert!(outcome.post_tokens > 0);
+
+        let store = eng.store.lock().unwrap();
+        let tombstones = store
+            .iter()
+            .filter(|m| matches!(m, Message::Tombstone { .. }))
+            .count();
+        assert_eq!(tombstones, 2, "originals tombstoned");
+        // The summary is spliced back as a User message prefixed with
+        // "[Context summary]" (so Anthropic, which drops System body text,
+        // still sees it).
+        let has_summary = store.iter().any(|m| {
+            matches!(
+                m,
+                Message::User { content, .. }
+                    if content.iter().any(|b| matches!(
+                        b,
+                        ContentBlock::Text { text }
+                            if text.contains("[Context summary]")
+                                && text.contains("We set up the project")
+                    ))
+            )
+        });
+        assert!(has_summary, "summary message spliced in");
     }
 
     #[tokio::test]

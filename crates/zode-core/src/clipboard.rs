@@ -33,6 +33,79 @@ pub fn read_from_clipboard() -> Result<String, String> {
     Err(last_err)
 }
 
+/// Read raw IMAGE bytes from the system clipboard (a screenshot or a copied
+/// image — not a file path). `Ok(None)` means the clipboard holds no image, so
+/// the caller falls back to a text paste. Returns PNG bytes on macOS/Linux;
+/// other platforms return `Ok(None)`.
+///
+/// Terminals deliver pastes as text and never hand image data to a TUI, so this
+/// queries the OS clipboard directly (the same reason Ctrl+V reads it for text).
+pub fn read_image_from_clipboard() -> Result<Option<Vec<u8>>, String> {
+    if cfg!(target_os = "macos") {
+        macos_clipboard_image()
+    } else if cfg!(target_os = "linux") {
+        linux_clipboard_image()
+    } else {
+        Ok(None)
+    }
+}
+
+/// macOS: AppleScript reads the pasteboard as PNG and writes it to a temp file
+/// (osascript can't emit binary on stdout), returning the path — or "" when the
+/// clipboard holds no image.
+fn macos_clipboard_image() -> Result<Option<Vec<u8>>, String> {
+    let script = "try\n\
+            set png to (the clipboard as «class PNGf»)\n\
+        on error\n\
+            return \"\"\n\
+        end try\n\
+        set tmp to (POSIX path of (path to temporary items)) & \"zode_clipboard.png\"\n\
+        set fh to open for access (POSIX file tmp) with write permission\n\
+        set eof fh to 0\n\
+        write png to fh\n\
+        close access fh\n\
+        return tmp";
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("osascript clipboard read failed".into());
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&path);
+    Ok((!bytes.is_empty()).then_some(bytes))
+}
+
+/// Linux: ask Wayland (`wl-paste`) then X11 (`xclip`) for `image/png` bytes.
+/// A missing helper or absent image yields `Ok(None)` so text paste can run.
+fn linux_clipboard_image() -> Result<Option<Vec<u8>>, String> {
+    let candidates: &[(&str, &[&str])] = &[
+        ("wl-paste", &["--type", "image/png"]),
+        ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]),
+    ];
+    for (bin, args) in candidates {
+        if let Ok(out) = Command::new(bin)
+            .args(*args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+        {
+            if out.status.success() && !out.stdout.is_empty() {
+                return Ok(Some(out.stdout));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Clipboard CLIs to try, in order, for the current platform.
 fn clipboard_candidates() -> &'static [(&'static str, &'static [&'static str])] {
     if cfg!(target_os = "macos") {

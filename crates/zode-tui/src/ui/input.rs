@@ -3,7 +3,7 @@
 //! keys here.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -15,6 +15,32 @@ use crate::ui::status::Mode;
 
 pub struct InputBox {
     area: TextArea<'static>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputSelectionPoint {
+    pub row: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputSelection {
+    pub anchor: InputSelectionPoint,
+    pub focus: InputSelectionPoint,
+}
+
+impl InputSelection {
+    pub fn new(anchor: InputSelectionPoint, focus: InputSelectionPoint) -> Self {
+        Self { anchor, focus }
+    }
+
+    fn normalized(self) -> (InputSelectionPoint, InputSelectionPoint) {
+        if (self.focus.row, self.focus.column) < (self.anchor.row, self.anchor.column) {
+            (self.focus, self.anchor)
+        } else {
+            (self.anchor, self.focus)
+        }
+    }
 }
 
 impl Default for InputBox {
@@ -86,6 +112,18 @@ impl InputBox {
         mode: Mode,
         completion_placeholder: Option<&str>,
     ) {
+        self.render_with_selection(f, area, theme, mode, completion_placeholder, None);
+    }
+
+    pub fn render_with_selection(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        mode: Mode,
+        completion_placeholder: Option<&str>,
+        selection: Option<InputSelection>,
+    ) {
         let status_color = match mode {
             Mode::Ready => theme.accent_secondary,
             Mode::Thinking => theme.system,
@@ -112,11 +150,80 @@ impl InputBox {
         }
 
         let body = input_body_area(area);
-        self.render_wrapped_text(f, body, theme);
+        self.render_wrapped_text(f, body, theme, selection);
         self.render_completion_placeholder(f, area, theme, completion_placeholder);
     }
 
-    fn render_wrapped_text(&self, f: &mut Frame, body: Rect, theme: &Theme) {
+    pub fn selection_point_at(
+        &self,
+        area: Rect,
+        column: u16,
+        row: u16,
+    ) -> Option<InputSelectionPoint> {
+        let body = input_body_area(area);
+        if !rect_contains(body, column, row) || body.width == 0 || body.height == 0 {
+            return None;
+        }
+        let rows = wrap_input_lines(self.area.lines(), body.width);
+        let start = visible_wrapped_start(&rows, self.area.cursor(), body.width, body.height);
+        let row_idx = start.saturating_add(usize::from(row.saturating_sub(body.y)));
+        let wrapped = rows.get(row_idx).or_else(|| rows.last())?;
+        let x = usize::from(
+            column
+                .saturating_sub(body.x)
+                .min(body.width.saturating_sub(1)),
+        );
+        let rel_col = char_col_for_display_x(&wrapped.text, x);
+        Some(InputSelectionPoint {
+            row: wrapped.source_row,
+            column: wrapped
+                .start_col
+                .saturating_add(rel_col)
+                .min(wrapped.end_col),
+        })
+    }
+
+    pub fn selected_text(&self, selection: InputSelection) -> String {
+        let lines = self.area.lines();
+        if lines.is_empty() {
+            return String::new();
+        }
+        let (start, end) = selection.normalized();
+        if start == end {
+            return String::new();
+        }
+        let last_row = lines.len().saturating_sub(1);
+        let start_row = start.row.min(last_row);
+        let end_row = end.row.min(last_row);
+        let mut out = Vec::new();
+        for (row_idx, line) in lines
+            .iter()
+            .enumerate()
+            .take(end_row + 1)
+            .skip(start_row)
+        {
+            let line_len = line.chars().count();
+            let text = if start_row == end_row {
+                slice_char_cols(line, start.column.min(line_len), end.column.min(line_len))
+            } else if row_idx == start_row {
+                slice_char_cols(line, start.column.min(line_len), line_len)
+            } else if row_idx == end_row {
+                slice_char_cols(line, 0, end.column.min(line_len))
+            } else {
+                line.clone()
+            };
+            out.push(text);
+        }
+        out.join("\n")
+    }
+
+    fn render_wrapped_text(
+        &self,
+        f: &mut Frame,
+        body: Rect,
+        theme: &Theme,
+        selection: Option<InputSelection>,
+    ) {
         if body.width == 0 || body.height == 0 {
             return;
         }
@@ -125,12 +232,16 @@ impl InputBox {
         let (cursor_row, cursor_col) =
             wrapped_cursor_position(&rows, self.area.cursor(), body.width).unwrap_or((0, 0));
         let visible_height = body.height as usize;
-        let start = cursor_row.saturating_add(1).saturating_sub(visible_height);
+        let start = visible_wrapped_start(&rows, self.area.cursor(), body.width, body.height);
+        let selected_style = Style::default()
+            .bg(theme.accent)
+            .fg(theme.bg_primary)
+            .add_modifier(Modifier::BOLD);
         let visible_rows: Vec<Line<'static>> = rows
             .iter()
             .skip(start)
             .take(visible_height)
-            .map(|row| Line::from(Span::styled(row.text.clone(), style)))
+            .map(|row| render_input_row(row, style, selected_style, selection))
             .collect();
 
         f.render_widget(Paragraph::new(visible_rows).style(style), body);
@@ -177,6 +288,92 @@ impl InputBox {
         )]));
         f.render_widget(hint, Rect::new(x, inner.y, width, 1));
     }
+}
+
+fn visible_wrapped_start(
+    rows: &[WrappedInputLine],
+    cursor: (usize, usize),
+    width: u16,
+    height: u16,
+) -> usize {
+    let (cursor_row, _) = wrapped_cursor_position(rows, cursor, width).unwrap_or((0, 0));
+    cursor_row
+        .saturating_add(1)
+        .saturating_sub(usize::from(height))
+}
+
+fn render_input_row(
+    row: &WrappedInputLine,
+    style: Style,
+    selected_style: Style,
+    selection: Option<InputSelection>,
+) -> Line<'static> {
+    let Some((start_col, end_col)) =
+        selection.and_then(|selection| selection_cols_for_wrapped_row(row, selection))
+    else {
+        return Line::from(Span::styled(row.text.clone(), style));
+    };
+    let mut spans = Vec::new();
+    for (idx, ch) in row.text.chars().enumerate() {
+        spans.push(Span::styled(
+            ch.to_string(),
+            if idx >= start_col && idx < end_col {
+                selected_style
+            } else {
+                style
+            },
+        ));
+    }
+    Line::from(spans)
+}
+
+fn selection_cols_for_wrapped_row(
+    row: &WrappedInputLine,
+    selection: InputSelection,
+) -> Option<(usize, usize)> {
+    let (start, end) = selection.normalized();
+    if start == end || row.source_row < start.row || row.source_row > end.row {
+        return None;
+    }
+    let start_col = if row.source_row == start.row {
+        start.column
+    } else {
+        0
+    };
+    let end_col = if row.source_row == end.row {
+        end.column
+    } else {
+        usize::MAX
+    };
+    let start = start_col.max(row.start_col);
+    let end = end_col.min(row.end_col);
+    (start < end).then_some((start - row.start_col, end - row.start_col))
+}
+
+fn char_col_for_display_x(text: &str, x: usize) -> usize {
+    let mut display_col = 0usize;
+    for (idx, ch) in text.chars().enumerate() {
+        let next_col = display_col.saturating_add(char_width(ch).max(1));
+        if x < next_col {
+            return idx;
+        }
+        display_col = next_col;
+    }
+    text.chars().count()
+}
+
+fn slice_char_cols(text: &str, start_col: usize, end_col: usize) -> String {
+    text.chars()
+        .skip(start_col)
+        .take(end_col.saturating_sub(start_col))
+        .collect()
+}
+
+fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -449,6 +646,59 @@ mod tests {
             rows.iter().any(|row| row.contains("klmnop")),
             "overflow should wrap onto the next visual line: {rows:?}"
         );
+    }
+
+    #[test]
+    fn selected_text_extracts_input_range() {
+        let mut ib = InputBox::new();
+        ib.set_text("queued follow-up");
+
+        let selection = InputSelection::new(
+            InputSelectionPoint { row: 0, column: 7 },
+            InputSelectionPoint { row: 0, column: 13 },
+        );
+
+        assert_eq!(ib.selected_text(selection), "follow");
+    }
+
+    #[test]
+    fn selection_point_maps_composer_coordinates_to_input_text() {
+        let mut ib = InputBox::new();
+        ib.set_text("queued follow-up");
+        let area = Rect::new(0, 0, 32, 4);
+
+        assert_eq!(
+            ib.selection_point_at(area, 2, 1),
+            Some(InputSelectionPoint { row: 0, column: 0 })
+        );
+        assert_eq!(
+            ib.selection_point_at(area, 8, 1),
+            Some(InputSelectionPoint { row: 0, column: 6 })
+        );
+    }
+
+    #[test]
+    fn input_selection_renders_with_theme_highlight() {
+        let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
+        let mut ib = InputBox::new();
+        ib.set_text("queued follow-up");
+        let selection = InputSelection::new(
+            InputSelectionPoint { row: 0, column: 0 },
+            InputSelectionPoint { row: 0, column: 6 },
+        );
+        let backend = TestBackend::new(32, 4);
+        let mut term = Terminal::new(backend).unwrap();
+
+        term.draw(|f| {
+            ib.render_with_selection(f, f.area(), &theme, Mode::Ready, None, Some(selection))
+        })
+        .unwrap();
+
+        let buf = term.backend().buffer();
+        assert_eq!(buf[(2, 1)].symbol(), "q");
+        assert_eq!(buf[(2, 1)].bg, theme.accent);
+        assert_eq!(buf[(8, 1)].symbol(), " ");
+        assert_ne!(buf[(8, 1)].bg, theme.accent);
     }
 
     #[test]

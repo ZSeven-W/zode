@@ -84,12 +84,6 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Ui,
     },
     SlashCommand {
-        name: "selection",
-        description: "Toggle mouse text selection mode",
-        usage: "/selection [on|off|toggle]",
-        action: CommandAction::Ui,
-    },
-    SlashCommand {
         name: "resume",
         description: "Resume a session by id",
         usage: "/resume <id>",
@@ -118,6 +112,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         description: "Toggle bypass-approval mode",
         usage: "/yolo",
         action: CommandAction::Engine,
+    },
+    SlashCommand {
+        name: "sandbox",
+        description: "Show / control the OS sandbox for shell commands",
+        usage: "/sandbox [on|off|read-only|workspace-write|network on|network off]",
+        action: CommandAction::Ui,
     },
     SlashCommand {
         name: "plan",

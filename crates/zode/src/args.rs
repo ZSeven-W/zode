@@ -37,9 +37,22 @@ pub struct Args {
     #[arg(long)]
     pub yolo: bool,
 
-    /// Run mutating tools inside an OS sandbox.
+    /// Run shell commands inside an OS sandbox (on by default; this flag is a
+    /// no-op kept for compatibility — use `--no-sandbox` to disable).
     #[arg(long)]
     pub sandbox: bool,
+
+    /// Disable the OS sandbox (it is on by default).
+    #[arg(long)]
+    pub no_sandbox: bool,
+
+    /// Sandbox in read-only mode (deny all filesystem writes).
+    #[arg(long)]
+    pub sandbox_read_only: bool,
+
+    /// Allow outbound network inside the sandbox (denied by default).
+    #[arg(long)]
+    pub sandbox_allow_network: bool,
 }
 
 #[cfg(test)]

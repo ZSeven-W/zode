@@ -28,8 +28,25 @@ pub fn load_image_attachment(cwd: &Path, raw_path: &str) -> Result<ImageAttachme
     let path = expand_image_path(cwd, raw);
     let bytes = std::fs::read(&path)
         .map_err(|_| CoreError::Other(format!("image not found: {}", path.display())))?;
+    let display_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("attached image")
+        .to_string();
+    let mut attachment = image_attachment_from_bytes(&bytes, &display_name)?;
+    attachment.path = path;
+    Ok(attachment)
+}
+
+/// Build an [`ImageAttachment`] from raw image bytes that have no file backing
+/// (e.g. an image pasted from the system clipboard). `path` is left empty; the
+/// content block (base64) is what gets sent, so downstream never re-reads disk.
+pub fn image_attachment_from_bytes(
+    bytes: &[u8],
+    display_name: &str,
+) -> Result<ImageAttachment, CoreError> {
     let size_bytes = bytes.len() as u64;
-    let content_block = image_from_bytes(&bytes).map_err(image_error)?;
+    let content_block = image_from_bytes(bytes).map_err(image_error)?;
     let media_type = match &content_block {
         ContentBlock::Image {
             source: ImageSource::Base64 { media_type, .. },
@@ -40,15 +57,9 @@ pub fn load_image_attachment(cwd: &Path, raw_path: &str) -> Result<ImageAttachme
             ))
         }
     };
-    let display_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("attached image")
-        .to_string();
-
     Ok(ImageAttachment {
-        path,
-        display_name,
+        path: PathBuf::new(),
+        display_name: display_name.to_string(),
         media_type,
         size_bytes,
         content_block,
@@ -251,6 +262,20 @@ mod tests {
             ],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn builds_attachment_from_clipboard_bytes_without_a_path() {
+        // The PNG magic header is enough for format detection.
+        let png = [
+            0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let image = image_attachment_from_bytes(&png, "clipboard image").unwrap();
+        assert_eq!(image.display_name, "clipboard image");
+        assert_eq!(image.media_type, "image/png");
+        assert_eq!(image.size_bytes, 12);
+        assert!(image.path.as_os_str().is_empty(), "clipboard image has no file path");
+        assert!(matches!(image.content_block, ContentBlock::Image { .. }));
     }
 
     #[test]
