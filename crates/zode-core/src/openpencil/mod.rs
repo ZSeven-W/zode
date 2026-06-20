@@ -3,6 +3,7 @@
 
 pub mod client;
 pub mod connection;
+pub mod design;
 pub mod install;
 pub mod launcher;
 pub mod locate;
