@@ -1,5 +1,9 @@
 //! Design-pipeline orchestrator: schedules op's design_skeleton/content/refine.
 
+use std::sync::Arc;
+
+use agent::provider::{Provider, StreamRequest};
+use futures::StreamExt;
 use serde_json::{json, Value};
 
 use super::OpError;
@@ -86,6 +90,80 @@ pub struct DesignResult {
     pub failures: Vec<String>,
 }
 
+/// Lenient JSON extraction from model text: tries whole-string parse first,
+/// then extracts from a ```json fence, then finds the first balanced {…}/[…] span.
+pub fn extract_json(text: &str) -> Option<Value> {
+    // Attempt 1: the whole string is valid JSON.
+    if let Ok(v) = serde_json::from_str::<Value>(text.trim()) {
+        return Some(v);
+    }
+    // Attempt 2: fenced code block (```json … ``` or ``` … ```).
+    if let Some(start) = text
+        .find("```json")
+        .map(|i| i + 7)
+        .or_else(|| text.find("```").map(|i| i + 3))
+    {
+        if let Some(end) = text[start..].find("```") {
+            if let Ok(v) = serde_json::from_str::<Value>(text[start..start + end].trim()) {
+                return Some(v);
+            }
+        }
+    }
+    // Attempt 3: first balanced {…} or […] span.
+    for (open, close) in [('{', '}'), ('[', ']')] {
+        if let (Some(s), Some(e)) = (text.find(open), text.rfind(close)) {
+            if e > s {
+                if let Ok(v) = serde_json::from_str::<Value>(&text[s..=e]) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// One-shot LLM completion: sends a single user turn under `system` and
+/// collects the assistant's streamed text into a `String`.
+pub async fn llm_oneshot(
+    provider: &Arc<dyn Provider>,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> Result<String, OpError> {
+    use agent::abort::AbortController;
+    use agent::message::{ContentBlock, Header, Message};
+    use agent::stream::Event;
+
+    let req = StreamRequest::new(
+        model.to_string(),
+        vec![Message::User {
+            header: Header::new(),
+            content: vec![ContentBlock::Text {
+                text: user.to_string(),
+            }],
+        }],
+    )
+    .with_system(system.to_string());
+
+    let mut stream = provider
+        .stream(req, AbortController::new())
+        .await
+        .map_err(|e| OpError::Rpc(e.to_string()))?;
+
+    let mut out = String::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(Event::TextDelta { delta }) => out.push_str(&delta),
+            Ok(Event::Error { code, message }) => {
+                return Err(OpError::Rpc(format!("stream error code={code}: {message}")));
+            }
+            Ok(_) => {} // Result / tool / thinking / usage / notice events ignored
+            Err(e) => return Err(OpError::Rpc(e.to_string())),
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +207,17 @@ mod tests {
     #[test]
     fn normalize_skeleton_errors_without_root() {
         assert!(normalize_skeleton(&json!({"sectionIds":"1"})).is_err());
+    }
+
+    #[test]
+    fn extract_json_handles_clean_fenced_and_prose() {
+        assert_eq!(extract_json("{\"a\":1}").unwrap()["a"], 1);
+        assert_eq!(extract_json("```json\n{\"a\":2}\n```").unwrap()["a"], 2);
+        assert_eq!(
+            extract_json("sure, here:\n{\"a\":3}\ndone").unwrap()["a"],
+            3
+        );
+        assert_eq!(extract_json("[{\"x\":1}]").unwrap()[0]["x"], 1);
+        assert!(extract_json("no json here").is_none());
     }
 }
