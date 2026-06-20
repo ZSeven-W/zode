@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::connection::OpConnection;
+use super::design::{load_guidance, DesignOrchestrator, DirectLlmContentGenerator};
 use super::{is_read_tool, Consent};
 use crate::config::OpenPencilConfig;
 use crate::question::QuestionQueue;
@@ -19,6 +20,20 @@ pub struct OpToolDeps {
     pub cfg: OpenPencilConfig,
     pub consent: Arc<dyn Consent>,
     pub tag: String,
+}
+
+/// Deps for `op_design` — SEPARATE from `OpToolDeps`. `op_read`/`op_write` are
+/// registered before the skills registry exists, so their deps stay narrow
+/// (cfg/consent/tag); only `op_design` (registered after skills) needs the
+/// provider/model/skills to drive the design pipeline.
+#[derive(Clone, Debug)]
+pub struct OpDesignDeps {
+    pub cfg: OpenPencilConfig,
+    pub consent: Arc<dyn Consent>,
+    pub tag: String,
+    pub provider: Arc<dyn agent::provider::Provider>,
+    pub model: String,
+    pub skills: Arc<agent::skills::SkillRegistry>,
 }
 
 /// Consent backed by the question queue: a yes/no prompt showing the action.
@@ -161,6 +176,78 @@ impl Tool for OpWriteTool {
     }
 }
 
+/// Generates a whole OpenPencil UI from a prompt via the design pipeline
+/// (skeleton → content → refine). Mutating, so it is approval-gated.
+#[derive(Debug)]
+pub struct OpDesignTool {
+    deps: OpDesignDeps,
+}
+
+impl OpDesignTool {
+    pub fn new(deps: OpDesignDeps) -> Self {
+        Self { deps }
+    }
+}
+
+#[async_trait]
+impl Tool for OpDesignTool {
+    fn name(&self) -> &str {
+        "op_design"
+    }
+
+    fn description(&self) -> &str {
+        "Generate a whole OpenPencil UI from a prompt via the design pipeline \
+         (skeleton→content→refine). Use for full-page/section generation; use \
+         op_write for single edits."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["prompt"],
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "What UI to generate (e.g. a SaaS pricing page)"
+                }
+            }
+        })
+    }
+
+    fn safety_class(&self) -> SafetyClass {
+        SafetyClass::Mutating
+    }
+
+    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+        let prompt = input
+            .get("prompt")
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| AgentError::other("op_design: missing 'prompt'"))?;
+        let client =
+            OpConnection::ensure(&self.deps.cfg, self.deps.consent.as_ref(), &self.deps.tag)
+                .await
+                .map_err(|e| AgentError::other(e.to_string()))?;
+        // `deps.skills` is an `Arc<SkillRegistry>`; pass it by reference.
+        let guidance = load_guidance(
+            self.deps.skills.as_ref(),
+            &["frontend-design", "openpencil-design"],
+        );
+        let generator = DirectLlmContentGenerator {
+            provider: self.deps.provider.clone(),
+            model: self.deps.model.clone(),
+        };
+        let res = DesignOrchestrator
+            .run(&client, &generator, &guidance, prompt)
+            .await
+            .map_err(|e| AgentError::other(e.to_string()))?;
+        Ok(json!({
+            "sections": res.section_ids,
+            "failures": res.failures,
+            "refine": res.refine,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod test_helpers {
     use super::*;
@@ -194,6 +281,21 @@ mod test_helpers {
             Self { deps: deps() }
         }
     }
+
+    impl OpDesignTool {
+        pub(crate) fn new_for_test() -> Self {
+            Self {
+                deps: OpDesignDeps {
+                    cfg: OpenPencilConfig::default(),
+                    consent: Arc::new(NoConsent),
+                    tag: "0.8.0".into(),
+                    provider: Arc::new(agent::testing::MockProvider::new(Vec::new())),
+                    model: "test-model".into(),
+                    skills: Arc::new(agent::skills::SkillRegistry::new()),
+                },
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -213,6 +315,11 @@ mod tests {
         );
         assert_eq!(OpReadTool::new_for_test().name(), "op_read");
         assert_eq!(OpWriteTool::new_for_test().name(), "op_write");
+        assert_eq!(OpDesignTool::new_for_test().name(), "op_design");
+        assert_eq!(
+            OpDesignTool::new_for_test().safety_class(),
+            SafetyClass::Mutating
+        );
     }
 
     #[test]

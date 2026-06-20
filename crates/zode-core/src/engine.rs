@@ -286,25 +286,29 @@ impl ZodeEngine {
         }
 
         // OpenPencil control surface (op-bridge). Disable via `tools:op`.
+        //
+        // Fallback consent: denies every lifecycle action when no UI question
+        // channel is wired (so the bridge never installs or launches without an
+        // interactive confirmation). Hoisted above the resolved-consent binding
+        // so the consent can be shared with the later `op_design` registration
+        // (which happens after the skills registry is built).
+        #[derive(Debug)]
+        struct DenyConsent;
+        #[async_trait::async_trait]
+        impl crate::openpencil::Consent for DenyConsent {
+            async fn confirm(&self, _prompt: &str) -> bool {
+                false
+            }
+        }
+        // Resolve consent once; reused by op_read/op_write here and op_design
+        // after skills are loaded.
+        let op_consent_resolved: Arc<dyn crate::openpencil::Consent> =
+            op_consent.unwrap_or_else(|| Arc::new(DenyConsent));
         if cfg.openpencil.enabled() {
             use crate::openpencil::tools::{OpReadTool, OpToolDeps, OpWriteTool};
-            let consent: Arc<dyn crate::openpencil::Consent> = op_consent.unwrap_or_else(|| {
-                /// Fallback consent: denies every lifecycle action when no UI
-                /// question channel is wired (so the bridge never installs or
-                /// launches without an interactive confirmation).
-                #[derive(Debug)]
-                struct DenyConsent;
-                #[async_trait::async_trait]
-                impl crate::openpencil::Consent for DenyConsent {
-                    async fn confirm(&self, _prompt: &str) -> bool {
-                        false
-                    }
-                }
-                Arc::new(DenyConsent)
-            });
             let deps = OpToolDeps {
                 cfg: cfg.openpencil.clone(),
-                consent,
+                consent: op_consent_resolved.clone(),
                 tag: cfg.openpencil.release_tag().to_string(),
             };
             base.register(Arc::new(OpReadTool::new(deps.clone())));
@@ -326,6 +330,23 @@ impl ZodeEngine {
         }));
         let skills_idx = skills_index(&skills);
         base.register(Arc::new(SkillTool::new(skills.clone())));
+
+        // OpenPencil design pipeline (op-bridge T6). Registered HERE — after the
+        // skills registry exists — because it loads design guidance from skills.
+        // It reuses the consent resolved above and is Mutating (auto-gated by
+        // `wrap_mutating_tools`). Disable via `tools:op`.
+        if cfg.openpencil.enabled() {
+            use crate::openpencil::tools::{OpDesignDeps, OpDesignTool};
+            let design_deps = OpDesignDeps {
+                cfg: cfg.openpencil.clone(),
+                consent: op_consent_resolved.clone(),
+                tag: cfg.openpencil.release_tag().to_string(),
+                provider: provider.clone(),
+                model: model.clone(),
+                skills: skills.clone(),
+            };
+            base.register(Arc::new(OpDesignTool::new(design_deps)));
+        }
 
         // MCP: discover configured servers; connect only the enabled ones
         // (disabled ones are still listed by /plugin). Register a ZodeMcpTool

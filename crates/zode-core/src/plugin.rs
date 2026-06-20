@@ -112,8 +112,8 @@ pub const TOOL_GROUPS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "op",
-        "Drive a live OpenPencil design (read + write)",
-        &["op_read", "op_write"],
+        "Drive a live OpenPencil design (read + write + generate)",
+        &["op_read", "op_write", "op_design"],
     ),
 ];
 
@@ -275,6 +275,11 @@ mod tests {
     fn op_tools_are_grouped() {
         assert_eq!(group_of("op_read"), Some("op"));
         assert_eq!(group_of("op_write"), Some("op"));
+    }
+
+    #[test]
+    fn op_design_is_grouped() {
+        assert_eq!(group_of("op_design"), Some("op"));
     }
 
     #[test]
