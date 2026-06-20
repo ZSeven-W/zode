@@ -90,3 +90,87 @@ cargo fmt --all -- --check && \
 cargo clippy --workspace --all-targets -- -D warnings && \
 cargo test --workspace
 ```
+
+## OpenPencil control (`op-bridge`)
+
+Zode can drive a running OpenPencil instance over its local MCP endpoint.
+The feature is built across three crates:
+
+- `zode-core/src/openpencil/` — config, port-file discovery, transport,
+  client, installer, launcher, planner, tools (`op_read`/`op_write`).
+- `zode-core/src/commands/op.rs` — `/op <subcommand>` parser.
+- `zode-tui/src/app.rs` — `/op` slash-command handler + consent modal.
+
+### `/op` slash command
+
+Type `/op <subcommand>` in the TUI input.
+The TUI popup shows subcommand hints while typing `/op ` (Up/Down/Tab to
+navigate, Enter/Tab to confirm, Esc to dismiss).
+
+| Command | Effect |
+|---------|--------|
+| `/op status` | Print connection state (connected / port / none) |
+| `/op design 'F1=I("rect",{})'` | Run a batch_design DSL string |
+| `/op get_document_info` | Call the MCP tool with empty args |
+| `/op insert {"type":"rect","x":0,"y":0}` | Shorthand MCP call with JSON args |
+| `/op call <tool> <json>` | Explicit tool-name + JSON args |
+
+Available subcommands (autocomplete list): `status`, `design`, `insert`,
+`update`, `delete`, `move`, `copy`, `page`, `vars`, `selection`, `call`.
+
+`/op status` is a zode-side connection report, not an MCP `tools/call`.
+
+### `op_read` / `op_write` tools
+
+The agent can call OpenPencil tools directly via two tool wrappers:
+
+- **`op_read`** — calls any tool on the curated read-only allowlist
+  (`get_document_info`, `get_selection`, `list_pages`, `get_node`,
+  `get_variables`, `list_components`, `export_svg`, `export_png`,
+  `get_styles`) without requiring user approval.
+- **`op_write`** — calls any other MCP tool; gated by the standard
+  `ApprovalGate` (asks the user before executing).
+
+Both tools are registered in the `op` tool group and connect to OpenPencil
+via `OpConnection::ensure` (which may trigger install/launch — see below).
+
+### `openpencil.*` config keys
+
+Set in `~/.config/zode/config.toml` (or `ZODE_CONFIG_DIR`):
+
+```toml
+[openpencil]
+# Pinned release tag used for install (default: "v0.8.0").
+releaseTag = "v0.8.0"
+
+# Auto-launch the OpenPencil GUI if no port file is found (default: true).
+autoLaunchGui = true
+
+# Override the install command (platform-default if unset).
+# Unix: "bash -c <script>"; Windows: "powershell.exe -Command <script>".
+installCommand = ""
+```
+
+All keys are optional; absent keys fall back to built-in defaults.
+
+### Connect / install / launch flow
+
+`OpConnection::ensure` runs on every `/op` subcommand or `op_read`/`op_write`
+tool call:
+
+1. **Discover** — reads `~/.openpencil/.op-mcp-port` for `{"port": N, "token": "..."}`.
+2. **Ping** — HTTP GET `http://127.0.0.1:<port>/mcp` with `Authorization: Bearer <token>`.
+   Token is required for ping verification; MCP `tools/call` calls are
+   **unauthenticated** (localhost trust boundary).
+3. **Attach** — if ping succeeds, use the live connection.
+4. **Install** — if no port file exists, prompt the user (consent modal) then
+   run the platform install script:
+   - Unix: `bash -c "$OP_INSTALL_SCRIPT"` with `OP_VERSION=<releaseTag>`.
+   - Windows: `powershell.exe -NoProfile -Command "$OP_INSTALL_SCRIPT"`.
+   The install command and argv are shown in the consent prompt before running.
+5. **Launch** — if installed but not running (port file absent / ping fails),
+   prompt the user then spawn `op start` as a detached background process.
+
+The localhost trust boundary means: tool calls go to `http://127.0.0.1:<port>/mcp`
+without auth headers; only the ping step sends the bearer token to verify
+the running server is the expected OpenPencil process.

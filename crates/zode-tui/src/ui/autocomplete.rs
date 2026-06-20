@@ -1,6 +1,10 @@
 //! Slash-command autocomplete popup. Activates when the input line starts
 //! with "/", filters via CommandRegistry::lookup, navigable with ↑↓/Tab,
 //! confirmed with Enter/Tab, dismissed with Esc.
+//!
+//! Also provides a secondary subcommand-hint popup for `/op <subcommand>`:
+//! activates when the input starts with "/op " and filters against
+//! `OP_SUBCOMMANDS`.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -16,6 +20,38 @@ const COMMAND_COLUMN_WIDTH: usize = 15;
 /// Upper bound for the auto-sized name column, so one very long name can't push
 /// every description off-screen.
 const NAME_COLUMN_MAX: usize = 30;
+
+/// Known `/op` subcommands. Each maps to an MCP tool on the OpenPencil side
+/// (or to the built-in `status` report). Kept here so the hint popup never
+/// goes stale relative to the parser in `zode_core::commands::op`.
+pub const OP_SUBCOMMANDS: &[&str] = &[
+    "status",
+    "design",
+    "insert",
+    "update",
+    "delete",
+    "move",
+    "copy",
+    "page",
+    "vars",
+    "selection",
+    "call",
+];
+
+/// Brief descriptions shown alongside each `/op` subcommand in the hint popup.
+const OP_SUBCOMMAND_DESCS: &[&str] = &[
+    "report connection state",
+    "run batch_design DSL",
+    "insert a node",
+    "update node properties",
+    "delete nodes",
+    "move nodes",
+    "copy nodes",
+    "page operations",
+    "variable operations",
+    "selection operations",
+    "call any MCP tool by name",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandCompletion {
@@ -43,6 +79,10 @@ pub struct Autocomplete {
     dyn_matches: Vec<DynCmd>,
     state: ListState,
     active: bool,
+    /// Secondary mode: subcommand hints for `/op <sub>`.
+    op_sub_matches: Vec<(&'static str, &'static str)>,
+    op_sub_state: ListState,
+    op_sub_active: bool,
 }
 
 impl Default for Autocomplete {
@@ -60,6 +100,9 @@ impl Autocomplete {
             dyn_matches: Vec::new(),
             state: ListState::default(),
             active: false,
+            op_sub_matches: Vec::new(),
+            op_sub_state: ListState::default(),
+            op_sub_active: false,
         }
     }
 
@@ -75,7 +118,25 @@ impl Autocomplete {
     }
 
     /// Recompute matches from the current input text.
+    ///
+    /// Two modes:
+    /// 1. Primary: `/command` (no space) — shows matching slash commands.
+    /// 2. Secondary: `/op ` prefix — shows `/op` subcommand hints.
     pub fn update(&mut self, input: &str) {
+        // Secondary mode: `/op ` prefix triggers subcommand hints.
+        if let Some(sub_prefix) = input.strip_prefix("/op ") {
+            self.active = false;
+            self.matches.clear();
+            self.dyn_matches.clear();
+            self.state.select(None);
+            self.update_op_sub(sub_prefix);
+            return;
+        }
+        // Clear any stale secondary state when not in `/op ` mode.
+        self.op_sub_active = false;
+        self.op_sub_matches.clear();
+        self.op_sub_state.select(None);
+
         match input.strip_prefix('/') {
             // Only while typing the command word (no space yet).
             Some(rest) if !rest.contains(char::is_whitespace) => {
@@ -111,8 +172,32 @@ impl Autocomplete {
         }
     }
 
+    /// Recompute the `/op` subcommand hint list from the typed subcommand prefix.
+    fn update_op_sub(&mut self, typed: &str) {
+        let q = typed.to_ascii_lowercase();
+        self.op_sub_matches = OP_SUBCOMMANDS
+            .iter()
+            .zip(OP_SUBCOMMAND_DESCS.iter())
+            .filter(|(name, _)| q.is_empty() || name.contains(q.as_str()))
+            .map(|(n, d)| (*n, *d))
+            .collect();
+        let total = self.op_sub_matches.len();
+        self.op_sub_active = total > 0;
+        if self.op_sub_active {
+            let sel = self.op_sub_state.selected().unwrap_or(0).min(total - 1);
+            self.op_sub_state.select(Some(sel));
+        } else {
+            self.op_sub_state.select(None);
+        }
+    }
+
     pub fn is_active(&self) -> bool {
         self.active
+    }
+
+    /// True when the `/op` subcommand hint popup is showing.
+    pub fn is_op_sub_active(&self) -> bool {
+        self.op_sub_active
     }
 
     pub fn matches(&self) -> &[SlashCommand] {
@@ -169,12 +254,61 @@ impl Autocomplete {
         }
     }
 
+    /// Navigate down in the `/op` subcommand hint list.
+    pub fn op_sub_next(&mut self) {
+        let total = self.op_sub_matches.len();
+        if total == 0 {
+            return;
+        }
+        let i = (self.op_sub_state.selected().unwrap_or(0) + 1) % total;
+        self.op_sub_state.select(Some(i));
+    }
+
+    /// Navigate up in the `/op` subcommand hint list.
+    pub fn op_sub_prev(&mut self) {
+        let total = self.op_sub_matches.len();
+        if total == 0 {
+            return;
+        }
+        let i = self
+            .op_sub_state
+            .selected()
+            .unwrap_or(0)
+            .checked_sub(1)
+            .unwrap_or(total - 1);
+        self.op_sub_state.select(Some(i));
+    }
+
+    /// Confirm the selected `/op` subcommand; returns the text to insert
+    /// (e.g. `"/op status"` or `"/op design "`).
+    pub fn op_sub_confirm(&self) -> Option<String> {
+        let i = self.op_sub_state.selected().unwrap_or(0);
+        self.op_sub_matches.get(i).map(|(name, _)| {
+            // `design` and `call` take a required argument, so leave a trailing
+            // space; all others can be submitted as-is.
+            if *name == "design" || *name == "call" {
+                format!("/op {name} ")
+            } else {
+                format!("/op {name}")
+            }
+        })
+    }
+
     pub fn dismiss(&mut self) {
         self.active = false;
+        self.op_sub_active = false;
+        self.op_sub_matches.clear();
+        self.op_sub_state.select(None);
     }
 
     /// Render anchored above `input_area`.
+    /// Renders the primary command popup when active, or the `/op` subcommand
+    /// hint popup when `op_sub_active`, but never both simultaneously.
     pub fn render(&mut self, f: &mut Frame, input_area: Rect, theme: &Theme) {
+        if self.op_sub_active {
+            self.render_op_sub(f, input_area, theme);
+            return;
+        }
         if !self.active {
             return;
         }
@@ -246,6 +380,54 @@ impl Autocomplete {
                     .add_modifier(Modifier::BOLD),
             );
         f.render_stateful_widget(list, area, &mut self.state);
+    }
+
+    /// Render the `/op` subcommand hint popup above `input_area`.
+    fn render_op_sub(&mut self, f: &mut Frame, input_area: Rect, theme: &Theme) {
+        let n = self.op_sub_matches.len().min(MAX_VISIBLE) as u16;
+        if n == 0 {
+            return;
+        }
+        let area = popup_area(input_area, n);
+        // Name column width: longest subcommand name, clamped for readability.
+        let name_col = self
+            .op_sub_matches
+            .iter()
+            .map(|(name, _)| name.len())
+            .max()
+            .unwrap_or(0)
+            .clamp(COMMAND_COLUMN_WIDTH, NAME_COLUMN_MAX);
+        let items: Vec<ListItem> = self
+            .op_sub_matches
+            .iter()
+            .map(|(name, desc)| {
+                ListItem::new(Line::from(vec![
+                    Span::raw("  /op "),
+                    Span::styled(
+                        format!("{name:<name_col$} "),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(*desc, Style::default().fg(theme.fg_text)),
+                ]))
+            })
+            .collect();
+        f.render_widget(Clear, area);
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT)
+                    .border_style(Style::default().fg(theme.separator))
+                    .style(Style::default().bg(theme.bg_secondary)),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(theme.accent)
+                    .fg(theme.bg_secondary)
+                    .add_modifier(Modifier::BOLD),
+            );
+        f.render_stateful_widget(list, area, &mut self.op_sub_state);
     }
 }
 
@@ -423,5 +605,115 @@ mod tests {
         assert!(content.contains("/theme"));
         assert!(!content.contains("/compact"));
         assert!(!content.contains("/cost"));
+    }
+
+    // --- /op subcommand hint tests ---
+
+    #[test]
+    fn op_sub_activates_on_op_space_prefix() {
+        let mut ac = Autocomplete::new();
+        ac.update("/op ");
+        assert!(ac.is_op_sub_active());
+        assert!(!ac.is_active(), "primary popup should be off in op-sub mode");
+    }
+
+    #[test]
+    fn op_sub_filters_by_typed_prefix() {
+        let mut ac = Autocomplete::new();
+        ac.update("/op des");
+        assert!(ac.is_op_sub_active());
+        let confirmed = ac.op_sub_confirm().expect("should match 'design'");
+        assert!(confirmed.contains("design"));
+    }
+
+    #[test]
+    fn op_sub_confirm_appends_space_for_design_and_call() {
+        let mut ac = Autocomplete::new();
+        // Navigate to "design" (it is second after "status"; easier to filter directly).
+        ac.update("/op design");
+        assert!(ac.is_op_sub_active());
+        let text = ac.op_sub_confirm().expect("design match");
+        assert_eq!(text, "/op design ");
+
+        ac.update("/op call");
+        let text = ac.op_sub_confirm().expect("call match");
+        assert_eq!(text, "/op call ");
+    }
+
+    #[test]
+    fn op_sub_confirm_no_trailing_space_for_status() {
+        let mut ac = Autocomplete::new();
+        ac.update("/op status");
+        assert!(ac.is_op_sub_active());
+        let text = ac.op_sub_confirm().expect("status match");
+        assert_eq!(text, "/op status");
+    }
+
+    #[test]
+    fn op_sub_navigation_wraps() {
+        let mut ac = Autocomplete::new();
+        ac.update("/op ");
+        let total = ac.op_sub_matches.len();
+        assert!(total > 1);
+        ac.op_sub_next();
+        ac.op_sub_prev();
+        // Back to first entry after next+prev.
+        let text = ac.op_sub_confirm().expect("wrapped back to first");
+        assert!(text.contains("status"));
+    }
+
+    #[test]
+    fn op_sub_dismiss_clears_state() {
+        let mut ac = Autocomplete::new();
+        ac.update("/op ");
+        assert!(ac.is_op_sub_active());
+        ac.dismiss();
+        assert!(!ac.is_op_sub_active());
+    }
+
+    #[test]
+    fn op_sub_deactivates_when_leaving_op_prefix() {
+        let mut ac = Autocomplete::new();
+        ac.update("/op ");
+        assert!(ac.is_op_sub_active());
+        ac.update("/th");
+        assert!(!ac.is_op_sub_active());
+        assert!(ac.is_active()); // switched back to primary popup
+    }
+
+    #[test]
+    fn op_sub_renders_subcommand_names() {
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("cyberpunk"));
+        let backend = ratatui::backend::TestBackend::new(110, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let input_area = Rect::new(0, 20, 110, 4);
+        let mut ac = Autocomplete::new();
+
+        ac.update("/op ");
+        term.draw(|f| ac.render(f, input_area, &theme)).unwrap();
+
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("status"), "popup should show 'status'");
+        assert!(content.contains("design"), "popup should show 'design'");
+    }
+
+    #[test]
+    fn op_subcommands_constant_covers_all_expected_entries() {
+        let expected = [
+            "status", "design", "insert", "update", "delete", "move", "copy", "page", "vars",
+            "selection", "call",
+        ];
+        assert_eq!(OP_SUBCOMMANDS, expected);
+        assert_eq!(
+            OP_SUBCOMMANDS.len(),
+            OP_SUBCOMMAND_DESCS.len(),
+            "each subcommand must have a description"
+        );
     }
 }

@@ -1681,6 +1681,34 @@ impl TuiApp {
             return;
         }
 
+        // 5a. /op subcommand hint popup (active after "/op " prefix is typed).
+        if self.autocomplete.is_op_sub_active() {
+            match key.code {
+                KeyCode::Up => {
+                    self.autocomplete.op_sub_prev();
+                    return;
+                }
+                KeyCode::Down => {
+                    self.autocomplete.op_sub_next();
+                    return;
+                }
+                KeyCode::Tab | KeyCode::Enter => {
+                    if let Some(insert) = self.autocomplete.op_sub_confirm() {
+                        self.input.take();
+                        self.input.insert_str(&insert);
+                        self.completion_hint = None;
+                    }
+                    self.autocomplete.dismiss();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.autocomplete.dismiss();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // 5. Autocomplete interception (when the popup is open).
         if self.autocomplete.is_active() {
             match key.code {
