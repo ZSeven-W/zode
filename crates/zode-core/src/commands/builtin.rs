@@ -52,6 +52,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         usage: "/cost",
         action: CommandAction::Engine,
     },
+    SlashCommand {
+        name: "op",
+        description: "Drive OpenPencil (e.g. /op status, /op design '<dsl>')",
+        usage: "/op <status|design '<dsl>'|<tool> <json>>",
+        action: CommandAction::Local,
+    },
     // Registered now, fully wired in later phases.
     SlashCommand {
         name: "theme",

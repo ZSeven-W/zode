@@ -129,6 +129,9 @@ async fn run(args: Args) -> i32 {
     // Parallel channel for the AskUserQuestion tool — the UI drains it like the
     // approval channel, but it carries a single-choice question, not an allow/deny.
     let (question_queue, question_rx) = zode_core::question::question_queue();
+    // The TUI also keeps a clone of the question queue so the `/op` command can
+    // raise install/launch consent prompts through the same modal.
+    let op_question_queue = question_queue.clone();
     // The TUI keeps a template so Ctrl+T / resume / hot-switch can (re)assemble
     // engines.
     let template = EngineTemplate::new(cfg.clone(), cwd, Some(queue), args.yolo, sandbox, today)
@@ -153,9 +156,17 @@ async fn run(args: Args) -> i32 {
         sandbox: args.sandbox,
         provider_names: cfg.providers.keys().cloned().collect(),
     };
-    match zode_tui::TuiApp::new(engine, template, ui, approval_rx, question_rx, resumed_id)
-        .run()
-        .await
+    match zode_tui::TuiApp::new(
+        engine,
+        template,
+        ui,
+        approval_rx,
+        question_rx,
+        op_question_queue,
+        resumed_id,
+    )
+    .run()
+    .await
     {
         Ok(()) => 0,
         Err(e) => {
@@ -182,9 +193,9 @@ async fn build(
     sandbox: Option<zode_core::sandbox::SandboxConfig>,
     date: &str,
 ) -> Option<ZodeEngine> {
-    // Headless surfaces have no UI to answer questions (None) and don't enter
-    // plan mode (false).
-    match ZodeEngine::assemble(cfg, cwd, gate, sandbox, date, None, false).await {
+    // Headless surfaces have no UI to answer questions (None), no consent
+    // channel for the op-bridge (None), and don't enter plan mode (false).
+    match ZodeEngine::assemble(cfg, cwd, gate, sandbox, date, None, None, false).await {
         Ok(e) => Some(e),
         Err(e) => {
             eprintln!("zode: {e}");

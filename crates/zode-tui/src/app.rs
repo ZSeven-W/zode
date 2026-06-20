@@ -201,6 +201,9 @@ pub struct TuiApp {
     pending_requests: VecDeque<ApprovalRequest>,
     /// AskUserQuestion channel + its modal (parallel to the approval path).
     question_rx: QuestionReceiver,
+    /// Question-queue sender clone: lets `/op` raise consent prompts (for
+    /// install/launch) through the same modal the agent's questions use.
+    question_queue: zode_core::question::QuestionQueue,
     active_question: Option<QuestionDialog>,
     pending_questions: VecDeque<QuestionRequest>,
     autocomplete: Autocomplete,
@@ -242,6 +245,7 @@ impl TuiApp {
         ui: UiConfig,
         approval_rx: ApprovalReceiver,
         question_rx: QuestionReceiver,
+        question_queue: zode_core::question::QuestionQueue,
         resumed_id: Option<String>,
     ) -> Self {
         let mut theme_store = ThemeStore::with_builtins();
@@ -317,6 +321,7 @@ impl TuiApp {
             active_dialog: None,
             pending_requests: VecDeque::new(),
             question_rx,
+            question_queue,
             active_question: None,
             pending_questions: VecDeque::new(),
             autocomplete: Autocomplete::new(),
@@ -3272,6 +3277,39 @@ impl TuiApp {
                 let report = self.active_tab().engine.cost.report().await;
                 self.active_tab_mut().chat.push_system(&report);
             }
+            "op" => {
+                use zode_core::commands::op::{map_subcommand, OpCommand};
+                use zode_core::openpencil::{
+                    connection::{connection_status, OpConnection},
+                    tools::QueueConsent,
+                    Consent,
+                };
+                let cfg = self.active_tab().engine.openpencil.clone();
+                match map_subcommand(args) {
+                    Err(e) => self.active_tab_mut().chat.push_system(&format!("/op: {e}")),
+                    Ok(OpCommand::Status) => {
+                        let s = connection_status(&cfg).await;
+                        self.active_tab_mut().chat.push_system(&s);
+                    }
+                    Ok(OpCommand::Call { tool, args }) => {
+                        // Tag consent prompts with the active tab so the modal
+                        // shows which session triggered the install/launch.
+                        let source = Some(self.active_tab().id.to_string());
+                        let consent: Arc<dyn Consent> =
+                            Arc::new(QueueConsent::new(self.question_queue.clone(), source));
+                        let tag = cfg.release_tag().to_string();
+                        let msg = match OpConnection::ensure(&cfg, consent.as_ref(), &tag).await {
+                            Ok(client) => match client.call(&tool, args).await {
+                                Ok(v) => serde_json::to_string_pretty(&v)
+                                    .unwrap_or_else(|_| v.to_string()),
+                                Err(e) => format!("/op {tool} failed: {e}"),
+                            },
+                            Err(e) => format!("/op: {e}"),
+                        };
+                        self.active_tab_mut().chat.push_system(&msg);
+                    }
+                }
+            }
             "sessions" | "resume" => self.open_session_picker(),
             "tab" => self.handle_tab_command(args),
             "connect" => self.open_connect_dialog(),
@@ -4769,6 +4807,7 @@ mod tests {
         };
         let (approval_queue, approval_rx) = zode_core::approval::approval_queue();
         let (question_queue, question_rx) = zode_core::question::question_queue();
+        let op_question_queue = question_queue.clone();
         let template = EngineTemplate::new(
             cfg,
             cwd.clone(),
@@ -4790,6 +4829,7 @@ mod tests {
             },
             approval_rx,
             question_rx,
+            op_question_queue,
             None,
         );
         let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
