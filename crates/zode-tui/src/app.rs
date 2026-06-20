@@ -21,7 +21,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -1151,6 +1151,17 @@ impl TuiApp {
                 maybe_ev = term_events.next() => {
                     if let Some(Ok(ev)) = maybe_ev {
                         self.handle_term(ev, &agent_tx).await;
+                        // Coalesce the rest of an input burst before redrawing.
+                        // A trackpad/wheel momentum flick floods scroll events;
+                        // handling them all here (then one draw at the top of
+                        // the loop) stops over-scrolling at the top/bottom from
+                        // backing up into a multi-second redraw storm.
+                        for ev in drain_ready_events(&mut term_events, INPUT_COALESCE_CAP) {
+                            if self.should_quit {
+                                break;
+                            }
+                            self.handle_term(ev, &agent_tx).await;
+                        }
                         // Switching to a tab that has queued input (and is now
                         // idle) flushes it here, not just on its own turn-done.
                         self.dispatch_queued_input(&agent_tx).await;
@@ -1724,6 +1735,7 @@ impl TuiApp {
         ) {
             FragmentedCursorAction::None => {}
             FragmentedCursorAction::ReplayBareO(count) => self.input.insert_str(&"O".repeat(count)),
+            FragmentedCursorAction::ReplaySgr(text) => self.input.insert_str(&text),
             FragmentedCursorAction::Consumed => return,
             FragmentedCursorAction::Scroll(scroll) => {
                 if self.input.text().is_empty() {
@@ -3753,18 +3765,31 @@ enum ChatMouseScroll {
     Down(u16),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FragmentedCursorSeqState {
     AfterEsc,
     AfterEscO,
     AfterEscBracket,
     MaybeBareO { count: usize },
+    /// Mid SGR mouse report (`<Cb;Cx;Cy` so far) reached via a lost/fragmented
+    /// `ESC[`. `buf` holds the bytes seen so they can be replayed verbatim if
+    /// the run turns out not to be a real report.
+    MaybeSgrMouse { buf: String },
+    /// A `[` seen right after a swallowed report — likely the next report's
+    /// `ESC[` with the ESC lost. Held tentatively so it can be replayed.
+    MaybeSgrBracket,
+    /// Just swallowed a complete SGR mouse report; a following bare `[`/`<`
+    /// continues a back-to-back momentum flood.
+    AfterSgrMouse,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FragmentedCursorAction {
     None,
     ReplayBareO(usize),
+    /// Give back tentatively-buffered bytes (a `<…`/`[` run that wasn't a mouse
+    /// report); the caller inserts them, then handles the current key.
+    ReplaySgr(String),
     Consumed,
     Scroll(ChatMouseScroll),
 }
@@ -3777,6 +3802,37 @@ enum SessionPickerMouseScroll {
 
 const CHAT_WHEEL_SCROLL_LINES: u16 = 1;
 const SESSION_PICKER_MOUSE_SCROLL_ROWS: usize = 1;
+
+/// Upper bound on how many already-buffered terminal events one loop iteration
+/// drains before redrawing. A trackpad/mouse-wheel momentum flick can deliver
+/// dozens to hundreds of scroll events at once; the cap keeps a sustained flood
+/// from starving the agent/approval/question `select!` branches.
+const INPUT_COALESCE_CAP: usize = 1024;
+
+/// Pull every terminal event that is *already buffered* — without awaiting —
+/// up to `cap`. Returns the burst so the caller can handle it and redraw ONCE,
+/// instead of once per event. Stops at the cap, at the first not-yet-ready
+/// poll, or at end-of-stream / a read error (the next `select!` await picks
+/// those back up). This is what stops over-scrolling at the top/bottom from
+/// feeling frozen: the redraw storm collapses into one redraw per flick.
+///
+/// `now_or_never` polls with a noop waker, so a final not-ready probe leaves no
+/// useful waker registered. That's safe here: the caller loops straight back to
+/// `select!`, which re-polls this stream with the real task waker before it ever
+/// parks, and the 100ms tick is a liveness backstop regardless.
+fn drain_ready_events<S>(stream: &mut S, cap: usize) -> Vec<CtEvent>
+where
+    S: futures::Stream<Item = std::io::Result<CtEvent>> + Unpin,
+{
+    let mut out = Vec::new();
+    while out.len() < cap {
+        match stream.next().now_or_never() {
+            Some(Some(Ok(ev))) => out.push(ev),
+            _ => break,
+        }
+    }
+    out
+}
 
 fn mode_label(mode: Mode) -> &'static str {
     match mode {
@@ -3876,81 +3932,172 @@ fn fragmented_cursor_sequence_action(
     modifiers: KeyModifiers,
     input_is_empty: bool,
 ) -> FragmentedCursorAction {
+    use FragmentedCursorAction as Action;
+    use FragmentedCursorSeqState as St;
+    let up = || Action::Scroll(ChatMouseScroll::Up(CHAT_WHEEL_SCROLL_LINES));
+    let down = || Action::Scroll(ChatMouseScroll::Down(CHAT_WHEEL_SCROLL_LINES));
+
+    // A modifier can't belong to a fragmented escape/mouse sequence (those
+    // arrive as bare chars). Abort any pending run, replaying buffered bytes so
+    // nothing the user typed is silently eaten.
     if !modifiers.is_empty() {
-        if let Some(FragmentedCursorSeqState::MaybeBareO { count }) = *state {
-            *state = None;
-            return FragmentedCursorAction::ReplayBareO(count);
-        }
-        *state = None;
-        return FragmentedCursorAction::None;
+        return match state.take() {
+            Some(St::MaybeBareO { count }) => Action::ReplayBareO(count),
+            Some(St::MaybeSgrMouse { buf }) => Action::ReplaySgr(buf),
+            Some(St::MaybeSgrBracket) => Action::ReplaySgr("[".to_string()),
+            _ => Action::None,
+        };
     }
 
-    match *state {
-        Some(FragmentedCursorSeqState::AfterEsc) => match code {
+    match state.take() {
+        Some(St::AfterEsc) => match code {
             KeyCode::Char('O') => {
-                *state = Some(FragmentedCursorSeqState::AfterEscO);
-                FragmentedCursorAction::Consumed
+                *state = Some(St::AfterEscO);
+                Action::Consumed
             }
             KeyCode::Char('[') => {
-                *state = Some(FragmentedCursorSeqState::AfterEscBracket);
-                FragmentedCursorAction::Consumed
+                *state = Some(St::AfterEscBracket);
+                Action::Consumed
             }
-            _ => {
-                *state = None;
-                FragmentedCursorAction::None
-            }
+            _ => Action::None,
         },
-        Some(FragmentedCursorSeqState::MaybeBareO { count }) => {
-            *state = None;
-            match code {
-                KeyCode::Up => {
-                    FragmentedCursorAction::Scroll(ChatMouseScroll::Up(CHAT_WHEEL_SCROLL_LINES))
-                }
-                KeyCode::Down => {
-                    FragmentedCursorAction::Scroll(ChatMouseScroll::Down(CHAT_WHEEL_SCROLL_LINES))
-                }
-                KeyCode::Char('A') => {
-                    FragmentedCursorAction::Scroll(ChatMouseScroll::Up(CHAT_WHEEL_SCROLL_LINES))
-                }
-                KeyCode::Char('B') => {
-                    FragmentedCursorAction::Scroll(ChatMouseScroll::Down(CHAT_WHEEL_SCROLL_LINES))
-                }
-                KeyCode::Char('C') | KeyCode::Char('D') => FragmentedCursorAction::Consumed,
-                KeyCode::Char('O') if input_is_empty => {
-                    *state = Some(FragmentedCursorSeqState::MaybeBareO {
-                        count: count.saturating_add(1),
-                    });
-                    FragmentedCursorAction::Consumed
-                }
-                _ => FragmentedCursorAction::ReplayBareO(count),
+        Some(St::MaybeBareO { count }) => match code {
+            KeyCode::Up | KeyCode::Char('A') => up(),
+            KeyCode::Down | KeyCode::Char('B') => down(),
+            KeyCode::Char('C') | KeyCode::Char('D') => Action::Consumed,
+            KeyCode::Char('O') if input_is_empty => {
+                *state = Some(St::MaybeBareO {
+                    count: count.saturating_add(1),
+                });
+                Action::Consumed
             }
-        }
-        Some(FragmentedCursorSeqState::AfterEscO)
-        | Some(FragmentedCursorSeqState::AfterEscBracket) => {
-            *state = None;
-            match code {
-                KeyCode::Char('A') => {
-                    FragmentedCursorAction::Scroll(ChatMouseScroll::Up(CHAT_WHEEL_SCROLL_LINES))
-                }
-                KeyCode::Char('B') => {
-                    FragmentedCursorAction::Scroll(ChatMouseScroll::Down(CHAT_WHEEL_SCROLL_LINES))
-                }
-                KeyCode::Char('C') | KeyCode::Char('D') => FragmentedCursorAction::Consumed,
-                _ => FragmentedCursorAction::None,
+            _ => Action::ReplayBareO(count),
+        },
+        Some(St::AfterEscO) | Some(St::AfterEscBracket) => match code {
+            KeyCode::Char('A') => up(),
+            KeyCode::Char('B') => down(),
+            KeyCode::Char('C') | KeyCode::Char('D') => Action::Consumed,
+            // `ESC [ < … M/m` — a fragmented SGR mouse report. Start swallowing.
+            KeyCode::Char('<') => {
+                *state = Some(St::MaybeSgrMouse {
+                    buf: String::from("<"),
+                });
+                Action::Consumed
             }
-        }
-        None => match code {
+            _ => Action::None,
+        },
+        Some(St::MaybeSgrMouse { buf }) => sgr_mouse_step(state, buf, code),
+        Some(St::AfterSgrMouse) => match code {
+            // Back-to-back reports in a momentum flood: the next report's ESC
+            // was lost, so a bare `[`/`<` begins the following sequence.
+            KeyCode::Char('[') => {
+                *state = Some(St::MaybeSgrBracket);
+                Action::Consumed
+            }
+            KeyCode::Char('<') => {
+                *state = Some(St::MaybeSgrMouse {
+                    buf: String::from("<"),
+                });
+                Action::Consumed
+            }
             KeyCode::Esc => {
-                *state = Some(FragmentedCursorSeqState::AfterEsc);
-                FragmentedCursorAction::Consumed
+                *state = Some(St::AfterEsc);
+                Action::Consumed
             }
             KeyCode::Char('O') if input_is_empty => {
-                *state = Some(FragmentedCursorSeqState::MaybeBareO { count: 1 });
-                FragmentedCursorAction::Consumed
+                *state = Some(St::MaybeBareO { count: 1 });
+                Action::Consumed
             }
-            _ => FragmentedCursorAction::None,
+            _ => Action::None,
+        },
+        Some(St::MaybeSgrBracket) => match code {
+            // Carry the held `[` so an invalid run replays `[<…` intact (real
+            // text like `[<x` typed right after a scroll keeps its `[`).
+            KeyCode::Char('<') => {
+                *state = Some(St::MaybeSgrMouse {
+                    buf: String::from("[<"),
+                });
+                Action::Consumed
+            }
+            // Fragmented arrow without ESC: `[` then A/B/C/D.
+            KeyCode::Char('A') => up(),
+            KeyCode::Char('B') => down(),
+            KeyCode::Char('C') | KeyCode::Char('D') => Action::Consumed,
+            // Not a sequence after all — give the `[` back, then let the caller
+            // handle this key normally.
+            _ => Action::ReplaySgr("[".to_string()),
+        },
+        None => match code {
+            KeyCode::Esc => {
+                *state = Some(St::AfterEsc);
+                Action::Consumed
+            }
+            KeyCode::Char('O') if input_is_empty => {
+                *state = Some(St::MaybeBareO { count: 1 });
+                Action::Consumed
+            }
+            // Bare SGR mouse report whose `ESC[` was lost to fragmentation.
+            KeyCode::Char('<') => {
+                *state = Some(St::MaybeSgrMouse {
+                    buf: String::from("<"),
+                });
+                Action::Consumed
+            }
+            _ => Action::None,
         },
     }
+}
+
+/// One step inside a fragmented SGR mouse report. `buf` holds the bytes seen so
+/// far — an optional leading `[` (a swallowed report's lost `ESC[`) then `<`
+/// then `Cb;Cx;Cy`. Digits and `;` accumulate; `M`/`m` completes ONLY if the
+/// run is a well-formed report (`<` + exactly three non-empty numeric fields),
+/// in which case it is dropped (it reaches the key stream only because crossterm
+/// fragmented the real Mouse event, and letting the raw `<64;48;27M` bytes
+/// through would type them into the input). Anything that breaks the shape —
+/// including a premature `M`/`m` like the `<M` in `Vec<M>` — replays the
+/// buffered bytes so real text is never eaten.
+fn sgr_mouse_step(
+    state: &mut Option<FragmentedCursorSeqState>,
+    mut buf: String,
+    code: KeyCode,
+) -> FragmentedCursorAction {
+    // Caps `<` + 3 fields; generous for huge terminals, bounded so a stray run
+    // can't grow without end.
+    const SGR_MOUSE_MAX_LEN: usize = 32;
+    match code {
+        KeyCode::Char(c) if c.is_ascii_digit() || c == ';' => {
+            // Bail BEFORE pushing so the overflow char isn't both replayed and
+            // re-handled by the caller (which would duplicate it).
+            if buf.len() >= SGR_MOUSE_MAX_LEN {
+                FragmentedCursorAction::ReplaySgr(buf)
+            } else {
+                buf.push(c);
+                *state = Some(FragmentedCursorSeqState::MaybeSgrMouse { buf });
+                FragmentedCursorAction::Consumed
+            }
+        }
+        KeyCode::Char('M') | KeyCode::Char('m') if is_complete_sgr_mouse_report(&buf) => {
+            *state = Some(FragmentedCursorSeqState::AfterSgrMouse);
+            FragmentedCursorAction::Consumed
+        }
+        // Not a real report (premature/extra/missing field, or any other char):
+        // give the buffered bytes back; the caller then handles `code` normally.
+        _ => FragmentedCursorAction::ReplaySgr(buf),
+    }
+}
+
+/// True iff `buf` is a complete SGR mouse report body: an optional leading `[`,
+/// a `<`, then exactly three non-empty all-digit fields separated by `;`
+/// (`Cb;Cx;Cy`). The terminating `M`/`m` is not part of `buf`.
+fn is_complete_sgr_mouse_report(buf: &str) -> bool {
+    let body = buf.strip_prefix('[').unwrap_or(buf);
+    let Some(fields) = body.strip_prefix('<') else {
+        return false;
+    };
+    let mut parts = fields.split(';');
+    let valid = |p: Option<&str>| matches!(p, Some(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+    valid(parts.next()) && valid(parts.next()) && valid(parts.next()) && parts.next().is_none()
 }
 
 fn session_picker_scroll_from_mouse(kind: MouseEventKind) -> Option<SessionPickerMouseScroll> {
@@ -4671,6 +4818,40 @@ mod tests {
         assert!(!should_show_sidebar(2, SidebarVisibility::Hidden));
     }
 
+    fn scroll_event(kind: MouseEventKind) -> std::io::Result<CtEvent> {
+        Ok(CtEvent::Mouse(MouseEvent {
+            kind,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }))
+    }
+
+    #[test]
+    fn drain_ready_events_coalesces_a_buffered_burst() {
+        // A trackpad/wheel momentum flick lands as many already-buffered scroll
+        // events. They must all drain in one pass so the loop redraws ONCE per
+        // batch instead of once per event (the over-scroll "freeze").
+        let burst: Vec<_> = (0..50)
+            .map(|_| scroll_event(MouseEventKind::ScrollDown))
+            .collect();
+        let mut stream = futures::stream::iter(burst);
+        let drained = drain_ready_events(&mut stream, INPUT_COALESCE_CAP);
+        assert_eq!(drained.len(), 50);
+    }
+
+    #[test]
+    fn drain_ready_events_respects_the_cap() {
+        // The cap bounds work per iteration so a sustained flood can't starve
+        // the agent/approval/question select! branches.
+        let burst: Vec<_> = (0..10)
+            .map(|_| scroll_event(MouseEventKind::ScrollUp))
+            .collect();
+        let mut stream = futures::stream::iter(burst);
+        let drained = drain_ready_events(&mut stream, 4);
+        assert_eq!(drained.len(), 4);
+    }
+
     #[test]
     fn tab_command_resolves_numbers_and_cycle_targets() {
         assert_eq!(resolve_tab_target("2", 0, 3), Ok(1));
@@ -5364,6 +5545,209 @@ mod tests {
             FragmentedCursorAction::ReplayBareO(1)
         );
         assert_eq!(state, None);
+    }
+
+    /// Feed each char of `s` through the reassembler and collect the actions.
+    fn feed_seq(
+        state: &mut Option<FragmentedCursorSeqState>,
+        s: &str,
+    ) -> Vec<FragmentedCursorAction> {
+        s.chars()
+            .map(|c| {
+                fragmented_cursor_sequence_action(state, KeyCode::Char(c), KeyModifiers::NONE, true)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fragmented_bare_sgr_mouse_report_is_swallowed_not_typed() {
+        // A wheel report whose ESC[ was lost to fragmentation arrives as the
+        // bare chars `<64;48;27M`. Every char must be consumed so none of it
+        // leaks into the input box.
+        let mut state = None;
+        let actions = feed_seq(&mut state, "<64;48;27M");
+        assert!(
+            actions
+                .iter()
+                .all(|a| *a == FragmentedCursorAction::Consumed),
+            "expected all consumed, got {actions:?}"
+        );
+        assert_eq!(state, Some(FragmentedCursorSeqState::AfterSgrMouse));
+    }
+
+    #[test]
+    fn fragmented_esc_bracket_sgr_mouse_report_is_swallowed() {
+        // The `ESC [ < ... M` shape (ESC and `[` arrive as their own keys).
+        let mut state = None;
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                true
+            ),
+            FragmentedCursorAction::Consumed
+        );
+        let actions = feed_seq(&mut state, "[<65;1;1M");
+        assert!(
+            actions
+                .iter()
+                .all(|a| *a == FragmentedCursorAction::Consumed),
+            "expected all consumed, got {actions:?}"
+        );
+    }
+
+    #[test]
+    fn back_to_back_sgr_reports_swallow_the_stray_bracket() {
+        // A momentum flood delivers `<65;105;38M[<64;48;27M...`; the `[` between
+        // reports (next report's lost ESC) must also be swallowed, not typed.
+        let mut state = None;
+        let actions = feed_seq(&mut state, "<65;105;38M[<64;48;27M");
+        assert!(
+            actions
+                .iter()
+                .all(|a| *a == FragmentedCursorAction::Consumed),
+            "expected all consumed, got {actions:?}"
+        );
+    }
+
+    #[test]
+    fn lone_less_than_then_text_is_replayed_into_input() {
+        // A `<` that is NOT a mouse report (e.g. typing "x < y") must be given
+        // back so real input is never eaten.
+        let mut state = None;
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('<'),
+                KeyModifiers::NONE,
+                true
+            ),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                true
+            ),
+            FragmentedCursorAction::ReplaySgr("<".to_string())
+        );
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn bracket_typed_in_idle_state_stays_plain_text() {
+        // Outside a mouse-report context a `[` is ordinary input and must pass
+        // straight through (no buffering lag for everyday typing).
+        let mut state = None;
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('['),
+                KeyModifiers::NONE,
+                true
+            ),
+            FragmentedCursorAction::None
+        );
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn premature_terminator_replays_instead_of_eating_text() {
+        // Typing `Vec<M>` must not vanish: `<M` is not a well-formed report.
+        let mut state = None;
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('<'),
+                KeyModifiers::NONE,
+                true
+            ),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('M'),
+                KeyModifiers::NONE,
+                true
+            ),
+            FragmentedCursorAction::ReplaySgr("<".to_string())
+        );
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn incomplete_field_count_replays_buffer() {
+        // `<1;2M` has only two fields — not a report; give the bytes back.
+        let mut state = None;
+        let consumed = feed_seq(&mut state, "<1;2");
+        assert!(consumed
+            .iter()
+            .all(|a| *a == FragmentedCursorAction::Consumed));
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('M'),
+                KeyModifiers::NONE,
+                true
+            ),
+            FragmentedCursorAction::ReplaySgr("<1;2".to_string())
+        );
+    }
+
+    #[test]
+    fn bracket_then_text_after_scroll_keeps_the_bracket() {
+        // `[<x` typed right after a swallowed report must replay `[<`, not `<`.
+        let mut state = Some(FragmentedCursorSeqState::AfterSgrMouse);
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('['),
+                KeyModifiers::NONE,
+                true
+            ),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('<'),
+                KeyModifiers::NONE,
+                true
+            ),
+            FragmentedCursorAction::Consumed
+        );
+        assert_eq!(
+            fragmented_cursor_sequence_action(
+                &mut state,
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+                true
+            ),
+            FragmentedCursorAction::ReplaySgr("[<".to_string())
+        );
+    }
+
+    #[test]
+    fn overshooting_sgr_buffer_bails_bounded_without_duplicating_a_char() {
+        // A pathological digit run must bail (never swallow) and the replayed
+        // buffer must stay capped and exclude the char that triggered the bail.
+        let mut state = None;
+        let long: String = std::iter::once('<')
+            .chain(std::iter::repeat('9').take(40))
+            .collect();
+        let actions = feed_seq(&mut state, &long);
+        let replay = actions
+            .iter()
+            .find_map(|a| match a {
+                FragmentedCursorAction::ReplaySgr(s) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("the over-long run should ReplaySgr");
+        assert_eq!(replay.len(), 32);
     }
 
     #[test]
