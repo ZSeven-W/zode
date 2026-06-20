@@ -302,6 +302,89 @@ pub async fn llm_oneshot(
     Ok(out)
 }
 
+// ─── Orchestrator ────────────────────────────────────────────────────────────
+
+use super::client::OpClient;
+
+/// Runs the deterministic design pipeline: plan → skeleton → per-section
+/// content (best-effort) → refine (best-effort).
+#[derive(Debug, Default)]
+pub struct DesignOrchestrator;
+
+impl DesignOrchestrator {
+    /// Execute the full pipeline against a live OpenPencil instance.
+    ///
+    /// - Step 1: call `generator.plan` with one retry on error.
+    /// - Step 2: call `design_skeleton`; parse with `normalize_skeleton`.
+    ///   A failure here aborts (the skeleton is structural; nothing else can run).
+    /// - Step 3: for each section call `generator.section` (one retry) then
+    ///   `design_content`.  Section failures are collected best-effort — a
+    ///   failed section never aborts the rest, and never skips the refine step.
+    /// - Step 4: call `design_refine` best-effort; an error is folded into the
+    ///   returned `DesignResult::refine` value rather than surfaced as `Err`.
+    pub async fn run(
+        &self,
+        client: &OpClient,
+        generator: &dyn ContentGenerator,
+        guidance: &Guidance,
+        request: &str,
+    ) -> Result<DesignResult, OpError> {
+        // Step 1: plan (one retry on error).
+        let plan = match generator.plan(request, guidance).await {
+            Ok(p) => p,
+            Err(_) => generator.plan(request, guidance).await?,
+        };
+
+        // Step 2: skeleton call — abort on failure.
+        let sk_raw = client
+            .call("design_skeleton", plan.to_skeleton_args())
+            .await?;
+        let sk = normalize_skeleton(&sk_raw)?;
+
+        // Step 3: per-section content (best-effort, collect failures).
+        let mut failures = Vec::new();
+        for (i, section) in plan.sections.iter().enumerate() {
+            let Some(section_id) = sk.section_ids.get(i) else {
+                failures.push(format!("section {i}: no skeleton id"));
+                continue;
+            };
+            let children = match generator.section(section, guidance).await {
+                Ok(c) => c,
+                Err(_) => match generator.section(section, guidance).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        failures.push(format!("section {section_id}: {e}"));
+                        continue;
+                    }
+                },
+            };
+            if let Err(e) = client
+                .call(
+                    "design_content",
+                    json!({"sectionId": section_id, "children": children}),
+                )
+                .await
+            {
+                failures.push(format!("section {section_id} content: {e}"));
+            }
+        }
+
+        // Step 4: refine best-effort.
+        let refine = client
+            .call("design_refine", json!({"rootId": sk.root_id}))
+            .await
+            .unwrap_or_else(|e| json!({"error": e.to_string()}));
+
+        Ok(DesignResult {
+            section_ids: sk.section_ids,
+            refine,
+            failures,
+        })
+    }
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,5 +488,92 @@ mod tests {
         );
         assert_eq!(extract_json("[{\"x\":1}]").unwrap()[0]["x"], 1);
         assert!(extract_json("no json here").is_none());
+    }
+
+    #[tokio::test]
+    async fn orchestrator_runs_skeleton_then_contents_then_refine() {
+        use std::sync::{Arc, Mutex};
+
+        use crate::openpencil::client::{OpClient, Transport};
+
+        #[derive(Debug)]
+        struct RecTransport {
+            calls: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl Transport for RecTransport {
+            async fn post_json(&self, _u: &str, body: Value) -> Result<Value, OpError> {
+                let method = body["params"]["name"].as_str().unwrap_or("").to_string();
+                self.calls.lock().unwrap().push(method.clone());
+                // Return an MCP text envelope wrapping the per-tool result.
+                let result = match method.as_str() {
+                    "design_skeleton" => json!({"rootId":"1","sectionIds":"2,3"}),
+                    "design_content" => json!({"insertedCount":1}),
+                    "design_refine" => json!({"ok":true}),
+                    _ => json!({}),
+                };
+                Ok(
+                    json!({"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text": result.to_string()}]}}),
+                )
+            }
+        }
+
+        #[derive(Debug)]
+        struct FakeGen;
+        #[async_trait::async_trait]
+        impl ContentGenerator for FakeGen {
+            async fn plan(&self, _r: &str, _g: &Guidance) -> Result<DesignPlan, OpError> {
+                Ok(DesignPlan {
+                    root_frame: json!({"name":"r","width":1,"height":1}),
+                    sections: vec![
+                        SectionPlan {
+                            skeleton: json!({"name":"A"}),
+                            content_intent: "a".into(),
+                        },
+                        SectionPlan {
+                            skeleton: json!({"name":"B"}),
+                            content_intent: "b".into(),
+                        },
+                    ],
+                    style_guide: None,
+                    canvas_width: None,
+                    page_id: None,
+                })
+            }
+            async fn section(
+                &self,
+                _s: &SectionPlan,
+                _g: &Guidance,
+            ) -> Result<Vec<Value>, OpError> {
+                Ok(vec![json!({"type":"text","content":"hi"})])
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let client = OpClient::new(
+            "http://127.0.0.1:1".into(),
+            Arc::new(RecTransport {
+                calls: calls.clone(),
+            }),
+        );
+        let g = Guidance {
+            baseline: BASELINE,
+            skills: vec![],
+        };
+        let res = DesignOrchestrator
+            .run(&client, &FakeGen, &g, "a pricing page")
+            .await
+            .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                "design_skeleton",
+                "design_content",
+                "design_content",
+                "design_refine"
+            ]
+        );
+        assert_eq!(res.section_ids, vec!["2", "3"]);
+        assert!(res.failures.is_empty());
     }
 }
