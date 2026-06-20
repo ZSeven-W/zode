@@ -1,6 +1,7 @@
 //! OpenPencil control surface (`op-bridge`): drive a live OpenPencil instance
 //! from zode. `sh` for lifecycle (locate/install/launch), `http` for ops.
 
+pub mod connection;
 pub mod install;
 pub mod locate;
 
