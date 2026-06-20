@@ -197,6 +197,8 @@ pub struct ZodeEngine {
     /// User/plugin slash commands (`commands/<name>.md`) — dynamic commands
     /// whose body is submitted as a turn.
     pub user_commands: Vec<crate::user_commands::UserCommand>,
+    /// OpenPencil control-surface config (for the `/op` TUI command).
+    pub openpencil: crate::config::OpenPencilConfig,
 }
 
 /// What a manual `/compact` run accomplished, for the UI to report.
@@ -222,6 +224,9 @@ impl ZodeEngine {
     /// gate would never run — master plan §4.6①.) Explicit cfg deny rules
     /// are still honored: agent evaluates deny rules before the Bypass-mode
     /// short-circuit.
+    // Cohesive constructor: every arg is shared engine state assembled at
+    // startup; splitting into a params struct would only obscure the wiring.
+    #[allow(clippy::too_many_arguments)]
     pub async fn assemble(
         cfg: &ZodeConfig,
         cwd: PathBuf,
@@ -229,6 +234,7 @@ impl ZodeEngine {
         sandbox: Option<crate::sandbox::SandboxConfig>,
         date: &str,
         question_tool: Option<Arc<dyn Tool>>,
+        op_consent: Option<Arc<dyn crate::openpencil::Consent>>,
         plan_mode: bool,
     ) -> Result<Self, CoreError> {
         let provider = build_provider(&cfg.provider)?;
@@ -277,6 +283,32 @@ impl ZodeEngine {
         // (never permission-gated) and not in any plugin group (always-on).
         if let Some(tool) = question_tool {
             base.register(tool);
+        }
+
+        // OpenPencil control surface (op-bridge). Disable via `tools:op`.
+        if cfg.openpencil.enabled() {
+            use crate::openpencil::tools::{OpReadTool, OpToolDeps, OpWriteTool};
+            let consent: Arc<dyn crate::openpencil::Consent> = op_consent.unwrap_or_else(|| {
+                /// Fallback consent: denies every lifecycle action when no UI
+                /// question channel is wired (so the bridge never installs or
+                /// launches without an interactive confirmation).
+                #[derive(Debug)]
+                struct DenyConsent;
+                #[async_trait::async_trait]
+                impl crate::openpencil::Consent for DenyConsent {
+                    async fn confirm(&self, _prompt: &str) -> bool {
+                        false
+                    }
+                }
+                Arc::new(DenyConsent)
+            });
+            let deps = OpToolDeps {
+                cfg: cfg.openpencil.clone(),
+                consent,
+                tag: cfg.openpencil.release_tag().to_string(),
+            };
+            base.register(Arc::new(OpReadTool::new(deps.clone())));
+            base.register(Arc::new(OpWriteTool::new(deps)));
         }
 
         // Skills: load the three-level SKILL.md tree. Disabled skills are
@@ -574,6 +606,7 @@ impl ZodeEngine {
                 .map(|w| (w.name, w.description))
                 .collect(),
             user_commands: crate::user_commands::load_user_commands(&cwd),
+            openpencil: cfg.openpencil.clone(),
         })
     }
 
@@ -838,6 +871,14 @@ impl EngineTemplate {
                 label.clone(),
             )) as Arc<dyn Tool>
         });
+        // Reuse the tab label for consent routing, exactly like AskUserQuestionTool.
+        let op_consent: Option<Arc<dyn crate::openpencil::Consent>> =
+            self.question_queue.as_ref().map(|q| {
+                Arc::new(crate::openpencil::tools::QueueConsent::new(
+                    q.clone(),
+                    label.clone(),
+                )) as Arc<dyn crate::openpencil::Consent>
+            });
         let cwd = cwd_override.unwrap_or_else(|| self.cwd.clone());
         // Rebase the sandbox onto this tab's cwd: a resumed session can run in a
         // different repo, and the sandbox must confine to THAT directory (its
@@ -850,6 +891,7 @@ impl EngineTemplate {
             sandbox,
             &self.date,
             question_tool,
+            op_consent,
             self.plan_mode,
         )
         .await
@@ -1127,7 +1169,12 @@ mod tests {
         assert!(off.to_uppercase().contains("RETRY"), "{off}");
         assert!(off.contains("ANYWHERE"));
         // workspace-write: says writes confined + how to escape.
-        if let Ok(ww) = SandboxConfig::new(std::path::Path::new("/tmp"), SandboxMode::WorkspaceWrite, false, &[]) {
+        if let Ok(ww) = SandboxConfig::new(
+            std::path::Path::new("/tmp"),
+            SandboxMode::WorkspaceWrite,
+            false,
+            &[],
+        ) {
             let note = sandbox_prompt_note(&Some(ww));
             assert!(note.contains("workspace-write"));
             assert!(note.contains("dangerouslyDisableSandbox"));
@@ -1245,6 +1292,7 @@ mod tests {
             agent_types: Vec::new(),
             workflows: Vec::new(),
             user_commands: Vec::new(),
+            openpencil: Default::default(),
         }
     }
 
@@ -1407,6 +1455,7 @@ mod tests {
             None,
             "2026-06-13",
             None,
+            None,
             false,
         )
         .await
@@ -1435,6 +1484,7 @@ mod tests {
             None,
             "2026-06-13",
             None,
+            None,
             false,
         )
         .await
@@ -1454,6 +1504,7 @@ mod tests {
             Arc::new(BypassGate),
             None,
             "2026-06-13",
+            None,
             None,
             true, // plan_mode
         )
@@ -1484,6 +1535,7 @@ mod tests {
             None,
             "2026-06-13",
             None,
+            None,
             false,
         )
         .await
@@ -1507,6 +1559,7 @@ mod tests {
             Arc::new(BypassGate),
             None,
             "2026-06-13",
+            None,
             None,
             false,
         )
@@ -1534,6 +1587,7 @@ mod tests {
             None,
             "2026-06-13",
             None,
+            None,
             false,
         )
         .await
@@ -1554,6 +1608,7 @@ mod tests {
             None,
             "2026-06-13",
             None,
+            None,
             false,
         )
         .await
@@ -1573,6 +1628,7 @@ mod tests {
             Arc::new(BypassGate),
             None,
             "2026-06-13",
+            None,
             None,
             false,
         )

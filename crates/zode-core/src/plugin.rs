@@ -110,6 +110,11 @@ pub const TOOL_GROUPS: &[(&str, &str, &[&str])] = &[
         "Delegate sub-tasks to child agents (Task)",
         &["Task"],
     ),
+    (
+        "op",
+        "Drive a live OpenPencil design (read + write)",
+        &["op_read", "op_write"],
+    ),
 ];
 
 /// The tool group a tool belongs to, if any. `None` → always-on (Skill,
@@ -264,6 +269,12 @@ mod tests {
         assert_eq!(group_of("Bash"), Some("shell"));
         assert_eq!(group_of("Skill"), None); // always on
         assert_eq!(group_of("ToolSearch"), None);
+    }
+
+    #[test]
+    fn op_tools_are_grouped() {
+        assert_eq!(group_of("op_read"), Some("op"));
+        assert_eq!(group_of("op_write"), Some("op"));
     }
 
     #[test]
