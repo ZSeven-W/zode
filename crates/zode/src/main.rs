@@ -2,7 +2,7 @@ mod args;
 mod headless;
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent::session::Session;
@@ -10,6 +10,7 @@ use args::Args;
 use clap::Parser;
 use zode_core::approval::{ApprovalGate, BypassGate, StdinGate};
 use zode_core::config::ConfigManager;
+use zode_core::noema::ZodeNoema;
 use zode_core::session_meta::{SessionIndex, SessionMeta};
 use zode_core::{EngineTemplate, ZodeEngine};
 
@@ -33,6 +34,10 @@ async fn run(args: Args) -> i32 {
         Some(c) => PathBuf::from(c),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
+    let noema = std::env::var("NOEMA_ROOT")
+        .ok()
+        .map(ZodeNoema::from_root)
+        .unwrap_or_else(ZodeNoema::disabled);
 
     let mut cfg = match ConfigManager::load(&cwd) {
         Ok(c) => c,
@@ -102,6 +107,7 @@ async fn run(args: Args) -> i32 {
 
     // --print: headless single turn (stdin gate, or bypass on --yolo).
     if let Some(prompt) = args.print.clone() {
+        let prompt = prepend_noema_memory(&noema, &prompt, Some(cwd.as_path()));
         let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox, &today).await else {
             return 1;
         };
@@ -172,6 +178,19 @@ async fn run(args: Args) -> i32 {
         Err(e) => {
             eprintln!("zode tui: {e}");
             1
+        }
+    }
+}
+
+fn prepend_noema_memory(noema: &ZodeNoema, user_input: &str, cwd: Option<&Path>) -> String {
+    match noema.recall_for_turn(user_input, cwd) {
+        Ok(Some(memory)) if !memory.trim().is_empty() => {
+            format!("{memory}\n\n{user_input}")
+        }
+        Ok(_) => user_input.to_string(),
+        Err(err) => {
+            tracing::debug!(error = %err, "memory unavailable");
+            user_input.to_string()
         }
     }
 }

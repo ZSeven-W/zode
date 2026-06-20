@@ -26,6 +26,7 @@ pub mod images;
 pub mod instructions;
 pub mod lsp;
 pub mod mcp;
+pub mod noema;
 pub mod openpencil;
 pub mod plugin;
 pub mod portability;
