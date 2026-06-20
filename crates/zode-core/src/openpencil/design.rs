@@ -2,6 +2,51 @@
 
 use std::sync::Arc;
 
+use agent::skills::SkillRegistry;
+
+/// Built-in design baseline — always applied, works with zero plugins.
+pub const BASELINE: &str = "\
+Design principles: use an 8pt spacing scale; a small, consistent type scale \
+(e.g. 12/14/16/20/28/40); a restrained palette (1 accent + neutrals) with \
+adequate contrast; generous whitespace; clear visual hierarchy (size/weight \
+before color); align to a grid; group related items; avoid default-looking, \
+templated layouts. Prefer frames with explicit layout/gap/padding.";
+
+/// Resolved guidance: the baseline plus any installed design skills' prompts.
+#[derive(Debug, Clone)]
+pub struct Guidance {
+    pub baseline: &'static str,
+    pub skills: Vec<(String, String)>, // (name, prompt)
+}
+
+/// Load guidance install-agnostically: baseline always present, each named
+/// skill is included only if installed in `registry`.  Missing skills are
+/// silently skipped (debug-logged) — never an error.
+pub fn load_guidance(registry: &SkillRegistry, names: &[&str]) -> Guidance {
+    let mut skills = Vec::new();
+    for name in names {
+        match registry.get(name) {
+            Some(s) => skills.push((s.name, s.prompt)),
+            None => tracing::debug!("design guidance skill '{name}' not installed; skipping"),
+        }
+    }
+    Guidance {
+        baseline: BASELINE,
+        skills,
+    }
+}
+
+impl Guidance {
+    /// Render baseline + each present skill prompt under a named heading.
+    pub fn render(&self) -> String {
+        let mut out = String::from(self.baseline);
+        for (name, prompt) in &self.skills {
+            out.push_str(&format!("\n\n# Guidance from the '{name}' skill\n{prompt}"));
+        }
+        out
+    }
+}
+
 use agent::provider::{Provider, StreamRequest};
 use futures::StreamExt;
 use serde_json::{json, Value};
@@ -168,6 +213,36 @@ pub async fn llm_oneshot(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // --- Guidance loader tests ---
+
+    #[test]
+    fn load_guidance_includes_baseline_and_present_skills_only() {
+        let reg = agent::skills::SkillRegistry::new();
+        reg.insert(agent::skills::Skill {
+            name: "frontend-design".into(),
+            description: "d".into(),
+            prompt: "USE 8PT SPACING".into(),
+            model: None,
+            allow_tools: Default::default(),
+            input_schema: serde_json::json!({}),
+        });
+        let g = load_guidance(&reg, &["frontend-design", "openpencil-design"]);
+        // only the present skill is included; the absent one is skipped
+        assert_eq!(g.skills.len(), 1);
+        let rendered = g.render();
+        assert!(rendered.contains("USE 8PT SPACING"));
+        assert!(rendered.contains(BASELINE));
+    }
+
+    #[test]
+    fn load_guidance_works_with_no_skills() {
+        let reg = agent::skills::SkillRegistry::new();
+        let g = load_guidance(&reg, &["frontend-design"]);
+        assert!(g.skills.is_empty());
+        // baseline is always present even when no skills are installed
+        assert!(g.render().contains(BASELINE));
+    }
 
     #[test]
     fn to_skeleton_args_matches_op_schema() {
