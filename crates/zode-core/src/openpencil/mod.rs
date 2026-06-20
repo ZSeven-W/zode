@@ -1,9 +1,17 @@
 //! OpenPencil control surface (`op-bridge`): drive a live OpenPencil instance
 //! from zode. `sh` for lifecycle (locate/install/launch), `http` for ops.
 
+pub mod install;
 pub mod locate;
 
 use thiserror::Error;
+
+/// User consent for a lifecycle action (install / launch). The prompt SHOULD
+/// include the exact command. Returns true to proceed.
+#[async_trait::async_trait]
+pub trait Consent: Send + Sync + std::fmt::Debug {
+    async fn confirm(&self, prompt: &str) -> bool;
+}
 
 /// Failures across the op-bridge.
 #[derive(Debug, Error)]
