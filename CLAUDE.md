@@ -110,13 +110,15 @@ navigate, Enter/Tab to confirm, Esc to dismiss).
 | Command | Effect |
 |---------|--------|
 | `/op status` | Print connection state (connected / port / none) |
+| `/op generate <prompt>` | Run the design pipeline (plan → skeleton → content → refine) |
 | `/op design 'F1=I("rect",{})'` | Run a batch_design DSL string |
 | `/op get_document_info` | Call the MCP tool with empty args |
 | `/op insert {"type":"rect","x":0,"y":0}` | Shorthand MCP call with JSON args |
 | `/op call <tool> <json>` | Explicit tool-name + JSON args |
 
-Available subcommands (autocomplete list): `status`, `design`, `insert`,
-`update`, `delete`, `move`, `copy`, `page`, `vars`, `selection`, `call`.
+Available subcommands (autocomplete list): `status`, `generate`, `design`,
+`insert`, `update`, `delete`, `move`, `copy`, `page`, `vars`, `selection`,
+`call`.
 
 `/op status` is a zode-side connection report, not an MCP `tools/call`.
 
@@ -161,6 +163,61 @@ Notes:
   an empty command and break installs.
 
 All keys are optional; absent keys fall back to built-in defaults.
+
+### Design generation (`op_design` / `/op generate`)
+
+Zode includes a deterministic design-pipeline orchestrator that generates a
+full OpenPencil page from a natural-language prompt. Zode owns all the op MCP
+calls; the agent never calls `design_skeleton`, `design_content`, or
+`design_refine` directly.
+
+**Pipeline — four steps, always in order:**
+
+1. **Plan** — a direct LLM call (`DirectLlmContentGenerator`) produces a
+   `DesignPlan`: a root frame, an ordered list of `SectionPlan`s (each with a
+   skeleton spec and a content intent), and optional style/canvas hints. One
+   automatic retry on error.
+2. **Skeleton** — `design_skeleton` is called with the plan's `to_skeleton_args()`
+   output. Returns `rootId` + `sectionIds`; parsed by `normalize_skeleton`.
+   Failure here aborts — nothing else can proceed without section IDs.
+3. **Content** — for each section, a second direct LLM call produces child
+   PenNode JSON, then `design_content` places the nodes into that section's
+   frame. Section failures are best-effort (collected in `DesignResult::failures`,
+   never abort the remaining sections or the refine step). One automatic retry per
+   section.
+4. **Refine** — `design_refine` is called best-effort on the root frame. An error
+   is folded into `DesignResult::refine` as `{error: "…"}`, not surfaced as a
+   hard failure.
+
+**Content generation** uses direct LLM calls (`llm_oneshot` → streamed
+`TextDelta` events) rather than spawning a sub-agent.
+
+**Install-agnostic guidance.** A built-in baseline (`BASELINE` constant in
+`design.rs`) is always applied — it works with zero plugins. It describes an
+8pt spacing scale, consistent type scale, restrained palette, generous
+whitespace, and grid alignment. When the `frontend-design` or
+`openpencil-design` skills are installed, their prompts are appended under
+named headings via `load_guidance`. Missing skills are silently skipped (a
+debug log is emitted). The pipeline never errors if a skill is absent.
+
+**`op_design` tool** — registered in the `op` tool group (`plugin.rs`).
+Safety class: `Mutating`; requires user approval via `ApprovalGate`. Input:
+`{ "prompt": "<string>" }`. Drives the full pipeline against a live
+OpenPencil instance and returns `{ sections, failures, refine }`.
+
+**`/op generate <prompt>`** — TUI slash command. Maps to `OpCommand::Generate`
+in `commands/op.rs`. The TUI autocomplete popup lists `generate` as a
+subcommand alongside `status`, `design`, `call`, etc.
+
+**Key source locations:**
+
+- `zode-core/src/openpencil/design.rs` — types (`DesignPlan`, `SectionPlan`,
+  `Skeleton`, `DesignResult`), helpers (`normalize_skeleton`, `extract_json`,
+  `plan_from_json`, `llm_oneshot`), guidance (`BASELINE`, `Guidance`,
+  `load_guidance`), `ContentGenerator` trait + `DirectLlmContentGenerator`,
+  `DesignOrchestrator::run`.
+- `zode-core/src/openpencil/tools.rs` — `OpDesignTool`, `OpDesignDeps`.
+- `zode-core/src/commands/op.rs` — `OpCommand::Generate` arm.
 
 ### Connect / install / launch flow
 
