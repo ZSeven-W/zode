@@ -167,6 +167,99 @@ pub fn extract_json(text: &str) -> Option<Value> {
     None
 }
 
+/// Parse a model plan-reply JSON into a [`DesignPlan`].
+///
+/// Required: `rootFrame`.  Optional: `sections[].skeleton`, `sections[].intent`,
+/// `styleGuide`, `canvasWidth`, `pageId`.  Returns `OpError::Parse` on missing
+/// required fields.  This is a pure function — testable without a live provider.
+pub fn plan_from_json(v: &Value) -> Result<DesignPlan, OpError> {
+    let root_frame = v
+        .get("rootFrame")
+        .cloned()
+        .ok_or_else(|| OpError::Parse("plan: no rootFrame".into()))?;
+    let sections = v
+        .get("sections")
+        .and_then(|s| s.as_array())
+        .ok_or_else(|| OpError::Parse("plan: no sections array".into()))?
+        .iter()
+        .map(|s| SectionPlan {
+            skeleton: s
+                .get("skeleton")
+                .cloned()
+                .unwrap_or_else(|| json!({"name": "Section"})),
+            content_intent: s
+                .get("intent")
+                .and_then(|i| i.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+        .collect();
+    Ok(DesignPlan {
+        root_frame,
+        sections,
+        style_guide: v.get("styleGuide").cloned(),
+        canvas_width: v
+            .get("canvasWidth")
+            .and_then(|w| w.as_u64())
+            .map(|n| n as u32),
+        page_id: v.get("pageId").and_then(|p| p.as_str()).map(str::to_string),
+    })
+}
+
+/// Trait for components that can generate design plan + section content via an LLM.
+#[async_trait::async_trait]
+pub trait ContentGenerator: Send + Sync {
+    /// Ask the LLM to produce a [`DesignPlan`] from a user request string.
+    async fn plan(&self, request: &str, g: &Guidance) -> Result<DesignPlan, OpError>;
+    /// Ask the LLM to produce child nodes for one section frame.
+    async fn section(&self, section: &SectionPlan, g: &Guidance) -> Result<Vec<Value>, OpError>;
+}
+
+/// [`ContentGenerator`] implementation backed by a direct LLM provider call.
+#[derive(Debug)]
+pub struct DirectLlmContentGenerator {
+    pub provider: Arc<dyn Provider>,
+    pub model: String,
+}
+
+#[async_trait::async_trait]
+impl ContentGenerator for DirectLlmContentGenerator {
+    async fn plan(&self, request: &str, g: &Guidance) -> Result<DesignPlan, OpError> {
+        let system = format!(
+            "{}\n\nYou plan an OpenPencil page. Output ONLY JSON: \
+             {{\"rootFrame\":{{\"name\",\"width\",\"height\",\"layout\"?,\"gap\"?,\"fill\"?,\"padding\"?}}, \
+             \"sections\":[{{\"skeleton\":{{\"name\"(required),\"height\"?,\"layout\"?,\"role\"?}}, \"intent\":\"what content goes here\"}}], \
+             \"canvasWidth\"?}}. No prose.",
+            g.render()
+        );
+        let text = llm_oneshot(&self.provider, &self.model, &system, request).await?;
+        let v = extract_json(&text)
+            .ok_or_else(|| OpError::Parse(format!("plan: non-JSON reply: {:.200}", text)))?;
+        plan_from_json(&v)
+    }
+
+    async fn section(&self, section: &SectionPlan, g: &Guidance) -> Result<Vec<Value>, OpError> {
+        let system = format!(
+            "{}\n\nYou populate one OpenPencil section frame. Output ONLY a JSON array of child \
+             node objects (PenNode shape: type/name/x/y/width/height/fill etc.; TEXT nodes use \
+             {{\"type\":\"text\",\"content\":\"...\"}} — the field is `content`, not `text`). No prose.",
+            g.render()
+        );
+        let user = format!(
+            "Section: {}\nIntent: {}",
+            section.skeleton, section.content_intent
+        );
+        let text = llm_oneshot(&self.provider, &self.model, &system, &user).await?;
+        match extract_json(&text) {
+            Some(Value::Array(a)) => Ok(a),
+            _ => Err(OpError::Parse(format!(
+                "section: non-array reply: {:.200}",
+                text
+            ))),
+        }
+    }
+}
+
 /// One-shot LLM completion: sends a single user turn under `system` and
 /// collects the assistant's streamed text into a `String`.
 pub async fn llm_oneshot(
@@ -282,6 +375,24 @@ mod tests {
     #[test]
     fn normalize_skeleton_errors_without_root() {
         assert!(normalize_skeleton(&json!({"sectionIds":"1"})).is_err());
+    }
+
+    #[test]
+    fn parse_plan_reply_builds_designplan() {
+        // The reply JSON shape the generator prompts for.
+        let reply = serde_json::json!({
+            "rootFrame": {"name":"root","width":1200,"height":900},
+            "sections": [
+                {"skeleton":{"name":"Header","height":80}, "intent":"logo + nav"},
+                {"skeleton":{"name":"Hero"}, "intent":"headline + CTA"}
+            ],
+            "canvasWidth": 1200
+        });
+        let plan = plan_from_json(&reply).unwrap();
+        assert_eq!(plan.sections.len(), 2);
+        assert_eq!(plan.sections[0].content_intent, "logo + nav");
+        assert_eq!(plan.root_frame["width"], 1200);
+        assert_eq!(plan.canvas_width, Some(1200));
     }
 
     #[test]
