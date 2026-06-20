@@ -8,15 +8,33 @@ use super::{locate, Consent, OpError};
 use crate::config::OpenPencilConfig;
 
 const REPO_RAW: &str = "https://raw.githubusercontent.com/ZSeven-W/openpencil";
+const REPO: &str = "https://github.com/ZSeven-W/openpencil";
 
-/// Default installer: pins BOTH the install-op.sh URL to the tag AND
-/// `OP_VERSION` (URL-pin alone still downloads the latest release asset).
+/// Platform-aware default installer command. Unix pins BOTH the install-op.sh
+/// URL to the tag AND `OP_VERSION` (URL-pin alone still downloads the latest
+/// asset). Windows has no shell installer, so we download the `op-cli` zip from
+/// the GitHub release and extract `op.exe` via PowerShell. Both honor the
+/// managed `dir` and the pinned `tag`.
 pub fn default_install_command(tag: &str, dir: &Path) -> String {
-    format!(
-        "curl -fsSL {REPO_RAW}/v{tag}/scripts/install-op.sh | \
-         INSTALL_DIR=\"{}\" OP_VERSION=\"{tag}\" bash",
-        dir.display()
-    )
+    if cfg!(windows) {
+        format!(
+            "$ErrorActionPreference='Stop'; \
+             $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {{'aarch64'}} else {{'x86_64'}}; \
+             $u = \"{REPO}/releases/download/v{tag}/op-cli-windows-$arch.zip\"; \
+             $z = Join-Path $env:TEMP 'op-cli-{tag}.zip'; \
+             Invoke-WebRequest -Uri $u -OutFile $z; \
+             New-Item -ItemType Directory -Force -Path '{dir}' | Out-Null; \
+             Expand-Archive -Force -Path $z -DestinationPath '{dir}'; \
+             Remove-Item $z",
+            dir = dir.display()
+        )
+    } else {
+        format!(
+            "curl -fsSL {REPO_RAW}/v{tag}/scripts/install-op.sh | \
+             INSTALL_DIR=\"{}\" OP_VERSION=\"{tag}\" bash",
+            dir.display()
+        )
+    }
 }
 
 /// Ensure `op` is runnable, installing on demand after consent.
@@ -29,23 +47,13 @@ pub async fn ensure_op(
         return Ok(p);
     }
     let dir = locate::managed_bin_dir().ok_or_else(|| OpError::Install("no config dir".into()))?;
-    // The default installer (install-op.sh) is bash-only (macOS/Linux). On
-    // Windows there is no shell installer — op.exe ships via the NSIS desktop
-    // installer — so auto-install requires an explicit `install_command`.
-    let cmd = match cfg.install_command.clone() {
-        Some(c) => c,
-        None => {
-            if cfg!(windows) {
-                return Err(OpError::Install(
-                    "auto-install is unsupported on Windows; install OpenPencil \
-                     (the win-setup.exe bundles op.exe) or set openpencil.opPath / \
-                     openpencil.installCommand"
-                        .into(),
-                ));
-            }
-            default_install_command(tag, &dir)
-        }
-    };
+    // Platform-aware default (Unix: install-op.sh via bash; Windows: PowerShell
+    // download+extract), overridable via install_command. Run through the
+    // platform shell.
+    let cmd = cfg
+        .install_command
+        .clone()
+        .unwrap_or_else(|| default_install_command(tag, &dir));
     if !cfg.auto_install() {
         let prompt = format!("Install the OpenPencil `op` CLI? This runs:\n  {cmd}");
         if !consent.confirm(&prompt).await {
@@ -53,9 +61,13 @@ pub async fn ensure_op(
         }
     }
     std::fs::create_dir_all(&dir).map_err(|e| OpError::Install(e.to_string()))?;
-    // Run through the platform shell so a Windows `install_command` works too.
     let out = if cfg!(windows) {
-        Command::new("cmd").arg("/C").arg(&cmd).output().await
+        Command::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(&cmd)
+            .output()
+            .await
     } else {
         Command::new("bash").arg("-c").arg(&cmd).output().await
     }
@@ -76,9 +88,15 @@ mod tests {
     #[test]
     fn default_command_pins_url_and_version() {
         let cmd = default_install_command("0.8.0", Path::new("/tmp/x/bin"));
-        assert!(cmd.contains("/v0.8.0/scripts/install-op.sh"), "{cmd}");
-        assert!(cmd.contains("OP_VERSION=\"0.8.0\""), "{cmd}");
-        assert!(cmd.contains("INSTALL_DIR=\"/tmp/x/bin\""), "{cmd}");
+        if cfg!(windows) {
+            assert!(cmd.contains("op-cli-windows-"), "{cmd}");
+            assert!(cmd.contains("/releases/download/v0.8.0/"), "{cmd}");
+            assert!(cmd.to_lowercase().contains("expand-archive"), "{cmd}");
+        } else {
+            assert!(cmd.contains("/v0.8.0/scripts/install-op.sh"), "{cmd}");
+            assert!(cmd.contains("OP_VERSION=\"0.8.0\""), "{cmd}");
+            assert!(cmd.contains("INSTALL_DIR=\"/tmp/x/bin\""), "{cmd}");
+        }
     }
 
     #[derive(Debug)]
