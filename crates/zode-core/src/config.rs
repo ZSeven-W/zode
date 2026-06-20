@@ -151,6 +151,55 @@ pub struct PluginsConfig {
     pub disabled: Vec<String>,
 }
 
+/// Default OpenPencil release the installer/launcher targets. zode and
+/// OpenPencil version independently — do NOT use zode's CARGO_PKG_VERSION.
+pub const DEFAULT_OPENPENCIL_VERSION: &str = "0.8.0";
+
+/// OpenPencil control-surface settings (the `op-bridge`). Every field is
+/// `Option` so layered config can tell "absent" from "explicitly set" and a
+/// project layer can reset a global value; read effective values via getters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OpenPencilConfig {
+    pub enabled: Option<bool>,
+    pub op_path: Option<String>,
+    pub install_command: Option<String>,
+    /// OpenPencil release tag to pin the installer/launcher to (no leading `v`).
+    pub release_tag: Option<String>,
+    pub auto_install: Option<bool>,
+    pub auto_launch_gui: Option<bool>,
+    pub launch_command: Option<String>,
+    pub headless_fallback: Option<bool>,
+    pub default_doc: Option<String>,
+    pub connect_timeout_ms: Option<u64>,
+}
+
+impl OpenPencilConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+    pub fn auto_install(&self) -> bool {
+        self.auto_install.unwrap_or(false)
+    }
+    pub fn auto_launch_gui(&self) -> bool {
+        self.auto_launch_gui.unwrap_or(true)
+    }
+    pub fn launch_command(&self) -> &str {
+        self.launch_command.as_deref().unwrap_or("op start")
+    }
+    pub fn headless_fallback(&self) -> bool {
+        self.headless_fallback.unwrap_or(false)
+    }
+    pub fn connect_timeout_ms(&self) -> u64 {
+        self.connect_timeout_ms.unwrap_or(10_000)
+    }
+    pub fn release_tag(&self) -> &str {
+        self.release_tag
+            .as_deref()
+            .unwrap_or(DEFAULT_OPENPENCIL_VERSION)
+    }
+}
+
 /// Configuration for the built-in LSP plugin: a language server per language
 /// key. The key (e.g. "rust", "python") is also the plugin id suffix
 /// (`lsp:rust`). `extensions` maps the server to the file types it handles.
@@ -226,6 +275,8 @@ pub struct ZodeConfig {
     pub plugins: PluginsConfig,
     /// Language-server configuration for the built-in LSP plugin.
     pub lsp: LspConfig,
+    /// OpenPencil control-surface configuration (the `op-bridge`).
+    pub openpencil: OpenPencilConfig,
 
     // --- Legacy (Zig/TS-era) flat fields, read-only for backward compat.
     // Mapped into `provider` by `normalize_legacy()` and dropped on save
@@ -392,6 +443,21 @@ impl ZodeConfig {
         }
         // Project LSP servers extend (and override same-key) the global set.
         self.lsp.servers.extend(other.lsp.servers);
+        // OpenPencil: each field present in the project layer overrides global.
+        let o = other.openpencil;
+        self.openpencil.enabled = o.enabled.or(self.openpencil.enabled);
+        self.openpencil.op_path = o.op_path.or(self.openpencil.op_path.take());
+        self.openpencil.install_command =
+            o.install_command.or(self.openpencil.install_command.take());
+        self.openpencil.release_tag = o.release_tag.or(self.openpencil.release_tag.take());
+        self.openpencil.auto_install = o.auto_install.or(self.openpencil.auto_install);
+        self.openpencil.auto_launch_gui = o.auto_launch_gui.or(self.openpencil.auto_launch_gui);
+        self.openpencil.launch_command = o.launch_command.or(self.openpencil.launch_command.take());
+        self.openpencil.headless_fallback =
+            o.headless_fallback.or(self.openpencil.headless_fallback);
+        self.openpencil.default_doc = o.default_doc.or(self.openpencil.default_doc.take());
+        self.openpencil.connect_timeout_ms =
+            o.connect_timeout_ms.or(self.openpencil.connect_timeout_ms);
     }
 }
 
@@ -514,6 +580,32 @@ fn extend_dedup(target: &mut Vec<String>, add: Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openpencil_camelcase_and_getters() {
+        let json = r#"{"openpencil":{"autoLaunchGui":false,"connectTimeoutMs":5000,"releaseTag":"0.9.0"}}"#;
+        let cfg: ZodeConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.openpencil.auto_launch_gui());
+        assert_eq!(cfg.openpencil.connect_timeout_ms(), 5000);
+        assert_eq!(cfg.openpencil.release_tag(), "0.9.0");
+        assert!(cfg.openpencil.enabled()); // absent → default true
+        assert_eq!(cfg.openpencil.launch_command(), "op start");
+    }
+
+    #[test]
+    fn openpencil_merge_is_presence_based() {
+        let mut base = ZodeConfig::default();
+        base.openpencil.auto_launch_gui = Some(false); // global turns it off
+        let mut proj = ZodeConfig::default();
+        proj.openpencil.auto_launch_gui = Some(true); // project resets it on
+        base.merge_from(proj);
+        assert!(base.openpencil.auto_launch_gui()); // project wins (presence)
+                                                    // unset-in-project preserves global
+        let mut base2 = ZodeConfig::default();
+        base2.openpencil.op_path = Some("/g/op".into());
+        base2.merge_from(ZodeConfig::default());
+        assert_eq!(base2.openpencil.op_path.as_deref(), Some("/g/op"));
+    }
 
     #[test]
     fn merge_unions_permission_lists() {
