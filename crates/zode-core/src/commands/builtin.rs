@@ -54,8 +54,8 @@ pub static BUILTINS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "op",
-        description: "Drive OpenPencil (e.g. /op status, /op design '<dsl>')",
-        usage: "/op <status|design '<dsl>'|<tool> <json>>",
+        description: "Drive OpenPencil (e.g. /op status, /op generate <prompt>)",
+        usage: "/op <status|design '<dsl>'|generate <prompt>|<tool> <json>>",
         action: CommandAction::Local,
     },
     // Registered now, fully wired in later phases.

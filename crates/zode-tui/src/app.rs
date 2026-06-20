@@ -3336,6 +3336,40 @@ impl TuiApp {
                         };
                         self.active_tab_mut().chat.push_system(&msg);
                     }
+                    Ok(OpCommand::Generate { prompt }) => {
+                        use zode_core::openpencil::design::{
+                            load_guidance, DesignOrchestrator, DirectLlmContentGenerator,
+                        };
+                        // Clone owned values BEFORE any .await — do NOT hold an
+                        // engine borrow across awaits.
+                        let (provider, model, skills) = {
+                            let eng = &self.active_tab().engine;
+                            (eng.provider.clone(), eng.model.clone(), eng.skills.clone())
+                        };
+                        let source = Some(self.active_tab().id.to_string());
+                        let consent: Arc<dyn Consent> =
+                            Arc::new(QueueConsent::new(self.question_queue.clone(), source));
+                        let tag = cfg.release_tag().to_string();
+                        let msg = match OpConnection::ensure(&cfg, consent.as_ref(), &tag).await {
+                            Ok(client) => {
+                                let g = load_guidance(
+                                    skills.as_ref(),
+                                    &["frontend-design", "openpencil-design"],
+                                );
+                                let gen = DirectLlmContentGenerator { provider, model };
+                                match DesignOrchestrator.run(&client, &gen, &g, &prompt).await {
+                                    Ok(r) => format!(
+                                        "generated {} sections ({} failures)",
+                                        r.section_ids.len(),
+                                        r.failures.len()
+                                    ),
+                                    Err(e) => format!("/op generate failed: {e}"),
+                                }
+                            }
+                            Err(e) => format!("/op: {e}"),
+                        };
+                        self.active_tab_mut().chat.push_system(&msg);
+                    }
                 }
             }
             "sessions" | "resume" => self.open_session_picker(),

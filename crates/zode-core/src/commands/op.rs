@@ -6,7 +6,14 @@ use serde_json::{json, Value};
 #[derive(Debug, PartialEq, Eq)]
 pub enum OpCommand {
     Status,
-    Call { tool: String, args: Value },
+    Call {
+        tool: String,
+        args: Value,
+    },
+    /// Run the design-pipeline orchestrator from a natural-language prompt.
+    Generate {
+        prompt: String,
+    },
 }
 
 pub fn map_subcommand(args: &str) -> Result<OpCommand, String> {
@@ -36,6 +43,14 @@ pub fn map_subcommand(args: &str) -> Result<OpCommand, String> {
             Ok(OpCommand::Call {
                 tool: tool.into(),
                 args: v,
+            })
+        }
+        "generate" => {
+            if rest.is_empty() {
+                return Err("usage: /op generate <prompt>".into());
+            }
+            Ok(OpCommand::Generate {
+                prompt: rest.to_string(),
             })
         }
         tool => {
@@ -80,6 +95,15 @@ mod tests {
             OpCommand::Call { tool, .. } => assert_eq!(tool, "get_document_info"),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn maps_generate() {
+        match map_subcommand("generate a pricing page").unwrap() {
+            OpCommand::Generate { prompt } => assert_eq!(prompt, "a pricing page"),
+            _ => panic!(),
+        }
+        assert!(map_subcommand("generate").is_err()); // needs a prompt
     }
 
     #[test]

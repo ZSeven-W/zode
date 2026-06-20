@@ -27,6 +27,7 @@ const NAME_COLUMN_MAX: usize = 30;
 pub const OP_SUBCOMMANDS: &[&str] = &[
     "status",
     "design",
+    "generate",
     "insert",
     "update",
     "delete",
@@ -42,6 +43,7 @@ pub const OP_SUBCOMMANDS: &[&str] = &[
 const OP_SUBCOMMAND_DESCS: &[&str] = &[
     "report connection state",
     "run batch_design DSL",
+    "generate a page from a prompt",
     "insert a node",
     "update node properties",
     "delete nodes",
@@ -284,9 +286,9 @@ impl Autocomplete {
     pub fn op_sub_confirm(&self) -> Option<String> {
         let i = self.op_sub_state.selected().unwrap_or(0);
         self.op_sub_matches.get(i).map(|(name, _)| {
-            // `design` and `call` take a required argument, so leave a trailing
-            // space; all others can be submitted as-is.
-            if *name == "design" || *name == "call" {
+            // `design`, `generate`, and `call` take a required argument, so
+            // leave a trailing space; all others can be submitted as-is.
+            if *name == "design" || *name == "generate" || *name == "call" {
                 format!("/op {name} ")
             } else {
                 format!("/op {name}")
@@ -706,8 +708,8 @@ mod tests {
     #[test]
     fn op_subcommands_constant_covers_all_expected_entries() {
         let expected = [
-            "status", "design", "insert", "update", "delete", "move", "copy", "page", "vars",
-            "selection", "call",
+            "status", "design", "generate", "insert", "update", "delete", "move", "copy", "page",
+            "vars", "selection", "call",
         ];
         assert_eq!(OP_SUBCOMMANDS, expected);
         assert_eq!(
