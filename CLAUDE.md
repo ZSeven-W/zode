@@ -124,10 +124,13 @@ Available subcommands (autocomplete list): `status`, `design`, `insert`,
 
 The agent can call OpenPencil tools directly via two tool wrappers:
 
-- **`op_read`** — calls any tool on the curated read-only allowlist
-  (`get_document_info`, `get_selection`, `list_pages`, `get_node`,
-  `get_variables`, `list_components`, `export_svg`, `export_png`,
-  `get_styles`) without requiring user approval.
+- **`op_read`** — calls any tool that matches the read-only classification
+  without requiring user approval. Classification is **prefix-based**: any
+  tool whose name starts with `get_`, `list_`, `snapshot_`, `count_`,
+  `find_`, `read_`, `export_`, or `search_` is read. In addition, a curated
+  explicit set is always treated as read regardless of prefix:
+  `read_nodes`, `batch_get`, `export_design_md`, `search_all_unique_properties`,
+  and the full set of per-prefix tools listed above.
 - **`op_write`** — calls any other MCP tool; gated by the standard
   `ApprovalGate` (asks the user before executing).
 
@@ -136,20 +139,26 @@ via `OpConnection::ensure` (which may trigger install/launch — see below).
 
 ### `openpencil.*` config keys
 
-Set in `~/.config/zode/config.toml` (or `ZODE_CONFIG_DIR`):
+Set in `~/.zode/config.json` (or override the directory with `$ZODE_CONFIG_DIR`).
+The file is JSON with camelCase keys; `openpencil` is a nested object:
 
-```toml
-[openpencil]
-# Pinned release tag used for install (default: "v0.8.0").
-releaseTag = "v0.8.0"
-
-# Auto-launch the OpenPencil GUI if no port file is found (default: true).
-autoLaunchGui = true
-
-# Override the install command (platform-default if unset).
-# Unix: "bash -c <script>"; Windows: "powershell.exe -Command <script>".
-installCommand = ""
+```json
+{
+  "openpencil": {
+    "releaseTag": "0.8.0",
+    "autoLaunchGui": true,
+    "installCommand": null
+  }
+}
 ```
+
+Notes:
+- `releaseTag` default is `"0.8.0"` (no leading `v`). The installer prepends
+  `v` when building the download URL, so writing `"v0.8.0"` would double the
+  prefix and break installs.
+- `installCommand` is `Option<String>`. Omit the key (or use `null`) to use
+  the platform default. An empty string `""` would override the default with
+  an empty command and break installs.
 
 All keys are optional; absent keys fall back to built-in defaults.
 
@@ -159,9 +168,13 @@ All keys are optional; absent keys fall back to built-in defaults.
 tool call:
 
 1. **Discover** — reads `~/.openpencil/.op-mcp-port` for `{"port": N, "token": "..."}`.
-2. **Ping** — HTTP GET `http://127.0.0.1:<port>/mcp` with `Authorization: Bearer <token>`.
-   Token is required for ping verification; MCP `tools/call` calls are
-   **unauthenticated** (localhost trust boundary).
+2. **Ping** — JSON-RPC POST to `http://127.0.0.1:<port>/mcp` with body
+   `{"jsonrpc":"2.0","id":1,"method":"ping","params":null}`. No `Authorization`
+   header is sent (localhost trust boundary — both ping and tool calls are
+   unauthenticated POSTs). The response must have `result.server=="openpencil-mcp"`,
+   `result.mode=="live"`, and `result.token` equal to the token read from the
+   port file (the server echoes its own token; the client validates by
+   comparison, not by sending the token as a credential).
 3. **Attach** — if ping succeeds, use the live connection.
 4. **Install** — if no port file exists, prompt the user (consent modal) then
    run the platform install script:
@@ -171,6 +184,7 @@ tool call:
 5. **Launch** — if installed but not running (port file absent / ping fails),
    prompt the user then spawn `op start` as a detached background process.
 
-The localhost trust boundary means: tool calls go to `http://127.0.0.1:<port>/mcp`
-without auth headers; only the ping step sends the bearer token to verify
-the running server is the expected OpenPencil process.
+The localhost trust boundary means: both ping and tool calls go to
+`http://127.0.0.1:<port>/mcp` without auth headers. The token in the port
+file is validated by comparing it against the value echoed in the ping
+response — it is never sent as a credential.
