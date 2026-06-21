@@ -137,6 +137,16 @@ pub struct EnvInfo {
     pub model: String,
 }
 
+/// Appended after the skills index (when skills exist + the toggle is on) to
+/// nudge the "use skills first" discipline. Generic — names no specific skill,
+/// so it adapts to whatever is installed.
+const SKILL_DISCIPLINE: &str = "\n### Using skills\n\
+Before starting non-trivial work, scan the Available Skills above; if one plausibly \
+applies, invoke it with the Skill tool FIRST and state which you're using. For \
+multi-step features or changes, prefer a plan-first flow — use any available \
+planning/brainstorming skill before writing code, and follow test-driven development \
+if a testing skill applies.\n";
+
 const IDENTITY: &str = "\
 You are Zode, an AI-native coding assistant developed by ZSeven-W, running in \
 a terminal. You help \
@@ -164,6 +174,7 @@ pub fn build_system_prompt(
     instructions: &[InstructionFile],
     skills_index: &str,
     env: &EnvInfo,
+    skill_discipline: bool,
 ) -> String {
     let mut s = String::new();
     s.push_str(IDENTITY);
@@ -190,6 +201,9 @@ pub fn build_system_prompt(
         s.push_str("Invoke a skill by name with the Skill tool to load its full instructions:\n");
         s.push_str(skills_index);
         s.push('\n');
+        if skill_discipline {
+            s.push_str(SKILL_DISCIPLINE);
+        }
     }
     s
 }
@@ -288,7 +302,7 @@ mod tests {
             git_branch: Some("main".into()),
             model: "deepseek-v4-pro".into(),
         };
-        let prompt = build_system_prompt(&files, "- code-review: review code", &env);
+        let prompt = build_system_prompt(&files, "- code-review: review code", &env, true);
         assert!(prompt.contains("Zode"));
         assert!(prompt.contains("/p"));
         assert!(prompt.contains("Always write tests."));
@@ -308,10 +322,53 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let prompt = build_system_prompt(&[], "", &env);
+        let prompt = build_system_prompt(&[], "", &env, true);
         assert!(!prompt.contains("Available Skills"));
         // An empty model is omitted from the Environment block.
         assert!(!prompt.contains("- model:"));
         assert!(!prompt.contains("Project Instructions"));
+    }
+
+    #[test]
+    fn system_prompt_includes_skill_discipline_when_skills_and_enabled() {
+        let env = EnvInfo {
+            cwd: "/p".into(),
+            platform: "linux".into(),
+            date: "2026-06-21".into(),
+            git_branch: None,
+            model: String::new(),
+        };
+        let p = build_system_prompt(&[], "- foo: a skill", &env, true);
+        assert!(p.contains("Using skills"));
+        assert!(p.contains("invoke it with the Skill tool"));
+        // install-agnostic: no hardcoded skill names
+        assert!(!p.to_lowercase().contains("superpowers"));
+        assert!(!p.to_lowercase().contains("openspec"));
+    }
+
+    #[test]
+    fn system_prompt_omits_discipline_without_skills() {
+        let env = EnvInfo {
+            cwd: "/p".into(),
+            platform: "linux".into(),
+            date: "2026-06-21".into(),
+            git_branch: None,
+            model: String::new(),
+        };
+        let p = build_system_prompt(&[], "", &env, true); // no skills index → no block
+        assert!(!p.contains("Using skills"));
+    }
+
+    #[test]
+    fn system_prompt_omits_discipline_when_disabled() {
+        let env = EnvInfo {
+            cwd: "/p".into(),
+            platform: "linux".into(),
+            date: "2026-06-21".into(),
+            git_branch: None,
+            model: String::new(),
+        };
+        let p = build_system_prompt(&[], "- foo: a skill", &env, false);
+        assert!(!p.contains("Using skills"));
     }
 }

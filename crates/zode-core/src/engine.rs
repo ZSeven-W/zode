@@ -507,7 +507,8 @@ impl ZodeEngine {
         // is answerable). Stable across a session, so it doesn't hurt caching.
         env.model = model.clone();
         let instructions = discover_instructions(&cwd);
-        let mut system = build_system_prompt(&instructions, &skills_idx, &env);
+        let mut system =
+            build_system_prompt(&instructions, &skills_idx, &env, cfg.skill_discipline());
         // Declare the live sandbox / write policy so the agent knows whether it
         // may write outside cwd or reach the network — and, crucially, RETRIES
         // when the policy changed (e.g. the user ran `/sandbox off`) instead of
