@@ -302,6 +302,146 @@ ZODE_CONFIG_DIR=~/.zode python3 benchmarks/selfverify.py                # one-sh
 ZODE_CONFIG_DIR=~/.zode python3 benchmarks/instructions.py              # MCP / Skills / constraints
 ```
 
+Zode can also act as the host LLM runner for Noema's LOCOMO memory benchmark.
+Generate Noema answer/judge task JSONL from the Noema repo, then run:
+
+Before answer/judge grading, Noema's top-200 LOCOMO retrieval proxy, using the Mem0
+`mem0ai/memory-benchmarks` LOCOMO data at commit
+`4b61c5d31b9c668a12b4f5e78064248a02c82d2b`, is `1536 / 1540 = 99.7%`
+for `raw-plus-fact-layer` retrieval. Evidence-only recall is `1536 / 1536 =
+100.0%` any-hit at top 200. The predict JSON is about 323 MB. The unbudgeted
+answer-task file is about 201 MB after query-aware episode compaction; the
+current v7 96k-budget answer-task file is about 148 MB.
+
+Current zode-hosted judged result:
+
+| Benchmark | Cutoff | Runner | Noema score | Mem0 score | Margin | Correct / total | Status |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| LoCoMo | top_200 | zode host runner, v7 96k prompts | 92.6623 | 92.5 | +0.1623 | 1427 / 1540 | exceeds Mem0 and Noema target |
+
+The final answer summary has `unique=1540`, `answers.valid=1540`,
+`answers.retryable=0`, `answers.empty=0`, and `answers.failed=0`. The final
+judge summary has `unique=1540`, `judges.valid=1540`, `judges.correct=1427`,
+`judges.wrong=113`, and `judges.retryable=0`.
+
+```bash
+python3 benchmarks/noema_locomo.py \
+  --tasks /tmp/noema-locomo-answer-tasks-top200-budget96k.jsonl \
+  --output /tmp/noema-locomo-answer-results.jsonl \
+  --zode-config-dir ~/.zode \
+  --jobs 1 \
+  --resume \
+  --retry-empty \
+  --retry-failed \
+  --summary-output /tmp/noema-locomo-answer-results.summary.json \
+  --manifest-output /tmp/noema-locomo-answer-run.manifest.json \
+  --stop-on-provider-blocker \
+  --retries 2
+
+# For recovered runs, Noema can emit a smaller retry-only 96k-budget task file:
+#   /tmp/noema-locomo-answer-tasks-retry-zode-top200-budget96k.jsonl
+
+python3 benchmarks/noema_locomo.py \
+  --tasks /tmp/noema-locomo-judge-tasks-top200.jsonl \
+  --output /tmp/noema-locomo-judge-results.jsonl \
+  --zode-config-dir ~/.zode \
+  --jobs 1 \
+  --resume \
+  --retry-empty \
+  --retry-failed \
+  --summary-output /tmp/noema-locomo-judge-results.summary.json \
+  --manifest-output /tmp/noema-locomo-judge-run.manifest.json \
+  --stop-on-provider-blocker \
+  --retries 2
+
+# Judge retries can likewise use:
+#   /tmp/noema-locomo-judge-tasks-retry-top200.jsonl
+```
+
+The runner prints a compact summary and can write the same counts to
+`--summary-output`. A task file can be inspected without an output file or host
+LLM call:
+
+```bash
+python3 benchmarks/noema_locomo.py \
+  --dry-run \
+  --tasks /tmp/noema-locomo-answer-tasks-top200.jsonl \
+  --summary-output /tmp/noema-locomo-answer-dry-run.summary.json \
+  --manifest-output /tmp/noema-locomo-answer-dry-run.manifest.json
+```
+
+Existing result files can also be summarized without a task file or host LLM
+call:
+
+```bash
+python3 benchmarks/noema_locomo.py \
+  --summary-only \
+  --fail-on-retryable \
+  --output /tmp/noema-locomo-answer-results.jsonl \
+  --summary-output /tmp/noema-locomo-answer-results.summary.json \
+  --manifest-output /tmp/noema-locomo-answer-summary.manifest.json
+```
+
+With `--fail-on-retryable`, the runner exits with status 2 when latest results
+still contain ordinary retryable answer or judge rows; if those retryables include
+a provider blocker such as `http_402_payment_required`, summary-only exits with
+status 3. Use Noema's `--locomo-fail-if-incomplete` gate for the authoritative
+readiness view across predict, answer, and judge artifacts.
+For retry batches that may hit provider balance or billing limits, run with
+`--jobs 1 --stop-on-provider-blocker`; the runner stops at the first provider
+blocker such as `http_402_payment_required`, writes the partial JSONL and
+manifest, and exits with status 3 instead of burning through the remaining
+tasks.
+`--manifest-output` writes the runner provenance used for reproducible benchmark
+reports: task/result paths, zode binary, provider/model names, retry settings,
+run/skipped counts, `tasks_total`, `pending_before_run`,
+`unrun_due_to_provider_blocker`, task input size stats, prompt character
+distribution, a rough `ceil(prompt_chars / 4)` prompt-token estimate, the same
+latest-row summary, provider-blocker status, and answer failure-reason buckets
+such as `http_402_payment_required`.
+Noema can embed that file into its combined run report with
+`--locomo-host-manifest-input`, so the final report contains both memory-side
+readiness and zode host-run provenance.
+It intentionally does not include provider API keys.
+Use `--zode-config-dir` to run against an isolated zode config directory instead
+of whatever global config is active in the shell.
+
+The final v7 96k answer run used append-only/latest-row semantics. The initial
+full pass reused 81 matching fingerprint results, ran 1459 tasks, and produced
+16 retryable answer rows; a resume pass with `--retry-empty --retry-failed`
+recovered all 16, leaving zero retryable answer rows.
+The current v7 96k-budget answer manifest records
+`task_file_bytes=148381415`, `tasks_loaded=1540`, and prompt chars
+`p50=95738`, `p95=95959`, `max=96000`. It estimates prompt input at `36611760`
+tokens total, with `p50=23935`, `p95=23990`, and `max=24000` per task using the
+runner's 4 chars/token estimate. It also records Noema prompt-retention stats:
+`retrieval_results_in_prompt.mean=155.3422077922078`, `p95=192`, and
+`truncated_memories.total=0`. These prompt and retention stats are also present
+in Noema's retention artifact under `prompt_summary`. For comparison, the
+unbudgeted compacted top-200 task file records `task_file_bytes=200747951`,
+prompt chars `p50=130719`, `p95=147523`, `max=162186`, and about `49778930`
+estimated prompt tokens total.
+The current full judge-task artifact is
+`/tmp/noema-locomo-judge-tasks-zode-top200-v7-96k-full.jsonl`; its zode
+manifest records `task_file_bytes=2608433`, `tasks_loaded=1540`, prompt chars
+`total=1683047`, `p50=1070`, `p95=1323`, `max=2110`, and estimated prompt input
+tokens `total=421327`, `p50=268`, `p95=331`, `max=528`. The judge run reused 81
+matching fingerprint results and ran 1459 tasks, with zero retryable judge rows.
+
+Noema has also been dry-run compared at 48k, 64k, and 96k prompt budgets. The
+conservative evidence-ID audit is now reproducible through Noema's
+`--locomo-retention-output` command. It shows 96k is the current recommended
+default: 48k retains `1515 / 1536` ID any-hits, 64k retains `1529 / 1536`, and
+96k retains `1534 / 1536`, matching the top-200 ID baseline any-hit while still
+reducing prompt tokens versus the unbudgeted task file. The 96k audit artifact
+is `/tmp/noema-locomo-answer-retention-top200-budget96k.json`. Noema also writes
+the combined proxy/retention/readiness report at
+`/tmp/noema-locomo-run-report-top200-budget96k-v7-full.json`; the current report
+has `completion.final_ready=true`, `completion.blocked_reason=ready`, and
+`target_verdict.score=92.66233766233766`. `--locomo-target-output` plus
+`--locomo-require-beats-mem0` can enforce the judged LOCOMO score against
+Mem0's `92.5` LoCoMo target.
+
 The suites, hidden graders, Claude's reference solutions, and the runners live in
 [`benchmarks/`](benchmarks/).
 

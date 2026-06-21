@@ -274,7 +274,10 @@ mod tests {
         assert_eq!(image.display_name, "clipboard image");
         assert_eq!(image.media_type, "image/png");
         assert_eq!(image.size_bytes, 12);
-        assert!(image.path.as_os_str().is_empty(), "clipboard image has no file path");
+        assert!(
+            image.path.as_os_str().is_empty(),
+            "clipboard image has no file path"
+        );
         assert!(matches!(image.content_block, ContentBlock::Image { .. }));
     }
 

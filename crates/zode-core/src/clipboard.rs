@@ -89,7 +89,10 @@ fn macos_clipboard_image() -> Result<Option<Vec<u8>>, String> {
 fn linux_clipboard_image() -> Result<Option<Vec<u8>>, String> {
     let candidates: &[(&str, &[&str])] = &[
         ("wl-paste", &["--type", "image/png"]),
-        ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]),
+        (
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/png", "-o"],
+        ),
     ];
     for (bin, args) in candidates {
         if let Ok(out) = Command::new(bin)

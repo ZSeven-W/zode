@@ -169,7 +169,11 @@ impl SandboxConfig {
     }
     /// Return a copy with the default-temp-root policy set (Codex
     /// `exclude_slash_tmp` / `exclude_tmpdir_env_var`).
-    pub fn with_temp_policy(mut self, exclude_slash_tmp: bool, exclude_tmpdir_env_var: bool) -> Self {
+    pub fn with_temp_policy(
+        mut self,
+        exclude_slash_tmp: bool,
+        exclude_tmpdir_env_var: bool,
+    ) -> Self {
         self.exclude_slash_tmp = exclude_slash_tmp;
         self.exclude_tmpdir_env_var = exclude_tmpdir_env_var;
         self
@@ -237,11 +241,7 @@ impl SandboxConfig {
     /// Build the wrapped argv that runs a `/bin/sh -c <command>` under the
     /// sandbox (used by the shell tool).
     pub fn wrap(&self, command: &str) -> Vec<String> {
-        self.wrap_argv(&[
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            command.to_string(),
-        ])
+        self.wrap_argv(&["/bin/sh".to_string(), "-c".to_string(), command.to_string()])
     }
 
     /// Wrap an arbitrary `argv` (program + args) so it runs under the sandbox.
@@ -711,10 +711,7 @@ impl Tool for SandboxedBashTool {
     }
     fn input_schema(&self) -> serde_json::Value {
         let mut schema = self.inner.input_schema();
-        if let Some(props) = schema
-            .get_mut("properties")
-            .and_then(|p| p.as_object_mut())
-        {
+        if let Some(props) = schema.get_mut("properties").and_then(|p| p.as_object_mut()) {
             props.insert(
                 SANDBOX_PERMISSIONS_FLAG.to_string(),
                 serde_json::json!({
@@ -855,7 +852,10 @@ mod tests {
         let mut c = cfg(SandboxMode::WorkspaceWrite, false);
         c.writable_roots = vec![PathBuf::from("/data/cache")];
         let p = c.macos_profile();
-        assert!(p.contains("/data/cache"), "extra writable root allowed: {p}");
+        assert!(
+            p.contains("/data/cache"),
+            "extra writable root allowed: {p}"
+        );
     }
 
     fn linux_cfg(mode: SandboxMode, net: bool) -> SandboxConfig {
@@ -896,7 +896,10 @@ mod tests {
     fn mode_parse() {
         assert_eq!(SandboxMode::parse("read-only"), SandboxMode::ReadOnly);
         assert_eq!(SandboxMode::parse("readonly"), SandboxMode::ReadOnly);
-        assert_eq!(SandboxMode::parse("workspace-write"), SandboxMode::WorkspaceWrite);
+        assert_eq!(
+            SandboxMode::parse("workspace-write"),
+            SandboxMode::WorkspaceWrite
+        );
         assert_eq!(SandboxMode::parse("nonsense"), SandboxMode::WorkspaceWrite);
     }
 
@@ -980,7 +983,10 @@ mod tests {
         let tool = SandboxedBashTool::new(rec, cfg, allow_gate());
         let schema = tool.input_schema();
         let perms = &schema["properties"][SANDBOX_PERMISSIONS_FLAG];
-        assert!(perms.is_object(), "sandbox_permissions advertised: {schema}");
+        assert!(
+            perms.is_object(),
+            "sandbox_permissions advertised: {schema}"
+        );
         let variants: Vec<&str> = perms["enum"]
             .as_array()
             .unwrap()
@@ -1011,9 +1017,19 @@ mod tests {
         .await
         .unwrap();
         let seen = rec.seen.lock().unwrap().clone().unwrap();
-        assert_eq!(seen["command"].as_str().unwrap(), "curl example.com", "ran raw");
-        assert!(seen.get(SANDBOX_PERMISSIONS_FLAG).is_none(), "control key stripped");
-        assert!(seen.get(JUSTIFICATION_FLAG).is_none(), "justification stripped");
+        assert_eq!(
+            seen["command"].as_str().unwrap(),
+            "curl example.com",
+            "ran raw"
+        );
+        assert!(
+            seen.get(SANDBOX_PERMISSIONS_FLAG).is_none(),
+            "control key stripped"
+        );
+        assert!(
+            seen.get(JUSTIFICATION_FLAG).is_none(),
+            "justification stripped"
+        );
     }
 
     #[test]
@@ -1030,9 +1046,16 @@ mod tests {
             p.contains("(deny file-write* (subpath \"/work/proj/.zode\"))"),
             ".zode protected: {p}"
         );
-        let allow_at = p.find("(allow file-write* (subpath \"/work/proj\"))").unwrap();
-        let deny_at = p.find("(deny file-write* (subpath \"/work/proj/.git\"))").unwrap();
-        assert!(deny_at > allow_at, "deny must follow allow for last-match-wins");
+        let allow_at = p
+            .find("(allow file-write* (subpath \"/work/proj\"))")
+            .unwrap();
+        let deny_at = p
+            .find("(deny file-write* (subpath \"/work/proj/.git\"))")
+            .unwrap();
+        assert!(
+            deny_at > allow_at,
+            "deny must follow allow for last-match-wins"
+        );
     }
 
     #[test]
@@ -1119,7 +1142,11 @@ mod tests {
         // The escalation (auto-approved) re-ran the raw command, which succeeded.
         assert_eq!(out["exit_code"], 0, "escalated raw run returned success");
         let calls = inner.calls.lock().unwrap();
-        assert_eq!(calls.len(), 2, "ran sandboxed, then escalated raw: {calls:?}");
+        assert_eq!(
+            calls.len(),
+            2,
+            "ran sandboxed, then escalated raw: {calls:?}"
+        );
         assert!(
             calls[0].contains("sandbox-exec") || calls[0].contains("bwrap"),
             "first run was sandboxed"
@@ -1162,7 +1189,11 @@ mod tests {
         tool.call(&ctx, json!({"command": "frobnicate"}))
             .await
             .unwrap();
-        assert_eq!(*inner.0.lock().unwrap(), 1, "ran once, no escalation re-run");
+        assert_eq!(
+            *inner.0.lock().unwrap(),
+            1,
+            "ran once, no escalation re-run"
+        );
     }
 
     #[test]
@@ -1175,7 +1206,9 @@ mod tests {
             &json!({"exit_code": 1, "stderr": "curl: (6) Could not resolve host: example.com"})
         ));
         // exit 0 is never a denial.
-        assert!(!looks_like_sandbox_denial(&json!({"exit_code": 0, "stderr": "sandbox"})));
+        assert!(!looks_like_sandbox_denial(
+            &json!({"exit_code": 0, "stderr": "sandbox"})
+        ));
         // 126/127 are exec failures — NOT sandbox denials — even though 126
         // prints "permission denied" (which would otherwise keyword-match).
         assert!(!looks_like_sandbox_denial(
@@ -1218,12 +1251,24 @@ mod tests {
             .await
             .expect_err("kernel must deny the write into .git");
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
-        assert!(!protected.exists(), "the protected file must not have been created");
+        assert!(
+            !protected.exists(),
+            "the protected file must not have been created"
+        );
     }
 
     #[test]
     fn resolve_disabled_is_none() {
-        assert!(resolve(Path::new("/tmp"), false, SandboxMode::WorkspaceWrite, false, &[], false, false).is_none());
+        assert!(resolve(
+            Path::new("/tmp"),
+            false,
+            SandboxMode::WorkspaceWrite,
+            false,
+            &[],
+            false,
+            false
+        )
+        .is_none());
     }
 
     #[test]
