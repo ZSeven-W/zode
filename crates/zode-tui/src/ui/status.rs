@@ -110,7 +110,9 @@ impl StatusBar {
             if self.sandbox_network {
                 spans.push(Span::styled(
                     " +NET",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
         } else {

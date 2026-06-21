@@ -19,7 +19,7 @@ tracing = { workspace = true }
 dirs = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
-noema-core = { path = "../../../noema/crates/noema-core", optional = true }
+noema-core = { path = "../../noema/crates/noema-core", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

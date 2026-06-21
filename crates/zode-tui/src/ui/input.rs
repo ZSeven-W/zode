@@ -196,12 +196,7 @@ impl InputBox {
         let start_row = start.row.min(last_row);
         let end_row = end.row.min(last_row);
         let mut out = Vec::new();
-        for (row_idx, line) in lines
-            .iter()
-            .enumerate()
-            .take(end_row + 1)
-            .skip(start_row)
-        {
+        for (row_idx, line) in lines.iter().enumerate().take(end_row + 1).skip(start_row) {
             let line_len = line.chars().count();
             let text = if start_row == end_row {
                 slice_char_cols(line, start.column.min(line_len), end.column.min(line_len))

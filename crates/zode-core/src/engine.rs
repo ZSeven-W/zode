@@ -34,7 +34,9 @@ use crate::error::CoreError;
 use crate::gated_tool::PermissionGatedTool;
 use crate::history::{EditHistory, EditHistoryHook};
 use crate::hooks_config::load_hook_handlers;
-use crate::instructions::{build_system_prompt, discover_instructions, gather_env, openspec_detected};
+use crate::instructions::{
+    build_system_prompt, discover_instructions, gather_env, openspec_detected,
+};
 use crate::plugin::PluginManager;
 use crate::provider::build_provider;
 use crate::skills::{load_skills_filtered, load_skills_from, skills_dirs, skills_index, SkillTool};

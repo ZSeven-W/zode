@@ -2211,7 +2211,8 @@ impl TuiApp {
                     self.input
                         .selection_point_at(input_area, mouse.column, mouse.row)
                 {
-                    self.active_input_selection = Some(InputSelection::new(selection.anchor, point));
+                    self.active_input_selection =
+                        Some(InputSelection::new(selection.anchor, point));
                 }
                 true
             }
@@ -2399,7 +2400,15 @@ impl TuiApp {
             }),
             "workspace-write" | "write" | "ww" => Some(match current.clone() {
                 Some(c) => Some(c.with_mode(SandboxMode::WorkspaceWrite)),
-                None => resolve(&cwd, true, SandboxMode::WorkspaceWrite, false, &[], false, false),
+                None => resolve(
+                    &cwd,
+                    true,
+                    SandboxMode::WorkspaceWrite,
+                    false,
+                    &[],
+                    false,
+                    false,
+                ),
             }),
             "network on" | "net on" | "network" => Some(match current.clone() {
                 Some(c) => Some(c.with_network(true)),
@@ -3237,8 +3246,11 @@ impl TuiApp {
             // Compaction rewrote the message store; persist it so the compacted
             // transcript survives a resume (mirrors the post-turn save).
             if ok {
-                let (session_id, engine, title) =
-                    (tab.session_id.clone(), tab.engine.clone(), tab.title.clone());
+                let (session_id, engine, title) = (
+                    tab.session_id.clone(),
+                    tab.engine.clone(),
+                    tab.title.clone(),
+                );
                 tokio::spawn(crate::tab::persist_session(session_id, engine, title));
             }
             return;
@@ -3922,7 +3934,6 @@ impl TuiApp {
             Err(msg) => self.active_tab_mut().chat.push_system(&msg),
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3943,11 +3954,15 @@ enum FragmentedCursorSeqState {
     AfterEsc,
     AfterEscO,
     AfterEscBracket,
-    MaybeBareO { count: usize },
+    MaybeBareO {
+        count: usize,
+    },
     /// Mid SGR mouse report (`<Cb;Cx;Cy` so far) reached via a lost/fragmented
     /// `ESC[`. `buf` holds the bytes seen so they can be replayed verbatim if
     /// the run turns out not to be a real report.
-    MaybeSgrMouse { buf: String },
+    MaybeSgrMouse {
+        buf: String,
+    },
     /// A `[` seen right after a swallowed report — likely the next report's
     /// `ESC[` with the ESC lost. Held tentatively so it can be replayed.
     MaybeSgrBracket,
@@ -5119,19 +5134,32 @@ mod tests {
         assert!(!app.active_tab().is_busy());
 
         send_key(&mut app, &agent_tx, KeyCode::Up, KeyModifiers::NONE).await;
-        assert_eq!(app.input.text(), "写个 /tmp/hello.txt", "Up → latest prompt");
+        assert_eq!(
+            app.input.text(),
+            "写个 /tmp/hello.txt",
+            "Up → latest prompt"
+        );
 
         send_key(&mut app, &agent_tx, KeyCode::Up, KeyModifiers::NONE).await;
-        assert_eq!(app.input.text(), "first prompt", "Up again → earlier prompt");
+        assert_eq!(
+            app.input.text(),
+            "first prompt",
+            "Up again → earlier prompt"
+        );
 
         send_key(&mut app, &agent_tx, KeyCode::Down, KeyModifiers::NONE).await;
-        assert_eq!(app.input.text(), "写个 /tmp/hello.txt", "Down → newer prompt");
+        assert_eq!(
+            app.input.text(),
+            "写个 /tmp/hello.txt",
+            "Down → newer prompt"
+        );
     }
 
     #[tokio::test]
     async fn two_escs_clear_a_non_empty_draft_when_idle() {
         let (mut app, agent_tx) = make_test_app().await;
-        app.input.set_text("a long draft I don't want to lose by accident");
+        app.input
+            .set_text("a long draft I don't want to lose by accident");
         assert!(!app.active_tab().is_busy());
 
         // First Esc only arms (draft preserved).
@@ -5158,7 +5186,10 @@ mod tests {
         assert!(!app.esc_clear_armed, "a non-Esc key disarms");
 
         send_key(&mut app, &agent_tx, KeyCode::Esc, KeyModifiers::NONE).await;
-        assert!(!app.input.is_empty(), "lone Esc after typing keeps the draft");
+        assert!(
+            !app.input.is_empty(),
+            "lone Esc after typing keeps the draft"
+        );
     }
 
     #[tokio::test]
@@ -5198,7 +5229,9 @@ mod tests {
 
         let png = [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
         let images: Vec<_> = (0..2)
-            .map(|_| zode_core::images::image_attachment_from_bytes(&png, "clipboard image").unwrap())
+            .map(|_| {
+                zode_core::images::image_attachment_from_bytes(&png, "clipboard image").unwrap()
+            })
             .collect();
         let theme = ThemeStore::with_builtins().resolve(None);
         let mut term = Terminal::new(TestBackend::new(80, 3)).unwrap();
@@ -5213,7 +5246,11 @@ mod tests {
         assert_eq!(hits[0].0, 2);
         let chip_w = (UnicodeWidthStr::width("clipboard image")
             + UnicodeWidthStr::width(" image/png")) as u16;
-        assert_eq!(hits[0].1 - hits[0].0, chip_w, "hitbox spans name + media type");
+        assert_eq!(
+            hits[0].1 - hits[0].0,
+            chip_w,
+            "hitbox spans name + media type"
+        );
         // The second chip starts after the first plus the 2-col separator.
         assert_eq!(hits[1].0, hits[0].1 + 2);
         assert_eq!(hits[1].2, 1, "carries the image index");
@@ -5224,13 +5261,23 @@ mod tests {
         let (mut app, _tx) = make_test_app().await;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shot.png");
-        std::fs::write(&path, [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])
-            .unwrap();
+        std::fs::write(
+            &path,
+            [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0],
+        )
+        .unwrap();
         // A dragged path lands in the input as text; absorbing lifts it to a chip.
         app.input.set_text(&path.display().to_string());
         app.absorb_image_paths_from_input();
-        assert_eq!(app.active_tab().pending_images.len(), 1, "path lifted to a chip");
-        assert!(app.input.text().trim().is_empty(), "path stripped from input");
+        assert_eq!(
+            app.active_tab().pending_images.len(),
+            1,
+            "path lifted to a chip"
+        );
+        assert!(
+            app.input.text().trim().is_empty(),
+            "path stripped from input"
+        );
     }
 
     #[tokio::test]
@@ -5238,8 +5285,15 @@ mod tests {
         let (mut app, _tx) = make_test_app().await;
         app.input.set_text("see foo.jpg please");
         app.absorb_image_paths_from_input();
-        assert!(app.active_tab().pending_images.is_empty(), "non-existent path ignored");
-        assert_eq!(app.input.text(), "see foo.jpg please", "text left untouched");
+        assert!(
+            app.active_tab().pending_images.is_empty(),
+            "non-existent path ignored"
+        );
+        assert_eq!(
+            app.input.text(),
+            "see foo.jpg please",
+            "text left untouched"
+        );
     }
 
     #[tokio::test]
@@ -5256,7 +5310,11 @@ mod tests {
         send_key(&mut app, &agent_tx, KeyCode::Char('h'), KeyModifiers::NONE).await;
         assert_eq!(app.selected_image, None);
         assert_eq!(app.input.text(), "h");
-        assert_eq!(app.active_tab().pending_images.len(), 1, "image not removed by typing");
+        assert_eq!(
+            app.active_tab().pending_images.len(),
+            1,
+            "image not removed by typing"
+        );
     }
 
     #[test]
@@ -5266,10 +5324,19 @@ mod tests {
         assert!(!record_prompt_history_entry(&mut history, "/sandbox"));
         assert!(!record_prompt_history_entry(&mut history, "/model gpt"));
         assert!(!record_prompt_history_entry(&mut history, "  /help  "));
-        assert!(history.is_empty(), "no slash commands recorded: {history:?}");
+        assert!(
+            history.is_empty(),
+            "no slash commands recorded: {history:?}"
+        );
         // Real prompts (incl. ones that merely contain a slash) ARE recorded.
-        assert!(record_prompt_history_entry(&mut history, "写个 /tmp/hello.txt"));
-        assert!(record_prompt_history_entry(&mut history, "/note\nmulti-line body"));
+        assert!(record_prompt_history_entry(
+            &mut history,
+            "写个 /tmp/hello.txt"
+        ));
+        assert!(record_prompt_history_entry(
+            &mut history,
+            "/note\nmulti-line body"
+        ));
         assert_eq!(history.len(), 2);
     }
 
@@ -5476,10 +5543,7 @@ mod tests {
 
         assert_eq!(app.active_tab().queued_input.len(), 1);
         // A queued follow-up is never recorded into recall/prompt history.
-        assert!(!app
-            .prompt_history
-            .iter()
-            .any(|p| p == "queued follow-up"));
+        assert!(!app.prompt_history.iter().any(|p| p == "queued follow-up"));
         assert!(!app
             .active_tab()
             .chat
@@ -5843,12 +5907,7 @@ mod tests {
         // The `ESC [ < ... M` shape (ESC and `[` arrive as their own keys).
         let mut state = None;
         assert_eq!(
-            fragmented_cursor_sequence_action(
-                &mut state,
-                KeyCode::Esc,
-                KeyModifiers::NONE,
-                true
-            ),
+            fragmented_cursor_sequence_action(&mut state, KeyCode::Esc, KeyModifiers::NONE, true),
             FragmentedCursorAction::Consumed
         );
         let actions = feed_seq(&mut state, "[<65;1;1M");

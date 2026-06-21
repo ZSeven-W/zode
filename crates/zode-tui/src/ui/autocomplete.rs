@@ -616,7 +616,10 @@ mod tests {
         let mut ac = Autocomplete::new();
         ac.update("/op ");
         assert!(ac.is_op_sub_active());
-        assert!(!ac.is_active(), "primary popup should be off in op-sub mode");
+        assert!(
+            !ac.is_active(),
+            "primary popup should be off in op-sub mode"
+        );
     }
 
     #[test]
@@ -708,8 +711,18 @@ mod tests {
     #[test]
     fn op_subcommands_constant_covers_all_expected_entries() {
         let expected = [
-            "status", "design", "generate", "insert", "update", "delete", "move", "copy", "page",
-            "vars", "selection", "call",
+            "status",
+            "design",
+            "generate",
+            "insert",
+            "update",
+            "delete",
+            "move",
+            "copy",
+            "page",
+            "vars",
+            "selection",
+            "call",
         ];
         assert_eq!(OP_SUBCOMMANDS, expected);
         assert_eq!(

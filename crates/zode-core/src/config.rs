@@ -982,7 +982,7 @@ mod tests {
         let cfg: ZodeConfig = serde_json::from_str(r#"{"openspecAwareness":false}"#).unwrap();
         assert!(!cfg.openspec_awareness());
         assert!(ZodeConfig::default().openspec_awareness()); // absent → default true
-        // presence-based merge: project value wins, absent preserves global
+                                                             // presence-based merge: project value wins, absent preserves global
         let mut base = ZodeConfig {
             openspec_awareness: Some(false),
             ..Default::default()

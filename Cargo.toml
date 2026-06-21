@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/zode", "crates/zode-core", "crates/zode-tui"]
 # vendor/agent is its own (agent-rs) workspace; keep it out of ours so its
 # crates resolve `*.workspace = true` against agent-rs's root, not zode's.
-exclude = ["vendor/agent"]
+exclude = ["vendor/agent", "noema"]
 
 [workspace.package]
 version = "0.2.0"
