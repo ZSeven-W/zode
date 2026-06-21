@@ -255,6 +255,10 @@ pub struct ZodeConfig {
     /// Inject a "use skills first" discipline block into the system prompt when
     /// skills are available. `None` → ON. Set `"skillDiscipline": false` to disable.
     pub skill_discipline: Option<bool>,
+    /// Inject an OpenSpec-workflow awareness block into the system prompt when
+    /// the project uses OpenSpec (an `openspec/` dir at the project root). `None`
+    /// → ON. Set `"openspecAwareness": false` to disable even when detected.
+    pub openspec_awareness: Option<bool>,
     pub permissions: PermissionsConfig,
     pub sandbox: SandboxSettings,
     pub max_output_tokens: Option<u32>,
@@ -329,6 +333,10 @@ impl ZodeConfig {
 
     pub fn skill_discipline(&self) -> bool {
         self.skill_discipline.unwrap_or(true)
+    }
+
+    pub fn openspec_awareness(&self) -> bool {
+        self.openspec_awareness.unwrap_or(true)
     }
 
     /// Fill missing provider connection details from env vars. Anthropic /
@@ -440,6 +448,7 @@ impl ZodeConfig {
             self.autonomous_orchestration = other.autonomous_orchestration;
         }
         self.skill_discipline = other.skill_discipline.or(self.skill_discipline);
+        self.openspec_awareness = other.openspec_awareness.or(self.openspec_awareness);
         if other.temperature.is_some() {
             self.temperature = other.temperature;
         }
@@ -958,5 +967,29 @@ mod tests {
         };
         base2.merge_from(proj);
         assert!(base2.skill_discipline()); // project true wins
+    }
+
+    #[test]
+    fn openspec_awareness_camelcase_default_and_merge() {
+        let cfg: ZodeConfig = serde_json::from_str(r#"{"openspecAwareness":false}"#).unwrap();
+        assert!(!cfg.openspec_awareness());
+        assert!(ZodeConfig::default().openspec_awareness()); // absent → default true
+        // presence-based merge: project value wins, absent preserves global
+        let mut base = ZodeConfig {
+            openspec_awareness: Some(false),
+            ..Default::default()
+        };
+        base.merge_from(ZodeConfig::default());
+        assert!(!base.openspec_awareness()); // global false preserved (project absent)
+        let mut base2 = ZodeConfig {
+            openspec_awareness: Some(false),
+            ..Default::default()
+        };
+        let proj = ZodeConfig {
+            openspec_awareness: Some(true),
+            ..Default::default()
+        };
+        base2.merge_from(proj);
+        assert!(base2.openspec_awareness()); // project true wins
     }
 }
