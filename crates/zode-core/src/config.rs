@@ -331,10 +331,14 @@ impl ZodeConfig {
         }
     }
 
+    /// Whether to inject the skill-invocation discipline block into the system
+    /// prompt (when skills are available). Defaults to `true`.
     pub fn skill_discipline(&self) -> bool {
         self.skill_discipline.unwrap_or(true)
     }
 
+    /// Whether to inject the OpenSpec-workflow awareness block into the system
+    /// prompt (when the project uses OpenSpec). Defaults to `true`.
     pub fn openspec_awareness(&self) -> bool {
         self.openspec_awareness.unwrap_or(true)
     }
@@ -447,8 +451,12 @@ impl ZodeConfig {
         if other.autonomous_orchestration.is_some() {
             self.autonomous_orchestration = other.autonomous_orchestration;
         }
-        self.skill_discipline = other.skill_discipline.or(self.skill_discipline);
-        self.openspec_awareness = other.openspec_awareness.or(self.openspec_awareness);
+        if other.skill_discipline.is_some() {
+            self.skill_discipline = other.skill_discipline;
+        }
+        if other.openspec_awareness.is_some() {
+            self.openspec_awareness = other.openspec_awareness;
+        }
         if other.temperature.is_some() {
             self.temperature = other.temperature;
         }
