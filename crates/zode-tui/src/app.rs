@@ -1,7 +1,7 @@
 //! TUI main loop. Initializes the terminal, runs a tokio::select! over
 //! terminal input + agent events + a tick, and drives one turn at a time.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Stdout;
 use std::path::Path;
@@ -61,8 +61,8 @@ use crate::ui::tabs::{render_sidebar, SidebarInfo};
 use crate::ui::toast::Toast;
 
 const PROMPT_HISTORY_FILE: &str = "prompt_history.json";
-/// Cap on persisted prompt-history entries. When exceeded, the OLDEST are
-/// dropped first (FIFO) — see `record_prompt_history_entry`.
+/// Cap on persisted prompt-history entries PER PROJECT. When exceeded, the
+/// OLDEST are dropped first (FIFO) — see `record_prompt_history_entry`.
 const PROMPT_HISTORY_LIMIT: usize = 100;
 
 fn prompt_history_path() -> Option<std::path::PathBuf> {
@@ -71,41 +71,103 @@ fn prompt_history_path() -> Option<std::path::PathBuf> {
         .map(|dir| dir.join(PROMPT_HISTORY_FILE))
 }
 
-fn load_prompt_history() -> Vec<String> {
+/// Stable key for a project's history bucket: the canonical cwd path (falling
+/// back to the raw path string if canonicalization fails, e.g. the dir was
+/// removed). The same cwd notion already keys `.zode/state.json`.
+fn prompt_history_key(cwd: &Path) -> String {
+    std::fs::canonicalize(cwd)
+        .unwrap_or_else(|_| cwd.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn load_prompt_history(project_key: &str) -> Vec<String> {
     prompt_history_path()
         .as_deref()
-        .map(load_prompt_history_from_path)
+        .map(|path| load_prompt_history_from_path(path, project_key))
         .unwrap_or_default()
 }
 
-fn save_prompt_history(history: &[String]) {
+fn save_prompt_history(project_key: &str, history: &[String]) {
     let Some(path) = prompt_history_path() else {
         return;
     };
-    if let Err(e) = save_prompt_history_to_path(&path, history) {
+    if let Err(e) = save_prompt_history_to_path(&path, project_key, history) {
         tracing::warn!(error = %e, path = %path.display(), "failed to save prompt history");
     }
 }
 
-fn load_prompt_history_from_path(path: &Path) -> Vec<String> {
+/// Read the whole project-keyed history map from disk. A legacy flat-array
+/// file (`["a","b"]`) is migrated under `project_key` so existing records are
+/// never lost. Missing/corrupt files yield an empty map (logged), so a bad
+/// file never wipes the user's history on the next save.
+fn load_history_map(path: &Path, project_key: &str) -> BTreeMap<String, Vec<String>> {
     let Ok(text) = fs::read_to_string(path) else {
-        return Vec::new();
+        return BTreeMap::new();
     };
-    match serde_json::from_str::<Vec<String>>(&text) {
-        Ok(entries) => sanitize_prompt_history(entries),
+    let value = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "failed to parse prompt history");
-            Vec::new()
+            return BTreeMap::new();
+        }
+    };
+    let mut map = BTreeMap::new();
+    match value {
+        // New format: { "<project-cwd>": ["entry", ...], ... }.
+        v @ serde_json::Value::Object(_) => {
+            match serde_json::from_value::<BTreeMap<String, Vec<String>>>(v) {
+                Ok(parsed) => {
+                    for (key, entries) in parsed {
+                        map.insert(key, sanitize_prompt_history(entries));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %path.display(), "prompt history map had unexpected shape");
+                }
+            }
+        }
+        // Legacy format: a flat array → migrate into the current project.
+        v @ serde_json::Value::Array(_) => {
+            if let Ok(entries) = serde_json::from_value::<Vec<String>>(v) {
+                let entries = sanitize_prompt_history(entries);
+                if !entries.is_empty() {
+                    map.insert(project_key.to_string(), entries);
+                }
+            }
+        }
+        _ => {
+            tracing::warn!(path = %path.display(), "prompt history had unexpected JSON type");
         }
     }
+    map
 }
 
-fn save_prompt_history_to_path(path: &Path, history: &[String]) -> Result<(), String> {
+fn load_prompt_history_from_path(path: &Path, project_key: &str) -> Vec<String> {
+    load_history_map(path, project_key)
+        .remove(project_key)
+        .unwrap_or_default()
+}
+
+fn save_prompt_history_to_path(
+    path: &Path,
+    project_key: &str,
+    history: &[String],
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let history = sanitize_prompt_history(history.to_vec());
-    let json = serde_json::to_string_pretty(&history).map_err(|e| e.to_string())?;
+    // Read-modify-write: preserve every OTHER project's bucket and migrate a
+    // legacy flat-array file, then replace only this project's entries. This is
+    // what keeps saving from one project from clearing another's records.
+    let mut map = load_history_map(path, project_key);
+    let entries = sanitize_prompt_history(history.to_vec());
+    if entries.is_empty() {
+        map.remove(project_key);
+    } else {
+        map.insert(project_key.to_string(), entries);
+    }
+    let json = serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?;
     fs::write(path, json).map_err(|e| e.to_string())
 }
 
@@ -229,6 +291,9 @@ pub struct TuiApp {
     show_tool_details: bool,
     /// Submitted prompts, oldest first, for Up/Down recall in the input box.
     prompt_history: Vec<String>,
+    /// Project bucket key (the session cwd) under which `prompt_history` is
+    /// persisted in `~/.zode/prompt_history.json`.
+    prompt_history_key: String,
     /// Cursor into `prompt_history` while browsing (None = editing live text).
     history_pos: Option<usize>,
     /// The in-progress text saved when history browsing began, restored when
@@ -280,9 +345,11 @@ impl TuiApp {
 
         // Seed input-line history with the conversation's prompts so Up/Down
         // recalls them immediately — even on a fresh/resumed session before
-        // anything is typed. Persisted entries (prompt_history.json) come
-        // first; then this conversation's user messages (deduped, in order).
-        let mut prompt_history = load_prompt_history();
+        // anything is typed. Persisted entries (this project's bucket in
+        // prompt_history.json) come first; then this conversation's user
+        // messages (deduped, in order).
+        let prompt_history_key = prompt_history_key(template.cwd());
+        let mut prompt_history = load_prompt_history(&prompt_history_key);
         for msg in tab0.chat.messages() {
             if msg.role == crate::ui::chat::Role::User {
                 record_prompt_history_entry(&mut prompt_history, &msg.text);
@@ -341,6 +408,7 @@ impl TuiApp {
             show_thinking,
             show_tool_details,
             prompt_history,
+            prompt_history_key,
             history_pos: None,
             history_draft: String::new(),
             queued_edit_index: None,
@@ -351,7 +419,7 @@ impl TuiApp {
     /// consecutive duplicates), and reset the browse cursor.
     fn record_prompt_history(&mut self, text: &str) {
         if record_prompt_history_entry(&mut self.prompt_history, text) {
-            save_prompt_history(&self.prompt_history);
+            save_prompt_history(&self.prompt_history_key, &self.prompt_history);
         }
         self.history_pos = None;
         self.history_draft.clear();
@@ -1795,7 +1863,12 @@ impl TuiApp {
                     return;
                 }
                 if !text.trim().is_empty() {
-                    self.record_prompt_history(&text);
+                    // A follow-up typed while the tab is busy will be QUEUED by
+                    // submit(); queued follow-ups are intentionally never
+                    // recorded — neither persisted nor added to Up/Down recall.
+                    if !self.active_tab().is_busy() {
+                        self.record_prompt_history(&text);
+                    }
                     self.submit(&text, agent_tx).await;
                 }
             }
@@ -5029,10 +5102,10 @@ mod tests {
             "  first prompt  "
         ));
         assert!(record_prompt_history_entry(&mut history, "second prompt"));
-        save_prompt_history_to_path(&path, &history).unwrap();
+        save_prompt_history_to_path(&path, "/proj/a", &history).unwrap();
 
         assert_eq!(
-            load_prompt_history_from_path(&path),
+            load_prompt_history_from_path(&path, "/proj/a"),
             vec!["first prompt".to_string(), "second prompt".to_string()]
         );
     }
@@ -5208,7 +5281,90 @@ mod tests {
             .nth(1)
             .and_then(|tail| tail.split("history_pos: None").next())
             .expect("TuiApp::new initialization block should exist");
-        assert!(init.contains("load_prompt_history()"));
+        assert!(init.contains("load_prompt_history(&prompt_history_key)"));
+    }
+
+    #[test]
+    fn prompt_history_round_trips_per_project_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompt_history.json");
+
+        save_prompt_history_to_path(&path, "/proj/a", &["a1".into(), "a2".into()]).unwrap();
+        save_prompt_history_to_path(&path, "/proj/b", &["b1".into()]).unwrap();
+
+        assert_eq!(
+            load_prompt_history_from_path(&path, "/proj/a"),
+            vec!["a1".to_string(), "a2".to_string()]
+        );
+        assert_eq!(
+            load_prompt_history_from_path(&path, "/proj/b"),
+            vec!["b1".to_string()]
+        );
+        // An unknown project starts empty.
+        assert!(load_prompt_history_from_path(&path, "/proj/c").is_empty());
+    }
+
+    #[test]
+    fn saving_one_project_preserves_other_projects_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompt_history.json");
+
+        save_prompt_history_to_path(&path, "/proj/a", &["a1".into()]).unwrap();
+        save_prompt_history_to_path(&path, "/proj/b", &["b1".into()]).unwrap();
+        // Overwrite project A — B must be untouched ("不要清空记录").
+        save_prompt_history_to_path(&path, "/proj/a", &["a1".into(), "a2".into()]).unwrap();
+
+        assert_eq!(
+            load_prompt_history_from_path(&path, "/proj/a"),
+            vec!["a1".to_string(), "a2".to_string()]
+        );
+        assert_eq!(
+            load_prompt_history_from_path(&path, "/proj/b"),
+            vec!["b1".to_string()]
+        );
+    }
+
+    #[test]
+    fn legacy_flat_array_migrates_into_current_project_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompt_history.json");
+        // Old format: a bare JSON array of prompts.
+        fs::write(&path, r#"["old one","old two"]"#).unwrap();
+
+        // Loading from project A pulls the legacy entries into A's bucket.
+        assert_eq!(
+            load_prompt_history_from_path(&path, "/proj/a"),
+            vec!["old one".to_string(), "old two".to_string()]
+        );
+
+        // Saving any project rewrites the file in the new map format while
+        // keeping the migrated legacy entries under the project that loaded them.
+        save_prompt_history_to_path(&path, "/proj/a", &["old one".into(), "old two".into()])
+            .unwrap();
+        save_prompt_history_to_path(&path, "/proj/b", &["b1".into()]).unwrap();
+        assert_eq!(
+            load_prompt_history_from_path(&path, "/proj/a"),
+            vec!["old one".to_string(), "old two".to_string()]
+        );
+        assert_eq!(
+            load_prompt_history_from_path(&path, "/proj/b"),
+            vec!["b1".to_string()]
+        );
+    }
+
+    #[test]
+    fn per_project_history_keeps_recent_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompt_history.json");
+        let entries: Vec<String> = (0..(PROMPT_HISTORY_LIMIT + 5))
+            .map(|i| format!("prompt {i}"))
+            .collect();
+
+        save_prompt_history_to_path(&path, "/proj/a", &entries).unwrap();
+
+        let loaded = load_prompt_history_from_path(&path, "/proj/a");
+        assert_eq!(loaded.len(), PROMPT_HISTORY_LIMIT);
+        assert_eq!(loaded.first().map(String::as_str), Some("prompt 5"));
     }
 
     #[test]
@@ -5319,6 +5475,11 @@ mod tests {
         send_key(&mut app, &agent_tx, KeyCode::Enter, KeyModifiers::NONE).await;
 
         assert_eq!(app.active_tab().queued_input.len(), 1);
+        // A queued follow-up is never recorded into recall/prompt history.
+        assert!(!app
+            .prompt_history
+            .iter()
+            .any(|p| p == "queued follow-up"));
         assert!(!app
             .active_tab()
             .chat
