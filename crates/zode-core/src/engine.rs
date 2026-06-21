@@ -34,7 +34,7 @@ use crate::error::CoreError;
 use crate::gated_tool::PermissionGatedTool;
 use crate::history::{EditHistory, EditHistoryHook};
 use crate::hooks_config::load_hook_handlers;
-use crate::instructions::{build_system_prompt, discover_instructions, gather_env};
+use crate::instructions::{build_system_prompt, discover_instructions, gather_env, openspec_detected};
 use crate::plugin::PluginManager;
 use crate::provider::build_provider;
 use crate::skills::{load_skills_filtered, load_skills_from, skills_dirs, skills_index, SkillTool};
@@ -507,8 +507,13 @@ impl ZodeEngine {
         // is answerable). Stable across a session, so it doesn't hurt caching.
         env.model = model.clone();
         let instructions = discover_instructions(&cwd);
-        let mut system =
-            build_system_prompt(&instructions, &skills_idx, &env, cfg.skill_discipline());
+        let mut system = build_system_prompt(
+            &instructions,
+            &skills_idx,
+            &env,
+            cfg.skill_discipline(),
+            cfg.openspec_awareness() && openspec_detected(&cwd),
+        );
         // Declare the live sandbox / write policy so the agent knows whether it
         // may write outside cwd or reach the network — and, crucially, RETRIES
         // when the policy changed (e.g. the user ran `/sandbox off`) instead of

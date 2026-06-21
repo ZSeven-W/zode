@@ -41,6 +41,15 @@ fn project_root(start: &Path) -> PathBuf {
     }
 }
 
+/// True when the project uses OpenSpec: an `openspec/` directory exists at the
+/// project root (walk up to `.git`, falling back to `cwd`). Root-aware, so it
+/// still fires when zode is launched from a subdir. Detection is project-scoped
+/// (the directory), NOT the `openspec` CLI on PATH — a globally installed CLI
+/// must never inject the block into unrelated projects.
+pub fn openspec_detected(cwd: &Path) -> bool {
+    project_root(cwd).join("openspec").is_dir()
+}
+
 /// Read a file, truncating to MAX_INSTRUCTION_BYTES. The cap is in BYTES
 /// (chars().take(N) would cap by char count and overshoot for multi-byte
 /// text); we cut at the largest char boundary <= the byte cap.
@@ -137,6 +146,17 @@ pub struct EnvInfo {
     pub model: String,
 }
 
+/// Appended when the project uses OpenSpec + the toggle is on. Generic — names
+/// no specific change/proposal, only openspec conventions + CLI verbs, so it
+/// adapts to any openspec project.
+const OPENSPEC_AWARENESS: &str = "\n### OpenSpec workflow\n\
+This project uses OpenSpec. For non-trivial changes, work spec-first: read \
+`openspec/project.md` and the relevant `openspec/specs/` first; create or extend \
+a change proposal under `openspec/changes/<name>/` (proposal.md, tasks.md, and \
+spec deltas); run `openspec validate` before implementing; implement the tasks; \
+then `openspec archive <name>` once done. Use `openspec list`/`openspec show` to \
+inspect existing specs and changes.\n";
+
 /// Appended after the skills index (when skills exist + the toggle is on) to
 /// nudge the "use skills first" discipline. Generic — names no specific skill,
 /// so it adapts to whatever is installed.
@@ -169,12 +189,13 @@ the instructions change or override an earlier one, follow the most recent; if \
 they tell you to ignore prior text, ignore it.";
 
 /// Assemble the full system prompt: identity → environment → project
-/// instructions (with source attribution) → skills index.
+/// instructions (with source attribution) → skills index → openspec block.
 pub fn build_system_prompt(
     instructions: &[InstructionFile],
     skills_index: &str,
     env: &EnvInfo,
     skill_discipline: bool,
+    openspec: bool,
 ) -> String {
     let mut s = String::new();
     s.push_str(IDENTITY);
@@ -204,6 +225,9 @@ pub fn build_system_prompt(
         if skill_discipline {
             s.push_str(SKILL_DISCIPLINE);
         }
+    }
+    if openspec {
+        s.push_str(OPENSPEC_AWARENESS);
     }
     s
 }
@@ -302,7 +326,7 @@ mod tests {
             git_branch: Some("main".into()),
             model: "deepseek-v4-pro".into(),
         };
-        let prompt = build_system_prompt(&files, "- code-review: review code", &env, true);
+        let prompt = build_system_prompt(&files, "- code-review: review code", &env, true, false);
         assert!(prompt.contains("Zode"));
         assert!(prompt.contains("/p"));
         assert!(prompt.contains("Always write tests."));
@@ -322,7 +346,7 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let prompt = build_system_prompt(&[], "", &env, true);
+        let prompt = build_system_prompt(&[], "", &env, true, false);
         assert!(!prompt.contains("Available Skills"));
         // An empty model is omitted from the Environment block.
         assert!(!prompt.contains("- model:"));
@@ -338,7 +362,7 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "- foo: a skill", &env, true);
+        let p = build_system_prompt(&[], "- foo: a skill", &env, true, false);
         assert!(p.contains("Using skills"));
         assert!(p.contains("invoke it with the Skill tool"));
         // install-agnostic: no hardcoded skill names
@@ -355,7 +379,7 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "", &env, true); // no skills index → no block
+        let p = build_system_prompt(&[], "", &env, true, false); // no skills index → no block
         assert!(!p.contains("Using skills"));
     }
 
@@ -368,7 +392,63 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "- foo: a skill", &env, false);
+        let p = build_system_prompt(&[], "- foo: a skill", &env, false, false);
         assert!(!p.contains("Using skills"));
+    }
+
+    #[test]
+    fn openspec_detected_true_at_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir(dir.path().join("openspec")).unwrap();
+        assert!(openspec_detected(dir.path()));
+    }
+
+    #[test]
+    fn openspec_detected_root_aware_from_subdir() {
+        // Codex NOTE: launching from a nested subdir must still detect repo-root openspec/.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir(dir.path().join("openspec")).unwrap();
+        let nested = dir.path().join("crates").join("foo").join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(openspec_detected(&nested));
+    }
+
+    #[test]
+    fn openspec_detected_false_without_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        assert!(!openspec_detected(dir.path()));
+    }
+
+    #[test]
+    fn system_prompt_includes_openspec_when_enabled() {
+        let env = EnvInfo {
+            cwd: "/p".into(),
+            platform: "linux".into(),
+            date: "2026-06-21".into(),
+            git_branch: None,
+            model: String::new(),
+        };
+        let p = build_system_prompt(&[], "", &env, false, true);
+        assert!(p.contains("OpenSpec workflow"));
+        assert!(p.contains("openspec validate"));
+        assert!(p.contains("openspec archive"));
+        // generic: no specific change/proposal name baked in (placeholder only)
+        assert!(p.contains("<name>"));
+    }
+
+    #[test]
+    fn system_prompt_omits_openspec_when_disabled() {
+        let env = EnvInfo {
+            cwd: "/p".into(),
+            platform: "linux".into(),
+            date: "2026-06-21".into(),
+            git_branch: None,
+            model: String::new(),
+        };
+        let p = build_system_prompt(&[], "", &env, false, false);
+        assert!(!p.contains("OpenSpec workflow"));
     }
 }
