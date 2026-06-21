@@ -2,5 +2,5 @@
 	path = vendor/agent
 	url = https://github.com/ZSeven-W/agent-rs.git
 [submodule "noema"]
-	path = noema
+	path = vendor/noema
 	url = https://github.com/ZSeven-W/noema.git
