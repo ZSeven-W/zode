@@ -252,6 +252,9 @@ pub struct ZodeConfig {
     /// tool is registered so it can create new sub-agent types. `None` → ON
     /// (enabled by default). Toggled off via Settings / `/orchestration`.
     pub autonomous_orchestration: Option<bool>,
+    /// Inject a "use skills first" discipline block into the system prompt when
+    /// skills are available. `None` → ON. Set `"skillDiscipline": false` to disable.
+    pub skill_discipline: Option<bool>,
     pub permissions: PermissionsConfig,
     pub sandbox: SandboxSettings,
     pub max_output_tokens: Option<u32>,
@@ -322,6 +325,10 @@ impl ZodeConfig {
                 ProviderKind::Ollama => {}
             }
         }
+    }
+
+    pub fn skill_discipline(&self) -> bool {
+        self.skill_discipline.unwrap_or(true)
     }
 
     /// Fill missing provider connection details from env vars. Anthropic /
@@ -432,6 +439,7 @@ impl ZodeConfig {
         if other.autonomous_orchestration.is_some() {
             self.autonomous_orchestration = other.autonomous_orchestration;
         }
+        self.skill_discipline = other.skill_discipline.or(self.skill_discipline);
         if other.temperature.is_some() {
             self.temperature = other.temperature;
         }
@@ -926,5 +934,29 @@ mod tests {
             global.images.vision_prompt.as_deref(),
             Some("Project prompt")
         );
+    }
+
+    #[test]
+    fn skill_discipline_camelcase_default_and_merge() {
+        let cfg: ZodeConfig = serde_json::from_str(r#"{"skillDiscipline":false}"#).unwrap();
+        assert!(!cfg.skill_discipline());
+        assert!(ZodeConfig::default().skill_discipline()); // absent → default true
+                                                           // presence-based merge: project value wins, absent preserves global
+        let mut base = ZodeConfig {
+            skill_discipline: Some(false),
+            ..Default::default()
+        };
+        base.merge_from(ZodeConfig::default());
+        assert!(!base.skill_discipline()); // global false preserved (project absent)
+        let mut base2 = ZodeConfig {
+            skill_discipline: Some(false),
+            ..Default::default()
+        };
+        let proj = ZodeConfig {
+            skill_discipline: Some(true),
+            ..Default::default()
+        };
+        base2.merge_from(proj);
+        assert!(base2.skill_discipline()); // project true wins
     }
 }
