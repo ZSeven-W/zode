@@ -242,6 +242,9 @@ async fn dispatch_command(
                 }
             }
         },
+        "memory" => {
+            println!("{}", engine.noema.handle_command(args, Some(&engine.cwd)));
+        }
         "diff" => println!("{}", zode_core::diff::working_tree_diff(&engine.cwd).await),
         "agents" => {
             for (n, desc) in &engine.agent_types {

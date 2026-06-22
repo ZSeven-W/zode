@@ -200,6 +200,36 @@ impl OpenPencilConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NoemaSettings {
+    /// Long-term memory is enabled by default. Set to false to keep zode fully
+    /// memory-less even when the noema feature is compiled in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Optional memory root override. When unset, Noema uses `NOEMA_ROOT` or
+    /// `~/.agent-memory`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    /// Optional personal Noema user id. When unset, Noema config / `$USER` wins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Automatically store explicit user memory requests such as
+    /// "remember that ..." or "请记住...". Defaults to true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_remember: Option<bool>,
+}
+
+impl NoemaSettings {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    pub fn auto_remember(&self) -> bool {
+        self.auto_remember.unwrap_or(true)
+    }
+}
+
 /// Configuration for the built-in LSP plugin: a language server per language
 /// key. The key (e.g. "rust", "python") is also the plugin id suffix
 /// (`lsp:rust`). `extensions` maps the server to the file types it handles.
@@ -284,6 +314,8 @@ pub struct ZodeConfig {
     pub lsp: LspConfig,
     /// OpenPencil control-surface configuration (the `op-bridge`).
     pub openpencil: OpenPencilConfig,
+    /// Native Noema long-term memory integration.
+    pub noema: NoemaSettings,
 
     // --- Legacy (Zig/TS-era) flat fields, read-only for backward compat.
     // Mapped into `provider` by `normalize_legacy()` and dropped on save
@@ -483,6 +515,12 @@ impl ZodeConfig {
         self.openpencil.default_doc = o.default_doc.or(self.openpencil.default_doc.take());
         self.openpencil.connect_timeout_ms =
             o.connect_timeout_ms.or(self.openpencil.connect_timeout_ms);
+
+        let n = other.noema;
+        self.noema.enabled = n.enabled.or(self.noema.enabled);
+        self.noema.root = n.root.or(self.noema.root.take());
+        self.noema.user = n.user.or(self.noema.user.take());
+        self.noema.auto_remember = n.auto_remember.or(self.noema.auto_remember);
     }
 }
 
@@ -630,6 +668,31 @@ mod tests {
         base2.openpencil.op_path = Some("/g/op".into());
         base2.merge_from(ZodeConfig::default());
         assert_eq!(base2.openpencil.op_path.as_deref(), Some("/g/op"));
+    }
+
+    #[test]
+    fn noema_config_defaults_on_and_merges_by_presence() {
+        let cfg: ZodeConfig = serde_json::from_str(
+            r#"{"noema":{"root":"/tmp/mem","user":"kay","autoRemember":false}}"#,
+        )
+        .unwrap();
+        assert!(cfg.noema.enabled());
+        assert!(!cfg.noema.auto_remember());
+        assert_eq!(cfg.noema.root.as_deref(), Some("/tmp/mem"));
+        assert_eq!(cfg.noema.user.as_deref(), Some("kay"));
+
+        let mut base = ZodeConfig::default();
+        base.noema.root = Some("/global/mem".into());
+        base.noema.enabled = Some(true);
+        let mut project = ZodeConfig::default();
+        project.noema.enabled = Some(false);
+        project.noema.user = Some("project-user".into());
+        project.noema.auto_remember = Some(false);
+        base.merge_from(project);
+        assert!(!base.noema.enabled());
+        assert!(!base.noema.auto_remember());
+        assert_eq!(base.noema.root.as_deref(), Some("/global/mem"));
+        assert_eq!(base.noema.user.as_deref(), Some("project-user"));
     }
 
     #[test]

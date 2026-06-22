@@ -26,5 +26,5 @@ tempfile = { workspace = true }
 serial_test = { workspace = true }
 
 [features]
-default = []
+default = ["noema"]
 noema = ["dep:noema-core"]

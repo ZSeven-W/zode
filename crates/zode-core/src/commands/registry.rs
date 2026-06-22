@@ -121,6 +121,16 @@ mod tests {
     }
 
     #[test]
+    fn builtins_include_memory_command() {
+        let reg = CommandRegistry::with_builtins();
+        let memory = reg
+            .get("memory")
+            .expect("/memory command should be registered");
+        assert_eq!(memory.action, CommandAction::Engine);
+        assert!(memory.usage.contains("remember"));
+    }
+
+    #[test]
     fn builtins_include_sidebar_command() {
         let reg = CommandRegistry::with_builtins();
         let sidebar = reg

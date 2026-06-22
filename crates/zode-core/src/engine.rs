@@ -37,6 +37,7 @@ use crate::hooks_config::load_hook_handlers;
 use crate::instructions::{
     build_system_prompt, discover_instructions, gather_env, openspec_detected,
 };
+use crate::noema::ZodeNoema;
 use crate::plugin::PluginManager;
 use crate::provider::build_provider;
 use crate::skills::{load_skills_filtered, load_skills_from, skills_dirs, skills_index, SkillTool};
@@ -167,6 +168,8 @@ pub struct ZodeEngine {
     pub temperature: Option<f32>,
     /// Whether to request provider prompt caching (default on).
     pub prompt_cache: bool,
+    /// Native Noema long-term memory adapter. Disabled adapters are cheap no-ops.
+    pub noema: ZodeNoema,
     /// Background shell registry (Phase 03/07 inspect this).
     pub bash_sessions: BashSessionRegistry,
     /// Shared TodoWrite state handle (Phase 07 reads the list for the UI).
@@ -617,6 +620,7 @@ impl ZodeEngine {
             model_max_tokens: cfg.context_window.unwrap_or(DEFAULT_MODEL_MAX_TOKENS),
             temperature: cfg.temperature,
             prompt_cache: cfg.prompt_cache.unwrap_or(true),
+            noema: ZodeNoema::from_settings(&cfg.noema),
             bash_sessions,
             todo_state,
             history,
@@ -796,6 +800,20 @@ impl ZodeEngine {
         content: Vec<ContentBlock>,
         abort: AbortController,
     ) -> Result<Box<dyn EventStream>, agent::error::AgentError> {
+        let query = text_query(&content);
+        self.auto_remember_noema(&query);
+        let content = self.inject_noema_memory(content, &query);
+        self.turn_blocks_raw(content, abort).await
+    }
+
+    /// Run one turn without dynamic memory injection. This is for internal
+    /// helper turns such as vision-model image description, where user memory
+    /// would pollute the auxiliary model task.
+    pub async fn turn_blocks_raw(
+        &self,
+        content: Vec<ContentBlock>,
+        abort: AbortController,
+    ) -> Result<Box<dyn EventStream>, agent::error::AgentError> {
         let mut builder = QueryLoop::builder(self.provider.clone(), self.model.clone())
             .tools(self.tools.clone())
             .permissions(self.permissions.clone())
@@ -817,9 +835,54 @@ impl ZodeEngine {
         builder.build().run_blocks(content, abort).await
     }
 
+    fn auto_remember_noema(&self, query: &str) {
+        if let Err(err) = self
+            .noema
+            .auto_remember_from_turn(query, Some(self.cwd.as_path()))
+        {
+            tracing::debug!(error = %err, "auto memory unavailable");
+        }
+    }
+
+    fn inject_noema_memory(
+        &self,
+        mut content: Vec<ContentBlock>,
+        query: &str,
+    ) -> Vec<ContentBlock> {
+        if query.trim().is_empty() {
+            return content;
+        }
+        let Some(memory) = self
+            .noema
+            .recall_for_turn(&query, Some(self.cwd.as_path()))
+            .ok()
+            .flatten()
+        else {
+            return content;
+        };
+        if let Some(ContentBlock::Text { text }) = content
+            .iter_mut()
+            .find(|block| matches!(block, ContentBlock::Text { .. }))
+        {
+            *text = format!("{memory}\n\n{text}");
+        }
+        content
+    }
+
     pub fn supports_images(&self) -> bool {
         self.provider.capabilities().supports_images
     }
+}
+
+fn text_query(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// How a tab's engine obtains its approval gate.
@@ -1283,6 +1346,10 @@ mod tests {
                 dialect: None,
                 ..Default::default()
             },
+            noema: crate::config::NoemaSettings {
+                enabled: Some(false),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -1306,6 +1373,7 @@ mod tests {
             model_max_tokens: DEFAULT_MODEL_MAX_TOKENS,
             temperature: None,
             prompt_cache: false,
+            noema: ZodeNoema::disabled(),
             bash_sessions: BashSessionRegistry::new(),
             todo_state: TodoState::new(),
             history: Arc::new(tokio::sync::Mutex::new(EditHistory::new(1))),
@@ -1412,6 +1480,78 @@ mod tests {
             panic!("expected first message to be user content");
         };
         assert_eq!(observed, &content);
+    }
+
+    #[cfg(feature = "noema")]
+    #[tokio::test]
+    async fn turn_blocks_injects_noema_memory_into_text_block() {
+        let provider = agent::testing::MockProvider::new(Vec::new());
+        let mut eng = minimal_engine(Arc::new(provider));
+        let root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        eng.cwd = cwd.path().to_path_buf();
+        eng.noema = ZodeNoema::from_root_with_user(root.path(), Some("kay".to_string()));
+        eng.noema
+            .remember(
+                "Prefer Rust for zode Noema integration work.",
+                crate::noema::ZodeMemoryScope::User,
+                None,
+            )
+            .unwrap();
+
+        let mut stream = eng
+            .turn_blocks(
+                vec![ContentBlock::Text {
+                    text: "rust integration preference?".into(),
+                }],
+                AbortController::new(),
+            )
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let store = eng.store.lock().unwrap();
+        let Message::User { content, .. } = store.iter().next().unwrap() else {
+            panic!("expected first message to be user content");
+        };
+        let ContentBlock::Text { text } = &content[0] else {
+            panic!("expected text content");
+        };
+        assert!(text.contains("## Relevant Memories"), "{text}");
+        assert!(
+            text.contains("Prefer Rust for zode Noema integration work."),
+            "{text}"
+        );
+        assert!(text.contains("rust integration preference?"), "{text}");
+    }
+
+    #[cfg(feature = "noema")]
+    #[tokio::test]
+    async fn turn_blocks_auto_remembers_explicit_memory_request() {
+        let provider = agent::testing::MockProvider::new(Vec::new());
+        let mut eng = minimal_engine(Arc::new(provider));
+        let root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        eng.cwd = cwd.path().to_path_buf();
+        eng.noema = ZodeNoema::from_root_with_user(root.path(), Some("kay".to_string()));
+
+        let mut stream = eng
+            .turn_blocks(
+                vec![ContentBlock::Text {
+                    text: "请记住我喜欢 Rust 工具".into(),
+                }],
+                AbortController::new(),
+            )
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let recalled = eng
+            .noema
+            .recall_for_turn("Rust 工具", Some(cwd.path()))
+            .unwrap()
+            .expect("auto memory recalled");
+        assert!(recalled.contains("我喜欢 Rust 工具"), "{recalled}");
     }
 
     #[tokio::test]

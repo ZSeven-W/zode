@@ -138,6 +138,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Ui,
     },
     SlashCommand {
+        name: "memory",
+        description: "Manage Noema long-term memory",
+        usage: "/memory [status|remember [project|user] <text>|search <query>|root]",
+        action: CommandAction::Engine,
+    },
+    SlashCommand {
         name: "skills",
         description: "List available skills",
         usage: "/skills",
