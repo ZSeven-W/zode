@@ -236,8 +236,10 @@ impl Tool for OpDesignTool {
             provider: self.deps.provider.clone(),
             model: self.deps.model.clone(),
         };
+        let abort = agent::abort::AbortController::new();
+        let progress = |_| {};
         let res = DesignOrchestrator
-            .run(&client, &generator, &guidance, prompt)
+            .run(&client, &generator, &guidance, prompt, &abort, &progress)
             .await
             .map_err(|e| AgentError::other(e.to_string()))?;
         Ok(json!({

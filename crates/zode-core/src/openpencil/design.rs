@@ -47,6 +47,7 @@ impl Guidance {
     }
 }
 
+use agent::abort::AbortController;
 use agent::provider::{Provider, StreamRequest};
 use futures::StreamExt;
 use serde_json::{json, Value};
@@ -135,6 +136,33 @@ pub struct DesignResult {
     pub failures: Vec<String>,
 }
 
+/// A pipeline phase transition, reported to the caller's progress sink so a
+/// long-running run isn't a silent black box. The orchestrator owns the events;
+/// the caller (TUI / tool) decides how to surface them. `total` is the section
+/// count so the caller can render "i/N".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesignProgress {
+    /// Asking the model for a layout plan.
+    Planning,
+    /// Plan parsed; `sections` is how many sections it proposes.
+    Planned { sections: usize },
+    /// `design_skeleton` placed the root frame + section frames.
+    SkeletonReady { sections: usize },
+    /// Generating content for section `index` of `total` (1-based).
+    Section { index: usize, total: usize },
+    /// Section `index` of `total` succeeded.
+    SectionDone { index: usize, total: usize },
+    /// Section `index` of `total` failed; `error` is the reason (so a missing
+    /// panel is never silent).
+    SectionFailed {
+        index: usize,
+        total: usize,
+        error: String,
+    },
+    /// Running the final `design_refine` pass.
+    Refining,
+}
+
 /// Lenient JSON extraction from model text: tries whole-string parse first,
 /// then extracts from a ```json fence, then finds the first balanced {…}/[…] span.
 pub fn extract_json(text: &str) -> Option<Value> {
@@ -207,12 +235,24 @@ pub fn plan_from_json(v: &Value) -> Result<DesignPlan, OpError> {
 }
 
 /// Trait for components that can generate design plan + section content via an LLM.
+/// `abort` lets a long LLM call be cancelled mid-flight (e.g. the user pressed
+/// Esc); implementations forward it to their provider stream.
 #[async_trait::async_trait]
 pub trait ContentGenerator: Send + Sync {
     /// Ask the LLM to produce a [`DesignPlan`] from a user request string.
-    async fn plan(&self, request: &str, g: &Guidance) -> Result<DesignPlan, OpError>;
+    async fn plan(
+        &self,
+        request: &str,
+        g: &Guidance,
+        abort: &AbortController,
+    ) -> Result<DesignPlan, OpError>;
     /// Ask the LLM to produce child nodes for one section frame.
-    async fn section(&self, section: &SectionPlan, g: &Guidance) -> Result<Vec<Value>, OpError>;
+    async fn section(
+        &self,
+        section: &SectionPlan,
+        g: &Guidance,
+        abort: &AbortController,
+    ) -> Result<Vec<Value>, OpError>;
 }
 
 /// [`ContentGenerator`] implementation backed by a direct LLM provider call.
@@ -224,7 +264,12 @@ pub struct DirectLlmContentGenerator {
 
 #[async_trait::async_trait]
 impl ContentGenerator for DirectLlmContentGenerator {
-    async fn plan(&self, request: &str, g: &Guidance) -> Result<DesignPlan, OpError> {
+    async fn plan(
+        &self,
+        request: &str,
+        g: &Guidance,
+        abort: &AbortController,
+    ) -> Result<DesignPlan, OpError> {
         let system = format!(
             "{}\n\nYou plan an OpenPencil page. Output ONLY JSON: \
              {{\"rootFrame\":{{\"name\",\"width\",\"height\",\"layout\"?,\"gap\"?,\"fill\"?,\"padding\"?}}, \
@@ -232,13 +277,18 @@ impl ContentGenerator for DirectLlmContentGenerator {
              \"canvasWidth\"?}}. No prose.",
             g.render()
         );
-        let text = llm_oneshot(&self.provider, &self.model, &system, request).await?;
+        let text = llm_oneshot(&self.provider, &self.model, &system, request, abort).await?;
         let v = extract_json(&text)
             .ok_or_else(|| OpError::Parse(format!("plan: non-JSON reply: {:.200}", text)))?;
         plan_from_json(&v)
     }
 
-    async fn section(&self, section: &SectionPlan, g: &Guidance) -> Result<Vec<Value>, OpError> {
+    async fn section(
+        &self,
+        section: &SectionPlan,
+        g: &Guidance,
+        abort: &AbortController,
+    ) -> Result<Vec<Value>, OpError> {
         let system = format!(
             "{}\n\nYou populate one OpenPencil section frame. Output ONLY a JSON array of child \
              node objects (PenNode shape: type/name/x/y/width/height/fill etc.; TEXT nodes use \
@@ -249,7 +299,7 @@ impl ContentGenerator for DirectLlmContentGenerator {
             "Section: {}\nIntent: {}",
             section.skeleton, section.content_intent
         );
-        let text = llm_oneshot(&self.provider, &self.model, &system, &user).await?;
+        let text = llm_oneshot(&self.provider, &self.model, &system, &user, abort).await?;
         match extract_json(&text) {
             Some(Value::Array(a)) => Ok(a),
             _ => Err(OpError::Parse(format!(
@@ -267,8 +317,8 @@ pub async fn llm_oneshot(
     model: &str,
     system: &str,
     user: &str,
+    abort: &AbortController,
 ) -> Result<String, OpError> {
-    use agent::abort::AbortController;
     use agent::message::{ContentBlock, Header, Message};
     use agent::stream::Event;
 
@@ -283,8 +333,9 @@ pub async fn llm_oneshot(
     )
     .with_system(system.to_string());
 
+    // Pass the caller's controller so Esc cancels the in-flight stream.
     let mut stream = provider
-        .stream(req, AbortController::new())
+        .stream(req, abort.clone())
         .await
         .map_err(|e| OpError::Rpc(e.to_string()))?;
 
@@ -322,38 +373,72 @@ impl DesignOrchestrator {
     ///   failed section never aborts the rest, and never skips the refine step.
     /// - Step 4: call `design_refine` best-effort; an error is folded into the
     ///   returned `DesignResult::refine` value rather than surfaced as `Err`.
+    ///
+    /// `abort` is checked at each phase boundary so an Esc cancels promptly
+    /// (the LLM streams also honor it). `progress` receives a [`DesignProgress`]
+    /// at every transition so the caller can show live status. Pass `&|_| {}`
+    /// for a silent run.
     pub async fn run(
         &self,
         client: &OpClient,
         generator: &dyn ContentGenerator,
         guidance: &Guidance,
         request: &str,
+        abort: &AbortController,
+        progress: &(dyn Fn(DesignProgress) + Send + Sync),
     ) -> Result<DesignResult, OpError> {
         // Step 1: plan (one retry on error).
-        let plan = match generator.plan(request, guidance).await {
+        progress(DesignProgress::Planning);
+        let plan = match generator.plan(request, guidance, abort).await {
             Ok(p) => p,
-            Err(_) => generator.plan(request, guidance).await?,
+            Err(_) => generator.plan(request, guidance, abort).await?,
         };
+        let total = plan.sections.len();
+        progress(DesignProgress::Planned { sections: total });
+        if abort.is_aborted() {
+            return Err(OpError::Rpc("aborted".into()));
+        }
 
         // Step 2: skeleton call — abort on failure.
         let sk_raw = client
             .call("design_skeleton", plan.to_skeleton_args())
             .await?;
         let sk = normalize_skeleton(&sk_raw)?;
+        progress(DesignProgress::SkeletonReady {
+            sections: sk.section_ids.len(),
+        });
 
         // Step 3: per-section content (best-effort, collect failures).
         let mut failures = Vec::new();
         for (i, section) in plan.sections.iter().enumerate() {
+            if abort.is_aborted() {
+                return Err(OpError::Rpc("aborted".into()));
+            }
+            progress(DesignProgress::Section {
+                index: i + 1,
+                total,
+            });
             let Some(section_id) = sk.section_ids.get(i) else {
-                failures.push(format!("section {i}: no skeleton id"));
+                let error = "no skeleton id".to_string();
+                failures.push(format!("section {i}: {error}"));
+                progress(DesignProgress::SectionFailed {
+                    index: i + 1,
+                    total,
+                    error,
+                });
                 continue;
             };
-            let children = match generator.section(section, guidance).await {
+            let children = match generator.section(section, guidance, abort).await {
                 Ok(c) => c,
-                Err(_) => match generator.section(section, guidance).await {
+                Err(_) => match generator.section(section, guidance, abort).await {
                     Ok(c) => c,
                     Err(e) => {
                         failures.push(format!("section {section_id}: {e}"));
+                        progress(DesignProgress::SectionFailed {
+                            index: i + 1,
+                            total,
+                            error: e.to_string(),
+                        });
                         continue;
                     }
                 },
@@ -366,10 +451,21 @@ impl DesignOrchestrator {
                 .await
             {
                 failures.push(format!("section {section_id} content: {e}"));
+                progress(DesignProgress::SectionFailed {
+                    index: i + 1,
+                    total,
+                    error: e.to_string(),
+                });
+            } else {
+                progress(DesignProgress::SectionDone {
+                    index: i + 1,
+                    total,
+                });
             }
         }
 
         // Step 4: refine best-effort.
+        progress(DesignProgress::Refining);
         let refine = client
             .call("design_refine", json!({"rootId": sk.root_id}))
             .await
@@ -522,7 +618,12 @@ mod tests {
         struct FakeGen;
         #[async_trait::async_trait]
         impl ContentGenerator for FakeGen {
-            async fn plan(&self, _r: &str, _g: &Guidance) -> Result<DesignPlan, OpError> {
+            async fn plan(
+                &self,
+                _r: &str,
+                _g: &Guidance,
+                _abort: &AbortController,
+            ) -> Result<DesignPlan, OpError> {
                 Ok(DesignPlan {
                     root_frame: json!({"name":"r","width":1,"height":1}),
                     sections: vec![
@@ -544,6 +645,7 @@ mod tests {
                 &self,
                 _s: &SectionPlan,
                 _g: &Guidance,
+                _abort: &AbortController,
             ) -> Result<Vec<Value>, OpError> {
                 Ok(vec![json!({"type":"text","content":"hi"})])
             }
@@ -560,8 +662,14 @@ mod tests {
             baseline: BASELINE,
             skills: vec![],
         };
+        let abort = AbortController::new();
+        // Collect progress events so we can assert the phase sequence.
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let ev = events.clone();
         let res = DesignOrchestrator
-            .run(&client, &FakeGen, &g, "a pricing page")
+            .run(&client, &FakeGen, &g, "a pricing page", &abort, &move |p| {
+                ev.lock().unwrap().push(p)
+            })
             .await
             .unwrap();
         assert_eq!(
@@ -575,5 +683,95 @@ mod tests {
         );
         assert_eq!(res.section_ids, vec!["2", "3"]);
         assert!(res.failures.is_empty());
+        // Progress reported each phase: plan → planned → skeleton →
+        // (section, done)×2 → refining.
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                DesignProgress::Planning,
+                DesignProgress::Planned { sections: 2 },
+                DesignProgress::SkeletonReady { sections: 2 },
+                DesignProgress::Section { index: 1, total: 2 },
+                DesignProgress::SectionDone { index: 1, total: 2 },
+                DesignProgress::Section { index: 2, total: 2 },
+                DesignProgress::SectionDone { index: 2, total: 2 },
+                DesignProgress::Refining,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestrator_bails_when_aborted_during_plan() {
+        use std::sync::{Arc, Mutex};
+
+        use crate::openpencil::client::{OpClient, Transport};
+
+        // Counts op calls so we can prove none happen after an abort.
+        #[derive(Debug)]
+        struct CountTransport {
+            calls: Arc<Mutex<usize>>,
+        }
+        #[async_trait::async_trait]
+        impl Transport for CountTransport {
+            async fn post_json(&self, _u: &str, _body: Value) -> Result<Value, OpError> {
+                *self.calls.lock().unwrap() += 1;
+                Ok(
+                    json!({"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{}"}]}}),
+                )
+            }
+        }
+
+        // Aborts during planning → run must stop before calling design_skeleton.
+        #[derive(Debug)]
+        struct AbortingGen {
+            abort: AbortController,
+        }
+        #[async_trait::async_trait]
+        impl ContentGenerator for AbortingGen {
+            async fn plan(
+                &self,
+                _r: &str,
+                _g: &Guidance,
+                _abort: &AbortController,
+            ) -> Result<DesignPlan, OpError> {
+                self.abort.abort();
+                Ok(DesignPlan {
+                    root_frame: json!({"name":"r","width":1,"height":1}),
+                    sections: vec![],
+                    style_guide: None,
+                    canvas_width: None,
+                    page_id: None,
+                })
+            }
+            async fn section(
+                &self,
+                _s: &SectionPlan,
+                _g: &Guidance,
+                _abort: &AbortController,
+            ) -> Result<Vec<Value>, OpError> {
+                Ok(vec![])
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(0usize));
+        let client = OpClient::new(
+            "http://127.0.0.1:1".into(),
+            Arc::new(CountTransport {
+                calls: calls.clone(),
+            }),
+        );
+        let g = Guidance {
+            baseline: BASELINE,
+            skills: vec![],
+        };
+        let abort = AbortController::new();
+        let gen = AbortingGen {
+            abort: abort.clone(),
+        };
+        let res = DesignOrchestrator
+            .run(&client, &gen, &g, "x", &abort, &|_| {})
+            .await;
+        assert!(res.is_err(), "aborted run should error");
+        assert_eq!(*calls.lock().unwrap(), 0, "no op calls after abort");
     }
 }

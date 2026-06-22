@@ -198,6 +198,25 @@ fn record_prompt_history_entry(history: &mut Vec<String>, text: &str) -> bool {
     true
 }
 
+/// Render one design-pipeline phase as a transcript progress line. Kept in the
+/// TUI (not zode-core) so wording/formatting is a presentation concern.
+fn design_progress_line(p: &zode_core::openpencil::design::DesignProgress) -> String {
+    use zode_core::openpencil::design::DesignProgress as P;
+    match p {
+        P::Planning => "planning layout...".to_string(),
+        P::Planned { sections } => format!("planned {sections} sections"),
+        P::SkeletonReady { sections } => format!("skeleton ready ({sections} sections)"),
+        P::Section { index, total } => format!("section {index}/{total}: generating..."),
+        P::SectionDone { index, total } => format!("section {index}/{total}: done"),
+        P::SectionFailed {
+            index,
+            total,
+            error,
+        } => format!("section {index}/{total}: failed - {error}"),
+        P::Refining => "refining...".to_string(),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CompletionHint {
     prefix: String,
@@ -3255,6 +3274,34 @@ impl TuiApp {
             }
             return;
         }
+        if let AppEvent::BgProgress { tab_id, line } = ev {
+            let Some(tab) = self.tab_by_id(tab_id) else {
+                return;
+            };
+            if tab.is_busy() {
+                tab.chat.push_system(&line);
+            }
+            return;
+        }
+        if let AppEvent::BgDone { tab_id, result } = ev {
+            let Some(tab) = self.tab_by_id(tab_id) else {
+                return;
+            };
+            tab.turn_abort = None;
+            tab.active_turn_id = 0;
+            tab.active_tool_names.clear();
+            match result {
+                Ok(line) => {
+                    tab.chat.push_system(&line);
+                    tab.mode = Mode::Ready;
+                }
+                Err(e) => {
+                    tab.chat.push_system(&e);
+                    tab.mode = Mode::Error;
+                }
+            }
+            return;
+        }
         // Route to the originating tab; drop events from a closed tab.
         let (tab_id, turn_id) = match &ev {
             AppEvent::Agent {
@@ -3263,7 +3310,10 @@ impl TuiApp {
             | AppEvent::TurnDone {
                 tab_id, turn_id, ..
             } => (*tab_id, *turn_id),
-            AppEvent::Toast { .. } | AppEvent::CompactDone { .. } => {
+            AppEvent::Toast { .. }
+            | AppEvent::CompactDone { .. }
+            | AppEvent::BgProgress { .. }
+            | AppEvent::BgDone { .. } => {
                 unreachable!("handled above")
             }
         };
@@ -3354,7 +3404,10 @@ impl TuiApp {
                 );
                 tokio::spawn(crate::tab::persist_session(session_id, engine, title));
             }
-            AppEvent::Toast { .. } | AppEvent::CompactDone { .. } => {
+            AppEvent::Toast { .. }
+            | AppEvent::CompactDone { .. }
+            | AppEvent::BgProgress { .. }
+            | AppEvent::BgDone { .. } => {
                 unreachable!("handled above")
             }
         }
@@ -3392,69 +3445,21 @@ impl TuiApp {
             }
             "op" => {
                 use zode_core::commands::op::{map_subcommand, OpCommand};
-                use zode_core::openpencil::{
-                    connection::{connection_status, OpConnection},
-                    tools::QueueConsent,
-                    Consent,
-                };
+                use zode_core::openpencil::connection::connection_status;
                 let cfg = self.active_tab().engine.openpencil.clone();
                 match map_subcommand(args) {
                     Err(e) => self.active_tab_mut().chat.push_system(&format!("/op: {e}")),
+                    // `status` is a quick local connection check — fine inline.
                     Ok(OpCommand::Status) => {
                         let s = connection_status(&cfg).await;
                         self.active_tab_mut().chat.push_system(&s);
                     }
-                    Ok(OpCommand::Call { tool, args }) => {
-                        // Tag consent prompts with the active tab so the modal
-                        // shows which session triggered the install/launch.
-                        let source = Some(self.active_tab().id.to_string());
-                        let consent: Arc<dyn Consent> =
-                            Arc::new(QueueConsent::new(self.question_queue.clone(), source));
-                        let tag = cfg.release_tag().to_string();
-                        let msg = match OpConnection::ensure(&cfg, consent.as_ref(), &tag).await {
-                            Ok(client) => match client.call(&tool, args).await {
-                                Ok(v) => serde_json::to_string_pretty(&v)
-                                    .unwrap_or_else(|_| v.to_string()),
-                                Err(e) => format!("/op {tool} failed: {e}"),
-                            },
-                            Err(e) => format!("/op: {e}"),
-                        };
-                        self.active_tab_mut().chat.push_system(&msg);
-                    }
-                    Ok(OpCommand::Generate { prompt }) => {
-                        use zode_core::openpencil::design::{
-                            load_guidance, DesignOrchestrator, DirectLlmContentGenerator,
-                        };
-                        // Clone owned values BEFORE any .await — do NOT hold an
-                        // engine borrow across awaits.
-                        let (provider, model, skills) = {
-                            let eng = &self.active_tab().engine;
-                            (eng.provider.clone(), eng.model.clone(), eng.skills.clone())
-                        };
-                        let source = Some(self.active_tab().id.to_string());
-                        let consent: Arc<dyn Consent> =
-                            Arc::new(QueueConsent::new(self.question_queue.clone(), source));
-                        let tag = cfg.release_tag().to_string();
-                        let msg = match OpConnection::ensure(&cfg, consent.as_ref(), &tag).await {
-                            Ok(client) => {
-                                let g = load_guidance(
-                                    skills.as_ref(),
-                                    &["frontend-design", "openpencil-design"],
-                                );
-                                let gen = DirectLlmContentGenerator { provider, model };
-                                match DesignOrchestrator.run(&client, &gen, &g, &prompt).await {
-                                    Ok(r) => format!(
-                                        "generated {} sections ({} failures)",
-                                        r.section_ids.len(),
-                                        r.failures.len()
-                                    ),
-                                    Err(e) => format!("/op generate failed: {e}"),
-                                }
-                            }
-                            Err(e) => format!("/op: {e}"),
-                        };
-                        self.active_tab_mut().chat.push_system(&msg);
-                    }
+                    // Tool/MCP and design calls run OFF the event loop (they may
+                    // connect/install/launch and stream an LLM for many seconds),
+                    // so the UI never freezes: they stream progress + a result
+                    // back as events, show the busy spinner, and Esc cancels.
+                    Ok(OpCommand::Call { tool, args }) => self.spawn_op_call(tool, args, agent_tx),
+                    Ok(OpCommand::Generate { prompt }) => self.spawn_op_generate(prompt, agent_tx),
                 }
             }
             "sessions" | "resume" => self.open_session_picker(),
@@ -3525,6 +3530,15 @@ impl TuiApp {
                 }
             }
             "mcp" => self.open_mcp_dialog(),
+            "memory" => {
+                let cwd = self.active_tab().engine.cwd.clone();
+                let msg = self
+                    .active_tab()
+                    .engine
+                    .noema
+                    .handle_command(args, Some(&cwd));
+                self.active_tab_mut().chat.push_system(&msg);
+            }
             "skills" => {
                 let list: Vec<String> = self
                     .active_tab()
@@ -3707,6 +3721,126 @@ impl TuiApp {
             cfg.show_tool_details = Some(value);
             let _ = ConfigManager::save_global(&cfg);
         }
+    }
+
+    /// Run a direct `/op <tool>` MCP call OFF the event loop. Even a "quick"
+    /// call can block on connect/install/launch, which would freeze the UI (and
+    /// could deadlock the consent prompt, which the event loop must pump). This
+    /// keeps the UI live + cancelable and posts the result back as an event.
+    fn spawn_op_call(
+        &mut self,
+        tool: String,
+        args: serde_json::Value,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        use zode_core::openpencil::connection::OpConnection;
+        use zode_core::openpencil::tools::QueueConsent;
+        use zode_core::openpencil::Consent;
+
+        if self.active_tab().is_busy() {
+            self.active_tab_mut()
+                .chat
+                .push_system("busy — finish or interrupt the current turn first");
+            return;
+        }
+        let tab_id = self.active_tab().id;
+        let cfg = self.active_tab().engine.openpencil.clone();
+        let consent: Arc<dyn Consent> = Arc::new(QueueConsent::new(
+            self.question_queue.clone(),
+            Some(tab_id.to_string()),
+        ));
+        let tag = cfg.release_tag().to_string();
+        // Reuse the turn-busy machinery: spinner shows, Esc clears it.
+        let abort = AbortController::new();
+        self.active_tab_mut().turn_abort = Some(abort.clone());
+        self.active_tab_mut()
+            .chat
+            .push_system(&format!("calling op {tool}…"));
+        let tx = agent_tx.clone();
+        tokio::spawn(async move {
+            let _ = &abort; // keep the controller alive for the duration
+            let result = match OpConnection::ensure(&cfg, consent.as_ref(), &tag).await {
+                Ok(client) => match client.call(&tool, args).await {
+                    Ok(v) => Ok(serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())),
+                    Err(e) => Err(format!("/op {tool} failed: {e}")),
+                },
+                Err(e) => Err(format!("/op: {e}")),
+            };
+            let _ = tx.send(AppEvent::BgDone { tab_id, result });
+        });
+    }
+
+    /// Run the design-pipeline orchestrator (`/op generate`) OFF the event loop.
+    /// The plan→skeleton→content→refine run streams an LLM for many seconds; run
+    /// inline it froze the whole TUI. This mirrors `spawn_compact`: it takes the
+    /// turn-busy slot (spinner + Esc-to-cancel — the stored abort clone shares
+    /// the cancel token with the task), streams each phase into the transcript,
+    /// and posts the final summary (including any per-section failures) back.
+    fn spawn_op_generate(&mut self, prompt: String, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        use zode_core::openpencil::connection::OpConnection;
+        use zode_core::openpencil::design::{
+            load_guidance, DesignOrchestrator, DirectLlmContentGenerator,
+        };
+        use zode_core::openpencil::tools::QueueConsent;
+        use zode_core::openpencil::Consent;
+
+        if self.active_tab().is_busy() {
+            self.active_tab_mut()
+                .chat
+                .push_system("busy — finish or interrupt the current turn first");
+            return;
+        }
+        let tab_id = self.active_tab().id;
+        let cfg = self.active_tab().engine.openpencil.clone();
+        let (provider, model, skills) = {
+            let eng = &self.active_tab().engine;
+            (eng.provider.clone(), eng.model.clone(), eng.skills.clone())
+        };
+        let consent: Arc<dyn Consent> = Arc::new(QueueConsent::new(
+            self.question_queue.clone(),
+            Some(tab_id.to_string()),
+        ));
+        let tag = cfg.release_tag().to_string();
+        let abort = AbortController::new();
+        self.active_tab_mut().turn_abort = Some(abort.clone());
+        self.active_tab_mut()
+            .chat
+            .push_system(&format!("generating design: {prompt}"));
+        let tx = agent_tx.clone();
+        tokio::spawn(async move {
+            let result = match OpConnection::ensure(&cfg, consent.as_ref(), &tag).await {
+                Ok(client) => {
+                    let g =
+                        load_guidance(skills.as_ref(), &["frontend-design", "openpencil-design"]);
+                    let gen = DirectLlmContentGenerator { provider, model };
+                    // Stream each phase into the originating tab's transcript.
+                    let ptx = tx.clone();
+                    let progress = move |p| {
+                        let _ = ptx.send(AppEvent::BgProgress {
+                            tab_id,
+                            line: design_progress_line(&p),
+                        });
+                    };
+                    match DesignOrchestrator
+                        .run(&client, &gen, &g, &prompt, &abort, &progress)
+                        .await
+                    {
+                        Ok(r) if r.failures.is_empty() => {
+                            Ok(format!("✓ generated {} sections", r.section_ids.len()))
+                        }
+                        Ok(r) => Ok(format!(
+                            "generated {} sections, {} failed:\n{}",
+                            r.section_ids.len(),
+                            r.failures.len(),
+                            r.failures.join("\n"),
+                        )),
+                        Err(e) => Err(format!("/op generate failed: {e}")),
+                    }
+                }
+                Err(e) => Err(format!("/op: {e}")),
+            };
+            let _ = tx.send(AppEvent::BgDone { tab_id, result });
+        });
     }
 
     fn spawn_history_op(&self, agent_tx: &mpsc::UnboundedSender<AppEvent>, undo: bool) {
@@ -4849,7 +4983,7 @@ async fn run_vision_description(
     blocks.extend(images.iter().map(|image| image.content_block.clone()));
 
     let mut stream = engine
-        .turn_blocks(blocks, abort)
+        .turn_blocks_raw(blocks, abort)
         .await
         .map_err(|e| e.to_string())?;
     let mut out = String::new();
@@ -4941,7 +5075,7 @@ fn install_panic_hook() {
 mod tests {
     use super::*;
     use crate::ui::chat::Role;
-    use zode_core::config::{ProviderConfig, ProviderKind, ZodeConfig};
+    use zode_core::config::{NoemaSettings, ProviderConfig, ProviderKind, ZodeConfig};
 
     async fn make_test_app() -> (TuiApp, mpsc::UnboundedSender<AppEvent>) {
         let temp = tempfile::tempdir().unwrap();
@@ -4951,6 +5085,10 @@ mod tests {
                 r#type: Some(ProviderKind::Ollama),
                 base_url: Some("http://localhost:11434".to_string()),
                 model: Some("test-model".to_string()),
+                ..Default::default()
+            },
+            noema: NoemaSettings {
+                enabled: Some(false),
                 ..Default::default()
             },
             ..Default::default()

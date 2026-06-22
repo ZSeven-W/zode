@@ -35,4 +35,16 @@ pub enum AppEvent {
         tab_id: usize,
         result: Result<String, String>,
     },
+    /// A progress line from an off-loop background op (e.g. a direct `/op`
+    /// tool/MCP/design call). Pushed into the originating tab's transcript so a
+    /// long task shows live status instead of freezing the UI. Tab-scoped, not
+    /// turn-scoped; dropped if the tab is no longer busy (the user interrupted).
+    BgProgress { tab_id: usize, line: String },
+    /// An off-loop background op finished. `result` is a ready-to-show line on
+    /// success or an error message. Clears the tab's busy state and posts the
+    /// result. Mirrors `CompactDone` but for the generic direct-invocation path.
+    BgDone {
+        tab_id: usize,
+        result: Result<String, String>,
+    },
 }
