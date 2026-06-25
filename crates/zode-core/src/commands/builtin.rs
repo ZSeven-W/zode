@@ -192,6 +192,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Ui,
     },
     SlashCommand {
+        name: "subagents",
+        description: "Open the sub-agent activity panel",
+        usage: "/subagents",
+        action: CommandAction::Ui,
+    },
+    SlashCommand {
         name: "permissions",
         description: "Show tool permission rules (allow / ask / deny)",
         usage: "/permissions",

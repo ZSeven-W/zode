@@ -4670,6 +4670,7 @@ dependencies = [
  "async-trait",
  "dirs",
  "futures",
+ "indexmap",
  "noema-core",
  "reqwest 0.12.28",
  "serde",

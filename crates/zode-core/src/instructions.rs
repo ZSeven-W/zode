@@ -167,6 +167,17 @@ multi-step features or changes, prefer a plan-first flow — use any available \
 planning/brainstorming skill before writing code, and follow test-driven development \
 if a testing skill applies.\n";
 
+/// Appended when the `AskUserQuestion` tool is available, so single-choice
+/// questions route to the interactive arrow-key picker instead of plain
+/// `A)/B)` text the user must retype.
+const ASK_USER_QUESTION: &str = "\n### Asking the user\n\
+When you need the user to make a single choice — ambiguous requirements, a fork \
+you can't resolve from the code, or a skill (such as brainstorming) that has you \
+ask one multiple-choice question at a time — call the `AskUserQuestion` tool with \
+the options instead of writing them as plain `A)/B)` text. The user gets an \
+arrow-key picker and you get their selection back. Use plain prose only for \
+open-ended questions that have no discrete options.\n";
+
 const IDENTITY: &str = "\
 You are Zode, an AI-native coding assistant developed by ZSeven-W, running in \
 a terminal. You help \
@@ -196,6 +207,7 @@ pub fn build_system_prompt(
     env: &EnvInfo,
     skill_discipline: bool,
     openspec: bool,
+    ask_user_question: bool,
 ) -> String {
     let mut s = String::new();
     s.push_str(IDENTITY);
@@ -225,6 +237,9 @@ pub fn build_system_prompt(
         if skill_discipline {
             s.push_str(SKILL_DISCIPLINE);
         }
+    }
+    if ask_user_question {
+        s.push_str(ASK_USER_QUESTION);
     }
     if openspec {
         s.push_str(OPENSPEC_AWARENESS);
@@ -326,7 +341,14 @@ mod tests {
             git_branch: Some("main".into()),
             model: "deepseek-v4-pro".into(),
         };
-        let prompt = build_system_prompt(&files, "- code-review: review code", &env, true, false);
+        let prompt = build_system_prompt(
+            &files,
+            "- code-review: review code",
+            &env,
+            true,
+            false,
+            false,
+        );
         assert!(prompt.contains("Zode"));
         assert!(prompt.contains("/p"));
         assert!(prompt.contains("Always write tests."));
@@ -346,7 +368,7 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let prompt = build_system_prompt(&[], "", &env, true, false);
+        let prompt = build_system_prompt(&[], "", &env, true, false, false);
         assert!(!prompt.contains("Available Skills"));
         // An empty model is omitted from the Environment block.
         assert!(!prompt.contains("- model:"));
@@ -362,7 +384,7 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "- foo: a skill", &env, true, false);
+        let p = build_system_prompt(&[], "- foo: a skill", &env, true, false, false);
         assert!(p.contains("Using skills"));
         assert!(p.contains("invoke it with the Skill tool"));
         // install-agnostic: no hardcoded skill names
@@ -379,7 +401,7 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "", &env, true, false); // no skills index → no block
+        let p = build_system_prompt(&[], "", &env, true, false, false); // no skills index → no block
         assert!(!p.contains("Using skills"));
     }
 
@@ -392,7 +414,7 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "- foo: a skill", &env, false, false);
+        let p = build_system_prompt(&[], "- foo: a skill", &env, false, false, false);
         assert!(!p.contains("Using skills"));
     }
 
@@ -431,7 +453,7 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "", &env, false, true);
+        let p = build_system_prompt(&[], "", &env, false, true, false);
         assert!(p.contains("OpenSpec workflow"));
         assert!(p.contains("openspec validate"));
         assert!(p.contains("openspec archive"));
@@ -448,7 +470,36 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "", &env, false, false);
+        let p = build_system_prompt(&[], "", &env, false, false, false);
         assert!(!p.contains("OpenSpec workflow"));
+    }
+
+    #[test]
+    fn system_prompt_includes_ask_user_question_when_available() {
+        let env = EnvInfo {
+            cwd: "/p".into(),
+            platform: "linux".into(),
+            date: "2026-06-25".into(),
+            git_branch: None,
+            model: String::new(),
+        };
+        let p = build_system_prompt(&[], "", &env, false, false, true);
+        assert!(p.contains("Asking the user"));
+        assert!(p.contains("AskUserQuestion"));
+        assert!(p.contains("arrow-key picker"));
+    }
+
+    #[test]
+    fn system_prompt_omits_ask_user_question_when_unavailable() {
+        let env = EnvInfo {
+            cwd: "/p".into(),
+            platform: "linux".into(),
+            date: "2026-06-25".into(),
+            git_branch: None,
+            model: String::new(),
+        };
+        let p = build_system_prompt(&[], "", &env, false, false, false);
+        assert!(!p.contains("AskUserQuestion"));
+        assert!(!p.contains("Asking the user"));
     }
 }

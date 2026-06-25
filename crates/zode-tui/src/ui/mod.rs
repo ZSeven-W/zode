@@ -9,8 +9,10 @@ pub mod input;
 pub mod layout;
 pub mod markdown;
 pub mod status;
+pub mod subagents_sidebar;
 pub mod tabs;
 pub mod toast;
+pub mod todo;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 

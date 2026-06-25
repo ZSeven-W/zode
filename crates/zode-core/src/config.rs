@@ -4,6 +4,8 @@
 //! TS/Zig-era config files users already have.
 
 use std::collections::HashMap;
+
+use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +34,14 @@ pub struct ProviderConfig {
     pub model: Option<String>,
     /// openai dialect: standard | deepseek | moonshot | openrouter
     pub dialect: Option<String>,
+    /// The model's context window in tokens (per provider). Read by the engine
+    /// in preference to the top-level `context_window`. None → top-level/default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    /// The model's max output tokens (per provider). Read in preference to the
+    /// top-level `max_output_tokens`. None → top-level/default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     /// Explicitly allow or block image input for this provider config.
     /// When unset, provider defaults decide.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -256,7 +266,9 @@ pub struct LspServerConfig {
 pub struct ZodeConfig {
     pub provider: ProviderConfig,
     /// Named providers; `--provider <name>` selects one into `provider`.
-    pub providers: HashMap<String, ProviderConfig>,
+    /// Order-preserving (`IndexMap`) so the user's config file order is kept —
+    /// the first entry is the default when no provider is explicitly selected.
+    pub providers: IndexMap<String, ProviderConfig>,
     pub images: ImagesConfig,
     pub theme: Option<String>,
     /// Display currency for cost (e.g. "USD", "CNY", "EUR"). `None` → USD.
@@ -399,6 +411,51 @@ impl ZodeConfig {
                 }
             }
         }
+    }
+
+    /// When the active `provider` has no API key but the `providers` map has a
+    /// matching entry, adopt that entry's settings into the active provider so
+    /// a configured `providers` map "just works" without an explicit
+    /// `--provider`. Match priority: a map key equal to the active model, then
+    /// an entry whose `model` equals the active model, then the sole entry.
+    /// Already-set active fields win; the entry only fills the gaps (notably
+    /// the API key). No-op when the active provider already has a key.
+    pub fn resolve_provider_from_map(&mut self) {
+        if self.provider.api_key.is_some() || self.providers.is_empty() {
+            return;
+        }
+        let pick = match self.provider.model.clone() {
+            // An explicit active model: adopt the entry whose map key OR `model`
+            // equals it. If none matches, leave it (the user named a model that
+            // isn't configured — don't silently swap in a different provider).
+            Some(m) => self.providers.get(&m).cloned().or_else(|| {
+                self.providers
+                    .values()
+                    .find(|p| p.model.as_deref() == Some(m.as_str()))
+                    .cloned()
+            }),
+            // No active model: default to the FIRST configured provider (file
+            // order, preserved by IndexMap) — adopted in full, including its
+            // model. This is the common "I only set up `providers`" case.
+            None => self.providers.values().next().cloned(),
+        };
+        let Some(p) = pick else {
+            return;
+        };
+        let active = &mut self.provider;
+        // Active fields win; the map entry fills the gaps (esp. the api key).
+        active.api_key = active.api_key.take().or(p.api_key);
+        active.r#type = active.r#type.or(p.r#type);
+        active.base_url = active.base_url.take().or(p.base_url);
+        active.model = active.model.take().or(p.model);
+        active.dialect = active.dialect.take().or(p.dialect);
+        active.context_window = active.context_window.or(p.context_window);
+        active.max_output_tokens = active.max_output_tokens.or(p.max_output_tokens);
+        active.supports_images = active.supports_images.or(p.supports_images);
+        active.input_price = active.input_price.or(p.input_price);
+        active.output_price = active.output_price.or(p.output_price);
+        active.cache_read_price = active.cache_read_price.or(p.cache_read_price);
+        active.cache_write_price = active.cache_write_price.or(p.cache_write_price);
     }
 
     /// Shallow-merge `other` (higher priority) onto self. Each provider
@@ -1038,6 +1095,92 @@ mod tests {
         };
         base2.merge_from(proj);
         assert!(base2.skill_discipline()); // project true wins
+    }
+
+    #[test]
+    fn provider_config_roundtrips_per_provider_limits() {
+        let json = r#"{
+            "type": "anthropic",
+            "apiKey": "sk-x",
+            "baseUrl": "https://api.deepseek.com/anthropic",
+            "model": "deepseek-v4-pro",
+            "contextWindow": 1000000,
+            "maxOutputTokens": 8192
+        }"#;
+        let p: ProviderConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(p.context_window, Some(1_000_000));
+        assert_eq!(p.max_output_tokens, Some(8192));
+        // Round-trips back out under camelCase.
+        let out = serde_json::to_string(&p).unwrap();
+        assert!(out.contains("\"contextWindow\":1000000"));
+        assert!(out.contains("\"maxOutputTokens\":8192"));
+    }
+
+    #[test]
+    fn resolve_provider_from_map_fills_key_by_model() {
+        let mut cfg = ZodeConfig::default();
+        cfg.provider.model = Some("deepseek-v4-pro".into()); // active model, NO key
+        cfg.providers.insert(
+            "deepseek-v4-pro".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk-x".into()),
+                base_url: Some("https://api.deepseek.com/anthropic".into()),
+                model: Some("deepseek-v4-pro".into()),
+                context_window: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        assert!(cfg.provider.api_key.is_none());
+        cfg.resolve_provider_from_map();
+        assert_eq!(cfg.provider.api_key.as_deref(), Some("sk-x"));
+        assert_eq!(
+            cfg.provider.base_url.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(cfg.provider.context_window, Some(1_000_000));
+    }
+
+    #[test]
+    fn resolve_provider_from_map_noop_when_active_has_key() {
+        let mut cfg = ZodeConfig::default();
+        cfg.provider.api_key = Some("already".into());
+        cfg.providers.insert(
+            "x".into(),
+            ProviderConfig {
+                api_key: Some("other".into()),
+                ..Default::default()
+            },
+        );
+        cfg.resolve_provider_from_map();
+        assert_eq!(cfg.provider.api_key.as_deref(), Some("already"));
+    }
+
+    #[test]
+    fn resolve_provider_from_map_picks_first_when_no_active_model() {
+        // The real-world case: no top-level `provider`, several `providers`
+        // entries. With no active model, adopt the FIRST (file/insertion order).
+        let mut cfg = ZodeConfig::default(); // provider.model == None
+        cfg.providers.insert(
+            "deepseek-v4-pro".into(),
+            ProviderConfig {
+                api_key: Some("sk-pro".into()),
+                model: Some("deepseek-v4-pro".into()),
+                base_url: Some("https://api.deepseek.com/anthropic".into()),
+                ..Default::default()
+            },
+        );
+        cfg.providers.insert(
+            "deepseek-v4-flash".into(),
+            ProviderConfig {
+                api_key: Some("sk-flash".into()),
+                model: Some("deepseek-v4-flash".into()),
+                ..Default::default()
+            },
+        );
+        cfg.resolve_provider_from_map();
+        assert_eq!(cfg.provider.api_key.as_deref(), Some("sk-pro")); // first entry
+        assert_eq!(cfg.provider.model.as_deref(), Some("deepseek-v4-pro"));
     }
 
     #[test]

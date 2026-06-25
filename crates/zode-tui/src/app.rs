@@ -45,7 +45,7 @@ use crate::theme::{Theme, ThemeStore};
 use crate::ui::autocomplete::{Autocomplete, DynCmd};
 use crate::ui::chat::{ChatRenderMeta, ChatSelection, ChatSelectionPoint, ChatView, ImagePreview};
 use crate::ui::dialog::agents_dialog::{AgentKind, AgentRow, AgentsAction, AgentsDialog};
-use crate::ui::dialog::connect::{ConnectAction, ConnectDialog, ConnectStage};
+use crate::ui::dialog::connect::{ConnectAction, ConnectDialog, ConnectField, ConnectStage};
 use crate::ui::dialog::mcp_dialog::McpDialog;
 use crate::ui::dialog::permission::PermissionDialog;
 use crate::ui::dialog::plugin_picker::PluginPicker;
@@ -301,6 +301,10 @@ pub struct TuiApp {
     /// tasks panel is open (the tracker's `list()` is async; the render path
     /// is not).
     bg_shells: Vec<BgShell>,
+    subagents_panel: Option<crate::ui::dialog::subagents::SubAgentsPanel>,
+    /// Cached snapshot of the active tab's sub-agent registry. Refreshed while
+    /// the sub-agents panel is open; `snapshot()` is sync so no await needed.
+    subagents: Vec<zode_core::SubAgent>,
     show_help: bool,
     toast: Option<Toast>,
     provider_names: Vec<String>,
@@ -421,6 +425,8 @@ impl TuiApp {
             session_picker: None,
             tasks_panel: None,
             bg_shells: Vec::new(),
+            subagents_panel: None,
+            subagents: Vec::new(),
             show_help: false,
             toast: None,
             provider_names: ui.provider_names,
@@ -1184,6 +1190,44 @@ impl TuiApp {
         }
     }
 
+    fn refresh_subagents(&mut self) {
+        self.subagents = self.active_tab().engine.subagents.snapshot();
+        // Newest-first so new sub-agents appear at the top of the list.
+        self.subagents.reverse();
+    }
+
+    fn open_subagents_panel(&mut self) {
+        self.refresh_subagents();
+        self.subagents_panel = Some(crate::ui::dialog::subagents::SubAgentsPanel::new());
+    }
+
+    fn handle_subagents_panel_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.subagents_panel = None,
+            KeyCode::Up => {
+                if let Some(p) = &mut self.subagents_panel {
+                    p.select_prev(&self.subagents);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(p) = &mut self.subagents_panel {
+                    p.select_next(&self.subagents);
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(p) = &mut self.subagents_panel {
+                    p.scroll_up();
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(p) = &mut self.subagents_panel {
+                    p.scroll_down();
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub async fn run(mut self) -> std::io::Result<()> {
         // Seed the autocomplete with the initial tab's agents/skills/MCP tools.
         self.refresh_dynamic_commands();
@@ -1261,6 +1305,22 @@ impl TuiApp {
                 }
                 Some(app_ev) = agent_rx.recv() => {
                     self.handle_agent_event(app_ev);
+                    // Coalesce a burst of streaming events (text deltas, tool
+                    // updates) into ONE redraw. Providers stream tokens in
+                    // bursts; handling each in its own loop pass forces a full
+                    // transcript re-render per token, which stutters on long
+                    // conversations. Drain everything already queued (capped),
+                    // then fall through to the single draw at the loop top.
+                    let mut drained = 0;
+                    while drained < AGENT_COALESCE_CAP {
+                        match agent_rx.try_recv() {
+                            Ok(ev) => {
+                                self.handle_agent_event(ev);
+                                drained += 1;
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     // A turn may have just finished — flush any queued input.
                     self.dispatch_queued_input(&agent_tx).await;
                 }
@@ -1272,6 +1332,7 @@ impl TuiApp {
                     self.connect = None;
                     self.session_picker = None;
                     self.tasks_panel = None;
+                    self.subagents_panel = None;
                     self.show_help = false;
                     // Only focus the source tab when this request becomes the
                     // active dialog; a queued request must not steal focus from
@@ -1290,6 +1351,7 @@ impl TuiApp {
                     self.connect = None;
                     self.session_picker = None;
                     self.tasks_panel = None;
+                    self.subagents_panel = None;
                     self.show_help = false;
                     if self.active_question.is_none() {
                         self.open_question(req);
@@ -1307,6 +1369,19 @@ impl TuiApp {
                     // Keep the open tasks panel's shell list live.
                     if self.tasks_panel.is_some() {
                         self.refresh_bg_shells().await;
+                    }
+                    // Keep the active tab's sub-agent snapshot fresh every tick:
+                    // it feeds BOTH the sidebar "subagents" section (always
+                    // visible) and the overlay (when open).
+                    self.refresh_subagents();
+                    // Keep each tab's cached todo snapshot fresh so the sync
+                    // sidebar render reads current state. Index-based to avoid
+                    // holding a `&self.tabs` borrow across the await. Cheap:
+                    // an RwLock read + small Vec clone per tab at ~10 fps.
+                    for i in 0..self.tabs.len() {
+                        let engine = self.tabs[i].engine.clone();
+                        let snap = engine.todo_state.snapshot().await;
+                        self.tabs[i].todos = snap;
                     }
                 }
             }
@@ -1380,6 +1455,9 @@ impl TuiApp {
                     cost_label: &active_cost,
                     yolo: self.status.yolo,
                     sandbox: self.status.sandbox,
+                    todos: &self.tabs[self.active].todos,
+                    busy: active_busy,
+                    subagents: &self.subagents,
                 },
                 &theme,
             );
@@ -1490,6 +1568,17 @@ impl TuiApp {
                 panel.render(f, area, &shells, &turns, now, &theme);
             }
             self.bg_shells = shells;
+        }
+        // Sub-agents overlay. Use std::mem::take to move the cached Vec out of
+        // self so panel (&mut self.subagents_panel) and the data aren't both
+        // borrowed from self at the same time.
+        if self.subagents_panel.is_some() {
+            let now = now_secs();
+            let agents = std::mem::take(&mut self.subagents);
+            if let Some(panel) = &mut self.subagents_panel {
+                panel.render(f, area, &agents, now, &theme);
+            }
+            self.subagents = agents;
         }
         if self.show_help {
             crate::ui::help::render_help(f, area, &theme);
@@ -1607,6 +1696,12 @@ impl TuiApp {
         // 2c. Tasks panel captures input.
         if self.tasks_panel.is_some() {
             self.handle_tasks_panel_key(key.code).await;
+            return;
+        }
+
+        // 2d. Sub-agents panel captures input (sync handler, no .await needed).
+        if self.subagents_panel.is_some() {
+            self.handle_subagents_panel_key(key.code);
             return;
         }
 
@@ -1735,6 +1830,10 @@ impl TuiApp {
             }
             (KeyCode::F(1), _) => {
                 self.show_help = true;
+                return;
+            }
+            (KeyCode::F(2), _) => {
+                self.open_subagents_panel();
                 return;
             }
             (KeyCode::PageUp, _) => {
@@ -2085,6 +2184,7 @@ impl TuiApp {
             || self.mcp_dialog.is_some()
             || self.session_picker.is_some()
             || self.tasks_panel.is_some()
+            || self.subagents_panel.is_some()
             || self.show_help
         {
             return;
@@ -2166,6 +2266,7 @@ impl TuiApp {
             || self.workflows_dialog.is_some()
             || self.mcp_dialog.is_some()
             || self.tasks_panel.is_some()
+            || self.subagents_panel.is_some()
             || self.show_help
         {
             return;
@@ -2474,7 +2575,17 @@ impl TuiApp {
     }
 
     fn open_connect_dialog(&mut self) {
-        self.connect = Some(ConnectDialog::new());
+        // Load the catalog synchronously (bundled/disk cache — never hits the
+        // network on this path). Then kick off a best-effort background refresh
+        // so the cache is warm for the next open.
+        let cat = zode_core::Catalog::load_blocking();
+        self.connect = Some(ConnectDialog::with_catalog(&cat));
+        // Spawn a detached blocking task to refresh the disk cache; ignore any error.
+        // spawn_blocking is correct here: refresh_blocking does sync I/O + a
+        // 5-second HTTP timeout and must not run on an async worker thread.
+        tokio::task::spawn_blocking(|| {
+            let _ = zode_core::Catalog::refresh_blocking();
+        });
     }
 
     /// Open the `/plugin` picker over the active tab's discovered plugins
@@ -2668,36 +2779,58 @@ impl TuiApp {
             let Some(dialog) = &mut self.connect else {
                 return;
             };
-            match code {
-                KeyCode::Esc => {
+            match (code, dialog.stage()) {
+                (KeyCode::Esc, _) => {
                     self.connect = None;
                     None
                 }
-                KeyCode::Up if dialog.stage() == ConnectStage::Provider => {
+                // Provider stage: Up/Down scroll the list, chars filter.
+                (KeyCode::Up, ConnectStage::Provider) => {
                     dialog.prev();
                     None
                 }
-                KeyCode::Down if dialog.stage() == ConnectStage::Provider => {
+                (KeyCode::Down, ConnectStage::Provider) => {
                     dialog.next();
                     None
                 }
-                KeyCode::Backspace if dialog.stage() == ConnectStage::Provider => {
+                (KeyCode::Backspace, ConnectStage::Provider) => {
                     dialog.pop_filter_char();
                     None
                 }
-                KeyCode::Backspace if dialog.stage() == ConnectStage::ApiKey => {
-                    dialog.pop_api_key_char();
-                    None
-                }
-                KeyCode::Enter => dialog.confirm(),
-                KeyCode::Char(c) if dialog.stage() == ConnectStage::Provider => {
+                (KeyCode::Char(c), ConnectStage::Provider) => {
                     dialog.push_filter_char(c);
                     None
                 }
-                KeyCode::Char(c) if dialog.stage() == ConnectStage::ApiKey => {
-                    dialog.push_api_key_char(c);
+                // Form stage: field navigation, type cycling, text editing.
+                (KeyCode::Up, ConnectStage::ApiKey) => {
+                    dialog.focus_prev();
                     None
                 }
+                (KeyCode::Down | KeyCode::Tab, ConnectStage::ApiKey) => {
+                    dialog.focus_next();
+                    None
+                }
+                (KeyCode::Left, ConnectStage::ApiKey)
+                    if dialog.focused_field() == ConnectField::Type =>
+                {
+                    dialog.cycle_type(false);
+                    None
+                }
+                (KeyCode::Right, ConnectStage::ApiKey)
+                    if dialog.focused_field() == ConnectField::Type =>
+                {
+                    dialog.cycle_type(true);
+                    None
+                }
+                (KeyCode::Backspace, ConnectStage::ApiKey) => {
+                    dialog.backspace();
+                    None
+                }
+                (KeyCode::Char(c), ConnectStage::ApiKey) => {
+                    dialog.input_char(c);
+                    None
+                }
+                (KeyCode::Enter, _) => dialog.confirm(),
                 _ => None,
             }
         };
@@ -3475,6 +3608,7 @@ impl TuiApp {
                 }
             }
             "tasks" => self.open_tasks_panel().await,
+            "subagents" => self.open_subagents_panel(),
             "config" => {
                 let msg = format!(
                     "model={} cwd={}",
@@ -4130,6 +4264,13 @@ const SESSION_PICKER_MOUSE_SCROLL_ROWS: usize = 1;
 /// dozens to hundreds of scroll events at once; the cap keeps a sustained flood
 /// from starving the agent/approval/question `select!` branches.
 const INPUT_COALESCE_CAP: usize = 1024;
+
+/// Max agent events (streaming text deltas, tool updates) drained per loop
+/// iteration before redrawing. Each delta otherwise triggers a full-transcript
+/// re-render at the top of the loop; coalescing a burst into one draw keeps
+/// streaming smooth on long conversations. Capped so a sustained flood can't
+/// starve the input/approval/tick branches.
+const AGENT_COALESCE_CAP: usize = 1024;
 
 /// Pull every terminal event that is *already buffered* — without awaiting —
 /// up to `cap`. Returns the burst so the caller can handle it and redraw ONCE,

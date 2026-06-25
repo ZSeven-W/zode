@@ -15,6 +15,7 @@ pub enum ActionId {
     OpenSettings,
     OpenHelp,
     OpenTasks,
+    OpenSubAgents,
     ToggleSidebar,
     NewTab,
     CloseTab,
@@ -80,6 +81,11 @@ pub static KEYMAP: &[Binding] = &[
         keys: "Ctrl+B",
         action: ActionId::OpenTasks,
         help: "Background tasks panel",
+    },
+    Binding {
+        keys: "F2 / /subagents",
+        action: ActionId::OpenSubAgents,
+        help: "Sub-agent activity panel",
     },
     Binding {
         keys: "Ctrl+G",

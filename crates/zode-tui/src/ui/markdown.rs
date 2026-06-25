@@ -312,6 +312,14 @@ mod tests {
     }
 
     #[test]
+    fn inline_code_after_cjk_drops_backticks() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let j = joined(&render_markdown("用 `writing-plans` skill", &theme));
+        assert!(j.contains("writing-plans"), "got: {j:?}");
+        assert!(!j.contains('`'), "literal backticks leaked: {j:?}");
+    }
+
+    #[test]
     fn code_block_is_highlighted_not_dropped() {
         let theme = ThemeStore::with_builtins().resolve(None);
         let lines = render_markdown("```rust\nfn main() {}\n```", &theme);

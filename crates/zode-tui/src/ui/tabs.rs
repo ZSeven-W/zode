@@ -7,6 +7,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use zode_core::TodoItem;
+
 use crate::tab::SessionTab;
 use crate::theme::Theme;
 use crate::ui::layout::compact_path;
@@ -22,6 +24,13 @@ pub struct SidebarInfo<'a> {
     pub cost_label: &'a str,
     pub yolo: bool,
     pub sandbox: bool,
+    /// Active tab's cached todo snapshot, rendered in the foot box.
+    pub todos: &'a [TodoItem],
+    /// Whether the active tab has a turn in flight (drives the box title).
+    pub busy: bool,
+    /// Active tab's Task-spawned sub-agents (newest first), rendered as their
+    /// own section beneath the sessions list.
+    pub subagents: &'a [zode_core::SubAgent],
 }
 
 pub fn tab_label(index: usize, title: &str, busy: bool) -> String {
@@ -71,7 +80,7 @@ fn tab_row_parts(index: usize, title: &str, busy: bool, width: usize) -> TabRowP
     }
 }
 
-fn truncate_to_width(text: &str, max_width: usize) -> String {
+pub(crate) fn truncate_to_width(text: &str, max_width: usize) -> String {
     let width = UnicodeWidthStr::width(text);
     if width <= max_width {
         return text.to_string();
@@ -110,21 +119,47 @@ pub fn render_sidebar(
     info: SidebarInfo<'_>,
     theme: &Theme,
 ) {
+    // The todo box sits directly beneath the sessions list (not pinned to the
+    // foot), with a one-row gap. `todo_box_height` returns 0 when the sidebar
+    // is too short to host both the summary/sessions block and the box.
+    const GAP: u16 = 1;
+    let box_h = crate::ui::todo::todo_box_height(info.todos.len(), area.height as usize) as u16;
+    let show_box = box_h > 0 && box_h + GAP < area.height && area.width >= 4;
+
     let row_width = area.width.saturating_sub(1) as usize;
+    // The "subagents" section flows beneath the tabs (empty → no-op); the todo
+    // box is the carved foot box. Reserve room for both so the tab list yields.
+    let sub_h = crate::ui::subagents_sidebar::section_height(info.subagents.len());
+    let todo_foot = if show_box { (box_h + GAP) as usize } else { 0 };
+
     let mut lines = sidebar_summary_lines(&info, row_width)
         .into_iter()
         .map(|line| styled_sidebar_line(&line, row_width, theme))
         .collect::<Vec<_>>();
     lines.push(header_line(row_width, theme));
-    append_tab_rows(
-        &mut lines,
+    // Cap the tab list so the subagents section AND the todo foot box fit.
+    let tabs_budget = (area.height as usize).saturating_sub(todo_foot + sub_h);
+    append_tab_rows(&mut lines, row_width, tabs_budget, tabs, active, theme);
+    // Flow the subagents section right after the tabs (no-op when empty).
+    lines.extend(crate::ui::subagents_sidebar::section_lines(
+        info.subagents,
         row_width,
-        area.height as usize,
-        tabs,
-        active,
         theme,
-    );
+    ));
+    let content_rows = lines.len() as u16;
     render_sidebar_block(f, area, lines, theme);
+
+    if show_box {
+        let y = area.y + content_rows + GAP;
+        let h = box_h.min(area.height.saturating_sub(content_rows + GAP));
+        if h >= 2 {
+            // Inset by one column so the sidebar's left rail (drawn by the top
+            // block) stays continuous through the box, and the box content
+            // lines up with the bordered sections above it.
+            let b = Rect::new(area.x + 1, y, area.width.saturating_sub(1), h);
+            crate::ui::todo::render_todo_box(f, b, info.todos, info.busy, theme);
+        }
+    }
 }
 
 fn render_tab_list(
@@ -337,6 +372,9 @@ mod tests {
             cost_label: "$0.0008",
             yolo: false,
             sandbox: true,
+            todos: &[],
+            busy: false,
+            subagents: &[],
         };
         let lines = sidebar_summary_lines(&info, 34);
         let joined = lines.join("\n");
@@ -349,6 +387,133 @@ mod tests {
         assert!(joined.contains("Minimal"));
         assert!(joined.contains("target/debug"));
         assert!(joined.contains("sandbox"));
+    }
+
+    #[test]
+    fn sidebar_renders_todo_box_with_items() {
+        use zode_core::{TodoItem, TodoStatus};
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("minimal"));
+        let todos = vec![
+            TodoItem {
+                subject: "read tabs.rs".into(),
+                description: None,
+                status: TodoStatus::Completed,
+                id: None,
+            },
+            TodoItem {
+                subject: "wire snapshot".into(),
+                description: None,
+                status: TodoStatus::InProgress,
+                id: None,
+            },
+        ];
+        let info = SidebarInfo {
+            session_title: "s",
+            theme_name: "Minimal",
+            model: "m",
+            cwd: std::path::Path::new("/tmp"),
+            mode: "ready",
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_label: "$0.00",
+            yolo: false,
+            sandbox: false,
+            todos: &todos,
+            busy: true,
+            subagents: &[],
+        };
+        let backend = ratatui::backend::TestBackend::new(34, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_sidebar(f, f.area(), &[], 0, info, &theme))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("Todo"));
+        assert!(content.contains("running…"));
+        assert!(content.contains("wire snapshot"));
+        assert!(content.contains("1/2"));
+
+        // The box must sit just beneath the sessions list, NOT pinned to the
+        // foot. With 0 tabs the summary+header is 16 rows, so the box opens
+        // around row 17 — assert its content lands in the upper half and the
+        // bottom rows stay empty.
+        let rows: Vec<String> = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(34)
+            .map(|r| r.iter().map(|c| c.symbol()).collect())
+            .collect();
+        let box_row = rows
+            .iter()
+            .position(|r| r.contains("wire snapshot"))
+            .expect("todo item should be rendered");
+        assert!(
+            box_row < 20,
+            "todo box should sit under sessions, not at the foot (row {box_row})"
+        );
+        assert!(
+            rows[30..].iter().all(|r| !r.contains("wire snapshot")),
+            "todo box must not render in the foot rows"
+        );
+    }
+
+    #[test]
+    fn sidebar_renders_subagents_in_their_own_section_below_sessions() {
+        use zode_core::{SubAgent, SubAgentStatus};
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("minimal"));
+        let subagents = vec![SubAgent {
+            id: 1,
+            agent_type: "researcher".into(),
+            description: Some("dig".into()),
+            depth: 0,
+            status: SubAgentStatus::Running,
+            started_at: 0,
+            finished_at: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            transcript: Vec::new(),
+        }];
+        let info = SidebarInfo {
+            session_title: "s",
+            theme_name: "Minimal",
+            model: "m",
+            cwd: std::path::Path::new("/tmp"),
+            mode: "ready",
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_label: "$0.00",
+            yolo: false,
+            sandbox: false,
+            todos: &[],
+            busy: false,
+            subagents: &subagents,
+        };
+        let backend = ratatui::backend::TestBackend::new(34, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_sidebar(f, f.area(), &[], 0, info, &theme))
+            .unwrap();
+        let rows: Vec<String> = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(34)
+            .map(|r| r.iter().map(|c| c.symbol()).collect())
+            .collect();
+        let sessions_row = rows.iter().position(|r| r.contains("sessions"));
+        let subagents_row = rows.iter().position(|r| r.contains("subagents"));
+        assert!(sessions_row.is_some(), "sessions header should render");
+        assert!(subagents_row.is_some(), "subagents header should render");
+        // The sub-agent section is its OWN header, placed below sessions.
+        assert!(subagents_row > sessions_row);
+        assert!(rows.iter().any(|r| r.contains("researcher")));
     }
 
     #[test]

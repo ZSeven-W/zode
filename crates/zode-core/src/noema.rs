@@ -58,11 +58,11 @@ impl ZodeNoema {
                 .cloned()
                 .or_else(|| loaded.map(|cfg| cfg.tenant.default_user_id))
                 .or_else(default_user);
-            return Self {
+            Self {
                 root: Some(root),
                 user,
                 auto_remember: settings.auto_remember(),
-            };
+            }
         }
 
         #[cfg(not(feature = "noema"))]
@@ -169,7 +169,7 @@ impl ZodeNoema {
                     return Err("rejected: secret-class content cannot be stored".to_string())
                 }
             };
-            return Ok(format!("remembered {memory_id}"));
+            Ok(format!("remembered {memory_id}"))
         }
 
         #[cfg(not(feature = "noema"))]
@@ -235,7 +235,7 @@ impl ZodeNoema {
             if pack.memories.is_empty() && pack.subconscious_hints.is_empty() {
                 return Ok(None);
             }
-            return Ok(Some(pack.to_markdown()));
+            Ok(Some(pack.to_markdown()))
         }
 
         #[cfg(not(feature = "noema"))]
@@ -404,9 +404,21 @@ fn is_likely_question(input: &str) -> bool {
     let trimmed = input.trim();
     trimmed.ends_with('?')
         || trimmed.ends_with('？')
-        || ["什么", "吗", "嘛", "么", "怎么", "如何", "为什么", "谁", "哪里", "哪", "多少"]
-            .iter()
-            .any(|marker| trimmed.contains(marker))
+        || [
+            "什么",
+            "吗",
+            "嘛",
+            "么",
+            "怎么",
+            "如何",
+            "为什么",
+            "谁",
+            "哪里",
+            "哪",
+            "多少",
+        ]
+        .iter()
+        .any(|marker| trimmed.contains(marker))
 }
 
 fn strip_invocation_prefix(input: &str) -> &str {

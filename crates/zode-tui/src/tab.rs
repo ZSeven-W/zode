@@ -12,7 +12,7 @@ use agent::session::Session;
 use once_cell::sync::Lazy;
 use zode_core::images::ImageAttachment;
 use zode_core::session_meta::{title_from_prompt, SessionIndex, SessionMeta};
-use zode_core::ZodeEngine;
+use zode_core::{TodoItem, ZodeEngine};
 
 /// Serializes ALL session persistence process-wide. `Session::save` reuses the
 /// same temp path per session id, and `SessionIndex` is a load-modify-save, so
@@ -59,6 +59,9 @@ pub struct SessionTab {
     /// the status badge reads it for the active tab, and reassembly re-applies
     /// it so a model/provider/yolo swap doesn't drop or leak plan mode.
     pub plan_mode: bool,
+    /// Cached snapshot of this tab's live `TodoWrite` list, refreshed each
+    /// tick from `engine.todo_state` so the sync sidebar render can read it.
+    pub todos: Vec<TodoItem>,
 }
 
 impl SessionTab {
@@ -81,6 +84,7 @@ impl SessionTab {
             queued_input: std::collections::VecDeque::new(),
             pending_images: Vec::new(),
             plan_mode: false,
+            todos: Vec::new(),
         }
     }
 

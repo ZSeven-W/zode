@@ -53,6 +53,10 @@ async fn run(args: Args) -> i32 {
     if let Some(m) = &args.model {
         cfg.provider.model = Some(m.clone());
     }
+    // If the active provider has no key but a matching `providers` entry does,
+    // adopt it — so a configured `providers` map works without `--provider`
+    // (config wins over the env-var fallback below).
+    cfg.resolve_provider_from_map();
     cfg.apply_env_fallbacks();
 
     // The OS sandbox for shell commands is ON BY DEFAULT (workspace-write,

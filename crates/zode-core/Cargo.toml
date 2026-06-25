@@ -14,6 +14,9 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Order-preserving map so the `providers` config keeps the user's file order
+# (the first entry is the default when no provider is explicitly selected).
+indexmap = { version = "2", features = ["serde"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }

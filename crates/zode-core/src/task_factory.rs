@@ -38,6 +38,8 @@ pub struct ZodeTaskFactory {
     /// User-defined agent definitions (`~/.zode/agents` etc.). Consulted before
     /// the built-in types so users can add/override sub-agents.
     defs: Vec<crate::agents::AgentDef>,
+    /// Per-engine sub-agent registry; the Task observer writes here.
+    subagents: crate::subagents::SubAgentRegistry,
 }
 
 impl ZodeTaskFactory {
@@ -51,6 +53,7 @@ impl ZodeTaskFactory {
         hooks: Arc<HookRunner>,
         parent_tools: ParentToolsCell,
         defs: Vec<crate::agents::AgentDef>,
+        subagents: crate::subagents::SubAgentRegistry,
     ) -> Self {
         Self {
             provider,
@@ -61,6 +64,7 @@ impl ZodeTaskFactory {
             hooks,
             parent_tools,
             defs,
+            subagents,
         }
     }
 
@@ -153,6 +157,7 @@ impl TaskAgentFactory for ZodeTaskFactory {
             cwd: Some(self.cwd.clone()),
             file_cache: Some(self.file_cache.clone()),
             hooks: Some(self.hooks.clone()),
+            observer: Some(self.subagents.observer()),
         })
     }
 }
@@ -215,6 +220,7 @@ mod tests {
             Arc::new(HookRunner::new()),
             cell,
             Vec::new(),
+            crate::subagents::SubAgentRegistry::new(),
         )
     }
 

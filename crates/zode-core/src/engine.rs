@@ -65,6 +65,20 @@ mode and execute.";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_384;
 const DEFAULT_MODEL_MAX_TOKENS: u32 = 200_000;
 const FILE_CACHE_ENTRIES: usize = 1024;
+
+/// Resolve the effective context window: per-provider field wins over the
+/// top-level config value; if both are absent, falls back to the default.
+fn resolve_context_window(p: &crate::config::ProviderConfig, top: Option<u32>) -> u32 {
+    p.context_window.or(top).unwrap_or(DEFAULT_MODEL_MAX_TOKENS)
+}
+
+/// Resolve the effective max output tokens: per-provider field wins over the
+/// top-level config value; if both are absent, falls back to the default.
+fn resolve_max_output(p: &crate::config::ProviderConfig, top: Option<u32>) -> u32 {
+    p.max_output_tokens
+        .or(top)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
+}
 const FILE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Build the file-tool [`WorkspacePolicy`] from the active sandbox so file
@@ -174,6 +188,8 @@ pub struct ZodeEngine {
     pub bash_sessions: BashSessionRegistry,
     /// Shared TodoWrite state handle (Phase 07 reads the list for the UI).
     pub todo_state: TodoState,
+    /// Live registry of Task-spawned sub-agents, read by the TUI overlay.
+    pub subagents: crate::subagents::SubAgentRegistry,
     /// File-edit undo/redo history, fed by an EditHistoryHook on `hooks`.
     pub history: Arc<tokio::sync::Mutex<EditHistory>>,
     /// Host-side metadata for background shells (Phase 07 task panel).
@@ -286,6 +302,9 @@ impl ZodeEngine {
 
         // AskUserQuestion, only when a UI question channel is wired. Read-only
         // (never permission-gated) and not in any plugin group (always-on).
+        // Capture availability before the move so the system prompt can nudge
+        // toward the tool only when it's actually registered.
+        let has_question_tool = question_tool.is_some();
         if let Some(tool) = question_tool {
             base.register(tool);
         }
@@ -444,6 +463,9 @@ impl ZodeEngine {
         // after wrapping, so it is late-bound through a OnceLock the engine
         // populates below. Registered LAST among base tools.
         let task_tools: ParentToolsCell = Arc::new(OnceLock::new());
+        // Per-engine sub-agent registry; shared between engine and factory so
+        // the Task observer writes here and the TUI reads a snapshot.
+        let subagents = crate::subagents::SubAgentRegistry::new();
         // User-defined sub-agents (~/.zode/agents etc.), available alongside the
         // built-in types for the Task tool and listed by `/agents`.
         let agent_defs = crate::agents::load_agent_defs(&cwd);
@@ -456,6 +478,7 @@ impl ZodeEngine {
             hooks.clone(),
             task_tools.clone(),
             agent_defs,
+            subagents.clone(),
         ));
         let agent_type_list = task_factory.agent_types();
         base.register(Arc::new(TaskTool::new(task_factory)));
@@ -518,6 +541,9 @@ impl ZodeEngine {
             &env,
             cfg.skill_discipline(),
             cfg.openspec_awareness() && openspec_detected(&cwd),
+            // Nudge toward the AskUserQuestion tool only when it's actually
+            // present (the `question_tool` this assembly was handed).
+            has_question_tool,
         );
         // Declare the live sandbox / write policy so the agent knows whether it
         // may write outside cwd or reach the network — and, crucially, RETRIES
@@ -616,13 +642,14 @@ impl ZodeEngine {
             model,
             system,
             cwd: cwd.clone(),
-            max_output_tokens: cfg.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
-            model_max_tokens: cfg.context_window.unwrap_or(DEFAULT_MODEL_MAX_TOKENS),
+            max_output_tokens: resolve_max_output(&cfg.provider, cfg.max_output_tokens),
+            model_max_tokens: resolve_context_window(&cfg.provider, cfg.context_window),
             temperature: cfg.temperature,
             prompt_cache: cfg.prompt_cache.unwrap_or(true),
             noema: ZodeNoema::from_settings(&cfg.noema),
             bash_sessions,
             todo_state,
+            subagents,
             history,
             bg_shells_meta,
             skills,
@@ -854,7 +881,7 @@ impl ZodeEngine {
         }
         let Some(memory) = self
             .noema
-            .recall_for_turn(&query, Some(self.cwd.as_path()))
+            .recall_for_turn(query, Some(self.cwd.as_path()))
             .ok()
             .flatten()
         else {
@@ -1376,6 +1403,7 @@ mod tests {
             noema: ZodeNoema::disabled(),
             bash_sessions: BashSessionRegistry::new(),
             todo_state: TodoState::new(),
+            subagents: crate::subagents::SubAgentRegistry::new(),
             history: Arc::new(tokio::sync::Mutex::new(EditHistory::new(1))),
             bg_shells_meta: BackgroundShellTracker::new(),
             skills: Arc::new(SkillRegistry::new()),
@@ -1807,5 +1835,25 @@ mod tests {
             .permissions
             .evaluate("Bash", &serde_json::json!({}), None);
         assert!(decision.is_deny());
+    }
+
+    #[test]
+    fn limits_prefer_provider_over_top_level() {
+        use crate::config::ProviderConfig;
+        let provider = ProviderConfig {
+            context_window: Some(1_000_000),
+            max_output_tokens: Some(8192),
+            ..Default::default()
+        };
+        assert_eq!(resolve_context_window(&provider, Some(200_000)), 1_000_000);
+        assert_eq!(resolve_max_output(&provider, Some(4096)), 8192);
+
+        let bare = ProviderConfig::default();
+        assert_eq!(resolve_context_window(&bare, Some(200_000)), 200_000); // top-level
+        assert_eq!(
+            resolve_context_window(&bare, None),
+            DEFAULT_MODEL_MAX_TOKENS
+        ); // default
+        assert_eq!(resolve_max_output(&bare, None), DEFAULT_MAX_OUTPUT_TOKENS);
     }
 }
