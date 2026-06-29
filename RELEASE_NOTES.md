@@ -1,0 +1,90 @@
+# zode v0.1.0-beta.1 — first public beta 🎉
+
+**zode** is an open-source, AI-native coding assistant for your terminal: it reads your code, runs commands, searches files, and manages git — all from a fast Rust TUI, with non-blocking permissions and an on-by-default OS sandbox.
+
+> ⚠️ **Beta.** APIs, config, and behavior may change before 1.0. Please file issues!
+
+---
+
+## Install
+
+### One line (recommended)
+
+**macOS / Linux:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.ps1 | iex
+```
+
+The installers auto-detect your OS + CPU, download the matching binary from this release, and drop `zode` on your PATH. Pin a version with `--version v0.1.0-beta.1` (sh) or `$env:ZODE_VERSION='v0.1.0-beta.1'` (ps1).
+
+> Because this is a **pre-release**, GitHub's "latest" excludes it from some tooling — the installers above resolve the newest release *including* betas, so they pick this up automatically.
+
+### Manual download
+
+| OS | Architecture | Asset |
+|----|--------------|-------|
+| macOS | Apple Silicon (M1+) | `zode-0.1.0-beta.1-arm64-mac.tar.gz` |
+| macOS | Intel | `zode-0.1.0-beta.1-x64-mac.tar.gz` |
+| Linux | x86_64 | `zode-0.1.0-beta.1-x64-linux.tar.gz` |
+| Linux | ARM64 (aarch64) | `zode-0.1.0-beta.1-arm64-linux.tar.gz` |
+| Windows | x64 | `zode-0.1.0-beta.1-x64-windows.zip` |
+| Windows | ARM64 | `zode-0.1.0-beta.1-arm64-windows.zip` |
+
+Unpack and move `zode` (or `zode.exe`) onto your PATH:
+
+```sh
+tar -xzf zode-0.1.0-beta.1-x64-linux.tar.gz
+sudo mv zode /usr/local/bin/
+```
+
+### From source
+
+```sh
+git clone --recurse-submodules https://github.com/ZSeven-W/zode.git
+cd zode && cargo build --release -p zode   # → target/release/zode
+```
+
+---
+
+## Quick start
+
+```sh
+mkdir -p ~/.zode
+cat > ~/.zode/config.json <<'JSON'
+{ "provider": { "type": "anthropic", "apiKey": "sk-...", "model": "claude-sonnet-4-6" } }
+JSON
+zode
+```
+
+OpenAI-compatible providers (DeepSeek, Moonshot, OpenRouter, …) set `type: "openai"` + `baseUrl` + optional `dialect`; local models use `type: "ollama"`. Inside the TUI, `/connect` configures providers interactively and `/help` lists everything. See the [README](https://github.com/ZSeven-W/zode#readme) for full usage.
+
+---
+
+## What's in the beta
+
+- Multi-provider chat (Anthropic / OpenAI-compatible / Ollama), large-output & 1M-context aware
+- Full tool surface: file read/write/edit, code & content search, fg/bg shells, git, web fetch, notebooks, TODOs
+- Non-blocking permission gate + OS sandbox (sandbox-exec / bwrap), outbound network denied by default
+- Full-screen TUI: streaming markdown, syntax highlighting, diff previews, autocomplete, history, themes, 15-language UI
+- Multi-session tabs, sub-agents & workflows, skills + MCP servers, hooks, three-level instructions
+
+## Supported platforms
+
+Prebuilt binaries for **macOS** (arm64 + x64), **Linux** (x86_64 + arm64, glibc), and **Windows** (x64 + arm64). Every binary is built natively on its own architecture in CI.
+
+## Notes & caveats
+
+- Linux builds are **glibc** (dynamically linked) — they run on mainstream distributions (Ubuntu/Debian/Fedora/Arch, …). A static musl build is not part of this beta.
+- The OS sandbox is enforced on macOS (`sandbox-exec`) and Linux (`bwrap`); on Windows it is a no-op (commands run ungated) — review tool calls accordingly.
+- macOS binaries are ad-hoc signed but not notarized. The install script strips the Gatekeeper quarantine flag automatically; for a **manual browser download**, run `xattr -dr com.apple.quarantine ./zode` once. (No Apple Developer certificate is required to run zode.)
+
+---
+
+**Full changelog:** https://github.com/ZSeven-W/zode/commits/v0.1.0-beta.1

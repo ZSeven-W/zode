@@ -29,7 +29,55 @@
 
 ## Install
 
-**From source** (requires a recent stable Rust toolchain):
+### One line (prebuilt binaries)
+
+**macOS / Linux:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.ps1 | iex
+```
+
+The installer auto-detects your OS + CPU, downloads the matching binary from
+the latest [release](https://github.com/ZSeven-W/zode/releases), and puts `zode`
+on your PATH. Pin a version or change the location:
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.sh | sh -s -- --version v0.1.0-beta.1
+ZODE_BIN_DIR="$HOME/.local/bin" curl -fsSL .../install.sh | sh
+```
+
+```powershell
+# Windows
+$env:ZODE_VERSION = 'v0.1.0-beta.1'; irm https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.ps1 | iex
+```
+
+### Manual download
+
+Grab the archive for your platform from the [releases page](https://github.com/ZSeven-W/zode/releases):
+
+| OS | Arch | Asset |
+|----|------|-------|
+| macOS | Apple Silicon | `zode-<version>-arm64-mac.tar.gz` |
+| macOS | Intel | `zode-<version>-x64-mac.tar.gz` |
+| Linux | x86_64 | `zode-<version>-x64-linux.tar.gz` |
+| Linux | ARM64 | `zode-<version>-arm64-linux.tar.gz` |
+| Windows | x64 | `zode-<version>-x64-windows.zip` |
+| Windows | ARM64 | `zode-<version>-arm64-windows.zip` |
+
+Then unpack and move `zode` onto your PATH (`sudo mv zode /usr/local/bin/`).
+Linux builds are glibc; macOS binaries are unsigned (`xattr -dr
+com.apple.quarantine ./zode` if Gatekeeper complains).
+
+### From source
+
+Requires a recent stable Rust toolchain:
 
 ```bash
 git clone --recurse-submodules https://github.com/ZSeven-W/zode.git
