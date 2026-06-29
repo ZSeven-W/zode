@@ -55,15 +55,32 @@ cd zode && cargo build --release -p zode   # → target/release/zode
 
 ## Quick start
 
+Launch `zode` and run **`/connect`** — an interactive, models.dev-backed picker
+that writes the provider config for you. Or write `~/.zode/config.json` by hand:
+`providers` holds the credentials + models (one entry per provider), and the
+top-level `provider` records the active model.
+
 ```sh
 mkdir -p ~/.zode
 cat > ~/.zode/config.json <<'JSON'
-{ "provider": { "type": "anthropic", "apiKey": "sk-...", "model": "claude-sonnet-4-6" } }
+{
+  "providers": {
+    "anthropic": {
+      "type": "anthropic",
+      "apiKey": "sk-...",
+      "models": { "claude-sonnet-4-6": {} }
+    }
+  },
+  "provider": { "model": "claude-sonnet-4-6" }
+}
 JSON
 zode
 ```
 
-OpenAI-compatible providers (DeepSeek, Moonshot, OpenRouter, …) set `type: "openai"` + `baseUrl` + optional `dialect`; local models use `type: "ollama"`. Inside the TUI, `/connect` configures providers interactively and `/help` lists everything. See the [README](https://github.com/ZSeven-W/zode#readme) for full usage.
+OpenAI-compatible providers (DeepSeek, Moonshot, OpenRouter, …) add `baseUrl` +
+`dialect` and use `type: "openai"`; local models use `type: "ollama"`. One entry
+can hold several models — switch live with `/model`. `/help` lists everything;
+see the [README](https://github.com/ZSeven-W/zode#readme) for full usage.
 
 ---
 
@@ -83,7 +100,7 @@ Prebuilt binaries for **macOS** (arm64 + x64), **Linux** (x86_64 + arm64, glibc)
 
 - Linux builds are **glibc** (dynamically linked) — they run on mainstream distributions (Ubuntu/Debian/Fedora/Arch, …). A static musl build is not part of this beta.
 - The OS sandbox is enforced on macOS (`sandbox-exec`) and Linux (`bwrap`); on Windows it is a no-op (commands run ungated) — review tool calls accordingly.
-- macOS binaries are ad-hoc signed but not notarized. The install script strips the Gatekeeper quarantine flag automatically; for a **manual browser download**, run `xattr -dr com.apple.quarantine ./zode` once. (No Apple Developer certificate is required to run zode.)
+- macOS binaries are ad-hoc signed but not notarized — **no Apple Developer certificate is required to run zode**. The `curl` / `irm` installers don't trip Gatekeeper (curl doesn't quarantine downloads). Only a **manual browser download** of the tarball is quarantined; if so, run `xattr -dr com.apple.quarantine ./zode` once.
 
 ---
 

@@ -91,31 +91,48 @@ cargo build --release -p zode
 
 ## Quick Start
 
-Create `~/.zode/config.json` with a provider:
+The easiest way is to launch `zode` and run **`/connect`** — an interactive,
+models.dev-backed picker that writes the config for you.
+
+To write `~/.zode/config.json` by hand: **`providers`** is the source of truth
+— one entry per provider (shared credentials) holding one or more **models** —
+and the top-level **`provider`** records the *active* model:
 
 ```jsonc
 {
-  "provider": {
-    "type": "anthropic",                 // "anthropic" | "openai" | "ollama"
-    "apiKey": "sk-...",
-    "model": "claude-sonnet-4-6"
-  }
+  "providers": {
+    "anthropic": {
+      "type": "anthropic",               // wire protocol: "anthropic" | "openai" | "ollama"
+      "apiKey": "sk-...",
+      "models": { "claude-sonnet-4-6": {} }
+    }
+  },
+  "provider": { "model": "claude-sonnet-4-6" }   // the active model
 }
 ```
 
-OpenAI-compatible providers set a `baseUrl` and (optionally) a `dialect`:
+OpenAI-compatible providers (DeepSeek, Moonshot, OpenRouter, …) add a `baseUrl`
++ `dialect`, and per-model settings live in each model's entry:
 
 ```jsonc
 {
-  "provider": {
-    "type": "openai",
-    "apiKey": "sk-...",
-    "baseUrl": "https://api.deepseek.com/v1",
-    "model": "deepseek-v4-pro",
-    "dialect": "deepseek"                 // "standard" | "deepseek" | "moonshot" | "openrouter"
-  }
+  "providers": {
+    "deepseek": {
+      "type": "openai",
+      "apiKey": "sk-...",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "dialect": "deepseek",             // "standard" | "deepseek" | "moonshot" | "openrouter"
+      "models": {
+        "deepseek-v4-pro":  { "contextWindow": 1000000, "maxOutputTokens": 16384 },
+        "deepseek-chat":    {}
+      }
+    }
+  },
+  "provider": { "model": "deepseek-v4-pro" }
 }
 ```
+
+One provider entry can hold several models — switch between them live with `/model`.
 
 Then run:
 
@@ -163,8 +180,12 @@ Optional top-level config keys (all have sensible defaults):
 > approval prompt — or toggle the whole sandbox live with `/sandbox`.
 
 > `contextWindow` drives auto-compaction — set it to your model's real window
-> (e.g. `1000000`). Do **not** set it above the real window: overestimating
-> makes requests overflow and the provider rejects the turn.
+> (e.g. `1000000`). Prefer the **per-model** value under
+> `providers.<name>.models.<id>.contextWindow` (it takes precedence); the
+> top-level key above is a global fallback, and zode also fills it from the
+> bundled models.dev catalog when neither is set. Do **not** set it above the
+> real window: overestimating makes requests overflow and the provider rejects
+> the turn.
 
 ## Slash Commands
 
