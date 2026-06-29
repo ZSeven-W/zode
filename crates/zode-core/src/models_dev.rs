@@ -197,6 +197,34 @@ impl Catalog {
             .find(|m| m.id == model_id)
     }
 
+    /// The published context window for `model_id`, searching across all
+    /// providers. A fallback for the effective context window when the config
+    /// doesn't pin a per-model `contextWindow` — so each model's real max
+    /// context (which differs per model) drives compaction + the status %.
+    pub fn context_for_model(&self, model_id: &str) -> Option<u32> {
+        self.providers
+            .iter()
+            .flat_map(|p| p.models.iter())
+            .find(|m| m.id == model_id)
+            .and_then(|m| m.context)
+    }
+
+    /// The published context window for `model_id`, preferring the entry under
+    /// `provider_id` when given. A model id can appear under several providers
+    /// with differing windows (e.g. a direct provider's 200K vs an aggregator's
+    /// 1M); scoping to the active provider picks the right one. Falls back to
+    /// the first global match when the provider is unknown or no hint is given.
+    pub fn context_for_model_scoped(
+        &self,
+        provider_id: Option<&str>,
+        model_id: &str,
+    ) -> Option<u32> {
+        provider_id
+            .and_then(|pid| self.find_model(pid, model_id))
+            .and_then(|m| m.context)
+            .or_else(|| self.context_for_model(model_id))
+    }
+
     // -----------------------------------------------------------------------
     // Disk cache helpers
     // -----------------------------------------------------------------------
@@ -405,6 +433,41 @@ mod tests {
         assert_eq!(m.max_output, Some(8192));
         assert_eq!(m.input_price, Some(0.28));
         assert_eq!(m.output_price, Some(0.42));
+    }
+
+    #[test]
+    fn context_for_model_scoped_prefers_active_provider() {
+        // The same model id under two providers with DIFFERENT context windows
+        // (e.g. a direct provider vs an aggregator), plus a unique model on one.
+        let json = r#"{
+          "alpha": { "id":"alpha","name":"Alpha","models": {
+            "dup": { "id":"dup","name":"Dup","limit": { "context": 200000 } } } },
+          "beta": { "id":"beta","name":"Beta","models": {
+            "dup":  { "id":"dup","name":"Dup","limit": { "context": 1000000 } },
+            "solo": { "id":"solo","name":"Solo","limit": { "context": 500000 } } } }
+        }"#;
+        let cat = Catalog::from_json(json).expect("parse");
+        // A provider hint scopes to that provider's value for the shared id.
+        assert_eq!(
+            cat.context_for_model_scoped(Some("beta"), "dup"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            cat.context_for_model_scoped(Some("alpha"), "dup"),
+            Some(200_000)
+        );
+        // No hint → falls back to the global first match (order-independent here
+        // only in that it must return one of the two configured windows).
+        assert!(cat.context_for_model_scoped(None, "dup").is_some());
+        // An unknown provider hint also falls back to the global search, which
+        // still resolves a uniquely-named model deterministically.
+        assert_eq!(
+            cat.context_for_model_scoped(Some("nope"), "solo"),
+            Some(500_000)
+        );
+        assert_eq!(cat.context_for_model_scoped(None, "solo"), Some(500_000));
+        // Unknown model → None regardless of hint.
+        assert_eq!(cat.context_for_model_scoped(Some("alpha"), "ghost"), None);
     }
 
     #[test]

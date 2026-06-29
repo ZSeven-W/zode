@@ -1,6 +1,10 @@
 //! Conversation view: holds the message list, the streaming delta buffer,
 //! and scroll state. Renders into a ratatui Frame.
 
+use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::Path;
 
@@ -34,7 +38,7 @@ fn line_disp_width(line: &Line) -> usize {
         .sum()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Role {
     User,
     Assistant,
@@ -107,6 +111,13 @@ pub struct ChatView {
     hide_tool_details: bool,
     revision: u64,
     render_cache: Option<RenderCache>,
+    /// Per-message rendered-line cache, keyed by a hash of (role, text, width,
+    /// theme). Lets a rebuild reuse unchanged messages' lines instead of
+    /// re-parsing markdown for the whole transcript on every content change —
+    /// the key invalidates automatically on content/width/theme change.
+    line_cache: RefCell<HashMap<u64, Vec<Line<'static>>>>,
+    #[cfg(test)]
+    render_misses: std::cell::Cell<usize>,
     #[cfg(test)]
     cache_builds: usize,
 }
@@ -470,7 +481,8 @@ impl ChatView {
         } else {
             let mut out = vec![Line::from("")];
             let mut prev_role: Option<&Role> = None;
-            for msg in self.messages.iter() {
+            let last = self.messages.len().saturating_sub(1);
+            for (i, msg) in self.messages.iter().enumerate() {
                 // Display-preference filters: thinking lines and tool-detail
                 // lines are both Role::Tool, told apart by the THINKING_PREFIX.
                 if msg.role == Role::Tool {
@@ -486,7 +498,18 @@ impl ChatView {
                         out.push(Line::from(""));
                     }
                 }
-                out.extend(self.render_message(msg, theme, width));
+                // The actively-streaming message (the assistant being filled, or
+                // the growing tail during a stream) changes every delta — never
+                // cache it; everything else reuses its cached lines.
+                let skip_cache =
+                    Some(i) == self.active_assistant_index || (self.streaming && i == last);
+                out.extend(self.render_message_cached(
+                    msg,
+                    theme,
+                    width,
+                    meta.theme_name,
+                    skip_cache,
+                ));
                 prev_role = Some(&msg.role);
             }
             out
@@ -575,6 +598,42 @@ impl ChatView {
                 Span::styled("slash commands are hot", muted),
             ]),
         ]
+    }
+
+    /// `render_message` with a content-keyed cache. The key (role, text, width,
+    /// theme) invalidates automatically on any of those changing, so a rebuild
+    /// reuses unchanged messages instead of re-parsing the whole transcript.
+    /// The actively-streaming message and image messages are never cached (the
+    /// former grows each delta; the latter's preview isn't keyed by content).
+    fn render_message_cached(
+        &self,
+        msg: &ChatMessage,
+        theme: &Theme,
+        width: u16,
+        theme_name: &str,
+        skip_cache: bool,
+    ) -> Vec<Line<'static>> {
+        if skip_cache || !msg.images.is_empty() {
+            return self.render_message(msg, theme, width);
+        }
+        let mut h = DefaultHasher::new();
+        msg.role.hash(&mut h);
+        msg.text.hash(&mut h);
+        width.hash(&mut h);
+        theme_name.hash(&mut h);
+        let key = h.finish();
+        if let Some(lines) = self.line_cache.borrow().get(&key) {
+            return lines.clone();
+        }
+        #[cfg(test)]
+        self.render_misses.set(self.render_misses.get() + 1);
+        let lines = self.render_message(msg, theme, width);
+        let mut cache = self.line_cache.borrow_mut();
+        if cache.len() > 4096 {
+            cache.clear(); // backstop against unbounded growth
+        }
+        cache.insert(key, lines.clone());
+        lines
     }
 
     fn render_message(&self, msg: &ChatMessage, theme: &Theme, width: u16) -> Vec<Line<'static>> {
@@ -924,6 +983,45 @@ mod tests {
     use super::*;
     use crate::theme::ThemeStore;
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn per_message_cache_skips_re_render_of_unchanged_messages() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let meta = ChatRenderMeta {
+            theme_name: "minimal",
+            model: "m",
+            cwd: std::path::Path::new("."),
+        };
+        let mut chat = ChatView::new();
+        chat.push_user("hello");
+        chat.push_system("world");
+        chat.push_tool("a tool line");
+        let width = 80u16;
+
+        // First build renders every message.
+        chat.render_misses.set(0);
+        let _ = chat.build_lines(&theme, meta, width);
+        assert!(chat.render_misses.get() >= 3, "first build renders all");
+
+        // Rebuilding with no change serves everything from the cache.
+        chat.render_misses.set(0);
+        let _ = chat.build_lines(&theme, meta, width);
+        assert_eq!(chat.render_misses.get(), 0, "unchanged rebuild re-rendered");
+
+        // Adding one message re-renders only that message.
+        chat.push_system("again");
+        chat.render_misses.set(0);
+        let _ = chat.build_lines(&theme, meta, width);
+        assert_eq!(chat.render_misses.get(), 1, "only the new message renders");
+
+        // A width change re-renders (key includes width).
+        chat.render_misses.set(0);
+        let _ = chat.build_lines(&theme, meta, 60);
+        assert!(
+            chat.render_misses.get() >= 4,
+            "width change invalidates cache"
+        );
+    }
 
     #[test]
     fn push_user_then_stream_assistant() {

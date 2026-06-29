@@ -24,6 +24,11 @@ ignore = [
   # yaml-rust unmaintained — transitive via syntect (parses bundled syntax
   # definitions at startup; inputs are the shipped defaults, not user data).
   "RUSTSEC-2024-0320",
+  # proc-macro-error2 unmaintained — build-time only through jieba-rs'
+  # compressed default dictionary generator. The default dictionary is required
+  # for noema's CJK tokenization behavior; re-evaluate when jieba-rs drops
+  # include-flate-codegen or offers an equivalent maintained dictionary path.
+  "RUSTSEC-2026-0173",
 ]
 
 [licenses]

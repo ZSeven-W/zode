@@ -66,10 +66,33 @@ const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_384;
 const DEFAULT_MODEL_MAX_TOKENS: u32 = 200_000;
 const FILE_CACHE_ENTRIES: usize = 1024;
 
-/// Resolve the effective context window: per-provider field wins over the
-/// top-level config value; if both are absent, falls back to the default.
-fn resolve_context_window(p: &crate::config::ProviderConfig, top: Option<u32>) -> u32 {
-    p.context_window.or(top).unwrap_or(DEFAULT_MODEL_MAX_TOKENS)
+/// Process-cached models.dev catalog (parsed once) used to look up a model's
+/// published context window when the config doesn't pin one.
+fn cached_catalog() -> &'static crate::Catalog {
+    static CATALOG: std::sync::OnceLock<crate::Catalog> = std::sync::OnceLock::new();
+    CATALOG.get_or_init(crate::Catalog::load_blocking)
+}
+
+/// Resolve the effective context window: an explicit per-provider field wins,
+/// then the top-level config value, then the model's published window from the
+/// models.dev `catalog` (so different models get their real, differing max
+/// context), and finally the conservative default. `provider_id` scopes the
+/// catalog lookup to the active provider so a model id shared across providers
+/// (different windows) resolves the right one.
+fn resolve_context_window(
+    p: &crate::config::ProviderConfig,
+    top: Option<u32>,
+    provider_id: Option<&str>,
+    catalog: &crate::Catalog,
+) -> u32 {
+    p.context_window
+        .or(top)
+        .or_else(|| {
+            p.model
+                .as_deref()
+                .and_then(|m| catalog.context_for_model_scoped(provider_id, m))
+        })
+        .unwrap_or(DEFAULT_MODEL_MAX_TOKENS)
 }
 
 /// Resolve the effective max output tokens: per-provider field wins over the
@@ -643,7 +666,12 @@ impl ZodeEngine {
             system,
             cwd: cwd.clone(),
             max_output_tokens: resolve_max_output(&cfg.provider, cfg.max_output_tokens),
-            model_max_tokens: resolve_context_window(&cfg.provider, cfg.context_window),
+            model_max_tokens: resolve_context_window(
+                &cfg.provider,
+                cfg.context_window,
+                cfg.active_provider_key(),
+                cached_catalog(),
+            ),
             temperature: cfg.temperature,
             prompt_cache: cfg.prompt_cache.unwrap_or(true),
             noema: ZodeNoema::from_settings(&cfg.noema),
@@ -1040,18 +1068,26 @@ impl EngineTemplate {
             out.push(model.to_string());
         }
 
-        let mut provider_models: Vec<String> = self
-            .cfg
-            .providers
-            .values()
-            .filter_map(|p| p.model.as_deref())
-            .filter(|model| !out.iter().any(|existing| existing == model))
-            .map(str::to_string)
-            .collect();
+        // Every provider entry contributes its default `model` plus any models
+        // listed under its `models` map (multi-model providers).
+        let mut provider_models: Vec<String> = Vec::new();
+        for p in self.cfg.providers.values() {
+            if let Some(model) = p.model.as_deref() {
+                provider_models.push(model.to_string());
+            }
+            provider_models.extend(p.models.keys().cloned());
+        }
+        provider_models.retain(|model| !out.iter().any(|existing| existing == model));
         provider_models.sort();
         provider_models.dedup();
         out.extend(provider_models);
         out
+    }
+
+    /// Read the resolved active provider (test-only assertion helper).
+    #[cfg(test)]
+    pub(crate) fn active_provider(&self) -> &crate::config::ProviderConfig {
+        &self.cfg.provider
     }
 
     pub fn yolo(&self) -> bool {
@@ -1070,10 +1106,26 @@ impl EngineTemplate {
         t
     }
 
-    /// Clone with the model overridden (for `/model <id>`).
+    /// Clone with the model overridden (for `/model <id>`). When the model
+    /// belongs to a configured provider (its map key, its `model`, or its
+    /// `models` map), the active provider adopts that provider's shared
+    /// credentials and the per-model overrides — so switching to another
+    /// provider's model "just works" without re-entering the API key. An
+    /// unknown model is simply set on the current active provider.
     pub fn with_model(&self, model: String) -> Self {
         let mut t = self.clone();
-        t.cfg.provider.model = Some(model);
+        match t.cfg.resolve_model_provider(&model) {
+            Some(resolved) => t.cfg.provider = resolved,
+            None => {
+                // Unknown model on the current provider's credentials: drop the
+                // previous model's per-model overrides so the new model resolves
+                // its own context window / output cap / prices instead of
+                // inheriting stale values (the status-bar % ctx denominator in
+                // particular must follow the new model's real max context).
+                t.cfg.provider.clear_model_overrides();
+                t.cfg.provider.model = Some(model);
+            }
+        }
         t
     }
 
@@ -1098,12 +1150,34 @@ impl EngineTemplate {
     }
 
     /// Clone with a named provider selected (for the settings provider switch).
-    /// `None` if the name isn't in `cfg.providers`.
+    /// `None` if the name isn't in `cfg.providers`. A multi-model provider (no
+    /// top-level `model`, several under `models`) defaults to its first listed
+    /// model with that model's override applied, and the active provider never
+    /// carries the `models` map.
     pub fn with_provider(&self, name: &str) -> Option<Self> {
-        let provider = self.cfg.providers.get(name).cloned()?;
+        let provider = self.cfg.resolve_named_provider(name)?;
         let mut t = self.clone();
         t.cfg.provider = provider;
         Some(t)
+    }
+
+    /// The `providers`-map key that owns the active model — its `models` map
+    /// contains it, its `model` equals it, or it is keyed by it. `None` when the
+    /// active model isn't part of any configured group. Used to display
+    /// "model(provider)" in the status bar.
+    pub fn active_provider_name(&self) -> Option<String> {
+        self.cfg.active_provider_key().map(str::to_string)
+    }
+
+    /// Clone with the `providers` map replaced — keeps `active_provider_name`
+    /// accurate after `/connect` adds a new group during the session.
+    pub fn with_providers_map(
+        &self,
+        providers: indexmap::IndexMap<String, crate::config::ProviderConfig>,
+    ) -> Self {
+        let mut t = self.clone();
+        t.cfg.providers = providers;
+        t
     }
 
     /// Clone with the active provider replaced by a complete provider config
@@ -1476,6 +1550,131 @@ mod tests {
         assert_eq!(template.model(), Some("MiniMax-M1"));
     }
 
+    fn deepseek_multi_model_cfg() -> ZodeConfig {
+        let mut cfg = test_cfg();
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "deepseek-v4-pro".to_string(),
+            crate::config::ModelOverride {
+                context_window: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        models.insert(
+            "deepseek-v4-flash".to_string(),
+            crate::config::ModelOverride::default(),
+        );
+        cfg.providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk-deepseek".into()),
+                base_url: Some("https://api.deepseek.com/anthropic".into()),
+                models,
+                ..Default::default()
+            },
+        );
+        cfg
+    }
+
+    #[test]
+    fn active_provider_name_finds_owning_group() {
+        // Active model not owned by any group → None.
+        let template = EngineTemplate::new(
+            deepseek_multi_model_cfg(),
+            std::path::PathBuf::from("/tmp/zode"),
+            None,
+            false,
+            None,
+            "2026-06-14".into(),
+        );
+        assert_eq!(template.active_provider_name(), None); // MiniMax-M1 unowned
+
+        // Active model inside the deepseek group's `models` map → "deepseek".
+        let mut cfg = deepseek_multi_model_cfg();
+        cfg.provider.model = Some("deepseek-v4-pro".into());
+        let template = EngineTemplate::new(
+            cfg,
+            std::path::PathBuf::from("/tmp/zode"),
+            None,
+            false,
+            None,
+            "2026-06-14".into(),
+        );
+        assert_eq!(template.active_provider_name().as_deref(), Some("deepseek"));
+    }
+
+    #[test]
+    fn with_provider_on_multi_model_picks_first_model() {
+        let template = EngineTemplate::new(
+            deepseek_multi_model_cfg(),
+            std::path::PathBuf::from("/tmp/zode"),
+            None,
+            false,
+            None,
+            "2026-06-14".into(),
+        );
+        // Selecting a multi-model provider via the settings picker adopts its
+        // shared creds and defaults to its first listed model — no map leak.
+        let switched = template.with_provider("deepseek").expect("named provider");
+        assert_eq!(switched.model(), Some("deepseek-v4-pro"));
+        let p = switched.active_provider();
+        assert_eq!(p.api_key.as_deref(), Some("sk-deepseek"));
+        assert_eq!(p.context_window, Some(1_000_000)); // default model's override applied
+        assert!(p.models.is_empty());
+    }
+
+    #[test]
+    fn model_ids_include_multi_model_provider_models() {
+        let template = EngineTemplate::new(
+            deepseek_multi_model_cfg(),
+            std::path::PathBuf::from("/tmp/zode"),
+            None,
+            false,
+            None,
+            "2026-06-14".into(),
+        );
+        let ids = template.model_ids();
+        assert!(
+            ids.contains(&"MiniMax-M1".to_string()),
+            "active model listed"
+        );
+        assert!(ids.contains(&"deepseek-v4-pro".to_string()));
+        assert!(ids.contains(&"deepseek-v4-flash".to_string()));
+    }
+
+    #[test]
+    fn with_model_adopts_owning_provider_creds_and_override() {
+        let template = EngineTemplate::new(
+            deepseek_multi_model_cfg(),
+            std::path::PathBuf::from("/tmp/zode"),
+            None,
+            false,
+            None,
+            "2026-06-14".into(),
+        );
+        // Switching to a model under the deepseek provider adopts its shared
+        // credentials plus the per-model override.
+        let switched = template.with_model("deepseek-v4-pro".into());
+        assert_eq!(switched.model(), Some("deepseek-v4-pro"));
+        let p = switched.active_provider();
+        assert_eq!(p.api_key.as_deref(), Some("sk-deepseek"));
+        assert_eq!(
+            p.base_url.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(p.context_window, Some(1_000_000));
+        assert!(p.models.is_empty(), "active provider drops the models map");
+
+        // An unknown model just sets the model; active creds are untouched.
+        let unknown = template.with_model("totally-unknown".into());
+        assert_eq!(unknown.model(), Some("totally-unknown"));
+        assert_eq!(
+            unknown.active_provider().api_key.as_deref(),
+            Some("sk-test")
+        );
+    }
+
     #[tokio::test]
     async fn turn_blocks_preserves_rich_user_content() {
         let mut caps = ProviderCapabilities::default();
@@ -1840,20 +2039,84 @@ mod tests {
     #[test]
     fn limits_prefer_provider_over_top_level() {
         use crate::config::ProviderConfig;
+        // A model id shared across two providers with DIFFERENT windows.
+        let cat = crate::Catalog::from_json(
+            r#"{
+              "alpha": { "id":"alpha","name":"Alpha","models": {
+                "shared": { "id":"shared","name":"Shared","limit": { "context": 128000 } } } },
+              "beta": { "id":"beta","name":"Beta","models": {
+                "shared": { "id":"shared","name":"Shared","limit": { "context": 1000000 } } } }
+            }"#,
+        )
+        .expect("parse fixture catalog");
+
+        // Explicit per-provider window wins over top-level and catalog.
         let provider = ProviderConfig {
             context_window: Some(1_000_000),
             max_output_tokens: Some(8192),
             ..Default::default()
         };
-        assert_eq!(resolve_context_window(&provider, Some(200_000)), 1_000_000);
+        assert_eq!(
+            resolve_context_window(&provider, Some(200_000), None, &cat),
+            1_000_000
+        );
         assert_eq!(resolve_max_output(&provider, Some(4096)), 8192);
 
+        // No per-provider window → top-level value.
         let bare = ProviderConfig::default();
-        assert_eq!(resolve_context_window(&bare, Some(200_000)), 200_000); // top-level
         assert_eq!(
-            resolve_context_window(&bare, None),
+            resolve_context_window(&bare, Some(200_000), None, &cat),
+            200_000
+        );
+
+        // No config window → models.dev catalog, scoped to the active provider
+        // (so the shared id resolves to the right provider's window).
+        let shared = ProviderConfig {
+            model: Some("shared".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_context_window(&shared, None, Some("beta"), &cat),
+            1_000_000
+        );
+        assert_eq!(
+            resolve_context_window(&shared, None, Some("alpha"), &cat),
+            128_000
+        );
+
+        // Unknown model with no config → conservative default.
+        assert_eq!(
+            resolve_context_window(&bare, None, None, &cat),
             DEFAULT_MODEL_MAX_TOKENS
-        ); // default
+        );
         assert_eq!(resolve_max_output(&bare, None), DEFAULT_MAX_OUTPUT_TOKENS);
+    }
+
+    #[test]
+    fn with_model_to_unknown_clears_previous_model_overrides() {
+        // Active provider currently describes a 1M-window model with prices.
+        let mut cfg = test_cfg();
+        cfg.provider.context_window = Some(1_000_000);
+        cfg.provider.max_output_tokens = Some(64_000);
+        cfg.provider.input_price = Some(3.0);
+        let template = EngineTemplate::new(
+            cfg,
+            std::path::PathBuf::from("/tmp/zode"),
+            None,
+            false,
+            None,
+            "2026-06-14".into(),
+        );
+
+        // Switching to a model no provider group describes drops those stale
+        // per-model fields so the new model resolves its own context window.
+        let switched = template.with_model("brand-new-model".into());
+        let p = switched.active_provider();
+        assert_eq!(p.model.as_deref(), Some("brand-new-model"));
+        assert_eq!(p.context_window, None);
+        assert_eq!(p.max_output_tokens, None);
+        assert_eq!(p.input_price, None);
+        // Shared credentials are preserved across the model switch.
+        assert_eq!(p.api_key.as_deref(), Some("sk-test"));
     }
 }

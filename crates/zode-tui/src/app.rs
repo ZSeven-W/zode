@@ -357,6 +357,7 @@ impl TuiApp {
         if let Some(id) = &resumed_id {
             if let Ok(store) = tab0.engine.store.lock() {
                 tab0.chat = rebuild_chat_from_store(&store);
+                tab0.context_tokens = estimate_store_tokens(&store);
             }
             if let Some(meta) = SessionIndex::load()
                 .ok()
@@ -1108,6 +1109,7 @@ impl TuiApp {
             }
         };
         let chat = rebuild_chat_from_store(&store);
+        let resumed_tokens = estimate_store_tokens(&store);
         // Resume in the session's original directory when it still exists, so
         // tools operate in the right repo (not the launch cwd).
         let cwd_override = if std::path::Path::new(&meta.cwd).is_dir() {
@@ -1132,6 +1134,7 @@ impl TuiApp {
         tab.title = meta.title.clone();
         tab.titled = true;
         tab.chat = chat;
+        tab.context_tokens = resumed_tokens;
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.autocomplete.dismiss();
@@ -1401,10 +1404,16 @@ impl TuiApp {
             self.status.mode = tab.mode;
             self.status.input_tokens = tab.input_tokens;
             self.status.output_tokens = tab.output_tokens;
+            // Context-window occupancy: last prompt size vs the active model's window.
+            self.status.context_tokens = tab.context_tokens;
+            self.status.context_window = tab.engine.model_max_tokens;
             // Plan mode is per-tab, so the badge always reflects the active tab.
             self.status.plan_mode = tab.plan_mode;
             self.status.selection_mode = self.selection_mode;
         }
+        // Active provider group (for the `model(provider)` label), from the live
+        // template — current across startup, model switch, and connect.
+        self.status.provider = self.template.active_provider_name().unwrap_or_default();
         // Keep the approval + sandbox badges in sync with the live template
         // (single source of truth across startup / toggles / tab switches).
         self.status.yolo = self.template.yolo();
@@ -2137,6 +2146,12 @@ impl TuiApp {
     /// then fall back to text. Terminals only deliver pastes as text and never
     /// hand image data to a TUI, so we query the OS clipboard directly.
     fn paste_from_clipboard(&mut self) {
+        // A text field is focused (connect form / filter) → paste text directly,
+        // never an image.
+        if self.connect.is_some() {
+            self.paste_clipboard_text();
+            return;
+        }
         match zode_core::clipboard::read_image_from_clipboard() {
             Ok(Some(bytes)) => self.attach_clipboard_image(bytes),
             // No image (or the image read failed) → treat it as a text paste.
@@ -2171,6 +2186,12 @@ impl TuiApp {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        // The connect dialog accepts pasted text into its focused field (API key,
+        // base URL, …) or, in the provider stage, its search filter.
+        if let Some(dialog) = &mut self.connect {
+            dialog.paste(text);
+            return;
+        }
         // NOTE: `active_dialog` (the permission prompt) is intentionally NOT in
         // this block-list. The permission prompt is non-blocking — the user can
         // type/queue a follow-up while a tool waits for approval — so paste must
@@ -2253,6 +2274,18 @@ impl TuiApp {
                 Some(SessionPickerMouseScroll::Up(n)) => picker.scroll_up(n),
                 Some(SessionPickerMouseScroll::Down(n)) => picker.scroll_down(n),
                 None => {}
+            }
+            return;
+        }
+
+        // Wheel-scroll the provider list (only the list stage has rows).
+        if let Some(dialog) = &mut self.connect {
+            if dialog.stage() == ConnectStage::Provider {
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => dialog.next(),
+                    MouseEventKind::ScrollUp => dialog.prev(),
+                    _ => {}
+                }
             }
             return;
         }
@@ -2579,7 +2612,12 @@ impl TuiApp {
         // network on this path). Then kick off a best-effort background refresh
         // so the cache is warm for the next open.
         let cat = zode_core::Catalog::load_blocking();
-        self.connect = Some(ConnectDialog::with_catalog(&cat));
+        // The user's configured providers form the "Configured" section (listed
+        // first); load them best-effort from the global config.
+        let configured = ConfigManager::load_global()
+            .map(|c| c.providers)
+            .unwrap_or_default();
+        self.connect = Some(ConnectDialog::with_catalog_and_providers(&cat, &configured));
         // Spawn a detached blocking task to refresh the disk cache; ignore any error.
         // spawn_blocking is correct here: refresh_blocking does sync I/O + a
         // 5-second HTTP timeout and must not run on an async worker thread.
@@ -2793,6 +2831,22 @@ impl TuiApp {
                     dialog.next();
                     None
                 }
+                (KeyCode::Home, ConnectStage::Provider) => {
+                    dialog.first();
+                    None
+                }
+                (KeyCode::End, ConnectStage::Provider) => {
+                    dialog.last();
+                    None
+                }
+                (KeyCode::PageUp, ConnectStage::Provider) => {
+                    dialog.page_up();
+                    None
+                }
+                (KeyCode::PageDown, ConnectStage::Provider) => {
+                    dialog.page_down();
+                    None
+                }
                 (KeyCode::Backspace, ConnectStage::Provider) => {
                     dialog.pop_filter_char();
                     None
@@ -2820,6 +2874,18 @@ impl TuiApp {
                     if dialog.focused_field() == ConnectField::Type =>
                 {
                     dialog.cycle_type(true);
+                    None
+                }
+                (KeyCode::Left, ConnectStage::ApiKey)
+                    if dialog.focused_field() == ConnectField::Model =>
+                {
+                    dialog.cycle_model(false);
+                    None
+                }
+                (KeyCode::Right, ConnectStage::ApiKey)
+                    if dialog.focused_field() == ConnectField::Model =>
+                {
+                    dialog.cycle_model(true);
                     None
                 }
                 (KeyCode::Backspace, ConnectStage::ApiKey) => {
@@ -2960,14 +3026,26 @@ impl TuiApp {
                 return;
             }
         };
-        cfg.provider = action.provider.clone();
+        // Group the connected model under its provider in the `providers` map
+        // (shared credentials, one entry per provider) and set it active.
+        let provider = action.provider.clone();
+        cfg.connect_provider(
+            &action.provider_key,
+            provider.clone(),
+            action.model_override,
+        );
         if let Err(e) = ConfigManager::save_global(&cfg) {
             self.toast = Some(Toast::error(format!("save config failed: {e}")));
             return;
         }
 
         let provider_name = action.name;
-        let t = self.template.with_provider_config(action.provider);
+        // Carry the just-saved providers map onto the template so the status
+        // bar's `model(provider)` label resolves the freshly connected group.
+        let t = self
+            .template
+            .with_provider_config(provider)
+            .with_providers_map(cfg.providers.clone());
         if self.reassemble_active(t.clone()).await {
             self.template = t;
             self.toast = Some(Toast::info(format!("provider -> {provider_name}")));
@@ -3090,6 +3168,14 @@ impl TuiApp {
         let t = self.template.with_model(id.to_string());
         if self.reassemble_active(t.clone()).await {
             self.template = t;
+            // Persist the switch so the saved config's active model reflects it
+            // (records just the model name when it's owned by the providers map).
+            if let Ok(mut cfg) = ConfigManager::load_global() {
+                cfg.set_active_model(id);
+                if let Err(e) = ConfigManager::save_global(&cfg) {
+                    self.toast = Some(Toast::error(format!("save config failed: {e}")));
+                }
+            }
             self.active_tab_mut()
                 .chat
                 .push_system(&format!("model → {id}"));
@@ -3115,8 +3201,88 @@ impl TuiApp {
         }
     }
 
+    /// Run a `!<cmd>` shell escape directly (no agent turn): execute in the
+    /// active tab's cwd, echo the command + output inline, and buffer the
+    /// command+output as context for the next prompt so the agent sees it.
+    async fn run_local_shell(&mut self, cmd: &str) {
+        let cwd = self.active_tab().engine.cwd.clone();
+        self.active_tab_mut().chat.push_system(&format!("$ {cmd}"));
+
+        #[cfg(windows)]
+        let mut command = {
+            let mut c = tokio::process::Command::new("cmd");
+            c.arg("/C").arg(cmd);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut c = tokio::process::Command::new("sh");
+            c.arg("-c").arg(cmd);
+            c
+        };
+        command.current_dir(&cwd);
+
+        // Bound the worst case: a timeout caps the UI stall and the output size
+        // cap prevents `!yes`/`!find /` from growing chat + context until OOM.
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+        const MAX_OUTPUT: usize = 64 * 1024;
+        let output = match tokio::time::timeout(TIMEOUT, command.output()).await {
+            Ok(Ok(o)) => {
+                let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                let err = String::from_utf8_lossy(&o.stderr);
+                if !err.trim().is_empty() {
+                    if !s.is_empty() && !s.ends_with('\n') {
+                        s.push('\n');
+                    }
+                    s.push_str(&err);
+                }
+                if s.len() > MAX_OUTPUT {
+                    let mut end = MAX_OUTPUT;
+                    while end > 0 && !s.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    s.truncate(end);
+                    s.push_str("\n… (output truncated)");
+                }
+                // Surface a non-zero exit so the agent sees failures.
+                if !matches!(o.status.code(), Some(0) | None) {
+                    if !s.is_empty() && !s.ends_with('\n') {
+                        s.push('\n');
+                    }
+                    s.push_str(&format!("[exit {}]", o.status.code().unwrap_or(-1)));
+                }
+                s
+            }
+            Ok(Err(e)) => format!("failed to run command: {e}"),
+            Err(_) => format!("command timed out after {}s", TIMEOUT.as_secs()),
+        };
+
+        let shown = output.trim_end();
+        if shown.is_empty() {
+            self.active_tab_mut().chat.push_tool("(no output)");
+        } else {
+            for line in shown.lines() {
+                self.active_tab_mut().chat.push_tool(line);
+            }
+        }
+        self.active_tab_mut()
+            .pending_shell_context
+            .push(format_shell_context(cmd, &output));
+    }
+
     async fn submit(&mut self, text: &str, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         let cwd = self.active_tab().engine.cwd.clone();
+
+        // `!<cmd>` runs a shell command directly (no agent turn). The command +
+        // its output show inline AND are buffered as context for the next prompt
+        // so the agent knows what was run locally.
+        if let Some(cmd) = text.trim().strip_prefix('!') {
+            let cmd = cmd.trim();
+            if !cmd.is_empty() {
+                self.run_local_shell(cmd).await;
+            }
+            return;
+        }
         let parsed = match split_pasted_image_paths(&cwd, text) {
             Ok(parsed) => parsed,
             Err(e) => {
@@ -3174,6 +3340,21 @@ impl TuiApp {
         }
         // One turn per tab (a second QueryLoop would mutate the same store
         // concurrently). Instead of rejecting, QUEUE the message and send it
+        // Prepend any buffered `!cmd` shell output so this turn's prompt shows
+        // the agent what was run locally (travels with a queued message too).
+        if !self.active_tab().pending_shell_context.is_empty() {
+            let ctx = self
+                .active_tab_mut()
+                .pending_shell_context
+                .drain(..)
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            submitted_text = if submitted_text.trim().is_empty() {
+                ctx
+            } else {
+                format!("{ctx}\n\n{submitted_text}")
+            };
+        }
         // when this tab goes idle — see `dispatch_queued_input`.
         if self.active_tab().is_busy() {
             if !submitted_text.trim().is_empty() {
@@ -3493,10 +3674,22 @@ impl TuiApp {
                     Event::Usage {
                         input_tokens,
                         output_tokens,
-                        ..
+                        cache_read,
+                        cache_create,
                     } => {
                         tab.input_tokens = tab.input_tokens.saturating_add(input_tokens);
                         tab.output_tokens = tab.output_tokens.saturating_add(output_tokens);
+                        // Current context occupancy = the FULL prompt size, not
+                        // just the uncached input — with prompt caching the new
+                        // input is tiny (cache hit), so the cached + cache-creation
+                        // tokens are what actually fill the window. Overwrite (not
+                        // accumulate); it drops after compaction.
+                        let prompt = input_tokens
+                            .saturating_add(cache_read)
+                            .saturating_add(cache_create);
+                        if prompt > 0 {
+                            tab.context_tokens = prompt;
+                        }
                         if let Some(line) = process_line_for_event(&event, None) {
                             tab.chat.push_tool(&line);
                         }
@@ -4805,6 +4998,17 @@ fn vision_summary(images: &ImagesConfig, active_provider_supports_images: bool) 
     )
 }
 
+/// Format a `!<cmd>` shell escape's command + output as a context note that's
+/// prepended to the next prompt, so the agent sees what the user ran locally.
+fn format_shell_context(cmd: &str, output: &str) -> String {
+    let out = output.trim_end();
+    if out.is_empty() {
+        format!("I ran the shell command `{cmd}` locally (no output).")
+    } else {
+        format!("I ran the shell command `{cmd}` locally. Output:\n```\n{out}\n```")
+    }
+}
+
 fn resolve_image_submit_route(
     has_images: bool,
     mode: ImageMode,
@@ -4845,6 +5049,17 @@ fn resolve_image_submit_route(
 /// is visible after /resume. User messages that carry only tool results are
 /// skipped (their tool card already shows under the assistant turn); System /
 /// Progress / Tombstone messages are not chat content.
+/// Estimate the token footprint of a restored conversation so a resumed session
+/// shows a sensible context-usage % immediately (the exact value arrives with
+/// the next `Usage` event). Sums the per-message estimate; the fixed system-
+/// prompt/tools overhead isn't included, so it's a slight under-count.
+fn estimate_store_tokens(store: &MessageStore) -> u32 {
+    store
+        .iter()
+        .map(agent::compact::estimate_tokens)
+        .fold(0u32, |acc, t| acc.saturating_add(t))
+}
+
 fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
     let mut chat = ChatView::new();
     for msg in store.iter() {
@@ -5217,6 +5432,19 @@ mod tests {
     use super::*;
     use crate::ui::chat::Role;
     use zode_core::config::{NoemaSettings, ProviderConfig, ProviderKind, ZodeConfig};
+
+    #[test]
+    fn shell_context_note_includes_command_and_output() {
+        let note = format_shell_context("ls -la", "file_a\nfile_b\n");
+        assert!(note.contains("`ls -la`"));
+        assert!(note.contains("file_a"));
+        assert!(note.contains("file_b"));
+        // Empty output is noted explicitly (no dangling code fence).
+        let empty = format_shell_context("true", "   \n");
+        assert!(empty.contains("`true`"));
+        assert!(empty.contains("no output"));
+        assert!(!empty.contains("```"));
+    }
 
     async fn make_test_app() -> (TuiApp, mpsc::UnboundedSender<AppEvent>) {
         let temp = tempfile::tempdir().unwrap();

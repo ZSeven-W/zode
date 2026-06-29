@@ -12,6 +12,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CoreError;
 
+/// serde `skip_serializing_if` helper: omit a value that's still at its default
+/// (an all-`None`/empty nested block) so the saved config stays free of
+/// redundant all-null noise. Round-trips, since every block is `#[serde(default)]`.
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
@@ -21,7 +28,7 @@ pub enum ProviderKind {
     Ollama,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProviderConfig {
     /// Option so config merging can tell "explicitly set" from "absent"
@@ -29,10 +36,14 @@ pub struct ProviderConfig {
     /// Use [`ProviderConfig::kind`] to read the effective kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<ProviderKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// openai dialect: standard | deepseek | moonshot | openrouter
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dialect: Option<String>,
     /// The model's context window in tokens (per provider). Read by the engine
     /// in preference to the top-level `context_window`. None → top-level/default.
@@ -58,6 +69,64 @@ pub struct ProviderConfig {
     pub cache_read_price: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write_price: Option<f64>,
+    /// Models offered by this provider, sharing its `type`/`api_key`/`base_url`/
+    /// `dialect`. Lets one provider entry expose several models without repeating
+    /// the credentials. Keyed by model id; each value may override the model-
+    /// specific fields (context window, max output, prices, image support).
+    /// Order-preserving so the config file order is kept in the model picker.
+    /// Empty for the common single-model provider — and skipped on serialize.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub models: IndexMap<String, ModelOverride>,
+}
+
+/// Per-model overrides under a multi-model provider's `models` map. Only the
+/// model-specific fields live here; `type`/`api_key`/`base_url`/`dialect` are
+/// inherited from the owning provider. An empty override (all `None`) means the
+/// model just shares the provider's settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelOverride {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_images: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_price: Option<f64>,
+}
+
+impl ModelOverride {
+    /// Apply the set (non-`None`) overrides onto a resolved provider config.
+    fn apply_to(&self, p: &mut ProviderConfig) {
+        if self.context_window.is_some() {
+            p.context_window = self.context_window;
+        }
+        if self.max_output_tokens.is_some() {
+            p.max_output_tokens = self.max_output_tokens;
+        }
+        if self.supports_images.is_some() {
+            p.supports_images = self.supports_images;
+        }
+        if self.input_price.is_some() {
+            p.input_price = self.input_price;
+        }
+        if self.output_price.is_some() {
+            p.output_price = self.output_price;
+        }
+        if self.cache_read_price.is_some() {
+            p.cache_read_price = self.cache_read_price;
+        }
+        if self.cache_write_price.is_some() {
+            p.cache_write_price = self.cache_write_price;
+        }
+    }
 }
 
 impl ProviderConfig {
@@ -84,6 +153,21 @@ impl ProviderConfig {
             self.cache_write_price.unwrap_or(0.0),
         ))
     }
+
+    /// Clear the per-model fields (everything a [`ModelOverride`] carries),
+    /// keeping the shared credentials and `model`/`models`. Used when switching
+    /// the active model to one the provider config doesn't describe, so the new
+    /// model resolves its own context window, output cap, and prices from the
+    /// catalog/defaults instead of inheriting the previous model's values.
+    pub fn clear_model_overrides(&mut self) {
+        self.context_window = None;
+        self.max_output_tokens = None;
+        self.supports_images = None;
+        self.input_price = None;
+        self.output_price = None;
+        self.cache_read_price = None;
+        self.cache_write_price = None;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -95,7 +179,7 @@ pub enum ImageMode {
     VisionModel,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ImagesConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,7 +204,7 @@ impl ImagesConfig {
 
 pub const DEFAULT_VISION_PROMPT: &str = "Describe the image precisely for a coding assistant. Mention UI layout, visible text, colors, and error states.";
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PermissionsConfig {
     /// Tool names always allowed without prompting.
@@ -133,7 +217,7 @@ pub struct PermissionsConfig {
 
 /// OS-sandbox settings for shell commands. The sandbox is **on by default**
 /// (workspace-write, network denied); these refine or disable it.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SandboxSettings {
     /// Run shell commands in an OS sandbox. `None` → enabled (default on).
@@ -155,7 +239,7 @@ pub struct SandboxSettings {
 
 /// Plugin enable/disable state. Plugins are on by default, so only the
 /// disabled ids are stored (e.g. `["tools:git", "mcp:foo", "lsp:rust"]`).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PluginsConfig {
     pub disabled: Vec<String>,
@@ -168,7 +252,7 @@ pub const DEFAULT_OPENPENCIL_VERSION: &str = "0.8.0";
 /// OpenPencil control-surface settings (the `op-bridge`). Every field is
 /// `Option` so layered config can tell "absent" from "explicitly set" and a
 /// project layer can reset a global value; read effective values via getters.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct OpenPencilConfig {
     pub enabled: Option<bool>,
@@ -210,7 +294,7 @@ impl OpenPencilConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NoemaSettings {
     /// Long-term memory is enabled by default. Set to false to keep zode fully
@@ -243,13 +327,13 @@ impl NoemaSettings {
 /// Configuration for the built-in LSP plugin: a language server per language
 /// key. The key (e.g. "rust", "python") is also the plugin id suffix
 /// (`lsp:rust`). `extensions` maps the server to the file types it handles.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LspConfig {
     pub servers: HashMap<String, LspServerConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LspServerConfig {
     /// Executable to spawn (e.g. "rust-analyzer", "pyright-langserver").
@@ -264,45 +348,63 @@ pub struct LspServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ZodeConfig {
+    /// Active provider. Omitted from the saved file when empty (the common case
+    /// when only a `providers` map is configured) so no all-null block is written.
+    #[serde(skip_serializing_if = "is_default")]
     pub provider: ProviderConfig,
     /// Named providers; `--provider <name>` selects one into `provider`.
     /// Order-preserving (`IndexMap`) so the user's config file order is kept —
     /// the first entry is the default when no provider is explicitly selected.
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub providers: IndexMap<String, ProviderConfig>,
+    #[serde(skip_serializing_if = "is_default")]
     pub images: ImagesConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
     /// Display currency for cost (e.g. "USD", "CNY", "EUR"). `None` → USD.
     /// Per-provider prices are in USD/MTok; the total is converted for display.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
     /// UI language code (e.g. "en", "zh"). `None` → English. (Settings picker
     /// + full UI translation land in a follow-up; the value is read here.)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// A persistent objective injected into the system prompt so the agent
     /// keeps it in focus. Set/cleared via `/goal`. `None`/empty → no goal.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
     /// Effort level: "low" | "medium" | "high". Injects a thoroughness
     /// directive into the system prompt. Set via `/effort`. `None` → balanced.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     /// Show the agent's thinking/reasoning output in the chat. `None` → shown.
     /// Toggled by `/thinking`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub show_thinking: Option<bool>,
     /// Show tool-call detail lines in the chat. `None` → shown. Toggled by
     /// `/tool-details`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub show_tool_details: Option<bool>,
     /// Autonomous orchestration: when on, the agent is told it may decompose a
     /// task and spawn sub-agents (Task tool) on its own, and the `define_agent`
     /// tool is registered so it can create new sub-agent types. `None` → ON
     /// (enabled by default). Toggled off via Settings / `/orchestration`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub autonomous_orchestration: Option<bool>,
     /// Inject a "use skills first" discipline block into the system prompt when
     /// skills are available. `None` → ON. Set `"skillDiscipline": false` to disable.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_discipline: Option<bool>,
     /// Inject an OpenSpec-workflow awareness block into the system prompt when
     /// the project uses OpenSpec (an `openspec/` dir at the project root). `None`
     /// → ON. Set `"openspecAwareness": false` to disable even when detected.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub openspec_awareness: Option<bool>,
+    #[serde(skip_serializing_if = "is_default")]
     pub permissions: PermissionsConfig,
+    #[serde(skip_serializing_if = "is_default")]
     pub sandbox: SandboxSettings,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     /// The model's context window in tokens, used for auto-compaction /
     /// context-left math. `None` defaults to a conservative 200K. Set this to
@@ -310,23 +412,30 @@ pub struct ZodeConfig {
     /// uses the full window instead of compacting at 200K. Do NOT set it ABOVE
     /// the model's real window — overestimating makes the request overflow and
     /// the API reject the turn; underestimating only compacts earlier.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
     /// Sampling temperature. `None` uses the provider default; a low value
     /// (e.g. 0) makes coding output deterministic and more reliably correct.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     /// Request provider prompt caching (`None` defaults to true). For Anthropic/
     /// MiniMax this adds `cache_control` so the stable system+tools prefix is
     /// cached across turns instead of re-billed every turn; OpenAI-compatible
     /// providers cache automatically.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache: Option<bool>,
     /// Plugin enable/disable state (`/plugin` manages MCP, skills, tool groups,
     /// LSP). Default-on, so this only records the disabled ones.
+    #[serde(skip_serializing_if = "is_default")]
     pub plugins: PluginsConfig,
     /// Language-server configuration for the built-in LSP plugin.
+    #[serde(skip_serializing_if = "is_default")]
     pub lsp: LspConfig,
     /// OpenPencil control-surface configuration (the `op-bridge`).
+    #[serde(skip_serializing_if = "is_default")]
     pub openpencil: OpenPencilConfig,
     /// Native Noema long-term memory integration.
+    #[serde(skip_serializing_if = "is_default")]
     pub noema: NoemaSettings,
 
     // --- Legacy (Zig/TS-era) flat fields, read-only for backward compat.
@@ -413,31 +522,212 @@ impl ZodeConfig {
         }
     }
 
+    /// Build a complete active `ProviderConfig` for `model_id` by finding its
+    /// owning entry in `providers` and combining the shared provider credentials
+    /// with the per-model override. Match priority: a provider whose `models`
+    /// map contains the id, then an entry keyed by the id, then an entry whose
+    /// `model` equals the id (the legacy flat-per-model shape). Returns `None`
+    /// when no provider owns the model. The result never carries a `models` map.
+    ///
+    /// When the same model id appears under more than one provider, the first
+    /// match (in `providers` insertion order, `models`-map entries first) wins.
+    /// This is deterministic but credential-ambiguous; a config that needs two
+    /// providers to expose the same model id should give them distinct ids.
+    /// The `providers`-map key owning the active model — its `models` map
+    /// contains it, its `model` equals it, or it is keyed by it. `None` when the
+    /// active model belongs to no configured group. For catalog-backed providers
+    /// this key equals the models.dev provider id, so it scopes catalog lookups.
+    pub fn active_provider_key(&self) -> Option<&str> {
+        let model = self.provider.model.as_deref()?;
+        self.providers
+            .iter()
+            .find(|(key, entry)| {
+                entry.models.contains_key(model)
+                    || entry.model.as_deref() == Some(model)
+                    || key.as_str() == model
+            })
+            .map(|(key, _)| key.as_str())
+    }
+
+    pub fn resolve_model_provider(&self, model_id: &str) -> Option<ProviderConfig> {
+        // 1. A multi-model provider whose `models` map lists the id.
+        for entry in self.providers.values() {
+            if let Some(ov) = entry.models.get(model_id) {
+                let mut p = entry.clone();
+                p.models = IndexMap::new();
+                p.model = Some(model_id.to_string());
+                ov.apply_to(&mut p);
+                return Some(p);
+            }
+        }
+        // 2. An entry keyed by the id (the common single-model shape).
+        if let Some(entry) = self.providers.get(model_id) {
+            let mut p = entry.clone();
+            p.models = IndexMap::new();
+            if p.model.is_none() {
+                p.model = Some(model_id.to_string());
+            }
+            return Some(p);
+        }
+        // 3. An entry whose own `model` equals the id.
+        if let Some(entry) = self
+            .providers
+            .values()
+            .find(|p| p.model.as_deref() == Some(model_id))
+        {
+            let mut p = entry.clone();
+            p.models = IndexMap::new();
+            return Some(p);
+        }
+        None
+    }
+
+    /// Record a freshly connected provider+model into the `providers` map so
+    /// one provider entry accumulates several models instead of duplicating
+    /// credentials per model. `group_key` is the provider's id; `active` is the
+    /// resolved session config (its `model` is the model being connected);
+    /// `model_override` is stored under `providers[group_key].models[model]`.
+    /// A pre-existing single-`model` entry is migrated into the `models` map
+    /// first. The active `provider` is then set to JUST the model name (no
+    /// duplicated credentials) — the full config is reconstructed from the map
+    /// at load time.
+    pub fn connect_provider(
+        &mut self,
+        group_key: &str,
+        active: ProviderConfig,
+        model_override: ModelOverride,
+    ) {
+        let model = active.model.clone();
+        {
+            let entry = self.providers.entry(group_key.to_string()).or_default();
+            // Share the credentials at the provider level (latest wins).
+            if active.r#type.is_some() {
+                entry.r#type = active.r#type;
+            }
+            if active.api_key.is_some() {
+                entry.api_key = active.api_key.clone();
+            }
+            if active.base_url.is_some() {
+                entry.base_url = active.base_url.clone();
+            }
+            if active.dialect.is_some() {
+                entry.dialect = active.dialect.clone();
+            }
+            // Migrate a legacy single-model entry into the map before adding the
+            // new one. Its per-model fields (context/max-output/prices) move into
+            // ITS override — leaving them on the parent would silently apply them
+            // to every model under this provider.
+            if let Some(old) = entry.model.take() {
+                let old_override = ModelOverride {
+                    context_window: entry.context_window.take(),
+                    max_output_tokens: entry.max_output_tokens.take(),
+                    supports_images: entry.supports_images.take(),
+                    input_price: entry.input_price.take(),
+                    output_price: entry.output_price.take(),
+                    cache_read_price: entry.cache_read_price.take(),
+                    cache_write_price: entry.cache_write_price.take(),
+                };
+                entry.models.entry(old).or_insert(old_override);
+            }
+            if let Some(ref m) = model {
+                entry.models.insert(m.clone(), model_override);
+            }
+        }
+        // The active selection records ONLY the model name; the full config
+        // (credentials + per-model override) lives in the `providers` map above
+        // and is reconstructed by `resolve_provider_from_map` at load time.
+        self.provider = ProviderConfig {
+            model,
+            ..Default::default()
+        };
+    }
+
+    /// Resolve a named provider entry into a complete active `ProviderConfig`:
+    /// adopt its shared credentials, default to its first model (its top-level
+    /// `model`, else the first key in its `models` map), apply that model's
+    /// override, and drop the `models` map. `None` if the name isn't configured.
+    pub fn resolve_named_provider(&self, name: &str) -> Option<ProviderConfig> {
+        let entry = self.providers.get(name)?;
+        let default_model = entry
+            .model
+            .clone()
+            .or_else(|| entry.models.keys().next().cloned());
+        match default_model {
+            Some(m) => self.resolve_named_provider_model(name, &m),
+            None => {
+                let mut p = entry.clone();
+                p.models = IndexMap::new();
+                Some(p)
+            }
+        }
+    }
+
+    /// Resolve a named provider entry to a SPECIFIC model: adopt its shared
+    /// credentials, set the active model to `model_id`, apply that model's
+    /// override (if it lives in the entry's `models` map; absent → no override,
+    /// for a custom model under the provider's credentials), and drop the map.
+    /// `None` if the name isn't configured. Used for `--provider X --model Y` so
+    /// Y gets Y's per-model settings, not the default model's.
+    pub fn resolve_named_provider_model(
+        &self,
+        name: &str,
+        model_id: &str,
+    ) -> Option<ProviderConfig> {
+        let entry = self.providers.get(name)?;
+        let mut p = entry.clone();
+        if let Some(ov) = entry.models.get(model_id) {
+            ov.apply_to(&mut p);
+        }
+        p.model = Some(model_id.to_string());
+        p.models = IndexMap::new();
+        Some(p)
+    }
+
     /// When the active `provider` has no API key but the `providers` map has a
-    /// matching entry, adopt that entry's settings into the active provider so
-    /// a configured `providers` map "just works" without an explicit
-    /// `--provider`. Match priority: a map key equal to the active model, then
-    /// an entry whose `model` equals the active model, then the sole entry.
-    /// Already-set active fields win; the entry only fills the gaps (notably
-    /// the API key). No-op when the active provider already has a key.
+    /// matching entry, adopt that entry's settings into the active provider so a
+    /// configured `providers` map "just works" without an explicit `--provider`.
+    /// With an active model, the owning entry is found via
+    /// [`Self::resolve_model_provider`] (its `models` map, its key, then its
+    /// `model`); with no active model, the FIRST configured provider (file order)
+    /// is resolved via [`Self::resolve_named_provider`]. Already-set active
+    /// fields win; the entry only fills the gaps. No-op when the active provider
+    /// already has a key.
+    /// Record a `/model` switch in the active `provider`. When the model is
+    /// owned by a configured provider, the active provider is reduced to JUST
+    /// its name (the full config is reconstructed from the `providers` map on
+    /// load — matching [`Self::connect_provider`]). For a custom model not in
+    /// the map, the model is set on the current active provider so its
+    /// credentials are preserved.
+    pub fn set_active_model(&mut self, model_id: &str) {
+        if self.resolve_model_provider(model_id).is_some() {
+            self.provider = ProviderConfig {
+                model: Some(model_id.to_string()),
+                ..Default::default()
+            };
+        } else {
+            self.provider.model = Some(model_id.to_string());
+        }
+    }
+
     pub fn resolve_provider_from_map(&mut self) {
         if self.provider.api_key.is_some() || self.providers.is_empty() {
             return;
         }
         let pick = match self.provider.model.clone() {
-            // An explicit active model: adopt the entry whose map key OR `model`
-            // equals it. If none matches, leave it (the user named a model that
-            // isn't configured — don't silently swap in a different provider).
-            Some(m) => self.providers.get(&m).cloned().or_else(|| {
-                self.providers
-                    .values()
-                    .find(|p| p.model.as_deref() == Some(m.as_str()))
-                    .cloned()
-            }),
+            // An explicit active model: adopt the entry that owns it (its map
+            // key, its `model`, or its `models` map). If none matches, leave it
+            // (the user named a model that isn't configured — don't silently
+            // swap in a different provider).
+            Some(m) => self.resolve_model_provider(&m),
             // No active model: default to the FIRST configured provider (file
-            // order, preserved by IndexMap) — adopted in full, including its
-            // model. This is the common "I only set up `providers`" case.
-            None => self.providers.values().next().cloned(),
+            // order, preserved by IndexMap), resolved to its default model and
+            // that model's override.
+            None => self
+                .providers
+                .keys()
+                .next()
+                .cloned()
+                .and_then(|k| self.resolve_named_provider(&k)),
         };
         let Some(p) = pick else {
             return;
@@ -638,6 +928,12 @@ impl ConfigManager {
             cfg.merge_from(Self::load_file(&state)?);
         }
         cfg.normalize_legacy();
+        // Reconstruct a minimal active provider (just `{ model }`) from the
+        // `providers` map BEFORE the env fallback — otherwise an env API key
+        // would fill `provider.api_key` and make `resolve_provider_from_map`
+        // early-return, stranding the session without the provider's base URL /
+        // dialect / context window.
+        cfg.resolve_provider_from_map();
         cfg.apply_env_fallbacks();
         Ok(cfg)
     }
@@ -761,6 +1057,44 @@ mod tests {
         a.merge_from(b);
         // Accumulated + deduped (not replaced, not duplicated).
         assert_eq!(a.permissions.allow, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_resolves_minimal_provider_before_env_fallback() {
+        let global = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::write(
+            global.path().join("config.json"),
+            r#"{
+                "provider": { "model": "deepseek-v4-pro" },
+                "providers": { "deepseek": {
+                    "type": "anthropic",
+                    "apiKey": "sk-saved",
+                    "baseUrl": "https://api.deepseek.com/anthropic",
+                    "models": { "deepseek-v4-pro": { "contextWindow": 1000000 } }
+                } }
+            }"#,
+        )
+        .unwrap();
+        std::env::set_var("ZODE_CONFIG_DIR", global.path());
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-env-should-not-win");
+
+        let cfg = ConfigManager::load(cwd.path()).unwrap();
+
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("ZODE_CONFIG_DIR");
+
+        // The minimal active provider must be reconstructed from the providers
+        // map BEFORE the env fallback runs — so base URL/context come from the
+        // saved provider and the saved key wins over the env var.
+        assert_eq!(cfg.provider.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(cfg.provider.api_key.as_deref(), Some("sk-saved"));
+        assert_eq!(
+            cfg.provider.base_url.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(cfg.provider.context_window, Some(1_000_000));
     }
 
     #[test]
@@ -1181,6 +1515,530 @@ mod tests {
         cfg.resolve_provider_from_map();
         assert_eq!(cfg.provider.api_key.as_deref(), Some("sk-pro")); // first entry
         assert_eq!(cfg.provider.model.as_deref(), Some("deepseek-v4-pro"));
+    }
+
+    #[test]
+    fn empty_and_default_blocks_are_omitted_on_serialize() {
+        let mut cfg = ZodeConfig::default();
+        // The realistic case: only a providers map is configured.
+        cfg.providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk".into()),
+                base_url: Some("https://x/anthropic".into()),
+                model: Some("deepseek-v4-pro".into()),
+                ..Default::default()
+            },
+        );
+        cfg.theme = Some("minimal".into());
+        let json = serde_json::to_string_pretty(&cfg).unwrap();
+
+        // The all-null active provider block and every all-default nested block
+        // must be omitted (no "全部 null" noise).
+        assert!(
+            !json.contains("\"provider\":"),
+            "empty active provider must be omitted: {json}"
+        );
+        for key in [
+            "openpencil",
+            "sandbox",
+            "permissions",
+            "lsp",
+            "noema",
+            "images",
+            "plugins",
+        ] {
+            assert!(
+                !json.contains(&format!("\"{key}\":")),
+                "default `{key}` block must be omitted: {json}"
+            );
+        }
+        // Null scalar options are dropped too.
+        for key in [
+            "currency",
+            "goal",
+            "effort",
+            "maxOutputTokens",
+            "contextWindow",
+            "temperature",
+        ] {
+            assert!(
+                !json.contains(&format!("\"{key}\":")),
+                "null `{key}` must be omitted: {json}"
+            );
+        }
+        // No `"dialect": null` noise inside providers entries.
+        assert!(!json.contains("\"dialect\": null"));
+        // Set values are kept and the config round-trips.
+        assert!(json.contains("\"providers\":"));
+        assert!(json.contains("\"theme\":"));
+        assert!(json.contains("deepseek-v4-pro"));
+        let back: ZodeConfig = serde_json::from_str(&json).unwrap();
+        assert!(back.providers.contains_key("deepseek"));
+        assert_eq!(back.theme.as_deref(), Some("minimal"));
+    }
+
+    #[test]
+    fn provider_config_roundtrips_models_map() {
+        let json = r#"{
+            "type": "anthropic",
+            "apiKey": "sk-x",
+            "baseUrl": "https://api.deepseek.com/anthropic",
+            "models": {
+                "deepseek-v4-pro":   { "contextWindow": 1000000 },
+                "deepseek-v4-flash": {}
+            }
+        }"#;
+        let p: ProviderConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(p.models.len(), 2);
+        assert_eq!(p.models["deepseek-v4-pro"].context_window, Some(1_000_000));
+        // Insertion order is preserved (IndexMap).
+        let keys: Vec<&String> = p.models.keys().collect();
+        assert_eq!(keys, vec!["deepseek-v4-pro", "deepseek-v4-flash"]);
+        // An empty models map is skipped on serialize.
+        let out = serde_json::to_string(&ProviderConfig::default()).unwrap();
+        assert!(
+            !out.contains("models"),
+            "empty models map must not serialize"
+        );
+    }
+
+    #[test]
+    fn resolve_model_provider_uses_shared_creds_and_per_model_override() {
+        let mut cfg = ZodeConfig::default();
+        let mut models = IndexMap::new();
+        models.insert(
+            "deepseek-v4-pro".to_string(),
+            ModelOverride {
+                context_window: Some(1_000_000),
+                input_price: Some(0.28),
+                ..Default::default()
+            },
+        );
+        models.insert("deepseek-v4-flash".to_string(), ModelOverride::default());
+        cfg.providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk-shared".into()),
+                base_url: Some("https://api.deepseek.com/anthropic".into()),
+                models,
+                ..Default::default()
+            },
+        );
+
+        let pro = cfg
+            .resolve_model_provider("deepseek-v4-pro")
+            .expect("pro model resolves");
+        assert_eq!(pro.api_key.as_deref(), Some("sk-shared"));
+        assert_eq!(
+            pro.base_url.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(pro.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(pro.context_window, Some(1_000_000)); // per-model override
+        assert_eq!(pro.input_price, Some(0.28));
+        assert!(
+            pro.models.is_empty(),
+            "resolved active provider must not carry the models map"
+        );
+
+        let flash = cfg
+            .resolve_model_provider("deepseek-v4-flash")
+            .expect("flash model resolves");
+        assert_eq!(flash.api_key.as_deref(), Some("sk-shared"));
+        assert_eq!(flash.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(flash.context_window, None); // no override → unset
+
+        assert!(cfg.resolve_model_provider("nope").is_none());
+    }
+
+    #[test]
+    fn connect_provider_groups_models_under_one_entry() {
+        let mut cfg = ZodeConfig::default();
+        let pro = ProviderConfig {
+            r#type: Some(ProviderKind::Anthropic),
+            api_key: Some("sk-shared".into()),
+            base_url: Some("https://api.deepseek.com/anthropic".into()),
+            model: Some("deepseek-v4-pro".into()),
+            context_window: Some(1_000_000),
+            ..Default::default()
+        };
+        cfg.connect_provider(
+            "deepseek",
+            pro,
+            ModelOverride {
+                context_window: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        // Connect a SECOND model under the same provider.
+        let flash = ProviderConfig {
+            r#type: Some(ProviderKind::Anthropic),
+            api_key: Some("sk-shared".into()),
+            base_url: Some("https://api.deepseek.com/anthropic".into()),
+            model: Some("deepseek-v4-flash".into()),
+            ..Default::default()
+        };
+        cfg.connect_provider("deepseek", flash, ModelOverride::default());
+
+        assert_eq!(cfg.providers.len(), 1, "both models share one entry");
+        let entry = &cfg.providers["deepseek"];
+        assert_eq!(entry.api_key.as_deref(), Some("sk-shared"));
+        assert!(
+            entry.model.is_none(),
+            "models live in the map, not top-level"
+        );
+        let keys: Vec<&String> = entry.models.keys().collect();
+        assert_eq!(keys, vec!["deepseek-v4-pro", "deepseek-v4-flash"]);
+        assert_eq!(
+            entry.models["deepseek-v4-pro"].context_window,
+            Some(1_000_000)
+        );
+        // Active provider is the most-recently connected model.
+        assert_eq!(cfg.provider.model.as_deref(), Some("deepseek-v4-flash"));
+        // The grouped entry resolves back to working credentials.
+        let resolved = cfg.resolve_model_provider("deepseek-v4-pro").unwrap();
+        assert_eq!(resolved.api_key.as_deref(), Some("sk-shared"));
+        assert_eq!(resolved.context_window, Some(1_000_000));
+    }
+
+    #[test]
+    fn set_active_model_minimal_when_in_map_else_keeps_creds() {
+        let mut cfg = ZodeConfig::default();
+        let mut models = IndexMap::new();
+        models.insert("deepseek-v4-pro".to_string(), ModelOverride::default());
+        models.insert("deepseek-chat".to_string(), ModelOverride::default());
+        cfg.providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk".into()),
+                base_url: Some("https://api.deepseek.com/anthropic".into()),
+                models,
+                ..Default::default()
+            },
+        );
+        cfg.provider = ProviderConfig {
+            model: Some("deepseek-chat".into()),
+            ..Default::default()
+        };
+
+        // Switching to a model owned by the providers map → active provider is
+        // reduced to just the model name, and still resolves to full creds.
+        cfg.set_active_model("deepseek-v4-pro");
+        assert_eq!(cfg.provider.model.as_deref(), Some("deepseek-v4-pro"));
+        assert!(cfg.provider.api_key.is_none());
+        assert_eq!(
+            cfg.resolve_model_provider("deepseek-v4-pro")
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("sk")
+        );
+
+        // A custom model not in the map → set on the active provider, creds kept.
+        cfg.provider = ProviderConfig {
+            api_key: Some("sk-custom".into()),
+            base_url: Some("https://custom/v1".into()),
+            model: Some("old".into()),
+            ..Default::default()
+        };
+        cfg.set_active_model("totally-custom");
+        assert_eq!(cfg.provider.model.as_deref(), Some("totally-custom"));
+        assert_eq!(cfg.provider.api_key.as_deref(), Some("sk-custom"));
+    }
+
+    #[test]
+    fn connect_provider_active_records_only_model_name() {
+        let mut cfg = ZodeConfig::default();
+        let active = ProviderConfig {
+            r#type: Some(ProviderKind::Anthropic),
+            api_key: Some("sk-x".into()),
+            base_url: Some("https://api.deepseek.com/anthropic".into()),
+            model: Some("deepseek-v4-pro".into()),
+            dialect: Some("deepseek".into()),
+            context_window: Some(1_000_000),
+            input_price: Some(0.435),
+            ..Default::default()
+        };
+        cfg.connect_provider(
+            "deepseek",
+            active,
+            ModelOverride {
+                context_window: Some(1_000_000),
+                input_price: Some(0.435),
+                ..Default::default()
+            },
+        );
+
+        // The active provider records ONLY the model name — no duplicated creds.
+        assert_eq!(cfg.provider.model.as_deref(), Some("deepseek-v4-pro"));
+        assert!(cfg.provider.api_key.is_none());
+        assert!(cfg.provider.base_url.is_none());
+        assert!(cfg.provider.dialect.is_none());
+        assert!(cfg.provider.context_window.is_none());
+        assert!(cfg.provider.input_price.is_none());
+        // The providers map is the single source of truth (creds + override).
+        let entry = &cfg.providers["deepseek"];
+        assert_eq!(entry.api_key.as_deref(), Some("sk-x"));
+        assert_eq!(
+            entry.models["deepseek-v4-pro"].context_window,
+            Some(1_000_000)
+        );
+        assert_eq!(entry.models["deepseek-v4-pro"].input_price, Some(0.435));
+        // …and the minimal active provider resolves back to the full config.
+        let resolved = cfg.resolve_model_provider("deepseek-v4-pro").unwrap();
+        assert_eq!(resolved.api_key.as_deref(), Some("sk-x"));
+        assert_eq!(
+            resolved.base_url.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(resolved.context_window, Some(1_000_000));
+        assert_eq!(resolved.input_price, Some(0.435));
+    }
+
+    #[test]
+    fn connect_provider_migration_preserves_legacy_model_settings() {
+        let mut cfg = ZodeConfig::default();
+        // Legacy entry with per-model settings ON the entry itself.
+        cfg.providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk-old".into()),
+                base_url: Some("https://api.deepseek.com/anthropic".into()),
+                model: Some("deepseek-v4-pro".into()),
+                context_window: Some(1_000_000),
+                input_price: Some(0.28),
+                ..Default::default()
+            },
+        );
+        let flash = ProviderConfig {
+            r#type: Some(ProviderKind::Anthropic),
+            api_key: Some("sk-old".into()),
+            base_url: Some("https://api.deepseek.com/anthropic".into()),
+            model: Some("deepseek-v4-flash".into()),
+            ..Default::default()
+        };
+        cfg.connect_provider("deepseek", flash, ModelOverride::default());
+        let entry = &cfg.providers["deepseek"];
+        // The legacy model's per-model settings move into ITS override…
+        assert_eq!(
+            entry.models["deepseek-v4-pro"].context_window,
+            Some(1_000_000)
+        );
+        assert_eq!(entry.models["deepseek-v4-pro"].input_price, Some(0.28));
+        // …and must NOT linger on the parent (else every model inherits them).
+        assert_eq!(entry.context_window, None);
+        assert_eq!(entry.input_price, None);
+        // The newly added flash model does not inherit pro's context.
+        assert_eq!(
+            cfg.resolve_model_provider("deepseek-v4-flash")
+                .unwrap()
+                .context_window,
+            None
+        );
+        assert_eq!(
+            cfg.resolve_model_provider("deepseek-v4-pro")
+                .unwrap()
+                .context_window,
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn resolve_named_provider_applies_default_model_override() {
+        let mut cfg = ZodeConfig::default();
+        let mut models = IndexMap::new();
+        models.insert(
+            "deepseek-v4-pro".to_string(),
+            ModelOverride {
+                context_window: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        models.insert("deepseek-v4-flash".to_string(), ModelOverride::default());
+        cfg.providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk-shared".into()),
+                models,
+                ..Default::default()
+            },
+        );
+        let p = cfg
+            .resolve_named_provider("deepseek")
+            .expect("named provider");
+        assert_eq!(p.model.as_deref(), Some("deepseek-v4-pro")); // first listed
+        assert_eq!(p.context_window, Some(1_000_000)); // its override applied
+        assert_eq!(p.api_key.as_deref(), Some("sk-shared"));
+        assert!(p.models.is_empty());
+        assert!(cfg.resolve_named_provider("nope").is_none());
+    }
+
+    #[test]
+    fn resolve_named_provider_model_applies_specified_model_override() {
+        let mut cfg = ZodeConfig::default();
+        let mut models = IndexMap::new();
+        models.insert(
+            "deepseek-v4-pro".to_string(),
+            ModelOverride {
+                context_window: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        models.insert(
+            "deepseek-v4-flash".to_string(),
+            ModelOverride {
+                context_window: Some(131_072),
+                ..Default::default()
+            },
+        );
+        cfg.providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk-shared".into()),
+                models,
+                ..Default::default()
+            },
+        );
+        // The chosen model's OWN override applies, not the default's.
+        let flash = cfg
+            .resolve_named_provider_model("deepseek", "deepseek-v4-flash")
+            .expect("model in provider");
+        assert_eq!(flash.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(flash.context_window, Some(131_072));
+        assert_eq!(flash.api_key.as_deref(), Some("sk-shared"));
+        assert!(flash.models.is_empty());
+        // A model not in the map → provider creds + that model, no override.
+        let custom = cfg
+            .resolve_named_provider_model("deepseek", "custom-x")
+            .expect("provider exists");
+        assert_eq!(custom.model.as_deref(), Some("custom-x"));
+        assert_eq!(custom.context_window, None);
+        // Unknown provider → None.
+        assert!(cfg.resolve_named_provider_model("nope", "x").is_none());
+    }
+
+    #[test]
+    fn resolve_provider_from_map_applies_default_model_override() {
+        let mut cfg = ZodeConfig::default(); // no active model
+        let mut models = IndexMap::new();
+        models.insert(
+            "deepseek-v4-pro".to_string(),
+            ModelOverride {
+                context_window: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        cfg.providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk-shared".into()),
+                base_url: Some("https://api.deepseek.com/anthropic".into()),
+                models,
+                ..Default::default()
+            },
+        );
+        cfg.resolve_provider_from_map();
+        assert_eq!(cfg.provider.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(cfg.provider.context_window, Some(1_000_000)); // override applied
+        assert!(cfg.provider.models.is_empty());
+    }
+
+    #[test]
+    fn connect_provider_migrates_legacy_single_model_entry() {
+        let mut cfg = ZodeConfig::default();
+        // A pre-existing entry keyed by the group with a single top-level model.
+        cfg.providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk-old".into()),
+                base_url: Some("https://api.deepseek.com/anthropic".into()),
+                model: Some("deepseek-v4-pro".into()),
+                ..Default::default()
+            },
+        );
+        let flash = ProviderConfig {
+            r#type: Some(ProviderKind::Anthropic),
+            api_key: Some("sk-old".into()),
+            base_url: Some("https://api.deepseek.com/anthropic".into()),
+            model: Some("deepseek-v4-flash".into()),
+            ..Default::default()
+        };
+        cfg.connect_provider("deepseek", flash, ModelOverride::default());
+        let entry = &cfg.providers["deepseek"];
+        assert!(entry.model.is_none());
+        let keys: Vec<&String> = entry.models.keys().collect();
+        assert_eq!(
+            keys,
+            vec!["deepseek-v4-pro", "deepseek-v4-flash"],
+            "legacy model is migrated into the map before the new one is added"
+        );
+    }
+
+    #[test]
+    fn real_world_minimal_provider_resolves_per_model_context_window() {
+        // The exact on-disk shape: a minimal active `provider` recording only
+        // the model name, with the real config living in the `providers` map and
+        // BOTH models pinning contextWindow=1_000_000. Proves the status-bar
+        // denominator resolves to 1M (not the 200K default) for this user, and
+        // that switching between the two models keeps it 1M (both are 1M) — i.e.
+        // identical %, by design, not a bug.
+        let json = r#"{
+          "provider": { "model": "deepseek-v4-pro" },
+          "providers": {
+            "deepseek": {
+              "type": "anthropic",
+              "apiKey": "sk-x",
+              "baseUrl": "https://api.deepseek.com/anthropic",
+              "dialect": "deepseek",
+              "models": {
+                "deepseek-v4-pro": { "contextWindow": 1000000, "maxOutputTokens": 384000 },
+                "deepseek-chat":   { "contextWindow": 1000000, "maxOutputTokens": 384000 }
+              }
+            }
+          }
+        }"#;
+        let mut cfg: ZodeConfig = serde_json::from_str(json).expect("parse config");
+        cfg.resolve_provider_from_map();
+        assert_eq!(cfg.provider.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(cfg.provider.context_window, Some(1_000_000));
+        // Resolving the sibling model yields the same window (both pinned 1M).
+        let chat = cfg
+            .resolve_model_provider("deepseek-chat")
+            .expect("resolve");
+        assert_eq!(chat.context_window, Some(1_000_000));
+    }
+
+    #[test]
+    fn resolve_provider_from_map_resolves_model_inside_models_map() {
+        let mut cfg = ZodeConfig::default();
+        cfg.provider.model = Some("deepseek-v4-flash".into()); // active model, NO key
+        let mut models = IndexMap::new();
+        models.insert("deepseek-v4-pro".to_string(), ModelOverride::default());
+        models.insert("deepseek-v4-flash".to_string(), ModelOverride::default());
+        cfg.providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk-shared".into()),
+                base_url: Some("https://api.deepseek.com/anthropic".into()),
+                models,
+                ..Default::default()
+            },
+        );
+        assert!(cfg.provider.api_key.is_none());
+        cfg.resolve_provider_from_map();
+        assert_eq!(cfg.provider.api_key.as_deref(), Some("sk-shared"));
+        assert_eq!(cfg.provider.model.as_deref(), Some("deepseek-v4-flash"));
+        assert!(cfg.provider.models.is_empty());
     }
 
     #[test]

@@ -4690,6 +4690,7 @@ dependencies = [
  "agent",
  "crossterm",
  "futures",
+ "indexmap",
  "once_cell",
  "pulldown-cmark",
  "ratatui",

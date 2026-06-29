@@ -130,6 +130,10 @@ impl InputBox {
             Mode::Streaming => theme.accent,
             Mode::Error => Color::Red,
         };
+        // `!cmd` shell-escape mode: a distinct (amber) rail + hint so it's clear
+        // the line runs locally and is not sent to the model.
+        let shell = self.is_shell_command();
+        let rail_color = if shell { Color::Yellow } else { status_color };
         f.render_widget(
             Paragraph::new("").style(Style::default().bg(theme.bg_input)),
             area,
@@ -139,7 +143,7 @@ impl InputBox {
                 .map(|_| {
                     Line::from(Span::styled(
                         "▌",
-                        Style::default().bg(theme.bg_input).fg(status_color),
+                        Style::default().bg(theme.bg_input).fg(rail_color),
                     ))
                 })
                 .collect();
@@ -152,6 +156,52 @@ impl InputBox {
         let body = input_body_area(area);
         self.render_wrapped_text(f, body, theme, selection);
         self.render_completion_placeholder(f, area, theme, completion_placeholder);
+        if shell {
+            self.render_shell_hint(f, area, theme);
+        }
+    }
+
+    /// True when the input is a `!cmd` shell escape (first line begins with `!`).
+    pub fn is_shell_command(&self) -> bool {
+        self.area
+            .lines()
+            .first()
+            .map(|l| l.trim_start().starts_with('!'))
+            .unwrap_or(false)
+    }
+
+    /// Right-aligned, subtle reminder shown in shell-escape mode (when there's
+    /// room on the first row that doesn't collide with the typed command).
+    fn render_shell_hint(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let body = input_body_area(area);
+        if body.width == 0 || body.height == 0 {
+            return;
+        }
+        let hint = "shell · ↵ runs locally";
+        // Width math in usize: the command line is unbounded, so a u16 add/cast
+        // could overflow or truncate and defeat the collision guard.
+        let hint_w = UnicodeWidthStr::width(hint);
+        let used = self
+            .area
+            .lines()
+            .first()
+            .map(|l| UnicodeWidthStr::width(l.as_str()))
+            .unwrap_or(0);
+        let avail = body.width as usize;
+        if hint_w.saturating_add(used).saturating_add(2) > avail {
+            return; // not enough room beside the command
+        }
+        let x = body.x.saturating_add(avail.saturating_sub(hint_w) as u16);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                hint,
+                Style::default()
+                    .bg(theme.bg_input)
+                    .fg(theme.fg_subtle)
+                    .add_modifier(Modifier::ITALIC),
+            ))),
+            Rect::new(x, body.y, hint_w as u16, 1),
+        );
     }
 
     pub fn selection_point_at(
@@ -519,6 +569,36 @@ mod tests {
     fn empty_take_returns_empty() {
         let mut ib = InputBox::new();
         assert_eq!(ib.take(), "");
+    }
+
+    #[test]
+    fn detects_shell_command_prefix() {
+        let mut ib = InputBox::new();
+        assert!(!ib.is_shell_command());
+        ib.insert_str("!ls -la");
+        assert!(ib.is_shell_command());
+        let mut chat = InputBox::new();
+        chat.insert_str("hello");
+        assert!(!chat.is_shell_command());
+        let mut spaced = InputBox::new();
+        spaced.insert_str("  !git status");
+        assert!(spaced.is_shell_command());
+    }
+
+    #[test]
+    fn shell_mode_colors_rail_amber_and_shows_hint() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut ib = InputBox::new();
+        ib.insert_str("!ls");
+        let backend = TestBackend::new(80, 3);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| ib.render(f, f.area(), &theme, Mode::Ready, None))
+            .unwrap();
+        let buf = term.backend().buffer();
+        // The left rail is amber in shell mode (vs the mode color otherwise).
+        assert_eq!(buf.cell((0, 0)).unwrap().fg, Color::Yellow);
+        let content: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(content.contains("shell"), "shell hint visible: {content}");
     }
 
     #[test]

@@ -19,8 +19,15 @@ pub enum Mode {
 pub struct StatusBar {
     pub mode: Mode,
     pub model: String,
+    /// Provider-group name of the active model (e.g. "deepseek"). Shown as
+    /// `model(provider)`; empty when the model isn't part of a configured group.
+    pub provider: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Current context-window usage (tokens) and total, for the occupancy %.
+    /// `context_window` of 0 hides the badge.
+    pub context_tokens: u32,
+    pub context_window: u32,
     pub yolo: bool,
     /// OS sandbox active for shell + file writes.
     pub sandbox: bool,
@@ -38,8 +45,11 @@ impl StatusBar {
         Self {
             mode: Mode::Ready,
             model,
+            provider: String::new(),
             input_tokens: 0,
             output_tokens: 0,
+            context_tokens: 0,
+            context_window: 0,
             yolo: false,
             sandbox: false,
             sandbox_read_only: false,
@@ -52,6 +62,24 @@ impl StatusBar {
 
     pub fn tick(&mut self) {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
+    }
+
+    /// `model(provider)` when the provider group is known, else just `model`.
+    fn model_label(&self) -> String {
+        if self.provider.is_empty() {
+            self.model.clone()
+        } else {
+            format!("{}({})", self.model, self.provider)
+        }
+    }
+
+    /// Context-window occupancy as a 0–100 percentage, or `None` when the window
+    /// size is unknown (no badge). Clamped so a slight over-count never exceeds 100.
+    fn context_percent(&self) -> Option<u64> {
+        if self.context_window == 0 {
+            return None;
+        }
+        Some((self.context_tokens as u64 * 100 / self.context_window as u64).min(100))
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme) {
@@ -78,13 +106,29 @@ impl StatusBar {
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" │ ", Style::default().fg(theme.separator)),
-            Span::styled(self.model.clone(), Style::default().fg(theme.fg_text)),
+            // Active model, with its provider group in parens: `model(provider)`.
+            Span::styled(self.model_label(), Style::default().fg(theme.fg_text)),
             Span::styled(" │ ", Style::default().fg(theme.separator)),
             Span::styled(
                 format!("↑{} ↓{}", self.input_tokens, self.output_tokens),
                 Style::default().fg(theme.fg_subtle),
             ),
         ];
+        // Context-window occupancy, when known. Subtle until it gets tight.
+        if let Some(pct) = self.context_percent() {
+            let pct_color = if pct >= 90 {
+                Color::Red
+            } else if pct >= 75 {
+                Color::Yellow
+            } else {
+                theme.fg_subtle
+            };
+            spans.push(Span::styled(" │ ", Style::default().fg(theme.separator)));
+            spans.push(Span::styled(
+                format!("{pct}% ctx"),
+                Style::default().fg(pct_color),
+            ));
+        }
         // Approval mode: YOLO (auto-approve, risky) in red, otherwise the safe
         // default is implicit (no badge).
         if self.yolo {
@@ -230,6 +274,23 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    #[test]
+    fn renders_provider_and_context_percent() {
+        let mut sb = StatusBar::new("deepseek-v4-pro".into());
+        sb.provider = "deepseek".into();
+        sb.context_tokens = 250_000;
+        sb.context_window = 1_000_000;
+        let s = render_to_string(&sb);
+        assert!(s.contains("deepseek-v4-pro(deepseek)"), "{s}");
+        assert!(s.contains("25% ctx"), "{s}");
+    }
+
+    #[test]
+    fn context_badge_hidden_without_window() {
+        let sb = StatusBar::new("m".into()); // context_window defaults to 0
+        assert!(!render_to_string(&sb).contains("ctx"));
     }
 
     #[test]

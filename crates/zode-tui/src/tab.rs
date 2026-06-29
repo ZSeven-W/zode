@@ -46,6 +46,9 @@ pub struct SessionTab {
     pub mode: Mode,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Most recent prompt size (last `Usage` event's input tokens) — a proxy
+    /// for current context-window occupancy, shown as a % in the status bar.
+    pub context_tokens: u32,
     pub cost_label: String,
     /// Per-turn process UI state: map tool results back to their visible tool
     /// call names.
@@ -55,6 +58,9 @@ pub struct SessionTab {
     pub queued_input: std::collections::VecDeque<String>,
     /// Local image attachments waiting to be sent with the next user message.
     pub pending_images: Vec<ImageAttachment>,
+    /// Output of `!<cmd>` shell escapes run since the last turn, buffered to
+    /// prepend to the next prompt so the agent sees what was run locally.
+    pub pending_shell_context: Vec<String>,
     /// Whether THIS tab is in plan mode (read-only tools). Per-tab, not global:
     /// the status badge reads it for the active tab, and reassembly re-applies
     /// it so a model/provider/yolo swap doesn't drop or leak plan mode.
@@ -79,10 +85,12 @@ impl SessionTab {
             mode: Mode::Ready,
             input_tokens: 0,
             output_tokens: 0,
+            context_tokens: 0,
             cost_label: "$0.00".into(),
             active_tool_names: HashMap::new(),
             queued_input: std::collections::VecDeque::new(),
             pending_images: Vec::new(),
+            pending_shell_context: Vec::new(),
             plan_mode: false,
             todos: Vec::new(),
         }

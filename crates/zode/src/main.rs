@@ -40,18 +40,27 @@ async fn run(args: Args) -> i32 {
             return 1;
         }
     };
-    // --provider selects a named provider; --model overrides the model.
-    if let Some(name) = &args.provider {
-        match cfg.providers.get(name).cloned() {
+    // --provider selects a named provider group; --model picks the model within
+    // it (or overrides the active model when no --provider is given). Resolving
+    // the (provider, model) pair TOGETHER applies the correct per-model override
+    // — `--provider X --model Y` must use Y's settings, not the group default's.
+    match (&args.provider, &args.model) {
+        (Some(name), Some(m)) => match cfg.resolve_named_provider_model(name, m) {
             Some(p) => cfg.provider = p,
             None => {
                 eprintln!("zode: no provider named '{name}' in config.providers");
                 return 1;
             }
-        }
-    }
-    if let Some(m) = &args.model {
-        cfg.provider.model = Some(m.clone());
+        },
+        (Some(name), None) => match cfg.resolve_named_provider(name) {
+            Some(p) => cfg.provider = p,
+            None => {
+                eprintln!("zode: no provider named '{name}' in config.providers");
+                return 1;
+            }
+        },
+        (None, Some(m)) => cfg.provider.model = Some(m.clone()),
+        (None, None) => {}
     }
     // If the active provider has no key but a matching `providers` entry does,
     // adopt it — so a configured `providers` map works without `--provider`

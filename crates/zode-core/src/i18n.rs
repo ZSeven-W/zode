@@ -15,6 +15,30 @@ use std::sync::RwLock;
 
 use crate::i18n_data::{LOCALES, SOURCE_STRINGS};
 
+/// Hand-maintained translations for UI strings added after the bulk locale
+/// table was generated (so new strings don't require regenerating the big
+/// index-aligned arrays). Each row is `[en, zh, zh-tw, ja, ko, es, fr, de, pt,
+/// ru, hi, id, th, tr, vi]`, aligned to [`Lang::ALL`]. Checked before
+/// `SOURCE_STRINGS`. Key names (enter/esc) are intentionally left out — they
+/// pass through unchanged.
+#[rustfmt::skip]
+const EXTRA: &[[&str; 15]] = &[
+    // /connect dialog.
+    ["Configured", "已配置", "已設定", "設定済み", "구성됨", "Configurados", "Configurés", "Konfiguriert", "Configurados", "Настроенные", "कॉन्फ़िगर किए गए", "Terkonfigurasi", "ที่กำหนดค่าแล้ว", "Yapılandırılmış", "Đã cấu hình"],
+    ["No providers", "无提供商", "無供應商", "プロバイダーなし", "공급자 없음", "Sin proveedores", "Aucun fournisseur", "Keine Anbieter", "Sem provedores", "Нет провайдеров", "कोई प्रदाता नहीं", "Tidak ada penyedia", "ไม่มีผู้ให้บริการ", "Sağlayıcı yok", "Không có nhà cung cấp"],
+    // NB: "Provider" intentionally omitted — it already lives in SOURCE_STRINGS
+    // (used by settings); duplicating it here would silently override that.
+    ["API key", "API 密钥", "API 金鑰", "API キー", "API 키", "Clave API", "Clé API", "API-Schlüssel", "Chave API", "API-ключ", "API कुंजी", "Kunci API", "คีย์ API", "API anahtarı", "Khóa API"],
+    ["type", "类型", "類型", "タイプ", "유형", "tipo", "type", "Typ", "tipo", "тип", "प्रकार", "tipe", "ประเภท", "tür", "loại"],
+    ["model", "模型", "模型", "モデル", "모델", "modelo", "modèle", "Modell", "modelo", "модель", "मॉडल", "model", "โมเดล", "model", "mô hình"],
+    ["base URL", "基础 URL", "基礎 URL", "ベース URL", "기본 URL", "URL base", "URL de base", "Basis-URL", "URL base", "Базовый URL", "बेस URL", "URL dasar", "URL พื้นฐาน", "Temel URL", "URL cơ sở"],
+    ["context", "上下文", "上下文", "コンテキスト", "컨텍스트", "contexto", "contexte", "Kontext", "contexto", "контекст", "संदर्भ", "konteks", "บริบท", "bağlam", "ngữ cảnh"],
+    ["max output", "最大输出", "最大輸出", "最大出力", "최대 출력", "salida máx.", "sortie max", "max. Ausgabe", "saída máx.", "макс. вывод", "अधिकतम आउटपुट", "keluaran maks", "เอาต์พุตสูงสุด", "maks çıktı", "đầu ra tối đa"],
+    ["input $/M", "输入 $/M", "輸入 $/M", "入力 $/M", "입력 $/M", "entrada $/M", "entrée $/M", "Eingabe $/M", "entrada $/M", "ввод $/M", "इनपुट $/M", "input $/M", "อินพุต $/M", "girdi $/M", "đầu vào $/M"],
+    ["output $/M", "输出 $/M", "輸出 $/M", "出力 $/M", "출력 $/M", "salida $/M", "sortie $/M", "Ausgabe $/M", "saída $/M", "вывод $/M", "आउटपुट $/M", "output $/M", "เอาต์พุต $/M", "çıktı $/M", "đầu ra $/M"],
+    ["submit", "提交", "提交", "送信", "제출", "enviar", "envoyer", "senden", "enviar", "отправить", "सबमिट करें", "kirim", "ส่ง", "gönder", "gửi"],
+];
+
 /// The 15 supported UI languages (OpenPencil set).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
@@ -144,6 +168,11 @@ pub fn current() -> Lang {
 /// and English itself pass through unchanged.
 pub fn t(s: &'static str) -> &'static str {
     let lang = current();
+    // Hand-maintained overlay first (new UI strings), then the generated table.
+    if let Some(row) = EXTRA.iter().find(|r| r[0] == s) {
+        let col = Lang::ALL.iter().position(|l| *l == lang).unwrap_or(0);
+        return row[col];
+    }
     let Some(row) = lang.locale_row() else {
         return s; // English (or an unmapped variant) → source string.
     };
@@ -187,6 +216,40 @@ mod tests {
             "a string that is not in the table"
         );
         set_language(Lang::En);
+    }
+
+    #[test]
+    #[serial]
+    fn overlay_translates_new_keys() {
+        set_language(Lang::Zh);
+        assert_eq!(t("model"), "模型");
+        assert_eq!(t("Configured"), "已配置");
+        assert_eq!(t("max output"), "最大输出");
+        set_language(Lang::En);
+        assert_eq!(t("model"), "model"); // English column = passthrough
+        assert_eq!(t("Configured"), "Configured");
+    }
+
+    #[test]
+    fn overlay_rows_have_no_duplicate_keys() {
+        for (i, a) in EXTRA.iter().enumerate() {
+            for b in EXTRA.iter().skip(i + 1) {
+                assert_ne!(a[0], b[0], "duplicate overlay key {:?}", a[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_keys_do_not_shadow_generated_table() {
+        // An EXTRA key that also exists in SOURCE_STRINGS would silently override
+        // the generated translation everywhere it's used — forbid it.
+        for row in EXTRA {
+            assert!(
+                !SOURCE_STRINGS.contains(&row[0]),
+                "overlay key {:?} shadows the generated table; remove it from EXTRA",
+                row[0]
+            );
+        }
     }
 
     #[test]

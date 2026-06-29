@@ -58,23 +58,20 @@ pub(crate) fn header_line(title: &'static str, width: u16, theme: &Theme) -> Par
 }
 
 pub(crate) fn search_line(filter: &str, theme: &Theme) -> Paragraph<'static> {
+    // The whole word is translated (no split-letter accent), so it works for
+    // non-Latin scripts like the CJK "搜索".
+    let label = zode_core::i18n::t("Search");
     let text = if filter.is_empty() {
-        "earch".to_string()
+        label.to_string()
     } else {
-        format!("earch {filter}")
+        format!("{label} {filter}")
     };
-    Paragraph::new(Line::from(vec![
-        Span::styled(
-            "S",
-            Style::default()
-                .fg(theme.accent_secondary)
-                .bg(theme.bg_secondary),
-        ),
-        Span::styled(
-            text,
-            Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary),
-        ),
-    ]))
+    Paragraph::new(Line::from(vec![Span::styled(
+        text,
+        Style::default()
+            .fg(theme.accent_secondary)
+            .bg(theme.bg_secondary),
+    )]))
     .style(Style::default().bg(theme.bg_secondary))
 }
 
@@ -88,41 +85,59 @@ pub(crate) fn field_line_focused(
 ) -> Line<'static> {
     let label_text = format!("{label} ");
     let label_len = label_text.chars().count() as u16;
-    // Reserve one column for the cursor when focused.
+    // Reserve one column for the cursor block when focused.
     let cursor_col = if focused { 1u16 } else { 0u16 };
+
+    // The focused row uses the accent color (label + a solid block cursor) so
+    // it's unmistakable which field is active; idle rows dim their label.
+    let label_style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .bg(theme.bg_secondary)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary)
+    };
+
+    // Degenerate width (very narrow terminal): not enough room for the label
+    // plus cursor. Emit only a clipped label so the line never exceeds `width`.
+    if width < label_len.saturating_add(cursor_col) {
+        let clipped: String = label_text.chars().take(width as usize).collect();
+        return Line::from(Span::styled(clipped, label_style));
+    }
+
     let value_cols = width.saturating_sub(label_len).saturating_sub(cursor_col) as usize;
     // Take the last `value_cols` chars so the end of a long value stays visible.
-    let display: String = if value.chars().count() > value_cols {
+    let shown: String = if value.chars().count() > value_cols {
         value
             .chars()
             .skip(value.chars().count() - value_cols)
             .collect()
     } else {
-        let mut s = value.to_string();
-        s.push_str(&" ".repeat(value_cols - value.chars().count()));
-        s
+        value.to_string()
     };
+    // Pad AFTER the cursor (below), not before — otherwise the cursor block
+    // floats at the far-right edge instead of marking the insertion point.
+    let pad = value_cols.saturating_sub(shown.chars().count());
+
     let mut spans = vec![
+        Span::styled(label_text, label_style),
         Span::styled(
-            label_text,
-            Style::default()
-                .fg(theme.fg_white)
-                .bg(theme.bg_secondary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            display,
+            shown,
             Style::default().fg(theme.fg_text).bg(theme.bg_secondary),
         ),
     ];
     if focused {
-        // Reverse-video block: the cursor position.
+        // Solid accent block marking the text-insertion point.
         spans.push(Span::styled(
             " ",
-            Style::default()
-                .fg(theme.bg_secondary)
-                .bg(theme.fg_text)
-                .add_modifier(Modifier::REVERSED),
+            Style::default().fg(theme.bg_secondary).bg(theme.accent),
+        ));
+    }
+    if pad > 0 {
+        spans.push(Span::styled(
+            " ".repeat(pad),
+            Style::default().bg(theme.bg_secondary),
         ));
     }
     Line::from(spans)
@@ -151,8 +166,8 @@ pub(crate) fn footer_line(
 
 pub(crate) fn section_title(section: ProviderSection) -> &'static str {
     match section {
-        ProviderSection::Popular => "Popular",
-        ProviderSection::Providers => "Providers",
+        ProviderSection::Configured => zode_core::i18n::t("Configured"),
+        ProviderSection::Providers => zode_core::i18n::t("Providers"),
     }
 }
 
@@ -186,5 +201,48 @@ pub(crate) fn kind_label(kind: zode_core::config::ProviderKind) -> String {
         ProviderKind::Anthropic => "‹ anthropic ›".to_string(),
         ProviderKind::Openai => "‹ openai ›".to_string(),
         ProviderKind::Ollama => "‹ ollama ›".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn theme() -> Theme {
+        crate::theme::ThemeStore::with_builtins().resolve(Some("minimal"))
+    }
+
+    fn line_width(line: &Line) -> usize {
+        line.spans.iter().map(|s| s.content.chars().count()).sum()
+    }
+
+    #[test]
+    fn field_line_never_exceeds_width_even_when_narrow() {
+        let th = theme();
+        // "max output " is the widest label (11 cols); sweep widths that can't
+        // fit it so the degenerate path is exercised.
+        for w in 0u16..14 {
+            for focused in [true, false] {
+                let line = field_line_focused("max output", "12345", w, &th, focused);
+                assert!(
+                    line_width(&line) <= w as usize,
+                    "width {w} focused={focused}: line is {} cols, exceeds {w}",
+                    line_width(&line)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn field_line_fills_exact_width_when_roomy() {
+        let th = theme();
+        assert_eq!(
+            line_width(&field_line_focused("model", "abc", 40, &th, true)),
+            40
+        );
+        assert_eq!(
+            line_width(&field_line_focused("model", "abc", 40, &th, false)),
+            40
+        );
     }
 }

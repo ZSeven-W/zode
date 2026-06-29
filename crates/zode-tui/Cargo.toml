@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 ratatui = "0.29"
+indexmap = "2"
 crossterm = { version = "0.28", features = ["event-stream"] }
 tui-textarea = "0.7"
 pulldown-cmark = { version = "0.12", default-features = false }
