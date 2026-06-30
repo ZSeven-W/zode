@@ -8,6 +8,7 @@ pub mod help;
 pub mod input;
 pub mod layout;
 pub mod markdown;
+pub mod mention;
 pub mod status;
 pub mod subagents_sidebar;
 pub mod tabs;

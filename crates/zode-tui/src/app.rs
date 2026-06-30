@@ -56,6 +56,9 @@ use crate::ui::dialog::tasks_panel::TasksPanel;
 use crate::ui::dialog::workflows_dialog::{WorkflowRow, WorkflowsAction, WorkflowsDialog};
 use crate::ui::input::{InputBox, InputSelection};
 use crate::ui::layout::{render_header, split_main, HeaderInfo};
+use crate::ui::mention::{
+    at_mention_query, collect_cwd_files, MentionItem, MentionKind, MentionPicker,
+};
 use crate::ui::status::{Mode, StatusBar};
 use crate::ui::tabs::{render_sidebar, SidebarInfo};
 use crate::ui::toast::Toast;
@@ -247,6 +250,11 @@ pub struct TuiApp {
     next_tab_id: usize,
     /// Assembly context for spinning up a fresh engine on Ctrl+T / resume.
     template: EngineTemplate,
+    /// Startup strict-read preference, remembered so a `/sandbox off` → `on`
+    /// toggle re-applies it (mode/network toggles carry it via with_mode/network,
+    /// but re-enabling from off rebuilds a fresh config that would otherwise drop
+    /// it).
+    sandbox_restrict_reads: bool,
     /// User visibility preference for the right session sidebar.
     sidebar_visibility: SidebarVisibility,
     /// App-managed text selection. When enabled, zode captures mouse drag
@@ -288,6 +296,9 @@ pub struct TuiApp {
     active_question: Option<QuestionDialog>,
     pending_questions: VecDeque<QuestionRequest>,
     autocomplete: Autocomplete,
+    /// `@`-mention picker (cwd file / skill / MCP server). Built once when `@`
+    /// first appears as the trailing token; re-filtered in place on keystrokes.
+    active_mention: Option<MentionPicker>,
     completion_hint: Option<CompletionHint>,
     settings: Option<SettingsDialog>,
     connect: Option<ConnectDialog>,
@@ -392,6 +403,11 @@ impl TuiApp {
             tabs: vec![tab0],
             active: 0,
             next_tab_id: 1,
+            // Capture the startup strict-read bit before `template` is moved.
+            sandbox_restrict_reads: template
+                .sandbox()
+                .map(|c| c.restrict_reads())
+                .unwrap_or(false),
             template,
             sidebar_visibility: SidebarVisibility::Auto,
             selection_mode: true,
@@ -416,6 +432,7 @@ impl TuiApp {
             active_question: None,
             pending_questions: VecDeque::new(),
             autocomplete: Autocomplete::new(),
+            active_mention: None,
             completion_hint: None,
             settings: None,
             connect: None,
@@ -486,9 +503,19 @@ impl TuiApp {
         }
     }
 
+    /// Close the transient popups that float over the input row: the slash
+    /// autocomplete and the `@`-mention picker. Call on every active-tab change
+    /// — the `@`-mention candidates are built from the active tab's engine
+    /// (files/skills/MCP), so a picker left open across a switch would otherwise
+    /// insert references from the previous session.
+    fn dismiss_input_popups(&mut self) {
+        self.autocomplete.dismiss();
+        self.active_mention = None;
+    }
+
     fn reset_input_browse_state(&mut self) {
         self.completion_hint = None;
-        self.autocomplete.dismiss();
+        self.dismiss_input_popups();
         self.history_pos = None;
         self.history_draft.clear();
         self.active_input_selection = None;
@@ -594,7 +621,7 @@ impl TuiApp {
                 self.tabs
                     .push(SessionTab::new(id, Arc::new(engine), session_id));
                 self.active = self.tabs.len() - 1;
-                self.autocomplete.dismiss();
+                self.dismiss_input_popups();
                 self.queued_edit_index = None;
             }
             Err(e) => {
@@ -626,7 +653,7 @@ impl TuiApp {
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len() - 1;
         }
-        self.autocomplete.dismiss();
+        self.dismiss_input_popups();
         self.queued_edit_index = None;
     }
 
@@ -651,7 +678,7 @@ impl TuiApp {
     fn switch_to(&mut self, idx: usize) {
         if idx < self.tabs.len() {
             self.active = idx;
-            self.autocomplete.dismiss();
+            self.dismiss_input_popups();
             self.queued_edit_index = None;
             // The chip selection indexes the previous tab's images.
             self.selected_image = None;
@@ -662,7 +689,7 @@ impl TuiApp {
     fn cycle_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.active = (self.active + 1) % self.tabs.len();
-            self.autocomplete.dismiss();
+            self.dismiss_input_popups();
             self.queued_edit_index = None;
         }
     }
@@ -680,6 +707,9 @@ impl TuiApp {
         if let Some(src) = req.source.as_deref().and_then(|s| s.parse::<usize>().ok()) {
             if let Some(pos) = self.tabs.iter().position(|t| t.id == src) {
                 self.active = pos;
+                // A request from another tab can steal focus mid-compose; drop
+                // any popup whose candidates belong to the previous tab.
+                self.dismiss_input_popups();
                 self.queued_edit_index = None;
             }
         }
@@ -742,6 +772,8 @@ impl TuiApp {
             if let Some(src) = req.source.as_deref().and_then(|s| s.parse::<usize>().ok()) {
                 if let Some(pos) = self.tabs.iter().position(|t| t.id == src) {
                     self.active = pos;
+                    // Focus moved tabs; drop a popup tied to the previous tab.
+                    self.dismiss_input_popups();
                     self.queued_edit_index = None;
                 }
             }
@@ -1091,7 +1123,7 @@ impl TuiApp {
     async fn resume_session(&mut self, meta: SessionMeta) {
         if let Some(pos) = self.tabs.iter().position(|t| t.session_id == meta.id) {
             self.active = pos;
-            self.autocomplete.dismiss();
+            self.dismiss_input_popups();
             return;
         }
         let path = match SessionIndex::session_path(&meta.id) {
@@ -1137,7 +1169,7 @@ impl TuiApp {
         tab.context_tokens = resumed_tokens;
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
-        self.autocomplete.dismiss();
+        self.dismiss_input_popups();
     }
 
     /// Delete a saved session's transcript file and index entry. Open tabs are
@@ -1540,6 +1572,11 @@ impl TuiApp {
         self.status.render(f, areas.status, &theme);
         // Autocomplete popup floats above the input row.
         self.autocomplete.render(f, input_area, &theme);
+        // @-mention popup occupies the same band; the two are mutually exclusive
+        // (autocomplete only activates on a leading `/`).
+        if let Some(mention) = &mut self.active_mention {
+            mention.render(f, input_area, &theme);
+        }
         // Overlays, lowest first. The permission dialog renders LAST (above
         // settings/help) because it captures input with the highest
         // precedence — it must never be hidden behind another overlay.
@@ -1621,6 +1658,14 @@ impl TuiApp {
                 self.handle_mouse(mouse);
                 return;
             }
+            CtEvent::Resize(_, _) => {
+                // The layout reflows on resize, so a held selection's screen
+                // mapping (anchored to the pre-resize frame) is now stale — drop
+                // it rather than risk copying the wrong region on the next chord.
+                self.active_selection = None;
+                self.active_input_selection = None;
+                return;
+            }
             _ => return,
         };
         // Ignore key-release events (crossterm reports them on some terminals).
@@ -1636,6 +1681,32 @@ impl TuiApp {
         // with a letter is never swallowed. Anything else falls through to the
         // normal input handling below (typing, Enter→queue, …).
         if self.active_dialog.is_some() && self.input.text().is_empty() {
+            // Arrow keys move the highlight, Enter confirms it; 1/2/3 still pick
+            // directly and Esc denies. (Only while the input is empty, so typing
+            // a draft is never captured — the prompt stays non-blocking.)
+            match key.code {
+                KeyCode::Up | KeyCode::Left => {
+                    if let Some(d) = &mut self.active_dialog {
+                        d.select_prev();
+                    }
+                    return;
+                }
+                KeyCode::Down | KeyCode::Right => {
+                    if let Some(d) = &mut self.active_dialog {
+                        d.select_next();
+                    }
+                    return;
+                }
+                KeyCode::Enter => {
+                    if let Some(approval) =
+                        self.active_dialog.as_ref().map(|d| d.selected_approval())
+                    {
+                        self.answer_permission(approval);
+                    }
+                    return;
+                }
+                _ => {}
+            }
             let decision = match key.code {
                 KeyCode::Char(c) => crate::ui::dialog::permission::approval_for_key(c),
                 KeyCode::Esc => Some(Approval::Deny),
@@ -1736,6 +1807,16 @@ impl TuiApp {
 
         // 4. Global chords.
         match (key.code, key.modifiers) {
+            // An EXPLICIT copy of the active selection on the platform copy chord
+            // — Ctrl+C (or Cmd+C where the terminal delivers it). Selecting also
+            // auto-copies on release (copy-on-select, via OSC 52), so this is a
+            // secondary path. Guarded by an active (non-empty) selection, so a
+            // bare Ctrl+C with nothing selected still clears the draft /
+            // interrupts / quits below.
+            (KeyCode::Char('c'), m) if is_primary_mod(m) && self.has_active_selection() => {
+                self.copy_active_selection();
+                return;
+            }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 // Clear a prompt draft first; with an empty prompt, interrupt a
                 // running turn or quit when idle.
@@ -1750,20 +1831,23 @@ impl TuiApp {
                 }
                 return;
             }
-            // Esc interrupts a running turn. An open autocomplete popup gets
-            // Esc first (to dismiss) — that's handled later, so only steal Esc
-            // here when the popup is closed and a turn is actually in flight.
+            // Esc interrupts a running turn. An open autocomplete or @-mention
+            // popup gets Esc first (to dismiss) — that's handled later, so only
+            // steal Esc here when no popup is open and a turn is in flight.
             (KeyCode::Esc, _)
-                if self.tabs[self.active].is_busy() && !self.autocomplete.is_active() =>
+                if self.tabs[self.active].is_busy()
+                    && !self.autocomplete.is_active()
+                    && !self.mention_active() =>
             {
                 self.interrupt_active_turn();
                 return;
             }
-            // Idle with a non-empty draft (and no autocomplete to dismiss): two
-            // Escs clear it. The first arms + hints; the second wipes the draft.
+            // Idle with a non-empty draft (and no popup to dismiss): two Escs
+            // clear it. The first arms + hints; the second wipes the draft.
             (KeyCode::Esc, _)
                 if !self.tabs[self.active].is_busy()
                     && !self.autocomplete.is_active()
+                    && !self.mention_active()
                     && !self.input.is_empty() =>
             {
                 if self.esc_clear_armed {
@@ -1874,6 +1958,35 @@ impl TuiApp {
                 ChatMouseScroll::Down(n) => self.tabs[self.active].chat.scroll_down(n),
             }
             return;
+        }
+
+        // 4b. @-mention picker (cwd file / skill / MCP server). Intercepts nav
+        // keys while a non-empty picker is open; selecting inserts the bare
+        // reference behind a leading `@`.
+        if self.mention_active() {
+            match key.code {
+                KeyCode::Up => {
+                    if let Some(p) = &mut self.active_mention {
+                        p.prev();
+                    }
+                    return;
+                }
+                KeyCode::Down => {
+                    if let Some(p) = &mut self.active_mention {
+                        p.next();
+                    }
+                    return;
+                }
+                KeyCode::Tab | KeyCode::Enter => {
+                    self.apply_mention();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.active_mention = None;
+                    return;
+                }
+                _ => {}
+            }
         }
 
         // 5a. /op subcommand hint popup (active after "/op " prefix is typed).
@@ -2022,8 +2135,9 @@ impl TuiApp {
                 self.absorb_image_paths_from_input();
             }
         }
-        // 7. Refresh the autocomplete popup from the new input text.
+        // 7. Refresh the autocomplete + @-mention popups from the new input.
         self.autocomplete.update(&self.input.text());
+        self.refresh_mention();
     }
 
     /// If the current input text contains a complete, existing image path (e.g.
@@ -2237,6 +2351,7 @@ impl TuiApp {
                     self.input.insert_str(&parsed.remaining_text);
                 }
                 self.autocomplete.update(&self.input.text());
+                self.refresh_mention();
             }
             Err(e) => {
                 self.toast = Some(Toast::error(e.to_string()));
@@ -2379,7 +2494,10 @@ impl TuiApp {
                     .map(|point| InputSelection::new(selection.anchor, point))
                     .unwrap_or(selection);
                 self.active_input_selection = Some(selection);
-                self.copy_input_selection(selection);
+                // Copy-on-select (OSC 52), same as the transcript selection.
+                if selection.anchor != selection.focus {
+                    self.copy_input_selection(selection);
+                }
                 true
             }
             _ => false,
@@ -2425,7 +2543,13 @@ impl TuiApp {
                     .map(|point| ChatSelection::new(selection.anchor, point))
                     .unwrap_or(selection);
                 self.active_selection = Some(selection);
-                self.copy_chat_selection(selection, chat_area);
+                // Copy-on-select (like opencode/Claude Code): finishing a drag
+                // puts the selection on the clipboard via OSC 52 — so it works in
+                // Warp etc. without ⌘C (which the terminal eats). The Cmd/Ctrl+C
+                // chord still copies explicitly too.
+                if selection.anchor != selection.focus {
+                    self.copy_chat_selection(selection, chat_area);
+                }
                 true
             }
             _ => false,
@@ -2451,6 +2575,41 @@ impl TuiApp {
             .selection_point_at(&theme, meta, chat_area, column, row)
     }
 
+    /// Whether a non-empty chat OR input selection is currently held. Used to
+    /// decide whether the copy chord copies (selection present) or falls through
+    /// to the interrupt/quit handling (nothing selected).
+    fn has_active_selection(&self) -> bool {
+        self.active_selection.is_some_and(|s| s.anchor != s.focus)
+            || self
+                .active_input_selection
+                .is_some_and(|s| s.anchor != s.focus)
+    }
+
+    /// Copy whatever is selected — the chat transcript selection if one is held,
+    /// otherwise the input-box selection. Bound to the platform copy chord.
+    ///
+    /// Clears the selection afterward so (a) the highlight doesn't linger and
+    /// (b) a follow-up Ctrl+C falls through to interrupt/quit — important because
+    /// on macOS terminals Cmd+C isn't delivered, so Ctrl+C is the copy chord AND
+    /// the interrupt key; copying must not permanently block the kill path.
+    fn copy_active_selection(&mut self) {
+        if let Some(selection) = self.active_selection.filter(|s| s.anchor != s.focus) {
+            // Recompute the chat area exactly like `handle_mouse` does, so
+            // `selected_text` resolves against the painted width.
+            let Ok((width, height)) = crossterm::terminal::size() else {
+                return;
+            };
+            let area = Rect::new(0, 0, width, height);
+            let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_visibility);
+            let chat_area = split_main(area, show_sidebar).chat;
+            self.copy_chat_selection(selection, chat_area);
+        } else if let Some(selection) = self.active_input_selection {
+            self.copy_input_selection(selection);
+        }
+        self.active_selection = None;
+        self.active_input_selection = None;
+    }
+
     fn copy_chat_selection(&mut self, selection: ChatSelection, chat_area: Rect) {
         let theme = self.theme.clone();
         let active_model = self.tabs[self.active].engine.model.clone();
@@ -2464,12 +2623,20 @@ impl TuiApp {
             .chat
             .selected_text(selection, &theme, meta, chat_area);
         if text.trim().is_empty() {
+            // A real drag (anchor ≠ focus) that landed only on blank/prefix area
+            // copies nothing — say so instead of silently doing nothing, which
+            // reads as "copy didn't work".
+            if selection.anchor != selection.focus {
+                self.toast = Some(Toast::info("nothing to copy in selection"));
+            }
             return;
         }
-        match zode_core::clipboard::copy_to_clipboard(&text) {
-            Ok(_) => self.toast = Some(Toast::info("copied selection to clipboard")),
-            Err(e) => self.toast = Some(Toast::error(format!("copy failed: {e}"))),
-        }
+        // Copy via OSC 52 (terminal clipboard — works in Warp, iTerm2, kitty,
+        // Ghostty and over SSH/tmux, where the in-app ⌘C never arrives) AND
+        // pbcopy (local fallback + large payloads OSC 52 may cap).
+        write_osc52_clipboard(&text);
+        let _ = zode_core::clipboard::copy_to_clipboard(&text);
+        self.toast = Some(Toast::info("copied selection to clipboard"));
     }
 
     fn copy_input_selection(&mut self, selection: InputSelection) {
@@ -2477,10 +2644,9 @@ impl TuiApp {
         if text.trim().is_empty() {
             return;
         }
-        match zode_core::clipboard::copy_to_clipboard(&text) {
-            Ok(_) => self.toast = Some(Toast::info("copied input selection to clipboard")),
-            Err(e) => self.toast = Some(Toast::error(format!("copy failed: {e}"))),
-        }
+        write_osc52_clipboard(&text);
+        let _ = zode_core::clipboard::copy_to_clipboard(&text);
+        self.toast = Some(Toast::info("copied input selection to clipboard"));
     }
 
     fn open_settings(&mut self) {
@@ -2526,11 +2692,33 @@ impl TuiApp {
         self.settings = Some(SettingsDialog::vision_provider_picker(providers));
     }
 
+    /// Resolve a sandbox config for a `/sandbox` toggle, FAIL-CLOSED: on a
+    /// backend error, report it in the transcript and return `Err(())` so the
+    /// caller aborts the toggle instead of silently enabling no isolation.
+    fn resolve_sandbox_or_report(
+        &mut self,
+        cwd: &std::path::Path,
+        mode: zode_core::sandbox::SandboxMode,
+        net: bool,
+    ) -> Result<Option<zode_core::sandbox::SandboxConfig>, ()> {
+        match zode_core::sandbox::resolve(cwd, true, mode, net, &[], false, false) {
+            // Re-apply the startup strict-read bit (a fresh resolve, e.g. on
+            // `/sandbox on` from off, would otherwise drop it).
+            Ok(opt) => Ok(opt.map(|c| c.with_restrict_reads(self.sandbox_restrict_reads))),
+            Err(e) => {
+                self.active_tab_mut()
+                    .chat
+                    .push_system(&format!("sandbox: {e}"));
+                Err(())
+            }
+        }
+    }
+
     /// Apply a `/sandbox` action (also used by the sandbox picker): toggle the
     /// sandbox on/off, switch mode, or toggle network, then rebuild the active
     /// tab's engine and report the new state.
     async fn apply_sandbox_action(&mut self, action: &str) {
-        use zode_core::sandbox::{resolve, SandboxConfig, SandboxMode};
+        use zode_core::sandbox::{SandboxConfig, SandboxMode};
         let cwd = self.active_tab().engine.cwd.clone();
         let current = self.template.sandbox().cloned();
         let arg = action
@@ -2545,28 +2733,34 @@ impl TuiApp {
                 let mode = current.as_ref().map(|c| c.mode()).unwrap_or_default();
                 let net = current.as_ref().map(|c| c.allow_network()).unwrap_or(false);
                 // Codex defaults: /tmp + $TMPDIR writable (re-enabling from off).
-                Some(resolve(&cwd, true, mode, net, &[], false, false))
+                match self.resolve_sandbox_or_report(&cwd, mode, net) {
+                    Ok(opt) => Some(opt),
+                    Err(()) => return,
+                }
             }
-            "read-only" | "readonly" | "ro" => Some(match current.clone() {
-                Some(c) => Some(c.with_mode(SandboxMode::ReadOnly)),
-                None => resolve(&cwd, true, SandboxMode::ReadOnly, false, &[], false, false),
-            }),
-            "workspace-write" | "write" | "ww" => Some(match current.clone() {
-                Some(c) => Some(c.with_mode(SandboxMode::WorkspaceWrite)),
-                None => resolve(
-                    &cwd,
-                    true,
-                    SandboxMode::WorkspaceWrite,
-                    false,
-                    &[],
-                    false,
-                    false,
-                ),
-            }),
-            "network on" | "net on" | "network" => Some(match current.clone() {
-                Some(c) => Some(c.with_network(true)),
-                None => resolve(&cwd, true, SandboxMode::default(), true, &[], false, false),
-            }),
+            "read-only" | "readonly" | "ro" => match current.clone() {
+                Some(c) => Some(Some(c.with_mode(SandboxMode::ReadOnly))),
+                None => match self.resolve_sandbox_or_report(&cwd, SandboxMode::ReadOnly, false) {
+                    Ok(opt) => Some(opt),
+                    Err(()) => return,
+                },
+            },
+            "workspace-write" | "write" | "ww" => match current.clone() {
+                Some(c) => Some(Some(c.with_mode(SandboxMode::WorkspaceWrite))),
+                None => {
+                    match self.resolve_sandbox_or_report(&cwd, SandboxMode::WorkspaceWrite, false) {
+                        Ok(opt) => Some(opt),
+                        Err(()) => return,
+                    }
+                }
+            },
+            "network on" | "net on" | "network" => match current.clone() {
+                Some(c) => Some(Some(c.with_network(true))),
+                None => match self.resolve_sandbox_or_report(&cwd, SandboxMode::default(), true) {
+                    Ok(opt) => Some(opt),
+                    Err(()) => return,
+                },
+            },
             "network off" | "net off" => Some(current.clone().map(|c| c.with_network(false))),
             _ => {
                 let line = sandbox_status_line(current.as_ref());
@@ -3164,6 +3358,95 @@ impl TuiApp {
         self.autocomplete.dismiss();
     }
 
+    /// Whether a non-empty `@`-mention picker is open (so it should intercept
+    /// navigation keys). An open-but-empty picker (query matches nothing) does
+    /// not capture keys — Enter still submits the turn.
+    fn mention_active(&self) -> bool {
+        self.active_mention.as_ref().is_some_and(|p| !p.is_empty())
+    }
+
+    /// Re-sync the `@`-mention picker against the current input. Builds the
+    /// candidate set the first time `@` appears as the trailing token (one cwd
+    /// walk per mention session), then only re-filters as the query changes.
+    fn refresh_mention(&mut self) {
+        let text = self.input.text();
+        match at_mention_query(&text) {
+            Some(query) => {
+                if let Some(picker) = &mut self.active_mention {
+                    picker.filter(query);
+                } else {
+                    let items = self.build_mention_items();
+                    self.active_mention = Some(MentionPicker::new(items, query));
+                }
+            }
+            None => self.active_mention = None,
+        }
+    }
+
+    /// Gather `@`-mention candidates from the active tab: skills and MCP servers
+    /// first (few, kept visible at the top of the empty-query list), then cwd
+    /// files (found by typing).
+    fn build_mention_items(&self) -> Vec<MentionItem> {
+        let eng = &self.active_tab().engine;
+        let mut items = Vec::new();
+        for s in eng.skills.list() {
+            items.push(MentionItem {
+                insert: s.name.clone(),
+                detail: s
+                    .description
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(60)
+                    .collect(),
+                kind: MentionKind::Skill,
+            });
+        }
+        if let Some(lc) = &eng.mcp {
+            for server in lc.registry.snapshot() {
+                items.push(MentionItem {
+                    insert: server.name.clone(),
+                    detail: String::new(),
+                    kind: MentionKind::Mcp,
+                });
+            }
+        }
+        let cwd = eng.cwd.clone();
+        for rel in collect_cwd_files(&cwd, 1000) {
+            items.push(MentionItem {
+                insert: rel,
+                detail: String::new(),
+                kind: MentionKind::File,
+            });
+        }
+        items
+    }
+
+    /// Replace the trailing `@query` token with the selected reference (a bare
+    /// path for files; a name for skills/MCP), keeping the leading `@` so it
+    /// reads as a mention, then append a space and close the picker.
+    fn apply_mention(&mut self) {
+        let Some(picker) = self.active_mention.take() else {
+            return;
+        };
+        let Some(insert) = picker.selected_insert().map(str::to_string) else {
+            return;
+        };
+        let text = self.input.text();
+        let new_text = match at_mention_query(&text) {
+            // `@query` is the trailing token; `query.len() + 1` covers the `@`.
+            Some(query) => {
+                let prefix = &text[..text.len().saturating_sub(query.len() + 1)];
+                format!("{prefix}@{insert} ")
+            }
+            None => format!("{text}@{insert} "),
+        };
+        self.input.take();
+        self.input.insert_str(&new_text);
+        self.completion_hint = None;
+    }
+
     async fn apply_model(&mut self, id: &str) {
         let t = self.template.with_model(id.to_string());
         if self.reassemble_active(t.clone()).await {
@@ -3728,6 +4011,9 @@ impl TuiApp {
                     tab.engine.clone(),
                     tab.title.clone(),
                 );
+                // Mine the just-completed turn for durable memories (no-op
+                // unless autoExtract is on; runs detached, never blocks).
+                engine.spawn_post_turn_extraction();
                 tokio::spawn(crate::tab::persist_session(session_id, engine, title));
             }
             AppEvent::Toast { .. }
@@ -5371,6 +5657,50 @@ fn merge_prompt_with_vision(user_text: &str, vision_description: &str) -> String
     }
 }
 
+/// Standard base64 encode (no padding omitted) — a tiny inline impl so OSC 52
+/// needs no extra dependency.
+fn base64_encode(input: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(T[(b0 >> 2) as usize] as char);
+        out.push(T[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(b2 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Copy `text` to the system clipboard via OSC 52 — an escape sequence the
+/// TERMINAL turns into a clipboard write. This is how a full-screen TUI copies
+/// when it holds mouse capture (so the terminal's own ⌘C/native selection is
+/// unavailable): it works in Warp (which shows a one-time "allow clipboard"
+/// prompt), iTerm2, kitty, Ghostty, AND over SSH / inside tmux — none of which
+/// `pbcopy` covers. tmux/screen need the DCS passthrough wrapper.
+fn write_osc52_clipboard(text: &str) {
+    use std::io::Write;
+    let seq = format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()));
+    let payload = if std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some() {
+        format!("\x1bPtmux;\x1b{seq}\x1b\\")
+    } else {
+        seq
+    };
+    let mut out = std::io::stdout();
+    let _ = out.write_all(payload.as_bytes());
+    let _ = out.flush();
+}
+
 fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -5988,6 +6318,58 @@ mod tests {
         .await;
 
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn base64_encode_matches_rfc4648_vectors() {
+        // The OSC 52 clipboard payload must be correct base64, so pin the
+        // canonical vectors against the hand-rolled encoder.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[tokio::test]
+    async fn resize_clears_active_selection() {
+        let (mut app, agent_tx) = make_test_app().await;
+        app.active_selection = Some(ChatSelection::new(
+            ChatSelectionPoint { line: 0, column: 0 },
+            ChatSelectionPoint { line: 2, column: 4 },
+        ));
+        app.handle_term(CtEvent::Resize(80, 24), &agent_tx).await;
+        assert!(
+            app.active_selection.is_none(),
+            "a resize must drop the now-stale selection"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_chord_consumes_and_clears_without_interrupting() {
+        let (mut app, agent_tx) = make_test_app().await;
+        // A non-empty input selection over the (empty) input box: the copy chord
+        // must be consumed (not fall through to the interrupt/quit arm) and must
+        // clear the selection so a follow-up Ctrl+C can interrupt. Empty input →
+        // no real clipboard write.
+        app.active_input_selection = Some(InputSelection::new(
+            crate::ui::input::InputSelectionPoint { row: 0, column: 0 },
+            crate::ui::input::InputSelectionPoint { row: 0, column: 5 },
+        ));
+        send_key(
+            &mut app,
+            &agent_tx,
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )
+        .await;
+        assert!(
+            app.active_input_selection.is_none(),
+            "copy must clear the selection"
+        );
+        assert!(!app.should_quit, "copy chord must not quit/interrupt");
     }
 
     #[tokio::test]

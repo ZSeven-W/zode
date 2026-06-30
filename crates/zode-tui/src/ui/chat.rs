@@ -104,6 +104,12 @@ pub struct ChatView {
     /// Lines scrolled up from the bottom (0 = following the tail).
     scroll_back: usize,
     last_render_total_rows: usize,
+    /// Absolute cache-line index painted at the top of the chat area on the last
+    /// render. Selection maps screen rows against THIS (what the user actually
+    /// sees) rather than recomputing from `scroll_back`, which can drift from the
+    /// painted frame when content streams in or an auto-scroll fires mid-drag
+    /// before the next repaint — the cause of "copied the wrong lines".
+    last_render_start: usize,
     /// Display prefs (`/thinking`, `/tool-details`). Stored as "hide" so the
     /// `Default` (false) shows everything; messages stay in the log and toggle
     /// live at render time.
@@ -339,6 +345,9 @@ impl ChatView {
         let viewport = area.height as usize;
         let offset = self.scroll_offset_for_render(total, viewport);
         let range = visible_line_window(total, viewport, offset);
+        // Remember what's painted at the top so selection maps rows to the SAME
+        // lines the user sees (see `last_render_start`).
+        self.last_render_start = range.start;
         let cache = self.render_cache.as_ref().expect("cache populated");
         let mut visible_lines: Vec<Line<'static>> = cache.lines[range.clone()]
             .iter()
@@ -384,7 +393,10 @@ impl ChatView {
         if total == 0 {
             return None;
         }
-        let line = self.visible_start(area.height as usize)
+        // Map against the last PAINTED top line, not a fresh `scroll_back`
+        // computation — the two can disagree when content grew or an auto-scroll
+        // fired since the last repaint, which would select the wrong lines.
+        let line = self.last_render_start
             + usize::from(
                 row.saturating_sub(area.y)
                     .min(area.height.saturating_sub(1)),
@@ -420,16 +432,21 @@ impl ChatView {
         let end_line = end.line.min(last_line);
         let mut out = Vec::new();
         for line_idx in start_line..=end_line {
-            let text = plain_line_text(&cache.lines[line_idx]);
-            let row_text = if start_line == end_line {
-                slice_display_cols(&text, start.column, end.column)
+            let line = &cache.lines[line_idx];
+            let text = plain_line_text(line);
+            // Skip the structural left prefix (rail/indent the UI adds) so copied
+            // text is the underlying content, not "  …" / "▌ …" / "│  …".
+            let prefix = line_prefix_width(line);
+            let (a, b) = if start_line == end_line {
+                (start.column, end.column)
             } else if line_idx == start_line {
-                slice_display_cols(&text, start.column, usize::MAX)
+                (start.column, usize::MAX)
             } else if line_idx == end_line {
-                slice_display_cols(&text, 0, end.column)
+                (0, end.column)
             } else {
-                text
+                (0, usize::MAX)
             };
+            let row_text = slice_display_cols(&text, a.max(prefix), b);
             out.push(row_text.trim_end().to_string());
         }
         out.join("\n")
@@ -458,16 +475,6 @@ impl ChatView {
                 self.cache_builds += 1;
             }
         }
-    }
-
-    fn visible_start(&self, viewport_rows: usize) -> usize {
-        let total = self
-            .render_cache
-            .as_ref()
-            .map(|cache| cache.lines.len())
-            .unwrap_or_default();
-        let max_scroll = total.saturating_sub(viewport_rows);
-        max_scroll.saturating_sub(self.scroll_back.min(max_scroll))
     }
 
     fn build_lines(
@@ -677,7 +684,10 @@ fn apply_selection_to_line(
     let Some((start_col, end_col)) = selection_cols_for_line(line_idx, selection) else {
         return line;
     };
-    if start_col == end_col {
+    // Don't highlight the structural left prefix — keep the visible selection in
+    // sync with what `selected_text` copies (which skips the same prefix).
+    let start_col = start_col.max(line_prefix_width(&line));
+    if start_col >= end_col {
         return line;
     }
     let selected_style = Style::default()
@@ -723,6 +733,31 @@ fn plain_line_text(line: &Line<'static>) -> String {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>()
+}
+
+/// Display width of a rendered line's structural left prefix — the rail/indent
+/// the chat UI prepends (assistant `"  "`, user `"▌ "`, tool `"  ▪ "`, process
+/// `"│  "`, …). Every line built via `wrap_spans_with_prefix` keeps that prefix
+/// as its single first span, so the prefix width is exactly the width of
+/// `spans[0]` WHEN that span is made entirely of rail/indent characters. The
+/// all-prefix-chars guard means real content (including a line whose own text
+/// starts with spaces, e.g. indented code in a later span) is never mistaken
+/// for a prefix.
+fn line_prefix_width(line: &Line<'static>) -> usize {
+    let Some(first) = line.spans.first() else {
+        return 0;
+    };
+    let s = first.content.as_ref();
+    if !s.is_empty() && s.chars().all(is_prefix_char) {
+        UnicodeWidthStr::width(s)
+    } else {
+        0
+    }
+}
+
+/// Characters that only ever appear in the structural rail/indent prefixes.
+fn is_prefix_char(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '▌' | '│' | '▐' | '▪' | '▣')
 }
 
 fn slice_display_cols(text: &str, start_col: usize, end_col: usize) -> String {
@@ -1712,7 +1747,96 @@ mod tests {
 
         let text = chat.selected_text(selection, &theme, meta, area);
 
-        assert_eq!(text, "alpha\n  beta");
+        // The assistant body indent ("  ") is a structural prefix and must NOT
+        // come through in the copied text.
+        assert_eq!(text, "alpha\nbeta");
+    }
+
+    #[test]
+    fn selected_text_strips_structural_prefixes() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let cwd = std::path::Path::new("/tmp");
+        let mut chat = ChatView::new();
+        // A user message (rendered with the "▌ " rail) then an assistant reply
+        // (rendered with a 2-space body indent).
+        chat.push_user("hello world");
+        chat.push_delta("first line\nsecond line");
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "test-model",
+            cwd,
+        };
+        let area = Rect::new(0, 0, 60, 20);
+        // Select the whole transcript generously (col 0 → far right, all rows).
+        chat.selected_text(
+            ChatSelection::new(
+                ChatSelectionPoint { line: 0, column: 0 },
+                ChatSelectionPoint {
+                    line: 50,
+                    column: usize::MAX,
+                },
+            ),
+            &theme,
+            meta,
+            area,
+        );
+        let text = chat.selected_text(
+            ChatSelection::new(
+                ChatSelectionPoint { line: 0, column: 0 },
+                ChatSelectionPoint {
+                    line: 50,
+                    column: usize::MAX,
+                },
+            ),
+            &theme,
+            meta,
+            area,
+        );
+        // No rail glyphs and no leading indent leaked into the copy.
+        assert!(!text.contains('▌'), "rail glyph leaked: {text:?}");
+        assert!(text.contains("hello world"), "user text missing: {text:?}");
+        assert!(
+            text.contains("first line"),
+            "assistant text missing: {text:?}"
+        );
+        for line in text.lines() {
+            assert!(
+                !line.starts_with(' '),
+                "line kept a structural indent: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_maps_to_painted_frame_after_content_grows() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let cwd = std::path::Path::new("/tmp");
+        let mut chat = ChatView::new();
+        for i in 0..30 {
+            chat.push_user(&format!("message number {i}"));
+        }
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: "test-model",
+            cwd,
+        };
+        let area = Rect::new(0, 0, 40, 10);
+        // Paint once — this records `last_render_start` (the top painted line).
+        let backend = TestBackend::new(40, 10);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| chat.render(f, f.area(), &theme, meta))
+            .unwrap();
+        let painted_top = chat.last_render_start;
+
+        // Content streams in WITHOUT a repaint (revision bumps, total grows).
+        chat.push_delta("a freshly streamed tail line");
+
+        // A click on the top row must resolve to the line the user still sees
+        // (the painted top), not a tail line computed from the grown total.
+        let point = chat
+            .selection_point_at(&theme, meta, area, 0, 0)
+            .expect("point");
+        assert_eq!(point.line, painted_top);
     }
 
     #[test]

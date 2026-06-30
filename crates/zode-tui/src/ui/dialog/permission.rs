@@ -28,9 +28,14 @@ const MAX_INLINE_HEIGHT: u16 = 14;
 /// State for the active approval prompt. Holds the request until the user
 /// answers, then responds and reports done. `cwd` resolves the diff
 /// preview's path the same way the engine does.
+/// The selectable actions, in display + arrow-navigation order.
+const OPTIONS: [Approval; 3] = [Approval::AllowOnce, Approval::AllowAlways, Approval::Deny];
+
 pub struct PermissionDialog {
     request: Option<ApprovalRequest>,
     cwd: std::path::PathBuf,
+    /// Highlighted action for arrow-key + Enter selection (index into OPTIONS).
+    selected: usize,
 }
 
 impl PermissionDialog {
@@ -38,11 +43,27 @@ impl PermissionDialog {
         Self {
             request: Some(request),
             cwd,
+            selected: 0,
         }
     }
 
     pub fn tool(&self) -> &str {
         self.request.as_ref().map(|r| r.tool.as_str()).unwrap_or("")
+    }
+
+    /// Move the highlight to the previous action (↑/←), wrapping.
+    pub fn select_prev(&mut self) {
+        self.selected = self.selected.checked_sub(1).unwrap_or(OPTIONS.len() - 1);
+    }
+
+    /// Move the highlight to the next action (↓/→), wrapping.
+    pub fn select_next(&mut self) {
+        self.selected = (self.selected + 1) % OPTIONS.len();
+    }
+
+    /// The currently highlighted action (what Enter confirms).
+    pub fn selected_approval(&self) -> Approval {
+        OPTIONS[self.selected]
     }
 
     /// Respond with `approval` and report done. Returns true if a pending
@@ -88,13 +109,30 @@ impl PermissionDialog {
     /// The PINNED footer: the answer keys (always row 0 so they survive a tight
     /// card) plus the non-blocking hint (row 1, dropped first if space is short).
     fn footer_lines(&self, theme: &Theme) -> Vec<Line<'static>> {
+        // Each action is a chip; the arrow-key/Enter highlight marks the active
+        // one. The leading digit keeps the 1/2/3 direct-pick affordance.
+        let labels = ["1 allow once", "2 allow always", "3 deny"];
+        let normal = Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let active = Style::default()
+            .fg(theme.bg_primary)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        for (i, lbl) in labels.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw("  "));
+            }
+            let style = if i == self.selected { active } else { normal };
+            spans.push(Span::styled(format!(" {lbl} "), style));
+        }
+        spans.push(Span::styled(
+            "   ↑↓/1-3 · enter · esc deny",
+            Style::default().fg(theme.fg_subtle),
+        ));
         vec![
-            Line::from(vec![Span::styled(
-                "[1] allow once   [2] allow always   [3] deny   (Esc deny)",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )]),
+            Line::from(spans),
             Line::styled(
                 "…or just keep typing to queue a message — this prompt won't block you.",
                 Style::default().fg(theme.fg_subtle),
@@ -259,7 +297,7 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(
-            content.contains("[1] allow once"),
+            content.contains("1 allow once"),
             "answer keys must stay visible even with huge params; got:\n{content}"
         );
         drop(queue);
@@ -287,6 +325,29 @@ mod tests {
         assert!(dialog.answer(Approval::AllowOnce)); // responded
         assert!(!dialog.answer(Approval::AllowOnce)); // request already taken
         assert_eq!(join.await.unwrap(), Approval::AllowOnce);
+    }
+
+    #[tokio::test]
+    async fn arrow_selection_wraps_and_confirms_the_highlighted_action() {
+        let (queue, mut rx) = approval_queue();
+        let q = queue.clone();
+        let join =
+            tokio::spawn(async move { q.request("Bash", &serde_json::json!({}), None).await });
+        let req = rx.next().await.unwrap();
+        let mut dialog = PermissionDialog::new(req, std::env::temp_dir());
+        // Default highlight is the first action.
+        assert_eq!(dialog.selected_approval(), Approval::AllowOnce);
+        dialog.select_next(); // → allow always
+        dialog.select_next(); // → deny
+        assert_eq!(dialog.selected_approval(), Approval::Deny);
+        dialog.select_next(); // wraps → allow once
+        assert_eq!(dialog.selected_approval(), Approval::AllowOnce);
+        dialog.select_prev(); // wraps back → deny
+        assert_eq!(dialog.selected_approval(), Approval::Deny);
+        // Enter would answer with the highlighted action.
+        let pick = dialog.selected_approval();
+        assert!(dialog.answer(pick));
+        assert_eq!(join.await.unwrap(), Approval::Deny);
     }
 
     #[tokio::test]
