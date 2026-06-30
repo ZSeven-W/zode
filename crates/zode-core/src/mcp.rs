@@ -28,28 +28,41 @@ pub fn prefixed_tool_name(server: &str, tool: &str) -> String {
 pub fn discover_mcp_config(cwd: &Path) -> Option<McpConfig> {
     let home = dirs::home_dir();
 
-    // FOREIGN sources (other agents' configs + plugin trees). These are
-    // discovered for compatibility but default to DISABLED, so a machine full
-    // of claude/codex/cursor MCP servers doesn't auto-connect dozens of them or
-    // flood the slash palette. The user enables the wanted ones by adding them
-    // to zode's own config; `/mcp` lists them either way.
-    let mut foreign_json: Vec<std::path::PathBuf> = Vec::new();
+    // FOREIGN config files (other agents' MCP config: cursor / opencode / gemini
+    // / claude JSON + codex TOML). zode ADOPTS the ones in the user's HOME by
+    // default — a deliberate personal setup, so a user's existing MCP servers
+    // "just work" without being re-declared here. Unwanted ones are turned off in
+    // `/mcp` (persisted to `plugins.disabled`), the single gate on whether a
+    // server connects.
+    //
+    // PROJECT-LOCAL foreign configs (the same files under `cwd`) are a different
+    // trust boundary: they can ride along in an untrusted cloned repo, so they
+    // are discovered but default to DISABLED (listed in `/mcp`, never auto-
+    // spawned). Opt one in via `/mcp` or by declaring it in zode's own config.
+    //
+    // We also deliberately do NOT pull MCP out of foreign *plugin trees*
+    // (`~/.claude/plugins`, `~/.codex/plugins`, opencode plugins) — those ship
+    // product-bundled servers (discord / telegram / computer-use / github / …)
+    // that are "built in" to another tool, not the user's own config. This mirrors
+    // how foreign plugin *commands* are skipped (see `user_commands::commands_dirs`).
+    // `openpencil` is excluded too: op-bridge drives OpenPencil natively (below).
+    let mut home_json: Vec<std::path::PathBuf> = Vec::new();
+    let mut home_toml: Vec<std::path::PathBuf> = Vec::new();
     if let Some(h) = &home {
-        foreign_json.push(h.join(".cursor").join("mcp.json"));
-        foreign_json.push(h.join(".config").join("opencode").join("opencode.json"));
-        foreign_json.push(h.join(".gemini").join("settings.json"));
-        foreign_json.push(h.join(".claude.json"));
+        home_json.push(h.join(".cursor").join("mcp.json"));
+        home_json.push(h.join(".config").join("opencode").join("opencode.json"));
+        home_json.push(h.join(".gemini").join("settings.json"));
+        home_json.push(h.join(".claude.json"));
+        // codex keeps MCP under [mcp_servers.*] in TOML (also foreign).
+        home_toml.push(h.join(".codex").join("config.toml"));
     }
-    foreign_json.push(cwd.join(".cursor").join("mcp.json"));
-    foreign_json.push(cwd.join(".vscode").join("mcp.json"));
-    foreign_json.push(cwd.join(".opencode").join("opencode.json"));
-
-    // codex keeps MCP under [mcp_servers.*] in TOML (also foreign).
-    let mut toml_paths: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(h) = &home {
-        toml_paths.push(h.join(".codex").join("config.toml"));
-    }
-    toml_paths.push(cwd.join(".codex").join("config.toml"));
+    // Project-local foreign files (untrusted workspace → disabled by default).
+    let cwd_json: Vec<std::path::PathBuf> = vec![
+        cwd.join(".cursor").join("mcp.json"),
+        cwd.join(".vscode").join("mcp.json"),
+        cwd.join(".opencode").join("opencode.json"),
+    ];
+    let cwd_toml: Vec<std::path::PathBuf> = vec![cwd.join(".codex").join("config.toml")];
 
     // zode's OWN sources (enabled): global → project, `.mcp.json` kept high.
     let mut zode_json: Vec<std::path::PathBuf> = Vec::new();
@@ -60,27 +73,20 @@ pub fn discover_mcp_config(cwd: &Path) -> Option<McpConfig> {
     zode_json.push(cwd.join(".zode").join("mcp.json"));
 
     let mut servers: serde_json::Map<String, Value> = serde_json::Map::new();
-    // --- Foreign: plugin trees, codex TOML, then foreign JSON ---
-    if let Some(h) = &home {
-        for root in [
-            h.join(".claude").join("plugins"),
-            h.join(".codex").join("plugins"),
-            h.join(".config").join("opencode").join("plugin"),
-        ] {
-            collect_plugin_mcp(&root, &mut servers);
-        }
-    }
+    // --- zode's OWN plugin tree is scanned (so zode-shipped plugins can declare
+    // MCP servers); foreign plugin trees are intentionally NOT (see note). ---
     if let Ok(global) = ConfigManager::config_dir() {
         collect_plugin_mcp(&global.join("plugins"), &mut servers);
     }
-    for path in &toml_paths {
+    // --- HOME foreign config files → adopted (enabled by default). ---
+    for path in &home_toml {
         if let Ok(s) = std::fs::read_to_string(path) {
             for (name, spec) in parse_codex_mcp_toml(&s) {
                 servers.insert(name, spec);
             }
         }
     }
-    for path in &foreign_json {
+    for path in &home_json {
         if let Ok(s) = std::fs::read_to_string(path) {
             if let Ok(root) = serde_json::from_str::<Value>(&s) {
                 for (name, spec) in extract_servers(&root) {
@@ -89,23 +95,60 @@ pub fn discover_mcp_config(cwd: &Path) -> Option<McpConfig> {
             }
         }
     }
-    // Everything collected so far is foreign → default it OFF.
-    for spec in servers.values_mut() {
-        if let Some(obj) = spec.as_object_mut() {
-            obj.insert("enabled".into(), Value::Bool(false));
+    // --- PROJECT-LOCAL foreign config files → disabled by default. An untrusted
+    // workspace must not auto-spawn processes, AND must not REPLACE the command
+    // of a server already adopted from a trusted home config (a hijack vector).
+    // So skip any already-adopted name entirely (never overwrite it), insert
+    // only workspace-only names, and default those to `enabled:false`. Opt one in
+    // via `/mcp` or by declaring it in zode's own config (below, which DOES
+    // override). ---
+    let adopted: std::collections::HashSet<String> = servers.keys().cloned().collect();
+    for path in &cwd_toml {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            for (name, spec) in parse_codex_mcp_toml(&s) {
+                if !adopted.contains(&name) {
+                    servers.insert(name, spec);
+                }
+            }
         }
     }
-    // --- zode's own (highest precedence; enabled) override any foreign ---
+    for path in &cwd_json {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            if let Ok(root) = serde_json::from_str::<Value>(&s) {
+                for (name, spec) in extract_servers(&root) {
+                    if !adopted.contains(&name) {
+                        servers.insert(name, spec);
+                    }
+                }
+            }
+        }
+    }
+    // Everything NOT already adopted is a workspace-only server → force OFF.
+    // Use insert (overwrite), not entry().or_insert: a workspace file that ships
+    // its own `"enabled": true` must NOT be able to keep itself enabled.
+    for (name, spec) in servers.iter_mut() {
+        if adopted.contains(name) {
+            continue; // trusted home config / zode plugin — leave enabled
+        }
+        if let Some(obj) = spec.as_object_mut() {
+            obj.insert("enabled".to_string(), Value::Bool(false));
+        }
+    }
+    // --- zode's own config (highest precedence; enabled) overrides any foreign
+    // definition — this is how a workspace-only server is opted in. ---
     collect_plugin_mcp(&cwd.join(".zode").join("plugins"), &mut servers);
     for path in &zode_json {
         if let Ok(s) = std::fs::read_to_string(path) {
             if let Ok(root) = serde_json::from_str::<Value>(&s) {
                 for (name, spec) in extract_servers(&root) {
-                    servers.insert(name, spec); // re-enabled (default true)
+                    servers.insert(name, spec);
                 }
             }
         }
     }
+    // op-bridge owns OpenPencil — never surface it as a discovered MCP server,
+    // even if a foreign (or zode-own) config declares it.
+    servers.remove("openpencil");
     if servers.is_empty() {
         return None;
     }
@@ -152,12 +195,14 @@ fn collect_plugin_mcp(root: &Path, out: &mut serde_json::Map<String, Value>) {
 }
 
 /// The fields accumulated for one `[mcp_servers.<name>]` section while parsing:
-/// `(name, command, args, env)`. `command` is optional until its line is seen.
+/// `(name, command, args, env, enabled)`. `command` is optional until its line
+/// is seen; `enabled` defaults true and flips on an explicit `enabled = false`.
 type PendingMcpServer = (
     String,
     Option<String>,
     Vec<String>,
     serde_json::Map<String, Value>,
+    bool,
 );
 
 /// Minimal parser for codex's `[mcp_servers.<name>]` TOML sections → zode's
@@ -166,16 +211,19 @@ type PendingMcpServer = (
 /// codex MCP entries are simple). Returns (name, spec) pairs.
 fn parse_codex_mcp_toml(s: &str) -> Vec<(String, Value)> {
     fn finish(pending: Option<PendingMcpServer>, out: &mut Vec<(String, Value)>) {
-        if let Some((name, Some(command), args, env)) = pending {
-            out.push((
-                name,
-                json!({
-                    "transport": "stdio",
-                    "command": command,
-                    "args": args,
-                    "env": Value::Object(env),
-                }),
-            ));
+        if let Some((name, Some(command), args, env, enabled)) = pending {
+            let mut spec = json!({
+                "transport": "stdio",
+                "command": command,
+                "args": args,
+                "env": Value::Object(env),
+            });
+            // Honor an explicit `enabled = false`; otherwise leave it unset so
+            // the default-enabled (adopted) policy applies.
+            if !enabled {
+                spec["enabled"] = Value::Bool(false);
+            }
+            out.push((name, spec));
         }
     }
 
@@ -196,6 +244,7 @@ fn parse_codex_mcp_toml(s: &str) -> Vec<(String, Value)> {
                         None,
                         Vec::new(),
                         serde_json::Map::new(),
+                        true,
                     ));
                 }
             }
@@ -209,6 +258,7 @@ fn parse_codex_mcp_toml(s: &str) -> Vec<(String, Value)> {
                 "command" => p.1 = Some(v.trim().trim_matches('"').to_string()),
                 "args" => p.2 = toml_str_array(v.trim()),
                 "env" => p.3 = toml_inline_table(v.trim()),
+                "enabled" => p.4 = v.trim() != "false",
                 _ => {}
             }
         }
@@ -528,7 +578,10 @@ foo = \"bar\"\n";
                 cfg.servers.keys().collect::<Vec<_>>()
             );
             assert!(cfg.servers.contains_key("oc"));
-            // Foreign sources are discovered but DISABLED by default (no flood).
+            // Both come from PROJECT-LOCAL foreign files (untrusted workspace):
+            // the formats parse, but the servers default to DISABLED — a
+            // workspace can't auto-spawn, and even oc's explicit `enabled:true`
+            // does not override the workspace-off default.
             assert!(!cfg.servers["gh"].enabled());
             assert!(!cfg.servers["oc"].enabled());
         });
@@ -556,11 +609,206 @@ foo = \"bar\"\n";
             let cfg = discover_mcp_config(proj.path()).expect("merged");
             std::env::remove_var("ZODE_CONFIG_DIR");
             assert!(cfg.servers["own"].enabled(), "zode-own enabled");
-            assert!(cfg.servers["shared"].enabled(), "zode override re-enables");
+            assert!(cfg.servers["shared"].enabled(), "zode override enabled");
+            // Prove the zode-own definition (command "z") actually won, not the
+            // foreign "x".
+            match &cfg.servers["shared"] {
+                agent::mcp::McpServerConfig::Stdio { command, .. } => {
+                    assert_eq!(command, "z", "zode-own command must override foreign");
+                }
+                other => panic!("shared should be a stdio server, got {other:?}"),
+            }
+            // "foreignonly" exists only in the project .cursor → off by default.
             assert!(
                 !cfg.servers["foreignonly"].enabled(),
-                "foreign-only disabled"
+                "workspace-only foreign server is disabled by default"
             );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn workspace_cannot_hijack_home_server() {
+        with_isolated_home(|| {
+            let home = dirs::home_dir().expect("isolated HOME");
+            std::env::set_var("ZODE_CONFIG_DIR", home.join("none"));
+            // Trusted home server.
+            std::fs::write(
+                home.join(".claude.json"),
+                r#"{"mcpServers":{"deepwiki":{"command":"good"}}}"#,
+            )
+            .unwrap();
+            // Untrusted workspace re-declares the SAME name with a hostile command.
+            let proj = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(proj.path().join(".cursor")).unwrap();
+            std::fs::write(
+                proj.path().join(".cursor").join("mcp.json"),
+                r#"{"mcpServers":{"deepwiki":{"command":"evil"}}}"#,
+            )
+            .unwrap();
+            let cfg = discover_mcp_config(proj.path()).expect("merged");
+            std::env::remove_var("ZODE_CONFIG_DIR");
+            // The home definition survives intact: still enabled, command unchanged.
+            assert!(cfg.servers["deepwiki"].enabled());
+            match &cfg.servers["deepwiki"] {
+                agent::mcp::McpServerConfig::Stdio { command, .. } => {
+                    assert_eq!(command, "good", "workspace must not replace home command");
+                }
+                other => panic!("expected stdio, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn workspace_cannot_self_enable_via_enabled_true() {
+        with_isolated_home(|| {
+            let home = dirs::home_dir().expect("isolated HOME");
+            std::env::set_var("ZODE_CONFIG_DIR", home.join("none"));
+            // A workspace file that ships its own enabled:true (in zode's tagged
+            // shape, which passes through normalize untouched) must still be off.
+            let proj = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(proj.path().join(".vscode")).unwrap();
+            std::fs::write(
+                proj.path().join(".vscode").join("mcp.json"),
+                r#"{"servers":{"sneaky":{"transport":"stdio","command":"x","enabled":true}}}"#,
+            )
+            .unwrap();
+            let cfg = discover_mcp_config(proj.path()).expect("merged");
+            std::env::remove_var("ZODE_CONFIG_DIR");
+            assert!(
+                !cfg.servers["sneaky"].enabled(),
+                "workspace foreign must not self-enable via enabled:true"
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openpencil_is_never_surfaced_as_mcp_server() {
+        with_isolated_home(|| {
+            let proj = tempfile::tempdir().unwrap();
+            std::env::set_var("ZODE_CONFIG_DIR", proj.path().join("none"));
+            // A foreign config declaring openpencil alongside a normal server.
+            std::fs::create_dir_all(proj.path().join(".cursor")).unwrap();
+            std::fs::write(
+                proj.path().join(".cursor").join("mcp.json"),
+                r#"{"mcpServers":{"openpencil":{"command":"op"},"keep":{"command":"x"}}}"#,
+            )
+            .unwrap();
+            let cfg = discover_mcp_config(proj.path()).expect("merged");
+            std::env::remove_var("ZODE_CONFIG_DIR");
+            // op-bridge drives OpenPencil natively — it must not double as MCP.
+            assert!(
+                !cfg.servers.contains_key("openpencil"),
+                "openpencil must not be surfaced as an MCP server"
+            );
+            assert!(cfg.servers.contains_key("keep"));
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn foreign_plugin_tree_mcp_is_not_adopted() {
+        with_isolated_home(|| {
+            let home = dirs::home_dir().expect("isolated HOME");
+            std::env::set_var("ZODE_CONFIG_DIR", home.join("none"));
+            // A product-bundled MCP server inside a foreign plugin tree…
+            let plug = home
+                .join(".claude")
+                .join("plugins")
+                .join("marketplaces")
+                .join("official")
+                .join("discord");
+            std::fs::create_dir_all(&plug).unwrap();
+            std::fs::write(
+                plug.join(".mcp.json"),
+                r#"{"mcpServers":{"discord":{"command":"discord-mcp"}}}"#,
+            )
+            .unwrap();
+            // …and one inside the codex plugin tree (also a foreign tree)…
+            let codex_plug = home.join(".codex").join("plugins").join("cache").join("gh");
+            std::fs::create_dir_all(&codex_plug).unwrap();
+            std::fs::write(
+                codex_plug.join(".mcp.json"),
+                r#"{"mcpServers":{"ghplugin":{"command":"gh-mcp"}}}"#,
+            )
+            .unwrap();
+            // …and a real user-config server the user actually wants.
+            std::fs::write(
+                home.join(".claude.json"),
+                r#"{"mcpServers":{"deepwiki":{"command":"npx","args":["deepwiki"]}}}"#,
+            )
+            .unwrap();
+            let cfg = discover_mcp_config(&home.join("noproj"));
+            std::env::remove_var("ZODE_CONFIG_DIR");
+            let cfg = cfg.expect("user-config server present");
+            assert!(
+                !cfg.servers.contains_key("discord"),
+                "claude plugin-tree MCP must not be adopted"
+            );
+            assert!(
+                !cfg.servers.contains_key("ghplugin"),
+                "codex plugin-tree MCP must not be adopted"
+            );
+            assert!(
+                cfg.servers["deepwiki"].enabled(),
+                "home user-config MCP is adopted (enabled)"
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn home_foreign_adopted_but_workspace_foreign_disabled() {
+        with_isolated_home(|| {
+            let home = dirs::home_dir().expect("isolated HOME");
+            std::env::set_var("ZODE_CONFIG_DIR", home.join("none"));
+            // Home config server → trusted personal setup → adopted.
+            std::fs::write(
+                home.join(".claude.json"),
+                r#"{"mcpServers":{"homesrv":{"command":"npx","args":["home"]}}}"#,
+            )
+            .unwrap();
+            // Same kind of file inside a project → untrusted workspace → off.
+            let proj = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(proj.path().join(".cursor")).unwrap();
+            std::fs::write(
+                proj.path().join(".cursor").join("mcp.json"),
+                r#"{"mcpServers":{"worksrv":{"command":"evil"}}}"#,
+            )
+            .unwrap();
+            let cfg = discover_mcp_config(proj.path()).expect("merged");
+            std::env::remove_var("ZODE_CONFIG_DIR");
+            assert!(cfg.servers["homesrv"].enabled(), "home foreign is adopted");
+            assert!(
+                !cfg.servers["worksrv"].enabled(),
+                "workspace foreign must not auto-spawn"
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_toml_enabled_false_is_respected() {
+        with_isolated_home(|| {
+            let home = dirs::home_dir().expect("isolated HOME");
+            std::env::set_var("ZODE_CONFIG_DIR", home.join("none"));
+            // A home codex server explicitly turned off must NOT be adopted.
+            std::fs::create_dir_all(home.join(".codex")).unwrap();
+            std::fs::write(
+                home.join(".codex").join("config.toml"),
+                "[mcp_servers.off]\ncommand = \"x\"\nenabled = false\n\
+                 \n[mcp_servers.on]\ncommand = \"y\"\n",
+            )
+            .unwrap();
+            let cfg = discover_mcp_config(&home.join("noproj")).expect("merged");
+            std::env::remove_var("ZODE_CONFIG_DIR");
+            assert!(
+                !cfg.servers["off"].enabled(),
+                "explicit enabled=false honored"
+            );
+            assert!(cfg.servers["on"].enabled(), "default codex server adopted");
         });
     }
 }

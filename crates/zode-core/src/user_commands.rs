@@ -27,8 +27,9 @@ pub struct UserCommand {
 /// Codex subagent, `/setup` configures claude-hud's statusline, etc. — that
 /// drive that product's own tooling and cannot work under zode. Loading them
 /// floods zode's palette with broken entries (the user's "还是有很多"). Same
-/// policy as foreign MCP servers: another product's installed integrations are
-/// off by default; to use one under zode, copy it into a `.zode/commands` dir.
+/// stance as MCP servers bundled in foreign plugin trees (see
+/// `mcp::discover_mcp_config`): another product's bundled integrations aren't
+/// loaded; to use one under zode, copy it into a `.zode/commands` dir.
 ///
 /// We DO still load the user's own direct command dirs (`.claude/commands`,
 /// `.codex/commands`, global + project) for cross-agent portability, and
