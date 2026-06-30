@@ -235,6 +235,10 @@ pub struct SandboxSettings {
     /// Drop `$TMPDIR` from the default writable roots (Codex
     /// `exclude_tmpdir_env_var`). `None`/false → `$TMPDIR` is writable.
     pub exclude_tmpdir_env_var: Option<bool>,
+    /// Opt-in "strict read": also hide a curated set of credential dirs
+    /// (`~/.ssh`, `~/.aws`, the zode config, …) from READS. `None`/false → reads
+    /// unrestricted (the safe default for a coding agent that reads the repo).
+    pub restrict_reads: Option<bool>,
 }
 
 /// Plugin enable/disable state. Plugins are on by default, so only the
@@ -312,6 +316,32 @@ pub struct NoemaSettings {
     /// "remember that ..." or "请记住...". Defaults to true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_remember: Option<bool>,
+    /// Run an LLM pass after each turn to extract durable memories from the
+    /// conversation (not just explicit "remember…" phrases). Off by default —
+    /// enabling it also flips the memory write policy to `autoSafe` (see
+    /// [`write_policy`](Self::write_policy)) so high-confidence, novel
+    /// candidates auto-store while the rest queue for `/memory review`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_extract: Option<bool>,
+    /// Memory write policy applied to the noema root: `"manual"`, `"review"`,
+    /// `"autoSafe"`, or `"auto"`. When unset, defaults to `autoSafe` if
+    /// `auto_extract` is on, else leaves noema's own default (`review`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_policy: Option<String>,
+    /// Model id for the extraction pass. When unset, the engine's active model
+    /// runs it. Point this at a cheaper model to cut per-turn cost.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extract_model: Option<String>,
+    /// Also mine the assistant's reply for durable memories (default false:
+    /// scan only the user message — higher precision, fewer tokens).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extract_scan_assistant: Option<bool>,
+    /// Max memories accepted from a single turn (bounds cost + noise). Default 3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_memories_per_turn: Option<u32>,
+    /// Truncate the transcript slice fed to the extractor. Default 4000 chars.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extract_max_input_chars: Option<u32>,
 }
 
 impl NoemaSettings {
@@ -321,6 +351,32 @@ impl NoemaSettings {
 
     pub fn auto_remember(&self) -> bool {
         self.auto_remember.unwrap_or(true)
+    }
+
+    /// Whether the post-turn LLM extraction pass runs. Off by default.
+    pub fn auto_extract(&self) -> bool {
+        self.auto_extract.unwrap_or(false)
+    }
+
+    /// The effective write policy keyword (lowercased for the noema mapping):
+    /// an explicit `write_policy` wins; otherwise `"autoSafe"` when extraction
+    /// is on, else `"review"` (noema's own default). Always `Some` so the
+    /// policy is *deterministic and reversible* — turning `auto_extract` back
+    /// off restores `review` rather than leaving the root stuck at `autoSafe`.
+    pub fn effective_write_policy(&self) -> String {
+        if let Some(p) = self
+            .write_policy
+            .as_ref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            return p;
+        }
+        if self.auto_extract() {
+            "autosafe".to_string()
+        } else {
+            "review".to_string()
+        }
     }
 }
 
@@ -406,6 +462,12 @@ pub struct ZodeConfig {
     pub sandbox: SandboxSettings,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    /// Runaway backstop on agent-loop iterations. Absent or `0` = UNBOUNDED: the
+    /// loop runs until the model returns a turn with no tool calls (the natural
+    /// "model is done" stop). Set a positive value to force a finite cap — handy
+    /// for headless `-p` runs, which can't be interrupted with Ctrl+C.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
     /// The model's context window in tokens, used for auto-compaction /
     /// context-left math. `None` defaults to a conservative 200K. Set this to
     /// `1000000` for a 1M-context model (e.g. `claude-opus-4-8[1m]`) so zode
@@ -803,8 +865,14 @@ impl ZodeConfig {
         if !other.sandbox.writable_roots.is_empty() {
             self.sandbox.writable_roots = other.sandbox.writable_roots;
         }
+        if other.sandbox.restrict_reads.is_some() {
+            self.sandbox.restrict_reads = other.sandbox.restrict_reads;
+        }
         if other.max_output_tokens.is_some() {
             self.max_output_tokens = other.max_output_tokens;
+        }
+        if other.max_iterations.is_some() {
+            self.max_iterations = other.max_iterations;
         }
         if other.context_window.is_some() {
             self.context_window = other.context_window;
@@ -868,6 +936,17 @@ impl ZodeConfig {
         self.noema.root = n.root.or(self.noema.root.take());
         self.noema.user = n.user.or(self.noema.user.take());
         self.noema.auto_remember = n.auto_remember.or(self.noema.auto_remember);
+        self.noema.auto_extract = n.auto_extract.or(self.noema.auto_extract);
+        self.noema.write_policy = n.write_policy.or(self.noema.write_policy.take());
+        self.noema.extract_model = n.extract_model.or(self.noema.extract_model.take());
+        self.noema.extract_scan_assistant = n
+            .extract_scan_assistant
+            .or(self.noema.extract_scan_assistant);
+        self.noema.max_memories_per_turn =
+            n.max_memories_per_turn.or(self.noema.max_memories_per_turn);
+        self.noema.extract_max_input_chars = n
+            .extract_max_input_chars
+            .or(self.noema.extract_max_input_chars);
     }
 }
 
@@ -1046,6 +1125,44 @@ mod tests {
         assert!(!base.noema.auto_remember());
         assert_eq!(base.noema.root.as_deref(), Some("/global/mem"));
         assert_eq!(base.noema.user.as_deref(), Some("project-user"));
+    }
+
+    #[test]
+    fn noema_auto_extract_defaults_off_and_drives_write_policy() {
+        // Absent → off, and the policy is `review` (deterministic & reversible:
+        // not `None`, so turning extraction off actively restores review).
+        let bare: ZodeConfig = serde_json::from_str(r#"{"noema":{}}"#).unwrap();
+        assert!(!bare.noema.auto_extract());
+        assert_eq!(bare.noema.effective_write_policy(), "review");
+
+        // Enabling extraction implies the autoSafe policy.
+        let on: ZodeConfig = serde_json::from_str(r#"{"noema":{"autoExtract":true}}"#).unwrap();
+        assert!(on.noema.auto_extract());
+        assert_eq!(on.noema.effective_write_policy(), "autosafe");
+
+        // An explicit writePolicy wins (normalized to lowercase) even with
+        // extraction off.
+        let explicit: ZodeConfig =
+            serde_json::from_str(r#"{"noema":{"writePolicy":"Review"}}"#).unwrap();
+        assert!(!explicit.noema.auto_extract());
+        assert_eq!(explicit.noema.effective_write_policy(), "review");
+    }
+
+    #[test]
+    fn noema_new_fields_round_trip_and_merge_by_presence() {
+        // Absent keys are omitted on serialize (skip_serializing_if).
+        let default_json = serde_json::to_string(&NoemaSettings::default()).unwrap();
+        assert!(!default_json.contains("autoExtract"));
+        assert!(!default_json.contains("writePolicy"));
+
+        // Project layer overrides extraction; absent writePolicy preserves global.
+        let mut base = ZodeConfig::default();
+        base.noema.write_policy = Some("auto".into());
+        let mut project = ZodeConfig::default();
+        project.noema.auto_extract = Some(true);
+        base.merge_from(project);
+        assert!(base.noema.auto_extract());
+        assert_eq!(base.noema.write_policy.as_deref(), Some("auto"));
     }
 
     #[test]

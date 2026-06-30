@@ -28,6 +28,7 @@ pub mod lsp;
 pub mod mcp;
 pub mod models_dev;
 pub mod noema;
+pub mod noema_extract;
 pub mod openpencil;
 pub mod plugin;
 pub mod portability;

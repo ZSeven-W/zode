@@ -225,6 +225,31 @@ impl Catalog {
             .or_else(|| self.context_for_model(model_id))
     }
 
+    /// The published max output tokens for `model_id`, searching all providers.
+    /// Lets the engine auto-resolve a model's real output cap instead of making
+    /// the user pin `maxOutputTokens` by hand.
+    pub fn max_output_for_model(&self, model_id: &str) -> Option<u32> {
+        self.providers
+            .iter()
+            .flat_map(|p| p.models.iter())
+            .find(|m| m.id == model_id)
+            .and_then(|m| m.max_output)
+    }
+
+    /// The published max output tokens for `model_id`, preferring the entry
+    /// under `provider_id` when given (same provider-scoping rationale as
+    /// [`Self::context_for_model_scoped`]).
+    pub fn max_output_for_model_scoped(
+        &self,
+        provider_id: Option<&str>,
+        model_id: &str,
+    ) -> Option<u32> {
+        provider_id
+            .and_then(|pid| self.find_model(pid, model_id))
+            .and_then(|m| m.max_output)
+            .or_else(|| self.max_output_for_model(model_id))
+    }
+
     // -----------------------------------------------------------------------
     // Disk cache helpers
     // -----------------------------------------------------------------------

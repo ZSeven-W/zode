@@ -58,16 +58,63 @@ impl ZodeNoema {
                 .cloned()
                 .or_else(|| loaded.map(|cfg| cfg.tenant.default_user_id))
                 .or_else(default_user);
-            Self {
+            let adapter = Self {
                 root: Some(root),
                 user,
                 auto_remember: settings.auto_remember(),
-            }
+            };
+            // Apply the effective write policy at startup so subsequent
+            // `NoemaEngine::new(root)` loads observe it. The policy is
+            // deterministic (review when extraction is off, autoSafe when on),
+            // and `apply_write_policy` only writes when it actually differs —
+            // so this is reversible and doesn't churn config.toml each launch.
+            // Best-effort: a failure here must not disable memory.
+            adapter.apply_write_policy(&settings.effective_write_policy());
+            adapter
         }
 
         #[cfg(not(feature = "noema"))]
         {
             Self::disabled()
+        }
+    }
+
+    /// Persist a write policy to the noema root so it governs future submits.
+    /// `policy` is a lowercased keyword (`manual`/`review`/`autosafe`/`auto`);
+    /// unknown values are ignored. Best-effort — errors are logged, not fatal.
+    #[cfg(feature = "noema")]
+    fn apply_write_policy(&self, policy: &str) {
+        use noema_core::api::{NoemaEngine, PolicySetRequest};
+        use noema_core::config::WritePolicy;
+
+        let Some(root) = &self.root else { return };
+        let write = match policy {
+            "manual" => WritePolicy::Manual,
+            "review" => WritePolicy::Review,
+            "autosafe" => WritePolicy::AutoSafe,
+            "auto" => WritePolicy::Auto,
+            other => {
+                tracing::debug!(policy = other, "unknown noema write policy; ignoring");
+                return;
+            }
+        };
+        let principal = self.principal();
+        let result = NoemaEngine::new(root).and_then(|engine| {
+            // Only persist when the policy actually differs, so we don't rewrite
+            // config.toml on every launch (and don't stomp an externally-managed
+            // tenant whose policy already matches).
+            if engine.policy_get(&principal)?.write == write {
+                return Ok(());
+            }
+            engine
+                .policy_set(PolicySetRequest {
+                    principal,
+                    write: Some(write),
+                })
+                .map(|_| ())
+        });
+        if let Err(err) = result {
+            tracing::debug!(error = %err, "failed to apply noema write policy");
         }
     }
 
@@ -201,6 +248,96 @@ impl ZodeNoema {
         };
         self.remember(candidate, ZodeMemoryScope::User, cwd)
             .map(Some)
+    }
+
+    /// Submit LLM-extracted candidates through noema's normal governance
+    /// (route_candidate decides auto-accept vs review). Unlike the explicit
+    /// [`remember`](Self::remember) path, this does NOT force-accept queued
+    /// items — low-confidence/duplicate candidates stay in the review inbox.
+    /// Returns one outcome string per candidate; never errors as a whole (a
+    /// per-item failure is reported in that item's slot). Best-effort: the
+    /// caller runs this off the turn's critical path.
+    #[cfg(feature = "noema")]
+    pub fn submit_extracted(
+        &self,
+        items: &[crate::noema_extract::ExtractedCandidate],
+        cwd: Option<&Path>,
+    ) -> Vec<Result<String, String>> {
+        use noema_core::api::{NoemaEngine, SubmitOutcome};
+
+        let Some(root) = &self.root else {
+            return vec![Err("memory is disabled".to_string()); items.len()];
+        };
+        let engine = match NoemaEngine::new(root) {
+            Ok(engine) => engine,
+            Err(err) => return vec![Err(err.to_string()); items.len()],
+        };
+        items
+            .iter()
+            .map(|item| {
+                let req = self.candidate_request(item, cwd);
+                match engine.submit_candidate(req) {
+                    Ok(SubmitOutcome::AutoAccepted { memory_id }) => {
+                        Ok(format!("stored {memory_id}"))
+                    }
+                    Ok(SubmitOutcome::Queued { candidate_id }) => {
+                        Ok(format!("queued {candidate_id}"))
+                    }
+                    Ok(SubmitOutcome::RejectedSecret) => {
+                        Err("rejected: secret-class content".to_string())
+                    }
+                    Err(err) => Err(err.to_string()),
+                }
+            })
+            .collect()
+    }
+
+    /// Map an extracted candidate onto a noema `RememberRequest`, honoring the
+    /// model's own kind/scope/sensitivity/importance/confidence (not the
+    /// hardcoded defaults the explicit path uses).
+    #[cfg(feature = "noema")]
+    fn candidate_request(
+        &self,
+        item: &crate::noema_extract::ExtractedCandidate,
+        cwd: Option<&Path>,
+    ) -> noema_core::api::RememberRequest {
+        use crate::noema_extract::{MemoryKindHint, SensitivityHint};
+        use noema_core::api::RememberRequest;
+        use noema_core::memory::{MemoryKind, Scope};
+        use noema_core::sensitivity::SensitivityLevel;
+
+        let scope = match item.scope {
+            ZodeMemoryScope::User => Scope::User,
+            ZodeMemoryScope::Project => Scope::Project,
+        };
+        let project_path = matches!(item.scope, ZodeMemoryScope::Project)
+            .then(|| cwd.map(Path::to_path_buf))
+            .flatten();
+        let kind = match item.kind {
+            MemoryKindHint::Preference => MemoryKind::Preference,
+            MemoryKindHint::Decision => MemoryKind::Decision,
+            MemoryKindHint::Constraint => MemoryKind::Constraint,
+            MemoryKindHint::Fact => MemoryKind::Fact,
+            MemoryKindHint::Reference => MemoryKind::Reference,
+            MemoryKindHint::Workflow => MemoryKind::Workflow,
+            MemoryKindHint::Warning => MemoryKind::Warning,
+        };
+        let sensitivity = match item.sensitivity {
+            SensitivityHint::Public => SensitivityLevel::Public,
+            SensitivityHint::Internal => SensitivityLevel::Internal,
+        };
+        RememberRequest {
+            principal: self.principal(),
+            text: item.body.clone(),
+            scope,
+            project_path,
+            kind,
+            sensitivity,
+            tags: item.tags.clone(),
+            entities: item.entities.clone(),
+            confidence: item.confidence,
+            importance: item.importance,
+        }
     }
 
     pub fn recall_for_turn(
@@ -526,6 +663,130 @@ mod tests {
             None
         );
         assert_eq!(extract_auto_memory("不要记住这个临时内容"), None);
+    }
+
+    #[cfg(feature = "noema")]
+    fn candidate(
+        body: &str,
+        confidence: f32,
+        importance: f32,
+    ) -> crate::noema_extract::ExtractedCandidate {
+        use crate::noema_extract::{ExtractedCandidate, MemoryKindHint, SensitivityHint};
+        ExtractedCandidate {
+            body: body.to_string(),
+            entities: Vec::new(),
+            tags: Vec::new(),
+            kind: MemoryKindHint::Preference,
+            scope: ZodeMemoryScope::User,
+            sensitivity: SensitivityHint::Internal,
+            importance,
+            confidence,
+        }
+    }
+
+    #[cfg(feature = "noema")]
+    #[test]
+    #[serial_test::serial]
+    fn submit_extracted_auto_accepts_high_confidence_under_autosafe() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("NOEMA_ROOT", dir.path());
+        let adapter = ZodeNoema::from_settings(&NoemaSettings {
+            auto_extract: Some(true), // → autoSafe policy applied
+            user: Some("kay".into()),
+            ..Default::default()
+        });
+        std::env::remove_var("NOEMA_ROOT");
+
+        // High confidence + importance + novel → auto-accepted.
+        let items = vec![candidate("User prefers ripgrep for search", 0.95, 0.7)];
+        let outcomes = adapter.submit_extracted(&items, None);
+        assert_eq!(outcomes.len(), 1);
+        assert!(
+            outcomes[0].as_ref().unwrap().starts_with("stored "),
+            "expected stored, got {:?}",
+            outcomes[0]
+        );
+
+        // And it is recallable.
+        let recalled = adapter.recall_for_turn("ripgrep search", None).unwrap();
+        assert!(recalled.is_some());
+    }
+
+    #[cfg(feature = "noema")]
+    #[test]
+    #[serial_test::serial]
+    fn submit_extracted_queues_low_confidence_without_force_accept() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("NOEMA_ROOT", dir.path());
+        let adapter = ZodeNoema::from_settings(&NoemaSettings {
+            auto_extract: Some(true),
+            user: Some("kay".into()),
+            ..Default::default()
+        });
+        std::env::remove_var("NOEMA_ROOT");
+
+        // Below the 0.80 confidence gate → queued, NOT stored (no force-accept).
+        let items = vec![candidate("User might like vim", 0.4, 0.5)];
+        let outcomes = adapter.submit_extracted(&items, None);
+        assert!(
+            outcomes[0].as_ref().unwrap().starts_with("queued "),
+            "expected queued, got {:?}",
+            outcomes[0]
+        );
+
+        // It must NOT be recallable yet (only the inbox holds it).
+        let recalled = adapter.recall_for_turn("vim", None).unwrap();
+        assert!(recalled.is_none(), "queued item must not be recallable");
+    }
+
+    #[cfg(feature = "noema")]
+    #[test]
+    #[serial_test::serial]
+    fn auto_extract_applies_autosafe_write_policy_to_root() {
+        use noema_core::api::NoemaEngine;
+        use noema_core::config::WritePolicy;
+        use noema_core::sensitivity::Principal;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("NOEMA_ROOT", dir.path());
+        // auto_extract on → effective policy is autoSafe, applied at startup.
+        let settings = NoemaSettings {
+            auto_extract: Some(true),
+            user: Some("kay".into()),
+            ..Default::default()
+        };
+        let _adapter = ZodeNoema::from_settings(&settings);
+        std::env::remove_var("NOEMA_ROOT");
+
+        let engine = NoemaEngine::new(dir.path()).unwrap();
+        let view = engine
+            .policy_get(&Principal::personal("kay".to_string(), "zode"))
+            .unwrap();
+        assert_eq!(view.write, WritePolicy::AutoSafe);
+    }
+
+    #[cfg(feature = "noema")]
+    #[test]
+    #[serial_test::serial]
+    fn no_auto_extract_keeps_default_review_policy() {
+        use noema_core::api::NoemaEngine;
+        use noema_core::config::WritePolicy;
+        use noema_core::sensitivity::Principal;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("NOEMA_ROOT", dir.path());
+        let settings = NoemaSettings {
+            user: Some("kay".into()),
+            ..Default::default()
+        };
+        let _adapter = ZodeNoema::from_settings(&settings);
+        std::env::remove_var("NOEMA_ROOT");
+
+        let engine = NoemaEngine::new(dir.path()).unwrap();
+        let view = engine
+            .policy_get(&Principal::personal("kay".to_string(), "zode"))
+            .unwrap();
+        assert_eq!(view.write, WritePolicy::Review);
     }
 
     #[cfg(feature = "noema")]

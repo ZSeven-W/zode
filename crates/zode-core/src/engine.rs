@@ -95,12 +95,67 @@ fn resolve_context_window(
         .unwrap_or(DEFAULT_MODEL_MAX_TOKENS)
 }
 
-/// Resolve the effective max output tokens: per-provider field wins over the
-/// top-level config value; if both are absent, falls back to the default.
-fn resolve_max_output(p: &crate::config::ProviderConfig, top: Option<u32>) -> u32 {
-    p.max_output_tokens
-        .or(top)
-        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
+/// Resolve the effective max output tokens, AUTOMATICALLY where possible so the
+/// user rarely needs to pin it. Order: an explicit per-provider / top-level
+/// value wins, then the model's published cap from the models.dev `catalog`,
+/// then a conservative default — and the result is clamped to strictly below
+/// the context window.
+///
+/// The explicit value is honored ONLY if it is physically sane: output tokens
+/// are part of the context window, so a value `>= context_window` (almost always
+/// a copy of `contextWindow`) is a mistake and is ignored, falling through to
+/// auto-resolution. That turns the common "maxOutputTokens == contextWindow"
+/// misconfig from a hard API error (e.g. xfyun 10163) into a working default.
+fn resolve_max_output(
+    p: &crate::config::ProviderConfig,
+    top: Option<u32>,
+    provider_id: Option<&str>,
+    catalog: &crate::Catalog,
+    context_window: u32,
+) -> u32 {
+    let sane = |n: u32| n > 0 && (context_window == 0 || n < context_window);
+    let explicit = p.max_output_tokens.or(top);
+    // Surface why a deliberately-set value is being ignored (vs silently
+    // overriding it) — the usual cause is copying `contextWindow`.
+    if let Some(n) = explicit {
+        if !sane(n) {
+            // Fires for both `n == 0` and `n >= context_window` (output tokens
+            // are part of the window — the usual cause is copying contextWindow).
+            tracing::warn!(
+                "ignoring invalid maxOutputTokens={n} (context window {context_window}); \
+                 it must be a positive value below the context window — \
+                 auto-resolving the cap instead"
+            );
+        }
+    }
+    let resolved = explicit
+        .filter(|&n| sane(n))
+        .or_else(|| {
+            p.model
+                .as_deref()
+                .and_then(|m| catalog.max_output_for_model_scoped(provider_id, m))
+                .filter(|&n| sane(n))
+        })
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+    // Never request output >= the context window. A window of 0/1 is degenerate
+    // (no real model has one) — skip the clamp so we don't return 0, which every
+    // provider rejects as `max_tokens=0`.
+    if context_window <= 1 {
+        resolved
+    } else {
+        resolved.min(context_window - 1)
+    }
+}
+
+/// Resolve the agent loop's runaway backstop. The loop already stops the moment
+/// the model returns a turn with no tool calls, so this only guards against a
+/// model that never converges. Absent or `0` → effectively unbounded
+/// (`usize::MAX`); a positive value imposes that finite cap.
+fn resolve_max_iterations(top: Option<u32>) -> usize {
+    match top {
+        Some(n) if n > 0 => n as usize,
+        _ => usize::MAX,
+    }
 }
 const FILE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -141,6 +196,14 @@ fn build_workspace_policy(
     // through it too (Codex parity): the kernel — not just this in-process
     // policy check — enforces the write boundary. Off → keep the direct sink.
     if let Some(sb) = sandbox {
+        // Strict-read: also hide credential dirs from the in-process FILE-READ
+        // tools (the OS sandbox only covers shell commands, so without this the
+        // agent could `Read` ~/.ssh directly). resolve_read rejects these.
+        if sb.restrict_reads() {
+            for dir in crate::sandbox::read_denied_dirs() {
+                p = p.with_read_denied_subpath(dir);
+            }
+        }
         p = p.with_fs_sink(std::sync::Arc::new(crate::sandbox::SandboxedFsSink::new(
             sb.clone(),
         )));
@@ -173,8 +236,13 @@ fn sandbox_prompt_note(sandbox: &Option<crate::sandbox::SandboxConfig>) -> Strin
             } else {
                 "Outbound network is DENIED."
             };
+            let reads = if sb.restrict_reads() {
+                " Strict-read is ON: credential dirs (~/.ssh, ~/.aws, the zode config, …) are hidden from reads (both shell commands and the file tools)."
+            } else {
+                ""
+            };
             format!(
-                "\n\n# Sandbox\nShell commands and file writes run in an OS sandbox: {mode}. {net} \
+                "\n\n# Sandbox\nShell commands and file writes run in an OS sandbox: {mode}. {net}{reads} \
                  To write outside the workspace or reach the network, either ask the user to relax it \
                  with `/sandbox` (e.g. off / workspace-write / network on), or — for a shell command — \
                  set `dangerouslyDisableSandbox: true` to request running it outside the sandbox (the \
@@ -201,12 +269,20 @@ pub struct ZodeEngine {
     /// thresholds. Configurable so 1M-context models use their full window
     /// instead of compacting at the conservative 200K default.
     pub model_max_tokens: u32,
+    /// Runaway backstop on agent-loop iterations. The loop's real stop condition
+    /// is "the model returned a turn with no tool calls" — this only guards
+    /// against a model that never converges. Default is effectively unbounded;
+    /// set `maxIterations` in config to impose a finite cap (useful for headless
+    /// `-p` runs that can't be interrupted).
+    pub max_iterations: usize,
     /// Sampling temperature (None = provider default).
     pub temperature: Option<f32>,
     /// Whether to request provider prompt caching (default on).
     pub prompt_cache: bool,
     /// Native Noema long-term memory adapter. Disabled adapters are cheap no-ops.
     pub noema: ZodeNoema,
+    /// Resolved knobs for the post-turn LLM extraction pass (off by default).
+    pub extract_config: crate::noema_extract::ExtractConfig,
     /// Background shell registry (Phase 03/07 inspect this).
     pub bash_sessions: BashSessionRegistry,
     /// Shared TodoWrite state handle (Phase 07 reads the list for the UI).
@@ -665,16 +741,29 @@ impl ZodeEngine {
             model,
             system,
             cwd: cwd.clone(),
-            max_output_tokens: resolve_max_output(&cfg.provider, cfg.max_output_tokens),
+            max_output_tokens: resolve_max_output(
+                &cfg.provider,
+                cfg.max_output_tokens,
+                cfg.active_provider_key(),
+                cached_catalog(),
+                resolve_context_window(
+                    &cfg.provider,
+                    cfg.context_window,
+                    cfg.active_provider_key(),
+                    cached_catalog(),
+                ),
+            ),
             model_max_tokens: resolve_context_window(
                 &cfg.provider,
                 cfg.context_window,
                 cfg.active_provider_key(),
                 cached_catalog(),
             ),
+            max_iterations: resolve_max_iterations(cfg.max_iterations),
             temperature: cfg.temperature,
             prompt_cache: cfg.prompt_cache.unwrap_or(true),
             noema: ZodeNoema::from_settings(&cfg.noema),
+            extract_config: crate::noema_extract::ExtractConfig::from_settings(&cfg.noema),
             bash_sessions,
             todo_state,
             subagents,
@@ -878,6 +967,7 @@ impl ZodeEngine {
             .compact_state(self.compact_state.clone())
             .max_output_tokens(self.max_output_tokens)
             .model_max_tokens(self.model_max_tokens)
+            .max_iterations(self.max_iterations)
             .cwd(self.cwd.clone())
             .auto_compact(true)
             .use_prompt_cache(self.prompt_cache);
@@ -924,6 +1014,100 @@ impl ZodeEngine {
         content
     }
 
+    /// Kick off the post-turn LLM memory-extraction pass on a detached task so
+    /// it never adds turn latency. No-op unless `extract_config.enabled` and
+    /// memory is on. The transcript slice is captured *synchronously here*
+    /// (before the spawn) so a rapid next turn can't race the snapshot. A
+    /// failure is logged, never surfaced. Call this from each front-end's
+    /// turn-completion site (the engine returns the undrained event stream, so
+    /// it can't self-trigger).
+    pub fn spawn_post_turn_extraction(self: &Arc<Self>) {
+        let Some(slice) = self.capture_extraction_slice() else {
+            return;
+        };
+        let engine = Arc::clone(self);
+        tokio::spawn(async move {
+            engine.extract_from_slice(slice).await;
+        });
+    }
+
+    /// Inline (await) variant for callers that own the engine by value and run
+    /// turns sequentially (the headless `-p` / REPL paths). Awaits the pass so
+    /// the process doesn't exit before the memory write lands.
+    pub async fn extract_post_turn_inline(&self) {
+        let Some(slice) = self.capture_extraction_slice() else {
+            return;
+        };
+        self.extract_from_slice(slice).await;
+    }
+
+    /// Snapshot the transcript and build the extractor input *synchronously*.
+    /// Returns `None` when extraction is disabled, memory is off, or there is
+    /// nothing to extract (empty user text). Holds the store's std mutex only
+    /// for the snapshot — no `.await` while locked, and the snapshot is taken
+    /// before any detached task so it reflects the turn that just completed.
+    fn capture_extraction_slice(&self) -> Option<String> {
+        if !self.extract_config.enabled || !self.noema.is_enabled() {
+            return None;
+        }
+        let cfg = &self.extract_config;
+        let (user_text, assistant_text) = {
+            let store = self.store.lock().ok()?;
+            last_user_assistant_text(&store)
+        };
+        crate::noema_extract::build_transcript_slice(
+            &user_text?,
+            assistant_text.as_deref(),
+            cfg.scan_assistant,
+            cfg.max_input_chars,
+        )
+    }
+
+    /// The extraction body: run the cheap LLM pass over an already-captured
+    /// transcript slice, parse candidates, and submit them through noema's
+    /// governance. Best-effort — every failure path logs and returns.
+    ///
+    /// Note: the extraction call's token usage is not folded into `self.cost`
+    /// (`llm_oneshot` ignores `Usage` events), so `/cost` undercounts by this
+    /// one small call per turn when `autoExtract` is on.
+    async fn extract_from_slice(&self, slice: String) {
+        let cfg = &self.extract_config;
+        let model = cfg.model.clone().unwrap_or_else(|| self.model.clone());
+        let abort = AbortController::new();
+        let raw = match crate::openpencil::design::llm_oneshot(
+            &self.provider,
+            &model,
+            crate::noema_extract::EXTRACT_SYSTEM_PROMPT,
+            &slice,
+            &abort,
+        )
+        .await
+        {
+            Ok(text) => text,
+            Err(err) => {
+                tracing::debug!(error = %err, "memory extraction call failed");
+                return;
+            }
+        };
+
+        let items = crate::noema_extract::parse_extraction(&raw, cfg.max_memories_per_turn);
+        if items.is_empty() {
+            return;
+        }
+        #[cfg(feature = "noema")]
+        {
+            let outcomes = self
+                .noema
+                .submit_extracted(&items, Some(self.cwd.as_path()));
+            let stored = outcomes.iter().filter(|o| o.is_ok()).count();
+            tracing::debug!(
+                candidates = items.len(),
+                submitted = stored,
+                "post-turn memory extraction complete"
+            );
+        }
+    }
+
     pub fn supports_images(&self) -> bool {
         self.provider.capabilities().supports_images
     }
@@ -938,6 +1122,38 @@ fn text_query(content: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// Pull the text of the most recent user message and the most recent assistant
+/// message from the store, for post-turn memory extraction. Either may be
+/// `None` (e.g. a tool-only turn). Scans from the tail so it reflects the turn
+/// that just completed.
+fn last_user_assistant_text(store: &MessageStore) -> (Option<String>, Option<String>) {
+    use agent::message::Message;
+    let mut user = None;
+    let mut assistant = None;
+    let messages: Vec<&Message> = store.iter().collect();
+    for msg in messages.into_iter().rev() {
+        match msg {
+            Message::User { content, .. } if user.is_none() => {
+                let text = text_query(content);
+                if !text.trim().is_empty() {
+                    user = Some(text);
+                }
+            }
+            Message::Assistant { content, .. } if assistant.is_none() => {
+                let text = text_query(content);
+                if !text.trim().is_empty() {
+                    assistant = Some(text);
+                }
+            }
+            _ => {}
+        }
+        if user.is_some() && assistant.is_some() {
+            break;
+        }
+    }
+    (user, assistant)
 }
 
 /// How a tab's engine obtains its approval gate.
@@ -1472,9 +1688,11 @@ mod tests {
             cwd: PathBuf::from("."),
             max_output_tokens: 128,
             model_max_tokens: DEFAULT_MODEL_MAX_TOKENS,
+            max_iterations: usize::MAX,
             temperature: None,
             prompt_cache: false,
             noema: ZodeNoema::disabled(),
+            extract_config: crate::noema_extract::ExtractConfig::default(),
             bash_sessions: BashSessionRegistry::new(),
             todo_state: TodoState::new(),
             subagents: crate::subagents::SubAgentRegistry::new(),
@@ -1841,6 +2059,69 @@ mod tests {
         assert!(has_summary, "summary message spliced in");
     }
 
+    #[cfg(feature = "noema")]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn post_turn_extraction_stores_high_confidence_memory() {
+        use agent::message::Header;
+        use agent::stream::Event;
+
+        // The MockProvider returns a JSON array as if the extraction model
+        // identified one durable, high-confidence preference.
+        let json = r#"[{"body":"User prefers tabs over spaces","kind":"preference","scope":"user","sensitivity":"internal","importance":0.7,"confidence":0.95}]"#;
+        let provider =
+            agent::testing::MockProvider::new(vec![Event::TextDelta { delta: json.into() }]);
+
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("NOEMA_ROOT", dir.path());
+        let noema = ZodeNoema::from_settings(&crate::config::NoemaSettings {
+            auto_extract: Some(true), // applies autoSafe
+            user: Some("kay".into()),
+            ..Default::default()
+        });
+        std::env::remove_var("NOEMA_ROOT");
+
+        let mut eng = minimal_engine(Arc::new(provider));
+        eng.noema = noema;
+        eng.extract_config = crate::noema_extract::ExtractConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        {
+            let mut store = eng.store.lock().unwrap();
+            store
+                .push(Message::User {
+                    header: Header::new(),
+                    content: vec![ContentBlock::Text {
+                        text: "I always use tabs, never spaces.".into(),
+                    }],
+                })
+                .unwrap();
+        }
+
+        // Use the awaited inline path for deterministic assertion.
+        eng.extract_post_turn_inline().await;
+
+        // The extracted preference is now recallable.
+        let recalled = eng.noema.recall_for_turn("tabs spaces", None).unwrap();
+        assert!(
+            recalled.is_some_and(|m| m.contains("tabs over spaces")),
+            "extracted memory should be recallable"
+        );
+    }
+
+    #[cfg(feature = "noema")]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn post_turn_extraction_noop_when_disabled() {
+        let provider = agent::testing::MockProvider::new(Vec::new());
+        let eng = Arc::new(minimal_engine(Arc::new(provider)));
+        // extract_config defaults to disabled → must not touch the provider/store.
+        eng.spawn_post_turn_extraction();
+        // Nothing to assert beyond "did not panic / did not block"; the disabled
+        // guard returns before any await.
+    }
+
     #[tokio::test]
     async fn assemble_registers_core_tools() {
         let dir = tempfile::tempdir().unwrap();
@@ -2060,7 +2341,10 @@ mod tests {
             resolve_context_window(&provider, Some(200_000), None, &cat),
             1_000_000
         );
-        assert_eq!(resolve_max_output(&provider, Some(4096)), 8192);
+        assert_eq!(
+            resolve_max_output(&provider, Some(4096), None, &cat, 1_000_000),
+            8192
+        );
 
         // No per-provider window → top-level value.
         let bare = ProviderConfig::default();
@@ -2089,7 +2373,83 @@ mod tests {
             resolve_context_window(&bare, None, None, &cat),
             DEFAULT_MODEL_MAX_TOKENS
         );
-        assert_eq!(resolve_max_output(&bare, None), DEFAULT_MAX_OUTPUT_TOKENS);
+        assert_eq!(
+            resolve_max_output(&bare, None, None, &cat, DEFAULT_MODEL_MAX_TOKENS),
+            DEFAULT_MAX_OUTPUT_TOKENS
+        );
+    }
+
+    #[test]
+    fn resolve_max_output_is_automatic_and_self_correcting() {
+        let cat = crate::Catalog::from_json(
+            r#"{ "xfyun": { "id":"xfyun","name":"X","models": {
+                "astron-code-latest": { "id":"astron-code-latest","name":"A",
+                  "limit": { "context": 200000, "output": 8192 } } } } }"#,
+        )
+        .expect("parse fixture catalog");
+
+        // The reported misconfig: maxOutputTokens == contextWindow. The
+        // physically-impossible value is ignored; the catalog's real cap wins.
+        let bad = ProviderConfig {
+            model: Some("astron-code-latest".into()),
+            max_output_tokens: Some(200_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_max_output(&bad, None, Some("xfyun"), &cat, 200_000),
+            8192,
+            "max_output >= context must be rejected and auto-resolved from catalog"
+        );
+
+        // No explicit value, known model → catalog cap (fully automatic).
+        let auto = ProviderConfig {
+            model: Some("astron-code-latest".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_max_output(&auto, None, Some("xfyun"), &cat, 200_000),
+            8192
+        );
+
+        // Unknown model, NO explicit value → conservative default (clean auto path).
+        let unknown_auto = ProviderConfig {
+            model: Some("mystery".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_max_output(&unknown_auto, None, None, &cat, 200_000),
+            DEFAULT_MAX_OUTPUT_TOKENS
+        );
+
+        // Unknown model, bad explicit value → rejected → conservative default.
+        let unknown = ProviderConfig {
+            model: Some("mystery".into()),
+            max_output_tokens: Some(999_999),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_max_output(&unknown, None, None, &cat, 200_000),
+            DEFAULT_MAX_OUTPUT_TOKENS
+        );
+
+        // Degenerate context window (0 or 1) must NOT clamp the cap to 0 — every
+        // provider rejects max_tokens=0.
+        let bare = ProviderConfig::default();
+        assert_eq!(
+            resolve_max_output(&bare, None, None, &cat, 0),
+            DEFAULT_MAX_OUTPUT_TOKENS
+        );
+        assert_eq!(
+            resolve_max_output(&bare, None, None, &cat, 1),
+            DEFAULT_MAX_OUTPUT_TOKENS
+        );
+
+        // A sane explicit value is honored as-is.
+        let sane = ProviderConfig {
+            max_output_tokens: Some(32_768),
+            ..Default::default()
+        };
+        assert_eq!(resolve_max_output(&sane, None, None, &cat, 200_000), 32_768);
     }
 
     #[test]

@@ -70,8 +70,10 @@ async fn run(args: Args) -> i32 {
 
     // The OS sandbox for shell commands is ON BY DEFAULT (workspace-write,
     // network denied). `--no-sandbox` disables it; `--sandbox` forces it on;
-    // otherwise config decides (default true). `resolve` degrades gracefully
-    // (returns None) on an unsupported OS or a missing backend.
+    // otherwise config decides (default true). `resolve` FAILS CLOSED: if the
+    // sandbox is wanted but can't be established (missing backend / unsupported
+    // OS) it errors instead of silently running unconfined — we stop here and
+    // tell the user to install a backend or pass `--no-sandbox`.
     let sandbox = {
         use zode_core::sandbox::SandboxMode;
         let enabled = if args.no_sandbox {
@@ -99,7 +101,9 @@ async fn run(args: Args) -> i32 {
             .collect();
         let exclude_slash_tmp = cfg.sandbox.exclude_slash_tmp.unwrap_or(false);
         let exclude_tmpdir_env_var = cfg.sandbox.exclude_tmpdir_env_var.unwrap_or(false);
-        zode_core::sandbox::resolve(
+        let restrict_reads =
+            args.sandbox_strict_read || cfg.sandbox.restrict_reads.unwrap_or(false);
+        match zode_core::sandbox::resolve(
             &cwd,
             enabled,
             mode,
@@ -107,7 +111,15 @@ async fn run(args: Args) -> i32 {
             &roots,
             exclude_slash_tmp,
             exclude_tmpdir_env_var,
-        )
+        ) {
+            // Strict-read is applied post-resolve so it rides along on the
+            // resolved config without widening `resolve`'s signature.
+            Ok(sandbox) => sandbox.map(|c| c.with_restrict_reads(restrict_reads)),
+            Err(e) => {
+                eprintln!("zode: {e}");
+                return 1;
+            }
+        }
     };
 
     let today = today_date();

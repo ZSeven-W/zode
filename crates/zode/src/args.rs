@@ -53,6 +53,11 @@ pub struct Args {
     /// Allow outbound network inside the sandbox (denied by default).
     #[arg(long)]
     pub sandbox_allow_network: bool,
+
+    /// Strict read: also hide credential dirs (`~/.ssh`, `~/.aws`, the zode
+    /// config, …) from reads. Off by default — a coding agent reads the repo.
+    #[arg(long)]
+    pub sandbox_strict_read: bool,
 }
 
 #[cfg(test)]

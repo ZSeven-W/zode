@@ -97,6 +97,10 @@ pub struct SandboxConfig {
     /// `exclude_tmpdir_env_var`). macOS gives each user a private `$TMPDIR`
     /// under `/var/folders`; Linux usually leaves it unset.
     exclude_tmpdir_env_var: bool,
+    /// Opt-in "strict read": hide a curated set of credential/secret dirs from
+    /// READS too (a coding agent reads almost everything, so this is OFF by
+    /// default — turning it on protects `~/.ssh`, `~/.aws`, the zode config, …).
+    restrict_reads: bool,
 }
 
 impl SandboxConfig {
@@ -132,6 +136,7 @@ impl SandboxConfig {
             // Codex defaults: /tmp and $TMPDIR ARE writable in workspace-write.
             exclude_slash_tmp: false,
             exclude_tmpdir_env_var: false,
+            restrict_reads: false,
         })
     }
 
@@ -140,6 +145,14 @@ impl SandboxConfig {
     }
     pub fn allow_network(&self) -> bool {
         self.allow_network
+    }
+    pub fn restrict_reads(&self) -> bool {
+        self.restrict_reads
+    }
+    /// Return a copy with strict-read on/off (opt-in credential read hiding).
+    pub fn with_restrict_reads(mut self, restrict: bool) -> Self {
+        self.restrict_reads = restrict;
+        self
     }
     pub fn cwd(&self) -> &Path {
         &self.cwd
@@ -295,6 +308,14 @@ impl SandboxConfig {
                 }
             }
         }
+        // Strict-read: hide credential dirs from READS too (any mode). Emitted
+        // last so these denies win over the `(allow default)` baseline.
+        if self.restrict_reads {
+            for dir in read_denied_dirs() {
+                let path = scheme_escape(&dir.to_string_lossy());
+                p.push_str(&format!("(deny file-read* (subpath \"{path}\"))"));
+            }
+        }
         p
     }
 
@@ -350,6 +371,19 @@ impl SandboxConfig {
                     args.push("--ro-bind".into());
                     args.push(source);
                     args.push(path);
+                }
+            }
+        }
+        // Strict-read (any mode): overlay an empty tmpfs over each credential
+        // dir so its real contents are hidden from reads. Only mask dirs that
+        // EXIST — `--tmpfs` on an absent path makes bwrap fail to build the
+        // mountpoint inside the sealed ro-root (breaking every shell command),
+        // and a missing dir has nothing to hide anyway.
+        if self.restrict_reads {
+            for dir in read_denied_dirs() {
+                if dir.is_dir() {
+                    args.push("--tmpfs".into());
+                    args.push(dir.to_string_lossy().into_owned());
                 }
             }
         }
@@ -506,10 +540,15 @@ impl agent_tools_code::FsSink for SandboxedFsSink {
     }
 }
 
-/// Resolve effective sandbox settings into a config, or `None` when the
-/// sandbox is disabled or can't run here. Degrades gracefully (logs + returns
-/// `None`) on an unsupported OS or a missing backend, so a default-on sandbox
-/// never bricks a host: on Linux that means `bwrap` must be installed.
+/// Resolve effective sandbox settings into a config. `Ok(None)` ONLY when the
+/// sandbox is explicitly disabled (`enabled == false`).
+///
+/// FAIL-CLOSED: when the sandbox is requested but can't be established here (an
+/// unsupported OS, or a missing backend like `bwrap` on Linux), this returns
+/// `Err` instead of silently running the agent UNCONFINED. The caller surfaces
+/// the error and stops; the user installs the backend or opts out explicitly
+/// with `--no-sandbox`. (Previously this degraded to `None` = no isolation,
+/// which is a silent security hole when the sandbox was supposed to be on.)
 pub fn resolve(
     cwd: &Path,
     enabled: bool,
@@ -518,24 +557,65 @@ pub fn resolve(
     writable_roots: &[PathBuf],
     exclude_slash_tmp: bool,
     exclude_tmpdir_env_var: bool,
-) -> Option<SandboxConfig> {
+) -> Result<Option<SandboxConfig>, CoreError> {
     if !enabled {
-        return None;
+        return Ok(None);
     }
-    let config = match SandboxConfig::new(cwd, mode, allow_network, writable_roots) {
-        Ok(c) => c.with_temp_policy(exclude_slash_tmp, exclude_tmpdir_env_var),
-        Err(e) => {
-            tracing::warn!("sandbox disabled: {e}");
-            return None;
-        }
+    let config = SandboxConfig::new(cwd, mode, allow_network, writable_roots)
+        .map_err(|e| sandbox_unavailable(&e.to_string()))?
+        .with_temp_policy(exclude_slash_tmp, exclude_tmpdir_env_var);
+    backend_available(config.os, binary_on_path("bwrap"))?;
+    Ok(Some(config))
+}
+
+/// Whether the OS sandbox backend is actually present — a PURE function so the
+/// fail-closed decision is testable without the host's real backend. Linux
+/// needs `bwrap` (bubblewrap); macOS has Seatbelt built in.
+fn backend_available(os: SandboxOs, bwrap_present: bool) -> Result<(), CoreError> {
+    if os == SandboxOs::Linux && !bwrap_present {
+        return Err(sandbox_unavailable(
+            "`bwrap` (bubblewrap) was not found on PATH",
+        ));
+    }
+    Ok(())
+}
+
+/// The fail-closed error for a requested-but-unavailable sandbox. Actionable:
+/// it names how to install a backend (with distro commands) and how to opt out.
+fn sandbox_unavailable(reason: &str) -> CoreError {
+    CoreError::Other(format!(
+        "the sandbox is enabled but can't be established here: {reason}. \
+         Install a backend — Linux: bubblewrap (`apt install bubblewrap` / \
+         `dnf install bubblewrap` / `pacman -S bubblewrap`); macOS: Seatbelt is built in. \
+         Or pass `--no-sandbox` (or set `\"sandbox\": {{ \"enabled\": false }}` in config) \
+         to run WITHOUT isolation — shell commands then run unconfined."
+    ))
+}
+
+/// Credential / secret directories hidden from READS in strict-read mode.
+/// Deliberately curated and short — a coding agent legitimately reads almost
+/// everything, so this stays high-signal (well-known credential stores) to keep
+/// false positives near zero. Canonicalized to match the inode the sandbox sees.
+/// A nonexistent entry is harmless (nothing to hide / mountpoint just created).
+pub(crate) fn read_denied_dirs() -> Vec<PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
     };
-    if config.os == SandboxOs::Linux && !binary_on_path("bwrap") {
-        tracing::warn!(
-            "sandbox disabled: `bwrap` (bubblewrap) not found on PATH — install it to sandbox shell commands"
-        );
-        return None;
-    }
-    Some(config)
+    [
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".azure",
+        ".kube",
+        ".docker",
+        ".config/gcloud",
+        ".config/gh",
+        // zode's own config dir holds provider API keys.
+        ".zode",
+    ]
+    .iter()
+    .map(|rel| canonical(&home.join(rel)))
+    .collect()
 }
 
 /// True if `name` is an executable on `$PATH`. Used to avoid enabling a
@@ -815,6 +895,63 @@ mod tests {
             writable_roots: vec![],
             exclude_slash_tmp: false,
             exclude_tmpdir_env_var: false,
+            restrict_reads: false,
+        }
+    }
+
+    #[test]
+    fn strict_read_off_by_default_allows_reads() {
+        let p = cfg(SandboxMode::WorkspaceWrite, false).macos_profile();
+        assert!(
+            !p.contains("(deny file-read*"),
+            "reads must be unrestricted by default: {p}"
+        );
+    }
+
+    #[test]
+    fn strict_read_denies_credential_dir_reads() {
+        // Only meaningful when there's a home dir to derive credential paths.
+        if dirs::home_dir().is_none() {
+            return;
+        }
+        let macos = cfg(SandboxMode::WorkspaceWrite, false)
+            .with_restrict_reads(true)
+            .macos_profile();
+        assert!(
+            macos.contains("(deny file-read*"),
+            "strict-read must emit read denies: {macos}"
+        );
+        assert!(macos.contains(".ssh"), "must hide ~/.ssh: {macos}");
+
+        let mut linux = cfg(SandboxMode::WorkspaceWrite, false).with_restrict_reads(true);
+        linux.os = SandboxOs::Linux;
+        let args = linux.linux_bwrap_prefix();
+        // Collect the dirs masked with --tmpfs.
+        let mut masked = Vec::new();
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            if a == "--tmpfs" {
+                if let Some(p) = it.next() {
+                    masked.push(p.clone());
+                }
+            }
+        }
+        // B3 invariant: only EXISTING dirs are masked (--tmpfs on an absent dir
+        // would make bwrap fail and break every shell command).
+        for m in &masked {
+            assert!(
+                std::path::Path::new(m).is_dir(),
+                "must not --tmpfs a nonexistent dir: {m}"
+            );
+        }
+        // If a known credential dir exists on this host, it must be masked.
+        if let Some(home) = dirs::home_dir() {
+            if home.join(".ssh").is_dir() {
+                assert!(
+                    masked.iter().any(|m| m.ends_with(".ssh")),
+                    "existing ~/.ssh must be masked: {masked:?}"
+                );
+            }
         }
     }
 
@@ -867,6 +1004,7 @@ mod tests {
             writable_roots: vec![],
             exclude_slash_tmp: false,
             exclude_tmpdir_env_var: false,
+            restrict_reads: false,
         }
     }
 
@@ -1258,17 +1396,61 @@ mod tests {
     }
 
     #[test]
-    fn resolve_disabled_is_none() {
-        assert!(resolve(
+    fn resolve_disabled_is_ok_none() {
+        // Explicitly disabled → Ok(None), the ONLY way to get no sandbox.
+        assert!(matches!(
+            resolve(
+                Path::new("/tmp"),
+                false,
+                SandboxMode::WorkspaceWrite,
+                false,
+                &[],
+                false,
+                false
+            ),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn backend_available_fails_closed_on_linux_without_bwrap() {
+        // Deterministic (no dependence on the host's real backend): Linux with
+        // no bwrap is the fail-closed Err path; with bwrap, or macOS, it's Ok.
+        assert!(backend_available(SandboxOs::Linux, true).is_ok());
+        assert!(
+            backend_available(SandboxOs::Linux, false).is_err(),
+            "Linux without bwrap must fail closed, not run unconfined"
+        );
+        assert!(
+            backend_available(SandboxOs::MacOs, false).is_ok(),
+            "macOS has Seatbelt built in"
+        );
+    }
+
+    #[test]
+    fn resolve_enabled_never_resolves_to_silent_none() {
+        // Whatever the host, a REQUESTED sandbox is never a silent Ok(None):
+        // Ok(Some) where a backend exists, else a fail-closed Err.
+        let r = resolve(
             Path::new("/tmp"),
-            false,
+            true,
             SandboxMode::WorkspaceWrite,
             false,
             &[],
             false,
-            false
-        )
-        .is_none());
+            false,
+        );
+        assert!(
+            !matches!(r, Ok(None)),
+            "a requested sandbox must never resolve to silent no-isolation"
+        );
+    }
+
+    #[test]
+    fn sandbox_unavailable_message_is_actionable() {
+        let s = sandbox_unavailable("`bwrap` was not found").to_string();
+        assert!(s.contains("--no-sandbox"), "{s}");
+        assert!(s.contains("bubblewrap") || s.contains("bwrap"), "{s}");
     }
 
     #[test]

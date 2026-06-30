@@ -56,6 +56,9 @@ pub async fn run_print(engine: &ZodeEngine, prompt: &str) -> i32 {
         }
     }
     let _ = writeln!(stdout);
+    // Mine the completed turn for durable memories (no-op unless autoExtract
+    // is on). Awaited so the process doesn't exit before the write lands.
+    engine.extract_post_turn_inline().await;
     // Token/cache usage to stderr (keeps stdout = the model's answer).
     eprintln!("{}", engine.cost.report().await);
     exit
@@ -113,6 +116,7 @@ pub async fn run_repl(engine: ZodeEngine, resumed_id: Option<String>) -> i32 {
                     titled = true;
                 }
                 run_turn(&engine, &line).await;
+                engine.extract_post_turn_inline().await;
                 save_session(&engine, &session_id).await;
             }
             Err(ReadlineError::Interrupted) => {
