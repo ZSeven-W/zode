@@ -6,7 +6,7 @@ members = ["crates/zode", "crates/zode-core", "crates/zode-tui"]
 exclude = ["vendor/agent", "vendor/noema"]
 
 [workspace.package]
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
