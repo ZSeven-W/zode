@@ -167,16 +167,19 @@ multi-step features or changes, prefer a plan-first flow — use any available \
 planning/brainstorming skill before writing code, and follow test-driven development \
 if a testing skill applies.\n";
 
-/// Appended when the `AskUserQuestion` tool is available, so single-choice
+/// Appended when the `AskUserQuestion` tool is available, so multiple-choice
 /// questions route to the interactive arrow-key picker instead of plain
 /// `A)/B)` text the user must retype.
 const ASK_USER_QUESTION: &str = "\n### Asking the user\n\
-When you need the user to make a single choice — ambiguous requirements, a fork \
-you can't resolve from the code, or a skill (such as brainstorming) that has you \
-ask one multiple-choice question at a time — call the `AskUserQuestion` tool with \
-the options instead of writing them as plain `A)/B)` text. The user gets an \
-arrow-key picker and you get their selection back. Use plain prose only for \
-open-ended questions that have no discrete options.\n";
+When you need the user to decide — ambiguous requirements, a fork you can't \
+resolve from the code, or a skill (such as brainstorming) that has you ask \
+multiple-choice questions — call the `AskUserQuestion` tool instead of writing \
+the choices as plain `A)/B)` text. Pass `questions` (1-4 questions, each with \
+2-10 `options` and an optional short `header`); the user gets an arrow-key \
+picker that always also offers a free-text 'Other'. You get back \
+`{ answers: [{ question, header, answer }] }`, where each `answer` is the chosen \
+option text or the user's custom text. Use plain prose only for open-ended \
+questions that have no discrete options.\n";
 
 const IDENTITY: &str = "\
 You are Zode, an AI-native coding assistant developed by ZSeven-W, running in \
