@@ -67,9 +67,14 @@ suffix="${plat_arch}-${plat_os}"   # e.g. arm64-mac, x64-linux
 # ---- resolve version (latest release, including pre-releases) -------------
 if [ -z "$VERSION" ]; then
   info "resolving latest release..."
-  VERSION="$(dl_stdout "https://api.github.com/repos/$REPO/releases" \
-    | grep '"tag_name"' | head -1 \
-    | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+  VERSION="$(dl_stdout "https://api.github.com/repos/$REPO/releases" 2>/dev/null \
+    | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' \
+    | head -1)"
+  if [ -z "$VERSION" ]; then
+    VERSION="$(dl_stdout "https://github.com/$REPO/releases.atom" 2>/dev/null \
+      | sed -nE "s@.*href=\"https://github.com/$REPO/releases/tag/([^\"]+)\".*@\1@p" \
+      | head -1)"
+  fi
   [ -n "$VERSION" ] || err "could not resolve latest release tag (set --version)"
 fi
 ver_num="${VERSION#v}"                       # tag may or may not start with v
