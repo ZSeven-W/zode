@@ -8,8 +8,57 @@
 //! turn — the agent `Event` itself has no turn identity).
 
 use agent::stream::Event;
+use zode_core::{EngineTemplate, ZodeEngine};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub enum ReassembleNotify {
+    None,
+    Toast(String),
+    System(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum ReassembleEffect {
+    AgentReload {
+        notify: ReassembleNotify,
+        refresh_dialog: bool,
+    },
+    Connect {
+        provider_name: String,
+    },
+    Effort {
+        notify: ReassembleNotify,
+    },
+    Goal {
+        goal: Option<String>,
+    },
+    Model {
+        id: String,
+    },
+    Notify(ReassembleNotify),
+    Orchestration {
+        on: bool,
+        notify: ReassembleNotify,
+    },
+    Plan {
+        on: bool,
+    },
+    ReloadSkills,
+    Sandbox,
+    Yolo {
+        notify: ReassembleNotify,
+    },
+}
+
+pub struct ReassembledEngine {
+    pub template: EngineTemplate,
+    pub engine: ZodeEngine,
+}
+
+// A high-frequency, short-lived event enum: the `Agent` variant streams one per
+// token. Boxing its payload to equalize variant size would add a heap allocation
+// on the hottest path, so we accept the size difference here.
+#[allow(clippy::large_enum_variant)]
 pub enum AppEvent {
     /// One event from turn `turn_id` running in tab `tab_id`.
     Agent {
@@ -46,5 +95,14 @@ pub enum AppEvent {
     BgDone {
         tab_id: usize,
         result: Result<String, String>,
+    },
+    /// A model/provider/config change finished rebuilding the tab's engine
+    /// off-loop. `seq` drops stale completions if a tab is closed/reused or a
+    /// later rebuild supersedes it.
+    ReassembleDone {
+        tab_id: usize,
+        seq: u64,
+        effect: ReassembleEffect,
+        result: Result<ReassembledEngine, String>,
     },
 }

@@ -251,7 +251,7 @@ impl QuestionDialog {
             let other_label = if !self.customs[q].is_empty() {
                 self.customs[q].clone()
             } else {
-                "Other (type a custom answer)".to_string()
+                crate::tr("Other (type a custom answer)").to_string()
             };
             let cursor_glyph = if editing_here { "▏" } else { "" };
             rows.push((
@@ -263,9 +263,9 @@ impl QuestionDialog {
         // Submit row.
         let ready = self.all_answered();
         let submit = if ready {
-            "✓ Submit"
+            format!("✓ {}", crate::tr("Submit"))
         } else {
-            "✓ Submit (answer all questions first)"
+            format!("✓ {}", crate::tr("Submit (answer all questions first)"))
         };
         rows.push((Line::from(format!("  {submit}")), Some(item_idx)));
         rows
@@ -291,7 +291,7 @@ impl QuestionDialog {
         // Header.
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "The agent is asking",
+                crate::tr("The agent is asking"),
                 Style::default()
                     .fg(theme.accent)
                     .bg(theme.bg_secondary)
@@ -338,20 +338,20 @@ impl QuestionDialog {
         let hint = if self.editing {
             Line::from(vec![
                 Span::styled("type", key),
-                Span::styled(" custom answer   ", lbl),
+                Span::styled(format!(" {}   ", crate::tr("custom answer")), lbl),
                 Span::styled("enter", key),
-                Span::styled(" confirm   ", lbl),
+                Span::styled(format!(" {}   ", crate::tr("confirm")), lbl),
                 Span::styled("esc", key),
-                Span::styled(" stop editing", lbl),
+                Span::styled(format!(" {}", crate::tr("stop editing")), lbl),
             ])
         } else {
             Line::from(vec![
                 Span::styled("↑↓/1-9", key),
-                Span::styled(" move   ", lbl),
+                Span::styled(format!(" {}   ", crate::tr("move")), lbl),
                 Span::styled("enter", key),
-                Span::styled(" select   ", lbl),
+                Span::styled(format!(" {}   ", crate::tr("select")), lbl),
                 Span::styled("esc", key),
-                Span::styled(" skip", lbl),
+                Span::styled(format!(" {}", crate::tr("skip")), lbl),
             ])
         };
         f.render_widget(

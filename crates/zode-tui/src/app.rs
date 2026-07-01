@@ -14,11 +14,13 @@ use agent::session::Session;
 use agent::stream::Event;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
+    Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
+    MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
 use futures::{FutureExt, StreamExt};
@@ -39,7 +41,7 @@ use zode_core::question::{QuestionReceiver, QuestionRequest};
 use zode_core::session_meta::{SessionIndex, SessionMeta};
 use zode_core::{EngineTemplate, ZodeEngine};
 
-use crate::event::AppEvent;
+use crate::event::{AppEvent, ReassembleEffect, ReassembleNotify, ReassembledEngine};
 use crate::tab::SessionTab;
 use crate::theme::{Theme, ThemeStore};
 use crate::ui::autocomplete::{Autocomplete, DynCmd};
@@ -67,6 +69,17 @@ const PROMPT_HISTORY_FILE: &str = "prompt_history.json";
 /// Cap on persisted prompt-history entries PER PROJECT. When exceeded, the
 /// OLDEST are dropped first (FIFO) — see `record_prompt_history_entry`.
 const PROMPT_HISTORY_LIMIT: usize = 100;
+
+/// First turn of the autonomous goal loop, queued when a goal is set.
+const GOAL_LOOP_START_PROMPT: &str =
+    "Begin working toward the goal now. Take concrete steps. When it is fully \
+     complete, call the goal_complete tool with a short summary.";
+/// Continuation turn, queued after each successful loop turn that did not signal
+/// completion.
+const GOAL_LOOP_CONTINUE_PROMPT: &str =
+    "Continue working toward the goal. Take the next concrete step now. When it \
+     is fully complete, call the goal_complete tool with a short summary — do \
+     not call it prematurely.";
 
 fn prompt_history_path() -> Option<std::path::PathBuf> {
     ConfigManager::config_dir()
@@ -239,6 +252,9 @@ pub struct UiConfig {
     pub sandbox: bool,
     /// Named providers (config.providers keys) for the settings dialog.
     pub provider_names: Vec<String>,
+    /// No provider credentials are configured yet — show a one-time setup hint
+    /// in the transcript pointing the user at `/connect`.
+    pub needs_setup: bool,
 }
 
 pub struct TuiApp {
@@ -376,6 +392,23 @@ impl TuiApp {
             {
                 tab0.title = meta.title;
             }
+        }
+
+        // First-run / unconfigured: the user reached the UI but no provider key
+        // is set yet. Point them at `/connect` (and the config file) right in
+        // the transcript instead of letting the first message fail silently.
+        if ui.needs_setup {
+            let path = ConfigManager::config_dir()
+                .map(|d| d.join("config.json").display().to_string())
+                .unwrap_or_else(|_| "~/.zode/config.json".to_string());
+            tab0.chat.push_system(
+                &crate::tr(
+                    "Welcome to zode. No provider is configured yet — run /connect to set one up, \
+                     or add your provider's apiKey to {path}. (Messages won't send until a provider \
+                     with an API key is configured.)",
+                )
+                .replace("{path}", &path),
+            );
         }
 
         // Seed input-line history with the conversation's prompts so Up/Down
@@ -596,9 +629,9 @@ impl TuiApp {
         self.queued_edit_index = None;
         self.reset_input_browse_state();
         self.toast = Some(Toast::info(if removed {
-            "queued message removed"
+            crate::tr("queued message removed")
         } else {
-            "queued message updated"
+            crate::tr("queued message updated")
         }));
         true
     }
@@ -625,7 +658,10 @@ impl TuiApp {
                 self.queued_edit_index = None;
             }
             Err(e) => {
-                self.toast = Some(Toast::error(format!("new tab failed: {e}")));
+                self.toast = Some(Toast::error(format!(
+                    "{}: {e}",
+                    crate::tr("new tab failed")
+                )));
             }
         }
     }
@@ -665,8 +701,11 @@ impl TuiApp {
         if let Some(abort) = tab.turn_abort.take() {
             abort.abort_with_reason("user interrupted");
             tab.active_turn_id = 0;
+            // Esc / Ctrl+C also halts the goal auto-loop (and purges any queued
+            // continuation) so it doesn't restart.
+            stop_goal_loop(tab);
             tab.chat.end_turn();
-            tab.chat.push_system("(interrupted)");
+            tab.chat.push_system(crate::tr("(interrupted)"));
             tab.mode = Mode::Ready;
             true
         } else {
@@ -781,43 +820,245 @@ impl TuiApp {
         self.active_question = Some(QuestionDialog::new(req));
     }
 
-    /// Rebuild the active tab's engine from `template` (a model / provider /
-    /// yolo hot-switch), carrying the conversation store + cwd over so the
-    /// context survives. On failure the old engine stays in place. Refused
-    /// mid-turn: the in-flight turn writes to the OLD engine's store, which the
-    /// new engine wouldn't see — switch after the turn (or Ctrl+C).
-    /// Returns true if the swap succeeded (callers commit template/status
-    /// changes only then, so a refused/failed switch leaves no half-state).
-    async fn reassemble_active(&mut self, template: EngineTemplate) -> bool {
+    /// Start rebuilding the active tab's engine from `template` off the UI loop
+    /// (model/provider/goal/plugin/sandbox switches all land here), carrying the
+    /// conversation store + cwd over so the context survives. The template and
+    /// status are committed only when the background result arrives.
+    fn start_reassemble_active(
+        &mut self,
+        template: EngineTemplate,
+        effect: ReassembleEffect,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) -> bool {
         if self.active_tab().is_busy() {
-            self.toast = Some(Toast::info("can't switch during a turn — Ctrl+C first"));
+            self.toast = Some(Toast::info(crate::tr(
+                "can't switch during a turn — Ctrl+C first",
+            )));
             return false;
         }
         // Plan mode is per-tab: re-apply THIS tab's mode to whatever template a
         // caller passed (a model/provider/yolo swap must not drop or leak it).
         let template = template.with_plan_mode(self.active_tab().plan_mode);
-        let (store, cwd, id) = {
+        let (store, cwd, id, seq) = {
             let tab = self.active_tab();
             let store = match tab.engine.store.lock() {
                 Ok(s) => s.clone(),
                 Err(_) => return false,
             };
-            (store, tab.engine.cwd.clone(), tab.id)
+            (
+                store,
+                tab.engine.cwd.clone(),
+                tab.id,
+                tab.reassemble_seq + 1,
+            )
         };
-        match template.assemble_tab(Some(cwd), Some(id.to_string())).await {
-            Ok(engine) => {
-                let engine = engine.with_store(store);
-                let model = engine.model.clone();
-                self.active_tab_mut().engine = Arc::new(engine);
+        {
+            let tab = self.active_tab_mut();
+            tab.reassemble_seq = seq;
+            tab.reassemble_pending = true;
+            tab.mode = Mode::Switching;
+            tab.active_tool_names.clear();
+        }
+
+        let tx = agent_tx.clone();
+        tokio::spawn(async move {
+            let result = match template.assemble_tab(Some(cwd), Some(id.to_string())).await {
+                Ok(engine) => Ok(ReassembledEngine {
+                    template,
+                    engine: engine.with_store(store),
+                }),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(AppEvent::ReassembleDone {
+                tab_id: id,
+                seq,
+                effect,
+                result,
+            });
+        });
+        true
+    }
+
+    fn handle_reassemble_done(
+        &mut self,
+        tab_id: usize,
+        seq: u64,
+        effect: ReassembleEffect,
+        result: Result<ReassembledEngine, String>,
+    ) {
+        let Some(tab_idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+            return;
+        };
+        if !self.tabs[tab_idx].reassemble_pending || self.tabs[tab_idx].reassemble_seq != seq {
+            return;
+        }
+
+        self.tabs[tab_idx].reassemble_pending = false;
+        match result {
+            Ok(done) => {
+                let model = done.engine.model.clone();
+                self.tabs[tab_idx].engine = Arc::new(done.engine);
+                self.tabs[tab_idx].mode = Mode::Ready;
+                self.template = done.template;
                 self.status.model = model;
-                self.refresh_dynamic_commands();
-                true
+                if self.active < self.tabs.len() && self.tabs[self.active].id == tab_id {
+                    self.refresh_dynamic_commands();
+                }
+                self.apply_reassemble_effect(tab_idx, effect);
             }
             Err(e) => {
-                self.toast = Some(Toast::error(format!("switch failed: {e}")));
-                false
+                if let ReassembleEffect::Plan { on } = effect {
+                    self.tabs[tab_idx].plan_mode = !on;
+                }
+                self.tabs[tab_idx]
+                    .chat
+                    .push_system(&format!("{}: {e}", crate::tr("switch failed")));
+                self.tabs[tab_idx].mode = Mode::Error;
+                self.toast = Some(Toast::error(format!("{}: {e}", crate::tr("switch failed"))));
             }
         }
+    }
+
+    fn apply_reassemble_effect(&mut self, tab_idx: usize, effect: ReassembleEffect) {
+        match effect {
+            ReassembleEffect::AgentReload {
+                notify,
+                refresh_dialog,
+            } => {
+                self.apply_reassemble_notify(tab_idx, notify);
+                if refresh_dialog {
+                    self.agents_dialog = Some(AgentsDialog::new(self.agent_rows()));
+                }
+            }
+            ReassembleEffect::Connect { provider_name } => {
+                self.toast = Some(Toast::info(format!(
+                    "{} -> {provider_name}",
+                    crate::tr("provider")
+                )));
+                self.tabs[tab_idx]
+                    .chat
+                    .push_system(&format!("{} -> {provider_name}", crate::tr("provider")));
+            }
+            ReassembleEffect::Effort { notify } => {
+                self.apply_reassemble_notify(tab_idx, notify);
+            }
+            ReassembleEffect::Goal { goal } => self.apply_goal_effect(tab_idx, goal),
+            ReassembleEffect::Model { id } => self.apply_model_effect(tab_idx, &id),
+            ReassembleEffect::Notify(notify) => self.apply_reassemble_notify(tab_idx, notify),
+            ReassembleEffect::Orchestration { on, notify } => {
+                if let Ok(mut cfg) = ConfigManager::load_global() {
+                    cfg.autonomous_orchestration = Some(on);
+                    let _ = ConfigManager::save_global(&cfg);
+                }
+                self.apply_reassemble_notify(tab_idx, notify);
+            }
+            ReassembleEffect::Plan { on } => {
+                self.tabs[tab_idx].chat.push_system(if on {
+                    crate::tr("plan mode: ON — read-only tools only; research and present a plan, then /plan to execute")
+                } else {
+                    crate::tr("plan mode: OFF — full tools restored")
+                });
+            }
+            ReassembleEffect::ReloadSkills => {
+                let n = self.tabs[tab_idx].engine.skills.list().len();
+                let msg = format!(
+                    "{} ({n} {})",
+                    crate::tr("reloaded skills"),
+                    crate::tr("loaded")
+                );
+                self.tabs[tab_idx].chat.push_system(&msg);
+            }
+            ReassembleEffect::Sandbox => self.apply_sandbox_reassemble_effect(tab_idx),
+            ReassembleEffect::Yolo { notify } => {
+                self.apply_reassemble_notify(tab_idx, notify);
+            }
+        }
+    }
+
+    fn apply_goal_effect(&mut self, tab_idx: usize, goal: Option<String>) {
+        match goal {
+            Some(g) => {
+                self.tabs[tab_idx]
+                    .chat
+                    .push_system(&format!("{}: {g}", crate::tr("goal set")));
+                self.tabs[tab_idx].engine.reset_goal_completed();
+                let tab = &mut self.tabs[tab_idx];
+                tab.goal_loop_active = true;
+                tab.goal_loop_iter = 0;
+                tab.goal_text = Some(g);
+                tab.goal_started_at = Some(std::time::Instant::now());
+                tab.queued_input
+                    .push_back(GOAL_LOOP_START_PROMPT.to_string());
+                self.toast = Some(Toast::info(crate::tr("goal-loop: started")));
+            }
+            None => {
+                let tab = &mut self.tabs[tab_idx];
+                stop_goal_loop(tab);
+                tab.chat.push_system(crate::tr("goal cleared"));
+            }
+        }
+    }
+
+    fn apply_model_effect(&mut self, tab_idx: usize, id: &str) {
+        self.persist_active_model_choice(id);
+        self.status.model = self.tabs[tab_idx].engine.model.clone();
+        self.tabs[tab_idx]
+            .chat
+            .push_system(&format!("{} → {id}", crate::tr("model")));
+    }
+
+    fn persist_active_model_choice(&mut self, id: &str) {
+        #[cfg(test)]
+        {
+            let _ = id;
+        }
+
+        #[cfg(not(test))]
+        {
+            if let Ok(mut cfg) = ConfigManager::load_global() {
+                cfg.set_active_model(id);
+                if let Err(e) = ConfigManager::save_global(&cfg) {
+                    self.toast = Some(Toast::error(format!(
+                        "{}: {e}",
+                        crate::tr("save config failed")
+                    )));
+                }
+            }
+        }
+    }
+
+    fn apply_reassemble_notify(&mut self, tab_idx: usize, notify: ReassembleNotify) {
+        match notify {
+            ReassembleNotify::None => {}
+            ReassembleNotify::Toast(text) => self.toast = Some(Toast::info(text)),
+            ReassembleNotify::System(text) => self.tabs[tab_idx].chat.push_system(&text),
+        }
+    }
+
+    fn apply_sandbox_reassemble_effect(&mut self, tab_idx: usize) {
+        use zode_core::sandbox::SandboxMode;
+
+        let new_sandbox = self.template.sandbox().cloned();
+        self.status.sandbox = new_sandbox.is_some();
+        let cwd = self.tabs[tab_idx].engine.cwd.clone();
+        let mode = new_sandbox.as_ref().map(|c| match c.mode() {
+            SandboxMode::ReadOnly => "read-only",
+            SandboxMode::WorkspaceWrite => "workspace-write",
+        });
+        let network = new_sandbox.as_ref().map(|c| c.allow_network());
+        let enabled = new_sandbox.is_some();
+        let _ = zode_core::config::ConfigManager::update_project_state(&cwd, |s| {
+            s.insert(
+                "sandbox".into(),
+                serde_json::json!({
+                    "enabled": enabled,
+                    "mode": mode,
+                    "network": network,
+                }),
+            );
+        });
+        let line = sandbox_status_line(new_sandbox.as_ref());
+        self.tabs[tab_idx].chat.push_system(&line);
     }
 
     /// Rebuild the autocomplete's dynamic command set from the active engine:
@@ -918,19 +1159,23 @@ impl TuiApp {
 
     /// Apply staged MCP enable/disable on close (reuses the plugin apply path,
     /// scoped to MCP ids so other plugins' disabled state is preserved).
-    async fn close_mcp_dialog(&mut self) {
+    async fn close_mcp_dialog(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         let Some(dialog) = self.mcp_dialog.take() else {
             return;
         };
         if dialog.is_dirty() {
-            self.apply_plugins(dialog.disabled_ids(), dialog.all_ids())
+            self.apply_plugins(dialog.disabled_ids(), dialog.all_ids(), agent_tx)
                 .await;
         }
     }
 
-    async fn handle_mcp_dialog_key(&mut self, code: KeyCode) {
+    async fn handle_mcp_dialog_key(
+        &mut self,
+        code: KeyCode,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
         match code {
-            KeyCode::Esc => self.close_mcp_dialog().await,
+            KeyCode::Esc => self.close_mcp_dialog(agent_tx).await,
             KeyCode::Up => {
                 if let Some(d) = &mut self.mcp_dialog {
                     d.prev();
@@ -944,8 +1189,15 @@ impl TuiApp {
             KeyCode::Char(' ') => {
                 if let Some(d) = &mut self.mcp_dialog {
                     if let Some((name, on)) = d.toggle_selected() {
-                        let state = if on { "enabled" } else { "disabled" };
-                        self.toast = Some(Toast::info(format!("{name} {state} (esc to apply)")));
+                        let state = if on {
+                            crate::tr("enabled")
+                        } else {
+                            crate::tr("disabled")
+                        };
+                        self.toast = Some(Toast::info(format!(
+                            "{name} {state} ({})",
+                            crate::tr("esc to apply")
+                        )));
                     }
                 }
             }
@@ -1030,12 +1282,18 @@ impl TuiApp {
                             self.active_tab_mut().queued_input.push_back(turn);
                         }
                         self.toast = Some(Toast::info(format!(
-                            "running workflow '{name}' ({n} steps)"
+                            "{} '{name}' ({n} {})",
+                            crate::tr("running workflow"),
+                            crate::tr("steps")
                         )));
                         // Kick off step 1; the rest auto-chain as each turn ends.
                         self.dispatch_queued_input(agent_tx).await;
                     }
-                    _ => self.toast = Some(Toast::error(format!("workflow '{name}' has no steps"))),
+                    _ => {
+                        self.toast = Some(Toast::error(
+                            crate::tr("workflow '{name}' has no steps").replace("{name}", &name),
+                        ))
+                    }
                 }
             }
             Some(WorkflowsAction::AiCreate { brief }) => {
@@ -1051,12 +1309,23 @@ impl TuiApp {
             Some(WorkflowsAction::Delete { name }) => {
                 match zode_core::workflows::delete_workflow_def(&name) {
                     Ok(true) => {
-                        let _ = self.reassemble_active(self.template.clone()).await;
-                        self.toast = Some(Toast::info(format!("workflow deleted: {name}")));
+                        self.start_reassemble_active(
+                            self.template.clone(),
+                            ReassembleEffect::Notify(ReassembleNotify::Toast(format!(
+                                "{}: {name}",
+                                crate::tr("workflow deleted")
+                            ))),
+                            agent_tx,
+                        );
                         self.workflows_dialog = Some(WorkflowsDialog::new(self.workflow_rows()));
                     }
-                    Ok(false) => self.toast = Some(Toast::info(format!("{name} not found"))),
-                    Err(e) => self.toast = Some(Toast::error(format!("delete failed: {e}"))),
+                    Ok(false) => {
+                        self.toast = Some(Toast::info(format!("{name} {}", crate::tr("not found"))))
+                    }
+                    Err(e) => {
+                        self.toast =
+                            Some(Toast::error(format!("{}: {e}", crate::tr("delete failed"))))
+                    }
                 }
             }
             None => {}
@@ -1069,7 +1338,7 @@ impl TuiApp {
             .map(|i| i.newest_first().into_iter().cloned().collect())
             .unwrap_or_default();
         if metas.is_empty() {
-            self.toast = Some(Toast::info("no saved sessions yet"));
+            self.toast = Some(Toast::info(crate::tr("no saved sessions yet")));
             return;
         }
         self.session_picker = Some(SessionPicker::new(metas));
@@ -1129,14 +1398,14 @@ impl TuiApp {
         let path = match SessionIndex::session_path(&meta.id) {
             Ok(p) => p,
             Err(_) => {
-                self.toast = Some(Toast::error("bad session path"));
+                self.toast = Some(Toast::error(crate::tr("bad session path")));
                 return;
             }
         };
         let store = match Session::load(&path).await {
             Ok(s) => s,
             Err(e) => {
-                self.toast = Some(Toast::error(format!("load failed: {e}")));
+                self.toast = Some(Toast::error(format!("{}: {e}", crate::tr("load failed"))));
                 return;
             }
         };
@@ -1157,7 +1426,10 @@ impl TuiApp {
         {
             Ok(e) => e.with_store(store),
             Err(e) => {
-                self.toast = Some(Toast::error(format!("assemble failed: {e}")));
+                self.toast = Some(Toast::error(format!(
+                    "{}: {e}",
+                    crate::tr("assemble failed")
+                )));
                 return;
             }
         };
@@ -1180,7 +1452,7 @@ impl TuiApp {
             let _ = std::fs::remove_file(path);
         }
         crate::tab::index_remove(id).await;
-        self.toast = Some(Toast::info("session deleted"));
+        self.toast = Some(Toast::info(crate::tr("session deleted")));
     }
 
     /// Open the background tasks panel (Ctrl+B / /tasks).
@@ -1214,7 +1486,11 @@ impl TuiApp {
                     let engine = self.active_tab().engine.clone();
                     match engine.kill_shell(&shell.shell_id).await {
                         Ok(()) => {
-                            self.toast = Some(Toast::info(format!("killed {}", shell.shell_id)))
+                            self.toast = Some(Toast::info(format!(
+                                "{} {}",
+                                crate::tr("killed"),
+                                shell.shell_id
+                            )))
                         }
                         Err(e) => self.toast = Some(Toast::error(e.to_string())),
                     }
@@ -1356,7 +1632,10 @@ impl TuiApp {
                             Err(_) => break,
                         }
                     }
-                    // A turn may have just finished — flush any queued input.
+                    // A turn may have just finished — if it left the context at
+                    // the auto-compact threshold, compact before anything new is
+                    // sent, then flush any queued input.
+                    self.maybe_auto_compact(&agent_tx);
                     self.dispatch_queued_input(&agent_tx).await;
                 }
                 Some(req) = self.approval_rx.next() => {
@@ -1479,7 +1758,7 @@ impl TuiApp {
             );
         }
         if let Some(tab_area) = areas.tabs {
-            let mode = mode_label(self.status.mode);
+            let mode = crate::tr(mode_label(self.status.mode));
             render_sidebar(
                 f,
                 tab_area,
@@ -1499,6 +1778,10 @@ impl TuiApp {
                     todos: &self.tabs[self.active].todos,
                     busy: active_busy,
                     subagents: &self.subagents,
+                    goal: self.tabs[self.active].goal_text.as_deref(),
+                    goal_elapsed: self.tabs[self.active]
+                        .goal_started_at
+                        .map(|t| format_elapsed(t.elapsed())),
                 },
                 &theme,
             );
@@ -1731,19 +2014,19 @@ impl TuiApp {
 
         // 2. Settings dialog captures input.
         if self.settings.is_some() {
-            self.handle_settings_key(key.code).await;
+            self.handle_settings_key(key.code, agent_tx).await;
             return;
         }
 
         // 2a. Connect dialog captures provider search and API key entry.
         if self.connect.is_some() {
-            self.handle_connect_key(key.code).await;
+            self.handle_connect_key(key.code, agent_tx).await;
             return;
         }
 
         // 2a2. Plugin picker captures toggle + filter input.
         if self.plugin_picker.is_some() {
-            self.handle_plugin_key(key.code).await;
+            self.handle_plugin_key(key.code, agent_tx).await;
             return;
         }
 
@@ -1763,7 +2046,7 @@ impl TuiApp {
 
         // 2a5. MCP manager captures nav + space-toggle.
         if self.mcp_dialog.is_some() {
-            self.handle_mcp_dialog_key(key.code).await;
+            self.handle_mcp_dialog_key(key.code, agent_tx).await;
             return;
         }
 
@@ -1809,7 +2092,7 @@ impl TuiApp {
         match (key.code, key.modifiers) {
             // An EXPLICIT copy of the active selection on the platform copy chord
             // — Ctrl+C (or Cmd+C where the terminal delivers it). Selecting also
-            // auto-copies on release (copy-on-select, via OSC 52), so this is a
+            // auto-copies on release (copy-on-select), so this chord is a
             // secondary path. Guarded by an active (non-empty) selection, so a
             // bare Ctrl+C with nothing selected still clears the draft /
             // interrupts / quits below.
@@ -1857,7 +2140,7 @@ impl TuiApp {
                     self.esc_clear_armed = false;
                 } else {
                     self.esc_clear_armed = true;
-                    self.toast = Some(Toast::info("press Esc again to clear the input"));
+                    self.toast = Some(Toast::info(crate::tr("press Esc again to clear the input")));
                 }
                 return;
             }
@@ -2161,8 +2444,9 @@ impl TuiApp {
                 self.active_tab_mut().pending_images.extend(parsed.images);
                 self.input.set_text(&parsed.remaining_text);
                 self.toast = Some(Toast::info(format!(
-                    "attached {n} image{}",
-                    if n == 1 { "" } else { "s" }
+                    "{} {n} {}",
+                    crate::tr("attached"),
+                    crate::tr("images")
                 )));
             }
         }
@@ -2215,7 +2499,7 @@ impl TuiApp {
                 cleanup_clipboard_temp(&mut self.clipboard_temps, &removed.path);
                 let remaining = self.active_tab().pending_images.len();
                 self.selected_image = (remaining > 0).then(|| i.min(remaining - 1));
-                self.toast = Some(Toast::info("removed attached image"));
+                self.toast = Some(Toast::info(crate::tr("removed attached image")));
                 true
             }
             KeyCode::Enter if selected.is_some() => {
@@ -2246,13 +2530,13 @@ impl TuiApp {
         let path = match self.active_tab().pending_images.get(i) {
             Some(img) if !img.path.as_os_str().is_empty() => img.path.clone(),
             _ => {
-                self.toast = Some(Toast::error("no file to view for this image"));
+                self.toast = Some(Toast::error(crate::tr("no file to view for this image")));
                 return;
             }
         };
         match open_in_os_viewer(&path) {
-            Ok(()) => self.toast = Some(Toast::info("opening image…")),
-            Err(e) => self.toast = Some(Toast::error(format!("view failed: {e}"))),
+            Ok(()) => self.toast = Some(Toast::info(crate::tr("opening image…"))),
+            Err(e) => self.toast = Some(Toast::error(format!("{}: {e}", crate::tr("view failed")))),
         }
     }
 
@@ -2276,7 +2560,9 @@ impl TuiApp {
     fn paste_clipboard_text(&mut self) {
         match zode_core::clipboard::read_from_clipboard() {
             Ok(text) => self.handle_paste(&text),
-            Err(e) => self.toast = Some(Toast::error(format!("paste failed: {e}"))),
+            Err(e) => {
+                self.toast = Some(Toast::error(format!("{}: {e}", crate::tr("paste failed"))))
+            }
         }
     }
 
@@ -2293,9 +2579,14 @@ impl TuiApp {
                     image.path = path;
                 }
                 self.active_tab_mut().pending_images.push(image);
-                self.toast = Some(Toast::info("attached image from clipboard"));
+                self.toast = Some(Toast::info(crate::tr("attached image from clipboard")));
             }
-            Err(e) => self.toast = Some(Toast::error(format!("paste image failed: {e}"))),
+            Err(e) => {
+                self.toast = Some(Toast::error(format!(
+                    "{}: {e}",
+                    crate::tr("paste image failed")
+                )))
+            }
         }
     }
 
@@ -2343,8 +2634,9 @@ impl TuiApp {
                 if image_count > 0 {
                     self.active_tab_mut().pending_images.extend(parsed.images);
                     self.toast = Some(Toast::info(format!(
-                        "attached {image_count} image{}",
-                        if image_count == 1 { "" } else { "s" }
+                        "{} {image_count} {}",
+                        crate::tr("attached"),
+                        crate::tr("images")
                     )));
                 }
                 if !parsed.remaining_text.is_empty() {
@@ -2384,6 +2676,27 @@ impl TuiApp {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // TEMP DEBUG PROBE: log every mouse event zode receives, so we can tell
+        // whether Warp is forwarding drags at all. Remove after diagnosing.
+        {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/zode-mouse-debug.log")
+            {
+                let _ = writeln!(
+                    f,
+                    "kind={:?} col={} row={} mods={:?} sel_mode={} has_sel={}",
+                    mouse.kind,
+                    mouse.column,
+                    mouse.row,
+                    mouse.modifiers,
+                    self.selection_mode,
+                    self.has_active_selection(),
+                );
+            }
+        }
         if let Some(picker) = &mut self.session_picker {
             match session_picker_scroll_from_mouse(mouse.kind) {
                 Some(SessionPickerMouseScroll::Up(n)) => picker.scroll_up(n),
@@ -2494,7 +2807,10 @@ impl TuiApp {
                     .map(|point| InputSelection::new(selection.anchor, point))
                     .unwrap_or(selection);
                 self.active_input_selection = Some(selection);
-                // Copy-on-select (OSC 52), same as the transcript selection.
+                // Copy-on-select: finishing a drag puts the selection on the
+                // system clipboard (pbcopy) + terminal clipboard (OSC 52) so
+                // Cmd+V pastes it — Cmd+C never reaches a TUI on macOS. Same as
+                // the transcript selection below.
                 if selection.anchor != selection.focus {
                     self.copy_input_selection(selection);
                 }
@@ -2543,10 +2859,10 @@ impl TuiApp {
                     .map(|point| ChatSelection::new(selection.anchor, point))
                     .unwrap_or(selection);
                 self.active_selection = Some(selection);
-                // Copy-on-select (like opencode/Claude Code): finishing a drag
-                // puts the selection on the clipboard via OSC 52 — so it works in
-                // Warp etc. without ⌘C (which the terminal eats). The Cmd/Ctrl+C
-                // chord still copies explicitly too.
+                // Copy-on-select (opencode's default): finishing a drag puts the
+                // selection on the system clipboard (pbcopy) + terminal clipboard
+                // (OSC 52), so Cmd+V pastes it without a copy key — Cmd+C is eaten
+                // by the terminal on macOS. The Ctrl/Cmd+C chord also copies.
                 if selection.anchor != selection.focus {
                     self.copy_chat_selection(selection, chat_area);
                 }
@@ -2627,16 +2943,19 @@ impl TuiApp {
             // copies nothing — say so instead of silently doing nothing, which
             // reads as "copy didn't work".
             if selection.anchor != selection.focus {
-                self.toast = Some(Toast::info("nothing to copy in selection"));
+                self.toast = Some(Toast::info(crate::tr("nothing to copy in selection")));
             }
             return;
         }
         // Copy via OSC 52 (terminal clipboard — works in Warp, iTerm2, kitty,
         // Ghostty and over SSH/tmux, where the in-app ⌘C never arrives) AND
-        // pbcopy (local fallback + large payloads OSC 52 may cap).
+        // pbcopy (local fallback + large payloads OSC 52 may cap). Surface a
+        // failing system-clipboard write instead of a "copied" toast that lies.
         write_osc52_clipboard(&text);
-        let _ = zode_core::clipboard::copy_to_clipboard(&text);
-        self.toast = Some(Toast::info("copied selection to clipboard"));
+        self.toast = Some(match zode_core::clipboard::copy_to_clipboard(&text) {
+            Ok(_) => Toast::info(crate::tr("copied selection to clipboard")),
+            Err(e) => Toast::error(format!("{}: {e}", crate::tr("copy failed"))),
+        });
     }
 
     fn copy_input_selection(&mut self, selection: InputSelection) {
@@ -2645,8 +2964,10 @@ impl TuiApp {
             return;
         }
         write_osc52_clipboard(&text);
-        let _ = zode_core::clipboard::copy_to_clipboard(&text);
-        self.toast = Some(Toast::info("copied input selection to clipboard"));
+        self.toast = Some(match zode_core::clipboard::copy_to_clipboard(&text) {
+            Ok(_) => Toast::info(crate::tr("copied input selection to clipboard")),
+            Err(e) => Toast::error(format!("{}: {e}", crate::tr("copy failed"))),
+        });
     }
 
     fn open_settings(&mut self) {
@@ -2683,10 +3004,10 @@ impl TuiApp {
     fn open_vision_picker(&mut self) {
         let providers = self.template.provider_names();
         if providers.is_empty() {
-            self.active_tab_mut().chat.push_system(
+            self.active_tab_mut().chat.push_system(crate::tr(
                 "no named providers configured — add one under `providers` in your config, \
                  then pick it here to handle image understanding",
-            );
+            ));
             return;
         }
         self.settings = Some(SettingsDialog::vision_provider_picker(providers));
@@ -2708,7 +3029,7 @@ impl TuiApp {
             Err(e) => {
                 self.active_tab_mut()
                     .chat
-                    .push_system(&format!("sandbox: {e}"));
+                    .push_system(&format!("{}: {e}", crate::tr("sandbox")));
                 Err(())
             }
         }
@@ -2717,7 +3038,11 @@ impl TuiApp {
     /// Apply a `/sandbox` action (also used by the sandbox picker): toggle the
     /// sandbox on/off, switch mode, or toggle network, then rebuild the active
     /// tab's engine and report the new state.
-    async fn apply_sandbox_action(&mut self, action: &str) {
+    async fn apply_sandbox_action(
+        &mut self,
+        action: &str,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
         use zode_core::sandbox::{SandboxConfig, SandboxMode};
         let cwd = self.active_tab().engine.cwd.clone();
         let current = self.template.sandbox().cloned();
@@ -2769,34 +3094,13 @@ impl TuiApp {
             }
         };
         if let Some(new_sandbox) = target {
-            let t = self.template.with_sandbox(new_sandbox.clone());
-            if self.reassemble_active(t.clone()).await {
-                self.template = t;
-                self.status.sandbox = new_sandbox.is_some();
-                // Remember the sandbox state for this project (.zode/state.json).
-                let cwd = self.active_tab().engine.cwd.clone();
-                let mode = new_sandbox.as_ref().map(|c| match c.mode() {
-                    SandboxMode::ReadOnly => "read-only",
-                    SandboxMode::WorkspaceWrite => "workspace-write",
-                });
-                let network = new_sandbox.as_ref().map(|c| c.allow_network());
-                let enabled = new_sandbox.is_some();
-                let _ = zode_core::config::ConfigManager::update_project_state(&cwd, |s| {
-                    s.insert(
-                        "sandbox".into(),
-                        serde_json::json!({
-                            "enabled": enabled,
-                            "mode": mode,
-                            "network": network,
-                        }),
-                    );
-                });
-                let line = sandbox_status_line(new_sandbox.as_ref());
-                self.active_tab_mut().chat.push_system(&line);
-            } else {
-                self.active_tab_mut()
-                    .chat
-                    .push_system("sandbox: unavailable on this host (need sandbox-exec / bwrap)");
+            let t = self.template.with_sandbox(new_sandbox);
+            if !self.start_reassemble_active(t, ReassembleEffect::Sandbox, agent_tx) {
+                self.active_tab_mut().chat.push_system(&format!(
+                    "{}: {}",
+                    crate::tr("sandbox"),
+                    crate::tr("unavailable on this host (need sandbox-exec / bwrap)")
+                ));
             }
         }
     }
@@ -2916,10 +3220,22 @@ impl TuiApp {
                     Ok(_) => {
                         self.agents_dialog = None;
                         // Reload so the new agent is spawnable + in autocomplete.
-                        let _ = self.reassemble_active(self.template.clone()).await;
-                        self.toast = Some(Toast::info(format!("agent created: {name}")));
+                        self.start_reassemble_active(
+                            self.template.clone(),
+                            ReassembleEffect::AgentReload {
+                                notify: ReassembleNotify::Toast(format!(
+                                    "{}: {name}",
+                                    crate::tr("agent created")
+                                )),
+                                refresh_dialog: false,
+                            },
+                            agent_tx,
+                        );
                     }
-                    Err(e) => self.toast = Some(Toast::error(format!("create failed: {e}"))),
+                    Err(e) => {
+                        self.toast =
+                            Some(Toast::error(format!("{}: {e}", crate::tr("create failed"))))
+                    }
                 }
             }
             Some(AgentsAction::AiCreate { brief }) => {
@@ -2937,16 +3253,28 @@ impl TuiApp {
             Some(AgentsAction::Delete { name }) => {
                 match zode_core::agents::delete_agent_def(&name) {
                     Ok(true) => {
-                        let _ = self.reassemble_active(self.template.clone()).await;
-                        self.toast = Some(Toast::info(format!("agent deleted: {name}")));
-                        // Rebuild the dialog's rows to drop the deleted entry.
-                        self.agents_dialog = Some(AgentsDialog::new(self.agent_rows()));
+                        self.start_reassemble_active(
+                            self.template.clone(),
+                            ReassembleEffect::AgentReload {
+                                notify: ReassembleNotify::Toast(format!(
+                                    "{}: {name}",
+                                    crate::tr("agent deleted")
+                                )),
+                                refresh_dialog: true,
+                            },
+                            agent_tx,
+                        );
                     }
                     Ok(false) => {
-                        self.toast =
-                            Some(Toast::info(format!("{name} is built-in (not deletable)")))
+                        self.toast = Some(Toast::info(format!(
+                            "{name} {}",
+                            crate::tr("is built-in (not deletable)")
+                        )))
                     }
-                    Err(e) => self.toast = Some(Toast::error(format!("delete failed: {e}"))),
+                    Err(e) => {
+                        self.toast =
+                            Some(Toast::error(format!("{}: {e}", crate::tr("delete failed"))))
+                    }
                 }
             }
             None => {}
@@ -2965,7 +3293,11 @@ impl TuiApp {
         self.template.model_ids()
     }
 
-    async fn handle_settings_key(&mut self, code: KeyCode) {
+    async fn handle_settings_key(
+        &mut self,
+        code: KeyCode,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
         // Extract a confirmed action (if any), then drop the dialog borrow
         // before the async apply.
         let action = {
@@ -3002,11 +3334,15 @@ impl TuiApp {
         };
         if let Some(action) = action {
             self.settings = None;
-            self.apply_settings(action).await;
+            self.apply_settings(action, agent_tx).await;
         }
     }
 
-    async fn handle_connect_key(&mut self, code: KeyCode) {
+    async fn handle_connect_key(
+        &mut self,
+        code: KeyCode,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
         let action = {
             let Some(dialog) = &mut self.connect else {
                 return;
@@ -3097,11 +3433,15 @@ impl TuiApp {
 
         if let Some(action) = action {
             self.connect = None;
-            self.apply_connect(action).await;
+            self.apply_connect(action, agent_tx).await;
         }
     }
 
-    async fn apply_settings(&mut self, action: SettingsAction) {
+    async fn apply_settings(
+        &mut self,
+        action: SettingsAction,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
         match action {
             SettingsAction::SetTheme(id) => {
                 self.theme = self.theme_store.resolve(Some(&id));
@@ -3109,22 +3449,28 @@ impl TuiApp {
                     cfg.theme = Some(id.clone());
                     let _ = ConfigManager::save_global(&cfg);
                 }
-                self.toast = Some(Toast::info(format!("theme → {id}")));
+                self.toast = Some(Toast::info(format!("{} → {id}", crate::tr("theme"))));
             }
-            SettingsAction::SetModel(id) => self.apply_model(&id).await,
+            SettingsAction::SetModel(id) => self.apply_model(&id, agent_tx),
             SettingsAction::SetProvider(name) => {
                 // Real hot switch: reassemble the active tab from the named
                 // provider, carrying the conversation over. Commit only on
                 // success (else the template/status would drift from reality).
                 match self.template.with_provider(&name) {
                     Some(t) => {
-                        if self.reassemble_active(t.clone()).await {
-                            self.template = t;
-                            self.toast = Some(Toast::info(format!("provider → {name}")));
-                        }
+                        self.start_reassemble_active(
+                            t,
+                            ReassembleEffect::Notify(ReassembleNotify::Toast(format!(
+                                "{} → {name}",
+                                crate::tr("provider")
+                            ))),
+                            agent_tx,
+                        );
                     }
                     None => {
-                        self.toast = Some(Toast::error(format!("no provider '{name}' in config")));
+                        self.toast = Some(Toast::error(
+                            crate::tr("no provider '{name}' in config").replace("{name}", &name),
+                        ));
                     }
                 }
             }
@@ -3132,18 +3478,26 @@ impl TuiApp {
                 // Map the approval mode to yolo: "dontAsk" auto-approves.
                 let yolo = m == "dontAsk";
                 let t = self.template.with_yolo(yolo);
-                if self.reassemble_active(t.clone()).await {
-                    self.template = t;
-                    self.status.yolo = yolo;
-                    self.toast = Some(Toast::info(format!("mode → {m}")));
-                }
+                self.start_reassemble_active(
+                    t,
+                    ReassembleEffect::Yolo {
+                        notify: ReassembleNotify::Toast(format!("{} → {m}", crate::tr("mode"))),
+                    },
+                    agent_tx,
+                );
             }
             SettingsAction::SetEffort(level) => {
                 let t = self.template.with_effort(Some(level.clone()));
-                if self.reassemble_active(t.clone()).await {
-                    self.template = t;
-                    self.toast = Some(Toast::info(format!("effort → {level}")));
-                }
+                self.start_reassemble_active(
+                    t,
+                    ReassembleEffect::Effort {
+                        notify: ReassembleNotify::Toast(format!(
+                            "{} → {level}",
+                            crate::tr("effort")
+                        )),
+                    },
+                    agent_tx,
+                );
             }
             SettingsAction::SetSidebar(choice) => {
                 self.sidebar_visibility = match choice.as_str() {
@@ -3151,13 +3505,14 @@ impl TuiApp {
                     "hidden" => SidebarVisibility::Hidden,
                     _ => SidebarVisibility::Auto,
                 };
-                self.toast = Some(Toast::info(format!("sidebar → {choice}")));
+                self.toast = Some(Toast::info(format!("{} → {choice}", crate::tr("sidebar"))));
             }
             SettingsAction::SetThinking(choice) => {
                 self.show_thinking = choice == "on";
                 self.persist_show_thinking(self.show_thinking);
                 self.toast = Some(Toast::info(format!(
-                    "thinking output {}",
+                    "{} {}",
+                    crate::tr("thinking output"),
                     on_off(self.show_thinking)
                 )));
             }
@@ -3165,24 +3520,26 @@ impl TuiApp {
                 self.show_tool_details = choice == "on";
                 self.persist_show_tool_details(self.show_tool_details);
                 self.toast = Some(Toast::info(format!(
-                    "tool details {}",
+                    "{} {}",
+                    crate::tr("tool details"),
                     on_off(self.show_tool_details)
                 )));
             }
             SettingsAction::SetOrchestration(choice) => {
                 let on = choice == "on";
                 let t = self.template.with_autonomous_orchestration(on);
-                if self.reassemble_active(t.clone()).await {
-                    self.template = t;
-                    if let Ok(mut cfg) = ConfigManager::load_global() {
-                        cfg.autonomous_orchestration = Some(on);
-                        let _ = ConfigManager::save_global(&cfg);
-                    }
-                    self.toast = Some(Toast::info(format!(
-                        "autonomous orchestration {}",
-                        on_off(on)
-                    )));
-                }
+                self.start_reassemble_active(
+                    t,
+                    ReassembleEffect::Orchestration {
+                        on,
+                        notify: ReassembleNotify::Toast(format!(
+                            "{} {}",
+                            crate::tr("autonomous orchestration"),
+                            on_off(on)
+                        )),
+                    },
+                    agent_tx,
+                );
             }
             SettingsAction::SetLanguage(code) => {
                 if zode_core::i18n::set_language_code(&code) {
@@ -3193,30 +3550,52 @@ impl TuiApp {
                     let name = zode_core::i18n::Lang::from_code(&code)
                         .map(|l| l.native_name())
                         .unwrap_or(code.as_str());
-                    self.toast = Some(Toast::info(format!("language → {name}")));
+                    self.toast = Some(Toast::info(format!("{} → {name}", crate::tr("language"))));
                 }
             }
             SettingsAction::SetSandbox(action) => {
-                self.apply_sandbox_action(&action).await;
+                self.apply_sandbox_action(&action, agent_tx).await;
             }
             SettingsAction::SetVisionProvider(provider) => {
                 self.apply_vision_provider(&provider);
             }
+            SettingsAction::SetCurrency(code) => {
+                // Switch the display currency in place (no engine rebuild),
+                // refresh the shown cost, and persist for future sessions.
+                let applied = self.active_tab().engine.cost.set_currency(&code);
+                let label = self.active_tab().engine.cost.sidebar_label().await;
+                self.active_tab_mut().cost_label = label;
+                if let Ok(mut cfg) = ConfigManager::load_global() {
+                    cfg.currency = Some(applied.to_string());
+                    let _ = ConfigManager::save_global(&cfg);
+                }
+                self.toast = Some(Toast::info(format!(
+                    "{} → {applied}",
+                    crate::tr("currency")
+                )));
+            }
         }
     }
 
-    async fn apply_connect(&mut self, action: ConnectAction) {
+    async fn apply_connect(
+        &mut self,
+        action: ConnectAction,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
         if self.active_tab().is_busy() {
-            self.toast = Some(Toast::info(
+            self.toast = Some(Toast::info(crate::tr(
                 "can't switch provider during a turn - Ctrl+C first",
-            ));
+            )));
             return;
         }
 
         let mut cfg = match ConfigManager::load_global() {
             Ok(cfg) => cfg,
             Err(e) => {
-                self.toast = Some(Toast::error(format!("load config failed: {e}")));
+                self.toast = Some(Toast::error(format!(
+                    "{}: {e}",
+                    crate::tr("load config failed")
+                )));
                 return;
             }
         };
@@ -3229,7 +3608,10 @@ impl TuiApp {
             action.model_override,
         );
         if let Err(e) = ConfigManager::save_global(&cfg) {
-            self.toast = Some(Toast::error(format!("save config failed: {e}")));
+            self.toast = Some(Toast::error(format!(
+                "{}: {e}",
+                crate::tr("save config failed")
+            )));
             return;
         }
 
@@ -3240,26 +3622,24 @@ impl TuiApp {
             .template
             .with_provider_config(provider)
             .with_providers_map(cfg.providers.clone());
-        if self.reassemble_active(t.clone()).await {
-            self.template = t;
-            self.toast = Some(Toast::info(format!("provider -> {provider_name}")));
-            self.active_tab_mut()
-                .chat
-                .push_system(&format!("provider -> {provider_name}"));
-        }
+        self.start_reassemble_active(t, ReassembleEffect::Connect { provider_name }, agent_tx);
     }
 
     /// Drive the plugin picker. Space/Enter flips the selected plugin in place;
     /// Esc closes and, if anything changed, persists the new disabled set and
     /// reassembles the active tab once so it takes effect live.
-    async fn handle_plugin_key(&mut self, code: KeyCode) {
+    async fn handle_plugin_key(
+        &mut self,
+        code: KeyCode,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
         match code {
             KeyCode::Esc => {
                 let Some(picker) = self.plugin_picker.take() else {
                     return;
                 };
                 if picker.is_dirty() {
-                    self.apply_plugins(picker.disabled_ids(), picker.all_ids())
+                    self.apply_plugins(picker.disabled_ids(), picker.all_ids(), agent_tx)
                         .await;
                 }
             }
@@ -3279,7 +3659,11 @@ impl TuiApp {
                     .as_mut()
                     .and_then(PluginPicker::toggle_selected)
                 {
-                    let state = if on { "on" } else { "off" };
+                    let state = if on {
+                        crate::tr("on")
+                    } else {
+                        crate::tr("off")
+                    };
                     self.toast = Some(Toast::info(format!("{name}: {state}")));
                 }
             }
@@ -3306,11 +3690,16 @@ impl TuiApp {
     /// project-scoped MCP server or skill from a different workspace, or the
     /// not-yet-shown `lsp:*` rows) are preserved verbatim — replacing the whole
     /// list with just `disabled` would silently re-enable them.
-    async fn apply_plugins(&mut self, disabled: Vec<String>, owned: Vec<String>) {
+    async fn apply_plugins(
+        &mut self,
+        disabled: Vec<String>,
+        owned: Vec<String>,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
         if self.active_tab().is_busy() {
-            self.toast = Some(Toast::info(
+            self.toast = Some(Toast::info(crate::tr(
                 "can't change plugins during a turn — Ctrl+C first",
-            ));
+            )));
             return;
         }
         let owned: std::collections::HashSet<String> = owned.into_iter().collect();
@@ -3328,21 +3717,30 @@ impl TuiApp {
                 next.dedup();
                 cfg.plugins.disabled = next.clone();
                 if let Err(e) = ConfigManager::save_global(&cfg) {
-                    self.toast = Some(Toast::error(format!("save config failed: {e}")));
+                    self.toast = Some(Toast::error(format!(
+                        "{}: {e}",
+                        crate::tr("save config failed")
+                    )));
                     return;
                 }
                 next
             }
             Err(e) => {
-                self.toast = Some(Toast::error(format!("load config failed: {e}")));
+                self.toast = Some(Toast::error(format!(
+                    "{}: {e}",
+                    crate::tr("load config failed")
+                )));
                 return;
             }
         };
         let t = self.template.with_plugins_disabled(merged);
-        if self.reassemble_active(t.clone()).await {
-            self.template = t;
-            self.toast = Some(Toast::info("plugins updated"));
-        }
+        self.start_reassemble_active(
+            t,
+            ReassembleEffect::Notify(ReassembleNotify::Toast(
+                crate::tr("plugins updated").to_string(),
+            )),
+            agent_tx,
+        );
     }
 
     fn apply_completion(&mut self) {
@@ -3447,21 +3845,94 @@ impl TuiApp {
         self.completion_hint = None;
     }
 
-    async fn apply_model(&mut self, id: &str) {
-        let t = self.template.with_model(id.to_string());
-        if self.reassemble_active(t.clone()).await {
-            self.template = t;
-            // Persist the switch so the saved config's active model reflects it
-            // (records just the model name when it's owned by the providers map).
-            if let Ok(mut cfg) = ConfigManager::load_global() {
-                cfg.set_active_model(id);
-                if let Err(e) = ConfigManager::save_global(&cfg) {
-                    self.toast = Some(Toast::error(format!("save config failed: {e}")));
-                }
+    fn apply_model(&mut self, id: &str, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        if self.active_tab().is_busy() {
+            self.toast = Some(Toast::info(crate::tr(
+                "can't switch during a turn — Ctrl+C first",
+            )));
+            return;
+        }
+
+        let tab_idx = self.active;
+        let template = self.template.with_plan_mode(self.tabs[tab_idx].plan_mode);
+        let hot_result = {
+            let tab = &mut self.tabs[tab_idx];
+            match Arc::get_mut(&mut tab.engine) {
+                Some(engine) => template.hot_swap_model(engine, id.to_string()).map(Some),
+                None => Ok(None),
             }
-            self.active_tab_mut()
-                .chat
-                .push_system(&format!("model → {id}"));
+        };
+
+        match hot_result {
+            Ok(Some(template)) => {
+                self.template = template;
+                self.apply_model_effect(tab_idx, id);
+            }
+            Ok(None) => {
+                let t = self.template.with_model(id.to_string());
+                self.start_reassemble_active(
+                    t,
+                    ReassembleEffect::Model { id: id.to_string() },
+                    agent_tx,
+                );
+            }
+            Err(e) => {
+                self.tabs[tab_idx]
+                    .chat
+                    .push_system(&format!("{}: {e}", crate::tr("switch failed")));
+                self.toast = Some(Toast::error(format!("{}: {e}", crate::tr("switch failed"))));
+            }
+        }
+    }
+
+    fn apply_goal(&mut self, new_goal: Option<String>, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        let tab_idx = self.active;
+        if new_goal.is_none() {
+            let was_looping = self.tabs[tab_idx].goal_loop_active;
+            stop_goal_loop(&mut self.tabs[tab_idx]);
+            if was_looping {
+                self.interrupt_active_turn();
+            }
+        }
+
+        if self.active_tab().is_busy() {
+            if new_goal.is_none() {
+                self.active_tab_mut().chat.push_system(crate::tr(
+                    "can't clear the goal text during a turn — run /goal clear again when idle",
+                ));
+            } else {
+                self.toast = Some(Toast::info(crate::tr(
+                    "can't set goal during a turn — Ctrl+C first",
+                )));
+            }
+            return;
+        }
+
+        let template = self.template.with_plan_mode(self.tabs[tab_idx].plan_mode);
+        let hot_template = {
+            let tab = &mut self.tabs[tab_idx];
+            Arc::get_mut(&mut tab.engine)
+                .map(|engine| template.hot_swap_goal(engine, new_goal.clone()))
+        };
+
+        if let Some(template) = hot_template {
+            self.template = template;
+            self.apply_goal_effect(tab_idx, new_goal);
+            return;
+        }
+
+        let t = self.template.with_goal(new_goal.clone());
+        if !self.start_reassemble_active(
+            t,
+            ReassembleEffect::Goal {
+                goal: new_goal.clone(),
+            },
+            agent_tx,
+        ) && new_goal.is_none()
+        {
+            self.active_tab_mut().chat.push_system(crate::tr(
+                "can't clear the goal text during a turn — run /goal clear again when idle",
+            ));
         }
     }
 
@@ -3645,13 +4116,15 @@ impl TuiApp {
                     .queued_input
                     .push_back(submitted_text.to_string());
                 let n = self.active_tab().queued_input.len();
-                self.toast = Some(Toast::info(format!(
-                    "queued ({n}) — sends when the turn finishes (Esc to interrupt now)"
-                )));
+                self.toast = Some(Toast::info(
+                    crate::tr("queued ({n}) — sends when the turn finishes (Esc to interrupt now)")
+                        .replace("{n}", &n.to_string()),
+                ));
             } else if pasted_count > 0 {
                 self.toast = Some(Toast::info(format!(
-                    "attached {pasted_count} image{}",
-                    if pasted_count == 1 { "" } else { "s" }
+                    "{} {pasted_count} {}",
+                    crate::tr("attached"),
+                    crate::tr("images")
                 )));
             }
             return;
@@ -3669,22 +4142,25 @@ impl TuiApp {
             ImageSubmitRoute::Direct => None,
             ImageSubmitRoute::Unsupported => {
                 if has_images {
-                    self.toast = Some(Toast::error(
+                    self.toast = Some(Toast::error(crate::tr(
                         "current provider does not declare image support; set supportsImages=true or configure /vision provider <name>",
-                    ));
+                    )));
                     return;
                 }
                 None
             }
             ImageSubmitRoute::VisionModel => {
                 let Some(provider_name) = images_cfg.vision_provider.as_deref() else {
-                    self.toast = Some(Toast::error("configure /vision provider <name> first"));
+                    self.toast = Some(Toast::error(crate::tr(
+                        "configure /vision provider <name> first",
+                    )));
                     return;
                 };
                 let Some(template) = self.template.with_provider(provider_name) else {
-                    self.toast = Some(Toast::error(format!(
-                        "vision provider '{provider_name}' is not configured"
-                    )));
+                    self.toast = Some(Toast::error(
+                        crate::tr("vision provider '{provider_name}' is not configured")
+                            .replace("{provider_name}", provider_name),
+                    ));
                     return;
                 };
                 match template
@@ -3696,13 +4172,19 @@ impl TuiApp {
                 {
                     Ok(engine) if engine.supports_images() => Some(Arc::new(engine)),
                     Ok(_) => {
-                        self.toast = Some(Toast::error(format!(
-                            "vision provider '{provider_name}' does not declare image support"
-                        )));
+                        self.toast = Some(Toast::error(
+                            crate::tr(
+                                "vision provider '{provider_name}' does not declare image support",
+                            )
+                            .replace("{provider_name}", provider_name),
+                        ));
                         return;
                     }
                     Err(e) => {
-                        self.toast = Some(Toast::error(format!("vision provider failed: {e}")));
+                        self.toast = Some(Toast::error(format!(
+                            "{}: {e}",
+                            crate::tr("vision provider failed")
+                        )));
                         return;
                     }
                 }
@@ -3837,6 +4319,16 @@ impl TuiApp {
     }
 
     fn handle_agent_event(&mut self, ev: AppEvent) {
+        if let AppEvent::ReassembleDone {
+            tab_id,
+            seq,
+            effect,
+            result,
+        } = ev
+        {
+            self.handle_reassemble_done(tab_id, seq, effect, result);
+            return;
+        }
         // Toasts (from off-loop work) carry no tab/turn id.
         if let AppEvent::Toast { text, error } = ev {
             self.toast = Some(if error {
@@ -3856,12 +4348,25 @@ impl TuiApp {
             tab.active_turn_id = 0;
             let ok = result.is_ok();
             match result {
-                Ok(summary) => tab.chat.push_system(&summary),
-                Err(e) => tab.chat.push_system(&format!("compact failed: {e}")),
+                Ok(summary) => {
+                    tab.chat.push_system(&summary);
+                    tab.mode = Mode::Ready;
+                }
+                Err(e) => {
+                    tab.chat
+                        .push_system(&format!("{}: {e}", crate::tr("compact failed")));
+                    tab.mode = Mode::Error;
+                }
             }
             // Compaction rewrote the message store; persist it so the compacted
             // transcript survives a resume (mirrors the post-turn save).
             if ok {
+                // Refresh the context gauge immediately from the shrunken store,
+                // so the "% ctx" badge drops right after /compact instead of
+                // lingering at the pre-compact count until the next Usage event.
+                if let Ok(store) = tab.engine.store.lock() {
+                    tab.context_tokens = estimate_store_tokens(&store);
+                }
                 let (session_id, engine, title) = (
                     tab.session_id.clone(),
                     tab.engine.clone(),
@@ -3910,7 +4415,8 @@ impl TuiApp {
             AppEvent::Toast { .. }
             | AppEvent::CompactDone { .. }
             | AppEvent::BgProgress { .. }
-            | AppEvent::BgDone { .. } => {
+            | AppEvent::BgDone { .. }
+            | AppEvent::ReassembleDone { .. } => {
                 unreachable!("handled above")
             }
         };
@@ -3977,13 +4483,22 @@ impl TuiApp {
                             tab.chat.push_tool(&line);
                         }
                     }
+                    // API-retry notices are the whole point of showing retries —
+                    // surface them as SYSTEM lines so `/tool-details off` can't
+                    // hide them (tool/process rows are hideable).
+                    Event::Notice { ref code, .. } if code == "api_retry" => {
+                        if let Some(line) = process_line_for_event(&event, None) {
+                            tab.chat.push_system(&line);
+                        }
+                    }
                     Event::Notice { .. } | Event::Result { .. } | Event::Unknown => {
                         if let Some(line) = process_line_for_event(&event, None) {
                             tab.chat.push_tool(&line);
                         }
                     }
                     Event::Error { code, message } => {
-                        tab.chat.push_system(&format!("error [{code}]: {message}"));
+                        tab.chat
+                            .push_system(&format!("{} [{code}]: {message}", crate::tr("error")));
                         tab.mode = Mode::Error;
                     }
                     _ => {
@@ -3998,13 +4513,47 @@ impl TuiApp {
                 tab.turn_abort = None;
                 tab.active_turn_id = 0;
                 tab.active_tool_names.clear();
+                let ok = result.is_ok();
                 tab.mode = match result {
                     Ok(()) => Mode::Ready,
                     Err(e) => {
-                        tab.chat.push_system(&format!("turn failed: {e}"));
+                        tab.chat
+                            .push_system(&format!("{}: {e}", crate::tr("turn failed")));
                         Mode::Error
                     }
                 };
+                // Goal auto-loop: keep taking turns toward the goal until the
+                // agent calls `goal_complete` — or the user interrupts / clears
+                // the goal, or a turn fails. Only continues on a successful turn.
+                if tab.goal_loop_active {
+                    if !ok {
+                        // A failed/interrupted turn halts the loop cleanly.
+                        stop_goal_loop(tab);
+                    } else if tab.engine.take_goal_completed() {
+                        stop_goal_loop(tab);
+                        tab.chat
+                            .push_system(crate::tr("✓ goal complete — auto-loop stopped"));
+                    } else {
+                        // Count the turn that just ran, THEN honor the cap so
+                        // `autoLoopMaxTurns = N` runs exactly N turns.
+                        tab.goal_loop_iter = tab.goal_loop_iter.saturating_add(1);
+                        if tab
+                            .engine
+                            .auto_loop_max_turns()
+                            .is_some_and(|max| tab.goal_loop_iter >= max)
+                        {
+                            stop_goal_loop(tab);
+                            tab.chat.push_system(crate::tr(
+                                "goal-loop: reached autoLoopMaxTurns — paused (send a message to resume)",
+                            ));
+                        } else {
+                            // Queue the next iteration; `dispatch_queued_input` (main
+                            // loop, right after this drains) submits it once idle.
+                            tab.queued_input
+                                .push_back(GOAL_LOOP_CONTINUE_PROMPT.to_string());
+                        }
+                    }
+                }
                 // Persist the session off the event loop.
                 let (session_id, engine, title) = (
                     tab.session_id.clone(),
@@ -4019,7 +4568,8 @@ impl TuiApp {
             AppEvent::Toast { .. }
             | AppEvent::CompactDone { .. }
             | AppEvent::BgProgress { .. }
-            | AppEvent::BgDone { .. } => {
+            | AppEvent::BgDone { .. }
+            | AppEvent::ReassembleDone { .. } => {
                 unreachable!("handled above")
             }
         }
@@ -4037,7 +4587,9 @@ impl TuiApp {
             "clear" => {
                 // Mutating the store mid-turn races the running QueryLoop.
                 if self.active_tab().is_busy() {
-                    self.toast = Some(Toast::info("can't clear during a turn — Ctrl+C first"));
+                    self.toast = Some(Toast::info(crate::tr(
+                        "can't clear during a turn — Ctrl+C first",
+                    )));
                 } else {
                     let tab = &mut self.tabs[self.active];
                     tab.chat = ChatView::new();
@@ -4054,6 +4606,32 @@ impl TuiApp {
             "cost" => {
                 let report = self.active_tab().engine.cost.report().await;
                 self.active_tab_mut().chat.push_system(&report);
+            }
+            "currency" => {
+                let code = args.trim();
+                if code.is_empty() {
+                    let cur = self.active_tab().engine.cost.currency_code();
+                    let list = zode_core::currency::CURRENCIES
+                        .iter()
+                        .map(|c| c.code)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    self.active_tab_mut().chat.push_system(&format!(
+                        "{}: {cur}\n{}: {list}\n{}",
+                        crate::tr("currency"),
+                        crate::tr("available"),
+                        crate::tr("use /currency <code>")
+                    ));
+                } else {
+                    // Switch the display currency IN PLACE (no engine rebuild, so
+                    // no reassembly freeze) and refresh the shown cost right away.
+                    let applied = self.active_tab().engine.cost.set_currency(code);
+                    let label = self.active_tab().engine.cost.sidebar_label().await;
+                    let tab = self.active_tab_mut();
+                    tab.cost_label = label;
+                    tab.chat
+                        .push_system(&format!("{}: {applied}", crate::tr("currency set")));
+                }
             }
             "op" => {
                 use zode_core::commands::op::{map_subcommand, OpCommand};
@@ -4101,21 +4679,24 @@ impl TuiApp {
                 if args.is_empty() {
                     self.open_model_picker();
                 } else {
-                    self.apply_model(args).await;
+                    self.apply_model(args, agent_tx);
                 }
             }
             "yolo" => {
                 let on = !self.template.yolo();
                 let t = self.template.with_yolo(on);
-                if self.reassemble_active(t.clone()).await {
-                    self.template = t;
-                    self.status.yolo = on;
-                    self.active_tab_mut().chat.push_system(if on {
-                        "yolo: ON — tools auto-approve (deny rules still apply)"
-                    } else {
-                        "yolo: OFF — tools prompt for approval"
-                    });
-                }
+                let msg = if on {
+                    crate::tr("yolo: ON — tools auto-approve (deny rules still apply)")
+                } else {
+                    crate::tr("yolo: OFF — tools prompt for approval")
+                };
+                self.start_reassemble_active(
+                    t,
+                    ReassembleEffect::Yolo {
+                        notify: ReassembleNotify::System(msg.to_string()),
+                    },
+                    agent_tx,
+                );
             }
             "sandbox" => {
                 // No args → open the picker (the options are too many to type);
@@ -4123,7 +4704,7 @@ impl TuiApp {
                 if args.trim().is_empty() {
                     self.open_sandbox_picker();
                 } else {
-                    self.apply_sandbox_action(args).await;
+                    self.apply_sandbox_action(args, agent_tx).await;
                 }
             }
             "plan" => {
@@ -4131,13 +4712,11 @@ impl TuiApp {
                 // it). The status badge syncs from the active tab on render.
                 let on = !self.active_tab().plan_mode;
                 self.active_tab_mut().plan_mode = on;
-                if self.reassemble_active(self.template.clone()).await {
-                    self.active_tab_mut().chat.push_system(if on {
-                        "plan mode: ON — read-only tools only; research and present a plan, then /plan to execute"
-                    } else {
-                        "plan mode: OFF — full tools restored"
-                    });
-                } else {
+                if !self.start_reassemble_active(
+                    self.template.clone(),
+                    ReassembleEffect::Plan { on },
+                    agent_tx,
+                ) {
                     // Reassembly refused (busy) — revert the flag.
                     self.active_tab_mut().plan_mode = !on;
                 }
@@ -4162,7 +4741,9 @@ impl TuiApp {
                     .map(|s| format!("{} — {}", s.name, s.description))
                     .collect();
                 if list.is_empty() {
-                    self.active_tab_mut().chat.push_system("(no skills loaded)");
+                    self.active_tab_mut()
+                        .chat
+                        .push_system(crate::tr("(no skills loaded)"));
                 } else {
                     for l in list {
                         self.active_tab_mut().chat.push_system(&l);
@@ -4173,8 +4754,12 @@ impl TuiApp {
                 let trimmed = args.trim();
                 if trimmed.is_empty() {
                     let msg = match self.template.goal() {
-                        Some(g) => format!("current goal: {g}\n(clear with /goal clear)"),
-                        None => "no goal set — use /goal <text> to set one".to_string(),
+                        Some(g) => format!(
+                            "{}: {g}\n{}",
+                            crate::tr("current goal"),
+                            crate::tr("(clear with /goal clear)")
+                        ),
+                        None => crate::tr("no goal set — use /goal <text> to set one").to_string(),
                     };
                     self.active_tab_mut().chat.push_system(&msg);
                 } else {
@@ -4182,15 +4767,7 @@ impl TuiApp {
                     let new_goal = (!trimmed.eq_ignore_ascii_case("clear")
                         && !trimmed.eq_ignore_ascii_case("none"))
                     .then(|| trimmed.to_string());
-                    let t = self.template.with_goal(new_goal.clone());
-                    if self.reassemble_active(t.clone()).await {
-                        self.template = t;
-                        let msg = match &new_goal {
-                            Some(g) => format!("goal set: {g}"),
-                            None => "goal cleared".to_string(),
-                        };
-                        self.active_tab_mut().chat.push_system(&msg);
-                    }
+                    self.apply_goal(new_goal, agent_tx);
                 }
             }
             "effort" => {
@@ -4202,27 +4779,36 @@ impl TuiApp {
                     level.as_str(),
                     "low" | "medium" | "high" | "clear" | "reset"
                 ) {
-                    self.toast = Some(Toast::info("usage: /effort low|medium|high"));
+                    self.toast = Some(Toast::info(crate::tr("usage: /effort low|medium|high")));
                 } else {
                     let new_effort =
                         matches!(level.as_str(), "low" | "medium" | "high").then(|| level.clone());
                     let t = self.template.with_effort(new_effort.clone());
-                    if self.reassemble_active(t.clone()).await {
-                        self.template = t;
-                        let msg = match &new_effort {
-                            Some(e) => format!("effort set: {e}"),
-                            None => "effort reset to medium (default)".to_string(),
-                        };
-                        self.active_tab_mut().chat.push_system(&msg);
-                    }
+                    let msg = match &new_effort {
+                        Some(e) => format!("{}: {e}", crate::tr("effort set")),
+                        None => crate::tr("effort reset to medium (default)").to_string(),
+                    };
+                    self.start_reassemble_active(
+                        t,
+                        ReassembleEffect::Effort {
+                            notify: ReassembleNotify::System(msg),
+                        },
+                        agent_tx,
+                    );
                 }
             }
             "copy" => match self.active_tab().engine.last_assistant_text() {
                 Some(text) => match zode_core::clipboard::copy_to_clipboard(&text) {
-                    Ok(_) => self.toast = Some(Toast::info("copied last response to clipboard")),
-                    Err(e) => self.toast = Some(Toast::error(format!("copy failed: {e}"))),
+                    Ok(_) => {
+                        self.toast =
+                            Some(Toast::info(crate::tr("copied last response to clipboard")))
+                    }
+                    Err(e) => {
+                        self.toast =
+                            Some(Toast::error(format!("{}: {e}", crate::tr("copy failed"))))
+                    }
                 },
-                None => self.toast = Some(Toast::info("nothing to copy yet")),
+                None => self.toast = Some(Toast::info(crate::tr("nothing to copy yet"))),
             },
             "export" => {
                 let path =
@@ -4230,10 +4816,17 @@ impl TuiApp {
                 let md = self.active_tab().engine.export_markdown();
                 match std::fs::write(&path, md) {
                     Ok(()) => {
-                        let msg = format!("exported conversation to {}", path.display());
+                        let msg = format!(
+                            "{} {}",
+                            crate::tr("exported conversation to"),
+                            path.display()
+                        );
                         self.active_tab_mut().chat.push_system(&msg);
                     }
-                    Err(e) => self.toast = Some(Toast::error(format!("export failed: {e}"))),
+                    Err(e) => {
+                        self.toast =
+                            Some(Toast::error(format!("{}: {e}", crate::tr("export failed"))))
+                    }
                 }
             }
             "diff" => {
@@ -4253,7 +4846,7 @@ impl TuiApp {
                 if lines.is_empty() {
                     self.active_tab_mut()
                         .chat
-                        .push_system("(no hooks configured)");
+                        .push_system(crate::tr("(no hooks configured)"));
                 } else {
                     for line in lines {
                         self.active_tab_mut().chat.push_system(&line);
@@ -4266,45 +4859,52 @@ impl TuiApp {
                 let cwd = self.active_tab().engine.cwd.clone();
                 match self.template.reload_plugins_from_disk(&cwd) {
                     Ok(t) => {
-                        if self.reassemble_active(t.clone()).await {
-                            self.template = t;
-                            self.active_tab_mut().chat.push_system(
-                                "reloaded — tools, MCP, skills, and LSP re-discovered",
-                            );
-                        }
+                        self.start_reassemble_active(
+                            t,
+                            ReassembleEffect::Notify(ReassembleNotify::System(
+                                crate::tr("reloaded — tools, MCP, skills, and LSP re-discovered")
+                                    .to_string(),
+                            )),
+                            agent_tx,
+                        );
                     }
-                    Err(e) => self.toast = Some(Toast::error(format!("reload failed: {e}"))),
+                    Err(e) => {
+                        self.toast =
+                            Some(Toast::error(format!("{}: {e}", crate::tr("reload failed"))))
+                    }
                 }
             }
             "reload-skills" => {
-                if self.reassemble_active(self.template.clone()).await {
-                    let n = self.active_tab().engine.skills.list().len();
-                    let msg = format!("reloaded skills ({n} loaded)");
-                    self.active_tab_mut().chat.push_system(&msg);
-                }
+                self.start_reassemble_active(
+                    self.template.clone(),
+                    ReassembleEffect::ReloadSkills,
+                    agent_tx,
+                );
             }
             "language" => self.open_language_picker(),
             "orchestration" => {
                 let on = !self.template.autonomous_orchestration();
                 let t = self.template.with_autonomous_orchestration(on);
-                if self.reassemble_active(t.clone()).await {
-                    self.template = t;
-                    if let Ok(mut cfg) = ConfigManager::load_global() {
-                        cfg.autonomous_orchestration = Some(on);
-                        let _ = ConfigManager::save_global(&cfg);
-                    }
-                    self.active_tab_mut().chat.push_system(if on {
-                        "autonomous orchestration: ON — the agent may decompose tasks, spawn sub-agents, and define new ones"
-                    } else {
-                        "autonomous orchestration: OFF"
-                    });
-                }
+                let msg = if on {
+                    crate::tr("autonomous orchestration: ON — the agent may decompose tasks, spawn sub-agents, and define new ones")
+                } else {
+                    crate::tr("autonomous orchestration: OFF")
+                };
+                self.start_reassemble_active(
+                    t,
+                    ReassembleEffect::Orchestration {
+                        on,
+                        notify: ReassembleNotify::System(msg.to_string()),
+                    },
+                    agent_tx,
+                );
             }
             "thinking" => {
                 self.show_thinking = !self.show_thinking;
                 self.persist_show_thinking(self.show_thinking);
                 self.toast = Some(Toast::info(format!(
-                    "thinking output {}",
+                    "{} {}",
+                    crate::tr("thinking output"),
                     on_off(self.show_thinking)
                 )));
             }
@@ -4312,12 +4912,16 @@ impl TuiApp {
                 self.show_tool_details = !self.show_tool_details;
                 self.persist_show_tool_details(self.show_tool_details);
                 self.toast = Some(Toast::info(format!(
-                    "tool details {}",
+                    "{} {}",
+                    crate::tr("tool details"),
                     on_off(self.show_tool_details)
                 )));
             }
             other => {
-                self.toast = Some(Toast::info(format!("/{other} lands in a later phase")));
+                self.toast = Some(Toast::info(format!(
+                    "/{other} {}",
+                    crate::tr("lands in a later phase")
+                )));
             }
         }
     }
@@ -4351,9 +4955,9 @@ impl TuiApp {
         use zode_core::openpencil::Consent;
 
         if self.active_tab().is_busy() {
-            self.active_tab_mut()
-                .chat
-                .push_system("busy — finish or interrupt the current turn first");
+            self.active_tab_mut().chat.push_system(crate::tr(
+                "busy — finish or interrupt the current turn first",
+            ));
             return;
         }
         let tab_id = self.active_tab().id;
@@ -4368,7 +4972,7 @@ impl TuiApp {
         self.active_tab_mut().turn_abort = Some(abort.clone());
         self.active_tab_mut()
             .chat
-            .push_system(&format!("calling op {tool}…"));
+            .push_system(&format!("{} {tool}…", crate::tr("calling op")));
         let tx = agent_tx.clone();
         tokio::spawn(async move {
             let _ = &abort; // keep the controller alive for the duration
@@ -4398,9 +5002,9 @@ impl TuiApp {
         use zode_core::openpencil::Consent;
 
         if self.active_tab().is_busy() {
-            self.active_tab_mut()
-                .chat
-                .push_system("busy — finish or interrupt the current turn first");
+            self.active_tab_mut().chat.push_system(crate::tr(
+                "busy — finish or interrupt the current turn first",
+            ));
             return;
         }
         let tab_id = self.active_tab().id;
@@ -4418,7 +5022,7 @@ impl TuiApp {
         self.active_tab_mut().turn_abort = Some(abort.clone());
         self.active_tab_mut()
             .chat
-            .push_system(&format!("generating design: {prompt}"));
+            .push_system(&format!("{}: {prompt}", crate::tr("generating design")));
         let tx = agent_tx.clone();
         tokio::spawn(async move {
             let result = match OpConnection::ensure(&cfg, consent.as_ref(), &tag).await {
@@ -4485,18 +5089,29 @@ impl TuiApp {
     /// lands back as a `CompactDone` event.
     fn spawn_compact(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         if self.active_tab().is_busy() {
-            self.active_tab_mut()
-                .chat
-                .push_system("busy — finish or interrupt the current turn before /compact");
+            self.active_tab_mut().chat.push_system(crate::tr(
+                "busy — finish or interrupt the current turn before /compact",
+            ));
             return;
         }
-        let tab_id = self.active_tab().id;
-        let engine = self.active_tab().engine.clone();
+        let idx = self.active;
+        self.start_compaction(idx, agent_tx);
+    }
+
+    /// Kick off compaction for a specific tab: reserve the turn-busy slot (so the
+    /// spinner shows and Esc can interrupt), flip the status to `Compacting`, and
+    /// run the summarization off-loop. The result lands as a `CompactDone` event.
+    /// Shared by the manual `/compact` command and the auto-compact trigger.
+    /// Callers must ensure the tab is idle (`!is_busy()`).
+    fn start_compaction(&mut self, tab_idx: usize, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        let tab = &mut self.tabs[tab_idx];
+        let tab_id = tab.id;
+        let engine = tab.engine.clone();
         let abort = AbortController::new();
-        self.active_tab_mut().turn_abort = Some(abort.clone());
-        self.active_tab_mut()
-            .chat
-            .push_system("compacting the conversation…");
+        tab.turn_abort = Some(abort.clone());
+        tab.mode = Mode::Compacting;
+        tab.chat
+            .push_system(crate::tr("compacting the conversation…"));
         let tx = agent_tx.clone();
         tokio::spawn(async move {
             let result = engine
@@ -4516,6 +5131,25 @@ impl TuiApp {
         });
     }
 
+    /// Auto-compact any idle tab whose REAL context occupancy (the badge value,
+    /// from the last Usage event) has reached [`AUTO_COMPACT_CONTEXT_PERCENT`].
+    /// The runtime's own auto-compaction keys off a byte estimate that
+    /// under-counts (especially CJK), so a long conversation can sail past the
+    /// provider's input limit and get a hard 400 before the runtime ever trips.
+    /// This guard uses the accurate post-turn count instead, and runs between
+    /// turns (before any queued input is dispatched).
+    fn maybe_auto_compact(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        for idx in 0..self.tabs.len() {
+            let tab = &self.tabs[idx];
+            if tab.is_busy() {
+                continue;
+            }
+            if needs_auto_compact(tab.context_tokens, tab.engine.model_max_tokens) {
+                self.start_compaction(idx, agent_tx);
+            }
+        }
+    }
+
     fn handle_theme(&mut self, args: &str) {
         if args.is_empty() {
             self.open_theme_picker();
@@ -4529,11 +5163,11 @@ impl TuiApp {
             }
             self.active_tab_mut()
                 .chat
-                .push_system(&format!("theme → {args}"));
+                .push_system(&format!("{} → {args}", crate::tr("theme")));
         } else {
             self.active_tab_mut()
                 .chat
-                .push_system(&format!("unknown theme: {args}"));
+                .push_system(&format!("{}: {args}", crate::tr("unknown theme")));
         }
     }
 
@@ -4559,10 +5193,12 @@ impl TuiApp {
             "mode" => match parse_image_mode(value) {
                 Some(mode) => {
                     images.mode = Some(mode);
-                    format!("vision mode -> {}", image_mode_label(mode))
+                    format!("{} -> {}", crate::tr("vision mode"), image_mode_label(mode))
                 }
                 None => {
-                    self.toast = Some(Toast::info("usage: /vision mode auto|direct|vision-model"));
+                    self.toast = Some(Toast::info(crate::tr(
+                        "usage: /vision mode auto|direct|vision-model",
+                    )));
                     return;
                 }
             },
@@ -4570,9 +5206,13 @@ impl TuiApp {
                 if value.is_empty() {
                     let providers = self.template.provider_names();
                     let msg = if providers.is_empty() {
-                        "no named providers configured".to_string()
+                        crate::tr("no named providers configured").to_string()
                     } else {
-                        format!("vision providers: {}", providers.join(", "))
+                        format!(
+                            "{}: {}",
+                            crate::tr("vision providers"),
+                            providers.join(", ")
+                        )
                     };
                     self.active_tab_mut().chat.push_system(&msg);
                     return;
@@ -4583,27 +5223,31 @@ impl TuiApp {
                     .iter()
                     .any(|name| name == value)
                 {
-                    self.toast = Some(Toast::error(format!("no provider '{value}' in config")));
+                    self.toast = Some(Toast::error(
+                        crate::tr("no provider '{name}' in config").replace("{name}", value),
+                    ));
                     return;
                 }
                 images.vision_provider = Some(value.to_string());
                 images.mode = Some(ImageMode::VisionModel);
-                format!("vision provider -> {value}")
+                format!("{} -> {value}", crate::tr("vision provider"))
             }
             "prompt" => {
                 if value.is_empty() {
-                    self.toast = Some(Toast::info("usage: /vision prompt <text>"));
+                    self.toast = Some(Toast::info(crate::tr("usage: /vision prompt <text>")));
                     return;
                 }
                 images.vision_prompt = Some(value.to_string());
-                "vision prompt updated".to_string()
+                crate::tr("vision prompt updated").to_string()
             }
             "clear" | "reset" => {
                 images = ImagesConfig::default();
-                "vision config reset".to_string()
+                crate::tr("vision config reset").to_string()
             }
             _ => {
-                self.toast = Some(Toast::info("usage: /vision [mode|provider|prompt|reset]"));
+                self.toast = Some(Toast::info(crate::tr(
+                    "usage: /vision [mode|provider|prompt|reset]",
+                )));
                 return;
             }
         };
@@ -4622,12 +5266,18 @@ impl TuiApp {
             Ok(mut cfg) => {
                 cfg.images = images.clone();
                 if let Err(e) = ConfigManager::save_global(&cfg) {
-                    self.toast = Some(Toast::error(format!("save config failed: {e}")));
+                    self.toast = Some(Toast::error(format!(
+                        "{}: {e}",
+                        crate::tr("save config failed")
+                    )));
                     return false;
                 }
             }
             Err(e) => {
-                self.toast = Some(Toast::error(format!("load config failed: {e}")));
+                self.toast = Some(Toast::error(format!(
+                    "{}: {e}",
+                    crate::tr("load config failed")
+                )));
                 return false;
             }
         }
@@ -4642,15 +5292,17 @@ impl TuiApp {
         let message = if provider == "off" || provider.is_empty() {
             images.vision_provider = None;
             images.mode = Some(ImageMode::Auto);
-            "vision model disabled (image mode → auto)".to_string()
+            crate::tr("vision model disabled (image mode → auto)").to_string()
         } else {
             if !self.template.provider_names().iter().any(|n| n == provider) {
-                self.toast = Some(Toast::error(format!("no provider '{provider}' in config")));
+                self.toast = Some(Toast::error(
+                    crate::tr("no provider '{name}' in config").replace("{name}", provider),
+                ));
                 return;
             }
             images.vision_provider = Some(provider.to_string());
             images.mode = Some(ImageMode::VisionModel);
-            format!("vision provider → {provider}")
+            format!("{} → {provider}", crate::tr("vision provider"))
         };
         if !self.persist_images_config(images) {
             return;
@@ -4676,7 +5328,7 @@ impl TuiApp {
                 };
                 self.active_tab_mut()
                     .chat
-                    .push_system(&format!("sidebar -> {state}"));
+                    .push_system(&format!("{} -> {state}", crate::tr("sidebar")));
             }
             Err(msg) => self.active_tab_mut().chat.push_system(&msg),
         }
@@ -4776,11 +5428,52 @@ where
     out
 }
 
+/// Context occupancy (real tokens / model window, as a percent) at which zode
+/// auto-compacts the conversation. Kept just under 100 so compaction happens
+/// before the prompt hits the provider's hard input limit.
+const AUTO_COMPACT_CONTEXT_PERCENT: u64 = 98;
+
+/// Whether a tab's real context occupancy has reached the auto-compact
+/// threshold. Pure (no side effects) so the decision is unit-testable. A zero
+/// window (unknown model size) never triggers.
+fn needs_auto_compact(context_tokens: u32, window: u32) -> bool {
+    window != 0 && (context_tokens as u64 * 100 / window as u64) >= AUTO_COMPACT_CONTEXT_PERCENT
+}
+
+/// Halt the goal auto-loop for a tab: clear the active flag, reset the turn
+/// counter, and PURGE any goal-loop prompts still sitting in the input queue so
+/// a stale continuation can't dispatch after the loop was stopped (by
+/// `goal_complete`, the cap, a failed turn, an interrupt, or `/goal clear`).
+/// User-typed follow-ups in the queue are preserved.
+fn stop_goal_loop(tab: &mut SessionTab) {
+    tab.goal_loop_active = false;
+    tab.goal_loop_iter = 0;
+    tab.goal_text = None;
+    tab.goal_started_at = None;
+    tab.queued_input
+        .retain(|s| s != GOAL_LOOP_CONTINUE_PROMPT && s != GOAL_LOOP_START_PROMPT);
+}
+
+/// A compact elapsed-time label for the sidebar goal section (e.g. `45s`,
+/// `2m 05s`, `1h 03m`).
+fn format_elapsed(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Ready => "ready",
         Mode::Thinking => "thinking",
         Mode::Streaming => "streaming",
+        Mode::Compacting => "compacting",
+        Mode::Switching => "switching",
         Mode::Error => "error",
     }
 }
@@ -5061,6 +5754,51 @@ fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
         && row < area.y.saturating_add(area.height)
 }
 
+/// A short, human-readable preview of a tool's result payload for the chat —
+/// stdout for shells, `content` for file reads, etc. Truncated so a chatty tool
+/// can't flood the transcript. `None` when there's nothing worth showing beyond
+/// the "done" status (e.g. an edit that only returns `{path, status}`).
+fn tool_output_preview(output: &serde_json::Value) -> Option<String> {
+    const MAX_LINES: usize = 12;
+    const MAX_CHARS: usize = 1000;
+
+    let raw = match output {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(map) => {
+            let pick = |k: &str| map.get(k).and_then(|v| v.as_str()).map(str::to_string);
+            let mut t = pick("stdout")
+                .or_else(|| pick("content"))
+                .or_else(|| pick("text"))
+                .or_else(|| pick("output"))
+                .unwrap_or_default();
+            if let Some(err) = pick("stderr").filter(|e| !e.trim().is_empty()) {
+                if !t.trim().is_empty() {
+                    t.push('\n');
+                }
+                t.push_str(&err);
+            }
+            t
+        }
+        _ => String::new(),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<&str> = trimmed.lines().collect();
+    let mut truncated = lines.len() > MAX_LINES;
+    lines.truncate(MAX_LINES);
+    let mut out = lines.join("\n");
+    if out.chars().count() > MAX_CHARS {
+        out = out.chars().take(MAX_CHARS).collect();
+        truncated = true;
+    }
+    if truncated {
+        out.push_str("\n… (truncated)");
+    }
+    Some(out)
+}
+
 fn process_line_for_event(event: &Event, known_tool: Option<&str>) -> Option<String> {
     match event {
         Event::TextDelta { .. } => None,
@@ -5074,9 +5812,19 @@ fn process_line_for_event(event: &Event, known_tool: Option<&str>) -> Option<Str
                 format!("{title} {summary}")
             })
         }
-        Event::ToolResult { ok, .. } => {
+        Event::ToolResult { ok, output, .. } => {
             let status = if *ok { "done" } else { "failed" };
-            Some(format!("{} {status}", tool_result_title(known_tool)))
+            let mut line = format!("{} {status}", tool_result_title(known_tool));
+            // Show the tool's actual output (stdout / file content / …), indented
+            // under the status line and truncated. Hidden by `/tool-details off`
+            // like the rest of the tool rows.
+            if let Some(preview) = tool_output_preview(output) {
+                for l in preview.lines() {
+                    line.push_str("\n    ");
+                    line.push_str(l);
+                }
+            }
+            Some(line)
         }
         Event::Usage {
             input_tokens,
@@ -5114,6 +5862,8 @@ fn process_line_for_event(event: &Event, known_tool: Option<&str>) -> Option<Str
                 .unwrap_or_default();
             Some(format!("Result {stop}{model}"))
         }
+        // Transient-API-error retries get their own clearer line.
+        Event::Notice { code, message } if code == "api_retry" => Some(format!("⟳ {message}")),
         Event::Notice { code, message } => Some(format!("Notice {code}: {message}")),
         Event::Error { code, message } => Some(format!("Error {code}: {message}")),
         Event::Unknown => Some("Event unknown".to_string()),
@@ -5701,6 +6451,11 @@ fn write_osc52_clipboard(text: &str) {
     let _ = out.flush();
 }
 
+/// Whether we pushed the Kitty keyboard-enhancement flags, so restore/panic pop
+/// exactly what we pushed (and only on terminals that accepted them).
+static KITTY_KEYBOARD_PUSHED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -5721,6 +6476,20 @@ fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
         let _ = disable_raw_mode();
         return Err(e);
     }
+    // Kitty keyboard protocol: makes terminals that support it (Warp, kitty,
+    // Ghostty, iTerm2, WezTerm) deliver modified keys — including the Cmd/Ctrl+C
+    // copy chord that Warp would otherwise intercept — to the app as escape
+    // codes. This is exactly what opencode does (`useKittyKeyboard`). Best-effort
+    // and gated on support, so terminals without it (Terminal.app) are untouched.
+    if supports_keyboard_enhancement().unwrap_or(false)
+        && stdout
+            .execute(PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+            ))
+            .is_ok()
+    {
+        KITTY_KEYBOARD_PUSHED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     match Terminal::new(CrosstermBackend::new(stdout)) {
         Ok(term) => {
             install_panic_hook();
@@ -5738,6 +6507,9 @@ fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> std::io::Result<()> {
     disable_raw_mode()?;
+    if KITTY_KEYBOARD_PUSHED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        let _ = terminal.backend_mut().execute(PopKeyboardEnhancementFlags);
+    }
     terminal.backend_mut().execute(DisableBracketedPaste)?;
     terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
@@ -5750,6 +6522,9 @@ fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
+        if KITTY_KEYBOARD_PUSHED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let _ = std::io::stdout().execute(PopKeyboardEnhancementFlags);
+        }
         let _ = std::io::stdout().execute(DisableBracketedPaste);
         let _ = std::io::stdout().execute(DisableMouseCapture);
         let _ = std::io::stdout().execute(LeaveAlternateScreen);
@@ -5813,6 +6588,7 @@ mod tests {
                 yolo: false,
                 sandbox: false,
                 provider_names: Vec::new(),
+                needs_setup: false,
             },
             approval_rx,
             question_rx,
@@ -5989,6 +6765,281 @@ mod tests {
             app.input.text(),
             "写个 /tmp/hello.txt",
             "Down → newer prompt"
+        );
+    }
+
+    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[tokio::test]
+    async fn drag_select_copies_to_clipboard_on_release() {
+        // Copy-on-select (opencode's default): finishing a drag over text puts
+        // the selection on the clipboard immediately. Cmd+C can't reach a TUI on
+        // macOS, so "select, then Cmd+V" is the copy path — the drag-release
+        // must write the clipboard on its own.
+        let (mut app, _agent_tx) = make_test_app().await;
+        app.input.set_text("hello world");
+        app.toast = None;
+
+        // A single-row input box; its body starts at column 2 (input_body_area).
+        let input_area = Rect::new(0, 0, 40, 1);
+
+        // Press → drag → release selects "hello" (columns 2..7 → chars 0..5).
+        app.handle_input_selection_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 0),
+            input_area,
+        );
+        app.handle_input_selection_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 7, 0),
+            input_area,
+        );
+        app.handle_input_selection_mouse(
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 7, 0),
+            input_area,
+        );
+
+        // The drag leaves a live (non-empty) selection...
+        let sel = app
+            .active_input_selection
+            .expect("a drag should leave a selection");
+        assert_ne!(sel.anchor, sel.focus, "selection is non-empty");
+        // ...and copies it on release — the toast confirms the clipboard write.
+        assert!(
+            app.toast.is_some(),
+            "finishing a drag should copy the selection (copy-on-select)"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_refreshes_the_context_gauge() {
+        // Regression: after /compact shrinks the store, the "% ctx" badge must
+        // drop right away. It reads tab.context_tokens live, so the CompactDone
+        // handler has to recompute that field — otherwise it stays stuck at the
+        // pre-compact value until the next turn's Usage event.
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+
+        // Pretend the gauge holds a large pre-compact count while the (freshly
+        // compacted) store is small.
+        app.tabs[0].context_tokens = 50_000;
+
+        app.handle_agent_event(AppEvent::CompactDone {
+            tab_id,
+            result: Ok("compacted the transcript".to_string()),
+        });
+
+        let store_tokens = {
+            let store = app.tabs[0].engine.store.lock().unwrap();
+            estimate_store_tokens(&store)
+        };
+        assert_eq!(
+            app.tabs[0].context_tokens, store_tokens,
+            "ctx gauge must be recomputed from the store after compaction"
+        );
+        assert!(
+            app.tabs[0].context_tokens < 50_000,
+            "gauge should drop after compaction, not stay at the pre-compact value"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_switch_hot_swaps_without_reassemble_pending() {
+        let (mut app, agent_tx) = make_test_app().await;
+
+        app.handle_slash("model", "other-model", &agent_tx).await;
+
+        assert!(
+            !app.active_tab().is_busy(),
+            "model switch should not mark the tab busy"
+        );
+        assert!(!app.active_tab().reassemble_pending);
+        assert_eq!(
+            app.status.model, "other-model",
+            "visible model should update immediately"
+        );
+        assert_eq!(app.active_tab().engine.model, "other-model");
+    }
+
+    #[tokio::test]
+    async fn goal_set_hot_swaps_prompt_and_starts_loop_immediately() {
+        let (mut app, agent_tx) = make_test_app().await;
+
+        app.handle_slash("goal", "ship the fix", &agent_tx).await;
+
+        assert!(
+            !app.active_tab().reassemble_pending,
+            "setting a goal should not start engine reassembly"
+        );
+        assert!(
+            app.active_tab().goal_loop_active,
+            "goal loop should start immediately"
+        );
+        assert!(
+            app.active_tab()
+                .queued_input
+                .iter()
+                .any(|msg| msg == GOAL_LOOP_START_PROMPT),
+            "first goal-loop prompt should be queued immediately"
+        );
+        assert!(
+            app.active_tab()
+                .engine
+                .system
+                .as_deref()
+                .is_some_and(|system| system.contains("ship the fix")),
+            "goal should be injected into the active system prompt immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_clear_hot_swaps_prompt_without_reassemble_pending() {
+        let (mut app, agent_tx) = make_test_app().await;
+
+        app.handle_slash("goal", "ship the fix", &agent_tx).await;
+        app.handle_slash("goal", "clear", &agent_tx).await;
+
+        assert!(!app.active_tab().reassemble_pending);
+        assert!(!app.active_tab().goal_loop_active);
+        assert!(app.active_tab().queued_input.is_empty());
+        assert!(
+            app.active_tab()
+                .engine
+                .system
+                .as_deref()
+                .is_some_and(|system| !system.contains("ship the fix")),
+            "cleared goal should be removed from the active system prompt"
+        );
+    }
+
+    #[test]
+    fn auto_compact_triggers_only_near_full_context() {
+        // The threshold is a PERCENT of the model's own window, not an absolute
+        // token count — so it scales with model_max_tokens.
+
+        // 200K model → ~196K trigger.
+        assert!(!needs_auto_compact(0, 200_000));
+        assert!(!needs_auto_compact(180_000, 200_000)); // 90%
+        assert!(!needs_auto_compact(195_999, 200_000)); // 97% (integer floor)
+        assert!(needs_auto_compact(196_000, 200_000)); // 98%
+        assert!(needs_auto_compact(200_000, 200_000)); // 100%
+
+        // 1M model → ~980K trigger, NOT 196K.
+        assert!(!needs_auto_compact(196_000, 1_000_000)); // ~20%, nowhere near
+        assert!(!needs_auto_compact(900_000, 1_000_000)); // 90%
+        assert!(needs_auto_compact(980_000, 1_000_000)); // 98%
+        assert!(needs_auto_compact(1_000_000, 1_000_000)); // 100%
+
+        // Unknown window (badge hidden) never triggers.
+        assert!(!needs_auto_compact(196_000, 0));
+    }
+
+    #[test]
+    fn format_elapsed_is_compact() {
+        use std::time::Duration;
+        assert_eq!(format_elapsed(Duration::from_secs(5)), "5s");
+        assert_eq!(format_elapsed(Duration::from_secs(59)), "59s");
+        assert_eq!(format_elapsed(Duration::from_secs(65)), "1m 05s");
+        assert_eq!(format_elapsed(Duration::from_secs(3725)), "1h 02m");
+    }
+
+    #[test]
+    fn tool_output_preview_extracts_and_truncates() {
+        use serde_json::json;
+        // Bash stdout is shown; stderr is appended.
+        assert_eq!(
+            tool_output_preview(&json!({"stdout": "hello\nhello"})).as_deref(),
+            Some("hello\nhello")
+        );
+        let p = tool_output_preview(&json!({"stdout": "out", "stderr": "err"})).unwrap();
+        assert!(p.contains("out") && p.contains("err"));
+        // File reads show `content`.
+        assert_eq!(
+            tool_output_preview(&json!({"content": "line"})).as_deref(),
+            Some("line")
+        );
+        // Status-only payloads (an edit/write) have nothing to preview.
+        assert!(tool_output_preview(&json!({"path": "/x", "status": "ok"})).is_none());
+        assert!(tool_output_preview(&json!({"stdout": "   "})).is_none());
+        // Long output is truncated with a marker.
+        let many = (0..30)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let p = tool_output_preview(&json!({"stdout": many})).unwrap();
+        assert!(p.contains("truncated"));
+        assert!(p.lines().count() <= 13);
+    }
+
+    #[tokio::test]
+    async fn goal_loop_continues_on_success_and_stops_on_failure() {
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        // Arm the loop as `/goal <text>` does.
+        app.tabs[0].goal_loop_active = true;
+        app.tabs[0].goal_loop_iter = 0;
+
+        // A successful turn with no completion signal → queue the next iteration.
+        app.handle_agent_event(AppEvent::TurnDone {
+            tab_id,
+            turn_id: 0,
+            result: Ok(()),
+        });
+        assert!(app.tabs[0].goal_loop_active, "loop stays active on success");
+        assert_eq!(app.tabs[0].goal_loop_iter, 1);
+        assert!(
+            app.tabs[0]
+                .queued_input
+                .iter()
+                .any(|s| s == GOAL_LOOP_CONTINUE_PROMPT),
+            "a continuation turn is queued"
+        );
+
+        // A failed turn halts the loop (no runaway on errors).
+        app.tabs[0].queued_input.clear();
+        app.handle_agent_event(AppEvent::TurnDone {
+            tab_id,
+            turn_id: 0,
+            result: Err("boom".to_string()),
+        });
+        assert!(
+            !app.tabs[0].goal_loop_active,
+            "a failed turn stops the loop"
+        );
+        assert!(
+            app.tabs[0].queued_input.is_empty(),
+            "no continuation queued after a failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_the_loop_purges_queued_continuations_but_keeps_user_input() {
+        // Regression (codex): a queued goal-loop continuation must not dispatch
+        // after the loop stops — but a user's own queued follow-up survives.
+        let (mut app, _tx) = make_test_app().await;
+        app.tabs[0].goal_loop_active = true;
+        app.tabs[0].goal_loop_iter = 3;
+        app.tabs[0]
+            .queued_input
+            .push_back("user follow-up".to_string());
+        app.tabs[0]
+            .queued_input
+            .push_back(GOAL_LOOP_CONTINUE_PROMPT.to_string());
+
+        stop_goal_loop(&mut app.tabs[0]);
+
+        assert!(!app.tabs[0].goal_loop_active);
+        assert_eq!(app.tabs[0].goal_loop_iter, 0);
+        let q: Vec<String> = app.tabs[0].queued_input.iter().cloned().collect();
+        assert_eq!(
+            q,
+            vec!["user follow-up".to_string()],
+            "continuation purged, user input kept"
         );
     }
 
@@ -7126,12 +8177,14 @@ mod tests {
             .push(Message::Assistant {
                 header: agent::message::Header::new(),
                 content: vec![
-                    ContentBlock::Text {
-                        text: "I wrote hello.rs.".into(),
-                    },
+                    // Models emit thinking BEFORE the answer; rebuild preserves
+                    // the block order chronologically (not reordered).
                     ContentBlock::Thinking {
                         thinking: "The user asked for a file.".into(),
                         signature: None,
+                    },
+                    ContentBlock::Text {
+                        text: "I wrote hello.rs.".into(),
                     },
                 ],
             })

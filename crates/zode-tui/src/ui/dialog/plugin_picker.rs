@@ -148,7 +148,7 @@ impl PluginPicker {
 
         let inner = inner_area(popup);
         f.render_widget(
-            header_line("Manage plugins", inner.width, theme),
+            header_line(crate::tr("Manage plugins"), inner.width, theme),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
         f.render_widget(
@@ -179,7 +179,7 @@ impl PluginPicker {
         let visible = self.visible_indices();
         if visible.is_empty() {
             f.render_widget(
-                Paragraph::new("No plugins match")
+                Paragraph::new(crate::tr("No plugins match"))
                     .style(Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary)),
                 Rect::new(area.x, area.y, area.width, 1),
             );
@@ -255,10 +255,10 @@ fn disabled_of(plugins: &[Plugin]) -> Vec<String> {
 
 fn section_title(kind: PluginKind) -> &'static str {
     match kind {
-        PluginKind::Tools => "Tool groups",
-        PluginKind::Mcp => "MCP servers",
-        PluginKind::Skill => "Skills",
-        PluginKind::Lsp => "LSP servers",
+        PluginKind::Tools => crate::tr("Tool groups"),
+        PluginKind::Mcp => crate::tr("MCP servers"),
+        PluginKind::Skill => crate::tr("Skills"),
+        PluginKind::Lsp => crate::tr("LSP servers"),
     }
 }
 
@@ -305,20 +305,26 @@ fn header_line(title: &'static str, width: u16, theme: &Theme) -> Paragraph<'sta
 }
 
 fn search_line(filter: &str, theme: &Theme) -> Paragraph<'static> {
-    let text = if filter.is_empty() {
-        "earch".to_string()
+    // Localized placeholder; accent the first character (works for multi-byte
+    // scripts like 搜索 / 検索, not just ASCII "Search").
+    let label = zode_core::i18n::t("Search");
+    let mut chars = label.chars();
+    let first: String = chars.next().map(|c| c.to_string()).unwrap_or_default();
+    let rest: String = chars.collect();
+    let rest = if filter.is_empty() {
+        rest
     } else {
-        format!("earch {filter}")
+        format!("{rest} {filter}")
     };
     Paragraph::new(Line::from(vec![
         Span::styled(
-            "S",
+            first,
             Style::default()
                 .fg(theme.accent_secondary)
                 .bg(theme.bg_secondary),
         ),
         Span::styled(
-            text,
+            rest,
             Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary),
         ),
     ]))
@@ -333,9 +339,9 @@ fn footer_line(theme: &Theme) -> Paragraph<'static> {
     let lbl = Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary);
     Paragraph::new(Line::from(vec![
         Span::styled("space", key),
-        Span::styled(" toggle   ", lbl),
+        Span::styled(format!(" {}   ", crate::tr("toggle")), lbl),
         Span::styled("esc", key),
-        Span::styled(" apply", lbl),
+        Span::styled(format!(" {}", crate::tr("apply")), lbl),
     ]))
     .style(Style::default().bg(theme.bg_secondary))
 }

@@ -1,4 +1,5 @@
 mod args;
+mod doctor;
 mod headless;
 
 use std::io::IsTerminal;
@@ -33,6 +34,15 @@ async fn run(args: Args) -> i32 {
         Some(c) => PathBuf::from(c),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
+    // Subcommands short-circuit the normal launch.
+    if let Some(args::Command::Doctor) = args.command {
+        return doctor::run(&cwd).await;
+    }
+    // First run: drop a starter config the user can edit. Best-effort — a
+    // failure here (e.g. read-only home) must never stop zode from launching.
+    if let Err(e) = ConfigManager::ensure_default_global() {
+        tracing::warn!("could not write starter config: {e}");
+    }
     let mut cfg = match ConfigManager::load(&cwd) {
         Ok(c) => c,
         Err(e) => {
@@ -124,13 +134,19 @@ async fn run(args: Args) -> i32 {
 
     let today = today_date();
 
-    // --print: headless single turn (stdin gate, or bypass on --yolo).
+    // --print: headless single turn (stdin gate, or bypass on --yolo). A
+    // short-lived one-shot has nothing to gain from a background update, so it's
+    // only started for the interactive surfaces below.
     if let Some(prompt) = args.print.clone() {
         let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox, &today).await else {
             return 1;
         };
         return headless::run_print(&engine, &prompt).await;
     }
+
+    // Silently check GitHub Releases in the background and swap in a newer build
+    // for the next launch (best-effort; never blocks or interrupts the session).
+    spawn_auto_update(&cfg);
 
     // Plain REPL when asked, or when stdout isn't a tty (piped/CI).
     if args.no_tui || !std::io::stdout().is_terminal() {
@@ -156,6 +172,11 @@ async fn run(args: Args) -> i32 {
     // The TUI also keeps a clone of the question queue so the `/op` command can
     // raise install/launch consent prompts through the same modal.
     let op_question_queue = question_queue.clone();
+    // Make the config launchable even when the user hasn't finished provider
+    // setup, so they always reach the UI (and can run `/connect`) instead of
+    // being blocked at startup. TUI-only: headless surfaces above keep the
+    // strict MissingApiKey / no-model errors. `needs_setup` drives a hint.
+    let needs_setup = cfg.prepare_for_interactive_launch();
     // The TUI keeps a template so Ctrl+T / resume / hot-switch can (re)assemble
     // engines.
     let template = EngineTemplate::new(cfg.clone(), cwd, Some(queue), args.yolo, sandbox, today)
@@ -179,6 +200,7 @@ async fn run(args: Args) -> i32 {
         yolo: args.yolo,
         sandbox: args.sandbox,
         provider_names: cfg.providers.keys().cloned().collect(),
+        needs_setup,
     };
     match zode_tui::TuiApp::new(
         engine,
@@ -198,6 +220,22 @@ async fn run(args: Args) -> i32 {
             1
         }
     }
+}
+
+/// Spawn the silent background self-updater. No-op when disabled via
+/// `autoUpdate: false` or `ZODE_NO_UPDATE`. Fully best-effort: it logs at debug
+/// and never surfaces UI, per the "silently pull in the background" intent.
+fn spawn_auto_update(cfg: &zode_core::config::ZodeConfig) {
+    if !cfg.auto_update() || std::env::var_os("ZODE_NO_UPDATE").is_some() {
+        return;
+    }
+    tokio::spawn(async {
+        match zode_core::updater::auto_update_if_available(env!("CARGO_PKG_VERSION")).await {
+            Ok(Some(tag)) => tracing::info!("zode self-updated to {tag} (restart to apply)"),
+            Ok(None) => {}
+            Err(e) => tracing::debug!("auto-update skipped: {e}"),
+        }
+    });
 }
 
 /// Gate for the headless surfaces: bypass on --yolo, else a stdin prompt.

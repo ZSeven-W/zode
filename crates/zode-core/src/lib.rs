@@ -18,6 +18,7 @@ pub mod engine;
 pub mod error;
 pub mod export;
 pub mod gated_tool;
+pub mod goal;
 pub mod history;
 pub mod hooks_config;
 pub mod i18n;
@@ -40,6 +41,7 @@ pub mod skills;
 pub mod subagents;
 pub mod task_factory;
 pub mod tools;
+pub mod updater;
 pub mod user_commands;
 pub mod workflows;
 

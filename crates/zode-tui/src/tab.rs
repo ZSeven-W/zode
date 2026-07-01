@@ -37,6 +37,13 @@ pub struct SessionTab {
     pub titled: bool,
     /// Abort handle for the in-flight turn, if any.
     pub turn_abort: Option<AbortController>,
+    /// True while a model/provider/config rebuild is running off the UI loop.
+    /// It blocks new turns just like an in-flight agent turn, but there is no
+    /// abort handle because engine assembly is not cancellation-aware.
+    pub reassemble_pending: bool,
+    /// Monotonic per-tab rebuild counter; completions carry this to avoid
+    /// applying stale background results.
+    pub reassemble_seq: u64,
     /// Monotonic per-tab turn counter; `active_turn_id` is the turn whose
     /// events we currently accept. Aborting/superseding bumps it so stale
     /// events from a still-draining task are dropped.
@@ -68,6 +75,18 @@ pub struct SessionTab {
     /// Cached snapshot of this tab's live `TodoWrite` list, refreshed each
     /// tick from `engine.todo_state` so the sync sidebar render can read it.
     pub todos: Vec<TodoItem>,
+    /// Whether the autonomous goal loop is active on this tab. Set true when a
+    /// goal is set via `/goal <text>`; cleared on `goal_complete`, `/goal
+    /// clear`, a failed turn, or a user interrupt (Esc/Ctrl+C).
+    pub goal_loop_active: bool,
+    /// How many turns the current goal loop has run (for the optional
+    /// `autoLoopMaxTurns` cap). Reset to 0 each time a new goal loop starts.
+    pub goal_loop_iter: u32,
+    /// The active goal's text, for the sidebar `goal` section. `Some` while the
+    /// loop runs; cleared when it stops.
+    pub goal_text: Option<String>,
+    /// When the current goal loop started, for the sidebar elapsed-time display.
+    pub goal_started_at: Option<std::time::Instant>,
 }
 
 impl SessionTab {
@@ -80,6 +99,8 @@ impl SessionTab {
             session_id,
             titled: false,
             turn_abort: None,
+            reassemble_pending: false,
+            reassemble_seq: 0,
             turn_seq: 0,
             active_turn_id: 0,
             mode: Mode::Ready,
@@ -93,12 +114,16 @@ impl SessionTab {
             pending_shell_context: Vec::new(),
             plan_mode: false,
             todos: Vec::new(),
+            goal_loop_active: false,
+            goal_loop_iter: 0,
+            goal_text: None,
+            goal_started_at: None,
         }
     }
 
     /// A tab is busy while a turn is in flight (abort handle present).
     pub fn is_busy(&self) -> bool {
-        self.turn_abort.is_some()
+        self.turn_abort.is_some() || self.reassemble_pending
     }
 
     /// Stamp the session index with a title derived from the first prompt.

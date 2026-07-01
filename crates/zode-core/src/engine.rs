@@ -4,6 +4,7 @@
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use agent::abort::AbortController;
@@ -41,7 +42,7 @@ use crate::noema::ZodeNoema;
 use crate::plugin::PluginManager;
 use crate::provider::build_provider;
 use crate::skills::{load_skills_filtered, load_skills_from, skills_dirs, skills_index, SkillTool};
-use crate::task_factory::{ParentToolsCell, ZodeTaskFactory};
+use crate::task_factory::{ModelRuntimeState, ParentToolsCell, ZodeTaskFactory};
 
 const EDIT_HISTORY_CAPACITY: usize = 50;
 
@@ -157,6 +158,11 @@ fn resolve_max_iterations(top: Option<u32>) -> usize {
         _ => usize::MAX,
     }
 }
+
+/// Transient-API-error retry count. Absent → 10; `0` disables retries.
+fn resolve_max_api_retries(cfg: Option<u32>) -> u32 {
+    cfg.unwrap_or(10)
+}
 const FILE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Build the file-tool [`WorkspacePolicy`] from the active sandbox so file
@@ -253,6 +259,122 @@ fn sandbox_prompt_note(sandbox: &Option<crate::sandbox::SandboxConfig>) -> Strin
     }
 }
 
+fn cost_state_for_model(cfg: &ZodeConfig, model: String) -> Arc<CostState> {
+    let mut catalog = agent::cost::ModelPriceCatalog::with_defaults();
+    if let Some(prices) = cfg.provider.price_overrides() {
+        catalog.insert(model.clone(), prices);
+    }
+    let currency_code = cfg.currency.as_deref().unwrap_or("USD");
+    Arc::new(CostState::new_with(model, catalog, currency_code))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_runtime_system_prompt(
+    cfg: &ZodeConfig,
+    cwd: &std::path::Path,
+    date: &str,
+    sandbox: &Option<crate::sandbox::SandboxConfig>,
+    plan_mode: bool,
+    has_question_tool: bool,
+    model: &str,
+    skills: &SkillRegistry,
+    agent_type_list: &[(String, String)],
+    workflow_defs: &[crate::workflows::WorkflowDef],
+) -> String {
+    let skills_idx = skills_index(skills);
+    let mut env = gather_env(cwd, date);
+    // Tell the agent which model it's running on (so "what model are you?"
+    // is answerable). Stable across a session, so it doesn't hurt caching.
+    env.model = model.to_string();
+    let instructions = discover_instructions(cwd);
+    let mut system = build_system_prompt(
+        &instructions,
+        &skills_idx,
+        &env,
+        cfg.skill_discipline(),
+        cfg.openspec_awareness() && openspec_detected(cwd),
+        // Nudge toward the AskUserQuestion tool only when it's actually present.
+        has_question_tool,
+    );
+    // Declare the live sandbox / write policy so the agent knows whether it may
+    // write outside cwd or reach the network.
+    system.push_str(&sandbox_prompt_note(sandbox));
+    if plan_mode {
+        system.push_str(PLAN_MODE_PROMPT);
+    }
+    // A persistent goal (`/goal`) keeps the agent focused on one objective AND
+    // drives an autonomous multi-turn loop.
+    if let Some(goal) = cfg.goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+        system.push_str(&format!(
+            "\n\n# Current goal\nKeep this objective in focus for every turn; \
+             if a request is ambiguous, resolve it toward the goal:\n{goal}\n\n\
+             You are working AUTONOMOUSLY toward this goal across multiple turns. \
+             Each turn, take the next concrete step (research, edit, run, verify) — \
+             do not just describe what you would do; actually do it. The loop \
+             continues automatically after every turn. When — and only when — the \
+             goal is FULLY achieved and verified, call the `goal_complete` tool \
+             with a short summary to end the loop. Do not call `goal_complete` \
+             prematurely, and do not stop early otherwise; if work remains, keep \
+             going on the next turn."
+        ));
+    }
+    // Effort level (`/effort`) tunes thoroughness vs. speed.
+    match cfg
+        .effort
+        .as_deref()
+        .map(|e| e.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("high") => system.push_str(
+            "\n\n# Effort: high\nBe thorough and exhaustive — explore broadly, \
+             verify carefully, and prefer completeness over brevity.",
+        ),
+        Some("low") => system.push_str(
+            "\n\n# Effort: low\nBe fast and concise — minimal exploration, direct \
+             answers, and skip non-essential detail.",
+        ),
+        _ => {} // medium / unset → balanced default, no directive.
+    }
+    // Autonomous orchestration directive: encourage task decomposition via
+    // sub-agents and advertise the available types + the define_agent tool.
+    if cfg.autonomous_orchestration.unwrap_or(true) {
+        let types = agent_type_list
+            .iter()
+            .map(|(n, d)| format!("  - {n}: {d}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        system.push_str(&format!(
+            "\n\n# Autonomous orchestration\nFor multi-part or large tasks, decompose the \
+             work and delegate independent sub-tasks to sub-agents with the Task tool \
+             instead of doing everything in one context. Available sub-agent types:\n{types}\n\
+             If no existing type fits, create one with the define_agent tool, then spawn it. \
+             Keep the main thread focused on planning and integrating the results.",
+        ));
+        system.push_str(
+            "\nFor a repeatable multi-step process, capture it as a reusable workflow \
+             with the define_workflow tool (ordered steps, each with a sub-agent type), \
+             then follow it by running each step via Task.",
+        );
+        if !workflow_defs.is_empty() {
+            let wfs = workflow_defs
+                .iter()
+                .map(|w| {
+                    let steps = w
+                        .steps
+                        .iter()
+                        .map(|s| format!("[{}] {}", s.agent_type, s.prompt))
+                        .collect::<Vec<_>>()
+                        .join(" → ");
+                    format!("  - {} ({}): {}", w.name, w.description, steps)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            system.push_str(&format!("\nSaved workflows:\n{wfs}"));
+        }
+    }
+    system
+}
+
 pub struct ZodeEngine {
     pub provider: Arc<dyn Provider>,
     pub tools: Arc<ToolRegistry>,
@@ -275,6 +397,9 @@ pub struct ZodeEngine {
     /// set `maxIterations` in config to impose a finite cap (useful for headless
     /// `-p` runs that can't be interrupted).
     pub max_iterations: usize,
+    /// Transient-API-error retries (rate limit / 5xx / network) with exponential
+    /// backoff before a turn fails. Default 10.
+    pub max_api_retries: u32,
     /// Sampling temperature (None = provider default).
     pub temperature: Option<f32>,
     /// Whether to request provider prompt caching (default on).
@@ -283,6 +408,8 @@ pub struct ZodeEngine {
     pub noema: ZodeNoema,
     /// Resolved knobs for the post-turn LLM extraction pass (off by default).
     pub extract_config: crate::noema_extract::ExtractConfig,
+    /// Shared provider/model snapshot used by tools that call an LLM internally.
+    model_runtime: ModelRuntimeState,
     /// Background shell registry (Phase 03/07 inspect this).
     pub bash_sessions: BashSessionRegistry,
     /// Shared TodoWrite state handle (Phase 07 reads the list for the UI).
@@ -319,6 +446,14 @@ pub struct ZodeEngine {
     pub user_commands: Vec<crate::user_commands::UserCommand>,
     /// OpenPencil control-surface config (for the `/op` TUI command).
     pub openpencil: crate::config::OpenPencilConfig,
+    /// Shared completion signal for the autonomous goal loop. The registered
+    /// `goal_complete` tool flips this; the TUI polls it after each turn to
+    /// decide whether to stop looping. Created fresh in `assemble` so a rebuilt
+    /// engine and its tool always share the same `Arc`.
+    goal_completed: Arc<AtomicBool>,
+    /// Optional cap on autonomous goal-loop turns (`autoLoopMaxTurns`). `None`
+    /// means unbounded — the loop runs until `goal_complete` or user interrupt.
+    auto_loop_max_turns: Option<u32>,
 }
 
 /// What a manual `/compact` run accomplished, for the UI to report.
@@ -363,6 +498,7 @@ impl ZodeEngine {
             .model
             .clone()
             .ok_or_else(|| CoreError::Other("no model set in config".into()))?;
+        let model_runtime = ModelRuntimeState::new(provider.clone(), model.clone());
 
         // File-tool write confinement (WorkspacePolicy) follows the SAME sandbox
         // policy as shell commands, so `/sandbox off` actually lets file writes
@@ -393,6 +529,15 @@ impl ZodeEngine {
         )));
         base.register(Arc::new(BashOutputTool::new(bash_sessions.clone())));
         base.register(Arc::new(KillShellTool::new(bash_sessions.clone())));
+
+        // Goal auto-loop completion signal. Created BEFORE tool registration so
+        // the `goal_complete` tool and the engine struct share the SAME `Arc`:
+        // the tool flips it, the host polls it after each turn to stop looping.
+        // Always registered (cheap, read-only) so a goal can be set mid-session.
+        let goal_completed = Arc::new(AtomicBool::new(false));
+        base.register(Arc::new(crate::goal::GoalCompleteTool::new(
+            goal_completed.clone(),
+        )));
 
         // Git tools (Zode product tools, not in agent-tools-code).
         for tool in crate::tools::git::all_git_tools() {
@@ -451,7 +596,6 @@ impl ZodeEngine {
         let skills = Arc::new(load_skills_filtered(&skill_dirs, |n| {
             plugins.skill_enabled(n)
         }));
-        let skills_idx = skills_index(&skills);
         base.register(Arc::new(SkillTool::new(skills.clone())));
 
         // OpenPencil design pipeline (op-bridge T6). Registered HERE — after the
@@ -464,8 +608,7 @@ impl ZodeEngine {
                 cfg: cfg.openpencil.clone(),
                 consent: op_consent_resolved.clone(),
                 tag: cfg.openpencil.release_tag().to_string(),
-                provider: provider.clone(),
-                model: model.clone(),
+                model_runtime: model_runtime.clone(),
                 skills: skills.clone(),
             };
             base.register(Arc::new(OpDesignTool::new(design_deps)));
@@ -569,8 +712,7 @@ impl ZodeEngine {
         // built-in types for the Task tool and listed by `/agents`.
         let agent_defs = crate::agents::load_agent_defs(&cwd);
         let task_factory = Arc::new(ZodeTaskFactory::new(
-            provider.clone(),
-            model.clone(),
+            model_runtime.clone(),
             permissions.clone(),
             cwd.clone(),
             file_cache.clone(),
@@ -627,108 +769,19 @@ impl ZodeEngine {
         // registry now that wrapping is complete.
         let _ = task_tools.set(tools.clone());
 
-        // System prompt: identity + env + three-level instructions + skills,
-        // plus a plan-mode preamble when only read-only tools are available.
-        let mut env = gather_env(&cwd, date);
-        // Tell the agent which model it's running on (so "what model are you?"
-        // is answerable). Stable across a session, so it doesn't hurt caching.
-        env.model = model.clone();
-        let instructions = discover_instructions(&cwd);
-        let mut system = build_system_prompt(
-            &instructions,
-            &skills_idx,
-            &env,
-            cfg.skill_discipline(),
-            cfg.openspec_awareness() && openspec_detected(&cwd),
-            // Nudge toward the AskUserQuestion tool only when it's actually
-            // present (the `question_tool` this assembly was handed).
+        let system = Some(render_runtime_system_prompt(
+            cfg,
+            &cwd,
+            date,
+            &sandbox,
+            plan_mode,
             has_question_tool,
-        );
-        // Declare the live sandbox / write policy so the agent knows whether it
-        // may write outside cwd or reach the network — and, crucially, RETRIES
-        // when the policy changed (e.g. the user ran `/sandbox off`) instead of
-        // giving up on a stale earlier failure.
-        system.push_str(&sandbox_prompt_note(&sandbox));
-        if plan_mode {
-            system.push_str(PLAN_MODE_PROMPT);
-        }
-        // A persistent goal (`/goal`) keeps the agent focused on one objective.
-        if let Some(goal) = cfg.goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
-            system.push_str(&format!(
-                "\n\n# Current goal\nKeep this objective in focus for every turn; \
-                 if a request is ambiguous, resolve it toward the goal:\n{goal}"
-            ));
-        }
-        // Effort level (`/effort`) tunes thoroughness vs. speed.
-        match cfg
-            .effort
-            .as_deref()
-            .map(|e| e.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("high") => system.push_str(
-                "\n\n# Effort: high\nBe thorough and exhaustive — explore broadly, \
-                 verify carefully, and prefer completeness over brevity.",
-            ),
-            Some("low") => system.push_str(
-                "\n\n# Effort: low\nBe fast and concise — minimal exploration, direct \
-                 answers, and skip non-essential detail.",
-            ),
-            _ => {} // medium / unset → balanced default, no directive.
-        }
-        // Autonomous orchestration directive: encourage task decomposition via
-        // sub-agents and advertise the available types + the define_agent tool.
-        if orchestration {
-            let types = agent_type_list
-                .iter()
-                .map(|(n, d)| format!("  - {n}: {d}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            system.push_str(&format!(
-                "\n\n# Autonomous orchestration\nFor multi-part or large tasks, decompose the \
-                 work and delegate independent sub-tasks to sub-agents with the Task tool \
-                 instead of doing everything in one context. Available sub-agent types:\n{types}\n\
-                 If no existing type fits, create one with the define_agent tool, then spawn it. \
-                 Keep the main thread focused on planning and integrating the results.",
-            ));
-            // Workflows: always advertise that the agent can CREATE reusable
-            // multi-step workflows (define_workflow), and list any saved ones.
-            system.push_str(
-                "\nFor a repeatable multi-step process, capture it as a reusable workflow \
-                 with the define_workflow tool (ordered steps, each with a sub-agent type), \
-                 then follow it by running each step via Task.",
-            );
-            if !workflow_defs.is_empty() {
-                let wfs = workflow_defs
-                    .iter()
-                    .map(|w| {
-                        let steps = w
-                            .steps
-                            .iter()
-                            .map(|s| format!("[{}] {}", s.agent_type, s.prompt))
-                            .collect::<Vec<_>>()
-                            .join(" → ");
-                        format!("  - {} ({}): {}", w.name, w.description, steps)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                system.push_str(&format!("\nSaved workflows:\n{wfs}"));
-            }
-        }
-        let system = Some(system);
-
-        // Clone before `model` is moved into the struct's `model` field below.
-        let model_for_cost = model.clone();
-        // Seed the price catalog with the active provider's configured prices
-        // (keyed on the exact model id) so models the built-ins don't know —
-        // e.g. DeepSeek — get a real cost instead of "n/a". Display in the
-        // configured currency (USD default).
-        let mut catalog = agent::cost::ModelPriceCatalog::with_defaults();
-        if let Some(prices) = cfg.provider.price_overrides() {
-            catalog.insert(model_for_cost.clone(), prices);
-        }
-        let currency_code = cfg.currency.as_deref().unwrap_or("USD");
-        let cost = Arc::new(CostState::new_with(model_for_cost, catalog, currency_code));
+            &model,
+            &skills,
+            &agent_type_list,
+            &workflow_defs,
+        ));
+        let cost = cost_state_for_model(cfg, model.clone());
 
         Ok(Self {
             provider,
@@ -760,10 +813,12 @@ impl ZodeEngine {
                 cached_catalog(),
             ),
             max_iterations: resolve_max_iterations(cfg.max_iterations),
+            max_api_retries: resolve_max_api_retries(cfg.max_api_retries),
             temperature: cfg.temperature,
             prompt_cache: cfg.prompt_cache.unwrap_or(true),
             noema: ZodeNoema::from_settings(&cfg.noema),
             extract_config: crate::noema_extract::ExtractConfig::from_settings(&cfg.noema),
+            model_runtime,
             bash_sessions,
             todo_state,
             subagents,
@@ -784,6 +839,8 @@ impl ZodeEngine {
                 .collect(),
             user_commands: crate::user_commands::load_user_commands(&cwd),
             openpencil: cfg.openpencil.clone(),
+            goal_completed,
+            auto_loop_max_turns: cfg.auto_loop_max_turns,
         })
     }
 
@@ -842,6 +899,26 @@ impl ZodeEngine {
     pub fn with_store(mut self, store: MessageStore) -> Self {
         self.store = Arc::new(Mutex::new(store));
         self
+    }
+
+    /// Read-and-clear the goal-loop completion signal. Returns `true` exactly
+    /// once per `goal_complete` call: the host polls this after each turn to
+    /// decide whether the autonomous goal loop should stop.
+    pub fn take_goal_completed(&self) -> bool {
+        self.goal_completed.swap(false, Ordering::SeqCst)
+    }
+
+    /// Clear the completion signal before starting a fresh goal loop, so a stale
+    /// flag from an earlier goal can't short-circuit the new one.
+    pub fn reset_goal_completed(&self) {
+        self.goal_completed.store(false, Ordering::SeqCst);
+    }
+
+    /// Optional cap on autonomous goal-loop turns (`autoLoopMaxTurns`). `None`
+    /// OR `0` means unbounded — matching zode's `max_iterations` convention where
+    /// 0 is "no cap" (a 0 cap that stopped after one turn would be surprising).
+    pub fn auto_loop_max_turns(&self) -> Option<u32> {
+        self.auto_loop_max_turns.filter(|&n| n > 0)
     }
 
     /// Render the conversation to a Markdown transcript (`/export`). Returns an
@@ -968,6 +1045,7 @@ impl ZodeEngine {
             .max_output_tokens(self.max_output_tokens)
             .model_max_tokens(self.model_max_tokens)
             .max_iterations(self.max_iterations)
+            .max_api_retries(self.max_api_retries)
             .cwd(self.cwd.clone())
             .auto_compact(true)
             .use_prompt_cache(self.prompt_cache);
@@ -1440,6 +1518,79 @@ impl EngineTemplate {
         t
     }
 
+    /// Apply a model change to an idle engine without rebuilding tools, MCP, or
+    /// LSP state. This is the fast path for `/model`: the main conversation
+    /// uses the new provider/model immediately, while tool topology remains the
+    /// same until a setting that actually changes tools triggers reassembly.
+    pub fn hot_swap_model(
+        &self,
+        engine: &mut ZodeEngine,
+        model: String,
+    ) -> Result<Self, CoreError> {
+        let template = self.with_model(model);
+        let provider = build_provider(&template.cfg.provider)?;
+        let model = template
+            .cfg
+            .provider
+            .model
+            .clone()
+            .ok_or_else(|| CoreError::Other("no model set in config".into()))?;
+        let context_window = resolve_context_window(
+            &template.cfg.provider,
+            template.cfg.context_window,
+            template.cfg.active_provider_key(),
+            cached_catalog(),
+        );
+        let max_output_tokens = resolve_max_output(
+            &template.cfg.provider,
+            template.cfg.max_output_tokens,
+            template.cfg.active_provider_key(),
+            cached_catalog(),
+            context_window,
+        );
+        let system = template.runtime_system_for_engine(engine, &model);
+
+        engine.provider = provider;
+        engine.model = model.clone();
+        engine.model_max_tokens = context_window;
+        engine.max_output_tokens = max_output_tokens;
+        engine
+            .model_runtime
+            .update(engine.provider.clone(), model.clone());
+        engine.cost = cost_state_for_model(&template.cfg, model);
+        engine.system = Some(system);
+        Ok(template)
+    }
+
+    /// Apply a goal change by rebuilding only the system prompt for the existing
+    /// engine. The goal tool is always registered, so no tool reassembly is
+    /// needed for `/goal`.
+    pub fn hot_swap_goal(&self, engine: &mut ZodeEngine, goal: Option<String>) -> Self {
+        let template = self.with_goal(goal);
+        engine.system = Some(template.runtime_system_for_engine(engine, &engine.model));
+        template
+    }
+
+    fn runtime_system_for_engine(&self, engine: &ZodeEngine, model: &str) -> String {
+        let sandbox = self
+            .sandbox
+            .as_ref()
+            .map(|sb| sb.clone().with_cwd(&engine.cwd));
+        let workflow_defs = crate::workflows::load_workflow_defs(&engine.cwd);
+        render_runtime_system_prompt(
+            &self.cfg,
+            &engine.cwd,
+            &self.date,
+            &sandbox,
+            self.plan_mode,
+            self.question_queue.is_some(),
+            model,
+            &engine.skills,
+            &engine.agent_types,
+            &workflow_defs,
+        )
+    }
+
     /// The effort level ("low" | "medium" | "high") (`/effort`).
     pub fn effort(&self) -> Option<&str> {
         self.cfg.effort.as_deref()
@@ -1672,6 +1823,7 @@ mod tests {
     }
 
     fn minimal_engine(provider: Arc<dyn Provider>) -> ZodeEngine {
+        let model_runtime = ModelRuntimeState::new(provider.clone(), "mock-model".into());
         ZodeEngine {
             provider,
             tools: Arc::new(ToolRegistry::new()),
@@ -1689,10 +1841,14 @@ mod tests {
             max_output_tokens: 128,
             model_max_tokens: DEFAULT_MODEL_MAX_TOKENS,
             max_iterations: usize::MAX,
+            goal_completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            auto_loop_max_turns: None,
+            max_api_retries: 10,
             temperature: None,
             prompt_cache: false,
             noema: ZodeNoema::disabled(),
             extract_config: crate::noema_extract::ExtractConfig::default(),
+            model_runtime,
             bash_sessions: BashSessionRegistry::new(),
             todo_state: TodoState::new(),
             subagents: crate::subagents::SubAgentRegistry::new(),

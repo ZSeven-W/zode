@@ -5,6 +5,10 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(name = "zode", version, about = "AI-native coding CLI")]
 pub struct Args {
+    /// Optional subcommand (e.g. `zode doctor`). Absent = launch normally.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Headless single-turn mode: run this prompt, stream to stdout, exit.
     #[arg(short = 'p', long = "print")]
     pub print: Option<String>,
@@ -58,6 +62,13 @@ pub struct Args {
     /// config, …) from reads. Off by default — a coding agent reads the repo.
     #[arg(long)]
     pub sandbox_strict_read: bool,
+}
+
+/// Subcommands. Kept minimal — the default (no subcommand) launches the CLI.
+#[derive(Debug, clap::Subcommand)]
+pub enum Command {
+    /// Diagnose environment / config problems and check for a newer release.
+    Doctor,
 }
 
 #[cfg(test)]

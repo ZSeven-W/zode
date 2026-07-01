@@ -100,6 +100,11 @@ impl ChatSelection {
 pub struct ChatView {
     messages: Vec<ChatMessage>,
     streaming: bool,
+    /// True only while the last row is a thinking block still being appended to.
+    /// Any other push (text, tool, user) or a turn end clears it, so a fresh
+    /// thinking block never coalesces into a previous turn's reasoning even if it
+    /// happens to be the tail message.
+    thinking_open: bool,
     active_assistant_index: Option<usize>,
     /// Lines scrolled up from the bottom (0 = following the tail).
     scroll_back: usize,
@@ -167,6 +172,7 @@ impl ChatView {
     pub fn push_user_with_images(&mut self, text: &str, images: Vec<ImagePreview>) {
         self.streaming = false;
         self.active_assistant_index = None;
+        self.thinking_open = false;
         self.messages.push(ChatMessage {
             role: Role::User,
             text: text.to_string(),
@@ -198,22 +204,28 @@ impl ChatView {
         if delta.is_empty() {
             return;
         }
-        let tail_is_thinking = matches!(
-            self.process_tail(),
-            Some(m) if m.role == Role::Tool && m.text.starts_with(THINKING_PREFIX)
-        );
-        let thinking_idx = if tail_is_thinking {
-            self.process_tail_index().expect("process tail exists")
+        // Append to the current thinking block only when it's still OPEN and the
+        // LAST message (chronological). Any intervening push — a tool row, an
+        // answer that has since started, a new user turn — clears `thinking_open`,
+        // so a fresh thinking block renders in its own position below what came
+        // before it instead of merging into a previous turn's reasoning.
+        let tail_is_thinking = self.thinking_open
+            && matches!(
+                self.messages.last(),
+                Some(m) if m.role == Role::Tool && m.text.starts_with(THINKING_PREFIX)
+            );
+        if tail_is_thinking {
+            if let Some(msg) = self.messages.last_mut() {
+                msg.text.push_str(delta);
+            }
         } else {
             self.push_process_message(ChatMessage {
                 role: Role::Tool,
-                text: THINKING_PREFIX.to_string(),
+                text: format!("{THINKING_PREFIX}{delta}"),
                 images: Vec::new(),
-            })
-        };
-        if let Some(msg) = self.messages.get_mut(thinking_idx) {
-            msg.text.push_str(delta);
+            });
         }
+        self.thinking_open = true;
         self.bump_revision();
     }
 
@@ -225,6 +237,7 @@ impl ChatView {
         });
         self.active_assistant_index = self.messages.len().checked_sub(1);
         self.streaming = true;
+        self.thinking_open = false;
         self.bump_revision();
     }
 
@@ -244,6 +257,7 @@ impl ChatView {
         };
         self.active_assistant_index = Some(idx);
         self.streaming = true;
+        self.thinking_open = false;
         if let Some(msg) = self.messages.get_mut(idx) {
             msg.text.push_str(delta);
         }
@@ -256,34 +270,25 @@ impl ChatView {
     }
 
     fn push_process_message(&mut self, msg: ChatMessage) -> usize {
-        if self.streaming {
-            if let Some(idx) = self.active_assistant_index {
-                self.messages.insert(idx, msg);
-                let shifted_idx = idx + 1;
-                self.active_assistant_index = Some(shifted_idx);
-                return idx;
-            }
-        }
-
+        // A process row (tool / usage / result / thinking) renders in its
+        // CHRONOLOGICAL position: append at the end and finalize any in-progress
+        // assistant answer, so later text starts a NEW message BELOW this row.
+        //
+        // A zode "turn" spans the whole multi-step agent run (end_turn fires only
+        // at TurnDone), so a model that streams reasoning as TEXT and calls tools
+        // repeatedly — reason→tool→reason→tool — would otherwise collapse into
+        // "all tools stacked together, all reasoning merged into one block". This
+        // keeps the reason/tool interleaving the model actually produced.
+        self.active_assistant_index = None;
+        self.thinking_open = false;
         self.messages.push(msg);
         self.messages.len() - 1
-    }
-
-    fn process_tail_index(&self) -> Option<usize> {
-        match self.active_assistant_index {
-            Some(idx) if self.streaming && idx > 0 => Some(idx - 1),
-            _ => self.messages.len().checked_sub(1),
-        }
-    }
-
-    fn process_tail(&self) -> Option<&ChatMessage> {
-        self.process_tail_index()
-            .and_then(|idx| self.messages.get(idx))
     }
 
     pub fn end_turn(&mut self) {
         self.streaming = false;
         self.active_assistant_index = None;
+        self.thinking_open = false;
     }
 
     pub fn scroll_up(&mut self, n: u16) {
@@ -535,7 +540,12 @@ impl ChatView {
                 .any(|l| l.spans.iter().any(|s| !s.content.trim().is_empty()))
         {
             lines.push(Line::styled(
-                "  (thinking & tool details are hidden — /thinking or /tool-details to show them)",
+                format!(
+                    "  {}",
+                    crate::tr(
+                        "(thinking & tool details are hidden — /thinking or /tool-details to show them)"
+                    )
+                ),
                 Style::default().fg(theme.fg_subtle),
             ));
         }
@@ -564,45 +574,48 @@ impl ChatView {
             Line::from(vec![
                 Span::styled("   ▗▄▄▄▄▖   ", rail),
                 Span::styled("zode", title),
-                Span::styled(" workbench ", muted),
-                Span::styled(":: terminal coding agent", accent2),
+                Span::styled(format!(" {} ", crate::tr("workbench")), muted),
+                Span::styled(
+                    format!(":: {}", crate::tr("terminal coding agent")),
+                    accent2,
+                ),
             ]),
             Line::from(vec![
                 Span::styled("  ▐  ◕ ◕ ▌  ", rail),
-                Span::styled("ready for code, shells, and agents", muted),
+                Span::styled(crate::tr("ready for code, shells, and agents"), muted),
             ]),
             Line::from(vec![
                 Span::styled("  ▐   ▿  ▌  ", rail),
-                Span::styled("small mascot, serious tools", accent2),
+                Span::styled(crate::tr("small mascot, serious tools"), accent2),
             ]),
             Line::from(vec![
                 Span::styled("   ▝▜██▛▘   ", rail),
-                Span::styled("command deck online", muted),
+                Span::styled(crate::tr("command deck online"), muted),
             ]),
             Line::from(vec![Span::styled("    ▝▘▝▘    ", rail)]),
             Line::from(vec![Span::styled("          ", panel)]),
             Line::from(vec![
                 Span::styled("  ", panel),
                 Span::styled(" /help ", accent),
-                Span::styled("commands", muted),
+                Span::styled(crate::tr("commands"), muted),
                 Span::styled("  ╱  ", accent2),
                 Span::styled(" /model ", accent),
-                Span::styled("engines", muted),
+                Span::styled(crate::tr("engines"), muted),
                 Span::styled("  ╱  ", accent2),
                 Span::styled(" /theme ", accent),
-                Span::styled("palettes", muted),
+                Span::styled(crate::tr("palettes"), muted),
                 Span::styled("  ╱  ", accent2),
                 Span::styled(" /sessions ", accent),
-                Span::styled("timeline", muted),
+                Span::styled(crate::tr("timeline"), muted),
                 Span::styled("  ╱  ", accent2),
                 Span::styled(" /tasks ", accent),
-                Span::styled("jobs", muted),
+                Span::styled(crate::tr("jobs"), muted),
             ]),
             Line::from(vec![
                 Span::styled("  ", panel),
-                Span::styled("neon rails online", accent2),
+                Span::styled(crate::tr("neon rails online"), accent2),
                 Span::styled("  •  ", muted),
-                Span::styled("slash commands are hot", muted),
+                Span::styled(crate::tr("slash commands are hot"), muted),
             ]),
         ]
     }
@@ -856,18 +869,35 @@ fn render_plain_markdown(src: &str, theme: &Theme, width: u16) -> Vec<Line<'stat
     if rendered.is_empty() {
         return vec![Line::from("")];
     }
-    rendered
-        .into_iter()
-        .filter(line_has_content)
-        .flat_map(|line| {
-            wrap_spans_with_prefix(
-                line.spans,
-                Span::raw(ASSISTANT_BODY_INDENT),
-                Span::raw(ASSISTANT_BODY_INDENT),
-                width,
-            )
-        })
-        .collect()
+    // Preserve the renderer's intentional single blank lines (section, paragraph
+    // and bullet spacing) instead of stripping them — that stripping is what made
+    // long answers read as a wall. Still drop leading/trailing blanks and collapse
+    // any run to a single spacer so nothing double-spaces.
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut prev_blank = true; // start "blank" so a leading blank is dropped
+    for line in rendered {
+        if !line_has_content(&line) {
+            if !prev_blank {
+                out.push(Line::from(""));
+            }
+            prev_blank = true;
+            continue;
+        }
+        prev_blank = false;
+        out.extend(wrap_spans_with_prefix(
+            line.spans,
+            Span::raw(ASSISTANT_BODY_INDENT),
+            Span::raw(ASSISTANT_BODY_INDENT),
+            width,
+        ));
+    }
+    while out.last().is_some_and(|l| !line_has_content(l)) {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push(Line::from(""));
+    }
+    out
 }
 
 fn line_has_content(line: &Line<'static>) -> bool {
@@ -879,7 +909,7 @@ fn line_has_content(line: &Line<'static>) -> bool {
 fn render_tool_line(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     if text == "Thinking…" {
         return render_tool_process_line(
-            "Thinking: ",
+            &format!("{}: ", crate::tr("Thinking")),
             "",
             Style::default()
                 .fg(theme.system)
@@ -890,7 +920,7 @@ fn render_tool_line(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>>
     }
     if let Some(thinking) = text.strip_prefix(THINKING_PREFIX) {
         return render_tool_process_line(
-            "Thinking: ",
+            &format!("{}: ", crate::tr("Thinking")),
             thinking,
             Style::default()
                 .fg(theme.system)
@@ -1087,20 +1117,45 @@ mod tests {
     }
 
     #[test]
-    fn delta_after_tool_stays_in_active_assistant_answer() {
-        // Process rows belong above the current answer, but they must not
-        // become the append target for subsequent assistant text.
+    fn text_around_a_tool_renders_in_chronological_order() {
+        // reason→tool→reason must interleave: the text before the tool stays
+        // above it, and the text after the tool starts a NEW answer below it —
+        // not merged back into one block. A tool row is never the append target.
         let mut view = ChatView::new();
         view.push_user("hi");
         view.push_delta("part1 ");
         view.push_tool("Bash");
         view.push_delta("part2");
         let msgs = view.messages();
-        assert_eq!(msgs.len(), 3); // user, tool, assistant(part1+part2)
-        assert_eq!(msgs[1].role, Role::Tool);
-        assert_eq!(msgs[1].text, "Bash");
-        assert_eq!(msgs[2].role, Role::Assistant);
-        assert_eq!(msgs[2].text, "part1 part2");
+        assert_eq!(msgs.len(), 4); // user, assistant(part1), tool, assistant(part2)
+        assert_eq!(msgs[1].role, Role::Assistant);
+        assert_eq!(msgs[1].text, "part1 ");
+        assert_eq!(msgs[2].role, Role::Tool);
+        assert_eq!(msgs[2].text, "Bash");
+        assert_eq!(msgs[3].role, Role::Assistant);
+        assert_eq!(msgs[3].text, "part2");
+    }
+
+    #[test]
+    fn thinking_does_not_merge_across_a_seal() {
+        // A tool row between two thinking bursts, and a turn boundary, both keep
+        // the reasoning in separate blocks (no cross-turn coalescing).
+        let mut view = ChatView::new();
+        view.push_thinking_delta("reason A");
+        view.push_tool("Tool Bash");
+        view.push_thinking_delta("reason B");
+        view.end_turn();
+        view.push_thinking_delta("reason C");
+        let texts: Vec<&str> = view.messages().iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Thinking: reason A",
+                "Tool Bash",
+                "Thinking: reason B",
+                "Thinking: reason C",
+            ]
+        );
     }
 
     #[test]
@@ -1116,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn process_events_stay_above_active_assistant_answer() {
+    fn interleaved_text_thinking_and_tool_keep_arrival_order() {
         let mut view = ChatView::new();
         view.push_user("why did clone timeout?");
         view.push_delta("It timed out because ");
@@ -1125,17 +1180,17 @@ mod tests {
         view.push_delta("the first attempt hit the shorter timeout.");
 
         let msgs = view.messages();
-        assert_eq!(msgs.len(), 4);
+        // Chronological: text#1, thinking, tool, text#2 — each in its own row.
+        assert_eq!(msgs.len(), 5);
         assert_eq!(msgs[0].role, Role::User);
-        assert_eq!(msgs[1].role, Role::Tool);
-        assert_eq!(msgs[1].text, "Thinking: Checking clone duration.");
+        assert_eq!(msgs[1].role, Role::Assistant);
+        assert_eq!(msgs[1].text, "It timed out because ");
         assert_eq!(msgs[2].role, Role::Tool);
-        assert_eq!(msgs[2].text, "Tool Bash git status");
-        assert_eq!(msgs[3].role, Role::Assistant);
-        assert_eq!(
-            msgs[3].text,
-            "It timed out because the first attempt hit the shorter timeout."
-        );
+        assert_eq!(msgs[2].text, "Thinking: Checking clone duration.");
+        assert_eq!(msgs[3].role, Role::Tool);
+        assert_eq!(msgs[3].text, "Tool Bash git status");
+        assert_eq!(msgs[4].role, Role::Assistant);
+        assert_eq!(msgs[4].text, "the first attempt hit the shorter timeout.");
     }
 
     #[test]
@@ -1671,7 +1726,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_markdown_compacts_empty_paragraph_gap() {
+    fn assistant_markdown_keeps_one_blank_between_paragraphs() {
         let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
         let view = ChatView::new();
         let lines = view.render_message(
@@ -1693,7 +1748,15 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        assert_eq!(rows, vec!["  第一段".to_string(), "  第二段".to_string()]);
+        // Paragraphs are separated by one blank line (not stripped into a wall).
+        assert_eq!(
+            rows,
+            vec![
+                "  第一段".to_string(),
+                "".to_string(),
+                "  第二段".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1917,6 +1980,28 @@ mod tests {
         let theme = ThemeStore::with_builtins().resolve(Some("minimal"));
 
         assert_ne!(theme.user, theme.assistant);
+    }
+
+    #[test]
+    fn plain_markdown_keeps_section_and_bullet_spacing() {
+        // Regression: the assistant body must NOT strip the renderer's blank
+        // lines — that stripping made long answers read as a dense wall.
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let lines = render_plain_markdown("## A\n\n- one\n- two", &theme, 80);
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.trim().is_empty()),
+            "spacing was stripped: {texts:?}"
+        );
+        let i_one = texts.iter().position(|t| t.contains("one")).unwrap();
+        let i_two = texts.iter().position(|t| t.contains("two")).unwrap();
+        assert!(
+            i_two > i_one + 1,
+            "expected a blank line between bullets: {texts:?}"
+        );
     }
 
     #[test]

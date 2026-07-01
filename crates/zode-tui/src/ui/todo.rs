@@ -54,13 +54,17 @@ fn color_for_status(s: TodoStatus, theme: &Theme) -> ratatui::style::Color {
 /// `(label, count)` for the header row: e.g. `("Todo · running…", "1/3")`.
 /// Unpadded — `render_todo_box` lays them out (label left, count right).
 pub(crate) fn todo_title(todos: &[TodoItem], busy: bool) -> (String, String) {
-    let activity = if busy { "running…" } else { "idle" };
+    let activity = if busy {
+        format!("{}…", crate::tr("running"))
+    } else {
+        crate::tr("idle").to_string()
+    };
     let done = todos
         .iter()
         .filter(|t| t.status == TodoStatus::Completed)
         .count();
     (
-        format!("Todo · {activity}"),
+        format!("{} · {activity}", crate::tr("Todo")),
         format!("{done}/{}", todos.len()),
     )
 }
@@ -91,8 +95,8 @@ pub(crate) fn row_text(row: &TodoRow) -> String {
         TodoRow::Item { status, subject } => {
             format!("{} {}", glyph_for_status(*status), subject)
         }
-        TodoRow::Overflow(k) => format!("…+{k} more"),
-        TodoRow::Empty => "no active todos".to_string(),
+        TodoRow::Overflow(k) => format!("…+{k} {}", crate::tr("more")),
+        TodoRow::Empty => crate::tr("no active todos").to_string(),
     }
 }
 

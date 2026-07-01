@@ -128,6 +128,8 @@ impl InputBox {
             Mode::Ready => theme.accent_secondary,
             Mode::Thinking => theme.system,
             Mode::Streaming => theme.accent,
+            Mode::Compacting => theme.system,
+            Mode::Switching => theme.system,
             Mode::Error => Color::Red,
         };
         // `!cmd` shell-escape mode: a distinct (amber) rail + hint so it's clear

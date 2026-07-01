@@ -19,9 +19,9 @@ pub fn shell_rows(shells: &[BgShell], now: u64) -> Vec<Line<'static>> {
         .iter()
         .map(|s| {
             let (mark, color) = if s.killed {
-                ("✗ killed", Color::Red)
+                (format!("✗ {}", crate::tr("killed")), Color::Red)
             } else {
-                ("● running", Color::Green)
+                (format!("● {}", crate::tr("running")), Color::Green)
             };
             let dur = now.saturating_sub(s.started_at);
             Line::from(vec![
@@ -93,7 +93,12 @@ impl TasksPanel {
         let list = List::new(items)
             .block(
                 Block::default()
-                    .title(" Background shells  [k] kill  [Esc] close ")
+                    .title(format!(
+                        " {}  [k] {}  [Esc] {} ",
+                        crate::tr("Background shells"),
+                        crate::tr("kill"),
+                        crate::tr("close")
+                    ))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.accent))
                     .style(Style::default().bg(theme.bg_secondary).fg(theme.fg_text)),
@@ -107,14 +112,14 @@ impl TasksPanel {
         f.render_stateful_widget(list, rows[0], &mut self.state);
 
         let turn_lines: Vec<Line> = if turns.is_empty() {
-            vec![Line::from("(no running turns)")]
+            vec![Line::from(crate::tr("(no running turns)"))]
         } else {
             turns.iter().map(|t| Line::from(t.clone())).collect()
         };
         f.render_widget(
             Paragraph::new(turn_lines).block(
                 Block::default()
-                    .title(" Running turns ")
+                    .title(format!(" {} ", crate::tr("Running turns")))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.accent_secondary))
                     .style(Style::default().bg(theme.bg_secondary).fg(theme.fg_text)),

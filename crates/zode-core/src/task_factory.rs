@@ -10,7 +10,7 @@
 //! of assembly.
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use agent::error::AgentError;
 use agent::file_cache::FileStateCache;
@@ -24,10 +24,50 @@ use async_trait::async_trait;
 /// Shared late-bound handle to the parent's final gated tool registry.
 pub type ParentToolsCell = Arc<OnceLock<Arc<ToolRegistry>>>;
 
+#[derive(Clone)]
+pub struct ModelRuntimeSnapshot {
+    pub provider: Arc<dyn Provider>,
+    pub model: String,
+}
+
+#[derive(Clone)]
+pub struct ModelRuntimeState {
+    inner: Arc<RwLock<ModelRuntimeSnapshot>>,
+}
+
+impl ModelRuntimeState {
+    pub fn new(provider: Arc<dyn Provider>, model: String) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(ModelRuntimeSnapshot { provider, model })),
+        }
+    }
+
+    pub fn update(&self, provider: Arc<dyn Provider>, model: String) {
+        match self.inner.write() {
+            Ok(mut guard) => *guard = ModelRuntimeSnapshot { provider, model },
+            Err(poisoned) => *poisoned.into_inner() = ModelRuntimeSnapshot { provider, model },
+        }
+    }
+
+    pub fn snapshot(&self) -> ModelRuntimeSnapshot {
+        match self.inner.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ModelRuntimeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelRuntimeState")
+            .field("model", &self.snapshot().model)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug)]
 pub struct ZodeTaskFactory {
-    provider: Arc<dyn Provider>,
-    model: String,
+    runtime: ModelRuntimeState,
     permissions: Arc<PermissionManager>,
     cwd: PathBuf,
     file_cache: Arc<FileStateCache>,
@@ -45,8 +85,7 @@ pub struct ZodeTaskFactory {
 impl ZodeTaskFactory {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        provider: Arc<dyn Provider>,
-        model: String,
+        runtime: ModelRuntimeState,
         permissions: Arc<PermissionManager>,
         cwd: PathBuf,
         file_cache: Arc<FileStateCache>,
@@ -56,8 +95,7 @@ impl ZodeTaskFactory {
         subagents: crate::subagents::SubAgentRegistry,
     ) -> Self {
         Self {
-            provider,
-            model,
+            runtime,
             permissions,
             cwd,
             file_cache,
@@ -126,12 +164,13 @@ impl ZodeTaskFactory {
 #[async_trait]
 impl TaskAgentFactory for ZodeTaskFactory {
     async fn build(&self, agent_type: &str) -> Result<TaskAgentConfig, AgentError> {
+        let runtime = self.runtime.snapshot();
         // User definitions take precedence over the built-in types, and may
         // override the model.
         let (system, model) = match self.defs.iter().find(|d| d.name == agent_type) {
             Some(def) => (
                 def.system.clone(),
-                def.model.clone().unwrap_or_else(|| self.model.clone()),
+                def.model.clone().unwrap_or_else(|| runtime.model.clone()),
             ),
             None => {
                 let system = Self::builtin_system_for(agent_type).ok_or_else(|| {
@@ -142,15 +181,17 @@ impl TaskAgentFactory for ZodeTaskFactory {
                         known.join(", ")
                     ))
                 })?;
-                (system, self.model.clone())
+                (system, runtime.model.clone())
             }
         };
         Ok(TaskAgentConfig {
-            provider: self.provider.clone(),
+            provider: runtime.provider,
             model,
             tools: self.child_tools(),
             system: Some(system),
-            max_iterations: Some(20),
+            // Unbounded, like the main loop — the sub-agent stops on a no-tool
+            // turn. (Leaving this None inherits the QueryLoop default.)
+            max_iterations: None,
             // Same gate/sandbox/hooks/cwd/file_cache as the parent so the
             // child cannot bypass approvals, sandboxing, or hook blockers.
             permissions: Some(self.permissions.clone()),
@@ -212,8 +253,7 @@ mod tests {
             1024 * 1024,
         ));
         ZodeTaskFactory::new(
-            provider(),
-            "MiniMax-M1".into(),
+            ModelRuntimeState::new(provider(), "MiniMax-M1".into()),
             Arc::new(PermissionManager::new()),
             std::env::temp_dir(),
             file_cache,
@@ -235,6 +275,17 @@ mod tests {
         assert!(cfg.cwd.is_some());
         assert!(cfg.file_cache.is_some());
         assert!(cfg.hooks.is_some());
+    }
+
+    #[tokio::test]
+    async fn runtime_model_update_changes_subagent_default_model() {
+        let f = factory_with(Arc::new(OnceLock::new()));
+
+        f.runtime
+            .update(provider(), "next-hot-swapped-model".to_string());
+
+        let cfg = f.build("general").await.unwrap();
+        assert_eq!(cfg.model, "next-hot-swapped-model");
     }
 
     #[tokio::test]

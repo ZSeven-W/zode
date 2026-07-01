@@ -149,7 +149,13 @@ impl SubAgentsPanel {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.separator))
-            .title(" Sub-agents  [↑/↓] select  [PgUp/PgDn] scroll  [Esc] close ")
+            .title(format!(
+                " {}  [↑/↓] {}  [PgUp/PgDn] {}  [Esc] {} ",
+                crate::tr("Sub-agents"),
+                crate::tr("select"),
+                crate::tr("scroll"),
+                crate::tr("close")
+            ))
             .style(Style::default().bg(theme.bg_secondary));
         // In-tree idiom (see dialog/permission.rs:151): compute the inner rect
         // from the block BEFORE rendering (render_widget moves the block).
@@ -162,7 +168,8 @@ impl SubAgentsPanel {
 
         if agents.is_empty() {
             f.render_widget(
-                Paragraph::new("no sub-agents yet").style(Style::default().fg(theme.fg_subtle)),
+                Paragraph::new(crate::tr("no sub-agents yet"))
+                    .style(Style::default().fg(theme.fg_subtle)),
                 cols[0],
             );
             return;

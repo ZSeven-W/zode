@@ -68,7 +68,7 @@ pub(crate) fn section_lines(
         .filter(|a| a.status == SubAgentStatus::Running)
         .count();
     let count = format!("{running}/{}", subagents.len());
-    let label = "subagents";
+    let label = crate::tr("subagents");
     let left_w = 1 + UnicodeWidthStr::width(label);
     let right_w = UnicodeWidthStr::width(count.as_str()) + 1;
     let pad = width.saturating_sub(left_w + right_w);
@@ -101,7 +101,7 @@ pub(crate) fn section_lines(
     }
     if overflow > 0 {
         lines.push(Line::from(Span::styled(
-            format!("   …+{overflow} more"),
+            format!("   …+{overflow} {}", crate::tr("more")),
             bg.fg(theme.fg_subtle),
         )));
     }

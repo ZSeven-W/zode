@@ -411,7 +411,7 @@ impl Autocomplete {
                             .fg(theme.accent)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(*desc, Style::default().fg(theme.fg_text)),
+                    Span::styled(crate::tr(desc), Style::default().fg(theme.fg_text)),
                 ]))
             })
             .collect();

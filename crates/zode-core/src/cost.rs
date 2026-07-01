@@ -13,7 +13,8 @@ pub struct CostState {
     model: String,
     tracker: Mutex<CostTracker>,
     /// Display currency; the USD total is converted for `/cost` + the sidebar.
-    currency: Currency,
+    /// Behind a lock so `/currency` can switch it in place (no engine rebuild).
+    currency: std::sync::RwLock<Currency>,
 }
 
 impl CostState {
@@ -30,8 +31,26 @@ impl CostState {
         Self {
             model,
             tracker: Mutex::new(CostTracker::new(Arc::new(catalog))),
-            currency: Currency::from_code(currency_code),
+            currency: std::sync::RwLock::new(Currency::from_code(currency_code)),
         }
+    }
+
+    /// Switch the display currency at runtime (`/currency`). Returns the applied
+    /// ISO code (falls back to USD for an unknown code). Cost is re-converted on
+    /// the next `report`/`sidebar_label` — no engine rebuild needed.
+    pub fn set_currency(&self, code: &str) -> &'static str {
+        let c = Currency::from_code(code);
+        *self.currency.write().expect("currency lock") = c;
+        c.code
+    }
+
+    /// The current display-currency ISO code.
+    pub fn currency_code(&self) -> &'static str {
+        self.currency.read().expect("currency lock").code
+    }
+
+    fn currency(&self) -> Currency {
+        *self.currency.read().expect("currency lock")
     }
 
     /// Feed one event. Usage events are counted by the tracker directly; Task
@@ -97,7 +116,7 @@ impl CostState {
             format!(
                 "model: {}\ntokens: ↑{input} ↓{output}{hit}\ncost: {}",
                 self.model,
-                self.currency.format(snap.total_usd())
+                self.currency().format(snap.total_usd())
             )
         }
     }
@@ -109,7 +128,7 @@ impl CostState {
         if snap.has_unknown_models() {
             "n/a".to_string()
         } else {
-            self.currency.format(snap.total_usd())
+            self.currency().format(snap.total_usd())
         }
     }
 }
@@ -170,6 +189,29 @@ mod tests {
         let report = cost.report().await;
         // $1.50 * 7.2 = ¥10.80.
         assert!(report.contains("¥10.80"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn set_currency_switches_display_in_place() {
+        use agent::cost::{ModelPriceCatalog, ModelPrices};
+        let mut catalog = ModelPriceCatalog::with_defaults();
+        catalog.insert(
+            "deepseek-v4-pro",
+            ModelPrices::from_usd_per_mtok(0.3, 1.2, 0.0, 0.0),
+        );
+        let cost = CostState::new_with("deepseek-v4-pro".into(), catalog, "USD");
+        cost.observe(&usage(1_000_000, 1_000_000)).await; // $1.50
+        assert!(cost.report().await.contains("$1.50"));
+
+        // Switch to CNY at runtime → re-converted, no rebuild.
+        assert_eq!(cost.set_currency("cny"), "CNY");
+        assert_eq!(cost.currency_code(), "CNY");
+        let report = cost.report().await;
+        assert!(report.contains("¥10.80"), "{report}"); // 1.50 * 7.2
+
+        // Unknown code falls back to USD.
+        assert_eq!(cost.set_currency("XYZ"), "USD");
+        assert!(cost.report().await.contains("$1.50"));
     }
 
     #[tokio::test]

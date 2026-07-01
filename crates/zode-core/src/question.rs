@@ -4,8 +4,10 @@
 //! allow/deny semantics and its own dialog), so keeping it parallel avoids
 //! entangling the well-tested permission path.
 //!
-//! A request carries 1-4 questions, each single-choice over 2-10 preset
-//! options; the UI additionally always offers a free-text "Other". The tool
+//! A tool request batches 4-8 questions (see [`MIN_QUESTIONS`]/[`MAX_QUESTIONS`]),
+//! each single-choice over 2-10 preset options; the UI additionally always
+//! offers a free-text "Other". (The internal `ask_specs`/`ask` API — used by the
+//! OpenPencil consent prompt — has no such minimum.) The tool
 //! gets back one answer per question (the chosen option label OR the custom
 //! text), or `None` when the user dismisses.
 //!
@@ -22,8 +24,12 @@ use tokio::sync::{mpsc, oneshot};
 use agent::error::AgentError;
 use agent::tool::{SafetyClass, Tool, ToolUseContext};
 
-/// Most questions allowed in a single request (matches the UI panel budget).
-pub const MAX_QUESTIONS: usize = 4;
+/// Fewest questions the tool accepts in one request. Requiring a batch means a
+/// model that would otherwise fire many one-question calls (which pile up in the
+/// transcript) groups them into a single prompt instead.
+pub const MIN_QUESTIONS: usize = 4;
+/// Most questions allowed in a single request (the picker scrolls past a few).
+pub const MAX_QUESTIONS: usize = 8;
 /// Fewest preset options a question may offer.
 pub const MIN_OPTIONS: usize = 2;
 /// Most preset options a question may offer (the picker scrolls past a few).
@@ -125,8 +131,9 @@ impl QuestionQueue {
     }
 }
 
-/// The `AskUserQuestion` tool: pauses the turn to ask the user 1-4 single-choice
-/// questions (each with a free-text "Other") and returns their answers.
+/// The `AskUserQuestion` tool: pauses the turn to ask the user a batch of 4-8
+/// single-choice questions (each with a free-text "Other") and returns their
+/// answers.
 /// Read-only (it changes nothing), so it is not wrapped by the permission gate.
 /// Registered only when a UI is present to answer it.
 #[derive(Debug)]
@@ -140,18 +147,27 @@ impl AskUserQuestionTool {
         Self { queue, source }
     }
 
-    /// Parse the new multi-question shape `{ questions: [...] }`, falling back to
-    /// the legacy single-question shape `{ question, options }`.
+    /// Parse the multi-question shape `{ questions: [...] }`. A batch of at least
+    /// [`MIN_QUESTIONS`] is required — the legacy single-question shape
+    /// `{ question, options }` is rejected with guidance to batch, so a model
+    /// asks its decisions together instead of one call at a time.
     fn parse(input: &Value) -> Result<Vec<QuestionSpec>, AgentError> {
-        if let Some(arr) = input.get("questions").and_then(|v| v.as_array()) {
-            if arr.is_empty() || arr.len() > MAX_QUESTIONS {
-                return Err(AgentError::other(format!(
-                    "AskUserQuestion: 'questions' must have 1-{MAX_QUESTIONS} entries"
-                )));
-            }
-            return arr.iter().map(Self::parse_one).collect();
+        let arr = input
+            .get("questions")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                AgentError::other(format!(
+                    "AskUserQuestion: provide a 'questions' array with {MIN_QUESTIONS}-{MAX_QUESTIONS} \
+                     entries — batch your decisions into one call rather than asking one at a time"
+                ))
+            })?;
+        if arr.len() < MIN_QUESTIONS || arr.len() > MAX_QUESTIONS {
+            return Err(AgentError::other(format!(
+                "AskUserQuestion: 'questions' must have {MIN_QUESTIONS}-{MAX_QUESTIONS} entries \
+                 (batch at least {MIN_QUESTIONS} decisions together)"
+            )));
         }
-        Ok(vec![Self::parse_one(input)?])
+        arr.iter().map(Self::parse_one).collect()
     }
 
     fn parse_one(v: &Value) -> Result<QuestionSpec, AgentError> {
@@ -198,12 +214,13 @@ impl Tool for AskUserQuestionTool {
         "AskUserQuestion"
     }
     fn description(&self) -> &str {
-        "Ask the user 1-4 single-choice questions at once and wait for the answers. \
-         The user can also type a custom 'Other' answer for any question. Returns \
-         { answers: [{ question, header, answer }] }, where `answer` is the chosen \
-         option text or the user's custom text. Use only when a decision is genuinely \
-         the user's to make (ambiguous requirements, a fork you can't resolve from the \
-         code) — not for things you can decide yourself."
+        "Ask the user several single-choice questions AT ONCE and wait for the answers. \
+         Batch at least 4 (up to 8) decisions into ONE call — do not call this repeatedly \
+         with one question at a time. The user can also type a custom 'Other' answer for \
+         any question. Returns { answers: [{ question, header, answer }] }, where `answer` \
+         is the chosen option text or the user's custom text. Use only when a decision is \
+         genuinely the user's to make (ambiguous requirements, a fork you can't resolve \
+         from the code) — not for things you can decide yourself."
     }
     fn input_schema(&self) -> Value {
         json!({
@@ -212,9 +229,9 @@ impl Tool for AskUserQuestionTool {
             "properties": {
                 "questions": {
                     "type": "array",
-                    "minItems": 1,
+                    "minItems": MIN_QUESTIONS,
                     "maxItems": MAX_QUESTIONS,
-                    "description": "1-4 questions to ask together. Each is single-choice; the UI always also offers a free-text 'Other'.",
+                    "description": "4-8 questions to ask together (batch your decisions; never one at a time). Each is single-choice; the UI always also offers a free-text 'Other'.",
                     "items": {
                         "type": "object",
                         "required": ["question", "options"],
@@ -328,12 +345,27 @@ mod tests {
         );
     }
 
+    /// A valid batch of four questions (the enforced minimum).
+    fn four_questions() -> Value {
+        json!({ "questions": [
+            { "question": "color?", "options": ["red", "blue"] },
+            { "question": "size?", "options": ["s", "l"] },
+            { "question": "shape?", "options": ["round", "square"] },
+            { "question": "speed?", "options": ["fast", "slow"] },
+        ] })
+    }
+
     #[tokio::test]
     async fn tool_returns_answers_and_handles_dismiss() {
         let (queue, mut rx) = question_queue();
         tokio::spawn(async move {
             if let Some(req) = rx.next().await {
-                let _ = req.respond(Some(vec!["red".into()]));
+                let _ = req.respond(Some(vec![
+                    "red".into(),
+                    "s".into(),
+                    "round".into(),
+                    "fast".into(),
+                ]));
             }
             if let Some(req) = rx.next().await {
                 let _ = req.respond(None);
@@ -341,7 +373,7 @@ mod tests {
         });
         let tool = AskUserQuestionTool::new(queue, None);
         let ctx = ToolUseContext::new(std::env::temp_dir());
-        let input = json!({ "questions": [{ "question": "color?", "options": ["red", "blue"] }] });
+        let input = four_questions();
 
         let answered = tool.call(&ctx, input.clone()).await.unwrap();
         assert_eq!(answered["answers"][0]["answer"], "red");
@@ -353,21 +385,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_accepts_legacy_single_question_shape() {
-        let (queue, mut rx) = question_queue();
-        tokio::spawn(async move {
-            if let Some(req) = rx.next().await {
-                assert_eq!(req.specs.len(), 1);
-                let _ = req.respond(Some(vec!["a".into()]));
-            }
-        });
+    async fn tool_rejects_legacy_single_question_shape() {
+        // Batching is enforced: the old `{ question, options }` shape (and any
+        // sub-minimum batch) is rejected with guidance to group decisions.
+        let (queue, _rx) = question_queue();
         let tool = AskUserQuestionTool::new(queue, None);
         let ctx = ToolUseContext::new(std::env::temp_dir());
-        let out = tool
+        let err = tool
             .call(&ctx, json!({ "question": "q", "options": ["a", "b"] }))
             .await
-            .unwrap();
-        assert_eq!(out["answers"][0]["answer"], "a");
+            .unwrap_err();
+        assert!(err.to_string().contains("questions"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn tool_rejects_too_few_questions() {
+        let (queue, _rx) = question_queue();
+        let tool = AskUserQuestionTool::new(queue, None);
+        let ctx = ToolUseContext::new(std::env::temp_dir());
+        let q = json!({ "question": "q", "options": ["a", "b"] });
+        let err = tool
+            .call(&ctx, json!({ "questions": [q, q, q] })) // only 3 < MIN 4
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("4-8"), "got: {err}");
     }
 
     #[tokio::test]
@@ -375,11 +416,11 @@ mod tests {
         let (queue, _rx) = question_queue();
         let tool = AskUserQuestionTool::new(queue, None);
         let ctx = ToolUseContext::new(std::env::temp_dir());
+        // Four questions (passes the batch check) but one has a single option.
+        let ok = json!({ "question": "q", "options": ["a", "b"] });
+        let bad = json!({ "question": "q", "options": ["only"] });
         let err = tool
-            .call(
-                &ctx,
-                json!({ "questions": [{ "question": "q", "options": ["only"] }] }),
-            )
+            .call(&ctx, json!({ "questions": [ok, ok, ok, bad] }))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("at least 2"));
@@ -392,10 +433,10 @@ mod tests {
         let ctx = ToolUseContext::new(std::env::temp_dir());
         let q = json!({ "question": "q", "options": ["a", "b"] });
         let err = tool
-            .call(&ctx, json!({ "questions": [q, q, q, q, q] }))
+            .call(&ctx, json!({ "questions": [q, q, q, q, q, q, q, q, q] })) // 9 > MAX 8
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("1-4"));
+        assert!(err.to_string().contains("4-8"));
     }
 
     #[tokio::test]
@@ -404,11 +445,10 @@ mod tests {
         let tool = AskUserQuestionTool::new(queue, None);
         let ctx = ToolUseContext::new(std::env::temp_dir());
         let opts: Vec<&str> = vec!["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"];
+        let ok = json!({ "question": "q", "options": ["a", "b"] });
+        let bad = json!({ "question": "q", "options": opts });
         let err = tool
-            .call(
-                &ctx,
-                json!({ "questions": [{ "question": "q", "options": opts }] }),
-            )
+            .call(&ctx, json!({ "questions": [ok, ok, ok, bad] }))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("at most 10"));

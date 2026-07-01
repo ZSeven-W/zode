@@ -133,9 +133,15 @@ impl SessionPicker {
         let popup = centered(area, 70, 60);
         f.render_widget(Clear, popup);
         let title = if self.filter.is_empty() {
-            " Sessions  [Enter] resume  [Del] delete  [Esc] close ".to_string()
+            format!(
+                " {}  [Enter] {}  [Del] {}  [Esc] {} ",
+                crate::tr("Sessions"),
+                crate::tr("resume"),
+                crate::tr("delete"),
+                crate::tr("close")
+            )
         } else {
-            format!(" Sessions  /{} ", self.filter)
+            format!(" {}  /{} ", crate::tr("Sessions"), self.filter)
         };
         let list = List::new(items)
             .block(

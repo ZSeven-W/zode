@@ -31,6 +31,11 @@ pub struct SidebarInfo<'a> {
     /// Active tab's Task-spawned sub-agents (newest first), rendered as their
     /// own section beneath the sessions list.
     pub subagents: &'a [zode_core::SubAgent],
+    /// The active goal (`/goal`) while its auto-loop runs — shown as its own
+    /// `goal` section. `None` hides the section.
+    pub goal: Option<&'a str>,
+    /// How long the goal loop has been running (pre-formatted, e.g. `2m 05s`).
+    pub goal_elapsed: Option<String>,
 }
 
 pub fn tab_label(index: usize, title: &str, busy: bool) -> String {
@@ -134,7 +139,7 @@ pub fn render_sidebar(
 
     let mut lines = sidebar_summary_lines(&info, row_width)
         .into_iter()
-        .map(|line| styled_sidebar_line(&line, row_width, theme))
+        .map(|(is_header, line)| styled_sidebar_line(is_header, &line, row_width, theme))
         .collect::<Vec<_>>();
     lines.push(header_line(row_width, theme));
     // Cap the tab list so the subagents section AND the todo foot box fit.
@@ -265,33 +270,54 @@ fn render_sidebar_block(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>, th
     );
 }
 
-fn sidebar_summary_lines(info: &SidebarInfo<'_>, width: usize) -> Vec<String> {
+/// Returns `(is_header, text)` rows: header rows get the accent color, others
+/// are values/blanks. Marking headers explicitly (rather than matching English
+/// text) lets the header labels be translated without losing their styling.
+fn sidebar_summary_lines(info: &SidebarInfo<'_>, width: usize) -> Vec<(bool, String)> {
+    use crate::tr;
     let flags = match (info.yolo, info.sandbox) {
-        (true, true) => "yolo · sandbox".to_string(),
+        (true, true) => format!("yolo · {}", tr("sandbox")),
         (true, false) => "yolo".to_string(),
-        (false, true) => "sandbox".to_string(),
-        (false, false) => "standard".to_string(),
+        (false, true) => tr("sandbox").to_string(),
+        (false, false) => tr("standard").to_string(),
     };
-    vec![
-        sidebar_line("session", width),
-        sidebar_line(info.session_title, width),
-        String::new(),
-        sidebar_line("context", width),
-        sidebar_line(
-            &format!("↑{} ↓{} tokens", info.input_tokens, info.output_tokens),
-            width,
-        ),
-        sidebar_line(&format!("cost {}", info.cost_label), width),
-        sidebar_line(&format!("{} · {}", info.mode, flags), width),
-        String::new(),
-        sidebar_line("model", width),
-        sidebar_line(info.model, width),
-        sidebar_line(&format!("theme {}", info.theme_name), width),
-        String::new(),
-        sidebar_line("workspace", width),
-        sidebar_line(&compact_path(info.cwd), width),
-        String::new(),
-    ]
+    let hdr = |s: &str| (true, sidebar_line(s, width));
+    let val = |s: &str| (false, sidebar_line(s, width));
+    let blank = (false, String::new());
+    let mut lines = vec![
+        hdr(tr("session")),
+        val(info.session_title),
+        blank.clone(),
+        hdr(tr("context")),
+        val(&format!(
+            "↑{} ↓{} {}",
+            info.input_tokens,
+            info.output_tokens,
+            tr("tokens")
+        )),
+        val(&format!("{} {}", tr("cost"), info.cost_label)),
+        val(&format!("{} · {}", info.mode, flags)),
+        blank.clone(),
+    ];
+    // Goal auto-loop: the objective + how long it's been running.
+    if let Some(goal) = info.goal {
+        lines.push(hdr(tr("goal")));
+        lines.push(val(goal));
+        if let Some(elapsed) = &info.goal_elapsed {
+            lines.push(val(&format!("{} · {}", tr("looping"), elapsed)));
+        }
+        lines.push(blank.clone());
+    }
+    lines.extend([
+        hdr(tr("model")),
+        val(info.model),
+        val(&format!("{} {}", tr("theme"), info.theme_name)),
+        blank.clone(),
+        hdr(tr("workspace")),
+        val(&compact_path(info.cwd)),
+        blank,
+    ]);
+    lines
 }
 
 fn sidebar_line(text: &str, width: usize) -> String {
@@ -304,16 +330,17 @@ fn sidebar_line(text: &str, width: usize) -> String {
     )
 }
 
-fn styled_sidebar_line(line: &str, width: usize, theme: &Theme) -> Line<'static> {
+fn styled_sidebar_line(is_header: bool, line: &str, width: usize, theme: &Theme) -> Line<'static> {
     let text = pad_to_width(line, width);
-    let trimmed = text.trim();
-    let style = match trimmed {
-        "session" | "context" | "model" | "workspace" => Style::default()
+    let style = if is_header {
+        Style::default()
             .fg(theme.accent)
             .bg(theme.bg_secondary)
-            .add_modifier(Modifier::BOLD),
-        "" => Style::default().bg(theme.bg_secondary),
-        _ => Style::default().fg(theme.fg_text).bg(theme.bg_secondary),
+            .add_modifier(Modifier::BOLD)
+    } else if text.trim().is_empty() {
+        Style::default().bg(theme.bg_secondary)
+    } else {
+        Style::default().fg(theme.fg_text).bg(theme.bg_secondary)
     };
     Line::from(Span::styled(text, style))
 }
@@ -375,9 +402,15 @@ mod tests {
             todos: &[],
             busy: false,
             subagents: &[],
+            goal: None,
+            goal_elapsed: None,
         };
         let lines = sidebar_summary_lines(&info, 34);
-        let joined = lines.join("\n");
+        let joined = lines
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(joined.contains("session"));
         assert!(joined.contains("implement tui sidebar"));
         assert!(joined.contains("context"));
@@ -421,6 +454,8 @@ mod tests {
             todos: &todos,
             busy: true,
             subagents: &[],
+            goal: None,
+            goal_elapsed: None,
         };
         let backend = ratatui::backend::TestBackend::new(34, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -494,6 +529,8 @@ mod tests {
             todos: &[],
             busy: false,
             subagents: &subagents,
+            goal: None,
+            goal_elapsed: None,
         };
         let backend = ratatui::backend::TestBackend::new(34, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();

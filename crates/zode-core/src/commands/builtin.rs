@@ -53,6 +53,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Engine,
     },
     SlashCommand {
+        name: "currency",
+        description: "Switch the display currency for cost (USD, CNY, EUR, …)",
+        usage: "/currency [code]",
+        action: CommandAction::Engine,
+    },
+    SlashCommand {
         name: "op",
         description: "Drive OpenPencil (e.g. /op status, /op generate <prompt>)",
         usage: "/op <status|design '<dsl>'|generate <prompt>|<tool> <json>>",

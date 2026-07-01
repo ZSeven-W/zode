@@ -429,6 +429,11 @@ pub struct ZodeConfig {
     /// keeps it in focus. Set/cleared via `/goal`. `None`/empty → no goal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
+    /// Optional cap on how many turns the autonomous goal loop runs before it
+    /// stops on its own (the agent can still end it early via `goal_complete`,
+    /// and the user can always interrupt). `None` → unbounded (the default).
+    #[serde(rename = "autoLoopMaxTurns", skip_serializing_if = "Option::is_none")]
+    pub auto_loop_max_turns: Option<u32>,
     /// Effort level: "low" | "medium" | "high". Injects a thoroughness
     /// directive into the system prompt. Set via `/effort`. `None` → balanced.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -468,6 +473,17 @@ pub struct ZodeConfig {
     /// for headless `-p` runs, which can't be interrupted with Ctrl+C.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_iterations: Option<u32>,
+    /// How many times to retry a transient API failure (rate limit / 5xx /
+    /// network) with exponential backoff before the turn fails. Absent = 10;
+    /// `0` disables retries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_api_retries: Option<u32>,
+    /// Whether zode silently checks GitHub Releases in the background at startup
+    /// and swaps in a newer build (applied on the next launch). Default ON; set
+    /// `false` to disable. Skipped automatically for dev builds and when the
+    /// install location isn't writable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
     /// The model's context window in tokens, used for auto-compaction /
     /// context-left math. `None` defaults to a conservative 200K. Set this to
     /// `1000000` for a 1M-context model (e.g. `claude-opus-4-8[1m]`) so zode
@@ -514,7 +530,36 @@ pub struct ZodeConfig {
     pub legacy_model: Option<String>,
 }
 
+/// Model written into the starter config and used as the interactive-launch
+/// fallback when the user hasn't picked one. A balanced coding default; the
+/// user can change it in `config.json` or via `/connect`.
+pub const DEFAULT_STARTER_MODEL: &str = "claude-sonnet-4-6";
+
 impl ZodeConfig {
+    /// Make this config assemble for the interactive TUI even when the user
+    /// hasn't finished provider setup, so they always land in the UI (where
+    /// `/connect` finishes setup) instead of being blocked at startup:
+    /// - a missing model gets [`DEFAULT_STARTER_MODEL`];
+    /// - a key-requiring provider (Anthropic / OpenAI) with no key gets an
+    ///   empty key, so the provider *builds* — the first request then fails
+    ///   with an auth error until a real key is configured.
+    ///
+    /// Returns `true` when the provider still lacks credentials (i.e. the user
+    /// must run `/connect`), so the caller can surface a setup hint. Ollama
+    /// needs no key, so it never reports as needing setup. TUI-only: headless
+    /// surfaces keep the strict `MissingApiKey` / no-model errors.
+    pub fn prepare_for_interactive_launch(&mut self) -> bool {
+        if self.provider.model.is_none() {
+            self.provider.model = Some(DEFAULT_STARTER_MODEL.to_string());
+        }
+        let needs_key = self.provider.kind() != ProviderKind::Ollama
+            && self.provider.api_key.as_deref().unwrap_or("").is_empty();
+        if needs_key {
+            self.provider.api_key = Some(String::new());
+        }
+        needs_key
+    }
+
     /// Map legacy flat fields (anthropic_api_key / openai_* / top-level
     /// model) into the modern `provider` block, but only where the modern
     /// block left a gap. No-op for configs already in the new shape.
@@ -544,6 +589,12 @@ impl ZodeConfig {
                 ProviderKind::Ollama => {}
             }
         }
+    }
+
+    /// Whether the background self-updater runs (checks GitHub Releases and
+    /// swaps in a newer build for the next launch). Defaults to `true`.
+    pub fn auto_update(&self) -> bool {
+        self.auto_update.unwrap_or(true)
     }
 
     /// Whether to inject the skill-invocation discipline block into the system
@@ -874,6 +925,12 @@ impl ZodeConfig {
         if other.max_iterations.is_some() {
             self.max_iterations = other.max_iterations;
         }
+        if other.max_api_retries.is_some() {
+            self.max_api_retries = other.max_api_retries;
+        }
+        if other.auto_update.is_some() {
+            self.auto_update = other.auto_update;
+        }
         if other.context_window.is_some() {
             self.context_window = other.context_window;
         }
@@ -983,6 +1040,23 @@ impl ConfigManager {
         Self::load_file(&path)
     }
 
+    /// On first run, drop a starter `config.json` into the global config dir so
+    /// the user has a real file to edit (provider + a default model; no api key,
+    /// so an env key still wins via the fallback). Returns `Ok(true)` when a
+    /// file was written, `Ok(false)` when one already existed. Callers treat
+    /// this as best-effort — a read-only home must never block startup.
+    pub fn ensure_default_global() -> Result<bool, CoreError> {
+        let path = Self::global_path()?;
+        if path.exists() {
+            return Ok(false);
+        }
+        let mut cfg = ZodeConfig::default();
+        cfg.provider.r#type = Some(ProviderKind::Anthropic);
+        cfg.provider.model = Some(DEFAULT_STARTER_MODEL.to_string());
+        Self::save_global(&cfg)?;
+        Ok(true)
+    }
+
     fn load_file(path: &Path) -> Result<ZodeConfig, CoreError> {
         match std::fs::read_to_string(path) {
             Ok(s) => Ok(serde_json::from_str(&s)?),
@@ -1052,15 +1126,44 @@ impl ConfigManager {
         Ok(())
     }
 
-    /// Persist to the global config path (creates the dir if needed).
+    /// Persist to the global config path (creates the dir if needed). Writes
+    /// ATOMICALLY (temp file + rename) so a crash / disk-full mid-write can
+    /// never leave a partial `config.json` that a later startup would abort on
+    /// — which would lock the user out, the very thing this must avoid. The
+    /// temp name is process-unique so concurrent writers don't clobber each
+    /// other's temp; the rename then atomically publishes one complete file.
     pub fn save_global(cfg: &ZodeConfig) -> Result<(), CoreError> {
         let dir = Self::config_dir()?;
         std::fs::create_dir_all(&dir)?;
-        let path = dir.join("config.json");
         let json = serde_json::to_string_pretty(cfg)?;
-        std::fs::write(path, json)?;
+        write_atomic(&dir.join("config.json"), json.as_bytes())?;
         Ok(())
     }
+}
+
+/// Write `bytes` to `path` atomically: stage in a sibling temp file (same
+/// directory, so the rename stays on one filesystem) then rename over the
+/// target. `std::fs::rename` replaces the destination atomically on both Unix
+/// and Windows, so readers see either the old file or the complete new one,
+/// never a half-written mix.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Per-call counter so two concurrent saves IN THIS PROCESS get distinct
+    // temps (pid alone only separates processes); together pid+seq are unique.
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.json".to_string());
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.{}.{seq}.tmp", std::process::id()));
+    // Best-effort cleanup of our own temp on any failure after creation.
+    let result = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Append `add` to `target`, skipping values already present (preserves order).
@@ -1287,6 +1390,76 @@ mod tests {
         std::env::set_var("ZODE_CONFIG_DIR", dir.path());
         assert_eq!(ConfigManager::config_dir().unwrap(), dir.path());
         std::env::remove_var("ZODE_CONFIG_DIR");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn ensure_default_global_writes_once_then_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ZODE_CONFIG_DIR", dir.path());
+        let path = dir.path().join("config.json");
+        assert!(!path.exists());
+        // First call writes a parseable starter config with a default model.
+        assert!(ConfigManager::ensure_default_global().unwrap());
+        assert!(path.exists());
+        let cfg = ConfigManager::load_global().unwrap();
+        assert_eq!(cfg.provider.kind(), ProviderKind::Anthropic);
+        assert_eq!(cfg.provider.model.as_deref(), Some(DEFAULT_STARTER_MODEL));
+        assert!(cfg.provider.api_key.is_none(), "no key, so env still wins");
+        // Second call must not overwrite (and reports it did nothing).
+        std::fs::write(&path, "{\"theme\":\"mono\"}").unwrap();
+        assert!(!ConfigManager::ensure_default_global().unwrap());
+        assert_eq!(
+            ConfigManager::load_global().unwrap().theme.as_deref(),
+            Some("mono")
+        );
+        std::env::remove_var("ZODE_CONFIG_DIR");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn save_global_is_atomic_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ZODE_CONFIG_DIR", dir.path());
+        let cfg = ZodeConfig {
+            theme: Some("mono".into()),
+            ..Default::default()
+        };
+        ConfigManager::save_global(&cfg).unwrap();
+        // The published file loads, and no staging temp is left behind.
+        assert_eq!(
+            ConfigManager::load_global().unwrap().theme.as_deref(),
+            Some("mono")
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "stray temp files: {leftovers:?}");
+        std::env::remove_var("ZODE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn prepare_for_interactive_launch_reports_and_patches_missing_creds() {
+        // Anthropic with no key/model: patched to launch, reports needs-setup.
+        let mut cfg = ZodeConfig::default();
+        assert!(cfg.prepare_for_interactive_launch());
+        assert_eq!(cfg.provider.model.as_deref(), Some(DEFAULT_STARTER_MODEL));
+        assert_eq!(cfg.provider.api_key.as_deref(), Some(""));
+
+        // A real key means no setup needed (model still defaulted if absent).
+        let mut keyed = ZodeConfig::default();
+        keyed.provider.api_key = Some("sk-real".into());
+        assert!(!keyed.prepare_for_interactive_launch());
+        assert_eq!(keyed.provider.api_key.as_deref(), Some("sk-real"));
+
+        // Ollama needs no key, so it never reports as needing setup.
+        let mut ollama = ZodeConfig::default();
+        ollama.provider.r#type = Some(ProviderKind::Ollama);
+        assert!(!ollama.prepare_for_interactive_launch());
+        assert!(ollama.provider.api_key.is_none());
     }
 
     #[test]

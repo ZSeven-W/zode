@@ -13,6 +13,7 @@ use super::design::{load_guidance, DesignOrchestrator, DirectLlmContentGenerator
 use super::{is_read_tool, Consent};
 use crate::config::OpenPencilConfig;
 use crate::question::QuestionQueue;
+use crate::task_factory::ModelRuntimeState;
 
 /// Shared deps: enough to `ensure` a client per call.
 #[derive(Debug, Clone)]
@@ -31,8 +32,7 @@ pub struct OpDesignDeps {
     pub cfg: OpenPencilConfig,
     pub consent: Arc<dyn Consent>,
     pub tag: String,
-    pub provider: Arc<dyn agent::provider::Provider>,
-    pub model: String,
+    pub model_runtime: ModelRuntimeState,
     pub skills: Arc<agent::skills::SkillRegistry>,
 }
 
@@ -232,9 +232,10 @@ impl Tool for OpDesignTool {
             self.deps.skills.as_ref(),
             &["frontend-design", "openpencil-design"],
         );
+        let runtime = self.deps.model_runtime.snapshot();
         let generator = DirectLlmContentGenerator {
-            provider: self.deps.provider.clone(),
-            model: self.deps.model.clone(),
+            provider: runtime.provider,
+            model: runtime.model,
         };
         let abort = agent::abort::AbortController::new();
         let progress = |_| {};
@@ -291,8 +292,10 @@ mod test_helpers {
                     cfg: OpenPencilConfig::default(),
                     consent: Arc::new(NoConsent),
                     tag: "0.8.0".into(),
-                    provider: Arc::new(agent::testing::MockProvider::new(Vec::new())),
-                    model: "test-model".into(),
+                    model_runtime: ModelRuntimeState::new(
+                        Arc::new(agent::testing::MockProvider::new(Vec::new())),
+                        "test-model".into(),
+                    ),
                     skills: Arc::new(agent::skills::SkillRegistry::new()),
                 },
             }

@@ -25,6 +25,8 @@ pub enum SettingsLevel {
     Sandbox,
     /// Pick the provider that handles image understanding (`/vision`).
     VisionProvider,
+    /// Pick the display currency for cost (`/currency`).
+    Currency,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +46,8 @@ pub enum SettingsAction {
     SetSandbox(String),
     /// Carries a provider name for image understanding, or "off" to disable.
     SetVisionProvider(String),
+    /// Carries a display-currency ISO code (e.g. "CNY").
+    SetCurrency(String),
 }
 
 pub struct SettingsDialog {
@@ -72,7 +76,15 @@ const TOP_ITEMS: &[&str] = &[
     "Orchestration",
     "Language",
     "Vision",
+    "Currency",
 ];
+
+fn currency_codes() -> Vec<String> {
+    zode_core::currency::CURRENCIES
+        .iter()
+        .map(|c| c.code.to_string())
+        .collect()
+}
 
 fn default_language_codes() -> Vec<String> {
     zode_core::i18n::Lang::ALL
@@ -293,6 +305,7 @@ impl SettingsDialog {
                         .unwrap_or_else(|| c.clone())
                 })
                 .collect(),
+            SettingsLevel::Currency => currency_codes(),
         }
     }
 
@@ -326,7 +339,8 @@ impl SettingsDialog {
                 6 => SettingsLevel::ToolDetails,
                 7 => SettingsLevel::Orchestration,
                 8 => SettingsLevel::Language,
-                _ => SettingsLevel::VisionProvider,
+                9 => SettingsLevel::VisionProvider,
+                _ => SettingsLevel::Currency,
             };
             self.state.select(Some(0));
         }
@@ -389,6 +403,9 @@ impl SettingsDialog {
                 .vision_items()
                 .get(idx)
                 .map(|s| SettingsAction::SetVisionProvider(s.clone())),
+            SettingsLevel::Currency => currency_codes()
+                .get(idx)
+                .map(|s| SettingsAction::SetCurrency(s.clone())),
         }
     }
 
@@ -518,6 +535,7 @@ fn title_text(level: SettingsLevel, root: SettingsLevel) -> &'static str {
         SettingsLevel::Language => "Select language",
         SettingsLevel::Sandbox => "Sandbox",
         SettingsLevel::VisionProvider => "Vision provider",
+        SettingsLevel::Currency => "Display currency",
     }
 }
 
@@ -536,6 +554,7 @@ fn section_title(level: SettingsLevel, root: SettingsLevel) -> &'static str {
         (SettingsLevel::Language, _) => "Language",
         (SettingsLevel::Sandbox, _) => "Sandbox",
         (SettingsLevel::VisionProvider, _) => "Vision",
+        (SettingsLevel::Currency, _) => "Currency",
     }
 }
 

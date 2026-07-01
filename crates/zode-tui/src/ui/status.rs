@@ -13,6 +13,8 @@ pub enum Mode {
     Ready,
     Thinking,
     Streaming,
+    Compacting,
+    Switching,
     Error,
 }
 
@@ -87,13 +89,19 @@ impl StatusBar {
             Mode::Ready => ("ready", theme.accent),
             Mode::Thinking => ("thinking", theme.system),
             Mode::Streaming => ("streaming", theme.accent),
+            Mode::Compacting => ("compacting", theme.system),
+            Mode::Switching => ("switching", theme.system),
             Mode::Error => ("error", Color::Red),
         };
         let frames = match self.mode {
             Mode::Streaming => &theme.spinner_streaming,
             _ => &theme.spinner_thinking,
         };
-        let spin = if matches!(self.mode, Mode::Thinking | Mode::Streaming) && !frames.is_empty() {
+        let spin = if matches!(
+            self.mode,
+            Mode::Thinking | Mode::Streaming | Mode::Compacting | Mode::Switching
+        ) && !frames.is_empty()
+        {
             format!("{} ", frames[self.spinner_frame % frames.len()])
         } else {
             "● ".to_string()
@@ -125,7 +133,7 @@ impl StatusBar {
             };
             spans.push(Span::styled(" │ ", Style::default().fg(theme.separator)));
             spans.push(Span::styled(
-                format!("{pct}% ctx"),
+                format!("{pct}% {}", crate::tr("ctx")),
                 Style::default().fg(pct_color),
             ));
         }
@@ -133,7 +141,7 @@ impl StatusBar {
         // default is implicit (no badge).
         if self.yolo {
             spans.push(Span::styled(
-                "  YOLO",
+                format!("  {}", crate::tr("YOLO")),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ));
         }
@@ -141,9 +149,9 @@ impl StatusBar {
         // warning (writes unconfined); ON shows the mode + network.
         if self.sandbox {
             let label = if self.sandbox_read_only {
-                "  SANDBOX:RO"
+                format!("  {}", crate::tr("SANDBOX:RO"))
             } else {
-                "  SANDBOX"
+                format!("  {}", crate::tr("SANDBOX"))
             };
             spans.push(Span::styled(
                 label,
@@ -153,7 +161,7 @@ impl StatusBar {
             ));
             if self.sandbox_network {
                 spans.push(Span::styled(
-                    " +NET",
+                    format!(" +{}", crate::tr("NET")),
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
@@ -161,13 +169,13 @@ impl StatusBar {
             }
         } else {
             spans.push(Span::styled(
-                "  UNSANDBOXED",
+                format!("  {}", crate::tr("UNSANDBOXED")),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ));
         }
         if self.plan_mode {
             spans.push(Span::styled(
-                "  PLAN",
+                format!("  {}", crate::tr("PLAN")),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
@@ -175,7 +183,7 @@ impl StatusBar {
         }
         if self.selection_mode {
             spans.push(Span::styled(
-                "  SELECT",
+                format!("  {}", crate::tr("SELECT")),
                 Style::default()
                     .fg(theme.accent_secondary)
                     .add_modifier(Modifier::BOLD),

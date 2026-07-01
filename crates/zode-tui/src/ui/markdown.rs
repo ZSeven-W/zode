@@ -29,6 +29,7 @@ pub fn render_markdown(src: &str, theme: &Theme) -> Vec<Line<'static>> {
     let mut code_lang: Option<String> = None;
     let mut code_buffer = String::new();
     let mut table: Option<TableState> = None;
+    let mut list_depth: usize = 0;
 
     for ev in parser {
         match ev {
@@ -79,6 +80,11 @@ pub fn render_markdown(src: &str, theme: &Theme) -> Vec<Line<'static>> {
                 }
             }
             MdEvent::Start(Tag::Heading { .. }) => {
+                // Separate each section: a blank line before the heading (unless
+                // we're already at a blank or the very top). Keeps a heading's own
+                // content tight beneath it while breaking the wall of sections.
+                flush_nonempty(&mut lines, &mut current);
+                push_blank_if_needed(&mut lines);
                 style = Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD);
@@ -124,10 +130,19 @@ pub fn render_markdown(src: &str, theme: &Theme) -> Vec<Line<'static>> {
                 }
             }
             MdEvent::SoftBreak | MdEvent::HardBreak => flush(&mut lines, &mut current),
+            MdEvent::Start(Tag::List(_)) => list_depth += 1,
+            MdEvent::End(TagEnd::List(_)) => list_depth = list_depth.saturating_sub(1),
             MdEvent::Start(Tag::Item) => {
                 current.push(Span::styled("• ", Style::default().fg(theme.accent)))
             }
-            MdEvent::End(TagEnd::Item) => flush(&mut lines, &mut current),
+            MdEvent::End(TagEnd::Item) => {
+                flush(&mut lines, &mut current);
+                // Air between top-level bullets so a long list doesn't read as a
+                // wall; nested items stay tight under their parent.
+                if list_depth <= 1 {
+                    push_blank_if_needed(&mut lines);
+                }
+            }
             MdEvent::End(TagEnd::Paragraph) if table.is_none() => {
                 flush(&mut lines, &mut current);
                 lines.push(Line::from(""));
@@ -152,7 +167,12 @@ fn flush_nonempty(lines: &mut Vec<Line<'static>>, current: &mut Vec<Span<'static
 }
 
 fn push_blank_if_needed(lines: &mut Vec<Line<'static>>) {
-    if lines.last().is_some_and(|line| !line.spans.is_empty()) {
+    // Treat a line whose text is all-whitespace (incl. an empty `Span`) as blank
+    // so we never stack two blank lines.
+    let last_has_content = lines
+        .last()
+        .is_some_and(|line| line.spans.iter().any(|s| !s.content.trim().is_empty()));
+    if last_has_content {
         lines.push(Line::from(""));
     }
 }
@@ -300,6 +320,78 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn cjk_single_newline_breaks_into_separate_lines() {
+        // A single '\n' between CJK sentences must render as a line break (not a
+        // collapsed run-on): pulldown-cmark emits SoftBreak, which we flush. When
+        // a model instead streams reasoning with NO newlines it renders as one
+        // wrapped block — that is faithful to the model output, not a bug here.
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let with_nl = render_markdown(
+            "好，微服务架构。\n第四个问题：好。\n第五个问题：好。",
+            &theme,
+        );
+        let content: Vec<String> = with_nl
+            .iter()
+            .map(|l| joined(std::slice::from_ref(l)))
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(
+            content,
+            vec!["好，微服务架构。", "第四个问题：好。", "第五个问题：好。"]
+        );
+    }
+
+    fn line_texts(lines: &[Line]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn heading_separated_from_previous_block_by_blank_line() {
+        // A section heading must not butt against the prior block — there should
+        // be a blank line before it so the sections read as distinct.
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let lines = render_markdown("- item one\n\n## Section Two\n- item two", &theme);
+        let texts = line_texts(&lines);
+        let idx = texts
+            .iter()
+            .position(|t| t.contains("Section Two"))
+            .expect("heading present");
+        assert!(idx > 0, "heading should not be the first line");
+        assert!(
+            texts[idx - 1].trim().is_empty(),
+            "expected a blank line before the heading, got: {:?}",
+            texts.get(idx - 1)
+        );
+    }
+
+    #[test]
+    fn top_level_bullets_get_air_between_them() {
+        // A long bullet list must not read as a wall — top-level items get a
+        // blank line between them (but not a trailing/leading double blank).
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let texts = line_texts(&render_markdown("- one\n- two\n- three", &theme));
+        let i_one = texts.iter().position(|t| t.contains("one")).unwrap();
+        let i_two = texts.iter().position(|t| t.contains("two")).unwrap();
+        assert!(
+            i_two == i_one + 2 && texts[i_one + 1].trim().is_empty(),
+            "expected exactly one blank line between top-level bullets: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn nested_bullets_stay_tight() {
+        // Sub-items under a parent bullet stay compact (no blank between them).
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let texts = line_texts(&render_markdown("- parent\n  - childa\n  - childb", &theme));
+        let a = texts.iter().position(|t| t.contains("childa")).unwrap();
+        let b = texts.iter().position(|t| t.contains("childb")).unwrap();
+        assert_eq!(b, a + 1, "nested items should stay tight: {texts:?}");
     }
 
     #[test]

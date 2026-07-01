@@ -98,7 +98,7 @@ impl PermissionDialog {
             lines.extend(diff.into_iter().take(MAX_PERMISSION_DIFF_LINES));
             if truncated {
                 lines.push(Line::styled(
-                    "… diff preview truncated",
+                    format!("… {}", crate::tr("diff preview truncated")),
                     Style::default().fg(theme.fg_subtle),
                 ));
             }
@@ -111,7 +111,11 @@ impl PermissionDialog {
     fn footer_lines(&self, theme: &Theme) -> Vec<Line<'static>> {
         // Each action is a chip; the arrow-key/Enter highlight marks the active
         // one. The leading digit keeps the 1/2/3 direct-pick affordance.
-        let labels = ["1 allow once", "2 allow always", "3 deny"];
+        let labels = [
+            format!("1 {}", crate::tr("allow once")),
+            format!("2 {}", crate::tr("allow always")),
+            format!("3 {}", crate::tr("deny")),
+        ];
         let normal = Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD);
@@ -128,13 +132,13 @@ impl PermissionDialog {
             spans.push(Span::styled(format!(" {lbl} "), style));
         }
         spans.push(Span::styled(
-            "   ↑↓/1-3 · enter · esc deny",
+            format!("   ↑↓/1-3 · enter · esc {}", crate::tr("deny")),
             Style::default().fg(theme.fg_subtle),
         ));
         vec![
             Line::from(spans),
             Line::styled(
-                "…or just keep typing to queue a message — this prompt won't block you.",
+                crate::tr("…or just keep typing to queue a message — this prompt won't block you."),
                 Style::default().fg(theme.fg_subtle),
             ),
         ]
@@ -182,7 +186,7 @@ impl PermissionDialog {
     fn render_card(&self, f: &mut Frame, area: Rect, theme: &Theme) {
         f.render_widget(Clear, area);
         let block = Block::default()
-            .title(format!(" Permission: {} ", self.tool()))
+            .title(format!(" {}: {} ", crate::tr("Permission"), self.tool()))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.accent))
             .style(Style::default().bg(theme.bg_secondary).fg(theme.fg_text));
