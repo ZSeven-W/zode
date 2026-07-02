@@ -25,7 +25,7 @@
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use rquickjs::{async_with, AsyncContext, AsyncRuntime, CatchResultExt};
+use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt};
 use serde_json::Value;
 
 /// Dispatches one `agent()` call. Implemented by the engine on top of the
@@ -182,12 +182,9 @@ pub async fn run_js_workflow(
     let script = format!("(async () => {{\n{body}\n}})()");
     let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "null".into());
 
-    // Everything captured by the async_with block must be owned (the macro
-    // uplifts the future's lifetime).
-    let out: Result<String, String> = async_with!(ctx => |ctx| {
-        run_in_ctx(ctx, &script, &args_json, runner, log).await
-    })
-    .await;
+    let out: Result<String, String> = ctx
+        .async_with(async |ctx| run_in_ctx(ctx, &script, &args_json, runner, log).await)
+        .await;
     let json = out?;
     serde_json::from_str(&json).map_err(|e| format!("workflow result not JSON: {e}"))
 }

@@ -8826,7 +8826,7 @@ mod tests {
         // buffer must stay capped and exclude the char that triggered the bail.
         let mut state = None;
         let long: String = std::iter::once('<')
-            .chain(std::iter::repeat('9').take(40))
+            .chain(std::iter::repeat_n('9', 40))
             .collect();
         let actions = feed_seq(&mut state, &long);
         let replay = actions

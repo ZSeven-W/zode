@@ -508,7 +508,7 @@ fn wrapped_cursor_position(
 
         let is_last_for_source = rows
             .get(idx + 1)
-            .map_or(true, |next| next.source_row != row.source_row);
+            .is_none_or(|next| next.source_row != row.source_row);
         if row.start_col == row.end_col && cursor.1 == row.start_col {
             return Some((idx, 0));
         }

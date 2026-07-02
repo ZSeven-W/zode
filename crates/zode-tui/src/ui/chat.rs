@@ -468,7 +468,7 @@ impl ChatView {
         if self
             .render_cache
             .as_ref()
-            .map_or(true, |cache| cache.key != cache_key)
+            .is_none_or(|cache| cache.key != cache_key)
         {
             let lines = self.build_lines(theme, meta, width);
             self.render_cache = Some(RenderCache {
