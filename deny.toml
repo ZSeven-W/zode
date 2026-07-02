@@ -24,6 +24,13 @@ ignore = [
   # yaml-rust unmaintained — transitive via syntect (parses bundled syntax
   # definitions at startup; inputs are the shipped defaults, not user data).
   "RUSTSEC-2024-0320",
+  # quick-xml 0.39 DoS-class parser issues (quadratic dup-attribute check /
+  # unbounded xmlns allocation). Transitive via syntect → plist, which only
+  # parses zode's BUNDLED .tmTheme assets — never attacker-supplied XML. The
+  # fix needs quick-xml >= 0.41, which plist 1.9 doesn't yet allow;
+  # re-evaluate when plist bumps its bound.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
   # proc-macro-error2 unmaintained — build-time only through jieba-rs'
   # compressed default dictionary generator. The default dictionary is required
   # for noema's CJK tokenization behavior; re-evaluate when jieba-rs drops
