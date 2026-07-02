@@ -1,14 +1,16 @@
-//! Modal opened by the `AskUserQuestion` tool: a multi-question panel. Each
-//! question is single-choice over its preset options PLUS a free-text "Other"
-//! row, and a request may carry several questions answered together. Navigation
-//! is arrow-keys + Enter (mirroring the other pickers); a final "Submit" row
-//! sends one answer per question back to the waiting tool, Esc dismisses.
+//! Modal opened by the `AskUserQuestion` tool: a TABBED multi-question panel.
+//! One question shows at a time; the tab strip on top tracks progress (✓ per
+//! answered question) and ends in a Submit tab. Each question is single-choice
+//! over its preset options PLUS a free-text "Other" row (preset options that
+//! duplicate "Other" — models sometimes add their own — are filtered out).
+//! Answering a question advances straight to the next unanswered one;
+//! Tab/←→ switch tabs manually; Esc dismisses.
 
 use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use zode_core::question::{QuestionRequest, QuestionSpec};
 
@@ -23,41 +25,55 @@ enum Sel {
     Other,
 }
 
-/// A focusable row in the flat navigation list.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Item {
-    Option { q: usize, opt: usize },
-    Other { q: usize },
-    Submit,
+/// A preset option that duplicates the built-in free-text "Other" row (the
+/// model added its own despite the tool description). Match on the label's
+/// LEADING word only, so options merely mentioning these words survive.
+fn is_custom_like(label: &str) -> bool {
+    let l = label.trim().to_lowercase();
+    [
+        "other",
+        "custom",
+        "其他",
+        "其它",
+        "自定义",
+        "自訂",
+        "手动输入",
+    ]
+    .iter()
+    .any(|p| l.starts_with(p))
 }
 
 pub struct QuestionDialog {
     request: Option<QuestionRequest>,
+    /// Specs with custom-like preset options already filtered out.
     specs: Vec<QuestionSpec>,
-    items: Vec<Item>,
+    /// Active tab: `0..specs.len()` is a question; `specs.len()` is Submit.
+    tab: usize,
+    /// Focused row inside the active question: `0..options.len()` is a preset
+    /// option, `options.len()` is the "Other" row. Unused on the Submit tab.
     cursor: usize,
     selections: Vec<Option<Sel>>,
     customs: Vec<String>,
-    /// Editing the focused question's "Other" text.
+    /// Editing the active question's "Other" text.
     editing: bool,
 }
 
 impl QuestionDialog {
     pub fn new(request: QuestionRequest) -> Self {
-        let specs = request.specs.clone();
-        let mut items = Vec::new();
-        for (q, spec) in specs.iter().enumerate() {
-            for opt in 0..spec.options.len() {
-                items.push(Item::Option { q, opt });
-            }
-            items.push(Item::Other { q });
-        }
-        items.push(Item::Submit);
+        let specs: Vec<QuestionSpec> = request
+            .specs
+            .iter()
+            .map(|s| {
+                let mut s = s.clone();
+                s.options.retain(|o| !is_custom_like(o));
+                s
+            })
+            .collect();
         let n = specs.len();
         Self {
             request: Some(request),
             specs,
-            items,
+            tab: 0,
             cursor: 0,
             selections: vec![None; n],
             customs: vec![String::new(); n],
@@ -70,12 +86,20 @@ impl QuestionDialog {
         self.request.as_ref().and_then(|r| r.source.clone())
     }
 
-    /// The question that the focused row belongs to (None on the Submit row).
-    fn focused_question(&self) -> Option<usize> {
-        match self.items.get(self.cursor) {
-            Some(Item::Option { q, .. }) | Some(Item::Other { q }) => Some(*q),
-            _ => None,
-        }
+    fn submit_tab(&self) -> usize {
+        self.specs.len()
+    }
+
+    fn on_submit_tab(&self) -> bool {
+        self.tab == self.submit_tab()
+    }
+
+    /// Rows in the active question (presets + the "Other" row).
+    fn rows(&self) -> usize {
+        self.specs
+            .get(self.tab)
+            .map(|s| s.options.len() + 1)
+            .unwrap_or(0)
     }
 
     fn all_answered(&self) -> bool {
@@ -95,32 +119,31 @@ impl QuestionDialog {
             .collect()
     }
 
-    fn submit_index(&self) -> usize {
-        self.items.len().saturating_sub(1)
+    /// Put the row cursor on the question's current answer (or the top).
+    fn sync_cursor(&mut self) {
+        self.cursor = match self.specs.get(self.tab).map(|s| s.options.len()) {
+            Some(len) => match self.selections.get(self.tab).and_then(|s| s.as_ref()) {
+                Some(Sel::Opt(i)) => (*i).min(len),
+                Some(Sel::Other) => len,
+                None => 0,
+            },
+            None => 0,
+        };
     }
 
-    fn first_unanswered_item(&self) -> Option<usize> {
-        let q = self.selections.iter().position(Option::is_none)?;
-        self.items
-            .iter()
-            .position(|it| matches!(it, Item::Option { q: iq, opt: 0 } if *iq == q))
+    fn goto_tab(&mut self, tab: usize) {
+        self.tab = tab.min(self.submit_tab());
+        self.sync_cursor();
     }
 
-    fn move_cursor(&mut self, delta: isize) {
-        let len = self.items.len() as isize;
-        if len == 0 {
-            return;
-        }
-        self.cursor = (((self.cursor as isize + delta) % len + len) % len) as usize;
-    }
-
-    /// After picking an answer for `q`: jump to Submit once everything's
-    /// answered, otherwise step to the next row.
+    /// After answering: the next unanswered question, else the Submit tab.
     fn advance_after_select(&mut self) {
-        if self.all_answered() {
-            self.cursor = self.submit_index();
-        } else {
-            self.move_cursor(1);
+        let next = (self.tab + 1..self.specs.len())
+            .chain(0..self.tab)
+            .find(|&q| self.selections[q].is_none());
+        match next {
+            Some(q) => self.goto_tab(q),
+            None => self.goto_tab(self.submit_tab()),
         }
     }
 
@@ -130,21 +153,36 @@ impl QuestionDialog {
         if self.editing {
             return self.on_edit_key(code);
         }
+        let tabs = self.submit_tab() + 1;
         match code {
-            KeyCode::Up | KeyCode::Left => {
-                self.move_cursor(-1);
+            KeyCode::Tab | KeyCode::Right => {
+                self.goto_tab((self.tab + 1) % tabs);
                 false
             }
-            KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
-                self.move_cursor(1);
+            KeyCode::BackTab | KeyCode::Left => {
+                self.goto_tab((self.tab + tabs - 1) % tabs);
                 false
             }
-            // A digit picks that option within the focused question.
+            KeyCode::Up => {
+                let rows = self.rows();
+                if rows > 0 {
+                    self.cursor = (self.cursor + rows - 1) % rows;
+                }
+                false
+            }
+            KeyCode::Down => {
+                let rows = self.rows();
+                if rows > 0 {
+                    self.cursor = (self.cursor + 1) % rows;
+                }
+                false
+            }
+            // A digit picks that option within the active question.
             KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                if let Some(q) = self.focused_question() {
+                if let Some(spec) = self.specs.get(self.tab) {
                     let n = (c as u8 - b'1') as usize;
-                    if n < self.specs[q].options.len() {
-                        self.selections[q] = Some(Sel::Opt(n));
+                    if n < spec.options.len() {
+                        self.selections[self.tab] = Some(Sel::Opt(n));
                         self.advance_after_select();
                     }
                 }
@@ -162,36 +200,34 @@ impl QuestionDialog {
     }
 
     fn activate(&mut self) -> bool {
-        match self.items[self.cursor] {
-            Item::Option { q, opt } => {
-                self.selections[q] = Some(Sel::Opt(opt));
-                self.advance_after_select();
-                false
-            }
-            Item::Other { .. } => {
-                self.editing = true;
-                false
-            }
-            Item::Submit => {
-                if self.all_answered() {
-                    if let Some(req) = self.request.take() {
-                        let _ = req.respond(Some(self.answers()));
-                    }
-                    return true;
+        if self.on_submit_tab() {
+            if self.all_answered() {
+                if let Some(req) = self.request.take() {
+                    let _ = req.respond(Some(self.answers()));
                 }
-                if let Some(i) = self.first_unanswered_item() {
-                    self.cursor = i;
-                }
-                false
+                return true;
             }
+            if let Some(q) = self.selections.iter().position(Option::is_none) {
+                self.goto_tab(q);
+            }
+            return false;
         }
+        let opts = self.specs[self.tab].options.len();
+        if self.cursor < opts {
+            self.selections[self.tab] = Some(Sel::Opt(self.cursor));
+            self.advance_after_select();
+        } else {
+            self.editing = true;
+        }
+        false
     }
 
     fn on_edit_key(&mut self, code: KeyCode) -> bool {
-        let Some(q) = self.focused_question() else {
+        let q = self.tab;
+        if q >= self.specs.len() {
             self.editing = false;
             return false;
-        };
+        }
         match code {
             KeyCode::Char(c) => self.customs[q].push(c),
             KeyCode::Backspace => {
@@ -209,135 +245,164 @@ impl QuestionDialog {
         false
     }
 
-    /// Flatten the panel into display rows, tagging each focusable row with its
-    /// `Item` index so the renderer can highlight the cursor and window scroll.
-    fn display_rows(&self, theme: &Theme) -> Vec<(Line<'static>, Option<usize>)> {
-        let mut rows: Vec<(Line<'static>, Option<usize>)> = Vec::new();
-        let mut item_idx = 0usize;
+    /// The tab strip: one chip per question (its header, or `Q<n>`) plus the
+    /// Submit chip. Active chip inverts; answered chips get a ✓.
+    fn tab_strip(&self, theme: &Theme) -> Line<'static> {
+        let bg = Style::default().bg(theme.bg_secondary);
+        let mut spans: Vec<Span<'static>> = vec![Span::styled(" ", bg)];
         for (q, spec) in self.specs.iter().enumerate() {
-            if q > 0 {
-                rows.push((Line::from(""), None));
-            }
-            // Question text (+ optional header chip).
-            let mut head: Vec<Span<'static>> = Vec::new();
-            if let Some(h) = &spec.header {
-                head.push(Span::styled(
-                    format!(" {h} "),
-                    Style::default()
-                        .fg(theme.bg_primary)
-                        .bg(theme.accent_secondary),
-                ));
-                head.push(Span::styled(" ", Style::default().bg(theme.bg_secondary)));
-            }
-            head.push(Span::styled(
-                spec.question.clone(),
-                Style::default()
-                    .fg(theme.fg_white)
-                    .bg(theme.bg_secondary)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            rows.push((Line::from(head), None));
-
-            for (opt, label) in spec.options.iter().enumerate() {
-                let chosen = self.selections[q] == Some(Sel::Opt(opt));
-                let marker = if chosen { "◉" } else { "○" };
-                rows.push((Line::from(format!("  {marker} {label}")), Some(item_idx)));
-                item_idx += 1;
-            }
-            // Other row.
-            let other_chosen = self.selections[q] == Some(Sel::Other);
-            let marker = if other_chosen { "◉" } else { "○" };
-            let editing_here = self.editing && self.focused_question() == Some(q);
-            let other_label = if !self.customs[q].is_empty() {
-                self.customs[q].clone()
+            let label = spec.header.clone().unwrap_or_else(|| format!("Q{}", q + 1));
+            let mark = if self.selections[q].is_some() {
+                "✓ "
             } else {
-                crate::tr("Other (type a custom answer)").to_string()
+                "○ "
             };
-            let cursor_glyph = if editing_here { "▏" } else { "" };
-            rows.push((
-                Line::from(format!("  {marker} {other_label}{cursor_glyph}")),
-                Some(item_idx),
-            ));
-            item_idx += 1;
-        }
-        // Submit row.
-        let ready = self.all_answered();
-        let submit = if ready {
-            format!("✓ {}", crate::tr("Submit"))
-        } else {
-            format!("✓ {}", crate::tr("Submit (answer all questions first)"))
-        };
-        rows.push((Line::from(format!("  {submit}")), Some(item_idx)));
-        rows
-    }
-
-    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme) {
-        if self.request.is_none() {
-            return;
-        }
-        let rows = self.display_rows(theme);
-        let inner_w = 76u16;
-        let total = rows.len() as u16;
-        // header + body(capped) + footer.
-        let body_cap = total.min(area.height.saturating_sub(6).max(3));
-        let popup = modal_area(area, inner_w, body_cap + 5);
-        f.render_widget(Clear, popup);
-        f.render_widget(
-            Paragraph::new("").style(Style::default().bg(theme.bg_secondary)),
-            popup,
-        );
-        let inner = inner_area(popup);
-
-        // Header.
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                crate::tr("The agent is asking"),
-                Style::default()
-                    .fg(theme.accent)
-                    .bg(theme.bg_secondary)
-                    .add_modifier(Modifier::BOLD),
-            )))
-            .style(Style::default().bg(theme.bg_secondary)),
-            Rect::new(inner.x, inner.y, inner.width, 1),
-        );
-
-        // Body window: keep the cursor's row visible.
-        let body_top = inner.y.saturating_add(2);
-        let body_h = inner.height.saturating_sub(3) as usize;
-        let cursor_row = rows
-            .iter()
-            .position(|(_, item)| *item == Some(self.cursor))
-            .unwrap_or(0);
-        let start = scroll_start(cursor_row, rows.len(), body_h);
-        let mut y = body_top;
-        for (line, item) in rows.iter().skip(start).take(body_h) {
-            let focused = *item == Some(self.cursor);
-            let style = if focused {
+            let style = if q == self.tab {
                 Style::default()
                     .fg(theme.bg_primary)
                     .bg(theme.accent)
                     .add_modifier(Modifier::BOLD)
+            } else if self.selections[q].is_some() {
+                bg.fg(Color::Green)
             } else {
-                Style::default().fg(theme.fg_text).bg(theme.bg_secondary)
+                bg.fg(theme.fg_subtle)
             };
-            let row = if item.is_some() {
-                Paragraph::new(pad_to_width(plain(line), inner.width)).style(style)
-            } else {
-                Paragraph::new(line.clone()).style(Style::default().bg(theme.bg_secondary))
-            };
-            f.render_widget(row, Rect::new(inner.x, y, inner.width, 1));
-            y = y.saturating_add(1);
+            spans.push(Span::styled(format!(" {mark}{label} "), style));
+            spans.push(Span::styled(" ", bg));
         }
+        let submit_label = crate::tr("Submit");
+        let submit_style = if self.on_submit_tab() {
+            Style::default()
+                .fg(theme.bg_primary)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else if self.all_answered() {
+            bg.fg(Color::Green).add_modifier(Modifier::BOLD)
+        } else {
+            bg.fg(theme.fg_subtle)
+        };
+        spans.push(Span::styled(format!(" ➤ {submit_label} "), submit_style));
+        Line::from(spans)
+    }
 
-        // Footer.
+    /// Body lines for the active tab. `Some(row)` tags focusable rows.
+    fn body_rows(&self, theme: &Theme) -> Vec<(Line<'static>, Option<usize>)> {
+        let bg = Style::default().bg(theme.bg_secondary);
+        let mut rows: Vec<(Line<'static>, Option<usize>)> = Vec::new();
+        if let Some(spec) = self.specs.get(self.tab) {
+            rows.push((
+                Line::from(Span::styled(
+                    format!(" {}", spec.question),
+                    bg.fg(theme.fg_white).add_modifier(Modifier::BOLD),
+                )),
+                None,
+            ));
+            rows.push((Line::from(Span::styled(String::new(), bg)), None));
+            for (opt, label) in spec.options.iter().enumerate() {
+                let chosen = self.selections[self.tab] == Some(Sel::Opt(opt));
+                rows.push((self.option_line(opt, label, chosen, theme), Some(opt)));
+            }
+            let other_row = spec.options.len();
+            let other_chosen = self.selections[self.tab] == Some(Sel::Other);
+            let editing_here = self.editing;
+            let label = if !self.customs[self.tab].is_empty() || editing_here {
+                format!(
+                    "{}{}",
+                    self.customs[self.tab],
+                    if editing_here { "▏" } else { "" }
+                )
+            } else {
+                crate::tr("Other (type a custom answer)").to_string()
+            };
+            rows.push((
+                self.option_line(other_row, &label, other_chosen, theme),
+                Some(other_row),
+            ));
+        } else {
+            // Submit tab: a summary of every answer.
+            for (q, spec) in self.specs.iter().enumerate() {
+                let name = spec.header.clone().unwrap_or_else(|| spec.question.clone());
+                let (mark, answer, style) = match &self.selections[q] {
+                    Some(sel) => {
+                        let a = match sel {
+                            Sel::Opt(i) => spec.options.get(*i).cloned().unwrap_or_default(),
+                            Sel::Other => self.customs[q].clone(),
+                        };
+                        ("✓", a, bg.fg(theme.fg_text))
+                    }
+                    None => ("○", "—".to_string(), bg.fg(theme.fg_subtle)),
+                };
+                rows.push((
+                    Line::from(vec![
+                        Span::styled(format!(" {mark} {name}  "), bg.fg(theme.fg_subtle)),
+                        Span::styled(answer, style),
+                    ]),
+                    None,
+                ));
+            }
+            rows.push((Line::from(Span::styled(String::new(), bg)), None));
+            let ready = self.all_answered();
+            let submit = if ready {
+                format!(" ➤ {}", crate::tr("Submit"))
+            } else {
+                format!(" ➤ {}", crate::tr("Submit (answer all questions first)"))
+            };
+            let style = if ready {
+                bg.fg(theme.accent).add_modifier(Modifier::BOLD)
+            } else {
+                bg.fg(theme.fg_subtle)
+            };
+            rows.push((Line::from(Span::styled(submit, style)), None));
+        }
+        rows
+    }
+
+    /// One selectable row: focus bar + radio marker + label.
+    fn option_line(&self, row: usize, label: &str, chosen: bool, theme: &Theme) -> Line<'static> {
+        let focused = !self.on_submit_tab() && self.cursor == row;
+        let row_bg = if focused {
+            theme.bg_input
+        } else {
+            theme.bg_secondary
+        };
+        let bar = if focused { "▌" } else { " " };
+        let marker = if chosen { "◉" } else { "○" };
+        let marker_fg = if chosen {
+            theme.accent
+        } else {
+            theme.fg_subtle
+        };
+        let label_style = if focused {
+            Style::default()
+                .bg(row_bg)
+                .fg(theme.fg_white)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().bg(row_bg).fg(theme.fg_text)
+        };
+        Line::from(vec![
+            Span::styled(
+                bar.to_string(),
+                Style::default().bg(row_bg).fg(theme.accent),
+            ),
+            Span::styled(" ".to_string(), Style::default().bg(row_bg)),
+            Span::styled(
+                marker.to_string(),
+                Style::default().bg(row_bg).fg(marker_fg),
+            ),
+            Span::styled(format!(" {label}"), label_style),
+        ])
+    }
+
+    fn footer(&self, theme: &Theme) -> Line<'static> {
         let key = Style::default()
             .fg(theme.fg_white)
             .bg(theme.bg_secondary)
             .add_modifier(Modifier::BOLD);
         let lbl = Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary);
-        let hint = if self.editing {
+        if self.editing {
             Line::from(vec![
-                Span::styled("type", key),
+                Span::styled(" type", key),
                 Span::styled(format!(" {}   ", crate::tr("custom answer")), lbl),
                 Span::styled("enter", key),
                 Span::styled(format!(" {}   ", crate::tr("confirm")), lbl),
@@ -346,6 +411,8 @@ impl QuestionDialog {
             ])
         } else {
             Line::from(vec![
+                Span::styled(" tab", key),
+                Span::styled(format!(" {}   ", crate::tr("switch")), lbl),
                 Span::styled("↑↓/1-9", key),
                 Span::styled(format!(" {}   ", crate::tr("move")), lbl),
                 Span::styled("enter", key),
@@ -353,21 +420,74 @@ impl QuestionDialog {
                 Span::styled("esc", key),
                 Span::styled(format!(" {}", crate::tr("skip")), lbl),
             ])
-        };
+        }
+    }
+
+    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        if self.request.is_none() {
+            return;
+        }
+        let body = self.body_rows(theme);
+        // borders(2) + tabs(1) + blank(1) + body + blank(1) + footer(1).
+        let want_h = (body.len() as u16).saturating_add(6);
+        let popup = modal_area(area, 76, want_h);
+        f.render_widget(Clear, popup);
+
+        let bg = Style::default().bg(theme.bg_secondary);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.separator).bg(theme.bg_secondary))
+            .title(Span::styled(
+                format!(" {} ", crate::tr("The agent is asking")),
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.bg_secondary)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .style(bg);
+        let inner = block.inner(popup);
+        f.render_widget(block, popup);
+        if inner.height < 4 || inner.width < 10 {
+            return;
+        }
+        // One column of breathing room inside the border.
+        let inner = Rect::new(
+            inner.x + 1,
+            inner.y,
+            inner.width.saturating_sub(2),
+            inner.height,
+        );
+
+        // Tab strip.
         f.render_widget(
-            Paragraph::new(hint).style(Style::default().bg(theme.bg_secondary)),
-            Rect::new(
-                inner.x,
-                inner.y.saturating_add(inner.height.saturating_sub(1)),
-                inner.width,
-                1,
-            ),
+            Paragraph::new(self.tab_strip(theme)).style(bg),
+            Rect::new(inner.x, inner.y, inner.width, 1),
+        );
+
+        // Body window (below tabs + blank, above blank + footer), scrolled to
+        // keep the focused row visible.
+        let body_top = inner.y + 2;
+        let body_h = inner.height.saturating_sub(4) as usize;
+        let cursor_row = body
+            .iter()
+            .position(|(_, row)| *row == Some(self.cursor))
+            .unwrap_or(0);
+        let start = scroll_start(cursor_row, body.len(), body_h);
+        let mut y = body_top;
+        for (line, _) in body.iter().skip(start).take(body_h) {
+            f.render_widget(
+                Paragraph::new(line.clone()).style(bg),
+                Rect::new(inner.x, y, inner.width, 1),
+            );
+            y = y.saturating_add(1);
+        }
+
+        // Footer.
+        f.render_widget(
+            Paragraph::new(self.footer(theme)).style(bg),
+            Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
         );
     }
-}
-
-fn plain(line: &Line<'static>) -> String {
-    line.spans.iter().map(|s| s.content.to_string()).collect()
 }
 
 fn scroll_start(cursor_row: usize, total: usize, height: usize) -> usize {
@@ -392,25 +512,6 @@ fn modal_area(area: Rect, target_width: u16, target_height: u16) -> Rect {
     }
 }
 
-fn inner_area(area: Rect) -> Rect {
-    Rect {
-        x: area.x.saturating_add(3),
-        y: area.y.saturating_add(1),
-        width: area.width.saturating_sub(6),
-        height: area.height.saturating_sub(2),
-    }
-}
-
-fn pad_to_width(value: String, width: u16) -> String {
-    let width = width as usize;
-    let mut out: String = value.chars().take(width).collect();
-    let len = out.chars().count();
-    if len < width {
-        out.push_str(&" ".repeat(width - len));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +525,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn custom_like_labels_are_detected() {
+        assert!(is_custom_like("其他(输入自定义答案)"));
+        assert!(is_custom_like("自定义(手动输入)"));
+        assert!(is_custom_like("Other (specify)"));
+        assert!(is_custom_like("  custom answer"));
+        assert!(!is_custom_like("use another library")); // mid-word "other"
+        assert!(!is_custom_like("2-3 步"));
+    }
+
+    #[tokio::test]
+    async fn custom_like_preset_options_are_deduped() {
+        let (queue, mut rx) = question_queue();
+        let _asker = tokio::spawn(async move {
+            queue
+                .ask_specs(
+                    vec![spec("pick", &["a", "自定义(手动输入)", "Other (specify)"])],
+                    None,
+                )
+                .await
+        });
+        let req = rx.next().await.unwrap();
+        let d = QuestionDialog::new(req);
+        assert_eq!(d.specs[0].options, vec!["a".to_string()]);
+    }
+
     #[tokio::test]
     async fn single_question_select_then_submit() {
         let (queue, mut rx) = question_queue();
@@ -434,9 +561,10 @@ mod tests {
         });
         let req = rx.next().await.unwrap();
         let mut d = QuestionDialog::new(req);
-        // Move to "b" and select it → all answered → cursor jumps to Submit.
+        // Move to "b" and select it → all answered → jumps to the Submit tab.
         assert!(!d.on_key(KeyCode::Down)); // -> b
-        assert!(!d.on_key(KeyCode::Enter)); // select b, jump to submit
+        assert!(!d.on_key(KeyCode::Enter)); // select b, advance to submit
+        assert!(d.on_submit_tab());
         assert!(d.on_key(KeyCode::Enter)); // submit
         assert_eq!(asker.await.unwrap(), Some(vec!["b".to_string()]));
     }
@@ -463,7 +591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multi_question_collects_all_answers() {
+    async fn answering_advances_to_the_next_question_tab() {
         let (queue, mut rx) = question_queue();
         let asker = tokio::spawn(async move {
             queue
@@ -472,17 +600,37 @@ mod tests {
         });
         let req = rx.next().await.unwrap();
         let mut d = QuestionDialog::new(req);
-        // items: [a(0) b(1) Other0(2) x(3) y(4) Other1(5) Submit(6)]
-        assert!(!d.on_key(KeyCode::Enter)); // q1 = a (cursor 0), advance → 1
-        d.on_key(KeyCode::Down); // -> Other0 (2)
-        d.on_key(KeyCode::Down); // -> x (3, q2 opt0)
-        d.on_key(KeyCode::Down); // -> y (4, q2 opt1)
+        assert!(!d.on_key(KeyCode::Enter)); // q1 = a → auto-advance to q2's tab
+        assert_eq!(d.tab, 1);
+        assert_eq!(d.cursor, 0);
+        d.on_key(KeyCode::Down); // -> y
         assert!(!d.on_key(KeyCode::Enter)); // q2 = y → all answered → submit
+        assert!(d.on_submit_tab());
         assert!(d.on_key(KeyCode::Enter)); // submit
         assert_eq!(
             asker.await.unwrap(),
             Some(vec!["a".to_string(), "y".to_string()])
         );
+    }
+
+    #[tokio::test]
+    async fn tab_key_switches_questions_and_wraps() {
+        let (queue, mut rx) = question_queue();
+        let _asker = tokio::spawn(async move {
+            queue
+                .ask_specs(vec![spec("q1", &["a", "b"]), spec("q2", &["x", "y"])], None)
+                .await
+        });
+        let req = rx.next().await.unwrap();
+        let mut d = QuestionDialog::new(req);
+        d.on_key(KeyCode::Tab);
+        assert_eq!(d.tab, 1);
+        d.on_key(KeyCode::Tab);
+        assert!(d.on_submit_tab());
+        d.on_key(KeyCode::Tab); // wraps back to the first question
+        assert_eq!(d.tab, 0);
+        d.on_key(KeyCode::BackTab);
+        assert!(d.on_submit_tab());
     }
 
     #[tokio::test]
@@ -508,11 +656,11 @@ mod tests {
         });
         let req = rx.next().await.unwrap();
         let mut d = QuestionDialog::new(req);
-        // Jump straight to submit without answering → not done, cursor moves to
-        // the first unanswered question.
-        let submit = d.submit_index();
-        d.cursor = submit;
+        // Jump straight to Submit without answering → not done; focus moves to
+        // the first unanswered question's tab.
+        d.goto_tab(d.submit_tab());
         assert!(!d.on_key(KeyCode::Enter));
-        assert!(matches!(d.items[d.cursor], Item::Option { q: 0, opt: 0 }));
+        assert_eq!(d.tab, 0);
+        assert_eq!(d.cursor, 0);
     }
 }

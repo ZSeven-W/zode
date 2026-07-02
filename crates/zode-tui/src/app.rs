@@ -19,8 +19,7 @@ use crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
-    LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
 use futures::{FutureExt, StreamExt};
@@ -332,6 +331,28 @@ pub struct TuiApp {
     /// Cached snapshot of the active tab's sub-agent registry. Refreshed while
     /// the sub-agents panel is open; `snapshot()` is sync so no await needed.
     subagents: Vec<zode_core::SubAgent>,
+    /// Fold state of the collapsible sidebar sections (session-scoped;
+    /// toggled by a header click or `/sidebar mcp|files|todo`).
+    mcp_section_collapsed: bool,
+    files_section_collapsed: bool,
+    todo_section_collapsed: bool,
+    /// Full modified-files overlay, opened by clicking the sidebar section's
+    /// "…+k more" row.
+    files_panel: Option<crate::ui::dialog::files_panel::FilesPanel>,
+    /// Header-row hitboxes of the collapsible sidebar sections, rebuilt each
+    /// frame so a left-click can toggle the section under the cursor.
+    sidebar_hits: crate::ui::tabs::SidebarHits,
+    /// The sidebar's rendered area (None while hidden), for click hit-testing.
+    sidebar_area: Option<Rect>,
+    /// When the last sidebar data poll (git stat + MCP state) started.
+    last_sidebar_poll: Option<std::time::Instant>,
+    /// Whether any overlay (modal/panel/toast) was open on the previous frame.
+    /// When one closes, the next frame forces a FULL terminal repaint: diff
+    /// rendering never re-sends "unchanged" cells, so a terminal that dropped
+    /// cells under the overlay (observed in Warp) would keep the gap forever.
+    overlay_was_open: bool,
+    /// One-shot full-repaint request (overlay close, Ctrl+L).
+    force_redraw: bool,
     show_help: bool,
     toast: Option<Toast>,
     provider_names: Vec<String>,
@@ -427,6 +448,10 @@ impl TuiApp {
         // Read display prefs before `template` is moved into the struct.
         let show_thinking = template.show_thinking();
         let show_tool_details = template.show_tool_details();
+        // Mouse capture drives BOTH terminal setup and app-managed selection:
+        // with capture off (`"mouseCapture": false`) the terminal owns
+        // selection — ⌘C copies natively — and no mouse events reach the app.
+        let mouse_capture = template.mouse_capture();
         // Apply the configured UI language so the chrome renders localized.
         if let Some(lang) = template.language() {
             zode_core::i18n::set_language_code(lang);
@@ -443,7 +468,7 @@ impl TuiApp {
                 .unwrap_or(false),
             template,
             sidebar_visibility: SidebarVisibility::Auto,
-            selection_mode: true,
+            selection_mode: mouse_capture,
             active_selection: None,
             active_input_selection: None,
             input: InputBox::new(),
@@ -478,6 +503,15 @@ impl TuiApp {
             bg_shells: Vec::new(),
             subagents_panel: None,
             subagents: Vec::new(),
+            mcp_section_collapsed: false,
+            files_section_collapsed: false,
+            todo_section_collapsed: false,
+            files_panel: None,
+            sidebar_hits: crate::ui::tabs::SidebarHits::default(),
+            sidebar_area: None,
+            last_sidebar_poll: None,
+            overlay_was_open: false,
+            force_redraw: false,
             show_help: false,
             toast: None,
             provider_names: ui.provider_names,
@@ -644,26 +678,40 @@ impl TuiApp {
         &mut self.tabs[self.active]
     }
 
-    /// Open a fresh tab (Ctrl+T) with its own engine; focus it.
-    async fn new_tab(&mut self) {
+    /// Open a fresh tab (Ctrl+T) and focus it immediately; its engine is
+    /// assembled OFF the event loop (skills scan, MCP connect, LSP discovery
+    /// can take seconds — run inline they froze every tab). Until the
+    /// `ReassembleDone` lands, the tab shows as Switching and borrows the
+    /// current tab's engine Arc as a placeholder — it is busy the whole time,
+    /// so nothing can run against the borrowed engine.
+    fn new_tab(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         let id = self.next_tab_id;
-        match self.template.assemble_tab(None, Some(id.to_string())).await {
-            Ok(engine) => {
-                self.next_tab_id += 1;
-                let session_id = Uuid::new_v4().simple().to_string();
-                self.tabs
-                    .push(SessionTab::new(id, Arc::new(engine), session_id));
-                self.active = self.tabs.len() - 1;
-                self.dismiss_input_popups();
-                self.queued_edit_index = None;
-            }
-            Err(e) => {
-                self.toast = Some(Toast::error(format!(
-                    "{}: {e}",
-                    crate::tr("new tab failed")
-                )));
-            }
-        }
+        self.next_tab_id += 1;
+        let session_id = Uuid::new_v4().simple().to_string();
+        let placeholder = self.active_tab().engine.clone();
+        let mut tab = SessionTab::new(id, placeholder, session_id);
+        tab.reassemble_pending = true;
+        tab.reassemble_seq = 1;
+        tab.mode = Mode::Switching;
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        self.dismiss_input_popups();
+        self.queued_edit_index = None;
+
+        let template = self.template.clone();
+        let tx = agent_tx.clone();
+        tokio::spawn(async move {
+            let result = match template.assemble_tab(None, Some(id.to_string())).await {
+                Ok(engine) => Ok(ReassembledEngine { template, engine }),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(AppEvent::ReassembleDone {
+                tab_id: id,
+                seq: 1,
+                effect: ReassembleEffect::NewTab,
+                result,
+            });
+        });
     }
 
     /// Close the active tab (Ctrl+W). Aborts its in-flight turn first; closing
@@ -894,17 +942,41 @@ impl TuiApp {
         }
 
         self.tabs[tab_idx].reassemble_pending = false;
+        // A new/resumed tab assembles under an UNCHANGED template clone —
+        // installing it back would clobber a template switch that happened
+        // while the assembly ran.
+        let tab_creation = matches!(
+            effect,
+            ReassembleEffect::NewTab | ReassembleEffect::ResumeTab
+        );
         match result {
             Ok(done) => {
                 let model = done.engine.model.clone();
                 self.tabs[tab_idx].engine = Arc::new(done.engine);
                 self.tabs[tab_idx].mode = Mode::Ready;
-                self.template = done.template;
-                self.status.model = model;
+                if !tab_creation {
+                    self.template = done.template;
+                    self.status.model = model;
+                }
                 if self.active < self.tabs.len() && self.tabs[self.active].id == tab_id {
                     self.refresh_dynamic_commands();
                 }
                 self.apply_reassemble_effect(tab_idx, effect);
+            }
+            Err(e) if tab_creation => {
+                // The placeholder tab never got a real engine — remove it
+                // (keeping it would leave a tab aliasing another tab's engine
+                // and store). If it was the last tab (the parent was closed
+                // mid-assembly), quit like closing the last tab does.
+                self.tabs.remove(tab_idx);
+                if self.tabs.is_empty() {
+                    self.should_quit = true;
+                    return;
+                }
+                if self.active >= self.tabs.len() {
+                    self.active = self.tabs.len() - 1;
+                }
+                self.toast = Some(Toast::error(e));
             }
             Err(e) => {
                 if let ReassembleEffect::Plan { on } = effect {
@@ -944,6 +1016,27 @@ impl TuiApp {
             }
             ReassembleEffect::Goal { goal } => self.apply_goal_effect(tab_idx, goal),
             ReassembleEffect::Model { id } => self.apply_model_effect(tab_idx, &id),
+            // Fresh tab: nothing to announce — the tab flipping from
+            // Switching to Ready IS the signal.
+            ReassembleEffect::NewTab => {}
+            // Resumed tab: the engine arrived with the saved store attached —
+            // replay it into the transcript and seed the context gauge.
+            ReassembleEffect::ResumeTab => {
+                let rebuilt = {
+                    let tab = &self.tabs[tab_idx];
+                    tab.engine.store.lock().ok().map(|store| {
+                        (
+                            rebuild_chat_from_store(&store),
+                            estimate_store_tokens(&store),
+                        )
+                    })
+                };
+                if let Some((chat, tokens)) = rebuilt {
+                    let tab = &mut self.tabs[tab_idx];
+                    tab.chat = chat;
+                    tab.context_tokens = tokens;
+                }
+            }
             ReassembleEffect::Notify(notify) => self.apply_reassemble_notify(tab_idx, notify),
             ReassembleEffect::Orchestration { on, notify } => {
                 if let Ok(mut cfg) = ConfigManager::load_global() {
@@ -1260,49 +1353,15 @@ impl TuiApp {
             Some(WorkflowsAction::Close) => self.workflows_dialog = None,
             Some(WorkflowsAction::Run { name }) => {
                 self.workflows_dialog = None;
-                let cwd = self.active_tab().engine.cwd.clone();
-                let def = zode_core::workflows::load_workflow_defs(&cwd)
-                    .into_iter()
-                    .find(|w| w.name == name);
-                match def {
-                    Some(def) if !def.steps.is_empty() => {
-                        // Deterministic execution: zode runs each step as its
-                        // OWN sequential turn (queued so step N+1 only fires when
-                        // step N's turn finishes — the model can't skip, reorder,
-                        // or merge steps). Each step is directed at its sub-agent.
-                        let n = def.steps.len();
-                        for (i, s) in def.steps.iter().enumerate() {
-                            let turn = format!(
-                                "[workflow \"{name}\" — step {}/{n}] Use the `{}` sub-agent (via \
-                                 the Task tool) for exactly this step, then report its result:\n\n{}",
-                                i + 1,
-                                s.agent_type,
-                                s.prompt
-                            );
-                            self.active_tab_mut().queued_input.push_back(turn);
-                        }
-                        self.toast = Some(Toast::info(format!(
-                            "{} '{name}' ({n} {})",
-                            crate::tr("running workflow"),
-                            crate::tr("steps")
-                        )));
-                        // Kick off step 1; the rest auto-chain as each turn ends.
-                        self.dispatch_queued_input(agent_tx).await;
-                    }
-                    _ => {
-                        self.toast = Some(Toast::error(
-                            crate::tr("workflow '{name}' has no steps").replace("{name}", &name),
-                        ))
-                    }
-                }
+                self.spawn_workflow_run(name, agent_tx);
             }
             Some(WorkflowsAction::AiCreate { brief }) => {
                 self.workflows_dialog = None;
                 let prompt = format!(
-                    "Create a reusable workflow for me using the `define_workflow` tool. \
-                     Here is what it should accomplish:\n\n{brief}\n\nBreak it into ordered \
-                     steps, each with a fitting sub-agent type and a precise instruction, so \
-                     the workflow runs the same way every time, then call define_workflow."
+                    "Create a reusable JS workflow for me using the `define_workflow` tool. \
+                     Here is what it should accomplish:\n\n{brief}\n\nWrite the orchestration \
+                     script with agent()/parallel()/pipeline() so zode can execute it \
+                     deterministically with run_workflow, then call define_workflow."
                 );
                 self.submit(&prompt, agent_tx).await;
             }
@@ -1344,7 +1403,11 @@ impl TuiApp {
         self.session_picker = Some(SessionPicker::new(metas));
     }
 
-    async fn handle_picker_key(&mut self, code: KeyCode) {
+    async fn handle_picker_key(
+        &mut self,
+        code: KeyCode,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
         match code {
             KeyCode::Esc => self.session_picker = None,
             KeyCode::Up => {
@@ -1375,7 +1438,7 @@ impl TuiApp {
                 let target = self.session_picker.as_ref().and_then(|p| p.selected());
                 self.session_picker = None;
                 if let Some(meta) = target {
-                    self.resume_session(meta).await;
+                    self.resume_session(meta, agent_tx);
                 }
             }
             KeyCode::Char(c) => {
@@ -1387,9 +1450,12 @@ impl TuiApp {
         }
     }
 
-    /// Resume a saved session in a new tab, replaying its history into the
-    /// chat. If the session is already open, just focus that tab.
-    async fn resume_session(&mut self, meta: SessionMeta) {
+    /// Resume a saved session in a new tab. If the session is already open,
+    /// just focus that tab. The transcript load + engine assembly run OFF the
+    /// event loop (a large transcript + MCP connect can take seconds); until
+    /// the `ReassembleDone` lands the tab is a busy Switching placeholder, and
+    /// the `ResumeTab` effect rebuilds the chat from the loaded store.
+    fn resume_session(&mut self, meta: SessionMeta, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         if let Some(pos) = self.tabs.iter().position(|t| t.session_id == meta.id) {
             self.active = pos;
             self.dismiss_input_popups();
@@ -1402,15 +1468,6 @@ impl TuiApp {
                 return;
             }
         };
-        let store = match Session::load(&path).await {
-            Ok(s) => s,
-            Err(e) => {
-                self.toast = Some(Toast::error(format!("{}: {e}", crate::tr("load failed"))));
-                return;
-            }
-        };
-        let chat = rebuild_chat_from_store(&store);
-        let resumed_tokens = estimate_store_tokens(&store);
         // Resume in the session's original directory when it still exists, so
         // tools operate in the right repo (not the launch cwd).
         let cwd_override = if std::path::Path::new(&meta.cwd).is_dir() {
@@ -1419,29 +1476,42 @@ impl TuiApp {
             None
         };
         let id = self.next_tab_id;
-        let engine = match self
-            .template
-            .assemble_tab(cwd_override, Some(id.to_string()))
-            .await
-        {
-            Ok(e) => e.with_store(store),
-            Err(e) => {
-                self.toast = Some(Toast::error(format!(
-                    "{}: {e}",
-                    crate::tr("assemble failed")
-                )));
-                return;
-            }
-        };
         self.next_tab_id += 1;
-        let mut tab = SessionTab::new(id, Arc::new(engine), meta.id.clone());
+        let placeholder = self.active_tab().engine.clone();
+        let mut tab = SessionTab::new(id, placeholder, meta.id.clone());
         tab.title = meta.title.clone();
         tab.titled = true;
-        tab.chat = chat;
-        tab.context_tokens = resumed_tokens;
+        tab.reassemble_pending = true;
+        tab.reassemble_seq = 1;
+        tab.mode = Mode::Switching;
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.dismiss_input_popups();
+
+        let template = self.template.clone();
+        let tx = agent_tx.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let store = Session::load(&path)
+                    .await
+                    .map_err(|e| format!("{}: {e}", crate::tr("load failed")))?;
+                let engine = template
+                    .assemble_tab(cwd_override, Some(id.to_string()))
+                    .await
+                    .map_err(|e| format!("{}: {e}", crate::tr("assemble failed")))?;
+                Ok(ReassembledEngine {
+                    template,
+                    engine: engine.with_store(store),
+                })
+            }
+            .await;
+            let _ = tx.send(AppEvent::ReassembleDone {
+                tab_id: id,
+                seq: 1,
+                effect: ReassembleEffect::ResumeTab,
+                result,
+            });
+        });
     }
 
     /// Delete a saved session's transcript file and index entry. Open tabs are
@@ -1507,6 +1577,122 @@ impl TuiApp {
         self.subagents.reverse();
     }
 
+    /// Refresh the active tab's sidebar section data on a slow cadence: the
+    /// MCP connection snapshot (sync, cheap) and a spawned git working-tree
+    /// poll (subprocess — never run on the UI loop, one in flight per tab).
+    fn refresh_sidebar_sections(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        const INTERVAL: Duration = Duration::from_secs(2);
+        if !should_show_sidebar(self.tabs.len(), self.sidebar_visibility) {
+            return;
+        }
+        if self
+            .last_sidebar_poll
+            .is_some_and(|t| t.elapsed() < INTERVAL)
+        {
+            return;
+        }
+        self.last_sidebar_poll = Some(std::time::Instant::now());
+        let tab = &mut self.tabs[self.active];
+        tab.mcp_status = tab.engine.mcp_status();
+        if tab.git_poll_inflight {
+            return;
+        }
+        tab.git_poll_inflight = true;
+        let (tab_id, cwd) = (tab.id, tab.engine.cwd.clone());
+        let tx = agent_tx.clone();
+        tokio::spawn(async move {
+            let files = zode_core::git_stat::git_modified_files(&cwd).await;
+            let _ = tx.send(AppEvent::GitStatDone { tab_id, files });
+        });
+    }
+
+    /// Whether anything is drawn on top of the base layout this frame —
+    /// modals, panels, pickers, help, toast. Drives the close-repaint above.
+    fn any_overlay_open(&self) -> bool {
+        self.active_dialog.is_some()
+            || self.active_question.is_some()
+            || self.settings.is_some()
+            || self.connect.is_some()
+            || self.plugin_picker.is_some()
+            || self.agents_dialog.is_some()
+            || self.workflows_dialog.is_some()
+            || self.mcp_dialog.is_some()
+            || self.session_picker.is_some()
+            || self.tasks_panel.is_some()
+            || self.subagents_panel.is_some()
+            || self.files_panel.is_some()
+            || self.show_help
+            || self.toast.is_some()
+    }
+
+    /// Left-click on a collapsible sidebar section header toggles its fold;
+    /// clicking the modified-files "…+k more" row opens the full-list overlay.
+    fn try_sidebar_header_click(&mut self, mouse: &MouseEvent) -> bool {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return false;
+        }
+        let Some(area) = self.sidebar_area else {
+            return false;
+        };
+        if mouse.column < area.x || mouse.column >= area.x + area.width {
+            return false;
+        }
+        if Some(mouse.row) == self.sidebar_hits.mcp_header_row {
+            self.mcp_section_collapsed = !self.mcp_section_collapsed;
+            return true;
+        }
+        if Some(mouse.row) == self.sidebar_hits.files_header_row {
+            self.files_section_collapsed = !self.files_section_collapsed;
+            return true;
+        }
+        if Some(mouse.row) == self.sidebar_hits.files_more_row {
+            self.files_panel = Some(crate::ui::dialog::files_panel::FilesPanel::new());
+            return true;
+        }
+        if Some(mouse.row) == self.sidebar_hits.todo_header_row {
+            self.todo_section_collapsed = !self.todo_section_collapsed;
+            return true;
+        }
+        false
+    }
+
+    /// The active tab's cached git-stat list length (0 while unknown).
+    fn active_git_file_count(&self) -> usize {
+        self.active_tab()
+            .git_files
+            .as_ref()
+            .map(|f| f.len())
+            .unwrap_or(0)
+    }
+
+    fn handle_files_panel_key(&mut self, code: KeyCode) {
+        let total = self.active_git_file_count();
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.files_panel = None,
+            KeyCode::Up => {
+                if let Some(p) = &mut self.files_panel {
+                    p.scroll_up(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(p) = &mut self.files_panel {
+                    p.scroll_down(1, total);
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(p) = &mut self.files_panel {
+                    p.scroll_up(10);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(p) = &mut self.files_panel {
+                    p.scroll_down(10, total);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn open_subagents_panel(&mut self) {
         self.refresh_subagents();
         self.subagents_panel = Some(crate::ui::dialog::subagents::SubAgentsPanel::new());
@@ -1542,7 +1728,8 @@ impl TuiApp {
     pub async fn run(mut self) -> std::io::Result<()> {
         // Seed the autocomplete with the initial tab's agents/skills/MCP tools.
         self.refresh_dynamic_commands();
-        let mut terminal = setup_terminal()?;
+        // selection_mode == effective mouseCapture (set once in `new`).
+        let mut terminal = setup_terminal(self.selection_mode)?;
         let result = self.event_loop(&mut terminal).await;
         restore_terminal(&mut terminal)?;
         self.print_resume_hint();
@@ -1580,6 +1767,14 @@ impl TuiApp {
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
 
         loop {
+            // Full repaint when an overlay just closed (or Ctrl+L asked): see
+            // `overlay_was_open` — repairs cells the terminal lost under it.
+            let overlay_open = self.any_overlay_open();
+            if self.force_redraw || (self.overlay_was_open && !overlay_open) {
+                self.force_redraw = false;
+                terminal.clear()?;
+            }
+            self.overlay_was_open = overlay_open;
             terminal.draw(|f| self.draw(f))?;
             if self.should_quit {
                 // Sweep any clipboard preview temp files still held by any tab.
@@ -1647,6 +1842,7 @@ impl TuiApp {
                     self.session_picker = None;
                     self.tasks_panel = None;
                     self.subagents_panel = None;
+                    self.files_panel = None;
                     self.show_help = false;
                     // Only focus the source tab when this request becomes the
                     // active dialog; a queued request must not steal focus from
@@ -1666,6 +1862,7 @@ impl TuiApp {
                     self.session_picker = None;
                     self.tasks_panel = None;
                     self.subagents_panel = None;
+                    self.files_panel = None;
                     self.show_help = false;
                     if self.active_question.is_none() {
                         self.open_question(req);
@@ -1697,6 +1894,9 @@ impl TuiApp {
                         let snap = engine.todo_state.snapshot().await;
                         self.tabs[i].todos = snap;
                     }
+                    // Throttled sidebar data poll: git working-tree stats
+                    // (spawned off-loop) + MCP connection state, active tab.
+                    self.refresh_sidebar_sections(&agent_tx);
                 }
             }
         }
@@ -1759,7 +1959,7 @@ impl TuiApp {
         }
         if let Some(tab_area) = areas.tabs {
             let mode = crate::tr(mode_label(self.status.mode));
-            render_sidebar(
+            let hits = render_sidebar(
                 f,
                 tab_area,
                 &self.tabs,
@@ -1777,14 +1977,25 @@ impl TuiApp {
                     sandbox: self.status.sandbox,
                     todos: &self.tabs[self.active].todos,
                     busy: active_busy,
+                    todos_collapsed: self.todo_section_collapsed,
                     subagents: &self.subagents,
                     goal: self.tabs[self.active].goal_text.as_deref(),
                     goal_elapsed: self.tabs[self.active]
                         .goal_started_at
                         .map(|t| format_elapsed(t.elapsed())),
+                    mcp_servers: &self.tabs[self.active].mcp_status,
+                    mcp_collapsed: self.mcp_section_collapsed,
+                    git_files: self.tabs[self.active].git_files.as_deref().unwrap_or(&[]),
+                    files_collapsed: self.files_section_collapsed,
+                    version: env!("CARGO_PKG_VERSION"),
                 },
                 &theme,
             );
+            self.sidebar_hits = hits;
+            self.sidebar_area = Some(tab_area);
+        } else {
+            self.sidebar_hits = crate::ui::tabs::SidebarHits::default();
+            self.sidebar_area = None;
         }
 
         let chat_meta = ChatRenderMeta {
@@ -1908,6 +2119,15 @@ impl TuiApp {
                 panel.render(f, area, &agents, now, &theme);
             }
             self.subagents = agents;
+        }
+        // Full modified-files overlay. Same take/restore dance so the panel
+        // (&mut) and the active tab's cached list aren't both borrowed.
+        if self.files_panel.is_some() {
+            let files = std::mem::take(&mut self.tabs[self.active].git_files);
+            if let Some(panel) = &mut self.files_panel {
+                panel.render(f, area, files.as_deref().unwrap_or(&[]), &theme);
+            }
+            self.tabs[self.active].git_files = files;
         }
         if self.show_help {
             crate::ui::help::render_help(f, area, &theme);
@@ -2052,7 +2272,7 @@ impl TuiApp {
 
         // 2b. Session picker captures input (typing filters the list).
         if self.session_picker.is_some() {
-            self.handle_picker_key(key.code).await;
+            self.handle_picker_key(key.code, agent_tx).await;
             return;
         }
 
@@ -2065,6 +2285,12 @@ impl TuiApp {
         // 2d. Sub-agents panel captures input (sync handler, no .await needed).
         if self.subagents_panel.is_some() {
             self.handle_subagents_panel_key(key.code);
+            return;
+        }
+
+        // 2e. Modified-files overlay captures input.
+        if self.files_panel.is_some() {
+            self.handle_files_panel_key(key.code);
             return;
         }
 
@@ -2164,6 +2390,10 @@ impl TuiApp {
                 if let Some(chat) = rebuilt {
                     tab.chat = chat;
                 }
+                // Also force a FULL terminal repaint: cells ratatui considers
+                // unchanged (e.g. the sidebar rail) are never re-sent, so a
+                // terminal that lost them (Warp glitches) shows gaps forever.
+                self.force_redraw = true;
                 return;
             }
             // Paste uses the platform primary modifier (Cmd on macOS, Ctrl on
@@ -2179,7 +2409,7 @@ impl TuiApp {
                 return;
             }
             (KeyCode::Char('t'), m) if is_primary_mod(m) => {
-                self.new_tab().await;
+                self.new_tab(agent_tx);
                 return;
             }
             (KeyCode::Char('w'), m) if is_primary_mod(m) => {
@@ -2329,7 +2559,7 @@ impl TuiApp {
                     self.input.take();
                     self.completion_hint = None;
                     self.autocomplete.dismiss();
-                    self.open_connect_dialog();
+                    self.open_connect_dialog(agent_tx);
                     return;
                 }
                 KeyCode::Enter if self.autocomplete.selected_name() == Some("plugin") => {
@@ -2611,6 +2841,7 @@ impl TuiApp {
             || self.session_picker.is_some()
             || self.tasks_panel.is_some()
             || self.subagents_panel.is_some()
+            || self.files_panel.is_some()
             || self.show_help
         {
             return;
@@ -2676,27 +2907,6 @@ impl TuiApp {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        // TEMP DEBUG PROBE: log every mouse event zode receives, so we can tell
-        // whether Warp is forwarding drags at all. Remove after diagnosing.
-        {
-            use std::io::Write as _;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/zode-mouse-debug.log")
-            {
-                let _ = writeln!(
-                    f,
-                    "kind={:?} col={} row={} mods={:?} sel_mode={} has_sel={}",
-                    mouse.kind,
-                    mouse.column,
-                    mouse.row,
-                    mouse.modifiers,
-                    self.selection_mode,
-                    self.has_active_selection(),
-                );
-            }
-        }
         if let Some(picker) = &mut self.session_picker {
             match session_picker_scroll_from_mouse(mouse.kind) {
                 Some(SessionPickerMouseScroll::Up(n)) => picker.scroll_up(n),
@@ -2718,6 +2928,19 @@ impl TuiApp {
             return;
         }
 
+        // Wheel-scroll the modified-files overlay.
+        if self.files_panel.is_some() {
+            let total = self.active_git_file_count();
+            if let Some(panel) = &mut self.files_panel {
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => panel.scroll_down(3, total),
+                    MouseEventKind::ScrollUp => panel.scroll_up(3),
+                    _ => {}
+                }
+            }
+            return;
+        }
+
         if self.active_dialog.is_some()
             || self.active_question.is_some()
             || self.settings.is_some()
@@ -2728,6 +2951,7 @@ impl TuiApp {
             || self.mcp_dialog.is_some()
             || self.tasks_panel.is_some()
             || self.subagents_panel.is_some()
+            || self.files_panel.is_some()
             || self.show_help
         {
             return;
@@ -2735,6 +2959,11 @@ impl TuiApp {
 
         // (Cmd/Ctrl)+left-click on an image chip opens it in the OS viewer.
         if self.try_view_image_chip_click(&mouse) {
+            return;
+        }
+
+        // Left-click on a collapsible sidebar section header toggles its fold.
+        if self.try_sidebar_header_click(&mouse) {
             return;
         }
 
@@ -3105,21 +3334,25 @@ impl TuiApp {
         }
     }
 
-    fn open_connect_dialog(&mut self) {
-        // Load the catalog synchronously (bundled/disk cache — never hits the
-        // network on this path). Then kick off a best-effort background refresh
-        // so the cache is warm for the next open.
-        let cat = zode_core::Catalog::load_blocking();
-        // The user's configured providers form the "Configured" section (listed
-        // first); load them best-effort from the global config.
-        let configured = ConfigManager::load_global()
-            .map(|c| c.providers)
-            .unwrap_or_default();
-        self.connect = Some(ConnectDialog::with_catalog_and_providers(&cat, &configured));
-        // Spawn a detached blocking task to refresh the disk cache; ignore any error.
-        // spawn_blocking is correct here: refresh_blocking does sync I/O + a
-        // 5-second HTTP timeout and must not run on an async worker thread.
-        tokio::task::spawn_blocking(|| {
+    fn open_connect_dialog(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        // Build the dialog OFF the event loop: the catalog + config reads are
+        // small local files (never the network on this path), but any sync
+        // disk I/O in the loop can stutter. The dialog arrives as an event a
+        // beat later; the same blocking thread then refreshes the disk cache
+        // best-effort (sync I/O + a 5-second HTTP timeout — it must not run
+        // on an async worker thread) so the next open is current.
+        let tx = agent_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let cat = zode_core::Catalog::load_blocking();
+            // The user's configured providers form the "Configured" section
+            // (listed first); load them best-effort from the global config.
+            let configured = ConfigManager::load_global()
+                .map(|c| c.providers)
+                .unwrap_or_default();
+            let dialog = ConnectDialog::with_catalog_and_providers(&cat, &configured);
+            let _ = tx.send(AppEvent::ConnectDialogReady {
+                dialog: Box::new(dialog),
+            });
             let _ = zode_core::Catalog::refresh_blocking();
         });
     }
@@ -3955,73 +4188,40 @@ impl TuiApp {
         }
     }
 
-    /// Run a `!<cmd>` shell escape directly (no agent turn): execute in the
-    /// active tab's cwd, echo the command + output inline, and buffer the
-    /// command+output as context for the next prompt so the agent sees it.
-    async fn run_local_shell(&mut self, cmd: &str) {
+    /// Run a `!<cmd>` shell escape (no agent turn) OFF the event loop: echo the
+    /// command immediately, spawn the process, and post the output back as a
+    /// `LocalShellDone` event — run inline it froze the whole TUI for up to the
+    /// 20s timeout. On an idle tab it takes the turn-busy slot, so a follow-up
+    /// prompt queues behind it (the output is prepended as context) and Esc
+    /// kills the child. On a busy tab (agent turn / op call in flight) it runs
+    /// concurrently without touching the slot — same immediacy as the old
+    /// inline version, minus the freeze.
+    fn spawn_local_shell(&mut self, cmd: &str, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         let cwd = self.active_tab().engine.cwd.clone();
+        let tab_id = self.active_tab().id;
         self.active_tab_mut().chat.push_system(&format!("$ {cmd}"));
-
-        #[cfg(windows)]
-        let mut command = {
-            let mut c = tokio::process::Command::new("cmd");
-            c.arg("/C").arg(cmd);
-            c
-        };
-        #[cfg(not(windows))]
-        let mut command = {
-            let mut c = tokio::process::Command::new("sh");
-            c.arg("-c").arg(cmd);
-            c
-        };
-        command.current_dir(&cwd);
-
-        // Bound the worst case: a timeout caps the UI stall and the output size
-        // cap prevents `!yes`/`!find /` from growing chat + context until OOM.
-        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-        const MAX_OUTPUT: usize = 64 * 1024;
-        let output = match tokio::time::timeout(TIMEOUT, command.output()).await {
-            Ok(Ok(o)) => {
-                let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-                let err = String::from_utf8_lossy(&o.stderr);
-                if !err.trim().is_empty() {
-                    if !s.is_empty() && !s.ends_with('\n') {
-                        s.push('\n');
-                    }
-                    s.push_str(&err);
-                }
-                if s.len() > MAX_OUTPUT {
-                    let mut end = MAX_OUTPUT;
-                    while end > 0 && !s.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    s.truncate(end);
-                    s.push_str("\n… (output truncated)");
-                }
-                // Surface a non-zero exit so the agent sees failures.
-                if !matches!(o.status.code(), Some(0) | None) {
-                    if !s.is_empty() && !s.ends_with('\n') {
-                        s.push('\n');
-                    }
-                    s.push_str(&format!("[exit {}]", o.status.code().unwrap_or(-1)));
-                }
-                s
-            }
-            Ok(Err(e)) => format!("failed to run command: {e}"),
-            Err(_) => format!("command timed out after {}s", TIMEOUT.as_secs()),
-        };
-
-        let shown = output.trim_end();
-        if shown.is_empty() {
-            self.active_tab_mut().chat.push_tool("(no output)");
-        } else {
-            for line in shown.lines() {
-                self.active_tab_mut().chat.push_tool(line);
-            }
+        let abort = AbortController::new();
+        let owned_slot = !self.active_tab().is_busy();
+        if owned_slot {
+            // Reuse the turn-busy machinery: spinner shows, prompts queue, and
+            // Esc (interrupt_active_turn) aborts — the select below sees it
+            // and the child dies with the dropped future (kill_on_drop).
+            self.active_tab_mut().turn_abort = Some(abort.clone());
         }
-        self.active_tab_mut()
-            .pending_shell_context
-            .push(format_shell_context(cmd, &output));
+        let cmd = cmd.to_string();
+        let tx = agent_tx.clone();
+        tokio::spawn(async move {
+            let output = tokio::select! {
+                out = run_shell_capture(&cmd, &cwd) => Some(out),
+                _ = abort.cancelled() => None,
+            };
+            let _ = tx.send(AppEvent::LocalShellDone {
+                tab_id,
+                cmd,
+                output,
+                owned_slot,
+            });
+        });
     }
 
     async fn submit(&mut self, text: &str, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
@@ -4033,7 +4233,7 @@ impl TuiApp {
         if let Some(cmd) = text.trim().strip_prefix('!') {
             let cmd = cmd.trim();
             if !cmd.is_empty() {
-                self.run_local_shell(cmd).await;
+                self.spawn_local_shell(cmd, agent_tx);
             }
             return;
         }
@@ -4138,7 +4338,11 @@ impl TuiApp {
             self.active_tab().engine.supports_images(),
             images_cfg.vision_provider.is_some(),
         );
-        let vision_engine = match image_route {
+        // Only ROUTE the image submission here; the vision engine itself is
+        // assembled inside the spawned turn task below (skills scan + MCP
+        // connect can take seconds — run inline it froze the whole TUI), so an
+        // assembly failure surfaces as a turn error, under the turn's spinner.
+        let vision_template = match image_route {
             ImageSubmitRoute::Direct => None,
             ImageSubmitRoute::Unsupported => {
                 if has_images {
@@ -4163,31 +4367,7 @@ impl TuiApp {
                     ));
                     return;
                 };
-                match template
-                    .assemble_tab(
-                        Some(self.active_tab().engine.cwd.clone()),
-                        Some(format!("{}:vision", self.active_tab().id)),
-                    )
-                    .await
-                {
-                    Ok(engine) if engine.supports_images() => Some(Arc::new(engine)),
-                    Ok(_) => {
-                        self.toast = Some(Toast::error(
-                            crate::tr(
-                                "vision provider '{provider_name}' does not declare image support",
-                            )
-                            .replace("{provider_name}", provider_name),
-                        ));
-                        return;
-                    }
-                    Err(e) => {
-                        self.toast = Some(Toast::error(format!(
-                            "{}: {e}",
-                            crate::tr("vision provider failed")
-                        )));
-                        return;
-                    }
-                }
+                Some((template, provider_name.to_string()))
             }
         };
 
@@ -4203,7 +4383,7 @@ impl TuiApp {
             } else {
                 submitted_text.clone()
             };
-            self.active_tab_mut().stamp_title(&title_source).await;
+            self.active_tab_mut().stamp_title(&title_source);
         }
 
         // The pending images are about to be consumed; drop any chip selection.
@@ -4236,7 +4416,32 @@ impl TuiApp {
         let vision_prompt = images_cfg.effective_prompt().to_string();
         let tx = agent_tx.clone();
         tokio::spawn(async move {
-            let stream_result = if let Some(vision_engine) = vision_engine {
+            let stream_result = if let Some((vision_template, provider_name)) = vision_template {
+                let vision_engine = match vision_template
+                    .assemble_tab(Some(engine.cwd.clone()), Some(format!("{tab_id}:vision")))
+                    .await
+                {
+                    Ok(e) if e.supports_images() => Arc::new(e),
+                    Ok(_) => {
+                        let _ = tx.send(AppEvent::TurnDone {
+                            tab_id,
+                            turn_id,
+                            result: Err(crate::tr(
+                                "vision provider '{provider_name}' does not declare image support",
+                            )
+                            .replace("{provider_name}", &provider_name)),
+                        });
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppEvent::TurnDone {
+                            tab_id,
+                            turn_id,
+                            result: Err(format!("{}: {e}", crate::tr("vision provider failed"))),
+                        });
+                        return;
+                    }
+                };
                 match run_vision_description(
                     vision_engine,
                     vision_prompt,
@@ -4266,6 +4471,21 @@ impl TuiApp {
 
             match stream_result {
                 Ok(mut stream) => {
+                    // Surface the post-compaction restoration note (if the
+                    // engine injected one at the start of this turn) through
+                    // the same channel as provider events, so the generic
+                    // Notice renderer shows it in the transcript.
+                    if let Some(note) = engine.take_restore_note() {
+                        let _ = tx.send(AppEvent::Agent {
+                            tab_id,
+                            turn_id,
+                            cost_label: None,
+                            event: Event::Notice {
+                                code: "zode.compact.restore".into(),
+                                message: note,
+                            },
+                        });
+                    }
                     while let Some(item) = stream.next().await {
                         match item {
                             Ok(event) => {
@@ -4329,6 +4549,14 @@ impl TuiApp {
             self.handle_reassemble_done(tab_id, seq, effect, result);
             return;
         }
+        // A background git-stat poll finished: cache it for the sidebar.
+        if let AppEvent::GitStatDone { tab_id, files } = ev {
+            if let Some(tab) = self.tab_by_id(tab_id) {
+                tab.git_poll_inflight = false;
+                tab.git_files = files;
+            }
+            return;
+        }
         // Toasts (from off-loop work) carry no tab/turn id.
         if let AppEvent::Toast { text, error } = ev {
             self.toast = Some(if error {
@@ -4340,7 +4568,12 @@ impl TuiApp {
         }
         // A manual /compact finished: clear the tab's busy state and post the
         // outcome. Routed by tab id only (it isn't a turn).
-        if let AppEvent::CompactDone { tab_id, result } = ev {
+        if let AppEvent::CompactDone {
+            tab_id,
+            result,
+            auto,
+        } = ev
+        {
             let Some(tab) = self.tab_by_id(tab_id) else {
                 return;
             };
@@ -4349,12 +4582,23 @@ impl TuiApp {
             let ok = result.is_ok();
             match result {
                 Ok(summary) => {
+                    tab.auto_compact_failures = 0;
                     tab.chat.push_system(&summary);
                     tab.mode = Mode::Ready;
                 }
                 Err(e) => {
                     tab.chat
                         .push_system(&format!("{}: {e}", crate::tr("compact failed")));
+                    // Trip the auto-compact breaker on repeated auto failures;
+                    // tell the user ONCE what stopped and what to do instead.
+                    if auto {
+                        tab.auto_compact_failures = tab.auto_compact_failures.saturating_add(1);
+                        if tab.auto_compact_failures == AUTO_COMPACT_MAX_FAILURES {
+                            tab.chat.push_system(crate::tr(
+                                "auto-compact paused after repeated failures — run /compact to retry manually, or /clear to start fresh",
+                            ));
+                        }
+                    }
                     tab.mode = Mode::Error;
                 }
             }
@@ -4404,6 +4648,50 @@ impl TuiApp {
             }
             return;
         }
+        if let AppEvent::ConnectDialogReady { dialog } = ev {
+            // An approval/question modal that arrived meanwhile owns the
+            // screen — drop the dialog rather than covering the prompt (the
+            // user can re-run /connect).
+            if self.active_dialog.is_none() && self.active_question.is_none() {
+                self.connect = Some(*dialog);
+            }
+            return;
+        }
+        if let AppEvent::LocalShellDone {
+            tab_id,
+            cmd,
+            output,
+            owned_slot,
+        } = ev
+        {
+            let Some(tab) = self.tab_by_id(tab_id) else {
+                return;
+            };
+            // Release the busy slot only if this run took it — and never
+            // clobber a LIVE agent turn's abort handle (possible if the user
+            // Esc'd this command and started a turn before the kill completed;
+            // `active_turn_id != 0` only while a turn is in flight).
+            if owned_slot && tab.active_turn_id == 0 {
+                tab.turn_abort = None;
+            }
+            // `None` = interrupted: the child was killed and the interrupt
+            // handler already posted "(interrupted)" — nothing more to show,
+            // and a partial run must not become agent context.
+            let Some(output) = output else {
+                return;
+            };
+            let shown = output.trim_end();
+            if shown.is_empty() {
+                tab.chat.push_tool("(no output)");
+            } else {
+                for line in shown.lines() {
+                    tab.chat.push_tool(line);
+                }
+            }
+            tab.pending_shell_context
+                .push(format_shell_context(&cmd, &output));
+            return;
+        }
         // Route to the originating tab; drop events from a closed tab.
         let (tab_id, turn_id) = match &ev {
             AppEvent::Agent {
@@ -4416,6 +4704,9 @@ impl TuiApp {
             | AppEvent::CompactDone { .. }
             | AppEvent::BgProgress { .. }
             | AppEvent::BgDone { .. }
+            | AppEvent::GitStatDone { .. }
+            | AppEvent::LocalShellDone { .. }
+            | AppEvent::ConnectDialogReady { .. }
             | AppEvent::ReassembleDone { .. } => {
                 unreachable!("handled above")
             }
@@ -4569,6 +4860,9 @@ impl TuiApp {
             | AppEvent::CompactDone { .. }
             | AppEvent::BgProgress { .. }
             | AppEvent::BgDone { .. }
+            | AppEvent::GitStatDone { .. }
+            | AppEvent::LocalShellDone { .. }
+            | AppEvent::ConnectDialogReady { .. }
             | AppEvent::ReassembleDone { .. } => {
                 unreachable!("handled above")
             }
@@ -4596,6 +4890,12 @@ impl TuiApp {
                     if let Ok(mut store) = tab.engine.store.lock() {
                         *store = agent::message::MessageStore::new();
                     }
+                    // The context gauge reflects the (now empty) store again
+                    // only at the next Usage event — reset it here so the
+                    // auto-compact trigger can't fire on a stale 98%+ badge.
+                    // A fresh conversation also re-arms the breaker.
+                    tab.context_tokens = 0;
+                    tab.auto_compact_failures = 0;
                 }
             }
             "theme" => self.handle_theme(args),
@@ -4654,7 +4954,7 @@ impl TuiApp {
             }
             "sessions" | "resume" => self.open_session_picker(),
             "tab" => self.handle_tab_command(args),
-            "connect" => self.open_connect_dialog(),
+            "connect" => self.open_connect_dialog(agent_tx),
             "plugin" => self.open_plugin_picker(),
             "vision" => self.handle_vision(args),
             "sidebar" => {
@@ -4944,6 +5244,51 @@ impl TuiApp {
     /// call can block on connect/install/launch, which would freeze the UI (and
     /// could deadlock the consent prompt, which the event loop must pump). This
     /// keeps the UI live + cancelable and posts the result back as an event.
+    /// Run a saved JS workflow off-loop (the `/workflows` dialog's Enter):
+    /// `log()` lines stream in as BgProgress, the result lands via BgDone,
+    /// and Esc aborts through the turn-busy slot like any other turn.
+    fn spawn_workflow_run(&mut self, name: String, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        if self.active_tab().is_busy() {
+            self.active_tab_mut().chat.push_system(crate::tr(
+                "busy — finish or interrupt the current turn first",
+            ));
+            return;
+        }
+        let tab_id = self.active_tab().id;
+        let engine = self.active_tab().engine.clone();
+        let abort = AbortController::new();
+        self.active_tab_mut().turn_abort = Some(abort.clone());
+        self.active_tab_mut().mode = Mode::Thinking;
+        self.active_tab_mut()
+            .chat
+            .push_system(&format!("{} '{name}'…", crate::tr("running workflow")));
+        let tx = agent_tx.clone();
+        tokio::spawn(async move {
+            let log_tx = tx.clone();
+            let log: zode_core::workflows_js::LogSink = Arc::new(move |line| {
+                let _ = log_tx.send(AppEvent::BgProgress {
+                    tab_id,
+                    line: format!("  {line}"),
+                });
+            });
+            let result = engine
+                .run_workflow_named(&name, serde_json::Value::Null, log, abort)
+                .await
+                .map(|value| {
+                    let pretty =
+                        serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+                    let mut line = format!("workflow '{name}' → {pretty}");
+                    if line.len() > 4000 {
+                        line.truncate(4000);
+                        line.push('…');
+                    }
+                    line
+                })
+                .map_err(|e| format!("workflow '{name}': {e}"));
+            let _ = tx.send(AppEvent::BgDone { tab_id, result });
+        });
+    }
+
     fn spawn_op_call(
         &mut self,
         tool: String,
@@ -5095,18 +5440,29 @@ impl TuiApp {
             return;
         }
         let idx = self.active;
-        self.start_compaction(idx, agent_tx);
+        self.start_compaction(idx, agent_tx, false);
     }
 
     /// Kick off compaction for a specific tab: reserve the turn-busy slot (so the
     /// spinner shows and Esc can interrupt), flip the status to `Compacting`, and
     /// run the summarization off-loop. The result lands as a `CompactDone` event.
-    /// Shared by the manual `/compact` command and the auto-compact trigger.
+    /// Shared by the manual `/compact` command (`auto: false`) and the
+    /// auto-compact trigger (`auto: true`).
     /// Callers must ensure the tab is idle (`!is_busy()`).
-    fn start_compaction(&mut self, tab_idx: usize, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+    fn start_compaction(
+        &mut self,
+        tab_idx: usize,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+        auto: bool,
+    ) {
         let tab = &mut self.tabs[tab_idx];
         let tab_id = tab.id;
         let engine = tab.engine.clone();
+        // Hand the engine the REAL occupancy (provider-reported badge value):
+        // it picks the compaction direction from it, and a transcript that is
+        // near/over the window must not be sent whole (the summarize request
+        // itself would 400 with context-overflow, deadlocking compaction).
+        let context_tokens = tab.context_tokens;
         let abort = AbortController::new();
         tab.turn_abort = Some(abort.clone());
         tab.mode = Mode::Compacting;
@@ -5115,7 +5471,7 @@ impl TuiApp {
         let tx = agent_tx.clone();
         tokio::spawn(async move {
             let result = engine
-                .compact(abort)
+                .compact_sized((context_tokens > 0).then_some(context_tokens), abort)
                 .await
                 .map(|o| {
                     format!(
@@ -5127,7 +5483,11 @@ impl TuiApp {
                     )
                 })
                 .map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::CompactDone { tab_id, result });
+            let _ = tx.send(AppEvent::CompactDone {
+                tab_id,
+                result,
+                auto,
+            });
         });
     }
 
@@ -5144,8 +5504,15 @@ impl TuiApp {
             if tab.is_busy() {
                 continue;
             }
+            // Circuit breaker: a CompactDone(Err) lands as an agent event, and
+            // this trigger runs right after every event batch — without the
+            // breaker a persistently failing compaction (e.g. provider 400s)
+            // would loop start→fail→start forever, one LLM call per lap.
+            if tab.auto_compact_failures >= AUTO_COMPACT_MAX_FAILURES {
+                continue;
+            }
             if needs_auto_compact(tab.context_tokens, tab.engine.model_max_tokens) {
-                self.start_compaction(idx, agent_tx);
+                self.start_compaction(idx, agent_tx, true);
             }
         }
     }
@@ -5318,6 +5685,29 @@ impl TuiApp {
     }
 
     fn handle_sidebar_command(&mut self, args: &str) {
+        // Section fold toggles (keyboard fallback for the header click).
+        let folded = match args.trim().to_ascii_lowercase().as_str() {
+            "mcp" => {
+                self.mcp_section_collapsed = !self.mcp_section_collapsed;
+                Some(("mcp", self.mcp_section_collapsed))
+            }
+            "files" => {
+                self.files_section_collapsed = !self.files_section_collapsed;
+                Some(("modified files", self.files_section_collapsed))
+            }
+            "todo" => {
+                self.todo_section_collapsed = !self.todo_section_collapsed;
+                Some(("Todo", self.todo_section_collapsed))
+            }
+            _ => None,
+        };
+        if let Some((section, collapsed)) = folded {
+            let state = if collapsed { "folded" } else { "expanded" };
+            self.active_tab_mut()
+                .chat
+                .push_system(&format!("{} -> {state}", crate::tr(section)));
+            return;
+        }
         match resolve_sidebar_visibility(args, self.sidebar_visibility, self.tabs.len()) {
             Ok(visibility) => {
                 self.sidebar_visibility = visibility;
@@ -5432,6 +5822,10 @@ where
 /// auto-compacts the conversation. Kept just under 100 so compaction happens
 /// before the prompt hits the provider's hard input limit.
 const AUTO_COMPACT_CONTEXT_PERCENT: u64 = 98;
+
+/// Consecutive auto-compaction failures per tab before the auto trigger stops
+/// firing (manual `/compact` stays available; any success resets the count).
+const AUTO_COMPACT_MAX_FAILURES: u32 = 3;
 
 /// Whether a tab's real context occupancy has reached the auto-compact
 /// threshold. Pure (no side effects) so the decision is unit-testable. A zero
@@ -5999,7 +6393,7 @@ fn resolve_sidebar_visibility(
         "off" | "hide" | "close" => Ok(SidebarVisibility::Hidden),
         "on" | "show" | "open" => Ok(SidebarVisibility::Visible),
         "auto" | "default" => Ok(SidebarVisibility::Auto),
-        _ => Err("usage: /sidebar [on|off|toggle|auto]".to_string()),
+        _ => Err("usage: /sidebar [on|off|toggle|auto|mcp|files|todo]".to_string()),
     }
 }
 
@@ -6032,6 +6426,61 @@ fn vision_summary(images: &ImagesConfig, active_provider_supports_images: bool) 
         images.vision_provider.as_deref().unwrap_or("(not set)"),
         images.effective_prompt()
     )
+}
+
+/// Execute a `!<cmd>` shell escape in `cwd` and capture its combined output.
+/// Runs on a spawned task, never on the event loop. `kill_on_drop` matters:
+/// when the caller's `select!` abandons this future on Esc, the child dies
+/// with it instead of lingering.
+async fn run_shell_capture(cmd: &str, cwd: &std::path::Path) -> String {
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = tokio::process::Command::new("cmd");
+        c.arg("/C").arg(cmd);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut c = tokio::process::Command::new("sh");
+        c.arg("-c").arg(cmd);
+        c
+    };
+    command.current_dir(cwd).kill_on_drop(true);
+
+    // Bound the worst case: a timeout caps a hung command and the output size
+    // cap prevents `!yes`/`!find /` from growing chat + context until OOM.
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+    const MAX_OUTPUT: usize = 64 * 1024;
+    match tokio::time::timeout(TIMEOUT, command.output()).await {
+        Ok(Ok(o)) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            let err = String::from_utf8_lossy(&o.stderr);
+            if !err.trim().is_empty() {
+                if !s.is_empty() && !s.ends_with('\n') {
+                    s.push('\n');
+                }
+                s.push_str(&err);
+            }
+            if s.len() > MAX_OUTPUT {
+                let mut end = MAX_OUTPUT;
+                while end > 0 && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                s.truncate(end);
+                s.push_str("\n… (output truncated)");
+            }
+            // Surface a non-zero exit so the agent sees failures.
+            if !matches!(o.status.code(), Some(0) | None) {
+                if !s.is_empty() && !s.ends_with('\n') {
+                    s.push('\n');
+                }
+                s.push_str(&format!("[exit {}]", o.status.code().unwrap_or(-1)));
+            }
+            s
+        }
+        Ok(Err(e)) => format!("failed to run command: {e}"),
+        Err(_) => format!("command timed out after {}s", TIMEOUT.as_secs()),
+    }
 }
 
 /// Format a `!<cmd>` shell escape's command + output as a context note that's
@@ -6456,7 +6905,13 @@ fn write_osc52_clipboard(text: &str) {
 static KITTY_KEYBOARD_PUSHED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
+/// `mouse_capture` (default on) wheel-scrolls the chat and enables in-app
+/// drag selection; an alt-screen TUI that doesn't consume wheel events gets
+/// its viewport sheared by the terminal's own scrolling (seen in Warp).
+/// `"mouseCapture": false` leaves the mouse to the terminal instead: native
+/// drag selection, copied by the terminal's own ⌘C — at the cost of the
+/// wheel/in-app selection above.
+fn setup_terminal(mouse_capture: bool) -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     // Undo raw mode if any subsequent step fails, so we never leave the
@@ -6465,10 +6920,12 @@ fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
         let _ = disable_raw_mode();
         return Err(e);
     }
-    if let Err(e) = stdout.execute(EnableMouseCapture) {
-        let _ = stdout.execute(LeaveAlternateScreen);
-        let _ = disable_raw_mode();
-        return Err(e);
+    if mouse_capture {
+        if let Err(e) = stdout.execute(EnableMouseCapture) {
+            let _ = stdout.execute(LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+            return Err(e);
+        }
     }
     if let Err(e) = stdout.execute(EnableBracketedPaste) {
         let _ = stdout.execute(DisableMouseCapture);
@@ -6476,12 +6933,23 @@ fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
         let _ = disable_raw_mode();
         return Err(e);
     }
-    // Kitty keyboard protocol: makes terminals that support it (Warp, kitty,
-    // Ghostty, iTerm2, WezTerm) deliver modified keys — including the Cmd/Ctrl+C
-    // copy chord that Warp would otherwise intercept — to the app as escape
-    // codes. This is exactly what opencode does (`useKittyKeyboard`). Best-effort
-    // and gated on support, so terminals without it (Terminal.app) are untouched.
-    if supports_keyboard_enhancement().unwrap_or(false)
+    // Kitty keyboard protocol (disambiguate): terminals that support it
+    // deliver modified chords as CSI-u escape codes, so ⌘C reaches the app
+    // where the emulator forwards it (kitty/Ghostty/WezTerm-family).
+    // VERIFIED 2026-07 against Warp: it answers the support query, but its
+    // own Copy keybinding swallows ⌘C BEFORE the protocol — under full
+    // reporting flags only the lone Super press/release (57444) arrives,
+    // never Super+C. In Warp copying is therefore served by copy-on-select
+    // and the Ctrl+C-with-selection chord instead (a user can rebind Warp's
+    // Copy shortcut to hand ⌘C through). Best-effort and gated on support,
+    // so terminals without it (Terminal.app) are untouched.
+    //
+    // NOT crossterm's supports_keyboard_enhancement(): its poll retries
+    // forever when the terminal answers neither the kitty query nor DA1
+    // (sampled: an unbounded startup hang in kevent under non-answering
+    // terminals/ptys). kitty_support_probe is the same query with a hard
+    // deadline.
+    if kitty_support_probe(Duration::from_millis(800))
         && stdout
             .execute(PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
@@ -6503,6 +6971,95 @@ fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
             Err(e)
         }
     }
+}
+
+/// Bounded kitty-keyboard support probe (see `setup_terminal`): writes the
+/// standard `CSI ? u` + DA1 query to /dev/tty and polls the reply against a
+/// hard deadline. Runs pre-event-loop (raw mode on, no other tty reader);
+/// bytes consumed here can only be keystrokes raced into the startup window.
+#[cfg(unix)]
+fn kitty_support_probe(timeout: Duration) -> bool {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    let Ok(mut tty) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+    else {
+        return false;
+    };
+    if tty
+        .write_all(b"\x1b[?u\x1b[c")
+        .and_then(|_| tty.flush())
+        .is_err()
+    {
+        return false;
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    let fd = tty.as_raw_fd();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tmp = [0u8; 256];
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let n = unsafe { libc::poll(&mut pfd, 1, left.as_millis() as libc::c_int) };
+        if n < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return false;
+        }
+        if n == 0 {
+            return false; // deadline
+        }
+        match tty.read(&mut tmp) {
+            Ok(0) => return false,
+            Ok(k) => buf.extend_from_slice(&tmp[..k]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return false,
+        }
+        // The kitty reply (`ESC [ ? … u`) confirms support; DA1 (`ESC [ ? … c`)
+        // arriving without it means the query is unsupported.
+        if csi_private_reply(&buf, b'u') {
+            return true;
+        }
+        if csi_private_reply(&buf, b'c') {
+            return false;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kitty_support_probe(_timeout: Duration) -> bool {
+    false
+}
+
+/// Whether `buf` contains a private-mode CSI reply: `ESC [ ? <params>
+/// <terminator>` with only digit/`;` parameter bytes in between.
+fn csi_private_reply(buf: &[u8], terminator: u8) -> bool {
+    let mut i = 0;
+    while i + 3 < buf.len() {
+        if buf[i] == 0x1b && buf[i + 1] == b'[' && buf[i + 2] == b'?' {
+            let mut j = i + 3;
+            while j < buf.len() && (buf[j].is_ascii_digit() || buf[j] == b';') {
+                j += 1;
+            }
+            if j < buf.len() && buf[j] == terminator {
+                return true;
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> std::io::Result<()> {
@@ -6551,7 +7108,208 @@ mod tests {
         assert!(!empty.contains("```"));
     }
 
+    #[tokio::test]
+    async fn local_shell_runs_off_loop_and_posts_output() {
+        let (mut app, _tx, _dir) = make_test_app_with_dir().await;
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        app.submit("!echo off-loop-ok", &agent_tx).await;
+        // submit returns immediately with the busy slot taken — the command is
+        // running on a spawned task, not blocking the caller.
+        assert!(
+            app.active_tab().is_busy(),
+            "shell escape holds the busy slot"
+        );
+        assert!(app
+            .active_tab()
+            .chat
+            .messages()
+            .iter()
+            .any(|m| m.text.contains("$ echo off-loop-ok")));
+        let ev = tokio::time::timeout(Duration::from_secs(10), agent_rx.recv())
+            .await
+            .expect("shell result within timeout")
+            .expect("channel open");
+        assert!(matches!(ev, AppEvent::LocalShellDone { .. }));
+        app.handle_agent_event(ev);
+        assert!(!app.active_tab().is_busy(), "busy slot released on done");
+        assert!(app
+            .active_tab()
+            .chat
+            .messages()
+            .iter()
+            .any(|m| m.text.contains("off-loop-ok") && !m.text.starts_with('$')));
+        // The command + output became context for the next prompt.
+        assert_eq!(app.active_tab().pending_shell_context.len(), 1);
+        assert!(app.active_tab().pending_shell_context[0].contains("off-loop-ok"));
+    }
+
+    #[tokio::test]
+    async fn local_shell_on_a_busy_tab_runs_without_taking_the_slot() {
+        let (mut app, _tx, _dir) = make_test_app_with_dir().await;
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let turn_abort = AbortController::new();
+        app.active_tab_mut().turn_abort = Some(turn_abort);
+        app.active_tab_mut().active_turn_id = 3;
+        app.submit("!echo concurrent", &agent_tx).await;
+        // Runs immediately (like the old inline version) but concurrently —
+        // the live turn's busy slot is untouched, nothing was queued.
+        assert!(app.active_tab().queued_input.is_empty());
+        assert!(app.active_tab().turn_abort.is_some());
+        let ev = tokio::time::timeout(Duration::from_secs(10), agent_rx.recv())
+            .await
+            .expect("shell result within timeout")
+            .expect("channel open");
+        match &ev {
+            AppEvent::LocalShellDone { owned_slot, .. } => assert!(!owned_slot),
+            other => panic!("unexpected event: {}", event_name(other)),
+        }
+        app.handle_agent_event(ev);
+        // Completion must not release the agent turn's slot.
+        assert!(app.active_tab().turn_abort.is_some());
+        assert_eq!(app.active_tab().pending_shell_context.len(), 1);
+    }
+
+    fn event_name(ev: &AppEvent) -> &'static str {
+        match ev {
+            AppEvent::Agent { .. } => "Agent",
+            AppEvent::TurnDone { .. } => "TurnDone",
+            AppEvent::Toast { .. } => "Toast",
+            AppEvent::CompactDone { .. } => "CompactDone",
+            AppEvent::BgProgress { .. } => "BgProgress",
+            AppEvent::BgDone { .. } => "BgDone",
+            AppEvent::GitStatDone { .. } => "GitStatDone",
+            AppEvent::LocalShellDone { .. } => "LocalShellDone",
+            AppEvent::ConnectDialogReady { .. } => "ConnectDialogReady",
+            AppEvent::ReassembleDone { .. } => "ReassembleDone",
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_dialog_builds_off_loop_and_opens_on_arrival() {
+        let (mut app, _tx) = make_test_app().await;
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        app.open_connect_dialog(&agent_tx);
+        assert!(
+            app.connect.is_none(),
+            "dialog opens via the event, not inline"
+        );
+        let ev = tokio::time::timeout(Duration::from_secs(10), agent_rx.recv())
+            .await
+            .expect("catalog load finishes")
+            .expect("channel open");
+        match &ev {
+            AppEvent::ConnectDialogReady { .. } => {}
+            other => panic!("unexpected event: {}", event_name(other)),
+        }
+        app.handle_agent_event(ev);
+        assert!(app.connect.is_some());
+    }
+
+    #[tokio::test]
+    async fn local_shell_done_never_clobbers_a_live_turn() {
+        let (mut app, _tx) = make_test_app().await;
+        // A live agent turn owns the busy slot (active_turn_id != 0) — a stale
+        // shell completion must not release it.
+        app.active_tab_mut().turn_abort = Some(AbortController::new());
+        app.active_tab_mut().active_turn_id = 7;
+        let tab_id = app.active_tab().id;
+        app.handle_agent_event(AppEvent::LocalShellDone {
+            tab_id,
+            cmd: "echo x".into(),
+            output: Some("x".into()),
+            owned_slot: true,
+        });
+        assert!(
+            app.active_tab().turn_abort.is_some(),
+            "live turn kept its abort handle"
+        );
+        // The output itself still lands (it did run).
+        assert_eq!(app.active_tab().pending_shell_context.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn new_tab_opens_a_busy_placeholder_then_installs_the_engine() {
+        let (mut app, _tx, _dir) = make_test_app_with_dir().await;
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        app.new_tab(&agent_tx);
+        // The tab exists and has focus immediately; it is busy (Switching)
+        // until its own engine lands, so nothing can run on the borrowed one.
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active, 1);
+        assert!(app.active_tab().is_busy());
+        assert!(Arc::ptr_eq(&app.tabs[0].engine, &app.tabs[1].engine));
+        let ev = tokio::time::timeout(Duration::from_secs(30), agent_rx.recv())
+            .await
+            .expect("assembly finishes")
+            .expect("channel open");
+        app.handle_agent_event(ev);
+        assert!(!app.active_tab().is_busy());
+        assert!(
+            !Arc::ptr_eq(&app.tabs[0].engine, &app.tabs[1].engine),
+            "placeholder engine replaced by the tab's own"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_new_tab_assembly_removes_the_placeholder() {
+        let (mut app, _tx) = make_test_app().await;
+        let (agent_tx, mut _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        app.new_tab(&agent_tx);
+        assert_eq!(app.tabs.len(), 2);
+        let tab_id = app.active_tab().id;
+        app.handle_reassemble_done(tab_id, 1, ReassembleEffect::NewTab, Err("boom".to_string()));
+        assert_eq!(app.tabs.len(), 1, "placeholder removed on failure");
+        assert_eq!(app.active, 0);
+    }
+
+    #[tokio::test]
+    async fn tab_creation_result_does_not_install_its_template() {
+        // A NewTab completion carries the template as it was when Ctrl+T was
+        // pressed; installing it would revert any /model switch made while
+        // the assembly ran. handle_reassemble_done must skip that for
+        // tab-creation effects.
+        let (mut app, _tx, _dir) = make_test_app_with_dir().await;
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        app.new_tab(&agent_tx);
+        let before = app.status.model.clone();
+        app.status.model = "switched-mid-assembly".to_string();
+        let ev = tokio::time::timeout(Duration::from_secs(30), agent_rx.recv())
+            .await
+            .expect("assembly finishes")
+            .expect("channel open");
+        app.handle_agent_event(ev);
+        assert_eq!(app.status.model, "switched-mid-assembly");
+        let _ = before;
+    }
+
+    #[tokio::test]
+    async fn local_shell_interrupted_posts_nothing() {
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.active_tab().id;
+        app.active_tab_mut().turn_abort = Some(AbortController::new());
+        let before = app.active_tab().chat.messages().len();
+        app.handle_agent_event(AppEvent::LocalShellDone {
+            tab_id,
+            cmd: "sleep 100".into(),
+            output: None,
+            owned_slot: true,
+        });
+        assert!(!app.active_tab().is_busy());
+        assert_eq!(app.active_tab().chat.messages().len(), before);
+        assert!(app.active_tab().pending_shell_context.is_empty());
+    }
+
     async fn make_test_app() -> (TuiApp, mpsc::UnboundedSender<AppEvent>) {
+        let (app, tx, _temp) = make_test_app_with_dir().await;
+        // The tempdir guard drops here — fine for tests that never touch the
+        // cwd again after assembly.
+        (app, tx)
+    }
+
+    /// Like [`make_test_app`] but keeps the cwd tempdir alive — required by
+    /// tests that run shell commands or assemble engines AFTER construction.
+    async fn make_test_app_with_dir() -> (TuiApp, mpsc::UnboundedSender<AppEvent>, tempfile::TempDir)
+    {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().to_path_buf();
         let cfg = ZodeConfig {
@@ -6596,7 +7354,7 @@ mod tests {
             None,
         );
         let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
-        (app, agent_tx)
+        (app, agent_tx, temp)
     }
 
     async fn send_key(
@@ -6672,6 +7430,23 @@ mod tests {
     }
 
     #[test]
+    fn csi_private_reply_detects_kitty_and_da1() {
+        // Kitty reply followed by DA1 — the normal "supported" handshake.
+        let both = b"\x1b[?1u\x1b[?62;22c";
+        assert!(csi_private_reply(both, b'u'));
+        assert!(csi_private_reply(both, b'c'));
+        // DA1 alone — terminal answered but doesn't speak kitty.
+        let da1 = b"\x1b[?62c";
+        assert!(!csi_private_reply(da1, b'u'));
+        assert!(csi_private_reply(da1, b'c'));
+        // Partial / noise: never a match.
+        assert!(!csi_private_reply(b"\x1b[?1", b'u'));
+        assert!(!csi_private_reply(b"hello", b'u'));
+        // A stray keystroke before the reply doesn't hide it.
+        assert!(csi_private_reply(b"x\x1b[?0u", b'u'));
+    }
+
+    #[test]
     fn sidebar_command_resolves_visibility_targets() {
         assert_eq!(
             resolve_sidebar_visibility("", SidebarVisibility::Auto, 1),
@@ -6715,7 +7490,7 @@ mod tests {
         );
         assert_eq!(
             resolve_sidebar_visibility("wat", SidebarVisibility::Auto, 1),
-            Err("usage: /sidebar [on|off|toggle|auto]".to_string())
+            Err("usage: /sidebar [on|off|toggle|auto|mcp|files|todo]".to_string())
         );
     }
 
@@ -6832,6 +7607,7 @@ mod tests {
         app.handle_agent_event(AppEvent::CompactDone {
             tab_id,
             result: Ok("compacted the transcript".to_string()),
+            auto: false,
         });
 
         let store_tokens = {
@@ -6846,6 +7622,57 @@ mod tests {
             app.tabs[0].context_tokens < 50_000,
             "gauge should drop after compaction, not stay at the pre-compact value"
         );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_breaker_stops_the_retry_loop() {
+        // Regression: with the context stuck over the threshold and the
+        // provider failing every summarize call (e.g. 400 context-overflow),
+        // CompactDone(Err) → maybe_auto_compact re-fired forever, one LLM
+        // call per lap. After AUTO_COMPACT_MAX_FAILURES auto failures the
+        // trigger must stop; a success re-arms it.
+        let (mut app, agent_tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        // Pin the gauge over the auto threshold for a known window.
+        app.tabs[0].context_tokens = u32::MAX;
+        assert!(needs_auto_compact(
+            app.tabs[0].context_tokens,
+            app.tabs[0].engine.model_max_tokens
+        ));
+
+        for _ in 0..AUTO_COMPACT_MAX_FAILURES {
+            app.handle_agent_event(AppEvent::CompactDone {
+                tab_id,
+                result: Err("HTTP 400: input token limit".into()),
+                auto: true,
+            });
+        }
+        assert_eq!(app.tabs[0].auto_compact_failures, AUTO_COMPACT_MAX_FAILURES);
+
+        // Breaker open: the trigger must NOT start another compaction.
+        app.maybe_auto_compact(&agent_tx);
+        assert!(
+            !app.tabs[0].is_busy(),
+            "auto-compact must stay off once the breaker is open"
+        );
+        assert!(!matches!(app.tabs[0].mode, Mode::Compacting));
+
+        // A successful (manual) compaction re-arms the trigger.
+        app.handle_agent_event(AppEvent::CompactDone {
+            tab_id,
+            result: Ok("compacted".into()),
+            auto: false,
+        });
+        assert_eq!(app.tabs[0].auto_compact_failures, 0);
+
+        // Manual-failure counting is out of scope for the breaker: a manual
+        // /compact failure must not advance it.
+        app.handle_agent_event(AppEvent::CompactDone {
+            tab_id,
+            result: Err("boom".into()),
+            auto: false,
+        });
+        assert_eq!(app.tabs[0].auto_compact_failures, 0);
     }
 
     #[tokio::test]
@@ -8013,7 +8840,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_uses_mouse_capture_without_scroll_key_emulation() {
+    fn setup_gates_mouse_capture_without_scroll_key_emulation() {
         let source = include_str!("app.rs");
         let setup = source
             .split("fn setup_terminal")
@@ -8030,19 +8857,24 @@ mod tests {
         assert!(!setup.contains(&format!("?{alternate_scroll_mode}l")));
         assert!(!setup.contains(concat!("Alternate", "Scroll")));
         assert!(!restore.contains(concat!("Alternate", "Scroll")));
+        // Capture is opt-in per config (off by default on macOS so the
+        // terminal keeps native selection and ⌘C copies it).
+        assert!(setup.contains("(mouse_capture: bool)"));
         assert!(setup.contains(concat!("Enable", "Mouse", "Capture")));
         assert!(source.contains(concat!("Disable", "Mouse", "Capture")));
     }
 
     #[test]
-    fn app_managed_selection_defaults_on_with_mouse_capture() {
+    fn app_managed_selection_follows_mouse_capture() {
         let source = include_str!("app.rs");
         let init = source
             .split("pub fn new(")
             .nth(1)
             .and_then(|tail| tail.split("input: InputBox::new()").next())
             .expect("TuiApp::new initialization block should exist");
-        assert!(init.contains("selection_mode: true"));
+        // In-app selection only exists while we hold mouse capture; with
+        // capture off the terminal's native selection (+ ⌘C) takes over.
+        assert!(init.contains("selection_mode: mouse_capture"));
     }
 
     #[test]

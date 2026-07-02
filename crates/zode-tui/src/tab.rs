@@ -56,6 +56,11 @@ pub struct SessionTab {
     /// Most recent prompt size (last `Usage` event's input tokens) — a proxy
     /// for current context-window occupancy, shown as a % in the status bar.
     pub context_tokens: u32,
+    /// Consecutive AUTO-compaction failures. At the breaker limit the
+    /// auto-compact trigger stops firing for this tab (a persistently failing
+    /// provider would otherwise loop compact attempts forever); any
+    /// successful compaction resets it.
+    pub auto_compact_failures: u32,
     pub cost_label: String,
     /// Per-turn process UI state: map tool results back to their visible tool
     /// call names.
@@ -75,6 +80,15 @@ pub struct SessionTab {
     /// Cached snapshot of this tab's live `TodoWrite` list, refreshed each
     /// tick from `engine.todo_state` so the sync sidebar render can read it.
     pub todos: Vec<TodoItem>,
+    /// Cached git working-tree stats for the sidebar "modified files" section,
+    /// refreshed by a throttled background poll. `None` = cwd is not a git
+    /// work tree (section hidden).
+    pub git_files: Option<Vec<zode_core::GitFileStat>>,
+    /// True while a git-stat poll for this tab is in flight (dedupes spawns).
+    pub git_poll_inflight: bool,
+    /// Cached `(server, connected)` MCP state for the sidebar MCP section,
+    /// refreshed on the same throttled cadence as the git poll.
+    pub mcp_status: Vec<(String, bool)>,
     /// Whether the autonomous goal loop is active on this tab. Set true when a
     /// goal is set via `/goal <text>`; cleared on `goal_complete`, `/goal
     /// clear`, a failed turn, or a user interrupt (Esc/Ctrl+C).
@@ -107,6 +121,7 @@ impl SessionTab {
             input_tokens: 0,
             output_tokens: 0,
             context_tokens: 0,
+            auto_compact_failures: 0,
             cost_label: "$0.00".into(),
             active_tool_names: HashMap::new(),
             queued_input: std::collections::VecDeque::new(),
@@ -114,6 +129,9 @@ impl SessionTab {
             pending_shell_context: Vec::new(),
             plan_mode: false,
             todos: Vec::new(),
+            git_files: None,
+            git_poll_inflight: false,
+            mcp_status: Vec::new(),
             goal_loop_active: false,
             goal_loop_iter: 0,
             goal_text: None,
@@ -127,18 +145,20 @@ impl SessionTab {
     }
 
     /// Stamp the session index with a title derived from the first prompt.
-    pub async fn stamp_title(&mut self, prompt: &str) {
+    /// The tab fields update synchronously; the index write (disk I/O under
+    /// the global SAVE_LOCK) is spawned so the first submit never stalls the
+    /// event loop behind another tab's in-flight save.
+    pub fn stamp_title(&mut self, prompt: &str) {
         let title = title_from_prompt(prompt);
         self.title = title.clone();
         self.titled = true;
-        index_upsert(SessionMeta {
+        tokio::spawn(index_upsert(SessionMeta {
             id: self.session_id.clone(),
             title,
             cwd: self.engine.cwd.display().to_string(),
             model: self.engine.model.clone(),
             updated_at: now_secs(),
-        })
-        .await;
+        }));
     }
 
     /// Snapshot the store then persist. Delegates to [`persist_session`].

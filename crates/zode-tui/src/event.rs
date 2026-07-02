@@ -10,6 +10,8 @@
 use agent::stream::Event;
 use zode_core::{EngineTemplate, ZodeEngine};
 
+use crate::ui::dialog::connect::ConnectDialog;
+
 #[derive(Debug, Clone)]
 pub enum ReassembleNotify {
     None,
@@ -35,6 +37,13 @@ pub enum ReassembleEffect {
     Model {
         id: String,
     },
+    /// A fresh tab (Ctrl+T) whose engine was assembled off-loop. The tab
+    /// already exists as a busy placeholder; on failure it is removed.
+    NewTab,
+    /// A resumed session's engine (with its store attached) assembled
+    /// off-loop. On success the transcript is rebuilt from the store; on
+    /// failure the placeholder tab is removed.
+    ResumeTab,
     Notify(ReassembleNotify),
     Orchestration {
         on: bool,
@@ -83,6 +92,10 @@ pub enum AppEvent {
     CompactDone {
         tab_id: usize,
         result: Result<String, String>,
+        /// Whether the compaction was auto-triggered (context threshold)
+        /// rather than a manual `/compact`. Auto failures feed the per-tab
+        /// circuit breaker so a failing provider can't loop compactions.
+        auto: bool,
     },
     /// A progress line from an off-loop background op (e.g. a direct `/op`
     /// tool/MCP/design call). Pushed into the originating tab's transcript so a
@@ -96,6 +109,29 @@ pub enum AppEvent {
         tab_id: usize,
         result: Result<String, String>,
     },
+    /// A throttled background git working-tree poll (for the sidebar
+    /// "modified files" section) finished. `files` is `None` when the tab's
+    /// cwd is not inside a git work tree.
+    GitStatDone {
+        tab_id: usize,
+        files: Option<Vec<zode_core::GitFileStat>>,
+    },
+    /// A `!<cmd>` shell escape (run off-loop so the UI never freezes on a slow
+    /// command) finished. `output` is the captured stdout+stderr; `None` means
+    /// the user interrupted it (Esc killed the child — nothing to show, the
+    /// interrupt handler already posted "(interrupted)"). `owned_slot` is
+    /// whether this run took the tab's turn-busy slot (it started while the
+    /// tab was idle) — only then may completion release the slot.
+    LocalShellDone {
+        tab_id: usize,
+        cmd: String,
+        output: Option<String>,
+        owned_slot: bool,
+    },
+    /// The `/connect` dialog, built off-loop (the catalog + config reads are
+    /// small local files, but any sync disk I/O in the event loop can
+    /// stutter). Opens on arrival unless a modal took the screen meanwhile.
+    ConnectDialogReady { dialog: Box<ConnectDialog> },
     /// A model/provider/config change finished rebuilding the tab's engine
     /// off-loop. `seq` drops stale completions if a tab is closed/reused or a
     /// later rebuild supersedes it.

@@ -768,14 +768,17 @@ mod tests {
     #[cfg(feature = "noema")]
     #[test]
     #[serial_test::serial]
-    fn no_auto_extract_keeps_default_review_policy() {
+    fn explicit_auto_extract_off_keeps_review_policy() {
         use noema_core::api::NoemaEngine;
         use noema_core::config::WritePolicy;
         use noema_core::sensitivity::Principal;
 
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("NOEMA_ROOT", dir.path());
+        // auto_extract explicitly off → policy reverts to review (extraction
+        // defaults ON now, so the off case must be opted into).
         let settings = NoemaSettings {
+            auto_extract: Some(false),
             user: Some("kay".into()),
             ..Default::default()
         };

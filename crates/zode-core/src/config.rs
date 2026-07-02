@@ -317,10 +317,11 @@ pub struct NoemaSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_remember: Option<bool>,
     /// Run an LLM pass after each turn to extract durable memories from the
-    /// conversation (not just explicit "remember…" phrases). Off by default —
-    /// enabling it also flips the memory write policy to `autoSafe` (see
-    /// [`write_policy`](Self::write_policy)) so high-confidence, novel
-    /// candidates auto-store while the rest queue for `/memory review`.
+    /// conversation (not just explicit "remember…" phrases). On by default —
+    /// set to false to keep memory writes explicit; when on, the memory write
+    /// policy defaults to `autoSafe` (see [`write_policy`](Self::write_policy))
+    /// so high-confidence, novel candidates auto-store while the rest queue
+    /// for `/memory review`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_extract: Option<bool>,
     /// Memory write policy applied to the noema root: `"manual"`, `"review"`,
@@ -353,9 +354,10 @@ impl NoemaSettings {
         self.auto_remember.unwrap_or(true)
     }
 
-    /// Whether the post-turn LLM extraction pass runs. Off by default.
+    /// Whether the post-turn LLM extraction pass runs. ON by default (memory
+    /// is opt-out); set `autoExtract: false` to keep memory writes explicit.
     pub fn auto_extract(&self) -> bool {
-        self.auto_extract.unwrap_or(false)
+        self.auto_extract.unwrap_or(true)
     }
 
     /// The effective write policy keyword (lowercased for the noema mapping):
@@ -377,6 +379,50 @@ impl NoemaSettings {
         } else {
             "review".to_string()
         }
+    }
+}
+
+/// Compaction-ladder + post-compaction restoration knobs (`compact` key).
+/// All keys optional; absent keys default to ON so the layered pipeline
+/// works out of the box.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CompactSettings {
+    /// Ladder step ①: clear old tool results before resorting to LLM
+    /// compaction. Default true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub microcompact: Option<bool>,
+    /// Sink compaction analysis bullets into noema (also requires noema to
+    /// be enabled). Default true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_sink: Option<bool>,
+    /// Re-attach recently touched files on the turn after a compaction.
+    /// Default true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restore_files: Option<bool>,
+    /// Token budget for restored file content. Default 50000.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restore_files_budget: Option<u32>,
+    /// Append a noema recall pack to the restoration message. Default true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recall_after_compact: Option<bool>,
+}
+
+impl CompactSettings {
+    pub fn microcompact(&self) -> bool {
+        self.microcompact.unwrap_or(true)
+    }
+    pub fn memory_sink(&self) -> bool {
+        self.memory_sink.unwrap_or(true)
+    }
+    pub fn restore_files(&self) -> bool {
+        self.restore_files.unwrap_or(true)
+    }
+    pub fn restore_files_budget(&self) -> u32 {
+        self.restore_files_budget.unwrap_or(50_000)
+    }
+    pub fn recall_after_compact(&self) -> bool {
+        self.recall_after_compact.unwrap_or(true)
     }
 }
 
@@ -446,6 +492,15 @@ pub struct ZodeConfig {
     /// `/tool-details`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_tool_details: Option<bool>,
+    /// Capture mouse events in the TUI. `None` → ON: wheel-scrolls the chat
+    /// and enables in-app drag selection with copy-on-select. Without capture
+    /// an alternate-screen TUI can't consume wheel events, so terminals
+    /// scroll their own viewport and shear the UI (seen in Warp). Set
+    /// `"mouseCapture": false` to hand the mouse back to the terminal
+    /// (native drag selection + the terminal's own ⌘C) at the cost of wheel
+    /// scrolling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mouse_capture: Option<bool>,
     /// Autonomous orchestration: when on, the agent is told it may decompose a
     /// task and spawn sub-agents (Task tool) on its own, and the `define_agent`
     /// tool is registered so it can create new sub-agent types. `None` → ON
@@ -515,6 +570,9 @@ pub struct ZodeConfig {
     /// Native Noema long-term memory integration.
     #[serde(skip_serializing_if = "is_default")]
     pub noema: NoemaSettings,
+    /// Compaction ladder / post-compaction restoration knobs.
+    #[serde(skip_serializing_if = "is_default")]
+    pub compact: CompactSettings,
 
     // --- Legacy (Zig/TS-era) flat fields, read-only for backward compat.
     // Mapped into `provider` by `normalize_legacy()` and dropped on save
@@ -536,6 +594,12 @@ pub struct ZodeConfig {
 pub const DEFAULT_STARTER_MODEL: &str = "claude-sonnet-4-6";
 
 impl ZodeConfig {
+    /// Effective TUI mouse-capture setting (see the `mouse_capture` field):
+    /// explicit value if set, otherwise ON.
+    pub fn mouse_capture_enabled(&self) -> bool {
+        self.mouse_capture.unwrap_or(true)
+    }
+
     /// Make this config assemble for the interactive TUI even when the user
     /// hasn't finished provider setup, so they always land in the UI (where
     /// `/connect` finishes setup) instead of being blocked at startup:
@@ -952,6 +1016,9 @@ impl ZodeConfig {
         if other.show_tool_details.is_some() {
             self.show_tool_details = other.show_tool_details;
         }
+        if other.mouse_capture.is_some() {
+            self.mouse_capture = other.mouse_capture;
+        }
         if other.autonomous_orchestration.is_some() {
             self.autonomous_orchestration = other.autonomous_orchestration;
         }
@@ -1004,6 +1071,15 @@ impl ZodeConfig {
         self.noema.extract_max_input_chars = n
             .extract_max_input_chars
             .or(self.noema.extract_max_input_chars);
+
+        let c = other.compact;
+        self.compact.microcompact = c.microcompact.or(self.compact.microcompact);
+        self.compact.memory_sink = c.memory_sink.or(self.compact.memory_sink);
+        self.compact.restore_files = c.restore_files.or(self.compact.restore_files);
+        self.compact.restore_files_budget =
+            c.restore_files_budget.or(self.compact.restore_files_budget);
+        self.compact.recall_after_compact =
+            c.recall_after_compact.or(self.compact.recall_after_compact);
     }
 }
 
@@ -1180,6 +1256,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mouse_capture_defaults_on_and_overrides() {
+        // Unset → capture ON: an alt-screen TUI must consume wheel events or
+        // terminals scroll their own viewport and shear the UI.
+        let cfg = ZodeConfig::default();
+        assert!(cfg.mouse_capture_enabled());
+
+        // Explicit value wins on every platform, camelCase key, and merge
+        // layers are presence-based.
+        let on: ZodeConfig = serde_json::from_str(r#"{"mouseCapture":true}"#).unwrap();
+        assert!(on.mouse_capture_enabled());
+        let off: ZodeConfig = serde_json::from_str(r#"{"mouseCapture":false}"#).unwrap();
+        assert!(!off.mouse_capture_enabled());
+        let mut base = ZodeConfig::default();
+        base.merge_from(on);
+        assert_eq!(base.mouse_capture, Some(true));
+        base.merge_from(ZodeConfig::default());
+        assert_eq!(base.mouse_capture, Some(true)); // unset layer preserves
+    }
+
+    #[test]
     fn openpencil_camelcase_and_getters() {
         let json = r#"{"openpencil":{"autoLaunchGui":false,"connectTimeoutMs":5000,"releaseTag":"0.9.0"}}"#;
         let cfg: ZodeConfig = serde_json::from_str(json).unwrap();
@@ -1231,12 +1327,12 @@ mod tests {
     }
 
     #[test]
-    fn noema_auto_extract_defaults_off_and_drives_write_policy() {
-        // Absent → off, and the policy is `review` (deterministic & reversible:
+    fn noema_auto_extract_defaults_on_and_drives_write_policy() {
+        // Absent → on, and the policy is `autosafe` (deterministic & reversible:
         // not `None`, so turning extraction off actively restores review).
         let bare: ZodeConfig = serde_json::from_str(r#"{"noema":{}}"#).unwrap();
-        assert!(!bare.noema.auto_extract());
-        assert_eq!(bare.noema.effective_write_policy(), "review");
+        assert!(bare.noema.auto_extract());
+        assert_eq!(bare.noema.effective_write_policy(), "autosafe");
 
         // Enabling extraction implies the autoSafe policy.
         let on: ZodeConfig = serde_json::from_str(r#"{"noema":{"autoExtract":true}}"#).unwrap();
@@ -1246,7 +1342,8 @@ mod tests {
         // An explicit writePolicy wins (normalized to lowercase) even with
         // extraction off.
         let explicit: ZodeConfig =
-            serde_json::from_str(r#"{"noema":{"writePolicy":"Review"}}"#).unwrap();
+            serde_json::from_str(r#"{"noema":{"autoExtract":false,"writePolicy":"Review"}}"#)
+                .unwrap();
         assert!(!explicit.noema.auto_extract());
         assert_eq!(explicit.noema.effective_write_policy(), "review");
     }
@@ -2353,5 +2450,45 @@ mod tests {
         };
         base2.merge_from(proj);
         assert!(base2.openspec_awareness()); // project true wins
+    }
+
+    #[test]
+    fn compact_settings_defaults_camelcase_and_merge() {
+        // All-on defaults.
+        let bare = ZodeConfig::default();
+        assert!(bare.compact.microcompact());
+        assert!(bare.compact.memory_sink());
+        assert!(bare.compact.restore_files());
+        assert_eq!(bare.compact.restore_files_budget(), 50_000);
+        assert!(bare.compact.recall_after_compact());
+
+        // camelCase keys parse; explicit values win.
+        let cfg: ZodeConfig = serde_json::from_str(
+            r#"{"compact":{"microcompact":false,"memorySink":false,"restoreFilesBudget":10000}}"#,
+        )
+        .unwrap();
+        assert!(!cfg.compact.microcompact());
+        assert!(!cfg.compact.memory_sink());
+        assert_eq!(cfg.compact.restore_files_budget(), 10_000);
+        assert!(cfg.compact.restore_files()); // untouched key keeps default
+
+        // Presence-based merge: project layer overrides only set keys.
+        let mut base = ZodeConfig::default();
+        base.merge_from(cfg);
+        assert_eq!(base.compact.microcompact, Some(false));
+        assert_eq!(base.compact.restore_files_budget, Some(10_000));
+        base.merge_from(ZodeConfig::default());
+        assert_eq!(base.compact.microcompact, Some(false)); // unset layer preserves
+    }
+
+    #[test]
+    fn auto_extract_defaults_on() {
+        let bare = ZodeConfig::default();
+        assert!(bare.noema.auto_extract());
+        assert_eq!(bare.noema.effective_write_policy(), "autosafe");
+        // Explicit false still wins and restores review policy.
+        let off: ZodeConfig = serde_json::from_str(r#"{"noema":{"autoExtract":false}}"#).unwrap();
+        assert!(!off.noema.auto_extract());
+        assert_eq!(off.noema.effective_write_policy(), "review");
     }
 }

@@ -216,11 +216,12 @@ impl Tool for AskUserQuestionTool {
     fn description(&self) -> &str {
         "Ask the user several single-choice questions AT ONCE and wait for the answers. \
          Batch at least 4 (up to 8) decisions into ONE call — do not call this repeatedly \
-         with one question at a time. The user can also type a custom 'Other' answer for \
-         any question. Returns { answers: [{ question, header, answer }] }, where `answer` \
-         is the chosen option text or the user's custom text. Use only when a decision is \
-         genuinely the user's to make (ambiguous requirements, a fork you can't resolve \
-         from the code) — not for things you can decide yourself."
+         with one question at a time. NEVER include an 'Other'/'custom'/free-form option \
+         in `options`: the UI always adds a free-text 'Other' row automatically, so listing \
+         one yourself shows a duplicate. Returns { answers: [{ question, header, answer }] }, \
+         where `answer` is the chosen option text or the user's custom text. Use only when a \
+         decision is genuinely the user's to make (ambiguous requirements, a fork you can't \
+         resolve from the code) — not for things you can decide yourself."
     }
     fn input_schema(&self) -> Value {
         json!({
@@ -243,7 +244,7 @@ impl Tool for AskUserQuestionTool {
                                 "items": { "type": "string" },
                                 "minItems": MIN_OPTIONS,
                                 "maxItems": MAX_OPTIONS,
-                                "description": "The preset choices (2-10)."
+                                "description": "The preset choices (2-10). Do NOT add an 'Other'/custom entry — the UI provides one."
                             }
                         }
                     }

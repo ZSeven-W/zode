@@ -4,6 +4,7 @@ pub mod agents_dialog;
 pub mod catalog_providers;
 pub mod connect;
 pub mod connect_render;
+pub mod files_panel;
 pub mod mcp_dialog;
 pub mod permission;
 pub mod plugin_picker;

@@ -200,13 +200,13 @@ Optional top-level config keys (all have sensible defaults):
 | `/theme [id]` | Switch theme (`catppuccin-mocha`, `cyberpunk`, `minimal`, `hacker`) |
 | `/sessions`, `/resume` | Session picker — resume into a new tab with history |
 | `/connect` | Connect and switch the active provider |
-| `/sidebar [on\|off\|toggle]` | Show or hide the right sidebar |
+| `/sidebar [on\|off\|toggle\|auto\|mcp\|files\|todo]` | Show/hide the right sidebar; fold the MCP / modified-files / todo sections (also click their ▼ headers) |
 | `/tasks` | Background shells + running turns panel |
 | `/undo`, `/redo` | Undo / redo the last file edit |
 | `/mcp` | Manage MCP servers — enable / disable in a dialog |
 | `/skills` | List available skills |
 | `/agents` | Manage sub-agents — create (AI-assisted or manual) / delete |
-| `/workflows` | Manage & run deterministic multi-step workflows |
+| `/workflows` | Manage & run JS-scripted workflows (`agent()`/`parallel()`/`pipeline()` orchestration, executed deterministically by zode) |
 | `/effort` | Pick the reasoning effort level |
 | `/thinking`, `/tool-details` | Toggle showing reasoning / tool-call detail |
 | `/orchestration` | Toggle autonomous sub-agent + workflow orchestration |
@@ -259,6 +259,127 @@ MCP servers and foreign-plugin commands are **off by default** (copy one into a
 `.zode/` dir to opt in), and skills/commands that hard-code another agent's host
 variables (e.g. `${CLAUDE_PLUGIN_ROOT}`) are filtered out since they can't run
 here. Hooks are **not** imported from other agents (they execute shell commands).
+
+## Configuring MCP Servers
+
+MCP servers live in the same nested-precedence config as everything else —
+`~/.zode/mcp.json` for all projects, `.mcp.json` or `.zode/mcp.json` at the
+project root to scope one to a repo. No registry, no restart-and-pray: edit
+the file, then `/mcp` (or relaunch) to pick it up.
+
+### stdio (spawn a local server)
+
+```json
+{
+  "servers": {
+    "github": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "$GITHUB_TOKEN" }
+    }
+  }
+}
+```
+
+`command`/`args` spawn the server as a subprocess piped over stdio. `env`
+values support `$NAME` / `${NAME}` substitution against zode's own process
+environment (expanded right before connecting, not written to disk) — handy
+for keeping tokens out of the config file itself.
+
+### Streamable HTTP (remote server)
+
+```json
+{
+  "servers": {
+    "linear": {
+      "transport": "http",
+      "url": "https://mcp.linear.app/mcp",
+      "headers": { "Authorization": "Bearer $LINEAR_TOKEN" }
+    }
+  }
+}
+```
+
+`"transport": "http"` connects with the current MCP spec's Streamable HTTP
+transport — a single `url`, no separate SSE endpoint to configure. `"sse"` is
+accepted as an equivalent spelling (some configs — and MCP servers' own setup
+docs — still call it that); both resolve to the same connector. `headers` are
+forwarded verbatim (including `Authorization`, so Bearer/Basic/custom schemes
+all work) and support the same `$VAR` substitution as `env`. Add `"enabled":
+false` to any server to keep its definition around without connecting it —
+`/mcp` also toggles this per server without hand-editing the file.
+
+### Using it
+
+Every tool a connected server exposes shows up as `mcp__<server>__<tool>`,
+callable by the agent like any built-in tool (and `@`-mentionable in the
+input box). `/mcp` opens a dialog listing every discovered server —
+connected / disconnected / disabled — with Space to toggle one on or off; the
+sidebar's collapsible `mcp` section (click its ▼ header, or `/sidebar mcp`)
+mirrors the same live connection state at a glance.
+
+**Cross-agent discovery.** Zode also adopts MCP servers already configured for
+Claude (`~/.claude.json`), Cursor (`~/.cursor/mcp.json`), opencode, Gemini,
+and Codex (`~/.codex/config.toml`) from your home directory — so an existing
+setup works with zero extra config. The same files found *inside a project*
+(e.g. a cloned repo's `.cursor/mcp.json`) are discovered but **disabled by
+default**, since a workspace shouldn't be able to silently spawn processes;
+opt one in via `/mcp` or by declaring it in zode's own `.mcp.json`, which
+always takes precedence on a name clash. `openpencil` is reserved — op-bridge
+(see below) drives it natively, so any server declared under that name is
+ignored.
+
+## Installing Skills & Command Markdown
+
+Both are plain Markdown on disk — no registry, no build step. Drop a file in,
+and it's live on the next launch (or `/skills` to check what loaded).
+
+### Install a skill
+
+A skill is a folder with a `SKILL.md` inside. Put it under the project
+(`.zode/skills/`) or your home dir (`~/.zode/skills/`):
+
+```bash
+mkdir -p .zode/skills/code-review
+cat > .zode/skills/code-review/SKILL.md <<'EOF'
+---
+name: code-review
+description: Review a diff for bugs, style, and missing tests
+---
+
+You are doing a focused code review. Read the diff or files the user points
+at, then report findings ordered by severity: correctness first, then API
+design, then style. For each finding give file:line and a suggested fix.
+EOF
+```
+
+The skill now shows up in `/skills`, the agent can invoke it on its own via
+the Skill tool, and it also becomes a dynamic slash command — typing
+`/code-review look at src/lib.rs` expands to a prompt that runs the skill.
+Extra files next to `SKILL.md` (references, scripts) ship with the skill.
+Skills already installed for Claude / Codex / opencode / cursor etc. are
+picked up automatically from their home dirs — a zode skill wins name clashes.
+
+### Install a command (prompt Markdown)
+
+A custom slash command is a single `.md` file whose **filename is the command
+name** and whose body is the prompt it submits. Anything you type after the
+command is appended to the body:
+
+```bash
+mkdir -p .zode/commands            # or ~/.zode/commands for all projects
+cat > .zode/commands/changelog.md <<'EOF'
+Update CHANGELOG.md for the changes in the current working tree.
+Follow Keep-a-Changelog headings and write entries in imperative mood.
+EOF
+```
+
+Now `/changelog` submits that prompt, and `/changelog only the sidebar work`
+appends your arguments after it. Commands in `~/.claude/commands` and
+`~/.codex/commands` (and their project-level equivalents) are loaded too;
+commands inside a *foreign plugin tree* are off by default — copy the `.md`
+into a `.zode/commands/` dir to opt in.
 
 ## Benchmark
 

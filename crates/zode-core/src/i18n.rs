@@ -116,6 +116,12 @@ const EXTRA: &[[&str; 15]] = &[
     ["call any MCP tool by name", "按名称调用任意 MCP 工具", "依名稱呼叫任意 MCP 工具", "名前で任意の MCP ツールを呼び出す", "이름으로 아무 MCP 도구 호출", "llamar cualquier herramienta MCP por nombre", "appeler n'importe quel outil MCP par son nom", "beliebiges MCP-Tool per Namen aufrufen", "chamar qualquer ferramenta MCP pelo nome", "вызвать любой инструмент MCP по имени", "नाम से कोई भी MCP टूल कॉल करें", "panggil alat MCP apa pun berdasarkan nama", "เรียกใช้เครื่องมือ MCP ใดก็ได้ตามชื่อ", "herhangi bir MCP aracını adıyla çağır", "gọi bất kỳ công cụ MCP nào theo tên"],
     ["Currency", "货币", "貨幣", "通貨", "통화", "Moneda", "Devise", "Währung", "Moeda", "Валюта", "मुद्रा", "Mata uang", "สกุลเงิน", "Para birimi", "Tiền tệ"],
     ["Display currency", "显示货币", "顯示貨幣", "表示通貨", "표시 통화", "Moneda de visualización", "Devise d'affichage", "Anzeigewährung", "Moeda de exibição", "Валюта отображения", "प्रदर्शन मुद्रा", "Mata uang tampilan", "สกุลเงินที่แสดง", "Görüntüleme para birimi", "Tiền tệ hiển thị"],
+    // Sidebar MCP + modified-files sections ("mcp" itself passes through).
+    ["modified files", "修改文件", "修改檔案", "変更ファイル", "수정된 파일", "archivos modificados", "fichiers modifiés", "geänderte Dateien", "arquivos modificados", "изменённые файлы", "संशोधित फ़ाइलें", "berkas diubah", "ไฟล์ที่แก้ไข", "değişen dosyalar", "tệp đã sửa"],
+    ["connected", "已连接", "已連線", "接続済み", "연결됨", "conectado", "connecté", "verbunden", "conectado", "подключено", "कनेक्टेड", "terhubung", "เชื่อมต่อแล้ว", "bağlı", "đã kết nối"],
+    ["disconnected", "未连接", "未連線", "未接続", "연결 안 됨", "desconectado", "déconnecté", "getrennt", "desconectado", "отключено", "डिस्कनेक्टेड", "terputus", "ไม่ได้เชื่อมต่อ", "bağlı değil", "chưa kết nối"],
+    // Question-dialog tab strip.
+    ["switch", "切换", "切換", "切替", "전환", "cambiar", "changer", "wechseln", "alternar", "переключить", "स्विच", "beralih", "สลับ", "geçiş", "chuyển"],
 ];
 
 /// The 15 supported UI languages (OpenPencil set).

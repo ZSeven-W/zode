@@ -351,25 +351,21 @@ fn render_runtime_system_prompt(
              Keep the main thread focused on planning and integrating the results.",
         ));
         system.push_str(
-            "\nFor a repeatable multi-step process, capture it as a reusable workflow \
-             with the define_workflow tool (ordered steps, each with a sub-agent type), \
-             then follow it by running each step via Task.",
+            "\nFor a repeatable multi-step process, capture it as a reusable JS \
+             workflow with the define_workflow tool (an orchestration script using \
+             agent()/parallel()/pipeline()), then execute it with the run_workflow \
+             tool — zode runs the script deterministically; do not re-follow its \
+             steps by hand.",
         );
         if !workflow_defs.is_empty() {
             let wfs = workflow_defs
                 .iter()
-                .map(|w| {
-                    let steps = w
-                        .steps
-                        .iter()
-                        .map(|s| format!("[{}] {}", s.agent_type, s.prompt))
-                        .collect::<Vec<_>>()
-                        .join(" → ");
-                    format!("  - {} ({}): {}", w.name, w.description, steps)
-                })
+                .map(|w| format!("  - {}: {}", w.name, w.description))
                 .collect::<Vec<_>>()
                 .join("\n");
-            system.push_str(&format!("\nSaved workflows:\n{wfs}"));
+            system.push_str(&format!(
+                "\nSaved workflows (execute via run_workflow):\n{wfs}"
+            ));
         }
     }
     system
@@ -406,8 +402,22 @@ pub struct ZodeEngine {
     pub prompt_cache: bool,
     /// Native Noema long-term memory adapter. Disabled adapters are cheap no-ops.
     pub noema: ZodeNoema,
-    /// Resolved knobs for the post-turn LLM extraction pass (off by default).
+    /// Resolved knobs for the post-turn LLM extraction pass (on by default;
+    /// disable via `noema.autoExtract`).
     pub extract_config: crate::noema_extract::ExtractConfig,
+    /// Resolved compaction-ladder / restoration knobs (`compact` config key).
+    pub compact_settings: crate::config::CompactSettings,
+    /// Durable sink for compaction analysis bullets. `None` when the sink
+    /// or noema itself is disabled.
+    pub session_store: Option<Arc<crate::compact_memory::NoemaSessionStore>>,
+    /// Most-recently-touched files, fed by the compact-tracker hook.
+    pub recent_files: crate::compact_memory::RecentFiles,
+    /// Latched by the tracker hook when a compaction replaced messages;
+    /// consumed (swap-false) at the start of the next turn.
+    restore_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// UI note produced by the last restoration, consumed by the front-end
+    /// via [`Self::take_restore_note`].
+    last_restore_note: Arc<std::sync::Mutex<Option<String>>>,
     /// Shared provider/model snapshot used by tools that call an LLM internally.
     model_runtime: ModelRuntimeState,
     /// Background shell registry (Phase 03/07 inspect this).
@@ -465,6 +475,27 @@ pub struct CompactOutcome {
     pub post_tokens: u32,
     /// How many messages were folded into the summary.
     pub replaced: usize,
+}
+
+/// Context occupancy (percent of the model window) above which a
+/// full-transcript summarize request is unsafe: the request carries the whole
+/// transcript plus prompt and reserved output, so near/over the window it
+/// gets a 400 context-overflow from the provider — the very condition
+/// compaction is meant to fix, a deadlock. Above the line, compact the
+/// EARLIEST HALF instead: the request carries roughly half the transcript and
+/// the recent half survives verbatim (run compact again to halve further).
+const FULL_COMPACT_SAFE_PERCENT: u64 = 60;
+
+/// Pick the compaction direction for a transcript of `context_tokens` against
+/// a `window`-token model. `window == 0` means "unknown" → Full (no basis to
+/// restrict).
+fn compact_direction(context_tokens: u32, window: u32) -> agent::compact::PartialCompactDirection {
+    use agent::compact::PartialCompactDirection;
+    if window != 0 && (context_tokens as u64 * 100 / window as u64) >= FULL_COMPACT_SAFE_PERCENT {
+        PartialCompactDirection::EarliestHalf
+    } else {
+        PartialCompactDirection::Full
+    }
 }
 
 impl ZodeEngine {
@@ -683,6 +714,12 @@ impl ZodeEngine {
             policy.clone(),
         )));
         hook_runner.register(Arc::new(BgShellHook::new(bg_shells_meta.clone())));
+        let recent_files = crate::compact_memory::RecentFiles::default();
+        let restore_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        hook_runner.register(Arc::new(crate::compact_memory::compact_tracker_hook(
+            recent_files.clone(),
+            restore_pending.clone(),
+        )));
         // External hooks.json scripts (global ⊕ project).
         for h in load_hook_handlers(&cwd) {
             hook_runner.register(h);
@@ -730,6 +767,11 @@ impl ZodeEngine {
         if orchestration {
             base.register(Arc::new(crate::agents::DefineAgentTool));
             base.register(Arc::new(crate::workflows::DefineWorkflowTool));
+            // run_workflow drives saved JS workflows; its agent() bridge calls
+            // the final gated Task through the same late-bound cell.
+            base.register(Arc::new(crate::workflows::RunWorkflowTool::new(
+                task_tools.clone(),
+            )));
         }
         // Saved workflows (~/.zode/workflows etc.), for `/workflows` + the
         // orchestration directive. Loaded regardless of the toggle so listing
@@ -783,6 +825,14 @@ impl ZodeEngine {
         ));
         let cost = cost_state_for_model(cfg, model.clone());
 
+        let noema = ZodeNoema::from_settings(&cfg.noema);
+        let session_store = (cfg.compact.memory_sink() && noema.is_enabled()).then(|| {
+            Arc::new(crate::compact_memory::NoemaSessionStore::new(
+                noema.clone(),
+                cwd.clone(),
+            ))
+        });
+
         Ok(Self {
             provider,
             tools,
@@ -816,8 +866,13 @@ impl ZodeEngine {
             max_api_retries: resolve_max_api_retries(cfg.max_api_retries),
             temperature: cfg.temperature,
             prompt_cache: cfg.prompt_cache.unwrap_or(true),
-            noema: ZodeNoema::from_settings(&cfg.noema),
+            noema,
             extract_config: crate::noema_extract::ExtractConfig::from_settings(&cfg.noema),
+            compact_settings: cfg.compact.clone(),
+            session_store,
+            recent_files,
+            restore_pending,
+            last_restore_note: Arc::new(std::sync::Mutex::new(None)),
             model_runtime,
             bash_sessions,
             todo_state,
@@ -871,11 +926,10 @@ impl ZodeEngine {
         result
     }
 
-    /// Full plugin list (incl. disabled) for `/plugin` and the picker — tool
-    /// groups, MCP servers (with live connection state), skills, LSP servers.
-    pub fn plugin_list(&self) -> Vec<crate::plugin::Plugin> {
-        let mcp_servers: Vec<(String, bool)> = self
-            .all_mcp_servers
+    /// `(server, connected)` for every configured MCP server. Feeds both the
+    /// plugin list and the sidebar MCP section (refreshed on the UI tick).
+    pub fn mcp_status(&self) -> Vec<(String, bool)> {
+        self.all_mcp_servers
             .iter()
             .map(|s| {
                 let connected = self
@@ -890,7 +944,38 @@ impl ZodeEngine {
                     .unwrap_or(false);
                 (s.clone(), connected)
             })
-            .collect();
+            .collect()
+    }
+
+    /// Run a saved JS workflow by name (the `/workflows` dialog's Enter).
+    /// `agent()` calls dispatch through this engine's final gated registry, so
+    /// approvals and the sidebar sub-agent view behave like model-run tasks.
+    pub async fn run_workflow_named(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        log: crate::workflows_js::LogSink,
+        abort: agent::abort::AbortController,
+    ) -> Result<serde_json::Value, String> {
+        let def = crate::workflows::load_workflow_defs(&self.cwd)
+            .into_iter()
+            .find(|w| w.name == name)
+            .ok_or_else(|| format!("no workflow named '{name}'"))?;
+        let runner = Arc::new(crate::workflows_js::GatedTaskRunner::new(
+            self.tools.clone(),
+            self.cwd.clone(),
+            self.file_cache.clone(),
+            self.permissions.clone(),
+            self.hooks.clone(),
+            abort,
+        ));
+        crate::workflows_js::run_js_workflow(&def.script, args, runner, log).await
+    }
+
+    /// Full plugin list (incl. disabled) for `/plugin` and the picker — tool
+    /// groups, MCP servers (with live connection state), skills, LSP servers.
+    pub fn plugin_list(&self) -> Vec<crate::plugin::Plugin> {
+        let mcp_servers = self.mcp_status();
         self.plugins
             .list(&mcp_servers, &self.all_skill_meta, &self.lsp_langs)
     }
@@ -964,8 +1049,24 @@ impl ZodeEngine {
     /// automatically near the context limit, exposed on demand. Returns the
     /// before/after token estimate so the UI can report what was reclaimed.
     pub async fn compact(&self, abort: AbortController) -> Result<CompactOutcome, CoreError> {
+        self.compact_sized(None, abort).await
+    }
+
+    /// Compact with a caller-supplied figure for the LIVE context size.
+    /// `context_tokens` should be the provider-reported usage (the TUI's "%
+    /// ctx" badge); `None` falls back to a byte estimate of the store (which
+    /// under-counts CJK). The figure picks the compaction direction — see
+    /// [`compact_direction`]: a transcript already near/over the input window
+    /// must NOT be sent whole, or the summarize request itself gets a 400
+    /// context-overflow and compaction can never succeed.
+    pub async fn compact_sized(
+        &self,
+        context_tokens: Option<u32>,
+        abort: AbortController,
+    ) -> Result<CompactOutcome, CoreError> {
         use agent::compact::{
-            apply_compaction_to_store, compact_conversation, PartialCompactDirection,
+            apply_compaction_to_store, compact_with_hooks, estimate_tokens, promote_to_store,
+            CompactTrigger, CompactWithHooksRequest,
         };
         // Snapshot the transcript so the store lock is never held across the
         // provider await below.
@@ -976,22 +1077,34 @@ impl ZodeEngine {
                 .map_err(|_| CoreError::Other("compact: message store poisoned".into()))?;
             store.iter().cloned().collect()
         };
-        let result = compact_conversation(
-            &messages,
-            self.provider.as_ref(),
-            self.model.clone(),
-            None,
-            PartialCompactDirection::Full,
-            abort,
-        )
-        .await
-        .map_err(|e| CoreError::Other(e.to_string()))?;
+        let tokens = context_tokens.unwrap_or_else(|| {
+            messages
+                .iter()
+                .map(estimate_tokens)
+                .fold(0u32, u32::saturating_add)
+        });
+        let mut request = CompactWithHooksRequest::new(&messages, self.model.clone())
+            .with_trigger(CompactTrigger::Manual)
+            .with_direction(compact_direction(tokens, self.model_max_tokens))
+            .with_abort(abort);
+        if self.session_store.is_some() {
+            request = request
+                .with_custom_instructions(crate::compact_memory::COMPACT_MEMORY_INSTRUCTIONS);
+        }
+        let result = compact_with_hooks(self.hooks.as_ref(), self.provider.as_ref(), request)
+            .await
+            .map_err(|e| CoreError::Other(e.to_string()))?;
         {
             let mut store = self
                 .store
                 .lock()
                 .map_err(|_| CoreError::Other("compact: message store poisoned".into()))?;
             apply_compaction_to_store(&mut store, &result)?;
+        }
+        if let Some(sm) = &self.session_store {
+            if let Err(err) = promote_to_store(sm.as_ref(), &result).await {
+                tracing::debug!(error = %err, "manual compact: memory sink failed");
+            }
         }
         Ok(CompactOutcome {
             pre_tokens: result.pre_compact_tokens,
@@ -1022,6 +1135,7 @@ impl ZodeEngine {
         abort: AbortController,
     ) -> Result<Box<dyn EventStream>, agent::error::AgentError> {
         let query = text_query(&content);
+        self.restore_after_compact(&query);
         self.auto_remember_noema(&query);
         let content = self.inject_noema_memory(content, &query);
         self.turn_blocks_raw(content, abort).await
@@ -1048,14 +1162,79 @@ impl ZodeEngine {
             .max_api_retries(self.max_api_retries)
             .cwd(self.cwd.clone())
             .auto_compact(true)
+            .microcompact(self.compact_settings.microcompact())
             .use_prompt_cache(self.prompt_cache);
         if let Some(t) = self.temperature {
             builder = builder.temperature(t);
+        }
+        if let Some(store) = &self.session_store {
+            builder = builder
+                .compact_instructions(crate::compact_memory::COMPACT_MEMORY_INSTRUCTIONS)
+                .session_memory(store.clone() as Arc<dyn agent::compact::SessionMemoryStore>);
         }
         if let Some(sys) = &self.system {
             builder = builder.system(sys.clone());
         }
         builder.build().run_blocks(content, abort).await
+    }
+
+    /// One-shot post-compaction restoration: when the tracker hook latched a
+    /// compaction, push a synthetic user message (recent files re-read from
+    /// disk + noema recall pack) into the store BEFORE this turn's user
+    /// prompt. Best-effort: any failure just skips that part.
+    fn restore_after_compact(&self, query: &str) {
+        use std::sync::atomic::Ordering;
+        if !self.restore_pending.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let cfg = &self.compact_settings;
+        let files = if cfg.restore_files() {
+            let paths = self.recent_files.top(5);
+            crate::compact_memory::read_attachments(&paths, 5)
+        } else {
+            Vec::new()
+        };
+        let recall = if cfg.recall_after_compact() {
+            let goal = self
+                .store
+                .lock()
+                .ok()
+                .and_then(|s| crate::compact_memory::latest_summary_goal(&s));
+            let recall_query = match goal {
+                Some(g) => format!("{g}\n{query}"),
+                None => query.to_string(),
+            };
+            self.noema
+                .recall_for_turn(&recall_query, Some(self.cwd.as_path()))
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let pc_config = agent::compact::PostCompactConfig {
+            token_budget: cfg.restore_files_budget(),
+            ..Default::default()
+        };
+        let Some((message, note)) =
+            crate::compact_memory::build_restore_message(files, recall, &pc_config)
+        else {
+            return;
+        };
+        if let Ok(mut store) = self.store.lock() {
+            if store.push(message).is_ok() {
+                if let Ok(mut n) = self.last_restore_note.lock() {
+                    *n = Some(note);
+                }
+            }
+        }
+    }
+
+    /// Take (and clear) the UI note produced by the last restoration.
+    pub fn take_restore_note(&self) -> Option<String> {
+        self.last_restore_note
+            .lock()
+            .ok()
+            .and_then(|mut n| n.take())
     }
 
     fn auto_remember_noema(&self, query: &str) {
@@ -1618,6 +1797,13 @@ impl EngineTemplate {
         self.cfg.language.as_deref()
     }
 
+    /// Whether the TUI captures mouse events (`mouseCapture` in config).
+    /// Default ON (wheel scroll + in-app selection); `false` hands the mouse
+    /// back to the terminal for native selection + its own ⌘C.
+    pub fn mouse_capture(&self) -> bool {
+        self.cfg.mouse_capture_enabled()
+    }
+
     /// Whether autonomous orchestration is on (`/orchestration`). Default ON
     /// (unset → enabled); toggle off via Settings / `/orchestration`.
     pub fn autonomous_orchestration(&self) -> bool {
@@ -1848,6 +2034,11 @@ mod tests {
             prompt_cache: false,
             noema: ZodeNoema::disabled(),
             extract_config: crate::noema_extract::ExtractConfig::default(),
+            compact_settings: crate::config::CompactSettings::default(),
+            session_store: None,
+            recent_files: crate::compact_memory::RecentFiles::default(),
+            restore_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_restore_note: Arc::new(std::sync::Mutex::new(None)),
             model_runtime,
             bash_sessions: BashSessionRegistry::new(),
             todo_state: TodoState::new(),
@@ -2155,6 +2346,32 @@ mod tests {
         assert!(recalled.contains("我喜欢 Rust 工具"), "{recalled}");
     }
 
+    #[test]
+    fn compact_direction_halves_when_near_the_window() {
+        use agent::compact::PartialCompactDirection;
+        // Small transcript → Full (maximal compaction).
+        assert!(matches!(
+            compact_direction(50_000, 200_000),
+            PartialCompactDirection::Full
+        ));
+        // Near/over the window → a Full request would itself overflow the
+        // provider input limit (the observed 220k-into-196k deadlock), so
+        // compact the earliest half instead.
+        assert!(matches!(
+            compact_direction(120_000, 200_000),
+            PartialCompactDirection::EarliestHalf
+        ));
+        assert!(matches!(
+            compact_direction(220_000, 196_000),
+            PartialCompactDirection::EarliestHalf
+        ));
+        // Unknown window → no basis to restrict.
+        assert!(matches!(
+            compact_direction(1_000_000, 0),
+            PartialCompactDirection::Full
+        ));
+    }
+
     #[tokio::test]
     async fn compact_folds_transcript_into_summary() {
         use agent::message::Header;
@@ -2213,6 +2430,69 @@ mod tests {
             )
         });
         assert!(has_summary, "summary message spliced in");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn restore_pending_injects_files_before_the_user_prompt() {
+        use agent::stream::Event;
+        use agent::testing::MockProvider;
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let touched = dir.path().join("recent.rs");
+        std::fs::write(&touched, "pub fn recently_touched() {}").unwrap();
+
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider::new(vec![
+            Event::TextDelta { delta: "ok".into() },
+            Event::Result {
+                data: agent::stream::ResultData {
+                    stop_reason: Some("end_turn".into()),
+                    ..Default::default()
+                },
+            },
+        ]));
+        let engine = minimal_engine(provider);
+        engine.recent_files.record(touched.clone());
+        engine.restore_pending.store(true, Ordering::SeqCst);
+
+        let mut stream = engine
+            .turn("continue please", AbortController::new())
+            .await
+            .unwrap();
+        while let Some(item) = stream.next().await {
+            item.unwrap();
+        }
+
+        let snap: Vec<Message> = engine.store.lock().unwrap().iter().cloned().collect();
+        // Restoration message sits BEFORE the user prompt.
+        let restore_idx = snap.iter().position(|m| matches!(
+            m,
+            Message::User { content, .. } if content.iter().any(|b| matches!(
+                b,
+                ContentBlock::Text { text } if text.contains("[Post-compaction file restoration")
+            ))
+        ));
+        let prompt_idx = snap.iter().position(|m| {
+            matches!(
+                m,
+                Message::User { content, .. } if content.iter().any(|b| matches!(
+                    b,
+                    ContentBlock::Text { text } if text.contains("continue please")
+                ))
+            )
+        });
+        assert!(
+            restore_idx.is_some(),
+            "restoration message missing: {snap:?}"
+        );
+        assert!(restore_idx.unwrap() < prompt_idx.unwrap());
+        assert_eq!(
+            engine.take_restore_note().as_deref(),
+            Some("post-compact restore: 1 file(s)")
+        );
+        assert!(engine.take_restore_note().is_none()); // take clears
+                                                       // Latch consumed — next turn will not re-inject.
+        assert!(!engine.restore_pending.load(Ordering::SeqCst));
     }
 
     #[cfg(feature = "noema")]
@@ -2446,7 +2726,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(eng.hooks.len(), 2); // EditHistory + BgShell
+        assert_eq!(eng.hooks.len(), 3); // EditHistory + BgShell + compact-tracker
         assert!(eng.undo().await.is_err()); // empty history
     }
 
@@ -2634,5 +2914,76 @@ mod tests {
         assert_eq!(p.input_price, None);
         // Shared credentials are preserved across the model switch.
         assert_eq!(p.api_key.as_deref(), Some("sk-test"));
+    }
+
+    #[cfg(feature = "noema")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn manual_compact_sinks_analysis_into_noema() {
+        use agent::stream::Event;
+        use agent::testing::MockProvider;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("NOEMA_ROOT", dir.path());
+        let adapter = crate::noema::ZodeNoema::from_settings(&crate::config::NoemaSettings {
+            auto_extract: Some(true), // → autoSafe write policy
+            user: Some("tester".into()),
+            ..Default::default()
+        });
+        std::env::remove_var("NOEMA_ROOT");
+
+        let tagged = "<analysis>\n\
+            - REQUIREMENT: dark mode must be the default theme.\n\
+            </analysis>\n\
+            <summary>User asked for dark mode; work continues.</summary>";
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider::new(vec![
+            Event::TextDelta {
+                delta: tagged.into(),
+            },
+            Event::Result {
+                data: Default::default(),
+            },
+        ]));
+        let mut engine = minimal_engine(provider);
+        engine.session_store = Some(Arc::new(crate::compact_memory::NoemaSessionStore::new(
+            adapter.clone(),
+            PathBuf::from("."),
+        )));
+        {
+            let mut store = engine.store.lock().unwrap();
+            store
+                .push(Message::User {
+                    header: agent::message::Header::new(),
+                    content: vec![ContentBlock::Text {
+                        text: "please default to dark mode".into(),
+                    }],
+                })
+                .unwrap();
+            store
+                .push(Message::Assistant {
+                    header: agent::message::Header::new(),
+                    content: vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
+                })
+                .unwrap();
+        }
+
+        let outcome = engine.compact(AbortController::new()).await.unwrap();
+        assert_eq!(outcome.replaced, 2);
+
+        // The REQUIREMENT bullet (0.85 confidence, autoSafe) is stored and
+        // recallable straight away. `candidate_from_entry` sinks compact
+        // bullets at `ZodeMemoryScope::Project` (they describe THIS
+        // project's decisions/constraints, not user-global preferences),
+        // and noema only loads the project cortex when a `cwd` is given —
+        // so recall must pass the same cwd the sink wrote under (`engine.cwd`,
+        // ".", matching `NoemaSessionStore::new`'s second arg above). This
+        // mirrors every real call site (e.g. `inject_noema_memory`), which
+        // always recalls with `Some(self.cwd.as_path())`.
+        let recalled = adapter
+            .recall_for_turn("dark mode theme", Some(engine.cwd.as_path()))
+            .unwrap();
+        assert!(recalled.is_some(), "expected the sunk memory to recall");
     }
 }

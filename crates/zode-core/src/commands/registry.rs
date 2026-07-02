@@ -136,7 +136,10 @@ mod tests {
         let sidebar = reg
             .get("sidebar")
             .expect("/sidebar command should be registered");
-        assert_eq!(sidebar.usage, "/sidebar [on|off|toggle|auto]");
+        assert_eq!(
+            sidebar.usage,
+            "/sidebar [on|off|toggle|auto|mcp|files|todo]"
+        );
         assert_eq!(sidebar.description, "Show or hide the sidebar");
     }
 

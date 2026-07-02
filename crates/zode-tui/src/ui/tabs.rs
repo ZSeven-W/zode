@@ -1,7 +1,7 @@
 //! Right session sidebar: current session metadata plus one row per open tab.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
@@ -24,10 +24,12 @@ pub struct SidebarInfo<'a> {
     pub cost_label: &'a str,
     pub yolo: bool,
     pub sandbox: bool,
-    /// Active tab's cached todo snapshot, rendered in the foot box.
+    /// Active tab's cached todo snapshot; empty hides the todo section.
     pub todos: &'a [TodoItem],
-    /// Whether the active tab has a turn in flight (drives the box title).
+    /// Whether the active tab has a turn in flight (drives the todo header).
     pub busy: bool,
+    /// Fold state of the todo section.
+    pub todos_collapsed: bool,
     /// Active tab's Task-spawned sub-agents (newest first), rendered as their
     /// own section beneath the sessions list.
     pub subagents: &'a [zode_core::SubAgent],
@@ -36,6 +38,27 @@ pub struct SidebarInfo<'a> {
     pub goal: Option<&'a str>,
     /// How long the goal loop has been running (pre-formatted, e.g. `2m 05s`).
     pub goal_elapsed: Option<String>,
+    /// Configured MCP servers as `(name, connected)`; empty hides the section.
+    pub mcp_servers: &'a [(String, bool)],
+    /// Fold state of the MCP section (header stays visible when folded).
+    pub mcp_collapsed: bool,
+    /// Git working-tree modifications; empty hides the section.
+    pub git_files: &'a [zode_core::GitFileStat],
+    /// Fold state of the modified-files section.
+    pub files_collapsed: bool,
+    /// App version for the pinned footer row (e.g. `0.1.0-beta.3`).
+    pub version: &'a str,
+}
+
+/// Absolute terminal rows of the sidebar's click targets, rebuilt each frame:
+/// the collapsible section headers (fold toggles) and the modified-files
+/// "…+k more" row (opens the full-list overlay).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SidebarHits {
+    pub mcp_header_row: Option<u16>,
+    pub files_header_row: Option<u16>,
+    pub files_more_row: Option<u16>,
+    pub todo_header_row: Option<u16>,
 }
 
 pub fn tab_label(index: usize, title: &str, busy: bool) -> String {
@@ -123,27 +146,45 @@ pub fn render_sidebar(
     active: usize,
     info: SidebarInfo<'_>,
     theme: &Theme,
-) {
-    // The todo box sits directly beneath the sessions list (not pinned to the
-    // foot), with a one-row gap. `todo_box_height` returns 0 when the sidebar
-    // is too short to host both the summary/sessions block and the box.
-    const GAP: u16 = 1;
-    let box_h = crate::ui::todo::todo_box_height(info.todos.len(), area.height as usize) as u16;
-    let show_box = box_h > 0 && box_h + GAP < area.height && area.width >= 4;
-
+) -> SidebarHits {
     let row_width = area.width.saturating_sub(1) as usize;
-    // The "subagents" section flows beneath the tabs (empty → no-op); the todo
-    // box is the carved foot box. Reserve room for both so the tab list yields.
+    // Sections flowing BELOW the tab list (empty → no-op) plus the pinned
+    // version row: reserve room so the tab list yields.
     let sub_h = crate::ui::subagents_sidebar::section_height(info.subagents.len());
-    let todo_foot = if show_box { (box_h + GAP) as usize } else { 0 };
+    let files_h =
+        crate::ui::modified_files::section_height(info.git_files.len(), info.files_collapsed);
+    let todo_h = crate::ui::todo::section_height(info.todos.len(), info.todos_collapsed);
+    let version_foot = 2; // blank gap + the pinned `● zode <version>` row
+
+    let mut hits = SidebarHits::default();
+    let header_row = |lines: &Vec<Line<'_>>| {
+        // The section's header renders after its leading blank separator.
+        let row = area.y + lines.len() as u16 + 1;
+        (row < area.y + area.height).then_some(row)
+    };
 
     let mut lines = sidebar_summary_lines(&info, row_width)
         .into_iter()
         .map(|(is_header, line)| styled_sidebar_line(is_header, &line, row_width, theme))
         .collect::<Vec<_>>();
+    // The MCP section flows between the summary and the sessions list.
+    if !info.mcp_servers.is_empty() {
+        hits.mcp_header_row = header_row(&lines);
+        lines.extend(crate::ui::mcp_sidebar::section_lines(
+            info.mcp_servers,
+            info.mcp_collapsed,
+            row_width,
+            theme,
+        ));
+        lines.push(Line::from(Span::styled(
+            " ".repeat(row_width),
+            Style::default().bg(theme.bg_secondary),
+        )));
+    }
     lines.push(header_line(row_width, theme));
-    // Cap the tab list so the subagents section AND the todo foot box fit.
-    let tabs_budget = (area.height as usize).saturating_sub(todo_foot + sub_h);
+    // Cap the tab list so everything below it fits.
+    let tabs_budget =
+        (area.height as usize).saturating_sub(sub_h + files_h + todo_h + version_foot);
     append_tab_rows(&mut lines, row_width, tabs_budget, tabs, active, theme);
     // Flow the subagents section right after the tabs (no-op when empty).
     lines.extend(crate::ui::subagents_sidebar::section_lines(
@@ -151,20 +192,60 @@ pub fn render_sidebar(
         row_width,
         theme,
     ));
-    let content_rows = lines.len() as u16;
-    render_sidebar_block(f, area, lines, theme);
-
-    if show_box {
-        let y = area.y + content_rows + GAP;
-        let h = box_h.min(area.height.saturating_sub(content_rows + GAP));
-        if h >= 2 {
-            // Inset by one column so the sidebar's left rail (drawn by the top
-            // block) stays continuous through the box, and the box content
-            // lines up with the bordered sections above it.
-            let b = Rect::new(area.x + 1, y, area.width.saturating_sub(1), h);
-            crate::ui::todo::render_todo_box(f, b, info.todos, info.busy, theme);
+    // Modified files flow beneath subagents; the todo section follows. Both
+    // appear only while they have content — nothing is pinned.
+    if !info.git_files.is_empty() {
+        hits.files_header_row = header_row(&lines);
+        let start = lines.len();
+        lines.extend(crate::ui::modified_files::section_lines(
+            info.git_files,
+            info.files_collapsed,
+            row_width,
+            theme,
+        ));
+        if let Some(idx) = crate::ui::modified_files::overflow_row_index(
+            info.git_files.len(),
+            info.files_collapsed,
+        ) {
+            let row = area.y + (start + idx) as u16;
+            hits.files_more_row = (row < area.y + area.height).then_some(row);
         }
     }
+    if !info.todos.is_empty() {
+        hits.todo_header_row = header_row(&lines);
+        lines.extend(crate::ui::todo::section_lines(
+            info.todos,
+            info.busy,
+            info.todos_collapsed,
+            row_width,
+            theme,
+        ));
+    }
+    let content_rows = lines.len() as u16;
+    render_sidebar_block(f, area, lines, theme);
+    render_version_row(f, area, content_rows, info.version, theme);
+    hits
+}
+
+/// The pinned `● zode <version>` footer row, on the sidebar's last line.
+/// Skipped when the flowing content already reaches it.
+fn render_version_row(f: &mut Frame, area: Rect, occupied: u16, version: &str, theme: &Theme) {
+    if area.height < 4 || area.width < 4 {
+        return;
+    }
+    let y = area.y + area.height - 1;
+    if y <= area.y + occupied {
+        return;
+    }
+    let row_width = area.width.saturating_sub(1) as usize;
+    let text = truncate_to_width(&format!("zode {version}"), row_width.saturating_sub(3));
+    let bg = Style::default().bg(theme.bg_secondary);
+    let line = Line::from(vec![
+        Span::styled(" ● ", bg.fg(Color::Green)),
+        Span::styled(text, bg.fg(theme.fg_subtle)),
+    ]);
+    let strip = Rect::new(area.x + 1, y, area.width.saturating_sub(1), 1);
+    f.render_widget(Paragraph::new(line).style(bg), strip);
 }
 
 fn render_tab_list(
@@ -401,9 +482,15 @@ mod tests {
             sandbox: true,
             todos: &[],
             busy: false,
+            todos_collapsed: false,
             subagents: &[],
             goal: None,
             goal_elapsed: None,
+            mcp_servers: &[],
+            mcp_collapsed: false,
+            git_files: &[],
+            files_collapsed: false,
+            version: "0.0.0-test",
         };
         let lines = sidebar_summary_lines(&info, 34);
         let joined = lines
@@ -423,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_renders_todo_box_with_items() {
+    fn sidebar_renders_todos_as_flowing_collapsible_section() {
         use zode_core::{TodoItem, TodoStatus};
         let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("minimal"));
         let todos = vec![
@@ -453,31 +540,24 @@ mod tests {
             sandbox: false,
             todos: &todos,
             busy: true,
+            todos_collapsed: false,
             subagents: &[],
             goal: None,
             goal_elapsed: None,
+            mcp_servers: &[],
+            mcp_collapsed: false,
+            git_files: &[],
+            files_collapsed: false,
+            version: "0.0.0-test",
         };
         let backend = ratatui::backend::TestBackend::new(34, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut hits = SidebarHits::default();
         terminal
-            .draw(|f| render_sidebar(f, f.area(), &[], 0, info, &theme))
+            .draw(|f| {
+                hits = render_sidebar(f, f.area(), &[], 0, info, &theme);
+            })
             .unwrap();
-        let content: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
-        assert!(content.contains("Todo"));
-        assert!(content.contains("running…"));
-        assert!(content.contains("wire snapshot"));
-        assert!(content.contains("1/2"));
-
-        // The box must sit just beneath the sessions list, NOT pinned to the
-        // foot. With 0 tabs the summary+header is 16 rows, so the box opens
-        // around row 17 — assert its content lands in the upper half and the
-        // bottom rows stay empty.
         let rows: Vec<String> = terminal
             .backend()
             .buffer()
@@ -485,18 +565,24 @@ mod tests {
             .chunks(34)
             .map(|r| r.iter().map(|c| c.symbol()).collect())
             .collect();
-        let box_row = rows
+        // Flows right beneath the sessions list like the other sections.
+        let sessions_row = rows.iter().position(|r| r.contains("sessions")).unwrap();
+        let todo_row = rows
             .iter()
-            .position(|r| r.contains("wire snapshot"))
-            .expect("todo item should be rendered");
-        assert!(
-            box_row < 20,
-            "todo box should sit under sessions, not at the foot (row {box_row})"
-        );
-        assert!(
-            rows[30..].iter().all(|r| !r.contains("wire snapshot")),
-            "todo box must not render in the foot rows"
-        );
+            .position(|r| r.contains("▼ Todo · running…"))
+            .expect("todo header should render");
+        assert!(todo_row > sessions_row);
+        assert!(rows[todo_row].contains("1/2"));
+        assert!(rows.iter().any(|r| r.contains("wire snapshot")));
+        // The header is a click target for the fold toggle.
+        assert_eq!(hits.todo_header_row, Some(todo_row as u16));
+    }
+
+    #[test]
+    fn sidebar_hides_todo_section_when_empty() {
+        let (rows, hits) = draw_rows(info_with_sections(&[], &[], false, false));
+        assert!(!rows.iter().any(|r| r.contains("Todo")));
+        assert_eq!(hits.todo_header_row, None);
     }
 
     #[test]
@@ -528,14 +614,22 @@ mod tests {
             sandbox: false,
             todos: &[],
             busy: false,
+            todos_collapsed: false,
             subagents: &subagents,
             goal: None,
             goal_elapsed: None,
+            mcp_servers: &[],
+            mcp_collapsed: false,
+            git_files: &[],
+            files_collapsed: false,
+            version: "0.0.0-test",
         };
         let backend = ratatui::backend::TestBackend::new(34, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_sidebar(f, f.area(), &[], 0, info, &theme))
+            .draw(|f| {
+                render_sidebar(f, f.area(), &[], 0, info, &theme);
+            })
             .unwrap();
         let rows: Vec<String> = terminal
             .backend()
@@ -551,6 +645,103 @@ mod tests {
         // The sub-agent section is its OWN header, placed below sessions.
         assert!(subagents_row > sessions_row);
         assert!(rows.iter().any(|r| r.contains("researcher")));
+    }
+
+    fn info_with_sections<'a>(
+        mcp_servers: &'a [(String, bool)],
+        git_files: &'a [zode_core::GitFileStat],
+        mcp_collapsed: bool,
+        files_collapsed: bool,
+    ) -> SidebarInfo<'a> {
+        SidebarInfo {
+            session_title: "s",
+            theme_name: "Minimal",
+            model: "m",
+            cwd: std::path::Path::new("/tmp"),
+            mode: "ready",
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_label: "$0.00",
+            yolo: false,
+            sandbox: false,
+            todos: &[],
+            busy: false,
+            todos_collapsed: false,
+            subagents: &[],
+            goal: None,
+            goal_elapsed: None,
+            mcp_servers,
+            mcp_collapsed,
+            git_files,
+            files_collapsed,
+            version: "0.1.0-test",
+        }
+    }
+
+    fn draw_rows(info: SidebarInfo<'_>) -> (Vec<String>, SidebarHits) {
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("minimal"));
+        let backend = ratatui::backend::TestBackend::new(34, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut hits = SidebarHits::default();
+        terminal
+            .draw(|f| {
+                hits = render_sidebar(f, f.area(), &[], 0, info, &theme);
+            })
+            .unwrap();
+        let rows = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(34)
+            .map(|r| r.iter().map(|c| c.symbol()).collect())
+            .collect();
+        (rows, hits)
+    }
+
+    #[test]
+    fn sidebar_renders_mcp_files_sections_and_version_row() {
+        let servers = vec![("chrome-devtools".to_string(), true)];
+        let files = vec![zode_core::GitFileStat {
+            path: "crates/zode-tui/src/app.rs".into(),
+            added: Some(4),
+            removed: Some(1),
+        }];
+        let (rows, hits) = draw_rows(info_with_sections(&servers, &files, false, false));
+
+        let mcp_row = rows.iter().position(|r| r.contains("▼ mcp"));
+        let sessions_row = rows.iter().position(|r| r.contains("sessions"));
+        let files_row = rows.iter().position(|r| r.contains("modified files"));
+        assert!(mcp_row.is_some(), "mcp header should render");
+        assert!(files_row.is_some(), "modified files header should render");
+        // MCP flows above the sessions list; modified files below it.
+        assert!(mcp_row < sessions_row);
+        assert!(files_row > sessions_row);
+        assert!(rows.iter().any(|r| r.contains("chrome-devtools")));
+        assert!(rows
+            .iter()
+            .any(|r| r.contains("app.rs") && r.contains("+4")));
+        // Version row pinned to the sidebar foot.
+        assert!(rows[39].contains("zode 0.1.0-test"));
+        // Click hitboxes point at the header rows just rendered.
+        assert_eq!(hits.mcp_header_row, mcp_row.map(|r| r as u16));
+        assert_eq!(hits.files_header_row, files_row.map(|r| r as u16));
+    }
+
+    #[test]
+    fn collapsed_sections_hide_their_rows_but_keep_headers() {
+        let servers = vec![("chrome-devtools".to_string(), true)];
+        let files = vec![zode_core::GitFileStat {
+            path: "crates/zode-tui/src/app.rs".into(),
+            added: Some(4),
+            removed: Some(1),
+        }];
+        let (rows, hits) = draw_rows(info_with_sections(&servers, &files, true, true));
+        assert!(rows.iter().any(|r| r.contains("▶ mcp")));
+        assert!(rows.iter().any(|r| r.contains("▶ modified files")));
+        assert!(!rows.iter().any(|r| r.contains("chrome-devtools")));
+        assert!(!rows.iter().any(|r| r.contains("app.rs")));
+        assert!(hits.mcp_header_row.is_some());
+        assert!(hits.files_header_row.is_some());
     }
 
     #[test]

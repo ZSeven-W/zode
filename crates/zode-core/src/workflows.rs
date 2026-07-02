@@ -1,26 +1,30 @@
-//! User-defined workflows: reusable, named multi-step recipes the agent can
-//! create (`define_workflow`), list (`/workflows`), and follow by dispatching
-//! each step to a sub-agent with the Task tool.
+//! User-defined workflows: reusable, named JS orchestration scripts the agent
+//! can create (`define_workflow`), list (`/workflows`), and RUN deterministically
+//! (`run_workflow` tool, or Enter in the `/workflows` dialog). Execution happens
+//! in zode's QuickJS runtime ([`crate::workflows_js`]) — the script drives real
+//! sub-agents through `agent()` / `parallel()` / `pipeline()`; the model never
+//! "follows steps" on its own. (The old Markdown step-list format is retired:
+//! `.md` files in the workflow dirs are skipped with a warning.)
 //!
-//! A workflow is a Markdown file with frontmatter and a numbered step list,
-//! each step prefixed with the sub-agent type to run it:
+//! A workflow file is frontmatter + a JS body:
 //!
 //! ```text
 //! ---
 //! name: review-and-fix
-//! description: Review the working-tree diff, then fix the findings
+//! description: Review the diff in parallel, then fix the findings
 //! ---
-//! 1. [reviewer] Review the working-tree git diff and list concrete issues.
-//! 2. [general] Fix each issue the reviewer found, then run the tests.
+//! const findings = await parallel([
+//!   () => agent("Review the working-tree diff for bugs", { type: "reviewer" }),
+//!   () => agent("Review test coverage gaps", { type: "researcher" }),
+//! ]);
+//! return await agent(`Fix these findings:\n${findings.filter(Boolean).join("\n")}`);
 //! ```
 //!
 //! Discovered from `~/.zode/workflows`, `<cwd>/.zode/workflows`, and
 //! `<cwd>/.claude/workflows` (later dirs override same-named earlier ones).
-//! This is the definition/orchestration layer — steps are executed by the agent
-//! via Task (advertised in the orchestration system-prompt directive), not by a
-//! separate parallel runtime.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use agent::error::AgentError;
 use agent::tool::{SafetyClass, Tool, ToolUseContext};
@@ -29,20 +33,15 @@ use serde_json::{json, Value};
 
 use crate::config::ConfigManager;
 use crate::error::CoreError;
+use crate::task_factory::ParentToolsCell;
+use crate::workflows_js::{run_js_workflow, syntax_check, GatedTaskRunner};
 
-/// One step: which sub-agent type runs it, and the instruction.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkflowStep {
-    pub agent_type: String,
-    pub prompt: String,
-}
-
-/// A parsed workflow definition.
+/// A parsed workflow definition: frontmatter + the JS orchestration body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowDef {
     pub name: String,
     pub description: String,
-    pub steps: Vec<WorkflowStep>,
+    pub script: String,
 }
 
 /// Workflow dirs, low → high precedence: global, project, .claude compat.
@@ -75,53 +74,8 @@ pub fn parse_workflow_def(text: &str) -> Option<WorkflowDef> {
     Some(WorkflowDef {
         name,
         description,
-        steps: parse_steps(body),
+        script: body.to_string(),
     })
-}
-
-/// Parse step lines into [`WorkflowStep`]s — public for the workflow create
-/// dialog, which collects steps as free text (one `[type] prompt` per line).
-pub fn parse_step_lines(body: &str) -> Vec<WorkflowStep> {
-    parse_steps(body)
-}
-
-/// Parse the body's step lines: `N. [agent_type] prompt` (the number and the
-/// `[type]` are both optional; a missing type defaults to "general").
-fn parse_steps(body: &str) -> Vec<WorkflowStep> {
-    let mut steps = Vec::new();
-    for raw in body.lines() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // Drop a leading "N." / "N)" ordinal.
-        let rest = match line.find(['.', ')']) {
-            Some(i) if line[..i].chars().all(|c| c.is_ascii_digit()) && i > 0 => {
-                line[i + 1..].trim()
-            }
-            _ => line,
-        };
-        let rest = rest.trim_start_matches(['-', '*', ' ']).trim();
-        let (agent_type, prompt) = match (rest.strip_prefix('['), rest.find(']')) {
-            (Some(_), Some(close)) => (
-                rest[1..close].trim().to_string(),
-                rest[close + 1..].trim().to_string(),
-            ),
-            _ => ("general".to_string(), rest.to_string()),
-        };
-        if prompt.is_empty() {
-            continue;
-        }
-        steps.push(WorkflowStep {
-            agent_type: if agent_type.is_empty() {
-                "general".into()
-            } else {
-                agent_type
-            },
-            prompt,
-        });
-    }
-    steps
 }
 
 /// Load all workflow definitions from the standard dirs (precedence-merged).
@@ -133,8 +87,16 @@ pub fn load_workflow_defs(cwd: &Path) -> Vec<WorkflowDef> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                continue;
+            match path.extension().and_then(|e| e.to_str()) {
+                Some("js") => {}
+                Some("md") => {
+                    tracing::warn!(
+                        "skip legacy Markdown workflow {} (rewrite it as a .js script)",
+                        path.display()
+                    );
+                    continue;
+                }
+                _ => continue,
             }
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
@@ -151,14 +113,8 @@ pub fn load_workflow_defs(cwd: &Path) -> Vec<WorkflowDef> {
     by_name.into_values().collect()
 }
 
-/// Write (create or overwrite) a global workflow at `~/.zode/workflows/<name>.md`.
-pub fn write_workflow_def(
-    name: &str,
-    description: &str,
-    steps: &[WorkflowStep],
-) -> Result<PathBuf, CoreError> {
-    let slug: String = name
-        .chars()
+fn slug_of(name: &str) -> String {
+    name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -166,45 +122,54 @@ pub fn write_workflow_def(
                 '-'
             }
         })
-        .collect();
+        .collect()
+}
+
+/// Write (create or overwrite) a global workflow at `~/.zode/workflows/<name>.js`.
+pub fn write_workflow_def(
+    name: &str,
+    description: &str,
+    script: &str,
+) -> Result<PathBuf, CoreError> {
+    let slug = slug_of(name);
     if slug.is_empty() {
         return Err(CoreError::Other("workflow name is empty".into()));
     }
     let dir = ConfigManager::config_dir()?.join("workflows");
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{slug}.md"));
-    let mut body = format!("---\nname: {name}\ndescription: {description}\n---\n");
-    for (i, s) in steps.iter().enumerate() {
-        body.push_str(&format!("{}. [{}] {}\n", i + 1, s.agent_type, s.prompt));
-    }
+    let path = dir.join(format!("{slug}.js"));
+    let body = format!("---\nname: {name}\ndescription: {description}\n---\n{script}\n");
     std::fs::write(&path, body)?;
     Ok(path)
 }
 
-/// Delete a global workflow (`~/.zode/workflows/<name>.md`). Ok(false) if absent.
+/// Delete a global workflow (`~/.zode/workflows/<name>.js`, plus a legacy
+/// same-named `.md` if present). Ok(false) if neither existed.
 pub fn delete_workflow_def(name: &str) -> Result<bool, CoreError> {
-    let slug: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let path = ConfigManager::config_dir()?
-        .join("workflows")
-        .join(format!("{slug}.md"));
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(CoreError::Io(e)),
+    let slug = slug_of(name);
+    let dir = ConfigManager::config_dir()?.join("workflows");
+    let mut removed = false;
+    for ext in ["js", "md"] {
+        match std::fs::remove_file(dir.join(format!("{slug}.{ext}"))) {
+            Ok(()) => removed = true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(CoreError::Io(e)),
+        }
     }
+    Ok(removed)
 }
 
-/// Tool that lets the agent create a reusable workflow (autonomous orchestration).
-/// Registered only when `autonomous_orchestration` is on.
+/// The scripting surface documented for the model (and `/help`): kept in one
+/// place so `define_workflow`'s description and prompts stay in sync.
+pub const WORKFLOW_JS_API: &str = "The script body runs in a sandboxed JS runtime \
+    (no fs/net) with: `await agent(prompt, {type, description})` → run one sub-agent \
+    and get its final text; `parallel([...thunks])` → run thunks concurrently (failed \
+    ones resolve to null); `pipeline(items, ...stages)` → per-item stage chains; \
+    `log(msg)` → progress line; `args` → the invocation's arguments value. Use \
+    top-level `await` and `return` the final result.";
+
+/// Tool that lets the agent create a reusable JS workflow (autonomous
+/// orchestration). Registered only when `autonomous_orchestration` is on.
 #[derive(Debug, Default)]
 pub struct DefineWorkflowTool;
 
@@ -215,10 +180,10 @@ impl Tool for DefineWorkflowTool {
     }
 
     fn description(&self) -> &str {
-        "Create a reusable, named workflow (ordered steps, each with a sub-agent \
-         type + instruction) saved to ~/.zode/workflows. Define a workflow once, \
-         then follow its steps by dispatching each to the Task tool. Takes effect \
-         on the next session rebuild."
+        "Create a reusable, named JS workflow saved to ~/.zode/workflows/<name>.js. \
+         The `script` is an orchestration body executed deterministically by zode \
+         (run it later with the run_workflow tool). Do NOT include frontmatter in \
+         `script` — it is added from `name`/`description`."
     }
 
     fn input_schema(&self) -> Value {
@@ -227,19 +192,9 @@ impl Tool for DefineWorkflowTool {
             "properties": {
                 "name": {"type": "string", "description": "Short kebab-case identifier"},
                 "description": {"type": "string", "description": "One-line summary"},
-                "steps": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "agent_type": {"type": "string", "description": "Sub-agent type to run this step"},
-                            "prompt": {"type": "string", "description": "Instruction for this step"}
-                        },
-                        "required": ["prompt"]
-                    }
-                }
+                "script": {"type": "string", "description": WORKFLOW_JS_API}
             },
-            "required": ["name", "description", "steps"]
+            "required": ["name", "description", "script"]
         })
     }
 
@@ -258,40 +213,112 @@ impl Tool for DefineWorkflowTool {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim();
-        let steps: Vec<WorkflowStep> = input
-            .get("steps")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|s| {
-                        let prompt = s.get("prompt").and_then(|v| v.as_str())?.trim().to_string();
-                        if prompt.is_empty() {
-                            return None;
-                        }
-                        let agent_type = s
-                            .get("agent_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("general")
-                            .trim()
-                            .to_string();
-                        Some(WorkflowStep { agent_type, prompt })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if name.is_empty() || steps.is_empty() {
+        let script = input
+            .get("script")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if name.is_empty() || script.is_empty() {
             return Err(AgentError::other(
-                "define_workflow requires a name and at least one step",
+                "define_workflow requires a name and a non-empty script",
             ));
         }
-        let path = write_workflow_def(name, description, &steps)
+        // Parse-only validation (the body is wrapped in an async fn, so
+        // top-level await/return are legal). Catches typos before saving.
+        syntax_check(script).map_err(|e| AgentError::other(format!("script error: {e}")))?;
+        let path = write_workflow_def(name, description, script)
             .map_err(|e| AgentError::other(e.to_string()))?;
         Ok(json!({
             "ok": true,
             "path": path.display().to_string(),
-            "steps": steps.len(),
-            "note": "available after the next session rebuild (/reload-plugins or next turn)"
+            "note": "run it with the run_workflow tool (available after the next session rebuild for /workflows)"
         }))
+    }
+}
+
+/// Tool that runs a saved JS workflow to completion: every `agent()` call in
+/// the script dispatches through the parent's FINAL gated registry's `Task`
+/// tool, so approvals / sandboxing / the recursion guard / sub-agent
+/// visibility all match model-initiated tasks.
+#[derive(Debug)]
+pub struct RunWorkflowTool {
+    /// The parent's final gated+sandboxed registry (set post-assembly).
+    tools: ParentToolsCell,
+}
+
+impl RunWorkflowTool {
+    pub fn new(tools: ParentToolsCell) -> Self {
+        Self { tools }
+    }
+}
+
+#[async_trait]
+impl Tool for RunWorkflowTool {
+    fn name(&self) -> &str {
+        "run_workflow"
+    }
+
+    fn description(&self) -> &str {
+        "Run a saved JS workflow to completion and return its result. `args` is \
+         exposed to the script as the global `args`. Prefer this over manually \
+         re-implementing a saved workflow's steps."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The workflow's frontmatter name"},
+                "args": {"description": "Optional value passed to the script as `args`"}
+            },
+            "required": ["name"]
+        })
+    }
+
+    fn safety_class(&self) -> SafetyClass {
+        // The script itself is sandboxed, but its agents can call mutating
+        // tools (each individually gated).
+        SafetyClass::Mutating
+    }
+
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+        let name = input
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let args = input.get("args").cloned().unwrap_or(Value::Null);
+        let def = load_workflow_defs(&ctx.cwd)
+            .into_iter()
+            .find(|w| w.name == name)
+            .ok_or_else(|| {
+                AgentError::other(format!("run_workflow: no workflow named '{name}'"))
+            })?;
+        let tools = self
+            .tools
+            .get()
+            .cloned()
+            .ok_or_else(|| AgentError::other("run_workflow: tool registry not ready"))?;
+        let runner = Arc::new(GatedTaskRunner::new(
+            tools,
+            ctx.cwd.clone(),
+            ctx.file_cache.clone(),
+            ctx.permissions.clone(),
+            ctx.hooks.clone(),
+            ctx.abort.clone(),
+        ));
+        let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = logs.clone();
+        let log: crate::workflows_js::LogSink = Arc::new(move |m| {
+            if let Ok(mut l) = sink.lock() {
+                l.push(m);
+            }
+        });
+        let result = run_js_workflow(&def.script, args, runner, log)
+            .await
+            .map_err(AgentError::other)?;
+        let logs = logs.lock().map(|l| l.clone()).unwrap_or_default();
+        Ok(json!({ "name": def.name, "result": result, "logs": logs }))
     }
 }
 
@@ -300,28 +327,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_name_and_typed_steps() {
-        let text = "---\nname: review-and-fix\ndescription: Review then fix\n---\n1. [reviewer] Review the diff and list issues.\n2. [general] Fix each issue.\n";
+    fn parses_name_description_and_script() {
+        let text = "---\nname: review-and-fix\ndescription: Review then fix\n---\nreturn await agent(\"go\");\n";
         let def = parse_workflow_def(text).expect("parses");
         assert_eq!(def.name, "review-and-fix");
         assert_eq!(def.description, "Review then fix");
-        assert_eq!(def.steps.len(), 2);
-        assert_eq!(def.steps[0].agent_type, "reviewer");
-        assert_eq!(def.steps[0].prompt, "Review the diff and list issues.");
-        assert_eq!(def.steps[1].agent_type, "general");
-    }
-
-    #[test]
-    fn step_without_type_defaults_to_general() {
-        let def =
-            parse_workflow_def("---\nname: w\ndescription: d\n---\n- just do the thing\n").unwrap();
-        assert_eq!(def.steps.len(), 1);
-        assert_eq!(def.steps[0].agent_type, "general");
-        assert_eq!(def.steps[0].prompt, "just do the thing");
+        assert!(def.script.contains("agent(\"go\")"));
     }
 
     #[test]
     fn no_name_is_rejected() {
         assert!(parse_workflow_def("no frontmatter").is_none());
+        assert!(parse_workflow_def("---\ndescription: d\n---\nreturn 1;").is_none());
+    }
+
+    #[test]
+    fn loads_js_and_skips_legacy_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let wf = dir.path().join(".zode").join("workflows");
+        std::fs::create_dir_all(&wf).unwrap();
+        std::fs::write(
+            wf.join("a.js"),
+            "---\nname: js-flow\ndescription: d\n---\nreturn 1;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            wf.join("b.md"),
+            "---\nname: md-flow\ndescription: d\n---\n1. [general] step\n",
+        )
+        .unwrap();
+        let defs = load_workflow_defs(dir.path());
+        assert!(defs.iter().any(|d| d.name == "js-flow"));
+        assert!(!defs.iter().any(|d| d.name == "md-flow"));
+    }
+
+    #[test]
+    fn slug_sanitizes_names() {
+        assert_eq!(slug_of("review & fix!"), "review---fix-");
+        assert_eq!(slug_of("ok-name_1"), "ok-name_1");
     }
 }

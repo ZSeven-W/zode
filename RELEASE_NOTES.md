@@ -1,19 +1,16 @@
-# zode v0.1.0-beta.3
+# zode v0.1.0-beta.4
 
 **zode** is an open-source, AI-native coding assistant for your terminal: it reads your code, runs commands, searches files, and manages git — all from a fast Rust TUI, with non-blocking permissions and an on-by-default OS sandbox.
 
 > ⚠️ **Beta.** APIs, config, and behavior may change before 1.0. Please file issues!
 
-## What's new in beta.3
+## What's new in beta.4
 
-- **Autonomous goal loop** — `/goal <task>` now works toward the goal across turns until it's done (the agent calls a `goal_complete` tool to stop); **Esc** or `/goal clear` halts it. The sidebar shows the active goal + elapsed time.
-- **Switchable pricing currency** — `/currency` (or **Settings → Currency**) converts the cost display live between USD / CNY / EUR / GBP / JPY / KRW / INR / TWD / HKD.
-- **Full UI localization** — the status bar, sidebar, badges, permission prompts, and menus are now translated across all **15 languages** (`/language`).
-- **Third-party Anthropic gateways** — custom Anthropic-compatible endpoints (LongCat, DeepSeek) now authenticate correctly (`Authorization: Bearer`).
-- **Readable transcript** — markdown renders with proper section / paragraph / bullet spacing, and tool output (stdout, file content) is shown inline.
-- **Context management** — the `% ctx` badge refreshes right after `/compact`, the loop auto-compacts near the window limit, and a spinner shows while compacting.
-- **Resilience** — transient provider stream failures retry with exponential backoff.
-- **Fixes** — copy-on-select & clipboard errors, and the "thinking process piling into one block" display issue.
+- **JS-scripted workflows** — `/workflows` now runs real orchestration scripts instead of prompt checklists. A workflow is a `.js` body using `await agent(prompt, {type})`, `parallel([...])`, and `pipeline(items, ...stages)`; zode executes it deterministically in a sandboxed QuickJS runtime, and every `agent()` call dispatches a gated sub-agent (approvals, sandbox, and the sidebar's live sub-agent view all apply). Create one with the `define_workflow` tool, run it with `run_workflow` or from the dialog.
+- **Richer sidebar** — new collapsible sections for **MCP** server connection state, **modified files** (git working-tree changes with per-file `+/-` line counts), and a pinned version footer. Todo and sub-agent sections are collapsible too — click a ▼ header, or use `/sidebar mcp|files|todo`. The "…+N more" row on modified files opens a full scrollable list.
+- **Tabbed question dialog** — the `AskUserQuestion` modal now shows one question per tab with a progress strip, auto-advances to the next unanswered question after each pick, de-duplicates model-supplied "Other" options, and has a cleaner bordered layout.
+- **Streamable HTTP MCP** — remote MCP servers configure with `"transport": "http"` (`"sse"` accepted as an alias); `$VAR` substitution works in `url`/`headers`. Docs added for configuring MCP servers, installing skills, and command Markdown.
+- **Fixes** — startup no longer hangs on terminals that don't answer the keyboard-protocol probe (bounded 800 ms timeout); the sidebar's left rail no longer disappears after a modal closes (forced repaint on overlay close / **Ctrl+L**).
 
 ---
 
@@ -33,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.
 irm https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.ps1 | iex
 ```
 
-The installers auto-detect your OS + CPU, download the matching binary from this release, and drop `zode` on your PATH. Pin a version with `--version v0.1.0-beta.3` (sh) or `$env:ZODE_VERSION='v0.1.0-beta.3'` (ps1).
+The installers auto-detect your OS + CPU, download the matching binary from this release, and drop `zode` on your PATH. Pin a version with `--version v0.1.0-beta.4` (sh) or `$env:ZODE_VERSION='v0.1.0-beta.4'` (ps1).
 
 > Because this is a **pre-release**, GitHub's "latest" excludes it from some tooling — the installers above resolve the newest release *including* betas, so they pick this up automatically.
 
@@ -41,17 +38,17 @@ The installers auto-detect your OS + CPU, download the matching binary from this
 
 | OS | Architecture | Asset |
 |----|--------------|-------|
-| macOS | Apple Silicon (M1+) | `zode-0.1.0-beta.3-arm64-mac.tar.gz` |
-| macOS | Intel | `zode-0.1.0-beta.3-x64-mac.tar.gz` |
-| Linux | x86_64 | `zode-0.1.0-beta.3-x64-linux.tar.gz` |
-| Linux | ARM64 (aarch64) | `zode-0.1.0-beta.3-arm64-linux.tar.gz` |
-| Windows | x64 | `zode-0.1.0-beta.3-x64-windows.zip` |
-| Windows | ARM64 | `zode-0.1.0-beta.3-arm64-windows.zip` |
+| macOS | Apple Silicon (M1+) | `zode-0.1.0-beta.4-arm64-mac.tar.gz` |
+| macOS | Intel | `zode-0.1.0-beta.4-x64-mac.tar.gz` |
+| Linux | x86_64 | `zode-0.1.0-beta.4-x64-linux.tar.gz` |
+| Linux | ARM64 (aarch64) | `zode-0.1.0-beta.4-arm64-linux.tar.gz` |
+| Windows | x64 | `zode-0.1.0-beta.4-x64-windows.zip` |
+| Windows | ARM64 | `zode-0.1.0-beta.4-arm64-windows.zip` |
 
 Unpack and move `zode` (or `zode.exe`) onto your PATH:
 
 ```sh
-tar -xzf zode-0.1.0-beta.3-x64-linux.tar.gz
+tar -xzf zode-0.1.0-beta.4-x64-linux.tar.gz
 sudo mv zode /usr/local/bin/
 ```
 
@@ -115,4 +112,4 @@ Prebuilt binaries for **macOS** (arm64 + x64), **Linux** (x86_64 + arm64, glibc)
 
 ---
 
-**Full changelog:** https://github.com/ZSeven-W/zode/commits/v0.1.0-beta.3
+**Full changelog:** https://github.com/ZSeven-W/zode/commits/v0.1.0-beta.4

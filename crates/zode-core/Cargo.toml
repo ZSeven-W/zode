@@ -23,6 +23,7 @@ dirs = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
 noema-core = { path = "../../vendor/noema/crates/noema-core", default-features = false, optional = true }
+rquickjs = { version = "0.8.1", features = ["futures", "parallel"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

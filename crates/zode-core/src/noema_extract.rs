@@ -361,22 +361,22 @@ mod tests {
     #[test]
     fn extract_config_from_settings_gates_and_defaults() {
         use crate::config::NoemaSettings;
-        // Off by default.
-        let off = ExtractConfig::from_settings(&NoemaSettings::default());
-        assert!(!off.enabled);
-        assert_eq!(off.max_memories_per_turn, 3);
-        assert_eq!(off.max_input_chars, 4000);
+        // On by default.
+        let on = ExtractConfig::from_settings(&NoemaSettings::default());
+        assert!(on.enabled);
+        assert_eq!(on.max_memories_per_turn, 3);
+        assert_eq!(on.max_input_chars, 4000);
 
         // Enabled requires auto_extract AND memory enabled.
-        let on = ExtractConfig::from_settings(&NoemaSettings {
+        let explicit_on = ExtractConfig::from_settings(&NoemaSettings {
             auto_extract: Some(true),
             extract_model: Some("cheap-model".into()),
             max_memories_per_turn: Some(5),
             ..Default::default()
         });
-        assert!(on.enabled);
-        assert_eq!(on.model.as_deref(), Some("cheap-model"));
-        assert_eq!(on.max_memories_per_turn, 5);
+        assert!(explicit_on.enabled);
+        assert_eq!(explicit_on.model.as_deref(), Some("cheap-model"));
+        assert_eq!(explicit_on.max_memories_per_turn, 5);
 
         // auto_extract on but memory disabled → still off.
         let memoff = ExtractConfig::from_settings(&NoemaSettings {

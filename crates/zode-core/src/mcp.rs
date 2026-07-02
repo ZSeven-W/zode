@@ -313,17 +313,32 @@ fn extract_servers(root: &Value) -> Vec<(String, Value)> {
 }
 
 /// Normalize one server spec to zode's `{transport, …}` shape. Handles:
-/// already-tagged (passthrough); stdio (`command` as string or `[cmd, ...args]`,
-/// `env`/`environment`); and remote (`url`, `type` remote/sse/http → sse).
+/// already-tagged (passthrough, aliasing `http`/dropping `websocket` — see
+/// below); stdio (`command` as string or `[cmd, ...args]`, `env`/`environment`);
+/// and remote (`url` → the Streamable HTTP transport).
 fn normalize_server(spec: &Value) -> Option<Value> {
     let obj = spec.as_object()?;
     // Explicitly disabled servers are dropped.
     if obj.get("enabled") == Some(&Value::Bool(false)) {
         return None;
     }
-    // Already in zode's tagged shape — pass through.
-    if obj.contains_key("transport") {
-        return Some(spec.clone());
+    // Already in zode's tagged shape. `http` is zode's user-facing spelling
+    // for the Streamable HTTP transport — the vendor parser's wire tag is
+    // still `sse` (an rmcp/serde naming leftover), so alias it here rather
+    // than exposing that quirk in every config file. `websocket` is accepted
+    // by the schema but has no real connector (rmcp 1.5 gates it behind a
+    // disabled feature) — drop it rather than register a server that can
+    // never connect.
+    if let Some(t) = obj.get("transport").and_then(|v| v.as_str()) {
+        return match t {
+            "websocket" => None,
+            "http" => {
+                let mut tagged = spec.clone();
+                tagged["transport"] = json!("sse");
+                Some(tagged)
+            }
+            _ => Some(spec.clone()),
+        };
     }
     // stdio: command is a string (claude) or an array (opencode local).
     if let Some(cmd) = obj.get("command") {
@@ -351,7 +366,7 @@ fn normalize_server(spec: &Value) -> Option<Value> {
             "env": env,
         }));
     }
-    // remote: url-based → sse (zode supports stdio/sse/websocket).
+    // remote: url-based → Streamable HTTP (wire tag `sse`, see above).
     if let Some(url) = obj.get("url").and_then(|v| v.as_str()) {
         let headers = obj.get("headers").cloned().unwrap_or_else(|| json!({}));
         return Some(json!({ "transport": "sse", "url": url, "headers": headers }));
@@ -470,6 +485,39 @@ mod tests {
     #[test]
     fn prefixed_name() {
         assert_eq!(prefixed_tool_name("deepwiki", "ask"), "mcp__deepwiki__ask");
+    }
+
+    #[test]
+    fn normalize_url_only_spec_infers_streamable_http() {
+        let spec = json!({ "url": "https://mcp.example.com/mcp" });
+        let got = normalize_server(&spec).unwrap();
+        assert_eq!(got["transport"], "sse");
+        assert_eq!(got["url"], "https://mcp.example.com/mcp");
+    }
+
+    #[test]
+    fn normalize_aliases_http_tag_to_wire_sse() {
+        let spec = json!({
+            "transport": "http",
+            "url": "https://mcp.example.com/mcp",
+            "headers": { "Authorization": "Bearer $TOK" }
+        });
+        let got = normalize_server(&spec).unwrap();
+        assert_eq!(got["transport"], "sse");
+        assert_eq!(got["headers"]["Authorization"], "Bearer $TOK");
+    }
+
+    #[test]
+    fn normalize_passes_through_explicit_sse_tag() {
+        let spec = json!({ "transport": "sse", "url": "https://mcp.example.com/mcp" });
+        let got = normalize_server(&spec).unwrap();
+        assert_eq!(got["transport"], "sse");
+    }
+
+    #[test]
+    fn normalize_drops_websocket_transport() {
+        let spec = json!({ "transport": "websocket", "url": "wss://mcp.example.com" });
+        assert!(normalize_server(&spec).is_none());
     }
 
     /// Run `f` with HOME pointed at an empty temp dir so cross-agent global

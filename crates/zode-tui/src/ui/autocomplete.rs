@@ -516,7 +516,10 @@ mod tests {
         let completion = ac.confirm().expect("sidebar command completion");
 
         assert_eq!(completion.insert, "/sidebar ");
-        assert_eq!(completion.placeholder, Some("[on|off|toggle|auto]"));
+        assert_eq!(
+            completion.placeholder,
+            Some("[on|off|toggle|auto|mcp|files|todo]")
+        );
     }
 
     #[test]
