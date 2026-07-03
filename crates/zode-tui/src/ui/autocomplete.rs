@@ -15,58 +15,16 @@ use zode_core::commands::{CommandRegistry, SlashCommand};
 
 use crate::theme::Theme;
 
-const MAX_VISIBLE: usize = 8;
-const COMMAND_COLUMN_WIDTH: usize = 15;
+use super::autocomplete_subhints::{
+    SubHints, BROWSER_SUBCOMMANDS, BROWSER_SUBCOMMAND_DESCS, BROWSER_SUB_TRAILING_SPACE,
+    OP_SUBCOMMANDS, OP_SUBCOMMAND_DESCS, OP_SUB_TRAILING_SPACE,
+};
+
+pub(crate) const MAX_VISIBLE: usize = 8;
+pub(crate) const COMMAND_COLUMN_WIDTH: usize = 15;
 /// Upper bound for the auto-sized name column, so one very long name can't push
 /// every description off-screen.
-const NAME_COLUMN_MAX: usize = 30;
-
-/// `/op` hint entries: the four subcommands the parser in
-/// `zode_core::commands::op` knows explicitly (`status` / `design` /
-/// `generate` / `call`), plus a few REAL OpenPencil read-tool names that
-/// work through the parser's tool-passthrough arm with empty args. Any
-/// other word passes through literally as an MCP tool name — so only
-/// names that actually exist on the OpenPencil side belong in this list
-/// (the previous bare verbs `insert`/`update`/`delete`/… matched no tool
-/// and failed on submit).
-pub const OP_SUBCOMMANDS: &[&str] = &[
-    "status",
-    "design",
-    "generate",
-    "call",
-    "get_document_info",
-    "get_selection",
-    "list_pages",
-    "list_variables",
-];
-
-/// Brief descriptions shown alongside each `/op` subcommand in the hint popup.
-const OP_SUBCOMMAND_DESCS: &[&str] = &[
-    "report connection state",
-    "run batch_design DSL",
-    "generate a page from a prompt",
-    "call any MCP tool by name",
-    "document info",
-    "current selection",
-    "list pages",
-    "list variables",
-];
-
-/// Known `/browser` subcommands — mirrors `zode_core::commands::browser::
-/// map_subcommand`, kept here so the hint popup never goes stale relative to
-/// the parser.
-pub(crate) const BROWSER_SUBCOMMANDS: &[&str] =
-    &["status", "launch", "close", "pair", "target", "screenshot"];
-
-/// Brief descriptions shown alongside each `/browser` subcommand in the hint popup.
-pub(crate) const BROWSER_SUBCOMMAND_DESCS: &[&str] = &[
-    "Connection and target state",
-    "Launch the managed browser now",
-    "Close the managed browser",
-    "Pair the Chrome extension (M2)",
-    "Switch target: managed | bridge",
-    "Capture a screenshot to a file",
-];
+pub(crate) const NAME_COLUMN_MAX: usize = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandCompletion {
@@ -95,13 +53,9 @@ pub struct Autocomplete {
     state: ListState,
     active: bool,
     /// Secondary mode: subcommand hints for `/op <sub>`.
-    op_sub_matches: Vec<(&'static str, &'static str)>,
-    op_sub_state: ListState,
-    op_sub_active: bool,
+    op_sub: SubHints,
     /// Secondary mode: subcommand hints for `/browser <sub>`.
-    browser_sub_matches: Vec<(&'static str, &'static str)>,
-    browser_sub_state: ListState,
-    browser_sub_active: bool,
+    browser_sub: SubHints,
 }
 
 impl Default for Autocomplete {
@@ -119,12 +73,8 @@ impl Autocomplete {
             dyn_matches: Vec::new(),
             state: ListState::default(),
             active: false,
-            op_sub_matches: Vec::new(),
-            op_sub_state: ListState::default(),
-            op_sub_active: false,
-            browser_sub_matches: Vec::new(),
-            browser_sub_state: ListState::default(),
-            browser_sub_active: false,
+            op_sub: SubHints::new("/op ", OP_SUB_TRAILING_SPACE),
+            browser_sub: SubHints::new("/browser ", BROWSER_SUB_TRAILING_SPACE),
         }
     }
 
@@ -152,10 +102,13 @@ impl Autocomplete {
             self.matches.clear();
             self.dyn_matches.clear();
             self.state.select(None);
-            self.browser_sub_active = false;
-            self.browser_sub_matches.clear();
-            self.browser_sub_state.select(None);
-            self.update_op_sub(sub_prefix);
+            self.browser_sub.dismiss();
+            let table: Vec<_> = OP_SUBCOMMANDS
+                .iter()
+                .copied()
+                .zip(OP_SUBCOMMAND_DESCS.iter().copied())
+                .collect();
+            self.op_sub.update(&table, sub_prefix);
             return;
         }
         // Secondary mode: `/browser ` prefix triggers subcommand hints.
@@ -164,19 +117,18 @@ impl Autocomplete {
             self.matches.clear();
             self.dyn_matches.clear();
             self.state.select(None);
-            self.op_sub_active = false;
-            self.op_sub_matches.clear();
-            self.op_sub_state.select(None);
-            self.update_browser_sub(sub_prefix);
+            self.op_sub.dismiss();
+            let table: Vec<_> = BROWSER_SUBCOMMANDS
+                .iter()
+                .copied()
+                .zip(BROWSER_SUBCOMMAND_DESCS.iter().copied())
+                .collect();
+            self.browser_sub.update(&table, sub_prefix);
             return;
         }
         // Clear any stale secondary state when not in `/op ` or `/browser ` mode.
-        self.op_sub_active = false;
-        self.op_sub_matches.clear();
-        self.op_sub_state.select(None);
-        self.browser_sub_active = false;
-        self.browser_sub_matches.clear();
-        self.browser_sub_state.select(None);
+        self.op_sub.dismiss();
+        self.browser_sub.dismiss();
 
         match input.strip_prefix('/') {
             // Only while typing the command word (no space yet).
@@ -213,60 +165,18 @@ impl Autocomplete {
         }
     }
 
-    /// Recompute the `/op` subcommand hint list from the typed subcommand prefix.
-    fn update_op_sub(&mut self, typed: &str) {
-        let q = typed.to_ascii_lowercase();
-        self.op_sub_matches = OP_SUBCOMMANDS
-            .iter()
-            .zip(OP_SUBCOMMAND_DESCS.iter())
-            .filter(|(name, _)| q.is_empty() || name.contains(q.as_str()))
-            .map(|(n, d)| (*n, *d))
-            .collect();
-        let total = self.op_sub_matches.len();
-        self.op_sub_active = total > 0;
-        if self.op_sub_active {
-            let sel = self.op_sub_state.selected().unwrap_or(0).min(total - 1);
-            self.op_sub_state.select(Some(sel));
-        } else {
-            self.op_sub_state.select(None);
-        }
-    }
-
-    /// Recompute the `/browser` subcommand hint list from the typed subcommand prefix.
-    fn update_browser_sub(&mut self, typed: &str) {
-        let q = typed.to_ascii_lowercase();
-        self.browser_sub_matches = BROWSER_SUBCOMMANDS
-            .iter()
-            .zip(BROWSER_SUBCOMMAND_DESCS.iter())
-            .filter(|(name, _)| q.is_empty() || name.contains(q.as_str()))
-            .map(|(n, d)| (*n, *d))
-            .collect();
-        let total = self.browser_sub_matches.len();
-        self.browser_sub_active = total > 0;
-        if self.browser_sub_active {
-            let sel = self
-                .browser_sub_state
-                .selected()
-                .unwrap_or(0)
-                .min(total - 1);
-            self.browser_sub_state.select(Some(sel));
-        } else {
-            self.browser_sub_state.select(None);
-        }
-    }
-
     pub fn is_active(&self) -> bool {
         self.active
     }
 
     /// True when the `/op` subcommand hint popup is showing.
     pub fn is_op_sub_active(&self) -> bool {
-        self.op_sub_active
+        self.op_sub.active
     }
 
     /// True when the `/browser` subcommand hint popup is showing.
     pub fn is_browser_sub_active(&self) -> bool {
-        self.browser_sub_active
+        self.browser_sub.active
     }
 
     pub fn matches(&self) -> &[SlashCommand] {
@@ -325,92 +235,40 @@ impl Autocomplete {
 
     /// Navigate down in the `/op` subcommand hint list.
     pub fn op_sub_next(&mut self) {
-        let total = self.op_sub_matches.len();
-        if total == 0 {
-            return;
-        }
-        let i = (self.op_sub_state.selected().unwrap_or(0) + 1) % total;
-        self.op_sub_state.select(Some(i));
+        self.op_sub.next();
     }
 
     /// Navigate up in the `/op` subcommand hint list.
     pub fn op_sub_prev(&mut self) {
-        let total = self.op_sub_matches.len();
-        if total == 0 {
-            return;
-        }
-        let i = self
-            .op_sub_state
-            .selected()
-            .unwrap_or(0)
-            .checked_sub(1)
-            .unwrap_or(total - 1);
-        self.op_sub_state.select(Some(i));
+        self.op_sub.prev();
     }
 
     /// Confirm the selected `/op` subcommand; returns the text to insert
     /// (e.g. `"/op status"` or `"/op design "`).
     pub fn op_sub_confirm(&self) -> Option<String> {
-        let i = self.op_sub_state.selected().unwrap_or(0);
-        self.op_sub_matches.get(i).map(|(name, _)| {
-            // `design`, `generate`, and `call` take a required argument, so
-            // leave a trailing space; all others can be submitted as-is.
-            if *name == "design" || *name == "generate" || *name == "call" {
-                format!("/op {name} ")
-            } else {
-                format!("/op {name}")
-            }
-        })
+        self.op_sub.confirm()
     }
 
     /// Navigate down in the `/browser` subcommand hint list.
     pub fn browser_sub_next(&mut self) {
-        let total = self.browser_sub_matches.len();
-        if total == 0 {
-            return;
-        }
-        let i = (self.browser_sub_state.selected().unwrap_or(0) + 1) % total;
-        self.browser_sub_state.select(Some(i));
+        self.browser_sub.next();
     }
 
     /// Navigate up in the `/browser` subcommand hint list.
     pub fn browser_sub_prev(&mut self) {
-        let total = self.browser_sub_matches.len();
-        if total == 0 {
-            return;
-        }
-        let i = self
-            .browser_sub_state
-            .selected()
-            .unwrap_or(0)
-            .checked_sub(1)
-            .unwrap_or(total - 1);
-        self.browser_sub_state.select(Some(i));
+        self.browser_sub.prev();
     }
 
     /// Confirm the selected `/browser` subcommand; returns the text to insert
     /// (e.g. `"/browser status"` or `"/browser target "`).
     pub fn browser_sub_confirm(&self) -> Option<String> {
-        let i = self.browser_sub_state.selected().unwrap_or(0);
-        self.browser_sub_matches.get(i).map(|(name, _)| {
-            // `target` and `screenshot` take an argument, so leave a trailing
-            // space; the rest can be submitted as-is.
-            if *name == "target" || *name == "screenshot" {
-                format!("/browser {name} ")
-            } else {
-                format!("/browser {name}")
-            }
-        })
+        self.browser_sub.confirm()
     }
 
     pub fn dismiss(&mut self) {
         self.active = false;
-        self.op_sub_active = false;
-        self.op_sub_matches.clear();
-        self.op_sub_state.select(None);
-        self.browser_sub_active = false;
-        self.browser_sub_matches.clear();
-        self.browser_sub_state.select(None);
+        self.op_sub.dismiss();
+        self.browser_sub.dismiss();
     }
 
     /// Render anchored above `input_area`.
@@ -418,12 +276,12 @@ impl Autocomplete {
     /// secondary subcommand-hint popups (`/op`, `/browser`), but never more
     /// than one at a time.
     pub fn render(&mut self, f: &mut Frame, input_area: Rect, theme: &Theme) {
-        if self.op_sub_active {
-            self.render_op_sub(f, input_area, theme);
+        if self.op_sub.active {
+            self.op_sub.render(f, input_area, theme);
             return;
         }
-        if self.browser_sub_active {
-            self.render_browser_sub(f, input_area, theme);
+        if self.browser_sub.active {
+            self.browser_sub.render(f, input_area, theme);
             return;
         }
         if !self.active {
@@ -498,102 +356,6 @@ impl Autocomplete {
             );
         f.render_stateful_widget(list, area, &mut self.state);
     }
-
-    /// Render the `/op` subcommand hint popup above `input_area`.
-    fn render_op_sub(&mut self, f: &mut Frame, input_area: Rect, theme: &Theme) {
-        let n = self.op_sub_matches.len().min(MAX_VISIBLE) as u16;
-        if n == 0 {
-            return;
-        }
-        let area = popup_area(input_area, n);
-        // Name column width: longest subcommand name, clamped for readability.
-        let name_col = self
-            .op_sub_matches
-            .iter()
-            .map(|(name, _)| name.len())
-            .max()
-            .unwrap_or(0)
-            .clamp(COMMAND_COLUMN_WIDTH, NAME_COLUMN_MAX);
-        let items: Vec<ListItem> = self
-            .op_sub_matches
-            .iter()
-            .map(|(name, desc)| {
-                ListItem::new(Line::from(vec![
-                    Span::raw("  /op "),
-                    Span::styled(
-                        format!("{name:<name_col$} "),
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(crate::tr(desc), Style::default().fg(theme.fg_text)),
-                ]))
-            })
-            .collect();
-        f.render_widget(Clear, area);
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::LEFT | Borders::RIGHT)
-                    .border_style(Style::default().fg(theme.separator))
-                    .style(Style::default().bg(theme.bg_secondary)),
-            )
-            .highlight_style(
-                Style::default()
-                    .bg(theme.accent)
-                    .fg(theme.bg_secondary)
-                    .add_modifier(Modifier::BOLD),
-            );
-        f.render_stateful_widget(list, area, &mut self.op_sub_state);
-    }
-
-    /// Render the `/browser` subcommand hint popup above `input_area`.
-    fn render_browser_sub(&mut self, f: &mut Frame, input_area: Rect, theme: &Theme) {
-        let n = self.browser_sub_matches.len().min(MAX_VISIBLE) as u16;
-        if n == 0 {
-            return;
-        }
-        let area = popup_area(input_area, n);
-        // Name column width: longest subcommand name, clamped for readability.
-        let name_col = self
-            .browser_sub_matches
-            .iter()
-            .map(|(name, _)| name.len())
-            .max()
-            .unwrap_or(0)
-            .clamp(COMMAND_COLUMN_WIDTH, NAME_COLUMN_MAX);
-        let items: Vec<ListItem> = self
-            .browser_sub_matches
-            .iter()
-            .map(|(name, desc)| {
-                ListItem::new(Line::from(vec![
-                    Span::raw("  /browser "),
-                    Span::styled(
-                        format!("{name:<name_col$} "),
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(crate::tr(desc), Style::default().fg(theme.fg_text)),
-                ]))
-            })
-            .collect();
-        f.render_widget(Clear, area);
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::LEFT | Borders::RIGHT)
-                    .border_style(Style::default().fg(theme.separator))
-                    .style(Style::default().bg(theme.bg_secondary)),
-            )
-            .highlight_style(
-                Style::default()
-                    .bg(theme.accent)
-                    .fg(theme.bg_secondary)
-                    .add_modifier(Modifier::BOLD),
-            );
-        f.render_stateful_widget(list, area, &mut self.browser_sub_state);
-    }
 }
 
 fn completion_from_usage(usage: &'static str) -> CommandCompletion {
@@ -612,7 +374,7 @@ fn completion_from_usage(usage: &'static str) -> CommandCompletion {
     }
 }
 
-fn popup_area(input_area: Rect, visible_rows: u16) -> Rect {
+pub(crate) fn popup_area(input_area: Rect, visible_rows: u16) -> Rect {
     let h = visible_rows;
     Rect {
         x: input_area.x,
@@ -824,7 +586,7 @@ mod tests {
     fn op_sub_navigation_wraps() {
         let mut ac = Autocomplete::new();
         ac.update("/op ");
-        let total = ac.op_sub_matches.len();
+        let total = ac.op_sub.matches.len();
         assert!(total > 1);
         ac.op_sub_next();
         ac.op_sub_prev();
@@ -956,7 +718,7 @@ mod tests {
     fn browser_sub_navigation_wraps() {
         let mut ac = Autocomplete::new();
         ac.update("/browser ");
-        let total = ac.browser_sub_matches.len();
+        let total = ac.browser_sub.matches.len();
         assert!(total > 1);
         ac.browser_sub_next();
         ac.browser_sub_prev();

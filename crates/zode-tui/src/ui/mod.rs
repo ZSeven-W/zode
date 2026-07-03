@@ -1,6 +1,7 @@
 //! TUI widgets and rendering helpers.
 
 pub mod autocomplete;
+mod autocomplete_subhints;
 pub mod chat;
 pub mod dialog;
 pub mod diff;
