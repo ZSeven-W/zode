@@ -12,15 +12,30 @@ use async_trait::async_trait;
 
 use crate::approval::{Approval, ApprovalGate};
 
+/// Optional hook that lets a decorator show the approval gate a different
+/// (usually context-enriched) copy of the input than what the inner tool
+/// actually receives. The inner tool always gets the original, unmodified
+/// input — only the human-facing prompt sees the `view()` output.
+#[async_trait]
+pub trait GateView: Send + Sync + std::fmt::Debug {
+    /// Produce the input variant shown to the approval gate. The inner
+    /// tool always receives the original input.
+    async fn view(&self, input: &serde_json::Value) -> serde_json::Value;
+}
+
 #[derive(Debug)]
 pub struct PermissionGatedTool {
     inner: Arc<dyn Tool>,
     gate: Arc<dyn ApprovalGate>,
-    always: AtomicBool,
+    always: Arc<AtomicBool>,
     /// Serializes the check-approve-store sequence so concurrent calls to
     /// the same tool in one turn don't double-prompt; the second waiter
     /// re-checks `always` inside the lock and skips the prompt.
     approve_lock: tokio::sync::Mutex<()>,
+    /// Optional context-injection hook for the approval prompt only (see
+    /// [`GateView`]). `None` for the plain `new()` path — identical
+    /// behavior to before this hook existed.
+    view: Option<Arc<dyn GateView>>,
 }
 
 impl PermissionGatedTool {
@@ -28,13 +43,36 @@ impl PermissionGatedTool {
         Self {
             inner,
             gate,
-            always: AtomicBool::new(false),
+            always: Arc::new(AtomicBool::new(false)),
             approve_lock: tokio::sync::Mutex::new(()),
+            view: None,
+        }
+    }
+
+    /// Like [`Self::new`], but the approval gate is shown `view.view(input)`
+    /// instead of the raw input. The inner tool still receives the raw input.
+    pub fn with_view(
+        inner: Arc<dyn Tool>,
+        gate: Arc<dyn ApprovalGate>,
+        view: Arc<dyn GateView>,
+    ) -> Self {
+        Self {
+            inner,
+            gate,
+            always: Arc::new(AtomicBool::new(false)),
+            approve_lock: tokio::sync::Mutex::new(()),
+            view: Some(view),
         }
     }
 
     pub fn is_always_allowed(&self) -> bool {
         self.always.load(Ordering::Relaxed)
+    }
+
+    /// Clone of the "allow always" flag, for callers (e.g. browser tool
+    /// assembly) that need to register it in an external flag registry.
+    pub fn always_flag(&self) -> Arc<AtomicBool> {
+        self.always.clone()
     }
 }
 
@@ -63,7 +101,11 @@ impl Tool for PermissionGatedTool {
             // call that already selected "always" doesn't re-prompt.
             let _guard = self.approve_lock.lock().await;
             if !self.always.load(Ordering::Relaxed) {
-                match self.gate.approve(self.inner.name(), &input).await {
+                let shown = match &self.view {
+                    Some(v) => v.view(&input).await,
+                    None => input.clone(),
+                };
+                match self.gate.approve(self.inner.name(), &shown).await {
                     Approval::AllowOnce => {}
                     Approval::AllowAlways => self.always.store(true, Ordering::Relaxed),
                     Approval::Deny => {

@@ -89,6 +89,47 @@ pub(crate) fn summarize_input(tool: &str, input: &serde_json::Value) -> String {
         "FileWrite" | "FileEdit" | "Remove" | "Move" | "Mkdir" => {
             format!("{tool} {}", pick("path"))
         }
+        "browser_act" => {
+            let target = pick("_target");
+            let detail = match pick("action") {
+                "navigate" => pick("url").to_string(),
+                "type" => format!("{} <- {:?}", pick("selector"), pick("text")),
+                "key" => pick("key").to_string(),
+                a @ ("click" | "scroll") => {
+                    let _ = a;
+                    input
+                        .get("ref")
+                        .map(|r| format!("ref {r}"))
+                        .or_else(|| {
+                            input
+                                .get("selector")
+                                .and_then(|s| s.as_str().map(String::from))
+                        })
+                        .unwrap_or_default()
+                }
+                _ => String::new(),
+            };
+            let t = if target.is_empty() {
+                String::new()
+            } else {
+                format!(" [{target}]")
+            };
+            format!("{} {}{}", pick("action"), detail, t)
+                .trim()
+                .to_string()
+        }
+        "browser_eval" => {
+            let t = pick("_target");
+            let t = if t.is_empty() {
+                String::new()
+            } else {
+                format!(" [{t}]")
+            };
+            format!("evaluate JS{t}: {}", pick("expression"))
+        }
+        "browser_tabs" => format!("{} tab {}", pick("action"), pick("id"))
+            .trim()
+            .to_string(),
         _ => {
             let compact = serde_json::to_string(input).unwrap_or_default();
             let max_chars = 120;
@@ -281,5 +322,21 @@ mod tests {
         drop(rx);
         let gate = QueueGate::new(queue);
         assert_eq!(gate.approve("Bash", &json!({})).await, Approval::Deny);
+    }
+
+    #[test]
+    fn summarize_browser_tools() {
+        let s = summarize_input(
+            "browser_act",
+            &json!({"action":"navigate","url":"https://x.test","_target":"managed"}),
+        );
+        assert_eq!(s, "navigate https://x.test [managed]");
+        let s = summarize_input(
+            "browser_eval",
+            &json!({"expression":"document.title","_target":"managed"}),
+        );
+        assert_eq!(s, "evaluate JS [managed]: document.title");
+        let s = summarize_input("browser_tabs", &json!({"action":"close","id":"t1"}));
+        assert_eq!(s, "close tab t1");
     }
 }
