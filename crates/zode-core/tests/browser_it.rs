@@ -45,3 +45,62 @@ async fn managed_end_to_end() {
     drop(lease);
     session.close().await;
 }
+
+/// Regression test for the M1 review finding: `tab_new`/`tab_select`/
+/// `tab_close` re-attach console/network listeners on every page swap but
+/// previously never stopped the PREVIOUS page's listener tasks, so after
+/// A -> B -> A there were two live listeners writing into the shared
+/// `console_buf`, doubling every console entry (and letting a backgrounded
+/// tab keep contaminating the logs). `ManagedBackend::replace_listeners`
+/// now aborts the old page's tasks before attaching the new page's.
+#[tokio::test]
+#[ignore]
+async fn tab_switch_a_b_a_does_not_duplicate_console_entries() {
+    if std::env::var("ZODE_BROWSER_IT").as_deref() != Ok("1") {
+        eprintln!("skipped: set ZODE_BROWSER_IT=1");
+        return;
+    }
+    let cfg = BrowserConfig {
+        headless: Some(true),
+        ..Default::default()
+    };
+    let session = BrowserSession::new(cfg, std::sync::Arc::new(ManagedFactory));
+    let lease = session.lease().await.expect("launch");
+    let b = lease.backend();
+
+    // Tab A: the initial tab from launch().
+    let tab_a = b.tabs().await.unwrap().remove(0);
+    b.navigate("data:text/html,<h1>A</h1>").await.unwrap();
+
+    // Tab B: open a second tab (tab_new makes it current and re-attaches
+    // listeners — this is where the old code leaked A's listener tasks).
+    let tab_b = b
+        .tab_new(Some("data:text/html,<h1>B</h1>"))
+        .await
+        .unwrap();
+
+    // A -> B -> A: select back to A, re-attaching listeners a second time.
+    b.tab_select(&tab_a.id).await.unwrap();
+    b.tab_select(&tab_b.id).await.unwrap();
+    b.tab_select(&tab_a.id).await.unwrap();
+
+    // Emit exactly one console entry with a unique marker on the CURRENT
+    // (A) page. If a stale listener from an earlier attach is still alive,
+    // it independently observes the same event and the marker appears more
+    // than once in the buffer.
+    b.evaluate("console.log('switch-marker-77')").await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let logs = b.console_logs(50).await.unwrap();
+    let hits = logs
+        .iter()
+        .filter(|l| l.text.contains("switch-marker-77"))
+        .count();
+    assert_eq!(
+        hits, 1,
+        "expected exactly one console entry after A->B->A switching, got {hits}: {logs:?}"
+    );
+
+    drop(lease);
+    session.close().await;
+}
