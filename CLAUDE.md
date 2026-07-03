@@ -246,3 +246,152 @@ The localhost trust boundary means: both ping and tool calls go to
 `http://127.0.0.1:<port>/mcp` without auth headers. The token in the port
 file is validated by comparing it against the value echoed in the ping
 response — it is never sent as a credential.
+
+## Browser control
+
+Zode has a built-in browser-automation subsystem (M1: a process-wide
+chromiumoxide-managed Chrome; extension pairing is M2). It is built across
+two crates plus the CLI entrypoint:
+
+- `zode-core/src/browser/` — `backend.rs` (`BrowserBackend` trait + types +
+  `BrowserError`), `managed.rs` (chromiumoxide `ManagedBackend` + launch
+  supervisor), `session.rs` (process-wide `BrowserSession`, one shared
+  backend slot, serialized leases), `gate.rs` (`BrowserGateView`, via the
+  generalized `PermissionGatedTool` `GateView` hook), `tools.rs` (the four
+  `browser_*` tools), `snapshot_js.rs` (in-page JS that produces the
+  ref-annotated accessibility outline).
+- `zode-core/src/commands/browser.rs` — `/browser <subcommand>` parser.
+- `zode-tui/src/ui/dialog/browser_panel.rs` — the `/browser` status panel;
+  wired into `zode-tui/src/app.rs` alongside the slash-command handler.
+
+### `browser_*` tools
+
+| Tool | Actions | Safety | Approval |
+|------|---------|--------|----------|
+| `browser_read` | `screenshot`, `snapshot`, `console`, `network`, `tabs` | `ReadOnly` | None — registered ungated, like `op_read` |
+| `browser_act` | `navigate`, `click`, `type`, `key`, `scroll` | `Mutating` | `PermissionGatedTool` + `BrowserGateView` |
+| `browser_eval` | arbitrary JS expression | `Mutating` | `PermissionGatedTool` + `BrowserGateView`, own independent always-allow flag |
+| `browser_tabs` | `new`, `close`, `select` | `Mutating` | `PermissionGatedTool` + `BrowserGateView` |
+
+All four tools take a lease on the session (`BrowserSession::lease`), which
+serializes every backend operation across tabs and concurrent tool calls —
+the browser has one "current tab", so overlapping navigate/click/eval calls
+from different agent turns would otherwise race.
+
+The mutating trio is wrapped in `browser_gated()` (`gate.rs`) *before*
+`wrap_mutating_tools` runs in `engine.rs`, and their names are added to the
+mutating-allow list passed into that pass, so they are never double-gated
+behind a second, context-blind `PermissionGatedTool`. `browser_eval` gets
+its own `PermissionGatedTool` instance (and thus its own always-allow flag)
+independent of `browser_act`/`browser_tabs` — allowing "always allow" for
+navigation doesn't silently also allow-always arbitrary JS execution.
+`BrowserGateView` enriches every approval prompt with `_target`
+(`"managed"`/`"bridge"`) and, when resolvable without blocking, `_page_url`
+— session state the model's own tool-call input cannot be trusted to
+report accurately. The tool group id is `browser` (disable via
+`tools:browser`, like `tools:op`).
+
+### `/browser` slash command
+
+Bare `/browser` opens the TUI status panel (target, connection state, and
+row actions: select target, manage permissions, reconnect extension,
+toggle default-enabled). Subcommands are the scriptable fast path; the
+popup shows hints while typing `/browser ` (Up/Down/Tab to navigate,
+Enter/Tab to confirm, Esc to dismiss).
+
+| Command | Effect |
+|---------|--------|
+| `/browser status` | Print target/running/headless state (session-local, no MCP-style round trip) |
+| `/browser launch` | Launch the managed browser now |
+| `/browser close` | Close the managed browser |
+| `/browser pair` | Placeholder — replies "extension bridge ships in M2" |
+| `/browser target <managed\|bridge>` | Switch target; `bridge` is rejected with an M2 error message (see below) |
+| `/browser screenshot [path]` | Take a screenshot, optionally to an explicit path |
+
+### `--browser` / `--no-browser` CLI flags
+
+Session-only overrides, never persisted to `config.json`:
+`--browser` force-enables the `browser` tool group for this run;
+`--no-browser` force-disables it. With neither flag, `browser.enabled`
+(config, default `true`) decides.
+
+### `browser.*` config keys
+
+Set in `~/.zode/config.json`, camelCase JSON, nested under `browser`:
+
+```json
+{
+  "browser": {
+    "enabled": true,
+    "executable": null,
+    "headless": false,
+    "profileDir": null,
+    "defaultTarget": "managed",
+    "viewport": { "width": 1280, "height": 800 }
+  }
+}
+```
+
+Defaults (all fields optional; getters supply these when absent):
+- `enabled` → `true`.
+- `executable` → `null`, meaning auto-detect an installed Chrome / Chromium
+  / Edge binary.
+- `headless` → `false`.
+- `profileDir` → `null`, meaning `~/.zode/browser-profile` (or
+  `$ZODE_CONFIG_DIR/browser-profile` when that env var is set).
+- `defaultTarget` → `"managed"`.
+- `viewport` → `1280x800`.
+
+### Screenshot return path (content-blocks sentinel)
+
+`browser_read` action `screenshot` always saves the JPEG to
+`<config-dir>/screenshots/shot-<millis>.jpg` and returns a JSON object
+shaped as the reserved `__agent_content_blocks__` sentinel (defined and
+consumed in the `agent` submodule, `query/loop_.rs`):
+
+```json
+{ "__agent_content_blocks__": [ { "type": "image", ... } ], "text": "screenshot saved: <path>" }
+```
+
+The query loop only inlines the image blocks into the model's tool-result
+turn when the active provider's capability bit `tool_result_images` is
+`true` — currently only the Anthropic provider sets this. Every other
+provider (OpenAI-compatible, Ollama) gets the `text` fallback only, i.e.
+the saved file path, never the raw bytes. This gate — plus the sentinel's
+exact-shape validation (top-level object holding *only*
+`__agent_content_blocks__` + optional `text`; blocks must all be `Text` or
+base64 `Image` under the same 5 MiB inline cap as file attachments; error
+results never parse the sentinel; anything malformed degrades to the text
+fallback) — lives entirely in `vendor/agent`, not in zode. Landing this
+feature required bumping the `vendor/agent` submodule pointer to a version
+that added the `tool_result_images` capability and the sentinel-to-blocks
+conversion.
+
+### Chrome 136+ and profiles
+
+Chrome 136 and later refuse CDP (`--remote-debugging-port`) connections
+against the user's default profile. `managed.rs` therefore always launches
+against a dedicated, persistent profile directory (`profileDir`, see
+above) rather than the user's regular Chrome profile — this doubles as the
+M1 story for retaining login state across sessions (cookies persist in
+that profile directory between launches). There is no cross-profile
+credential sharing with the user's everyday browser.
+
+Bridge/extension pairing (`BrowserTarget::Bridge`, `/browser pair`, the
+panel's "Reconnect extension" row) is explicitly out of scope for M1:
+`BrowserSession::set_target(Bridge)` and `BrowserSession::lease()` both
+return an error naming M2, and the TUI surfaces that as a plain message
+rather than attempting a connection.
+
+### Integration tests
+
+Unit tests run under plain `cargo test --workspace` (mock backend, no
+Chrome required). A real-Chrome end-to-end test is opt-in and `#[ignore]`d
+by default:
+
+```bash
+ZODE_BROWSER_IT=1 cargo test -p zode-core --test browser_it -- --ignored
+```
+
+It launches a headless managed Chrome, navigates a `data:` URL, evaluates
+JS, screenshots, snapshots, clicks by ref, and checks console-log capture.
