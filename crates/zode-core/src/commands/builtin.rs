@@ -64,6 +64,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         usage: "/op <status|design '<dsl>'|generate <prompt>|<tool> <json>>",
         action: CommandAction::Local,
     },
+    SlashCommand {
+        name: "browser",
+        description: "Browser control panel and commands (e.g. /browser, /browser status)",
+        usage: "/browser [status|launch|close|pair|target <managed|bridge>|screenshot [path]]",
+        action: CommandAction::Local,
+    },
     // Registered now, fully wired in later phases.
     SlashCommand {
         name: "theme",

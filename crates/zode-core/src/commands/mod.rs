@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod builtin;
 pub mod op;
 pub mod registry;
