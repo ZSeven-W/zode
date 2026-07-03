@@ -263,8 +263,9 @@ async fn build(
     date: &str,
 ) -> Option<ZodeEngine> {
     // Headless surfaces have no UI to answer questions (None), no consent
-    // channel for the op-bridge (None), and don't enter plan mode (false).
-    match ZodeEngine::assemble(cfg, cwd, gate, sandbox, date, None, None, false).await {
+    // channel for the op-bridge (None), don't enter plan mode (false), and
+    // build a fresh, single-use browser session (None; no tab to share it with).
+    match ZodeEngine::assemble(cfg, cwd, gate, sandbox, date, None, None, false, None).await {
         Ok(e) => Some(e),
         Err(e) => {
             eprintln!("zode: {e}");

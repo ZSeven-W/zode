@@ -29,6 +29,10 @@ use std::sync::Mutex;
 
 use crate::approval::{ApprovalGate, ApprovalQueue, BypassGate, QueueGate};
 use crate::bg_shells::{BackgroundShellTracker, BgShellHook};
+use crate::browser::{
+    BrowserActTool, BrowserEvalTool, BrowserReadTool, BrowserSession, BrowserTabsTool,
+    BrowserToolDeps, ManagedFactory,
+};
 use crate::config::ZodeConfig;
 use crate::cost::CostState;
 use crate::error::CoreError;
@@ -505,6 +509,10 @@ pub struct ZodeEngine {
     pub user_commands: Vec<crate::user_commands::UserCommand>,
     /// OpenPencil control-surface config (for the `/op` TUI command).
     pub openpencil: crate::config::OpenPencilConfig,
+    /// Built-in browser control session (shared by all `browser_*` tools and
+    /// the `/browser` TUI panel). All tabs from the same `EngineTemplate`
+    /// share one `Arc` — one browser process per zode run.
+    pub browser: Arc<BrowserSession>,
     /// Shared completion signal for the autonomous goal loop. The registered
     /// `goal_complete` tool flips this; the TUI polls it after each turn to
     /// decide whether to stop looping. Created fresh in `assemble` so a rebuilt
@@ -571,6 +579,7 @@ impl ZodeEngine {
         question_tool: Option<Arc<dyn Tool>>,
         op_consent: Option<Arc<dyn crate::openpencil::Consent>>,
         plan_mode: bool,
+        browser: Option<Arc<BrowserSession>>,
     ) -> Result<Self, CoreError> {
         Self::assemble_with_carry(
             cfg,
@@ -581,6 +590,7 @@ impl ZodeEngine {
             question_tool,
             op_consent,
             plan_mode,
+            browser,
             CarryState::default(),
         )
         .await
@@ -605,8 +615,14 @@ impl ZodeEngine {
         question_tool: Option<Arc<dyn Tool>>,
         op_consent: Option<Arc<dyn crate::openpencil::Consent>>,
         plan_mode: bool,
+        browser: Option<Arc<BrowserSession>>,
         carry: CarryState,
     ) -> Result<Self, CoreError> {
+        // Reuse the caller's session (all tabs share ONE browser process) or
+        // build a fresh one — cheap: the managed backend only launches
+        // chromium lazily, on the first `lease()`.
+        let browser_session = browser
+            .unwrap_or_else(|| BrowserSession::new(cfg.browser.clone(), Arc::new(ManagedFactory)));
         let provider = build_provider(&cfg.provider)?;
         let model = cfg
             .provider
@@ -721,6 +737,37 @@ impl ZodeEngine {
                 }
                 None => None,
             };
+
+        // Built-in browser control (browser_*). Disable via `tools:browser`.
+        // browser_read is ReadOnly and registered un-gated, like op_read.
+        // The mutating trio (act/eval/tabs) is wrapped in `browser_gated`
+        // HERE, before `wrap_mutating_tools` runs below, so their approval
+        // prompts carry the live target/URL (session state the model's
+        // input cannot be trusted to report) instead of the generic view.
+        if cfg.browser.enabled() {
+            // Same fallback convention as `resolve_profile_dir` (managed.rs):
+            // `$ZODE_CONFIG_DIR`/`~/.zode`, or a relative `.zode` if the home
+            // directory can't be resolved.
+            let shots_dir = crate::config::ConfigManager::config_dir()
+                .unwrap_or_else(|_| PathBuf::from(".zode"))
+                .join("screenshots");
+            let deps = BrowserToolDeps {
+                session: browser_session.clone(),
+                shots_dir,
+            };
+            base.register(Arc::new(BrowserReadTool::new(deps.clone())));
+            for tool in [
+                Arc::new(BrowserActTool::new(deps.clone())) as Arc<dyn Tool>,
+                Arc::new(BrowserEvalTool::new(deps.clone())),
+                Arc::new(BrowserTabsTool::new(deps)),
+            ] {
+                base.register(crate::browser::gate::browser_gated(
+                    tool,
+                    gate.clone(),
+                    browser_session.clone(),
+                ));
+            }
+        }
 
         // Skills: load the three-level SKILL.md tree. Disabled skills are
         // dropped from the registry + index, but the full list is kept for the
@@ -903,8 +950,17 @@ impl ZodeEngine {
 
         // 2. Wrap mutating/destructive tools with the approval gate. `ask`
         //    force-gates its tools even when read-only / allowed.
+        // browser_* mutating tools are pre-wrapped via browser_gated() above
+        // (context-aware view); list them in the allow set so wrap_mutating_tools
+        // does not double-gate them behind a second, plain PermissionGatedTool.
+        let mut mutating_allow = cfg.permissions.allow.clone();
+        if cfg.browser.enabled() {
+            for name in ["browser_act", "browser_eval", "browser_tabs"] {
+                mutating_allow.push(name.to_string());
+            }
+        }
         let mut gated =
-            wrap_mutating_tools(base, &gate, &cfg.permissions.allow, &cfg.permissions.ask);
+            wrap_mutating_tools(base, &gate, &mutating_allow, &cfg.permissions.ask);
 
         // 3. ToolSearch over the full set (candidates = snapshot of the
         //    gated registry, taken before ToolSearch itself is added).
@@ -1028,6 +1084,7 @@ impl ZodeEngine {
             openpencil: cfg.openpencil.clone(),
             goal_completed,
             auto_loop_max_turns: cfg.auto_loop_max_turns,
+            browser: browser_session,
         })
     }
 
@@ -1651,6 +1708,9 @@ pub struct EngineTemplate {
     plan_mode: bool,
     sandbox: Option<crate::sandbox::SandboxConfig>,
     date: String,
+    /// Process-wide browser session, shared by every tab assembled from this
+    /// template — one browser process per zode run, not one per tab.
+    pub browser: Arc<BrowserSession>,
 }
 
 impl EngineTemplate {
@@ -1662,6 +1722,7 @@ impl EngineTemplate {
         sandbox: Option<crate::sandbox::SandboxConfig>,
         date: String,
     ) -> Self {
+        let browser = BrowserSession::new(cfg.browser.clone(), Arc::new(ManagedFactory));
         Self {
             cfg,
             cwd,
@@ -1671,6 +1732,7 @@ impl EngineTemplate {
             plan_mode: false,
             sandbox,
             date,
+            browser,
         }
     }
 
@@ -1743,6 +1805,7 @@ impl EngineTemplate {
             question_tool,
             op_consent,
             self.plan_mode,
+            Some(self.browser.clone()),
             carry,
         )
         .await
@@ -2382,6 +2445,10 @@ mod tests {
             workflows: Vec::new(),
             user_commands: Vec::new(),
             openpencil: Default::default(),
+            browser: BrowserSession::new(
+                crate::config::BrowserConfig::default(),
+                Arc::new(ManagedFactory),
+            ),
         }
     }
 
@@ -2895,6 +2962,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -2924,6 +2992,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -2945,6 +3014,7 @@ mod tests {
             None,
             None,
             true, // plan_mode
+            None,
         )
         .await
         .unwrap();
@@ -2975,6 +3045,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -3000,6 +3071,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -3027,6 +3099,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -3048,6 +3121,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -3069,6 +3143,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -3076,6 +3151,68 @@ mod tests {
             .permissions
             .evaluate("Bash", &serde_json::json!({}), None);
         assert!(decision.is_deny());
+    }
+
+    #[tokio::test]
+    async fn browser_tools_registered_when_enabled() {
+        // BrowserConfig.enabled() defaults true (test_cfg() leaves it unset).
+        let dir = tempfile::tempdir().unwrap();
+        let eng = ZodeEngine::assemble(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-06-13",
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
+        for t in [
+            "browser_read",
+            "browser_act",
+            "browser_eval",
+            "browser_tabs",
+        ] {
+            assert!(names.iter().any(|n| n == t), "missing {t}: {names:?}");
+        }
+        // browser_read stays ReadOnly and un-gated; the mutating trio is
+        // pre-wrapped via browser_gated (not double-wrapped by
+        // wrap_mutating_tools).
+        let read = eng.tools.get("browser_read").expect("browser_read");
+        assert_eq!(read.safety_class(), SafetyClass::ReadOnly);
+        for t in ["browser_act", "browser_eval", "browser_tabs"] {
+            let tool = eng.tools.get(t).unwrap_or_else(|| panic!("missing {t}"));
+            assert_eq!(tool.safety_class(), SafetyClass::Mutating);
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_tools_absent_when_group_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_cfg();
+        cfg.plugins.disabled.push("tools:browser".into());
+        let eng = ZodeEngine::assemble(
+            &cfg,
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-06-13",
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
+        assert!(
+            !names.iter().any(|n| n.starts_with("browser_")),
+            "{names:?}"
+        );
     }
 
     #[test]

@@ -115,6 +115,16 @@ pub const TOOL_GROUPS: &[(&str, &str, &[&str])] = &[
         "Drive a live OpenPencil design (read + write + generate)",
         &["op_read", "op_write", "op_design"],
     ),
+    (
+        "browser",
+        "Built-in browser control (navigate, screenshot, click, evaluate)",
+        &[
+            "browser_read",
+            "browser_act",
+            "browser_eval",
+            "browser_tabs",
+        ],
+    ),
 ];
 
 /// The tool group a tool belongs to, if any. `None` → always-on (Skill,
@@ -280,6 +290,14 @@ mod tests {
     #[test]
     fn op_design_is_grouped() {
         assert_eq!(group_of("op_design"), Some("op"));
+    }
+
+    #[test]
+    fn browser_tools_are_grouped() {
+        assert_eq!(group_of("browser_read"), Some("browser"));
+        assert_eq!(group_of("browser_act"), Some("browser"));
+        assert_eq!(group_of("browser_eval"), Some("browser"));
+        assert_eq!(group_of("browser_tabs"), Some("browser"));
     }
 
     #[test]
