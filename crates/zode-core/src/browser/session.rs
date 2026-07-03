@@ -78,6 +78,15 @@ impl BrowserSession {
         self.target.lock().unwrap().clone()
     }
 
+    /// Whether browser control is enabled by config (`browser.enabled`,
+    /// including the session-only `--no-browser` CLI override folded into
+    /// `cfg` before the engine assembles). Distinct from the `tools:browser`
+    /// plugin-group toggle — callers that need "are the tools actually live"
+    /// must check both (see `app.rs` `browser_panel_status`).
+    pub fn enabled(&self) -> bool {
+        self.cfg.enabled()
+    }
+
     pub fn set_target(&self, t: BrowserTarget) -> Result<(), BrowserError> {
         if matches!(t, BrowserTarget::Bridge) {
             return Err(BrowserError::Protocol(

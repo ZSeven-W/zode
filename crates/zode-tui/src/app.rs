@@ -3587,7 +3587,11 @@ impl TuiApp {
     fn browser_panel_status(&self) -> BrowserPanelStatus {
         let engine = &self.active_tab().engine;
         BrowserPanelStatus {
-            group_enabled: engine.plugins.is_enabled("tools:browser"),
+            // Reflect BOTH switches: `browser.enabled`/`--no-browser` (which
+            // skips tool registration entirely, engine.rs `cfg.browser.enabled()`)
+            // and the `tools:browser` plugin-group toggle. Either one being off
+            // means zero browser tools are actually live.
+            group_enabled: engine.browser.enabled() && engine.plugins.is_enabled("tools:browser"),
             target: match engine.browser.target() {
                 zode_core::browser::BrowserTarget::Managed => "managed".into(),
                 zode_core::browser::BrowserTarget::Bridge => "bridge".into(),
