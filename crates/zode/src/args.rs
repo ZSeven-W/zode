@@ -50,6 +50,14 @@ pub struct Args {
     #[arg(long)]
     pub no_sandbox: bool,
 
+    /// Force-enable the browser tool group for this session.
+    #[arg(long)]
+    pub browser: bool,
+
+    /// Disable the browser tool group for this session.
+    #[arg(long)]
+    pub no_browser: bool,
+
     /// Sandbox in read-only mode (deny all filesystem writes).
     #[arg(long)]
     pub sandbox_read_only: bool,
@@ -110,5 +118,13 @@ mod tests {
         let a = Args::parse_from(["zode"]);
         assert!(!a.continue_);
         assert!(!a.no_tui);
+    }
+
+    #[test]
+    fn browser_flags_parse() {
+        let a = Args::parse_from(["zode", "--browser"]);
+        assert!(a.browser && !a.no_browser);
+        let a = Args::parse_from(["zode", "--no-browser"]);
+        assert!(!a.browser && a.no_browser);
     }
 }

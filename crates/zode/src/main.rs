@@ -132,6 +132,13 @@ async fn run(args: Args) -> i32 {
         }
     };
 
+    // --browser / --no-browser: session-only override, never persisted.
+    if args.no_browser {
+        cfg.browser.enabled = Some(false);
+    } else if args.browser {
+        cfg.browser.enabled = Some(true);
+    }
+
     let today = today_date();
 
     // --print: headless single turn (stdin gate, or bypass on --yolo). A
