@@ -46,6 +46,7 @@ use crate::theme::{Theme, ThemeStore};
 use crate::ui::autocomplete::{Autocomplete, DynCmd};
 use crate::ui::chat::{ChatRenderMeta, ChatSelection, ChatSelectionPoint, ChatView, ImagePreview};
 use crate::ui::dialog::agents_dialog::{AgentKind, AgentRow, AgentsAction, AgentsDialog};
+use crate::ui::dialog::browser_panel::{BrowserPanel, BrowserPanelAction, BrowserPanelStatus};
 use crate::ui::dialog::connect::{ConnectAction, ConnectDialog, ConnectField, ConnectStage};
 use crate::ui::dialog::mcp_dialog::McpDialog;
 use crate::ui::dialog::permission::PermissionDialog;
@@ -242,6 +243,67 @@ fn design_progress_line(p: &zode_core::openpencil::design::DesignProgress) -> St
     }
 }
 
+/// A `/browser` op run off the event loop by `spawn_browser_op`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BrowserOp {
+    Launch,
+    Close,
+    /// `None` saves under the config dir's `screenshots/` with a timestamped
+    /// name (mirrors `browser_read`'s own screenshot-save path in zode-core).
+    Screenshot {
+        path: Option<String>,
+    },
+}
+
+/// Run one `BrowserOp` against the shared session. Free function (not a
+/// method) so it can be moved into `tokio::spawn` without borrowing `App`.
+async fn run_browser_op(
+    session: Arc<zode_core::browser::BrowserSession>,
+    op: BrowserOp,
+) -> Result<String, String> {
+    match op {
+        BrowserOp::Launch => session
+            .lease()
+            .await
+            .map(|_lease| "browser launched".to_string())
+            .map_err(|e| e.to_string()),
+        BrowserOp::Close => {
+            session.close().await;
+            Ok("browser closed".to_string())
+        }
+        BrowserOp::Screenshot { path } => {
+            let lease = session.lease().await.map_err(|e| e.to_string())?;
+            let shot = lease
+                .backend()
+                .screenshot()
+                .await
+                .map_err(|e| e.to_string())?;
+            drop(lease); // release the browser before disk I/O
+            let dest = match path {
+                Some(p) => std::path::PathBuf::from(p),
+                None => {
+                    let dir = ConfigManager::config_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from(".zode"))
+                        .join("screenshots");
+                    let name = format!(
+                        "shot-{}.jpg",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                    );
+                    dir.join(name)
+                }
+            };
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("screenshot dir: {e}"))?;
+            }
+            std::fs::write(&dest, &shot.bytes).map_err(|e| format!("save screenshot: {e}"))?;
+            Ok(format!("screenshot saved: {}", dest.display()))
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CompletionHint {
     prefix: String,
@@ -328,6 +390,8 @@ pub struct TuiApp {
     settings: Option<SettingsDialog>,
     connect: Option<ConnectDialog>,
     plugin_picker: Option<PluginPicker>,
+    /// `/browser` status panel (bare `/browser`, no subcommand).
+    browser_panel: Option<BrowserPanel>,
     agents_dialog: Option<AgentsDialog>,
     workflows_dialog: Option<WorkflowsDialog>,
     mcp_dialog: Option<McpDialog>,
@@ -514,6 +578,7 @@ impl TuiApp {
             settings: None,
             connect: None,
             plugin_picker: None,
+            browser_panel: None,
             agents_dialog: None,
             workflows_dialog: None,
             mcp_dialog: None,
@@ -1674,6 +1739,7 @@ impl TuiApp {
             || self.settings.is_some()
             || self.connect.is_some()
             || self.plugin_picker.is_some()
+            || self.browser_panel.is_some()
             || self.agents_dialog.is_some()
             || self.workflows_dialog.is_some()
             || self.mcp_dialog.is_some()
@@ -1917,6 +1983,7 @@ impl TuiApp {
                     self.tasks_panel = None;
                     self.subagents_panel = None;
                     self.files_panel = None;
+                    self.browser_panel = None;
                     self.show_help = false;
                     // Only focus the source tab when this request becomes the
                     // active dialog; a queued request must not steal focus from
@@ -1937,6 +2004,7 @@ impl TuiApp {
                     self.tasks_panel = None;
                     self.subagents_panel = None;
                     self.files_panel = None;
+                    self.browser_panel = None;
                     self.show_help = false;
                     if self.active_question.is_none() {
                         self.open_question(req);
@@ -2212,6 +2280,9 @@ impl TuiApp {
             }
             self.tabs[self.active].git_files = files;
         }
+        if let Some(panel) = &mut self.browser_panel {
+            panel.render(f, area, &theme);
+        }
         if self.show_help {
             crate::ui::help::render_help(f, area, &theme);
         }
@@ -2374,6 +2445,12 @@ impl TuiApp {
         // 2e. Modified-files overlay captures input.
         if self.files_panel.is_some() {
             self.handle_files_panel_key(key.code);
+            return;
+        }
+
+        // 2f. Browser panel captures nav + Enter (may await a plugin toggle).
+        if self.browser_panel.is_some() {
+            self.handle_browser_panel_key(key.code, agent_tx).await;
             return;
         }
 
@@ -2605,6 +2682,34 @@ impl TuiApp {
                 }
                 KeyCode::Tab | KeyCode::Enter => {
                     if let Some(insert) = self.autocomplete.op_sub_confirm() {
+                        self.input.take();
+                        self.input.insert_str(&insert);
+                        self.completion_hint = None;
+                    }
+                    self.autocomplete.dismiss();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.autocomplete.dismiss();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // 5a2. /browser subcommand hint popup (active after "/browser " prefix).
+        if self.autocomplete.is_browser_sub_active() {
+            match key.code {
+                KeyCode::Up => {
+                    self.autocomplete.browser_sub_prev();
+                    return;
+                }
+                KeyCode::Down => {
+                    self.autocomplete.browser_sub_next();
+                    return;
+                }
+                KeyCode::Tab | KeyCode::Enter => {
+                    if let Some(insert) = self.autocomplete.browser_sub_confirm() {
                         self.input.take();
                         self.input.insert_str(&insert);
                         self.completion_hint = None;
@@ -2925,6 +3030,7 @@ impl TuiApp {
             || self.settings.is_some()
             || self.connect.is_some()
             || self.plugin_picker.is_some()
+            || self.browser_panel.is_some()
             || self.agents_dialog.is_some()
             || self.workflows_dialog.is_some()
             || self.mcp_dialog.is_some()
@@ -3036,6 +3142,7 @@ impl TuiApp {
             || self.settings.is_some()
             || self.connect.is_some()
             || self.plugin_picker.is_some()
+            || self.browser_panel.is_some()
             || self.agents_dialog.is_some()
             || self.workflows_dialog.is_some()
             || self.mcp_dialog.is_some()
@@ -3472,6 +3579,29 @@ impl TuiApp {
     fn open_plugin_picker(&mut self) {
         let plugins = self.active_tab().engine.plugin_list();
         self.plugin_picker = Some(PluginPicker::new(plugins));
+    }
+
+    /// Snapshot the active tab's browser session/plugin state into the shape
+    /// the `/browser` panel renders. Cheap: `target()` and `is_enabled` are
+    /// both plain reads, no I/O.
+    fn browser_panel_status(&self) -> BrowserPanelStatus {
+        let engine = &self.active_tab().engine;
+        BrowserPanelStatus {
+            group_enabled: engine.plugins.is_enabled("tools:browser"),
+            target: match engine.browser.target() {
+                zode_core::browser::BrowserTarget::Managed => "managed".into(),
+                zode_core::browser::BrowserTarget::Bridge => "bridge".into(),
+            },
+            // M1: the extension bridge isn't implemented yet, and there's no
+            // cheap sync "is the managed browser up" read — both stay fixed.
+            paired: false,
+            running: false,
+        }
+    }
+
+    /// Open the bare `/browser` status panel.
+    fn open_browser_panel(&mut self) {
+        self.browser_panel = Some(BrowserPanel::new(self.browser_panel_status()));
     }
 
     fn open_agents_dialog(&mut self) {
@@ -4021,6 +4151,104 @@ impl TuiApp {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Drive the `/browser` panel. Up/Down move the selection; Enter applies
+    /// the selected row's action (may reassemble the active tab, for
+    /// `ToggleDefault`); Esc closes it.
+    async fn handle_browser_panel_key(
+        &mut self,
+        code: KeyCode,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        match code {
+            KeyCode::Esc => self.browser_panel = None,
+            KeyCode::Up => {
+                if let Some(p) = &mut self.browser_panel {
+                    p.prev();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(p) = &mut self.browser_panel {
+                    p.next();
+                }
+            }
+            KeyCode::Enter => {
+                let Some(action) = self.browser_panel.as_ref().and_then(BrowserPanel::confirm)
+                else {
+                    return;
+                };
+                self.apply_browser_panel_action(action, agent_tx).await;
+            }
+            _ => {}
+        }
+    }
+
+    /// Apply one `/browser` panel action, then refresh the panel's status
+    /// header so the change is visible without closing it.
+    async fn apply_browser_panel_action(
+        &mut self,
+        action: BrowserPanelAction,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let mut status = self.browser_panel_status();
+        match action {
+            BrowserPanelAction::SelectTarget => {
+                let engine = self.active_tab().engine.clone();
+                let next = match engine.browser.target() {
+                    zode_core::browser::BrowserTarget::Managed => {
+                        zode_core::browser::BrowserTarget::Bridge
+                    }
+                    zode_core::browser::BrowserTarget::Bridge => {
+                        zode_core::browser::BrowserTarget::Managed
+                    }
+                };
+                match engine.browser.set_target(next) {
+                    // set_target mutates the shared session synchronously (no
+                    // reassembly involved), so a fresh snapshot already
+                    // reflects it.
+                    Ok(()) => status = self.browser_panel_status(),
+                    Err(e) => self.active_tab_mut().chat.push_system(&e.to_string()),
+                }
+            }
+            BrowserPanelAction::ManagePermissions => {
+                let flags = self.active_tab().engine.browser.perm_flags();
+                for (_, flag) in &flags {
+                    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+                let msg = if flags.is_empty() {
+                    "no always-allow grants yet".to_string()
+                } else {
+                    let names: Vec<&str> = flags.iter().map(|(n, _)| n.as_str()).collect();
+                    format!("reset always-allow for: {}", names.join(", "))
+                };
+                self.active_tab_mut().chat.push_system(&msg);
+            }
+            BrowserPanelAction::Reconnect => {
+                self.active_tab_mut()
+                    .chat
+                    .push_system("extension bridge ships in M2");
+            }
+            BrowserPanelAction::ToggleDefault => {
+                // Reuse the SAME toggle+persist+reassemble path the `/plugin`
+                // picker uses on close, so `tools:browser` round-trips through
+                // config exactly like every other tool group.
+                let enabled = status.group_enabled;
+                let disabled = if enabled {
+                    vec!["tools:browser".to_string()]
+                } else {
+                    Vec::new()
+                };
+                self.apply_plugins(disabled, vec!["tools:browser".to_string()], agent_tx)
+                    .await;
+                // Reassembly runs off-loop (ReassembleDone lands later), so
+                // reflect the intended state immediately for a responsive UI.
+                status.group_enabled = !enabled;
+            }
+        }
+        if let Some(p) = &mut self.browser_panel {
+            p.set_status(status);
         }
     }
 
@@ -5197,6 +5425,45 @@ impl TuiApp {
                     Ok(OpCommand::Generate { prompt }) => self.spawn_op_generate(prompt, agent_tx),
                 }
             }
+            "browser" => {
+                use zode_core::commands::browser::{map_subcommand, BrowserCommand};
+                match map_subcommand(args) {
+                    Err(e) => self
+                        .active_tab_mut()
+                        .chat
+                        .push_system(&format!("/browser: {e}")),
+                    Ok(BrowserCommand::Panel) => self.open_browser_panel(),
+                    // Fast local read (try_lock inside) — fine inline, like `/op status`.
+                    Ok(BrowserCommand::Status) => {
+                        let session = self.active_tab().engine.browser.clone();
+                        let line = session.status().await;
+                        self.active_tab_mut().chat.push_system(&line);
+                    }
+                    Ok(BrowserCommand::Launch) => {
+                        self.spawn_browser_op(BrowserOp::Launch, agent_tx)
+                    }
+                    Ok(BrowserCommand::Close) => self.spawn_browser_op(BrowserOp::Close, agent_tx),
+                    Ok(BrowserCommand::Pair) => self
+                        .active_tab_mut()
+                        .chat
+                        .push_system("extension bridge ships in M2"),
+                    Ok(BrowserCommand::Target { target }) => {
+                        let t = if target == "bridge" {
+                            zode_core::browser::BrowserTarget::Bridge
+                        } else {
+                            zode_core::browser::BrowserTarget::Managed
+                        };
+                        let msg = match self.active_tab().engine.browser.set_target(t) {
+                            Ok(()) => format!("browser target: {target}"),
+                            Err(e) => e.to_string(),
+                        };
+                        self.active_tab_mut().chat.push_system(&msg);
+                    }
+                    Ok(BrowserCommand::Screenshot { path }) => {
+                        self.spawn_browser_op(BrowserOp::Screenshot { path }, agent_tx)
+                    }
+                }
+            }
             "sessions" | "resume" => self.open_session_picker(),
             "tab" => self.handle_tab_command(args),
             "connect" => self.open_connect_dialog(agent_tx),
@@ -5582,6 +5849,37 @@ impl TuiApp {
                 },
                 Err(e) => Err(format!("/op: {e}")),
             };
+            let _ = tx.send(AppEvent::BgDone { tab_id, result });
+        });
+    }
+
+    /// Run a `/browser launch|close|screenshot` op OFF the event loop (mirrors
+    /// `spawn_op_call`): each may block on a browser launch or a CDP round
+    /// trip, so it streams progress via the turn-busy slot and posts its
+    /// result back as `AppEvent::BgDone`.
+    fn spawn_browser_op(&mut self, op: BrowserOp, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        if self.active_tab().is_busy() {
+            self.active_tab_mut().chat.push_system(crate::tr(
+                "busy — finish or interrupt the current turn first",
+            ));
+            return;
+        }
+        let tab_id = self.active_tab().id;
+        let session = self.active_tab().engine.browser.clone();
+        let abort = AbortController::new();
+        self.active_tab_mut().turn_abort = Some(abort.clone());
+        let label = match &op {
+            BrowserOp::Launch => "launching browser",
+            BrowserOp::Close => "closing browser",
+            BrowserOp::Screenshot { .. } => "capturing screenshot",
+        };
+        self.active_tab_mut()
+            .chat
+            .push_system(&format!("{}…", crate::tr(label)));
+        let tx = agent_tx.clone();
+        tokio::spawn(async move {
+            let _ = &abort; // keep the controller alive for the duration
+            let result = run_browser_op(session, op).await;
             let _ = tx.send(AppEvent::BgDone { tab_id, result });
         });
     }
