@@ -42,12 +42,13 @@ impl BackendLease<'_> {
 
 impl BrowserSession {
     pub fn new(cfg: BrowserConfig, factory: Arc<dyn BackendFactory>) -> Arc<Self> {
-        let target = if cfg.default_target() == "bridge" {
-            // Bridge ships in M2; fall back rather than fail startup.
-            BrowserTarget::Managed
-        } else {
-            BrowserTarget::Managed
-        };
+        // Bridge ships in M2; every startup target falls back to Managed for
+        // now, but log when the user explicitly asked for bridge so the
+        // fallback isn't silent.
+        if cfg.default_target() == "bridge" {
+            tracing::debug!("browser.defaultTarget=bridge requested but bridge ships in M2; falling back to managed");
+        }
+        let target = BrowserTarget::Managed;
         Arc::new(Self {
             cfg,
             factory,
