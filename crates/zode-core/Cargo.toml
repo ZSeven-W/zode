@@ -22,6 +22,7 @@ tracing = { workspace = true }
 dirs = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
+chromiumoxide = { workspace = true }
 noema-core = { path = "../../vendor/noema/crates/noema-core", default-features = false, optional = true }
 rquickjs = { version = "0.12", features = ["futures", "parallel"] }
 

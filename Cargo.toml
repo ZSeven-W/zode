@@ -50,6 +50,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tempfile = "3"
 serial_test = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+chromiumoxide = { version = "0.9", default-features = true }
 
 [profile.release]
 lto = "thin"
