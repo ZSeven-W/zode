@@ -74,10 +74,7 @@ async fn tab_switch_a_b_a_does_not_duplicate_console_entries() {
 
     // Tab B: open a second tab (tab_new makes it current and re-attaches
     // listeners — this is where the old code leaked A's listener tasks).
-    let tab_b = b
-        .tab_new(Some("data:text/html,<h1>B</h1>"))
-        .await
-        .unwrap();
+    let tab_b = b.tab_new(Some("data:text/html,<h1>B</h1>")).await.unwrap();
 
     // A -> B -> A: select back to A, re-attaching listeners a second time.
     b.tab_select(&tab_a.id).await.unwrap();
