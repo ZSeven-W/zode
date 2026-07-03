@@ -3,6 +3,24 @@
 use zode_core::browser::{BrowserSession, ManagedFactory};
 use zode_core::config::BrowserConfig;
 
+/// Builds a headless `BrowserConfig` pointed at a fresh temp profile dir.
+///
+/// Each test gets its OWN profile dir rather than the default
+/// `~/.zode/browser-profile`: Chrome takes an exclusive `SingletonLock` on
+/// its profile dir, so two tests sharing the default (the harness runs
+/// `#[tokio::test]` fns concurrently by default) would race for the lock —
+/// one launch fails or hangs waiting on the other. The returned `TempDir`
+/// must be kept alive for the duration of the test (it deletes on drop).
+fn isolated_headless_cfg() -> (tempfile::TempDir, BrowserConfig) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = BrowserConfig {
+        headless: Some(true),
+        profile_dir: Some(dir.path().to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    (dir, cfg)
+}
+
 #[tokio::test]
 #[ignore]
 async fn managed_end_to_end() {
@@ -10,10 +28,7 @@ async fn managed_end_to_end() {
         eprintln!("skipped: set ZODE_BROWSER_IT=1");
         return;
     }
-    let cfg = BrowserConfig {
-        headless: Some(true),
-        ..Default::default()
-    };
+    let (_profile_dir, cfg) = isolated_headless_cfg();
     let session = BrowserSession::new(cfg, std::sync::Arc::new(ManagedFactory));
     let lease = session.lease().await.expect("launch");
     let b = lease.backend();
@@ -60,10 +75,7 @@ async fn tab_switch_a_b_a_does_not_duplicate_console_entries() {
         eprintln!("skipped: set ZODE_BROWSER_IT=1");
         return;
     }
-    let cfg = BrowserConfig {
-        headless: Some(true),
-        ..Default::default()
-    };
+    let (_profile_dir, cfg) = isolated_headless_cfg();
     let session = BrowserSession::new(cfg, std::sync::Arc::new(ManagedFactory));
     let lease = session.lease().await.expect("launch");
     let b = lease.backend();
