@@ -1,0 +1,264 @@
+use async_trait::async_trait;
+use serde::Serialize;
+use serde_json;
+use std::fmt;
+
+/// Which browser instance to control.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BrowserTarget {
+    /// Process-wide singleton, chromiumoxide-backed.
+    Managed,
+    /// External OpenPencil bridge.
+    Bridge,
+}
+
+/// Target for click/type operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClickTarget {
+    /// CSS selector.
+    Selector(String),
+    /// Element reference ID.
+    Ref(u32),
+    /// Absolute coordinates.
+    Coords { x: f64, y: f64 },
+}
+
+/// Information about an open browser tab.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TabInfo {
+    pub id: String,
+    pub url: String,
+    pub title: String,
+    pub active: bool,
+}
+
+/// A single console log entry.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConsoleEntry {
+    pub level: String,
+    pub text: String,
+}
+
+/// A single network request/response entry.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NetworkEntry {
+    pub method: String,
+    pub url: String,
+    pub status: Option<u16>,
+    pub mime: Option<String>,
+}
+
+/// A screenshot image.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Screenshot {
+    pub bytes: Vec<u8>,
+    pub media_type: &'static str,
+}
+
+/// Browser operation errors.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BrowserError {
+    NotFound(String),
+    Launch(String),
+    Protocol(String),
+    Timeout(String),
+    Dead(String),
+}
+
+impl fmt::Display for BrowserError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BrowserError::NotFound(msg) => write!(f, "browser executable not found: {}", msg),
+            BrowserError::Launch(msg) => write!(f, "browser launch failed: {}", msg),
+            BrowserError::Protocol(msg) => write!(f, "browser protocol error: {}", msg),
+            BrowserError::Timeout(msg) => write!(f, "browser operation timed out: {}", msg),
+            BrowserError::Dead(msg) => write!(f, "browser is not running: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for BrowserError {}
+
+/// Backend for browser automation operations.
+///
+/// Implementers must be object-safe (`Send + Sync + Debug`).
+#[async_trait]
+pub trait BrowserBackend: Send + Sync + std::fmt::Debug {
+    /// Navigate to a URL; returns the final URL (may differ after redirects).
+    async fn navigate(&self, url: &str) -> Result<String, BrowserError>;
+
+    /// Take a screenshot of the current tab.
+    async fn screenshot(&self) -> Result<Screenshot, BrowserError>;
+
+    /// Get the accessibility tree (snapshot) of the current tab.
+    async fn snapshot(&self) -> Result<String, BrowserError>;
+
+    /// Click a target on the page.
+    async fn click(&self, target: &ClickTarget) -> Result<(), BrowserError>;
+
+    /// Type text into a focused or targeted field.
+    async fn type_text(&self, target: &ClickTarget, text: &str) -> Result<(), BrowserError>;
+
+    /// Press a key (e.g., "Enter", "Escape", "Tab").
+    async fn press_key(&self, key: &str) -> Result<(), BrowserError>;
+
+    /// Scroll the page by dx, dy pixels.
+    async fn scroll(&self, dx: f64, dy: f64) -> Result<(), BrowserError>;
+
+    /// Evaluate a JavaScript expression in the current tab.
+    async fn evaluate(&self, expression: &str) -> Result<serde_json::Value, BrowserError>;
+
+    /// Get recent console log entries (up to limit).
+    async fn console_logs(&self, limit: usize) -> Result<Vec<ConsoleEntry>, BrowserError>;
+
+    /// Get recent network request/response entries (up to limit).
+    async fn network_log(&self, limit: usize) -> Result<Vec<NetworkEntry>, BrowserError>;
+
+    /// List all open tabs.
+    async fn tabs(&self) -> Result<Vec<TabInfo>, BrowserError>;
+
+    /// Open a new tab, optionally navigating to a URL.
+    async fn tab_new(&self, url: Option<&str>) -> Result<TabInfo, BrowserError>;
+
+    /// Close a tab by ID.
+    async fn tab_close(&self, id: &str) -> Result<(), BrowserError>;
+
+    /// Activate a tab by ID (bring it to focus).
+    async fn tab_select(&self, id: &str) -> Result<(), BrowserError>;
+
+    /// Get the URL of the current tab.
+    async fn current_url(&self) -> Result<String, BrowserError>;
+
+    /// Check if the browser instance is still alive.
+    async fn is_alive(&self) -> bool;
+
+    /// Close the browser instance.
+    async fn close(&self) -> Result<(), BrowserError>;
+}
+
+#[cfg(test)]
+pub(crate) mod mock {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// Records calls; every op succeeds with a canned value.
+    #[derive(Debug, Default)]
+    pub struct MockBackend {
+        pub calls: AtomicUsize,
+        pub dead: AtomicBool,
+        pub in_flight: AtomicUsize,
+        pub overlap_seen: AtomicBool,
+    }
+
+    impl MockBackend {
+        async fn track<T>(&self, v: T) -> T {
+            // Detect overlapping ops: session must serialize us.
+            if self.in_flight.fetch_add(1, Ordering::SeqCst) > 0 {
+                self.overlap_seen.store(true, Ordering::SeqCst);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            v
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserBackend for MockBackend {
+        async fn navigate(&self, url: &str) -> Result<String, BrowserError> {
+            self.track(Ok(url.to_string())).await
+        }
+        async fn screenshot(&self) -> Result<Screenshot, BrowserError> {
+            self.track(Ok(Screenshot {
+                bytes: vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1],
+                media_type: "image/png",
+            }))
+            .await
+        }
+        async fn snapshot(&self) -> Result<String, BrowserError> {
+            self.track(Ok("[1] <body>".into())).await
+        }
+        async fn click(&self, _t: &ClickTarget) -> Result<(), BrowserError> {
+            self.track(Ok(())).await
+        }
+        async fn type_text(&self, _t: &ClickTarget, _s: &str) -> Result<(), BrowserError> {
+            self.track(Ok(())).await
+        }
+        async fn press_key(&self, _k: &str) -> Result<(), BrowserError> {
+            self.track(Ok(())).await
+        }
+        async fn scroll(&self, _dx: f64, _dy: f64) -> Result<(), BrowserError> {
+            self.track(Ok(())).await
+        }
+        async fn evaluate(&self, _e: &str) -> Result<serde_json::Value, BrowserError> {
+            self.track(Ok(serde_json::json!(2))).await
+        }
+        async fn console_logs(&self, _n: usize) -> Result<Vec<ConsoleEntry>, BrowserError> {
+            self.track(Ok(vec![ConsoleEntry {
+                level: "log".into(),
+                text: "hi".into(),
+            }]))
+            .await
+        }
+        async fn network_log(&self, _n: usize) -> Result<Vec<NetworkEntry>, BrowserError> {
+            self.track(Ok(vec![])).await
+        }
+        async fn tabs(&self) -> Result<Vec<TabInfo>, BrowserError> {
+            self.track(Ok(vec![TabInfo {
+                id: "t1".into(),
+                url: "about:blank".into(),
+                title: "tab".into(),
+                active: true,
+            }]))
+            .await
+        }
+        async fn tab_new(&self, _u: Option<&str>) -> Result<TabInfo, BrowserError> {
+            self.track(Ok(TabInfo {
+                id: "t2".into(),
+                url: "about:blank".into(),
+                title: "new".into(),
+                active: true,
+            }))
+            .await
+        }
+        async fn tab_close(&self, _id: &str) -> Result<(), BrowserError> {
+            self.track(Ok(())).await
+        }
+        async fn tab_select(&self, _id: &str) -> Result<(), BrowserError> {
+            self.track(Ok(())).await
+        }
+        async fn current_url(&self) -> Result<String, BrowserError> {
+            self.track(Ok("https://example.test/".into())).await
+        }
+        async fn is_alive(&self) -> bool {
+            !self.dead.load(Ordering::SeqCst)
+        }
+        async fn close(&self) -> Result<(), BrowserError> {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_display_is_prefixed() {
+        assert_eq!(
+            BrowserError::Launch("no chrome".into()).to_string(),
+            "browser launch failed: no chrome"
+        );
+        assert_eq!(
+            BrowserError::Dead("gone".into()).to_string(),
+            "browser is not running: gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_backend_is_object_safe() {
+        let b: std::sync::Arc<dyn BrowserBackend> =
+            std::sync::Arc::new(mock::MockBackend::default());
+        assert_eq!(b.evaluate("1+1").await.unwrap(), serde_json::json!(2));
+    }
+}

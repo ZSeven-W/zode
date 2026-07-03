@@ -8,6 +8,7 @@
 pub mod agents;
 pub mod approval;
 pub mod bg_shells;
+pub mod browser;
 pub mod clipboard;
 pub mod commands;
 pub mod compact_memory;
