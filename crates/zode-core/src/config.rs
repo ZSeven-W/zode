@@ -298,6 +298,44 @@ impl OpenPencilConfig {
     }
 }
 
+/// Viewport for the managed browser window (and screenshot size).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ViewportConfig {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Built-in browser control (`browser_*` tools, `/browser` command).
+/// All fields optional; effective values come from the getters.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BrowserConfig {
+    pub enabled: Option<bool>,
+    pub executable: Option<String>,
+    pub headless: Option<bool>,
+    pub profile_dir: Option<String>,
+    pub default_target: Option<String>,
+    pub viewport: Option<ViewportConfig>,
+}
+
+impl BrowserConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+    pub fn headless(&self) -> bool {
+        self.headless.unwrap_or(false)
+    }
+    pub fn default_target(&self) -> &str {
+        self.default_target.as_deref().unwrap_or("managed")
+    }
+    pub fn viewport(&self) -> (u32, u32) {
+        self.viewport
+            .as_ref()
+            .map(|v| (v.width, v.height))
+            .unwrap_or((1280, 800))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NoemaSettings {
@@ -567,6 +605,9 @@ pub struct ZodeConfig {
     /// OpenPencil control-surface configuration (the `op-bridge`).
     #[serde(skip_serializing_if = "is_default")]
     pub openpencil: OpenPencilConfig,
+    /// Built-in browser control configuration (the `browser_*` tools).
+    #[serde(skip_serializing_if = "is_default")]
+    pub browser: BrowserConfig,
     /// Native Noema long-term memory integration.
     #[serde(skip_serializing_if = "is_default")]
     pub noema: NoemaSettings,
@@ -1054,6 +1095,15 @@ impl ZodeConfig {
         self.openpencil.default_doc = o.default_doc.or(self.openpencil.default_doc.take());
         self.openpencil.connect_timeout_ms =
             o.connect_timeout_ms.or(self.openpencil.connect_timeout_ms);
+
+        // Browser: each field present in the project layer overrides global.
+        let b = other.browser;
+        self.browser.enabled = b.enabled.or(self.browser.enabled);
+        self.browser.executable = b.executable.or(self.browser.executable.take());
+        self.browser.headless = b.headless.or(self.browser.headless);
+        self.browser.profile_dir = b.profile_dir.or(self.browser.profile_dir.take());
+        self.browser.default_target = b.default_target.or(self.browser.default_target.take());
+        self.browser.viewport = b.viewport.or(self.browser.viewport.take());
 
         let n = other.noema;
         self.noema.enabled = n.enabled.or(self.noema.enabled);
@@ -2490,5 +2540,31 @@ mod tests {
         let off: ZodeConfig = serde_json::from_str(r#"{"noema":{"autoExtract":false}}"#).unwrap();
         assert!(!off.noema.auto_extract());
         assert_eq!(off.noema.effective_write_policy(), "review");
+    }
+
+    #[test]
+    fn browser_config_parses_and_defaults() {
+        let cfg: ZodeConfig = serde_json::from_str(
+            r#"{"browser":{"headless":true,"defaultTarget":"managed",
+             "viewport":{"width":1440,"height":900}}}"#,
+        )
+        .unwrap();
+        assert!(cfg.browser.enabled()); // absent -> default true
+        assert!(cfg.browser.headless());
+        assert_eq!(cfg.browser.viewport(), (1440, 900));
+        let d = ZodeConfig::default();
+        assert_eq!(d.browser.viewport(), (1280, 800));
+        assert_eq!(d.browser.default_target(), "managed");
+    }
+
+    #[test]
+    fn browser_config_merges_presence_based() {
+        let mut base: ZodeConfig =
+            serde_json::from_str(r#"{"browser":{"headless":true}}"#).unwrap();
+        let over: ZodeConfig =
+            serde_json::from_str(r#"{"browser":{"executable":"/opt/chrome"}}"#).unwrap();
+        base.merge_from(over);
+        assert!(base.browser.headless()); // kept
+        assert_eq!(base.browser.executable.as_deref(), Some("/opt/chrome")); // merged
     }
 }
