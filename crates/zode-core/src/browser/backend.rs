@@ -140,6 +140,7 @@ pub trait BrowserBackend: Send + Sync + std::fmt::Debug {
 pub(crate) mod mock {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     /// Records calls; every op succeeds with a canned value.
     #[derive(Debug, Default)]
@@ -236,6 +237,42 @@ pub(crate) mod mock {
         async fn close(&self) -> Result<(), BrowserError> {
             Ok(())
         }
+    }
+
+    /// Factory that always returns a fresh `MockBackend`, tracking creation
+    /// count and exposing the most recently created backend for assertions.
+    #[derive(Debug)]
+    pub(crate) struct MockFactory {
+        pub(crate) made: AtomicUsize,
+        pub(crate) current: std::sync::Mutex<Option<Arc<MockBackend>>>,
+    }
+
+    impl MockFactory {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                made: 0.into(),
+                current: std::sync::Mutex::new(None),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::browser::session::BackendFactory for MockFactory {
+        async fn create(
+            &self,
+            _cfg: &crate::config::BrowserConfig,
+        ) -> Result<Arc<dyn BrowserBackend>, BrowserError> {
+            self.made.fetch_add(1, Ordering::SeqCst);
+            let b = Arc::new(MockBackend::default());
+            *self.current.lock().unwrap() = Some(b.clone());
+            Ok(b)
+        }
+    }
+
+    /// Ready-made `BackendFactory` for tests that just need a working mock
+    /// session and don't care about call-count assertions.
+    pub(crate) fn mock_factory() -> Arc<dyn crate::browser::session::BackendFactory> {
+        MockFactory::new()
     }
 }
 

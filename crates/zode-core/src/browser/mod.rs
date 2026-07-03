@@ -6,6 +6,7 @@ pub mod backend;
 pub mod managed;
 pub mod session;
 mod snapshot_js;
+pub mod tools;
 
 pub use backend::{
     BrowserBackend, BrowserError, BrowserTarget, ClickTarget, ConsoleEntry, NetworkEntry,
@@ -13,3 +14,6 @@ pub use backend::{
 };
 pub use managed::ManagedFactory;
 pub use session::{BackendFactory, BackendLease, BrowserSession};
+pub use tools::{
+    BrowserActTool, BrowserEvalTool, BrowserReadTool, BrowserTabsTool, BrowserToolDeps,
+};

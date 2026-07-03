@@ -132,34 +132,8 @@ impl BrowserSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::backend::mock::MockBackend;
+    use crate::browser::backend::mock::MockFactory;
     use std::sync::atomic::Ordering;
-
-    #[derive(Debug)]
-    struct MockFactory {
-        made: std::sync::atomic::AtomicUsize,
-        current: std::sync::Mutex<Option<Arc<MockBackend>>>,
-    }
-    impl MockFactory {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                made: 0.into(),
-                current: std::sync::Mutex::new(None),
-            })
-        }
-    }
-    #[async_trait::async_trait]
-    impl BackendFactory for MockFactory {
-        async fn create(
-            &self,
-            _cfg: &BrowserConfig,
-        ) -> Result<Arc<dyn BrowserBackend>, BrowserError> {
-            self.made.fetch_add(1, Ordering::SeqCst);
-            let b = Arc::new(MockBackend::default());
-            *self.current.lock().unwrap() = Some(b.clone());
-            Ok(b)
-        }
-    }
 
     #[tokio::test]
     async fn lease_serializes_concurrent_ops() {
