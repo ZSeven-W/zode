@@ -5,6 +5,7 @@
 pub mod backend;
 pub mod managed;
 pub mod session;
+mod snapshot_js;
 
 pub use backend::{
     BrowserBackend, BrowserError, BrowserTarget, ClickTarget, ConsoleEntry, NetworkEntry,

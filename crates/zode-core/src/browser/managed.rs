@@ -9,7 +9,13 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use chromiumoxide::browser::Browser;
+use chromiumoxide::cdp::browser_protocol::input::{DispatchKeyEventParams, DispatchKeyEventType};
+use chromiumoxide::cdp::browser_protocol::network::{
+    EventRequestWillBeSent, EventResponseReceived, RequestId,
+};
+use chromiumoxide::cdp::js_protocol::runtime::EventConsoleApiCalled;
 use chromiumoxide::handler::viewport::Viewport;
+use chromiumoxide::layout::Point;
 use chromiumoxide::BrowserConfig as CdpBrowserConfig;
 use chromiumoxide::Page;
 use futures::StreamExt;
@@ -18,10 +24,12 @@ use crate::config::BrowserConfig;
 
 use super::backend::*;
 use super::session::BackendFactory;
+use super::snapshot_js::SNAPSHOT_JS;
 
 const OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const NAV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-#[allow(dead_code)] // consumed by console_logs/network_log once implemented (Task 7)
+/// Cap for the console/network ring buffers and the request-correlation
+/// pending queue; oldest entries are evicted once exceeded.
 const LOG_BUFFER_CAP: usize = 500;
 
 /// Candidate executable paths per platform, tried in order.
@@ -125,16 +133,11 @@ pub struct ManagedBackend {
     browser: tokio::sync::Mutex<Browser>,
     page: tokio::sync::Mutex<Page>,
     alive: Arc<AtomicBool>,
-    // Populated by Task 7's console/network event listeners and read by the
-    // `console_logs`/`network_log` trait methods once those are implemented
-    // (still `Err("implemented in task 7")` placeholders in this task).
-    #[allow(dead_code)]
+    // Populated by the console/network event listeners (`attach_listeners`)
+    // and read by the `console_logs`/`network_log` trait methods.
     console_buf: Arc<StdMutex<VecDeque<ConsoleEntry>>>,
-    #[allow(dead_code)]
     network_buf: Arc<StdMutex<VecDeque<NetworkEntry>>>,
-    // Last accessibility-snapshot ref counter, for click-by-ref validation
-    // (Task 7).
-    #[allow(dead_code)]
+    // Last accessibility-snapshot ref counter, for click-by-ref validation.
     snapshot_refs: StdMutex<u32>,
 }
 
@@ -198,6 +201,17 @@ impl ManagedBackend {
             .new_page("about:blank")
             .await
             .map_err(|e| BrowserError::Launch(e.to_string()))?;
+        // Chrome opens its own initial blank tab on startup in addition to
+        // the one just created above; close any such extras so the session
+        // starts with exactly one tab (the `tabs()`/`tab_close` "last tab"
+        // semantics assume a single-tab baseline).
+        if let Ok(pages) = browser.pages().await {
+            for p in pages {
+                if p.target_id() != page.target_id() {
+                    let _ = p.close().await;
+                }
+            }
+        }
         let backend = Arc::new(Self {
             browser: tokio::sync::Mutex::new(browser),
             page: tokio::sync::Mutex::new(page),
@@ -206,11 +220,166 @@ impl ManagedBackend {
             network_buf: Arc::new(StdMutex::new(VecDeque::new())),
             snapshot_refs: StdMutex::new(0),
         });
-        backend.spawn_log_listeners().await; // Task 7 fills this in
+        backend.spawn_log_listeners().await;
         Ok(backend)
     }
 
-    async fn spawn_log_listeners(&self) {} // Task 7
+    /// Attaches console/network listeners to the current page.
+    async fn spawn_log_listeners(&self) {
+        let page = self.page.lock().await;
+        attach_listeners(&page, self.console_buf.clone(), self.network_buf.clone());
+    }
+}
+
+/// Push `item` onto the back of a ring buffer, evicting the oldest entry
+/// once `LOG_BUFFER_CAP` is reached.
+fn push_capped<T>(buf: &StdMutex<VecDeque<T>>, item: T) {
+    let mut guard = buf.lock().unwrap();
+    if guard.len() >= LOG_BUFFER_CAP {
+        guard.pop_front();
+    }
+    guard.push_back(item);
+}
+
+/// Builds a [`ConsoleEntry`] from a `Runtime.consoleAPICalled` event: level
+/// is the call type (`log`/`error`/...), text joins each argument's JSON
+/// `value` (falling back to its `description`) with spaces.
+fn console_entry_from_event(ev: Arc<EventConsoleApiCalled>) -> ConsoleEntry {
+    let level = ev.r#type.as_ref().to_string();
+    let text = ev
+        .args
+        .iter()
+        .map(|arg| match &arg.value {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+            None => arg.description.clone().unwrap_or_default(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    ConsoleEntry { level, text }
+}
+
+/// Builds a [`NetworkEntry`] from a `Network.responseReceived` event,
+/// recovering the HTTP method from the matching `Network.requestWillBeSent`
+/// entry in `pending` (removed once consumed). If no match is found (e.g.
+/// listener attached mid-flight), `method` is left empty.
+fn network_entry_from_event(
+    pending: &StdMutex<VecDeque<(RequestId, String, String)>>,
+    ev: Arc<EventResponseReceived>,
+) -> NetworkEntry {
+    let method = {
+        let mut guard = pending.lock().unwrap();
+        guard
+            .iter()
+            .position(|(id, _, _)| *id == ev.request_id)
+            .map(|idx| guard.remove(idx).expect("index in bounds").1)
+            .unwrap_or_default()
+    };
+    NetworkEntry {
+        method,
+        url: ev.response.url.clone(),
+        status: u16::try_from(ev.response.status).ok(),
+        mime: Some(ev.response.mime_type.clone()),
+    }
+}
+
+/// Attaches console + network log listeners to `page`. chromiumoxide scopes
+/// event listeners to a single `Page`, so this must be re-run every time
+/// `self.page` is swapped (see `tab_new`/`tab_select`) or the new tab's
+/// activity won't be captured.
+fn attach_listeners(
+    page: &Page,
+    console_buf: Arc<StdMutex<VecDeque<ConsoleEntry>>>,
+    network_buf: Arc<StdMutex<VecDeque<NetworkEntry>>>,
+) {
+    let console_page = page.clone();
+    tokio::spawn(async move {
+        if let Ok(mut events) = console_page.event_listener::<EventConsoleApiCalled>().await {
+            while let Some(ev) = events.next().await {
+                push_capped(&console_buf, console_entry_from_event(ev));
+            }
+        }
+    });
+
+    // Network entries need both the request (method) and response
+    // (status/mime) events; correlate them through a small pending queue
+    // shared between the two listener tasks.
+    let pending: Arc<StdMutex<VecDeque<(RequestId, String, String)>>> =
+        Arc::new(StdMutex::new(VecDeque::new()));
+
+    let request_page = page.clone();
+    let request_pending = pending.clone();
+    tokio::spawn(async move {
+        if let Ok(mut events) = request_page
+            .event_listener::<EventRequestWillBeSent>()
+            .await
+        {
+            while let Some(ev) = events.next().await {
+                push_capped(
+                    &request_pending,
+                    (
+                        ev.request_id.clone(),
+                        ev.request.method.clone(),
+                        ev.request.url.clone(),
+                    ),
+                );
+            }
+        }
+    });
+
+    let response_page = page.clone();
+    tokio::spawn(async move {
+        if let Ok(mut events) = response_page
+            .event_listener::<EventResponseReceived>()
+            .await
+        {
+            while let Some(ev) = events.next().await {
+                push_capped(&network_buf, network_entry_from_event(&pending, ev));
+            }
+        }
+    });
+}
+
+/// Presses a single key via a raw `Input.dispatchKeyEvent` keydown+keyup
+/// pair. `Page` in chromiumoxide 0.9.1 does not expose `type_str`/`press_key`
+/// publicly (only `Element` does, backed by the crate-private `PageInner`);
+/// this reimplements the same two-command sequence on the public
+/// `Page::execute` API so it also covers coordinate-only targets that have
+/// no `Element` to call through.
+async fn dispatch_key(page: &Page, key: &str) -> Result<(), BrowserError> {
+    let def = chromiumoxide::keys::get_key_definition(key)
+        .ok_or_else(|| BrowserError::Protocol(format!("unknown key: {key}")))?;
+    let mut cmd = DispatchKeyEventParams::builder();
+    let key_down_type = if let Some(txt) = def.text {
+        cmd = cmd.text(txt);
+        DispatchKeyEventType::KeyDown
+    } else if def.key.len() == 1 {
+        cmd = cmd.text(def.key);
+        DispatchKeyEventType::KeyDown
+    } else {
+        DispatchKeyEventType::RawKeyDown
+    };
+    let cmd = cmd
+        .key(def.key)
+        .code(def.code)
+        .windows_virtual_key_code(def.key_code)
+        .native_virtual_key_code(def.key_code);
+    page.execute(cmd.clone().r#type(key_down_type).build().unwrap())
+        .await
+        .map_err(|e| BrowserError::Protocol(e.to_string()))?;
+    page.execute(cmd.r#type(DispatchKeyEventType::KeyUp).build().unwrap())
+        .await
+        .map_err(|e| BrowserError::Protocol(e.to_string()))?;
+    Ok(())
+}
+
+/// Types `text` by pressing one key per character (mirrors chromiumoxide's
+/// own `type_str`, reimplemented on top of [`dispatch_key`]).
+async fn dispatch_type_str(page: &Page, text: &str) -> Result<(), BrowserError> {
+    for c in text.split("").filter(|s| !s.is_empty()) {
+        dispatch_key(page, c).await?;
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -250,23 +419,70 @@ impl BrowserBackend for ManagedBackend {
     }
 
     async fn snapshot(&self) -> Result<String, BrowserError> {
-        Err(BrowserError::Protocol("implemented in task 7".into()))
+        let v = self.evaluate(SNAPSHOT_JS).await?;
+        let count = v.get("count").and_then(|c| c.as_u64()).unwrap_or(0) as u32;
+        *self.snapshot_refs.lock().unwrap() = count;
+        Ok(v.get("outline")
+            .and_then(|o| o.as_str())
+            .unwrap_or_default()
+            .to_string())
     }
 
-    async fn click(&self, _target: &ClickTarget) -> Result<(), BrowserError> {
-        Err(BrowserError::Protocol("implemented in task 7".into()))
+    async fn click(&self, target: &ClickTarget) -> Result<(), BrowserError> {
+        let page = self.page.lock().await;
+        match target {
+            ClickTarget::Selector(sel) => {
+                let el = page
+                    .find_element(sel.as_str())
+                    .await
+                    .map_err(|e| BrowserError::Protocol(format!("selector {sel:?}: {e}")))?;
+                el.click()
+                    .await
+                    .map_err(|e| BrowserError::Protocol(e.to_string()))?;
+            }
+            ClickTarget::Ref(n) => {
+                let max = *self.snapshot_refs.lock().unwrap();
+                if *n == 0 || *n > max {
+                    return Err(BrowserError::Protocol(format!(
+                        "ref {n} out of range (run browser_read snapshot first; {max} refs)"
+                    )));
+                }
+                let sel = format!("[data-zode-ref=\"{n}\"]");
+                let el = page
+                    .find_element(sel.as_str())
+                    .await
+                    .map_err(|e| BrowserError::Protocol(format!("stale ref {n}: {e}")))?;
+                el.click()
+                    .await
+                    .map_err(|e| BrowserError::Protocol(e.to_string()))?;
+            }
+            ClickTarget::Coords { x, y } => {
+                page.click(Point { x: *x, y: *y })
+                    .await
+                    .map_err(|e| BrowserError::Protocol(e.to_string()))?;
+            }
+        }
+        Ok(())
     }
 
-    async fn type_text(&self, _target: &ClickTarget, _text: &str) -> Result<(), BrowserError> {
-        Err(BrowserError::Protocol("implemented in task 7".into()))
+    async fn type_text(&self, target: &ClickTarget, text: &str) -> Result<(), BrowserError> {
+        // Click first to focus the target, then dispatch keystrokes; CDP key
+        // events go to whatever is currently focused, not a specific
+        // element, so typing is page-scoped rather than target-specific.
+        self.click(target).await?;
+        let page = self.page.lock().await;
+        dispatch_type_str(&page, text).await
     }
 
-    async fn press_key(&self, _key: &str) -> Result<(), BrowserError> {
-        Err(BrowserError::Protocol("implemented in task 7".into()))
+    async fn press_key(&self, key: &str) -> Result<(), BrowserError> {
+        let page = self.page.lock().await;
+        dispatch_key(&page, key).await
     }
 
-    async fn scroll(&self, _dx: f64, _dy: f64) -> Result<(), BrowserError> {
-        Err(BrowserError::Protocol("implemented in task 7".into()))
+    async fn scroll(&self, dx: f64, dy: f64) -> Result<(), BrowserError> {
+        self.evaluate(&format!("window.scrollBy({dx},{dy})"))
+            .await
+            .map(|_| ())
     }
 
     async fn evaluate(&self, expression: &str) -> Result<serde_json::Value, BrowserError> {
@@ -278,28 +494,127 @@ impl BrowserBackend for ManagedBackend {
         Ok(res.value().cloned().unwrap_or(serde_json::Value::Null))
     }
 
-    async fn console_logs(&self, _limit: usize) -> Result<Vec<ConsoleEntry>, BrowserError> {
-        Err(BrowserError::Protocol("implemented in task 7".into()))
+    async fn console_logs(&self, limit: usize) -> Result<Vec<ConsoleEntry>, BrowserError> {
+        let buf = self.console_buf.lock().unwrap();
+        Ok(buf.iter().rev().take(limit).rev().cloned().collect())
     }
 
-    async fn network_log(&self, _limit: usize) -> Result<Vec<NetworkEntry>, BrowserError> {
-        Err(BrowserError::Protocol("implemented in task 7".into()))
+    async fn network_log(&self, limit: usize) -> Result<Vec<NetworkEntry>, BrowserError> {
+        let buf = self.network_buf.lock().unwrap();
+        Ok(buf.iter().rev().take(limit).rev().cloned().collect())
     }
 
     async fn tabs(&self) -> Result<Vec<TabInfo>, BrowserError> {
-        Err(BrowserError::Protocol("implemented in task 7".into()))
+        let pages = {
+            let browser = self.browser.lock().await;
+            browser
+                .pages()
+                .await
+                .map_err(|e| BrowserError::Protocol(e.to_string()))?
+        };
+        let current_id = self.page.lock().await.target_id().clone();
+        let mut out = Vec::with_capacity(pages.len());
+        for p in pages {
+            let url = p.url().await.ok().flatten().unwrap_or_default();
+            let title = p.get_title().await.ok().flatten().unwrap_or_default();
+            let active = *p.target_id() == current_id;
+            out.push(TabInfo {
+                id: p.target_id().as_ref().to_string(),
+                url,
+                title,
+                active,
+            });
+        }
+        Ok(out)
     }
 
-    async fn tab_new(&self, _url: Option<&str>) -> Result<TabInfo, BrowserError> {
-        Err(BrowserError::Protocol("implemented in task 7".into()))
+    async fn tab_new(&self, url: Option<&str>) -> Result<TabInfo, BrowserError> {
+        let new_page = {
+            let browser = self.browser.lock().await;
+            browser
+                .new_page(url.unwrap_or("about:blank"))
+                .await
+                .map_err(|e| BrowserError::Launch(e.to_string()))?
+        };
+        let info = TabInfo {
+            id: new_page.target_id().as_ref().to_string(),
+            url: new_page.url().await.ok().flatten().unwrap_or_default(),
+            title: new_page
+                .get_title()
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+            active: true,
+        };
+        attach_listeners(
+            &new_page,
+            self.console_buf.clone(),
+            self.network_buf.clone(),
+        );
+        *self.page.lock().await = new_page;
+        Ok(info)
     }
 
-    async fn tab_close(&self, _id: &str) -> Result<(), BrowserError> {
-        Err(BrowserError::Protocol("implemented in task 7".into()))
+    async fn tab_close(&self, id: &str) -> Result<(), BrowserError> {
+        let pages = {
+            let browser = self.browser.lock().await;
+            browser
+                .pages()
+                .await
+                .map_err(|e| BrowserError::Protocol(e.to_string()))?
+        };
+        if pages.len() <= 1 {
+            return Err(BrowserError::Protocol("cannot close the last tab".into()));
+        }
+        let target = pages
+            .into_iter()
+            .find(|p| p.target_id().as_ref() == id)
+            .ok_or_else(|| BrowserError::Protocol(format!("no such tab: {id}")))?;
+        let closed_id = target.target_id().clone();
+        target
+            .close()
+            .await
+            .map_err(|e| BrowserError::Protocol(e.to_string()))?;
+
+        // If the closed tab was the current one, fall back to whatever tab
+        // remains so `self.page` never points at a dead target.
+        let current_id = self.page.lock().await.target_id().clone();
+        if current_id == closed_id {
+            let remaining = {
+                let browser = self.browser.lock().await;
+                browser
+                    .pages()
+                    .await
+                    .map_err(|e| BrowserError::Protocol(e.to_string()))?
+            };
+            if let Some(next) = remaining.into_iter().next() {
+                attach_listeners(&next, self.console_buf.clone(), self.network_buf.clone());
+                *self.page.lock().await = next;
+            }
+        }
+        Ok(())
     }
 
-    async fn tab_select(&self, _id: &str) -> Result<(), BrowserError> {
-        Err(BrowserError::Protocol("implemented in task 7".into()))
+    async fn tab_select(&self, id: &str) -> Result<(), BrowserError> {
+        let pages = {
+            let browser = self.browser.lock().await;
+            browser
+                .pages()
+                .await
+                .map_err(|e| BrowserError::Protocol(e.to_string()))?
+        };
+        let target = pages
+            .into_iter()
+            .find(|p| p.target_id().as_ref() == id)
+            .ok_or_else(|| BrowserError::Protocol(format!("no such tab: {id}")))?;
+        target
+            .bring_to_front()
+            .await
+            .map_err(|e| BrowserError::Protocol(e.to_string()))?;
+        attach_listeners(&target, self.console_buf.clone(), self.network_buf.clone());
+        *self.page.lock().await = target;
+        Ok(())
     }
 
     async fn current_url(&self) -> Result<String, BrowserError> {
