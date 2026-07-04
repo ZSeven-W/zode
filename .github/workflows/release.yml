@@ -10,7 +10,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Create the release ONCE before the build fan-out. Six matrix jobs racing
+  # "create if absent" let GitHub mint duplicate same-tag DRAFTS, and any
+  # later finalize PATCH then dies with `already_exists` (seen in beta.4).
+  # With the release pre-created, softprops only ever uploads to it.
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release already exists — reusing"
+            exit 0
+          fi
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease";; esac
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md $prerelease
+
   build:
+    needs: create-release
     name: ${{ matrix.pkg-suffix }}
     strategy:
       fail-fast: false
@@ -69,9 +91,5 @@ jobs:
             scripts/install.sh
             scripts/install.ps1
           fail_on_unmatched_files: true
-          # Tags with a pre-release suffix (e.g. v0.1.0-beta.1) publish as a
-          # GitHub pre-release; plain vX.Y.Z tags publish as a full release.
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          # Fixed body (same across all matrix jobs → no duplication). Update
-          # RELEASE_NOTES.md per release.
-          body_path: RELEASE_NOTES.md
+          # Title/body/prerelease are set by the create-release job (once);
+          # this step ONLY uploads assets to that existing release.
