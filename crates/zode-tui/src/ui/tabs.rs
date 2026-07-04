@@ -42,6 +42,10 @@ pub struct SidebarInfo<'a> {
     pub mcp_servers: &'a [(String, bool)],
     /// Fold state of the MCP section (header stays visible when folded).
     pub mcp_collapsed: bool,
+    /// Enabled LSP languages as `(language, running)`; empty hides the section.
+    pub lsp_servers: &'a [(String, bool)],
+    /// Fold state of the LSP section (header stays visible when folded).
+    pub lsp_collapsed: bool,
     /// Git working-tree modifications; empty hides the section.
     pub git_files: &'a [zode_core::GitFileStat],
     /// Fold state of the modified-files section.
@@ -56,6 +60,7 @@ pub struct SidebarInfo<'a> {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SidebarHits {
     pub mcp_header_row: Option<u16>,
+    pub lsp_header_row: Option<u16>,
     pub files_header_row: Option<u16>,
     pub files_more_row: Option<u16>,
     pub todo_header_row: Option<u16>,
@@ -167,19 +172,37 @@ pub fn render_sidebar(
         .into_iter()
         .map(|(is_header, line)| styled_sidebar_line(is_header, &line, row_width, theme))
         .collect::<Vec<_>>();
-    // The MCP section flows between the summary and the sessions list.
-    if !info.mcp_servers.is_empty() {
-        hits.mcp_header_row = header_row(&lines);
-        lines.extend(crate::ui::mcp_sidebar::section_lines(
-            info.mcp_servers,
-            info.mcp_collapsed,
-            row_width,
-            theme,
-        ));
+    // The MCP and LSP sections flow between the summary and the sessions
+    // list; each renders only while it has items.
+    let section_gap = |lines: &mut Vec<Line<'static>>| {
         lines.push(Line::from(Span::styled(
             " ".repeat(row_width),
             Style::default().bg(theme.bg_secondary),
         )));
+    };
+    if !info.mcp_servers.is_empty() {
+        hits.mcp_header_row = header_row(&lines);
+        lines.extend(crate::ui::mcp_sidebar::section_lines(
+            "MCP",
+            info.mcp_servers,
+            ("connected", "disconnected"),
+            info.mcp_collapsed,
+            row_width,
+            theme,
+        ));
+        section_gap(&mut lines);
+    }
+    if !info.lsp_servers.is_empty() {
+        hits.lsp_header_row = header_row(&lines);
+        lines.extend(crate::ui::mcp_sidebar::section_lines(
+            "LSP",
+            info.lsp_servers,
+            ("running", "idle"),
+            info.lsp_collapsed,
+            row_width,
+            theme,
+        ));
+        section_gap(&mut lines);
     }
     lines.push(header_line(row_width, theme));
     // Cap the tab list so everything below it fits.
@@ -436,7 +459,7 @@ fn pad_to_width(text: &str, width: usize) -> String {
 }
 
 fn header_line(width: usize, theme: &Theme) -> Line<'static> {
-    let title = " sessions";
+    let title = " Sessions";
     let padding = " ".repeat(width.saturating_sub(UnicodeWidthStr::width(title)));
     Line::from(vec![
         Span::styled(
@@ -488,6 +511,8 @@ mod tests {
             goal_elapsed: None,
             mcp_servers: &[],
             mcp_collapsed: false,
+            lsp_servers: &[],
+            lsp_collapsed: false,
             git_files: &[],
             files_collapsed: false,
             version: "0.0.0-test",
@@ -546,6 +571,8 @@ mod tests {
             goal_elapsed: None,
             mcp_servers: &[],
             mcp_collapsed: false,
+            lsp_servers: &[],
+            lsp_collapsed: false,
             git_files: &[],
             files_collapsed: false,
             version: "0.0.0-test",
@@ -566,7 +593,7 @@ mod tests {
             .map(|r| r.iter().map(|c| c.symbol()).collect())
             .collect();
         // Flows right beneath the sessions list like the other sections.
-        let sessions_row = rows.iter().position(|r| r.contains("sessions")).unwrap();
+        let sessions_row = rows.iter().position(|r| r.contains("Sessions")).unwrap();
         let todo_row = rows
             .iter()
             .position(|r| r.contains("▼ Todo · running…"))
@@ -620,6 +647,8 @@ mod tests {
             goal_elapsed: None,
             mcp_servers: &[],
             mcp_collapsed: false,
+            lsp_servers: &[],
+            lsp_collapsed: false,
             git_files: &[],
             files_collapsed: false,
             version: "0.0.0-test",
@@ -638,9 +667,9 @@ mod tests {
             .chunks(34)
             .map(|r| r.iter().map(|c| c.symbol()).collect())
             .collect();
-        let sessions_row = rows.iter().position(|r| r.contains("sessions"));
+        let sessions_row = rows.iter().position(|r| r.contains("Sessions"));
         let subagents_row = rows.iter().position(|r| r.contains("subagents"));
-        assert!(sessions_row.is_some(), "sessions header should render");
+        assert!(sessions_row.is_some(), "Sessions header should render");
         assert!(subagents_row.is_some(), "subagents header should render");
         // The sub-agent section is its OWN header, placed below sessions.
         assert!(subagents_row > sessions_row);
@@ -672,6 +701,8 @@ mod tests {
             goal_elapsed: None,
             mcp_servers,
             mcp_collapsed,
+            lsp_servers: &[],
+            lsp_collapsed: false,
             git_files,
             files_collapsed,
             version: "0.1.0-test",
@@ -708,10 +739,10 @@ mod tests {
         }];
         let (rows, hits) = draw_rows(info_with_sections(&servers, &files, false, false));
 
-        let mcp_row = rows.iter().position(|r| r.contains("▼ mcp"));
-        let sessions_row = rows.iter().position(|r| r.contains("sessions"));
+        let mcp_row = rows.iter().position(|r| r.contains("▼ MCP"));
+        let sessions_row = rows.iter().position(|r| r.contains("Sessions"));
         let files_row = rows.iter().position(|r| r.contains("modified files"));
-        assert!(mcp_row.is_some(), "mcp header should render");
+        assert!(mcp_row.is_some(), "MCP header should render");
         assert!(files_row.is_some(), "modified files header should render");
         // MCP flows above the sessions list; modified files below it.
         assert!(mcp_row < sessions_row);
@@ -728,6 +759,27 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_renders_lsp_section_only_when_servers_exist() {
+        // Present: renders between MCP and the Sessions list with running
+        // state, and the header is a fold click target.
+        let langs = vec![("rust".to_string(), true), ("python".to_string(), false)];
+        let mut info = info_with_sections(&[], &[], false, false);
+        info.lsp_servers = &langs;
+        let (rows, hits) = draw_rows(info);
+        let lsp_row = rows.iter().position(|r| r.contains("▼ LSP"));
+        let sessions_row = rows.iter().position(|r| r.contains("Sessions"));
+        assert!(lsp_row.is_some(), "LSP header should render");
+        assert!(lsp_row < sessions_row);
+        assert!(rows.iter().any(|r| r.contains("rust")));
+        assert_eq!(hits.lsp_header_row, lsp_row.map(|r| r as u16));
+
+        // Absent: no header, no hitbox.
+        let (rows, hits) = draw_rows(info_with_sections(&[], &[], false, false));
+        assert!(!rows.iter().any(|r| r.contains("LSP")));
+        assert_eq!(hits.lsp_header_row, None);
+    }
+
+    #[test]
     fn collapsed_sections_hide_their_rows_but_keep_headers() {
         let servers = vec![("chrome-devtools".to_string(), true)];
         let files = vec![zode_core::GitFileStat {
@@ -736,7 +788,7 @@ mod tests {
             removed: Some(1),
         }];
         let (rows, hits) = draw_rows(info_with_sections(&servers, &files, true, true));
-        assert!(rows.iter().any(|r| r.contains("▶ mcp")));
+        assert!(rows.iter().any(|r| r.contains("▶ MCP")));
         assert!(rows.iter().any(|r| r.contains("▶ modified files")));
         assert!(!rows.iter().any(|r| r.contains("chrome-devtools")));
         assert!(!rows.iter().any(|r| r.contains("app.rs")));

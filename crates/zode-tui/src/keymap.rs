@@ -17,6 +17,7 @@ pub enum ActionId {
     OpenTasks,
     OpenSubAgents,
     ToggleSidebar,
+    ToggleFold,
     NewTab,
     CloseTab,
     SwitchTab,
@@ -91,6 +92,11 @@ pub static KEYMAP: &[Binding] = &[
         keys: "Ctrl+G",
         action: ActionId::ToggleSidebar,
         help: "Toggle the sidebar",
+    },
+    Binding {
+        keys: "Ctrl+E",
+        action: ActionId::ToggleFold,
+        help: "Expand/collapse tool & thinking blocks",
     },
     Binding {
         keys: "Ctrl+T",

@@ -80,6 +80,16 @@ const GOAL_LOOP_CONTINUE_PROMPT: &str =
      is fully complete, call the goal_complete tool with a short summary — do \
      not call it prematurely.";
 
+/// Default cap on autonomous goal-loop turns when `autoLoopMaxTurns` is unset.
+/// Without a default an unbounded loop can burn tokens indefinitely; the user
+/// can raise it via config or just resume by sending a message.
+const GOAL_LOOP_DEFAULT_MAX_TURNS: u32 = 25;
+
+/// Consecutive goal-loop turns with NO tool use before the loop stops for
+/// lack of progress: a model that keeps replying "I'll continue" without
+/// doing any work (no tool calls, no diff) is spinning, not progressing.
+const GOAL_LOOP_NO_PROGRESS_LIMIT: u32 = 3;
+
 fn prompt_history_path() -> Option<std::path::PathBuf> {
     ConfigManager::config_dir()
         .ok()
@@ -334,6 +344,7 @@ pub struct TuiApp {
     /// Fold state of the collapsible sidebar sections (session-scoped;
     /// toggled by a header click or `/sidebar mcp|files|todo`).
     mcp_section_collapsed: bool,
+    lsp_section_collapsed: bool,
     files_section_collapsed: bool,
     todo_section_collapsed: bool,
     /// Full modified-files overlay, opened by clicking the sidebar section's
@@ -353,6 +364,10 @@ pub struct TuiApp {
     overlay_was_open: bool,
     /// One-shot full-repaint request (overlay close, Ctrl+L).
     force_redraw: bool,
+    /// Set by an idle tick (nothing animatable changed) to skip the next
+    /// redraw — keeps a fully idle app from rebuilding the widget tree at the
+    /// tick rate. Consumed (reset) at the top of the loop.
+    skip_next_draw: bool,
     show_help: bool,
     toast: Option<Toast>,
     provider_names: Vec<String>,
@@ -406,6 +421,10 @@ impl TuiApp {
             if let Ok(store) = tab0.engine.store.lock() {
                 tab0.chat = rebuild_chat_from_store(&store);
                 tab0.context_tokens = estimate_store_tokens(&store);
+                // Seed the append watermark to the loaded length (see the
+                // ResumeTab reassemble effect for the rationale).
+                tab0.persisted_msgs
+                    .store(store.len(), std::sync::atomic::Ordering::Relaxed);
             }
             if let Some(meta) = SessionIndex::load()
                 .ok()
@@ -504,6 +523,7 @@ impl TuiApp {
             subagents_panel: None,
             subagents: Vec::new(),
             mcp_section_collapsed: false,
+            lsp_section_collapsed: false,
             files_section_collapsed: false,
             todo_section_collapsed: false,
             files_panel: None,
@@ -512,6 +532,7 @@ impl TuiApp {
             last_sidebar_poll: None,
             overlay_was_open: false,
             force_redraw: false,
+            skip_next_draw: false,
             show_help: false,
             toast: None,
             provider_names: ui.provider_names,
@@ -749,6 +770,13 @@ impl TuiApp {
         if let Some(abort) = tab.turn_abort.take() {
             abort.abort_with_reason("user interrupted");
             tab.active_turn_id = 0;
+            // The aborted task is still tearing down (may hold the store lock /
+            // emit late events); stay busy until its terminal TurnDone lands so
+            // a fast resubmit can't spawn a second turn onto the same store.
+            tab.draining = true;
+            // Clear stale in-flight tool titles so the next turn doesn't
+            // inherit them (TurnDone / submit clear these; interrupt did not).
+            tab.active_tool_names.clear();
             // Esc / Ctrl+C also halts the goal auto-loop (and purges any queued
             // continuation) so it doesn't restart.
             stop_goal_loop(tab);
@@ -791,16 +819,26 @@ impl TuiApp {
     /// over the right conversation and uses that tab's cwd. Only called when a
     /// request becomes the ACTIVE dialog — queued requests don't move focus.
     fn open_approval(&mut self, req: ApprovalRequest) -> PermissionDialog {
-        if let Some(src) = req.source.as_deref().and_then(|s| s.parse::<usize>().ok()) {
-            if let Some(pos) = self.tabs.iter().position(|t| t.id == src) {
-                self.active = pos;
-                // A request from another tab can steal focus mid-compose; drop
-                // any popup whose candidates belong to the previous tab.
-                self.dismiss_input_popups();
-                self.queued_edit_index = None;
-            }
+        // Show the modal WITHOUT switching the active tab: the dialog renders
+        // on top and captures input regardless of which tab is focused, so a
+        // background tab's approval no longer teleports the user (and wipes
+        // their compose state) away from the tab they're typing in. Only when
+        // the request is FOR the active tab do we clear its input popups (the
+        // dialog now owns input). The dialog's cwd comes from the source tab
+        // so the prompt shows the right directory even without focusing it.
+        let src_tab = req
+            .source
+            .as_deref()
+            .and_then(|s| s.parse::<usize>().ok())
+            .and_then(|src| self.tabs.iter().find(|t| t.id == src));
+        let cwd = src_tab
+            .map(|t| t.engine.cwd.clone())
+            .unwrap_or_else(|| self.active_tab().engine.cwd.clone());
+        let is_active_tab = src_tab.map(|t| t.id) == Some(self.active_tab().id);
+        if is_active_tab {
+            self.dismiss_input_popups();
+            self.queued_edit_index = None;
         }
-        let cwd = self.active_tab().engine.cwd.clone();
         PermissionDialog::new(req, cwd)
     }
 
@@ -887,7 +925,7 @@ impl TuiApp {
         // Plan mode is per-tab: re-apply THIS tab's mode to whatever template a
         // caller passed (a model/provider/yolo swap must not drop or leak it).
         let template = template.with_plan_mode(self.active_tab().plan_mode);
-        let (store, cwd, id, seq) = {
+        let (store, carry, cwd, id, seq) = {
             let tab = self.active_tab();
             let store = match tab.engine.store.lock() {
                 Ok(s) => s.clone(),
@@ -895,6 +933,10 @@ impl TuiApp {
             };
             (
                 store,
+                // Carry the long-lived session state (cost, undo history, bg
+                // shells, todos, sub-agents, compaction latches, file cache)
+                // so a hot-swap doesn't reset it or orphan running shells.
+                tab.engine.carry_state(),
                 tab.engine.cwd.clone(),
                 tab.id,
                 tab.reassemble_seq + 1,
@@ -910,7 +952,10 @@ impl TuiApp {
 
         let tx = agent_tx.clone();
         tokio::spawn(async move {
-            let result = match template.assemble_tab(Some(cwd), Some(id.to_string())).await {
+            let result = match template
+                .assemble_tab_with_carry(Some(cwd), Some(id.to_string()), carry)
+                .await
+            {
                 Ok(engine) => Ok(ReassembledEngine {
                     template,
                     engine: engine.with_store(store),
@@ -1028,15 +1073,22 @@ impl TuiApp {
                         (
                             rebuild_chat_from_store(&store),
                             estimate_store_tokens(&store),
+                            store.len(),
                         )
                     })
                 };
-                if let Some((chat, tokens)) = rebuilt {
+                if let Some((chat, tokens, len)) = rebuilt {
                     let tab = &mut self.tabs[tab_idx];
                     tab.chat = chat;
                     tab.context_tokens = tokens;
+                    // Seed the append watermark to the loaded length so the
+                    // first post-resume save appends onto the existing file
+                    // instead of mismatching and rewriting it.
+                    tab.persisted_msgs
+                        .store(len, std::sync::atomic::Ordering::Relaxed);
                 }
             }
+
             ReassembleEffect::Notify(notify) => self.apply_reassemble_notify(tab_idx, notify),
             ReassembleEffect::Orchestration { on, notify } => {
                 if let Ok(mut cfg) = ConfigManager::load_global() {
@@ -1078,6 +1130,7 @@ impl TuiApp {
                 let tab = &mut self.tabs[tab_idx];
                 tab.goal_loop_active = true;
                 tab.goal_loop_iter = 0;
+                tab.goal_no_progress_streak = 0;
                 tab.goal_text = Some(g);
                 tab.goal_started_at = Some(std::time::Instant::now());
                 tab.queued_input
@@ -1194,6 +1247,12 @@ impl TuiApp {
                 });
             }
         }
+        // Builtins always win a name clash (`expand_dynamic_command` returns
+        // None for any registry name), so a dynamic entry shadowing a builtin
+        // would render as a duplicate popup row that does nothing when
+        // chosen. Drop them here instead of offering dead rows.
+        let registry = zode_core::commands::CommandRegistry::with_builtins();
+        cmds.retain(|c| registry.get(&c.name).is_none());
         self.autocomplete.set_dynamic(cmds);
     }
 
@@ -1594,6 +1653,7 @@ impl TuiApp {
         self.last_sidebar_poll = Some(std::time::Instant::now());
         let tab = &mut self.tabs[self.active];
         tab.mcp_status = tab.engine.mcp_status();
+        tab.lsp_status = tab.engine.lsp_status();
         if tab.git_poll_inflight {
             return;
         }
@@ -1639,6 +1699,10 @@ impl TuiApp {
         }
         if Some(mouse.row) == self.sidebar_hits.mcp_header_row {
             self.mcp_section_collapsed = !self.mcp_section_collapsed;
+            return true;
+        }
+        if Some(mouse.row) == self.sidebar_hits.lsp_header_row {
+            self.lsp_section_collapsed = !self.lsp_section_collapsed;
             return true;
         }
         if Some(mouse.row) == self.sidebar_hits.files_header_row {
@@ -1765,6 +1829,10 @@ impl TuiApp {
         let mut term_events = EventStream::new();
         let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        // Skip missed ticks instead of bursting to catch up: after a long
+        // synchronous handler the ticker would otherwise fire a storm of
+        // back-to-back ticks (each a redraw).
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             // Full repaint when an overlay just closed (or Ctrl+L asked): see
@@ -1775,7 +1843,13 @@ impl TuiApp {
                 terminal.clear()?;
             }
             self.overlay_was_open = overlay_open;
-            terminal.draw(|f| self.draw(f))?;
+            // An idle tick (nothing animatable changed) skips the redraw — a
+            // fully idle app shouldn't rebuild the widget tree 10×/second.
+            if std::mem::take(&mut self.skip_next_draw) {
+                // still fell through the tick handler's state refresh below
+            } else {
+                terminal.draw(|f| self.draw(f))?;
+            }
             if self.should_quit {
                 // Sweep any clipboard preview temp files still held by any tab.
                 let temps: Vec<std::path::PathBuf> = self
@@ -1872,31 +1946,38 @@ impl TuiApp {
                 }
                 _ = ticker.tick() => {
                     self.status.tick();
+                    let had_toast = self.toast.is_some();
                     if let Some(t) = &mut self.toast {
                         if t.tick() {
                             self.toast = None;
                         }
                     }
-                    // Keep the open tasks panel's shell list live.
+                    // Todo/sub-agent state only changes while a turn runs (or
+                    // its panel is open) — skip the per-tab lock+clone traffic
+                    // when fully idle rather than paying it 10×/second.
+                    let any_busy = self.tabs.iter().any(|t| t.is_busy());
                     if self.tasks_panel.is_some() {
                         self.refresh_bg_shells().await;
                     }
-                    // Keep the active tab's sub-agent snapshot fresh every tick:
-                    // it feeds BOTH the sidebar "subagents" section (always
-                    // visible) and the overlay (when open).
-                    self.refresh_subagents();
-                    // Keep each tab's cached todo snapshot fresh so the sync
-                    // sidebar render reads current state. Index-based to avoid
-                    // holding a `&self.tabs` borrow across the await. Cheap:
-                    // an RwLock read + small Vec clone per tab at ~10 fps.
-                    for i in 0..self.tabs.len() {
-                        let engine = self.tabs[i].engine.clone();
-                        let snap = engine.todo_state.snapshot().await;
-                        self.tabs[i].todos = snap;
+                    if any_busy || self.subagents_panel.is_some() {
+                        self.refresh_subagents();
+                    }
+                    if any_busy {
+                        for i in 0..self.tabs.len() {
+                            let engine = self.tabs[i].engine.clone();
+                            let snap = engine.todo_state.snapshot().await;
+                            self.tabs[i].todos = snap;
+                        }
                     }
                     // Throttled sidebar data poll: git working-tree stats
                     // (spawned off-loop) + MCP connection state, active tab.
                     self.refresh_sidebar_sections(&agent_tx);
+                    // Skip the redraw for a fully-idle tick — nothing that
+                    // animates (spinner, toast countdown) is active, so the
+                    // frame would be identical. Any real event path leaves
+                    // `skip_next_draw` false and redraws normally.
+                    let animating = any_busy || self.toast.is_some() || had_toast;
+                    self.skip_next_draw = !animating && !overlay_open;
                 }
             }
         }
@@ -1985,6 +2066,8 @@ impl TuiApp {
                         .map(|t| format_elapsed(t.elapsed())),
                     mcp_servers: &self.tabs[self.active].mcp_status,
                     mcp_collapsed: self.mcp_section_collapsed,
+                    lsp_servers: &self.tabs[self.active].lsp_status,
+                    lsp_collapsed: self.lsp_section_collapsed,
                     git_files: self.tabs[self.active].git_files.as_deref().unwrap_or(&[]),
                     files_collapsed: self.files_section_collapsed,
                     version: env!("CARGO_PKG_VERSION"),
@@ -2422,6 +2505,13 @@ impl TuiApp {
             }
             (KeyCode::Char('g'), m) if is_primary_mod(m) => {
                 self.handle_sidebar_command("toggle");
+                return;
+            }
+            // Fold toggle for tool/thinking blocks: expand all when any is
+            // folded, fold all otherwise (a click on a block header toggles
+            // just that block).
+            (KeyCode::Char('e'), m) if is_primary_mod(m) => {
+                self.tabs[self.active].chat.toggle_all_collapsed();
                 return;
             }
             // ⌘/Ctrl + 1..9 jump to a tab by position.
@@ -3094,11 +3184,31 @@ impl TuiApp {
                 // by the terminal on macOS. The Ctrl/Cmd+C chord also copies.
                 if selection.anchor != selection.focus {
                     self.copy_chat_selection(selection, chat_area);
+                } else if rect_contains(chat_area, mouse.column, mouse.row) {
+                    // A plain click (no drag): toggle the fold of the tool /
+                    // thinking block whose header row was hit, if any.
+                    self.try_chat_collapse_click(chat_area, mouse.row);
                 }
                 true
             }
             _ => false,
         }
+    }
+
+    /// A plain chat-area click: toggle the collapsed/expanded state of the
+    /// tool or thinking block whose header row sits at `row`.
+    fn try_chat_collapse_click(&mut self, chat_area: Rect, row: u16) -> bool {
+        let theme = self.theme.clone();
+        let active_model = self.tabs[self.active].engine.model.clone();
+        let active_cwd = self.tabs[self.active].engine.cwd.clone();
+        let meta = ChatRenderMeta {
+            theme_name: &theme.name,
+            model: &active_model,
+            cwd: &active_cwd,
+        };
+        self.tabs[self.active]
+            .chat
+            .toggle_collapse_at(&theme, meta, chat_area, row)
     }
 
     fn chat_selection_point(
@@ -4311,6 +4421,28 @@ impl TuiApp {
         }
         // when this tab goes idle — see `dispatch_queued_input`.
         if self.active_tab().is_busy() {
+            // Mid-turn steering: a LIVE agent turn (has an abort handle) can
+            // absorb the message NOW — inject it into the running loop so the
+            // model sees it on its next round-trip, Claude-Code style, instead
+            // of waiting for the whole turn to finish. Text-only and only for a
+            // live turn (not a reassemble/draining tab); images/empties fall
+            // through to the queue.
+            let live_turn = self.active_tab().turn_abort.is_some();
+            if live_turn
+                && !submitted_text.trim().is_empty()
+                && self.active_tab().pending_images.is_empty()
+            {
+                let blocks = vec![agent::message::ContentBlock::Text {
+                    text: submitted_text.to_string(),
+                }];
+                if self.active_tab().engine.steer(blocks) {
+                    self.active_tab_mut().chat.push_user(&submitted_text);
+                    self.toast = Some(Toast::info(crate::tr(
+                        "steered into the running turn — the agent will see it next step",
+                    )));
+                    return;
+                }
+            }
             if !submitted_text.trim().is_empty() {
                 self.active_tab_mut()
                     .queued_input
@@ -4402,6 +4534,8 @@ impl TuiApp {
         // so text after a tool card starts a fresh segment.
         tab.mode = Mode::Thinking;
         tab.active_tool_names.clear();
+        // Fresh turn: reset the per-turn tool-use flag (goal no-progress).
+        tab.turn_used_tools = false;
 
         tab.turn_seq += 1;
         let turn_id = tab.turn_seq;
@@ -4580,11 +4714,37 @@ impl TuiApp {
             tab.turn_abort = None;
             tab.active_turn_id = 0;
             let ok = result.is_ok();
+            if ok {
+                // Refresh the context gauge immediately from the rewritten
+                // store, so the "% ctx" badge drops right after /compact
+                // instead of lingering at the pre-compact count until the
+                // next Usage event — and so the progress check below reads
+                // the same number the auto trigger will.
+                if let Ok(store) = tab.engine.store.lock() {
+                    tab.context_tokens = estimate_store_tokens(&store);
+                }
+            }
             match result {
                 Ok(summary) => {
-                    tab.auto_compact_failures = 0;
                     tab.chat.push_system(&summary);
                     tab.mode = Mode::Ready;
+                    // A compaction that leaves the gauge over the trigger
+                    // threshold made no effective progress — without this,
+                    // Ok reset the breaker and maybe_auto_compact re-fired
+                    // on the next event-loop pass, looping useless LLM
+                    // calls forever with the context pinned at ~100%.
+                    let stuck =
+                        auto && needs_auto_compact(tab.context_tokens, tab.engine.model_max_tokens);
+                    if stuck {
+                        tab.auto_compact_failures = tab.auto_compact_failures.saturating_add(1);
+                        if tab.auto_compact_failures == AUTO_COMPACT_MAX_FAILURES {
+                            tab.chat.push_system(crate::tr(
+                                "auto-compact paused: compaction is no longer shrinking the context — run /compact to retry manually, or /clear to start fresh",
+                            ));
+                        }
+                    } else {
+                        tab.auto_compact_failures = 0;
+                    }
                 }
                 Err(e) => {
                     tab.chat
@@ -4603,20 +4763,20 @@ impl TuiApp {
                 }
             }
             // Compaction rewrote the message store; persist it so the compacted
-            // transcript survives a resume (mirrors the post-turn save).
+            // transcript survives a resume (mirrors the post-turn save). The
+            // PREFIX changed (tombstones + spliced summary), so this must be a
+            // full rewrite, not an append.
             if ok {
-                // Refresh the context gauge immediately from the shrunken store,
-                // so the "% ctx" badge drops right after /compact instead of
-                // lingering at the pre-compact count until the next Usage event.
-                if let Ok(store) = tab.engine.store.lock() {
-                    tab.context_tokens = estimate_store_tokens(&store);
-                }
-                let (session_id, engine, title) = (
+                tab.store_dirty = false; // full rewrite makes the file current
+                let (session_id, engine, title, persisted) = (
                     tab.session_id.clone(),
                     tab.engine.clone(),
                     tab.title.clone(),
+                    tab.persisted_msgs.clone(),
                 );
-                tokio::spawn(crate::tab::persist_session(session_id, engine, title));
+                tokio::spawn(crate::tab::persist_session(
+                    session_id, engine, title, persisted, false,
+                ));
             }
             return;
         }
@@ -4716,6 +4876,11 @@ impl TuiApp {
         };
         // Drop events from an aborted/superseded turn within that tab.
         if turn_id != tab.active_turn_id {
+            // The aborted turn's terminal TurnDone marks the end of its
+            // teardown — clear the draining latch so the tab is idle again.
+            if matches!(ev, AppEvent::TurnDone { .. }) {
+                tab.draining = false;
+            }
             return;
         }
         match ev {
@@ -4739,6 +4904,9 @@ impl TuiApp {
                         ref name,
                         ref input,
                     } => {
+                        // Mark that this turn did real work (drives goal-loop
+                        // no-progress detection).
+                        tab.turn_used_tools = true;
                         let title = tool_call_title(name, input);
                         tab.active_tool_names.insert(id.clone(), title);
                         if let Some(line) = process_line_for_event(&event, None) {
@@ -4782,6 +4950,25 @@ impl TuiApp {
                             tab.chat.push_system(&line);
                         }
                     }
+                    // The runtime's own (mid-turn) compaction just rewrote the
+                    // store — refresh the "% ctx" badge from it right away,
+                    // like the CompactDone handler does for TUI-driven
+                    // compaction. Otherwise the badge lingers at the
+                    // pre-compact count until the next Usage event (which
+                    // never arrives if the turn errors first).
+                    Event::Notice { ref code, .. }
+                        if code == "agent.compact.ok" || code == "agent.compact.micro" =>
+                    {
+                        if let Ok(store) = tab.engine.store.lock() {
+                            tab.context_tokens = estimate_store_tokens(&store);
+                        }
+                        // A mid-turn compaction rewrote the store's prefix —
+                        // the next save can't be a pure append.
+                        tab.store_dirty = true;
+                        if let Some(line) = process_line_for_event(&event, None) {
+                            tab.chat.push_tool(&line);
+                        }
+                    }
                     Event::Notice { .. } | Event::Result { .. } | Event::Unknown => {
                         if let Some(line) = process_line_for_event(&event, None) {
                             tab.chat.push_tool(&line);
@@ -4817,6 +5004,19 @@ impl TuiApp {
                 // agent calls `goal_complete` — or the user interrupts / clears
                 // the goal, or a turn fails. Only continues on a successful turn.
                 if tab.goal_loop_active {
+                    // No-progress tracking: a turn with no tool call did no
+                    // real work. Update the streak before the decisions below.
+                    if tab.turn_used_tools {
+                        tab.goal_no_progress_streak = 0;
+                    } else {
+                        tab.goal_no_progress_streak = tab.goal_no_progress_streak.saturating_add(1);
+                    }
+                    // Effective cap: the user's `autoLoopMaxTurns`, or a sane
+                    // built-in default so an unset config can't loop forever.
+                    let max_turns = tab
+                        .engine
+                        .auto_loop_max_turns()
+                        .unwrap_or(GOAL_LOOP_DEFAULT_MAX_TURNS);
                     if !ok {
                         // A failed/interrupted turn halts the loop cleanly.
                         stop_goal_loop(tab);
@@ -4824,37 +5024,58 @@ impl TuiApp {
                         stop_goal_loop(tab);
                         tab.chat
                             .push_system(crate::tr("✓ goal complete — auto-loop stopped"));
+                    } else if tab.goal_no_progress_streak >= GOAL_LOOP_NO_PROGRESS_LIMIT {
+                        // The model keeps replying without doing work — stop
+                        // rather than burn turns spinning in place.
+                        stop_goal_loop(tab);
+                        tab.chat.push_system(crate::tr(
+                            "goal-loop: no progress (no tool use) for several turns — paused (send a message to resume)",
+                        ));
                     } else {
                         // Count the turn that just ran, THEN honor the cap so
-                        // `autoLoopMaxTurns = N` runs exactly N turns.
+                        // the loop runs exactly `max_turns` turns.
                         tab.goal_loop_iter = tab.goal_loop_iter.saturating_add(1);
-                        if tab
-                            .engine
-                            .auto_loop_max_turns()
-                            .is_some_and(|max| tab.goal_loop_iter >= max)
-                        {
+                        if tab.goal_loop_iter >= max_turns {
                             stop_goal_loop(tab);
                             tab.chat.push_system(crate::tr(
-                                "goal-loop: reached autoLoopMaxTurns — paused (send a message to resume)",
+                                "goal-loop: reached the turn cap — paused (send a message to resume)",
                             ));
-                        } else {
-                            // Queue the next iteration; `dispatch_queued_input` (main
-                            // loop, right after this drains) submits it once idle.
+                        } else if !tab
+                            .queued_input
+                            .iter()
+                            .any(|q| q == GOAL_LOOP_CONTINUE_PROMPT)
+                        {
+                            // Queue the next iteration ONCE — a user message
+                            // injected mid-loop must not leave a duplicate
+                            // continuation stacked in the queue.
                             tab.queued_input
                                 .push_back(GOAL_LOOP_CONTINUE_PROMPT.to_string());
                         }
                     }
                 }
-                // Persist the session off the event loop.
-                let (session_id, engine, title) = (
+                // Persist the session off the event loop. A normal turn only
+                // APPENDS to the store, so save incrementally — unless a
+                // mid-turn compaction rewrote the prefix (`store_dirty`), in
+                // which case a full rewrite is required. The dirty flag is
+                // cleared either way (the save makes the file current).
+                let allow_append = !tab.store_dirty;
+                tab.store_dirty = false;
+                let (session_id, engine, title, persisted) = (
                     tab.session_id.clone(),
                     tab.engine.clone(),
                     tab.title.clone(),
+                    tab.persisted_msgs.clone(),
                 );
                 // Mine the just-completed turn for durable memories (no-op
                 // unless autoExtract is on; runs detached, never blocks).
                 engine.spawn_post_turn_extraction();
-                tokio::spawn(crate::tab::persist_session(session_id, engine, title));
+                tokio::spawn(crate::tab::persist_session(
+                    session_id,
+                    engine,
+                    title,
+                    persisted,
+                    allow_append,
+                ));
             }
             AppEvent::Toast { .. }
             | AppEvent::CompactDone { .. }
@@ -4875,6 +5096,12 @@ impl TuiApp {
         args: &str,
         agent_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
+        // Builtins are matched case-insensitively (`/HELP` works — the
+        // registry lookup that routed us here is already case-insensitive).
+        // Dynamic commands (skills/agents/MCP) keep their exact case and
+        // never reach this match.
+        let lowered = name.to_ascii_lowercase();
+        let name = lowered.as_str();
         match name {
             "exit" => self.should_quit = true,
             "help" => self.show_help = true,
@@ -4896,13 +5123,31 @@ impl TuiApp {
                     // A fresh conversation also re-arms the breaker.
                     tab.context_tokens = 0;
                     tab.auto_compact_failures = 0;
+                    // The store was emptied (prefix discarded) — the next save
+                    // must be a full rewrite, not an append onto the old file.
+                    tab.store_dirty = true;
+                    // The runtime's compaction latches (no-progress, failure
+                    // breaker) describe the conversation just discarded —
+                    // reset them or the QueryLoop's own auto-compaction
+                    // stays disabled for the rest of the session.
+                    if let Ok(mut s) = tab.engine.compact_state.lock() {
+                        *s = agent::compact::AutoCompactState::default();
+                    }
                 }
             }
             "theme" => self.handle_theme(args),
             // Run undo/redo off the event loop (the history mutex + file
             // restore could block) and toast the result back as an event.
-            "undo" => self.spawn_history_op(agent_tx, true),
-            "redo" => self.spawn_history_op(agent_tx, false),
+            // Mark the store dirty so the next save is a full rewrite — undo
+            // touches persisted state and a pure append could miss it.
+            "undo" => {
+                self.tabs[self.active].store_dirty = true;
+                self.spawn_history_op(agent_tx, true);
+            }
+            "redo" => {
+                self.tabs[self.active].store_dirty = true;
+                self.spawn_history_op(agent_tx, false);
+            }
             "cost" => {
                 let report = self.active_tab().engine.cost.report().await;
                 self.active_tab_mut().chat.push_system(&report);
@@ -5111,8 +5356,14 @@ impl TuiApp {
                 None => self.toast = Some(Toast::info(crate::tr("nothing to copy yet"))),
             },
             "export" => {
-                let path =
-                    zode_core::export::resolve_export_path(&self.active_tab().engine.cwd, args);
+                let Some(path) =
+                    zode_core::export::try_resolve_export_path(&self.active_tab().engine.cwd, args)
+                else {
+                    self.toast = Some(Toast::error(crate::tr(
+                        "export path escapes the workspace — use an absolute path to export elsewhere",
+                    )));
+                    return;
+                };
                 let md = self.active_tab().engine.export_markdown();
                 match std::fs::write(&path, md) {
                     Ok(()) => {
@@ -5218,9 +5469,12 @@ impl TuiApp {
                 )));
             }
             other => {
+                // Every registered builtin has an arm above, so this is a
+                // typo/unknown — say so instead of implying a planned feature.
                 self.toast = Some(Toast::info(format!(
-                    "/{other} {}",
-                    crate::tr("lands in a later phase")
+                    "{}: /{other}  ({})",
+                    crate::tr("unknown command"),
+                    crate::tr("try /help")
                 )));
             }
         }
@@ -5689,7 +5943,11 @@ impl TuiApp {
         let folded = match args.trim().to_ascii_lowercase().as_str() {
             "mcp" => {
                 self.mcp_section_collapsed = !self.mcp_section_collapsed;
-                Some(("mcp", self.mcp_section_collapsed))
+                Some(("MCP", self.mcp_section_collapsed))
+            }
+            "lsp" => {
+                self.lsp_section_collapsed = !self.lsp_section_collapsed;
+                Some(("LSP", self.lsp_section_collapsed))
             }
             "files" => {
                 self.files_section_collapsed = !self.files_section_collapsed;
@@ -5842,6 +6100,7 @@ fn needs_auto_compact(context_tokens: u32, window: u32) -> bool {
 fn stop_goal_loop(tab: &mut SessionTab) {
     tab.goal_loop_active = false;
     tab.goal_loop_iter = 0;
+    tab.goal_no_progress_streak = 0;
     tab.goal_text = None;
     tab.goal_started_at = None;
     tab.queued_input
@@ -7370,6 +7629,40 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn ctrl_e_toggles_tool_block_folds() {
+        let (mut app, agent_tx) = make_test_app().await;
+        app.tabs[0].chat.push_tool("Bash done\n    output");
+        assert!(
+            app.tabs[0].chat.messages()[0].collapsed,
+            "folded by default"
+        );
+
+        send_key(
+            &mut app,
+            &agent_tx,
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+        )
+        .await;
+        assert!(
+            !app.tabs[0].chat.messages()[0].collapsed,
+            "Ctrl+E expands the folded blocks"
+        );
+
+        send_key(
+            &mut app,
+            &agent_tx,
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+        )
+        .await;
+        assert!(
+            app.tabs[0].chat.messages()[0].collapsed,
+            "Ctrl+E again folds them back"
+        );
+    }
+
     #[test]
     fn sidebar_is_hidden_until_multiple_tabs_exist() {
         assert!(!should_show_sidebar(0, SidebarVisibility::Auto));
@@ -7676,6 +7969,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_compact_success_without_progress_trips_the_breaker() {
+        // Regression: near 100% occupancy an EarliestHalf compaction can
+        // "succeed" while reclaiming almost nothing (the mass sits in the
+        // preserved half). CompactDone(Ok) used to reset the breaker to 0,
+        // so maybe_auto_compact re-fired on the very next event-loop pass —
+        // an endless loop of useless LLM calls with the gauge pinned at
+        // ~100%. A success that leaves the gauge over the threshold must
+        // advance the breaker like a failure.
+        let (mut app, agent_tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        let window = app.tabs[0].engine.model_max_tokens;
+        assert!(window > 0, "test engine needs a real context window");
+        // A store whose own estimate stays at ~100% of the window: the
+        // CompactDone handler recomputes the gauge from the store, so the
+        // "compaction changed nothing" case is a store that stays huge.
+        {
+            let mut store = app.tabs[0].engine.store.lock().unwrap();
+            store
+                .push(agent::message::Message::User {
+                    header: agent::message::Header::new(),
+                    content: vec![agent::message::ContentBlock::Text {
+                        text: "x".repeat(window as usize * 4),
+                    }],
+                })
+                .unwrap();
+        }
+
+        for round in 1..=AUTO_COMPACT_MAX_FAILURES {
+            app.handle_agent_event(AppEvent::CompactDone {
+                tab_id,
+                result: Ok("compacted 1 message · ~10 → ~10 tokens".into()),
+                auto: true,
+            });
+            assert_eq!(
+                app.tabs[0].auto_compact_failures, round,
+                "a no-progress success must advance the breaker"
+            );
+        }
+        assert!(needs_auto_compact(
+            app.tabs[0].context_tokens,
+            app.tabs[0].engine.model_max_tokens
+        ));
+
+        // Breaker open: the trigger must NOT start another compaction.
+        app.maybe_auto_compact(&agent_tx);
+        assert!(
+            !app.tabs[0].is_busy(),
+            "no-progress breaker must stop the auto-compact loop"
+        );
+
+        // Genuine progress (gauge drops under the threshold) re-arms it.
+        {
+            let mut store = app.tabs[0].engine.store.lock().unwrap();
+            *store = agent::message::MessageStore::new();
+        }
+        app.handle_agent_event(AppEvent::CompactDone {
+            tab_id,
+            result: Ok("compacted".into()),
+            auto: true,
+        });
+        assert_eq!(app.tabs[0].auto_compact_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_compact_notice_refreshes_the_context_gauge() {
+        // The QueryLoop's own auto-compaction rewrites the store MID-TURN and
+        // announces it with an agent.compact.ok / agent.compact.micro notice.
+        // The "% ctx" badge must drop right then — not linger at ~100% until
+        // the next Usage event (which never comes if the turn errors first).
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].active_turn_id = 7;
+
+        for code in ["agent.compact.ok", "agent.compact.micro"] {
+            app.tabs[0].context_tokens = 999_999;
+            app.handle_agent_event(AppEvent::Agent {
+                tab_id,
+                turn_id: 7,
+                cost_label: None,
+                event: Event::Notice {
+                    code: code.into(),
+                    message: "auto-compact 100 → 10 tokens".into(),
+                },
+            });
+            let store_tokens = {
+                let store = app.tabs[0].engine.store.lock().unwrap();
+                estimate_store_tokens(&store)
+            };
+            assert_eq!(
+                app.tabs[0].context_tokens, store_tokens,
+                "{code} must recompute the ctx gauge from the rewritten store"
+            );
+        }
+
+        // Unrelated notices must NOT touch the gauge (Usage owns it).
+        app.tabs[0].context_tokens = 999_999;
+        app.handle_agent_event(AppEvent::Agent {
+            tab_id,
+            turn_id: 7,
+            cost_label: None,
+            event: Event::Notice {
+                code: "api_retry".into(),
+                message: "retrying".into(),
+            },
+        });
+        assert_eq!(app.tabs[0].context_tokens, 999_999);
+    }
+
+    #[tokio::test]
+    async fn clear_resets_runtime_compact_latches() {
+        // /clear starts a fresh conversation; runtime compaction latches
+        // (no-progress, failure breaker) describe the discarded one and
+        // would otherwise keep the QueryLoop's auto-compaction disabled
+        // for the rest of the session.
+        let (mut app, agent_tx) = make_test_app().await;
+        {
+            let mut s = app.tabs[0].engine.compact_state.lock().unwrap();
+            s.record_no_progress();
+            s.record_failure();
+        }
+        app.handle_slash("clear", "", &agent_tx).await;
+        let s = app.tabs[0].engine.compact_state.lock().unwrap();
+        assert!(!s.no_progress, "/clear must clear the no-progress latch");
+        assert_eq!(s.consecutive_failures, 0, "/clear must re-arm the breaker");
+    }
+
+    #[tokio::test]
     async fn model_switch_hot_swaps_without_reassemble_pending() {
         let (mut app, agent_tx) = make_test_app().await;
 
@@ -7841,6 +8261,139 @@ mod tests {
         assert!(
             app.tabs[0].queued_input.is_empty(),
             "no continuation queued after a failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_loop_stops_after_consecutive_no_progress_turns() {
+        // A model that keeps "succeeding" without using any tool is spinning —
+        // the loop must stop after GOAL_LOOP_NO_PROGRESS_LIMIT such turns.
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].goal_loop_active = true;
+
+        for _ in 0..GOAL_LOOP_NO_PROGRESS_LIMIT {
+            assert!(
+                app.tabs[0].goal_loop_active,
+                "still looping before the limit"
+            );
+            app.tabs[0].turn_used_tools = false; // no tool use this turn
+            app.handle_agent_event(AppEvent::TurnDone {
+                tab_id,
+                turn_id: 0,
+                result: Ok(()),
+            });
+        }
+        assert!(
+            !app.tabs[0].goal_loop_active,
+            "no-progress streak stops the loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_loop_tool_use_resets_the_no_progress_streak() {
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].goal_loop_active = true;
+
+        // Two no-progress turns, then a productive one resets the streak.
+        for used in [false, false, true, false, false] {
+            app.tabs[0].turn_used_tools = used;
+            app.handle_agent_event(AppEvent::TurnDone {
+                tab_id,
+                turn_id: 0,
+                result: Ok(()),
+            });
+        }
+        // Streak never hit 3 in a row → loop still active.
+        assert!(
+            app.tabs[0].goal_loop_active,
+            "a tool-using turn resets the no-progress streak"
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_loop_honors_the_default_turn_cap() {
+        // With no autoLoopMaxTurns configured, the built-in default caps the
+        // loop so it can't run unbounded. Each turn uses a tool (no
+        // no-progress stop) to isolate the cap.
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].goal_loop_active = true;
+        for _ in 0..GOAL_LOOP_DEFAULT_MAX_TURNS + 2 {
+            if !app.tabs[0].goal_loop_active {
+                break;
+            }
+            app.tabs[0].turn_used_tools = true;
+            app.handle_agent_event(AppEvent::TurnDone {
+                tab_id,
+                turn_id: 0,
+                result: Ok(()),
+            });
+        }
+        assert!(
+            !app.tabs[0].goal_loop_active,
+            "the default cap stops an otherwise-unbounded loop"
+        );
+        assert!(app.tabs[0].goal_loop_iter <= GOAL_LOOP_DEFAULT_MAX_TURNS);
+    }
+
+    #[tokio::test]
+    async fn goal_loop_does_not_double_queue_continuations() {
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].goal_loop_active = true;
+        // A user message already sits in the queue alongside a stale
+        // continuation; a productive TurnDone must not stack a second one.
+        app.tabs[0]
+            .queued_input
+            .push_back(GOAL_LOOP_CONTINUE_PROMPT.to_string());
+        app.tabs[0].turn_used_tools = true;
+        app.handle_agent_event(AppEvent::TurnDone {
+            tab_id,
+            turn_id: 0,
+            result: Ok(()),
+        });
+        let continuations = app.tabs[0]
+            .queued_input
+            .iter()
+            .filter(|s| *s == GOAL_LOOP_CONTINUE_PROMPT)
+            .count();
+        assert_eq!(continuations, 1, "continuation must not be double-queued");
+    }
+
+    #[tokio::test]
+    async fn interrupt_keeps_tab_busy_until_the_aborted_turn_drains() {
+        // A fast resubmit after Esc must not race the aborted task's teardown:
+        // the tab stays busy (draining) until that task's terminal TurnDone.
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].turn_abort = Some(AbortController::new());
+        app.tabs[0].active_turn_id = 42;
+        app.tabs[0]
+            .active_tool_names
+            .insert("t1".into(), "Bash".into());
+
+        assert!(app.interrupt_active_turn());
+        assert!(
+            app.tabs[0].is_busy(),
+            "tab stays busy (draining) right after interrupt"
+        );
+        assert!(
+            app.tabs[0].active_tool_names.is_empty(),
+            "interrupt clears stale in-flight tool titles"
+        );
+
+        // The aborted turn's terminal TurnDone (its old turn_id) clears the
+        // draining latch — the tab is idle again.
+        app.handle_agent_event(AppEvent::TurnDone {
+            tab_id,
+            turn_id: 42,
+            result: Err("aborted".to_string()),
+        });
+        assert!(
+            !app.tabs[0].is_busy(),
+            "draining clears when the aborted turn's TurnDone lands"
         );
     }
 
@@ -8302,8 +8855,10 @@ mod tests {
         app.prompt_history.clear();
         app.active_tab_mut().titled = true;
         app.active_tab_mut().turn_seq = 1;
-        app.active_tab_mut().active_turn_id = 1;
-        app.active_tab_mut().turn_abort = Some(AbortController::new());
+        // Busy but NOT a live agent turn (a reassemble): no abort handle, so
+        // the message QUEUES rather than steering into a running loop. (A live
+        // turn steers — covered by `submit_during_a_live_turn_steers_it`.)
+        app.active_tab_mut().reassemble_pending = true;
 
         app.input.set_text("queued follow-up");
         send_key(&mut app, &agent_tx, KeyCode::Enter, KeyModifiers::NONE).await;
@@ -8318,9 +8873,8 @@ mod tests {
             .iter()
             .any(|msg| msg.role == Role::User && msg.text == "queued follow-up"));
         assert_eq!(count_store_user_text(&app, "queued follow-up"), 0);
-        assert_eq!(app.active_tab().active_turn_id, 1);
 
-        app.active_tab_mut().turn_abort = None;
+        app.active_tab_mut().reassemble_pending = false;
         app.active_tab_mut().active_turn_id = 0;
         app.dispatch_queued_input(&agent_tx).await;
 
@@ -8340,6 +8894,37 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(count_store_user_text(&app, "queued follow-up"), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_during_a_live_turn_steers_it() {
+        // Typing a follow-up while a LIVE agent turn runs injects it into the
+        // running loop (mid-turn steering) instead of queuing it for a later
+        // turn — the message is shown in chat and NOT left in the queue.
+        let (mut app, agent_tx) = make_test_app().await;
+        app.prompt_history.clear();
+        app.active_tab_mut().titled = true;
+        app.active_tab_mut().turn_seq = 1;
+        app.active_tab_mut().active_turn_id = 1;
+        app.active_tab_mut().turn_abort = Some(AbortController::new());
+
+        app.input.set_text("also handle the edge case");
+        send_key(&mut app, &agent_tx, KeyCode::Enter, KeyModifiers::NONE).await;
+
+        // Steered, not queued.
+        assert!(
+            app.active_tab().queued_input.is_empty(),
+            "a live turn steers the message rather than queuing it"
+        );
+        // Shown in the transcript so the user sees what they injected.
+        assert!(app
+            .active_tab()
+            .chat
+            .messages()
+            .iter()
+            .any(|m| m.role == Role::User && m.text == "also handle the edge case"));
+        // The live turn keeps running (not superseded).
+        assert_eq!(app.active_tab().active_turn_id, 1);
     }
 
     #[test]

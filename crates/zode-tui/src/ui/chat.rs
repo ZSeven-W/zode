@@ -51,6 +51,11 @@ pub struct ChatMessage {
     pub role: Role,
     pub text: String,
     pub images: Vec<ImagePreview>,
+    /// Fold state for process rows (tool calls / thinking). Tool-role
+    /// messages start collapsed; a block that renders taller than one row
+    /// shows a single `▸ …` header until clicked open. Ignored for roles
+    /// that never collapse (user/assistant/system).
+    pub collapsed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +151,10 @@ struct RenderCacheKey {
 struct RenderCache {
     key: RenderCacheKey,
     lines: Vec<Line<'static>>,
+    /// Header-row line index → message index, for every collapsible block
+    /// (a Tool message that renders taller than one row). Clicking that
+    /// row toggles the message's fold state.
+    toggles: HashMap<usize, usize>,
 }
 
 impl ChatView {
@@ -177,6 +186,7 @@ impl ChatView {
             role: Role::User,
             text: text.to_string(),
             images,
+            collapsed: false,
         });
         self.scroll_back = 0;
         self.bump_revision();
@@ -187,6 +197,7 @@ impl ChatView {
             role: Role::System,
             text: text.to_string(),
             images: Vec::new(),
+            collapsed: false,
         });
         self.bump_revision();
     }
@@ -196,6 +207,7 @@ impl ChatView {
             role: Role::Tool,
             text: text.to_string(),
             images: Vec::new(),
+            collapsed: true,
         });
         self.bump_revision();
     }
@@ -223,6 +235,7 @@ impl ChatView {
                 role: Role::Tool,
                 text: format!("{THINKING_PREFIX}{delta}"),
                 images: Vec::new(),
+                collapsed: true,
             });
         }
         self.thinking_open = true;
@@ -234,6 +247,7 @@ impl ChatView {
             role: Role::Assistant,
             text: String::new(),
             images: Vec::new(),
+            collapsed: false,
         });
         self.active_assistant_index = self.messages.len().checked_sub(1);
         self.streaming = true;
@@ -251,6 +265,7 @@ impl ChatView {
                     role: Role::Assistant,
                     text: String::new(),
                     images: Vec::new(),
+                    collapsed: false,
                 });
                 self.messages.len() - 1
             }
@@ -470,10 +485,11 @@ impl ChatView {
             .as_ref()
             .is_none_or(|cache| cache.key != cache_key)
         {
-            let lines = self.build_lines(theme, meta, width);
+            let (lines, toggles) = self.build_lines(theme, meta, width);
             self.render_cache = Some(RenderCache {
                 key: cache_key,
                 lines,
+                toggles,
             });
             #[cfg(test)]
             {
@@ -482,12 +498,63 @@ impl ChatView {
         }
     }
 
+    /// Global fold toggle (the Ctrl+E chord): if ANY tool/thinking block is
+    /// folded, expand them all; otherwise fold them all. Returns true when
+    /// the blocks are now expanded.
+    pub fn toggle_all_collapsed(&mut self) -> bool {
+        let any_collapsed = self
+            .messages
+            .iter()
+            .any(|m| m.role == Role::Tool && m.collapsed);
+        for m in self.messages.iter_mut().filter(|m| m.role == Role::Tool) {
+            m.collapsed = !any_collapsed;
+        }
+        self.bump_revision();
+        any_collapsed
+    }
+
+    /// Toggle the fold state of the collapsible block whose HEADER row is
+    /// painted at screen position (`row` in `area`). Returns true when a
+    /// block was toggled. Maps against the last painted top line, like
+    /// selection, so the click lands on what the user actually sees.
+    pub fn toggle_collapse_at(
+        &mut self,
+        theme: &Theme,
+        meta: ChatRenderMeta<'_>,
+        area: Rect,
+        row: u16,
+    ) -> bool {
+        if area.width == 0 || area.height == 0 {
+            return false;
+        }
+        self.ensure_render_cache(theme, meta, area.width);
+        let line = self.last_render_start
+            + usize::from(
+                row.saturating_sub(area.y)
+                    .min(area.height.saturating_sub(1)),
+            );
+        let Some(&msg_idx) = self
+            .render_cache
+            .as_ref()
+            .and_then(|c| c.toggles.get(&line))
+        else {
+            return false;
+        };
+        let Some(msg) = self.messages.get_mut(msg_idx) else {
+            return false;
+        };
+        msg.collapsed = !msg.collapsed;
+        self.bump_revision();
+        true
+    }
+
     fn build_lines(
         &self,
         theme: &Theme,
         meta: ChatRenderMeta<'_>,
         width: u16,
-    ) -> Vec<Line<'static>> {
+    ) -> (Vec<Line<'static>>, HashMap<usize, usize>) {
+        let mut toggles: HashMap<usize, usize> = HashMap::new();
         let mut lines: Vec<Line<'static>> = if self.messages.is_empty() {
             self.render_empty(theme, meta)
         } else {
@@ -515,13 +582,26 @@ impl ChatView {
                 // cache it; everything else reuses its cached lines.
                 let skip_cache =
                     Some(i) == self.active_assistant_index || (self.streaming && i == last);
-                out.extend(self.render_message_cached(
-                    msg,
-                    theme,
-                    width,
-                    meta.theme_name,
-                    skip_cache,
-                ));
+                let full =
+                    self.render_message_cached(msg, theme, width, meta.theme_name, skip_cache);
+                // A tool/thinking block taller than one row is collapsible:
+                // its first painted row becomes a click target, and while
+                // collapsed only a `▸ …` header renders.
+                if msg.role == Role::Tool && full.len() > 1 {
+                    toggles.insert(out.len(), i);
+                    if msg.collapsed {
+                        out.extend(render_tool_collapsed(
+                            &msg.text,
+                            full.len().saturating_sub(1),
+                            theme,
+                            width,
+                        ));
+                    } else {
+                        out.extend(render_tool_line_marked(&msg.text, theme, width, '▾'));
+                    }
+                } else {
+                    out.extend(full);
+                }
                 prev_role = Some(&msg.role);
             }
             out
@@ -552,7 +632,7 @@ impl ChatView {
         if !self.messages.is_empty() {
             lines.push(Line::from(""));
         }
-        lines
+        (lines, toggles)
     }
 
     fn render_empty(&self, theme: &Theme, _meta: ChatRenderMeta<'_>) -> Vec<Line<'static>> {
@@ -770,7 +850,7 @@ fn line_prefix_width(line: &Line<'static>) -> usize {
 
 /// Characters that only ever appear in the structural rail/indent prefixes.
 fn is_prefix_char(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '▌' | '│' | '▐' | '▪' | '▣')
+    c.is_whitespace() || matches!(c, '▌' | '│' | '▐' | '▪' | '▣' | '▸' | '▾')
 }
 
 fn slice_display_cols(text: &str, start_col: usize, end_col: usize) -> String {
@@ -906,6 +986,40 @@ fn line_has_content(line: &Line<'static>) -> bool {
         .any(|span| !span.content.as_ref().is_empty())
 }
 
+/// Split a tool-row text into its render parts: `(label, body, label_style,
+/// body_style)` — the thinking label for `Thinking:` rows, the `▪ ` glyph
+/// for everything else.
+fn tool_line_parts(text: &str, theme: &Theme) -> (String, String, Style, Style) {
+    if let Some(thinking) = text.strip_prefix(THINKING_PREFIX) {
+        (
+            format!("{}: ", crate::tr("Thinking")),
+            thinking.to_string(),
+            Style::default()
+                .fg(theme.system)
+                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(theme.fg_subtle),
+        )
+    } else {
+        (
+            "▪ ".to_string(),
+            text.to_string(),
+            Style::default().fg(theme.accent_secondary),
+            Style::default().fg(theme.fg_subtle),
+        )
+    }
+}
+
+/// Prepend a fold marker to a block label. The plain `▪ ` glyph is
+/// REPLACED (two markers would just be noise); the thinking label keeps
+/// its text after the marker.
+fn marked_label(label: &str, marker: char) -> String {
+    if label == "▪ " {
+        format!("{marker} ")
+    } else {
+        format!("{marker} {label}")
+    }
+}
+
 fn render_tool_line(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     if text == "Thinking…" {
         return render_tool_process_line(
@@ -918,22 +1032,50 @@ fn render_tool_line(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>>
             width,
         );
     }
-    if let Some(thinking) = text.strip_prefix(THINKING_PREFIX) {
-        return render_tool_process_line(
-            &format!("{}: ", crate::tr("Thinking")),
-            thinking,
-            Style::default()
-                .fg(theme.system)
-                .add_modifier(Modifier::ITALIC),
-            Style::default().fg(theme.fg_subtle),
-            width,
-        );
-    }
+    let (label, body, label_style, body_style) = tool_line_parts(text, theme);
+    render_tool_process_line(&label, &body, label_style, body_style, width)
+}
+
+/// Full (expanded) render of a collapsible block, its first row marked
+/// with the fold glyph so the click target is visible.
+fn render_tool_line_marked(
+    text: &str,
+    theme: &Theme,
+    width: u16,
+    marker: char,
+) -> Vec<Line<'static>> {
+    let (label, body, label_style, body_style) = tool_line_parts(text, theme);
     render_tool_process_line(
-        "▪ ",
-        text,
-        Style::default().fg(theme.accent_secondary),
-        Style::default().fg(theme.fg_subtle),
+        &marked_label(&label, marker),
+        &body,
+        label_style,
+        body_style,
+        width,
+    )
+}
+
+/// Single-row header for a collapsed block: `▸ <first line, truncated> …
+/// (+N)` where N is the number of rows hidden by the fold.
+fn render_tool_collapsed(
+    text: &str,
+    hidden_rows: usize,
+    theme: &Theme,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let (label, body, label_style, body_style) = tool_line_parts(text, theme);
+    let label = marked_label(&label, '▸');
+    let suffix = format!(" … (+{hidden_rows})");
+    // "  " indent + label + body + suffix must fit one row.
+    let avail = (width as usize)
+        .saturating_sub(2 + UnicodeWidthStr::width(label.as_str()))
+        .saturating_sub(UnicodeWidthStr::width(suffix.as_str()));
+    let first = body.lines().next().unwrap_or_default();
+    let first = crate::ui::tabs::truncate_to_width(first, avail.max(1));
+    render_tool_process_line(
+        &label,
+        &format!("{first}{suffix}"),
+        label_style,
+        body_style,
         width,
     )
 }
@@ -1086,6 +1228,134 @@ mod tests {
             chat.render_misses.get() >= 4,
             "width change invalidates cache"
         );
+    }
+
+    fn test_meta() -> ChatRenderMeta<'static> {
+        ChatRenderMeta {
+            theme_name: "minimal",
+            model: "m",
+            cwd: std::path::Path::new("."),
+        }
+    }
+
+    fn joined_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(plain_line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn multi_row_tool_blocks_collapse_by_default_and_expand_on_toggle() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let meta = test_meta();
+        let mut chat = ChatView::new();
+        chat.push_tool("Bash done\n    line one\n    line two");
+
+        // Collapsed by default: a single ▸ header with the hidden-row count;
+        // the output lines stay hidden.
+        let (lines, toggles) = chat.build_lines(&theme, meta, 80);
+        let text = joined_text(&lines);
+        assert!(text.contains("▸"), "collapsed block shows the fold marker");
+        assert!(text.contains("Bash done"), "header keeps the first line");
+        assert!(text.contains("(+2)"), "hidden row count shown: {text}");
+        assert!(!text.contains("line two"), "folded body must not render");
+        assert_eq!(toggles.len(), 1, "one collapsible block registered");
+
+        // Expanding shows the whole block, marked with ▾.
+        chat.messages[0].collapsed = false;
+        chat.bump_revision();
+        let (lines, _) = chat.build_lines(&theme, meta, 80);
+        let text = joined_text(&lines);
+        assert!(text.contains("▾"));
+        assert!(text.contains("line two"));
+        assert!(!text.contains("(+2)"));
+    }
+
+    #[test]
+    fn single_row_tool_lines_render_without_fold_marker() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut chat = ChatView::new();
+        chat.push_tool("Usage ↑10 ↓5");
+        let (lines, toggles) = chat.build_lines(&theme, test_meta(), 80);
+        let text = joined_text(&lines);
+        assert!(!text.contains("▸") && !text.contains("▾"));
+        assert!(toggles.is_empty(), "nothing to toggle on a one-row line");
+    }
+
+    #[test]
+    fn long_thinking_collapses_to_one_header_row() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut chat = ChatView::new();
+        chat.push_thinking_delta(&"reasoning ".repeat(50));
+        let (lines, toggles) = chat.build_lines(&theme, test_meta(), 40);
+        let text = joined_text(&lines);
+        assert!(text.contains("Thinking"));
+        assert!(text.contains("▸") && text.contains("(+"));
+        assert_eq!(toggles.len(), 1);
+        // One content row only: header + the surrounding blank spacers.
+        let content_rows = lines
+            .iter()
+            .filter(|l| !plain_line_text(l).trim().is_empty())
+            .count();
+        assert_eq!(content_rows, 1, "collapsed thinking is a single row");
+    }
+
+    #[test]
+    fn toggle_all_collapsed_expands_then_folds_every_tool_block() {
+        let mut chat = ChatView::new();
+        chat.push_tool("Bash done\n    out");
+        chat.push_user("q");
+        chat.push_tool("Read done\n    text");
+        // One block manually expanded: the global toggle still EXPANDS
+        // first (some are folded), then folds everything uniformly.
+        chat.messages[2].collapsed = false;
+
+        assert!(chat.toggle_all_collapsed(), "first press expands all");
+        assert!(chat
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .all(|m| !m.collapsed));
+
+        assert!(!chat.toggle_all_collapsed(), "second press folds all");
+        assert!(chat
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .all(|m| m.collapsed));
+        // Non-tool messages are untouched.
+        assert!(!chat.messages[1].collapsed);
+    }
+
+    #[test]
+    fn click_on_header_row_toggles_the_fold() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let meta = test_meta();
+        let mut chat = ChatView::new();
+        chat.push_tool("Bash done\n    output line");
+        let area = Rect::new(0, 0, 80, 24);
+
+        // Paint once so last_render_start reflects a real frame.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| chat.render(f, area, &theme, meta))
+            .unwrap();
+
+        let (_, toggles) = chat.build_lines(&theme, meta, 80);
+        let (&header_line, &msg_idx) = toggles.iter().next().expect("one collapsible block");
+        assert!(chat.messages[msg_idx].collapsed);
+
+        // Click the header row (content fits the viewport → screen row ==
+        // cache line index): the block expands.
+        assert!(chat.toggle_collapse_at(&theme, meta, area, header_line as u16));
+        assert!(!chat.messages[msg_idx].collapsed, "click expands the block");
+
+        // A click on a non-header row does nothing.
+        assert!(!chat.toggle_collapse_at(&theme, meta, area, (header_line + 1) as u16));
+        assert!(!chat.messages[msg_idx].collapsed);
     }
 
     #[test]
@@ -1478,7 +1748,7 @@ mod tests {
             cwd: std::path::Path::new("/tmp/zode"),
         };
 
-        let lines = view.build_lines(&theme, meta, 40);
+        let (lines, _) = view.build_lines(&theme, meta, 40);
         let last = lines.last().expect("chat should render lines");
 
         assert!(
@@ -1689,6 +1959,7 @@ mod tests {
                 role: Role::Assistant,
                 text: "hello".into(),
                 images: Vec::new(),
+                collapsed: false,
             },
             &theme,
             80,
@@ -1712,6 +1983,7 @@ mod tests {
                 role: Role::Assistant,
                 text: "hello".into(),
                 images: Vec::new(),
+                collapsed: false,
             },
             &theme,
             80,
@@ -1734,6 +2006,7 @@ mod tests {
                 role: Role::Assistant,
                 text: "第一段\n\n第二段".into(),
                 images: Vec::new(),
+                collapsed: false,
             },
             &theme,
             80,
@@ -1768,6 +2041,7 @@ mod tests {
                 role: Role::Assistant,
                 text: "| Type | 示例 |\n|---|---|\n| Fact | API 地址 |\n".into(),
                 images: Vec::new(),
+                collapsed: false,
             },
             &theme,
             80,
@@ -1937,6 +2211,7 @@ mod tests {
                 role: Role::Tool,
                 text: "Bash cargo build".into(),
                 images: Vec::new(),
+                collapsed: false,
             },
             &theme,
             80,
@@ -1962,6 +2237,7 @@ mod tests {
                 role: Role::Tool,
                 text: "Thinking: checking context".into(),
                 images: Vec::new(),
+                collapsed: false,
             },
             &theme,
             80,

@@ -35,8 +35,23 @@ pub struct SessionTab {
     /// Whether the session index entry has been stamped with a real title
     /// (false until the first user turn for a fresh tab).
     pub titled: bool,
+    /// Count of messages already written to the session file — the append
+    /// watermark. Shared with the detached save task (updated under the
+    /// global save lock) so a long session persists a turn's new messages
+    /// by APPENDING rather than rewriting the whole transcript each turn
+    /// (was O(n²) per session). Seeded to the loaded length on resume.
+    pub persisted_msgs: Arc<std::sync::atomic::AtomicUsize>,
+    /// Set when the store's PREFIX changed since the last save (a
+    /// compaction rewrote/tombstoned earlier messages, `/clear`, undo/redo)
+    /// — an append would corrupt, so the next save is a full rewrite.
+    pub store_dirty: bool,
     /// Abort handle for the in-flight turn, if any.
     pub turn_abort: Option<AbortController>,
+    /// True between an interrupt and the aborted turn's task actually
+    /// finishing its teardown (its terminal `TurnDone` arriving). Keeps the
+    /// tab `is_busy()` so a fast resubmit can't spawn a second turn that
+    /// races the still-draining one on the shared message store.
+    pub draining: bool,
     /// True while a model/provider/config rebuild is running off the UI loop.
     /// It blocks new turns just like an in-flight agent turn, but there is no
     /// abort handle because engine assembly is not cancellation-aware.
@@ -89,6 +104,10 @@ pub struct SessionTab {
     /// Cached `(server, connected)` MCP state for the sidebar MCP section,
     /// refreshed on the same throttled cadence as the git poll.
     pub mcp_status: Vec<(String, bool)>,
+    /// Cached `(language, running)` LSP state for the sidebar LSP section,
+    /// refreshed on the same cadence. Only languages the project actually
+    /// uses appear; empty hides the section.
+    pub lsp_status: Vec<(String, bool)>,
     /// Whether the autonomous goal loop is active on this tab. Set true when a
     /// goal is set via `/goal <text>`; cleared on `goal_complete`, `/goal
     /// clear`, a failed turn, or a user interrupt (Esc/Ctrl+C).
@@ -96,6 +115,13 @@ pub struct SessionTab {
     /// How many turns the current goal loop has run (for the optional
     /// `autoLoopMaxTurns` cap). Reset to 0 each time a new goal loop starts.
     pub goal_loop_iter: u32,
+    /// Consecutive goal-loop turns that used NO tools — a no-progress signal.
+    /// Reset whenever a turn does use a tool; at the limit the loop stops.
+    pub goal_no_progress_streak: u32,
+    /// Whether the CURRENT turn has used any tool. Set on the first ToolUse
+    /// event of the turn, reset at each turn's start; read at TurnDone to
+    /// drive goal-loop no-progress detection.
+    pub turn_used_tools: bool,
     /// The active goal's text, for the sidebar `goal` section. `Some` while the
     /// loop runs; cleared when it stops.
     pub goal_text: Option<String>,
@@ -112,7 +138,10 @@ impl SessionTab {
             chat: ChatView::new(),
             session_id,
             titled: false,
+            persisted_msgs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            store_dirty: false,
             turn_abort: None,
+            draining: false,
             reassemble_pending: false,
             reassemble_seq: 0,
             turn_seq: 0,
@@ -132,16 +161,21 @@ impl SessionTab {
             git_files: None,
             git_poll_inflight: false,
             mcp_status: Vec::new(),
+            lsp_status: Vec::new(),
             goal_loop_active: false,
             goal_loop_iter: 0,
+            goal_no_progress_streak: 0,
+            turn_used_tools: false,
             goal_text: None,
             goal_started_at: None,
         }
     }
 
-    /// A tab is busy while a turn is in flight (abort handle present).
+    /// A tab is busy while a turn is in flight (abort handle present), a
+    /// rebuild is running, or an interrupted turn is still draining — the
+    /// last keeps a fast resubmit from racing the aborted task's teardown.
     pub fn is_busy(&self) -> bool {
-        self.turn_abort.is_some() || self.reassemble_pending
+        self.turn_abort.is_some() || self.reassemble_pending || self.draining
     }
 
     /// Stamp the session index with a title derived from the first prompt.
@@ -161,12 +195,17 @@ impl SessionTab {
         }));
     }
 
-    /// Snapshot the store then persist. Delegates to [`persist_session`].
+    /// Snapshot the store then persist (full rewrite). Delegates to
+    /// [`persist_session`]. `save_session` is used by the explicit-save
+    /// paths that don't track the append watermark, so it forces a full
+    /// rewrite and resets the tab's watermark.
     pub async fn save_session(&self) {
         persist_session(
             self.session_id.clone(),
             self.engine.clone(),
             self.title.clone(),
+            self.persisted_msgs.clone(),
+            false, // full rewrite
         )
         .await;
     }
@@ -176,7 +215,22 @@ impl SessionTab {
 /// its index recency. Standalone (owned args) so the app can spawn it off the
 /// event loop. The std mutex guard is dropped before the await, so it never
 /// crosses an await point.
-pub async fn persist_session(session_id: String, engine: Arc<ZodeEngine>, title: String) {
+///
+/// `allow_append`: when the store only grew since the last save (a normal
+/// turn), append the new tail instead of rewriting the whole file — the
+/// difference between O(n) and O(n²) I/O over a long session. The append is
+/// self-validating (it refuses and falls back to a full rewrite if the
+/// file's message count doesn't match the watermark), so a stale watermark
+/// can never corrupt the transcript. `persisted` is the shared append
+/// watermark (read + updated here under the save lock).
+pub async fn persist_session(
+    session_id: String,
+    engine: Arc<ZodeEngine>,
+    title: String,
+    persisted: Arc<std::sync::atomic::AtomicUsize>,
+    allow_append: bool,
+) {
+    use std::sync::atomic::Ordering;
     // Serialize all saves: prevents same-session transcript temp-file races and
     // SessionIndex lost updates across concurrent tab saves.
     let _guard = SAVE_LOCK.lock().await;
@@ -190,10 +244,25 @@ pub async fn persist_session(session_id: String, engine: Arc<ZodeEngine>, title:
         Ok(store) => store.clone(),
         Err(_) => return,
     };
-    if let Err(e) = Session::save(&path, &snapshot).await {
-        tracing::warn!("session save failed: {e}");
-        return;
+    let total = snapshot.len();
+    // Try the incremental append first when permitted.
+    let mut appended = false;
+    if allow_append {
+        let expected = persisted.load(Ordering::Relaxed).min(total);
+        let tail: Vec<agent::message::Message> = snapshot.iter().skip(expected).cloned().collect();
+        match Session::append(&path, &tail, expected).await {
+            Ok(true) => appended = true,
+            Ok(false) => {} // count mismatch / missing → full save below
+            Err(e) => tracing::warn!("session append failed, rewriting: {e}"),
+        }
     }
+    if !appended {
+        if let Err(e) = Session::save(&path, &snapshot).await {
+            tracing::warn!("session save failed: {e}");
+            return;
+        }
+    }
+    persisted.store(total, Ordering::Relaxed);
     // Keep the index's recency current so `--continue` resumes this tab.
     let mut idx = SessionIndex::load().unwrap_or_default();
     if !idx.touch_updated(&session_id, now_secs()) {

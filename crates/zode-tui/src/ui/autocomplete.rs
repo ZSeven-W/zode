@@ -21,22 +21,23 @@ const COMMAND_COLUMN_WIDTH: usize = 15;
 /// every description off-screen.
 const NAME_COLUMN_MAX: usize = 30;
 
-/// Known `/op` subcommands. Each maps to an MCP tool on the OpenPencil side
-/// (or to the built-in `status` report). Kept here so the hint popup never
-/// goes stale relative to the parser in `zode_core::commands::op`.
+/// `/op` hint entries: the four subcommands the parser in
+/// `zode_core::commands::op` knows explicitly (`status` / `design` /
+/// `generate` / `call`), plus a few REAL OpenPencil read-tool names that
+/// work through the parser's tool-passthrough arm with empty args. Any
+/// other word passes through literally as an MCP tool name — so only
+/// names that actually exist on the OpenPencil side belong in this list
+/// (the previous bare verbs `insert`/`update`/`delete`/… matched no tool
+/// and failed on submit).
 pub const OP_SUBCOMMANDS: &[&str] = &[
     "status",
     "design",
     "generate",
-    "insert",
-    "update",
-    "delete",
-    "move",
-    "copy",
-    "page",
-    "vars",
-    "selection",
     "call",
+    "get_document_info",
+    "get_selection",
+    "list_pages",
+    "list_variables",
 ];
 
 /// Brief descriptions shown alongside each `/op` subcommand in the hint popup.
@@ -44,15 +45,11 @@ const OP_SUBCOMMAND_DESCS: &[&str] = &[
     "report connection state",
     "run batch_design DSL",
     "generate a page from a prompt",
-    "insert a node",
-    "update node properties",
-    "delete nodes",
-    "move nodes",
-    "copy nodes",
-    "page operations",
-    "variable operations",
-    "selection operations",
     "call any MCP tool by name",
+    "document info",
+    "current selection",
+    "list pages",
+    "list variables",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -713,21 +710,27 @@ mod tests {
 
     #[test]
     fn op_subcommands_constant_covers_all_expected_entries() {
+        // Only the parser-known subcommands plus REAL OpenPencil tool names
+        // belong here — a hint that maps to no tool fails on submit
+        // (regression: the old bare verbs `insert`/`update`/`delete`/…).
         let expected = [
             "status",
             "design",
             "generate",
-            "insert",
-            "update",
-            "delete",
-            "move",
-            "copy",
-            "page",
-            "vars",
-            "selection",
             "call",
+            "get_document_info",
+            "get_selection",
+            "list_pages",
+            "list_variables",
         ];
         assert_eq!(OP_SUBCOMMANDS, expected);
+        // Every non-parser entry must be a real read-classified tool.
+        for name in &OP_SUBCOMMANDS[4..] {
+            assert!(
+                zode_core::openpencil::is_read_tool(name),
+                "{name} must be a real OpenPencil read tool"
+            );
+        }
         assert_eq!(
             OP_SUBCOMMANDS.len(),
             OP_SUBCOMMAND_DESCS.len(),
