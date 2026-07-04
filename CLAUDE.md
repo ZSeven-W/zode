@@ -113,12 +113,13 @@ navigate, Enter/Tab to confirm, Esc to dismiss).
 | `/op generate <prompt>` | Run the design pipeline (plan → skeleton → content → refine) |
 | `/op design 'F1=I("rect",{})'` | Run a batch_design DSL string |
 | `/op get_document_info` | Call the MCP tool with empty args |
-| `/op insert {"type":"rect","x":0,"y":0}` | Shorthand MCP call with JSON args |
+| `/op insert_node {"type":"rect","x":0,"y":0}` | Shorthand MCP call: any word passes through as a REAL tool name + JSON args |
 | `/op call <tool> <json>` | Explicit tool-name + JSON args |
 
-Available subcommands (autocomplete list): `status`, `generate`, `design`,
-`insert`, `update`, `delete`, `move`, `copy`, `page`, `vars`, `selection`,
-`call`.
+Autocomplete hints list the four parser-known subcommands (`status`,
+`generate`, `design`, `call`) plus a few real read tools
+(`get_document_info`, `get_selection`, `list_pages`, `list_variables`);
+the passthrough accepts any real tool name.
 
 `/op status` is a zode-side connection report, not an MCP `tools/call`.
 
