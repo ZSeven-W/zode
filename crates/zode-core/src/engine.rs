@@ -959,8 +959,7 @@ impl ZodeEngine {
                 mutating_allow.push(name.to_string());
             }
         }
-        let mut gated =
-            wrap_mutating_tools(base, &gate, &mutating_allow, &cfg.permissions.ask);
+        let mut gated = wrap_mutating_tools(base, &gate, &mutating_allow, &cfg.permissions.ask);
 
         // 3. ToolSearch over the full set (candidates = snapshot of the
         //    gated registry, taken before ToolSearch itself is added).
