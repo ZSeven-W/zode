@@ -29,7 +29,19 @@ pub fn lsp_tools(mgr: &Arc<LspManager>) -> Vec<Arc<dyn Tool>> {
 /// on demand (npm/rustup/go available). The `/plugin` picker lists these so a
 /// language shows up even before its server is installed; the manager installs
 /// it on first use.
+///
+/// Memoized in a process `OnceLock`: `offered()` walks the whole `PATH` (plus
+/// go/cargo bin dirs) once per spec, and installed-tool/PATH state is
+/// effectively static within a session — recomputing it on every engine
+/// assembly + reassembly (frequent: each `/plugin`/`/sandbox` toggle) was a
+/// dozen+ synchronous directory scans for a feature that's often unused.
 pub fn detect_default_servers() -> HashMap<String, LspServerConfig> {
+    static CACHE: std::sync::OnceLock<HashMap<String, LspServerConfig>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(detect_default_servers_uncached).clone()
+}
+
+fn detect_default_servers_uncached() -> HashMap<String, LspServerConfig> {
     let mut out = HashMap::new();
     for spec in install::SERVERS {
         if install::offered(spec) {

@@ -2,9 +2,10 @@
 //! spawned lazily on first use (so configuring rust-analyzer doesn't pay its
 //! startup cost until an `lsp_*` tool actually touches a `.rs` file).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
@@ -21,6 +22,10 @@ pub struct LspManager {
     ext_index: HashMap<String, String>,
     /// Lazily-spawned clients, keyed by language.
     clients: Mutex<HashMap<String, Arc<LspClient>>>,
+    /// Cached workspace language scan for [`Self::status`], refreshed on a
+    /// TTL — the sidebar polls every couple of seconds and must not walk
+    /// the tree each time.
+    scan: std::sync::Mutex<Option<(Instant, HashSet<String>)>>,
 }
 
 impl LspManager {
@@ -37,6 +42,7 @@ impl LspManager {
             servers: cfg.servers,
             ext_index,
             clients: Mutex::new(HashMap::new()),
+            scan: std::sync::Mutex::new(None),
         }
     }
 
@@ -53,6 +59,46 @@ impl LspManager {
     fn lang_for(&self, path: &Path) -> Option<String> {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         self.ext_index.get(&ext).cloned()
+    }
+
+    /// `(language, client-running)` for the enabled servers the PROJECT
+    /// actually uses — a language shows only when the workspace holds a
+    /// matching file (bounded scan) or its client is already running.
+    /// Sorted by language; feeds the sidebar's LSP section. Uses `try_lock`
+    /// (the render-side caller must never block); during the brief
+    /// spawn-time contention everything reads as not-running until the
+    /// next poll.
+    pub fn status(&self) -> Vec<(String, bool)> {
+        let running: HashSet<String> = self
+            .clients
+            .try_lock()
+            .map(|g| g.keys().cloned().collect())
+            .unwrap_or_default();
+        let present = self.project_languages();
+        let mut langs: Vec<(String, bool)> = self
+            .servers
+            .keys()
+            .filter(|lang| present.contains(*lang) || running.contains(*lang))
+            .map(|lang| (lang.clone(), running.contains(lang)))
+            .collect();
+        langs.sort();
+        langs
+    }
+
+    /// Languages with at least one matching file in the workspace, cached
+    /// for [`SCAN_TTL`] so the sidebar poll doesn't re-walk the tree; a
+    /// file of a new language created mid-session shows up on the next
+    /// rescan.
+    fn project_languages(&self) -> HashSet<String> {
+        let mut guard = self.scan.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, set)) = &*guard {
+            if at.elapsed() < SCAN_TTL {
+                return set.clone();
+            }
+        }
+        let set = scan_project_languages(&self.root, &self.ext_index);
+        *guard = Some((Instant::now(), set.clone()));
+        set
     }
 
     /// Get (spawning if needed) the client that handles `path`. Errors when no
@@ -78,9 +124,11 @@ impl LspManager {
             .clone();
         // For a built-in language, resolve the runnable command — installing it
         // on demand into ~/.zode/lsp if needed (blocking, hence spawn_blocking).
-        // User-defined languages use their configured command as-is.
+        // User-defined languages AND user-overridden commands (a config entry
+        // whose command differs from the built-in default) spawn exactly what
+        // the config says — auto-provisioning must not trample an override.
         let resolved = match install::spec_for_lang(&lang) {
-            Some(spec) => {
+            Some(spec) if cfg.command == spec.command => {
                 let path = tokio::task::spawn_blocking(move || install::ensure(spec))
                     .await
                     .map_err(|e| format!("install task failed: {e}"))??;
@@ -89,12 +137,61 @@ impl LspManager {
                     ..cfg
                 }
             }
-            None => cfg,
+            _ => cfg,
         };
         let client = Arc::new(LspClient::start(lang.clone(), &resolved, self.root.clone()).await?);
         clients.insert(lang, client.clone());
         Ok(client)
     }
+}
+
+/// How long a workspace language scan stays fresh.
+const SCAN_TTL: Duration = Duration::from_secs(60);
+
+/// Walk depth and entry caps: keep the (UI-poll-triggered) scan bounded to
+/// a few milliseconds even in a huge workspace.
+const SCAN_MAX_DEPTH: usize = 5;
+const SCAN_MAX_ENTRIES: usize = 4000;
+
+/// Which languages (per `ext_index`) have at least one file under `root`.
+/// Breadth-first, bounded by [`SCAN_MAX_DEPTH`] / [`SCAN_MAX_ENTRIES`];
+/// skips hidden directories and dependency/build trees (their files belong
+/// to dependencies, not the project). Early-exits once every language in
+/// the index has been seen.
+fn scan_project_languages(root: &Path, ext_index: &HashMap<String, String>) -> HashSet<String> {
+    const SKIP_DIRS: &[&str] = &["node_modules", "target", "dist", "build", "out", "vendor"];
+    let all_langs: HashSet<&String> = ext_index.values().collect();
+    let mut found: HashSet<String> = HashSet::new();
+    let mut queue: std::collections::VecDeque<(PathBuf, usize)> =
+        std::collections::VecDeque::from([(root.to_path_buf(), 0)]);
+    let mut seen_entries = 0usize;
+    while let Some((dir, depth)) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen_entries += 1;
+            if seen_entries > SCAN_MAX_ENTRIES || found.len() == all_langs.len() {
+                return found;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() {
+                if depth < SCAN_MAX_DEPTH
+                    && !name.starts_with('.')
+                    && !SKIP_DIRS.contains(&name.as_ref())
+                {
+                    queue.push_back((path, depth + 1));
+                }
+            } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if let Some(lang) = ext_index.get(&ext.to_ascii_lowercase()) {
+                    found.insert(lang.clone());
+                }
+            }
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -129,5 +226,54 @@ mod tests {
         let m = LspManager::new(cfg(), PathBuf::from("/proj"));
         assert_eq!(m.resolve("src/main.rs"), PathBuf::from("/proj/src/main.rs"));
         assert_eq!(m.resolve("/abs/x.rs"), PathBuf::from("/abs/x.rs"));
+    }
+
+    fn two_lang_cfg() -> LspConfig {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "rust".to_string(),
+            LspServerConfig {
+                command: "rust-analyzer".into(),
+                args: vec![],
+                extensions: vec!["rs".into()],
+            },
+        );
+        servers.insert(
+            "typescript".to_string(),
+            LspServerConfig {
+                command: "typescript-language-server".into(),
+                args: vec!["--stdio".into()],
+                extensions: vec!["ts".into()],
+            },
+        );
+        LspConfig { servers }
+    }
+
+    #[test]
+    fn status_lists_only_languages_the_project_uses() {
+        // rust + typescript configured, but the workspace only holds a .rs
+        // file — the sidebar must not list every offered language, only
+        // what the project actually uses.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src").join("main.rs"), b"fn main(){}").unwrap();
+        let m = LspManager::new(two_lang_cfg(), dir.path().to_path_buf());
+        assert_eq!(m.status(), vec![("rust".to_string(), false)]);
+    }
+
+    #[test]
+    fn scan_skips_dependency_trees_and_hidden_dirs() {
+        // A .ts file that exists ONLY under node_modules (or a hidden dir)
+        // belongs to dependencies, not the project — it must not surface
+        // typescript in the sidebar.
+        let dir = tempfile::tempdir().unwrap();
+        let nm = dir.path().join("node_modules").join("pkg");
+        std::fs::create_dir_all(&nm).unwrap();
+        std::fs::write(nm.join("index.ts"), b"x").unwrap();
+        let hidden = dir.path().join(".cache");
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::write(hidden.join("gen.rs"), b"x").unwrap();
+        let m = LspManager::new(two_lang_cfg(), dir.path().to_path_buf());
+        assert_eq!(m.status(), Vec::<(String, bool)>::new());
     }
 }

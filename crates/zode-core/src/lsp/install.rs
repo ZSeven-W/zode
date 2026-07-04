@@ -274,26 +274,120 @@ pub fn install_root() -> Option<PathBuf> {
     ConfigManager::config_dir().ok().map(|d| d.join("lsp"))
 }
 
-/// Whether `cmd` resolves to a file on `PATH`.
-pub fn on_path(cmd: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file())
+/// Candidate file names for a command: as-is on Unix; on Windows the
+/// launcher extensions come first (npm shims are `.cmd`, compiled tools
+/// `.exe` — a bare `foo` almost never exists there, so without these the
+/// auto-detection finds nothing on Windows).
+fn candidate_names(cmd: &str) -> Vec<String> {
+    if cfg!(windows) {
+        vec![
+            format!("{cmd}.exe"),
+            format!("{cmd}.cmd"),
+            format!("{cmd}.bat"),
+            cmd.to_string(),
+        ]
+    } else {
+        vec![cmd.to_string()]
+    }
 }
 
-/// The runnable path for a spec if it's already available — the npm-managed
-/// bin under `~/.zode/lsp`, else the bare command on `PATH`.
+fn first_file_in(dir: &std::path::Path, cmd: &str) -> Option<PathBuf> {
+    candidate_names(cmd)
+        .into_iter()
+        .map(|n| dir.join(n))
+        .find(|p| p.is_file())
+}
+
+/// Full path of `cmd` on `PATH`, if any.
+pub fn find_on_path(cmd: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| first_file_in(&dir, cmd))
+}
+
+/// Whether `cmd` resolves to a file on `PATH`.
+pub fn on_path(cmd: &str) -> bool {
+    find_on_path(cmd).is_some()
+}
+
+/// Directories `go install` drops binaries into, cheapest first: `$GOBIN`,
+/// `$GOPATH/bin`, `~/go/bin` (the default when neither is set). Version
+/// managers (gvm, asdf) often leave these off `PATH`, so a SUCCESSFUL
+/// install would otherwise read as "not found" — and get re-installed on
+/// every first use.
+fn go_bin_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(gobin) = std::env::var_os("GOBIN") {
+        dirs.push(PathBuf::from(gobin));
+    }
+    if let Some(gopath) = std::env::var_os("GOPATH") {
+        dirs.extend(std::env::split_paths(&gopath).map(|p| p.join("bin")));
+    }
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join("go").join("bin"));
+    }
+    dirs
+}
+
+/// Same, but asking `go env` (subprocess — only used on the blocking
+/// install path, where the `GOPATH` env var may be unset while the go
+/// toolchain still has one configured).
+fn go_env_bin_dirs() -> Vec<PathBuf> {
+    let Ok(out) = Command::new("go").args(["env", "GOBIN", "GOPATH"]).output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let gobin = lines.next().unwrap_or("").trim();
+    let gopath = lines.next().unwrap_or("").trim();
+    let mut dirs = Vec::new();
+    if !gobin.is_empty() {
+        dirs.push(PathBuf::from(gobin));
+    }
+    if !gopath.is_empty() {
+        dirs.extend(std::env::split_paths(std::ffi::OsStr::new(gopath)).map(|p| p.join("bin")));
+    }
+    dirs
+}
+
+/// `$CARGO_HOME/bin` / `~/.cargo/bin` — where the rustup proxies live even
+/// when the user's `PATH` doesn't include them.
+fn cargo_bin_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("CARGO_HOME") {
+        return Some(PathBuf::from(home).join("bin"));
+    }
+    dirs::home_dir().map(|h| h.join(".cargo").join("bin"))
+}
+
+/// The runnable path for a spec if it's already available: the npm-managed
+/// bin under `~/.zode/lsp`, the recipe's install destination (go bin dirs /
+/// cargo bin), or the command on `PATH`.
 pub fn resolve(spec: &ServerSpec) -> Option<PathBuf> {
-    if let Install::Npm { bin, .. } = spec.install {
-        if let Some(root) = install_root() {
-            let managed = root.join("node_modules").join(".bin").join(bin);
-            if managed.is_file() {
-                return Some(managed);
+    match spec.install {
+        Install::Npm { bin, .. } => {
+            if let Some(root) = install_root() {
+                if let Some(managed) = first_file_in(&root.join("node_modules").join(".bin"), bin) {
+                    return Some(managed);
+                }
             }
         }
+        Install::Go { .. } => {
+            for dir in go_bin_dirs() {
+                if let Some(p) = first_file_in(&dir, spec.command) {
+                    return Some(p);
+                }
+            }
+        }
+        Install::Rustup { .. } => {
+            if let Some(p) = cargo_bin_dir().and_then(|d| first_file_in(&d, spec.command)) {
+                return Some(p);
+            }
+        }
+        Install::Manual => {}
     }
-    on_path(spec.command).then(|| PathBuf::from(spec.command))
+    find_on_path(spec.command)
 }
 
 /// Whether the installer this spec needs (npm / rustup / go) is on `PATH`.
@@ -325,8 +419,22 @@ pub fn ensure(spec: &ServerSpec) -> Result<PathBuf, String> {
         ));
     }
     run_install(spec)?;
-    resolve(spec)
-        .ok_or_else(|| format!("installed {} but could not locate the binary", spec.command))
+    if let Some(path) = resolve(spec) {
+        return Ok(path);
+    }
+    // A Go install may have landed in a bin dir only the toolchain knows
+    // about (`go env GOPATH` set via config, not the environment).
+    if matches!(spec.install, Install::Go { .. }) {
+        for dir in go_env_bin_dirs() {
+            if let Some(p) = first_file_in(&dir, spec.command) {
+                return Ok(p);
+            }
+        }
+    }
+    Err(format!(
+        "installed {} but could not locate the binary",
+        spec.command
+    ))
 }
 
 fn run_install(spec: &ServerSpec) -> Result<(), String> {
@@ -335,7 +443,10 @@ fn run_install(spec: &ServerSpec) -> Result<(), String> {
             let root = install_root().ok_or("no config dir for ~/.zode/lsp")?;
             std::fs::create_dir_all(&root).map_err(|e| format!("mkdir {}: {e}", root.display()))?;
             tracing::info!("installing language server: npm install {package}");
-            let mut cmd = Command::new("npm");
+            // Spawn npm by its full path: on Windows it's `npm.cmd`, which
+            // `Command::new("npm")` would not find.
+            let npm = find_on_path("npm").unwrap_or_else(|| PathBuf::from("npm"));
+            let mut cmd = Command::new(npm);
             cmd.arg("install").arg("--prefix").arg(&root);
             for pkg in package.split_whitespace() {
                 cmd.arg(pkg);
@@ -388,6 +499,39 @@ mod tests {
         let manual = spec_for_lang("cpp").unwrap();
         assert_eq!(manual.install, Install::Manual);
         assert!(!installable(manual)); // Manual is never auto-installable
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_finds_go_binaries_outside_path() {
+        // Regression: `go install` drops gopls into $GOBIN / $GOPATH/bin,
+        // which version managers often leave off PATH. resolve() must look
+        // there — otherwise a successful install reads as "not found" and
+        // ensure() re-installs on every first use.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("gopls");
+        std::fs::write(&fake, b"#!/bin/sh\n").unwrap();
+        let spec = spec_for_lang("go").unwrap();
+
+        let old_gobin = std::env::var_os("GOBIN");
+        std::env::set_var("GOBIN", dir.path());
+        let found = resolve(spec);
+        match old_gobin {
+            Some(v) => std::env::set_var("GOBIN", v),
+            None => std::env::remove_var("GOBIN"),
+        }
+        assert_eq!(found, Some(fake));
+    }
+
+    #[test]
+    fn candidate_names_are_platform_shaped() {
+        let names = candidate_names("tool");
+        if cfg!(windows) {
+            assert!(names.contains(&"tool.exe".to_string()));
+            assert!(names.contains(&"tool.cmd".to_string()));
+        } else {
+            assert_eq!(names, vec!["tool".to_string()]);
+        }
     }
 
     #[test]
