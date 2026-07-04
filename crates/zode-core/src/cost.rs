@@ -10,11 +10,20 @@ use tokio::sync::Mutex;
 use crate::currency::Currency;
 
 pub struct CostState {
-    model: String,
+    /// Model that NEW usage is attributed to. Behind a lock so a model
+    /// hot-swap can retarget it in place while preserving the accumulated
+    /// tracker totals (the tracker is keyed per-model, so old and new
+    /// models coexist and the session total is continuous).
+    model: std::sync::RwLock<String>,
     tracker: Mutex<CostTracker>,
     /// Display currency; the USD total is converted for `/cost` + the sidebar.
     /// Behind a lock so `/currency` can switch it in place (no engine rebuild).
     currency: std::sync::RwLock<Currency>,
+    /// Provider-reported prompt size of the most recent turn (input +
+    /// cache_read + cache_create from the last `Usage`) — a point-in-time
+    /// occupancy figure (NOT the cumulative tracker total), used by the
+    /// headless pre-turn compaction guard.
+    last_prompt_tokens: std::sync::RwLock<Option<u32>>,
 }
 
 impl CostState {
@@ -29,10 +38,28 @@ impl CostState {
     /// cost instead of "n/a".
     pub fn new_with(model: String, catalog: ModelPriceCatalog, currency_code: &str) -> Self {
         Self {
-            model,
+            model: std::sync::RwLock::new(model),
             tracker: Mutex::new(CostTracker::new(Arc::new(catalog))),
             currency: std::sync::RwLock::new(Currency::from_code(currency_code)),
+            last_prompt_tokens: std::sync::RwLock::new(None),
         }
+    }
+
+    /// The most recent turn's provider-reported prompt size, or `None` if no
+    /// usage has been seen. See [`Self::last_prompt_tokens`] field.
+    pub async fn last_prompt_tokens(&self) -> Option<u32> {
+        *self.last_prompt_tokens.read().expect("last-prompt lock")
+    }
+
+    /// Retarget which model new usage is billed against (a `/model` swap),
+    /// keeping all accumulated totals. Lets cost survive a model switch
+    /// instead of resetting to $0.
+    pub fn set_model(&self, model: String) {
+        *self.model.write().expect("cost model lock") = model;
+    }
+
+    fn model(&self) -> String {
+        self.model.read().expect("cost model lock").clone()
     }
 
     /// Switch the display currency at runtime (`/currency`). Returns the applied
@@ -59,8 +86,32 @@ impl CostState {
     /// internally and never emitted to the parent stream — fold those in too so
     /// `/cost` reflects sub-agent calls.
     pub async fn observe(&self, event: &Event) {
+        // Cheap pre-filter BEFORE taking the async lock: only Usage and
+        // ToolResult events change any total. A streaming turn emits
+        // hundreds of TextDelta/Thinking events — locking the tracker for
+        // each just to hit a no-op is wasted contention on the hottest path.
+        if !matches!(event, Event::Usage { .. } | Event::ToolResult { .. }) {
+            return;
+        }
+        // Record the point-in-time prompt size (occupancy) from a Usage frame
+        // — the full prompt = non-cached input + cached read + cache creation.
+        if let Event::Usage {
+            input_tokens,
+            cache_read,
+            cache_create,
+            ..
+        } = event
+        {
+            let prompt = input_tokens
+                .saturating_add(*cache_read)
+                .saturating_add(*cache_create);
+            if prompt > 0 {
+                *self.last_prompt_tokens.write().expect("last-prompt lock") = Some(prompt);
+            }
+        }
         let mut tracker = self.tracker.lock().await;
-        tracker.observe_event(&self.model, event);
+        let model = self.model();
+        tracker.observe_event(&model, event);
         if let Event::ToolResult { output, .. } = event {
             // `agent_type` is unique to the Task tool's result shape — gate on
             // it so an MCP tool that happens to use those field names can't be
@@ -80,7 +131,7 @@ impl CostState {
                     // `observe` — NOT `observe_event`, whose cumulative-delta
                     // baseline is keyed by model and would be corrupted by an
                     // out-of-band absolute count for the parent's model.
-                    tracker.observe(&self.model, ci, co, 0, 0);
+                    tracker.observe(&model, ci, co, 0, 0);
                 }
             }
         }
@@ -110,12 +161,12 @@ impl CostState {
         if snap.has_unknown_models() {
             format!(
                 "model: {} (no price data)\ntokens: ↑{input} ↓{output}{hit}\n(cost estimate unavailable for this model)",
-                self.model
+                self.model()
             )
         } else {
             format!(
                 "model: {}\ntokens: ↑{input} ↓{output}{hit}\ncost: {}",
-                self.model,
+                self.model(),
                 self.currency().format(snap.total_usd())
             )
         }
@@ -145,6 +196,53 @@ mod tests {
             cache_read: 0,
             cache_create: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn model_swap_preserves_accumulated_totals() {
+        // A `/model` switch retargets billing but must NOT drop the tokens
+        // already accrued — the session total is continuous across the swap.
+        let cost = CostState::new("model-a".into());
+        cost.observe(&usage(100, 50)).await;
+        cost.set_model("model-b".into());
+        cost.observe(&usage(30, 20)).await;
+        let report = cost.report().await;
+        // Total tokens = 130 in / 70 out across both models.
+        assert!(report.contains("130"), "input total preserved: {report}");
+        assert!(report.contains("70"), "output total preserved: {report}");
+        // Report shows the CURRENT model.
+        assert!(report.contains("model-b"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn last_prompt_tokens_tracks_full_prompt_occupancy() {
+        let cost = CostState::new("m".into());
+        assert_eq!(cost.last_prompt_tokens().await, None);
+        // Full prompt = input + cache_read + cache_create.
+        cost.observe(&Event::Usage {
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_read: 900,
+            cache_create: 50,
+        })
+        .await;
+        assert_eq!(cost.last_prompt_tokens().await, Some(1050));
+        // A later, smaller turn overwrites (occupancy, not cumulative).
+        cost.observe(&Event::Usage {
+            input_tokens: 200,
+            output_tokens: 5,
+            cache_read: 0,
+            cache_create: 0,
+        })
+        .await;
+        assert_eq!(cost.last_prompt_tokens().await, Some(200));
+    }
+
+    #[tokio::test]
+    async fn text_deltas_do_not_touch_the_last_prompt_gauge() {
+        let cost = CostState::new("m".into());
+        cost.observe(&Event::TextDelta { delta: "hi".into() }).await;
+        assert_eq!(cost.last_prompt_tokens().await, None);
     }
 
     #[tokio::test]
