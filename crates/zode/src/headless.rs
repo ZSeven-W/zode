@@ -18,7 +18,13 @@ use zode_core::session_meta::{title_from_prompt, SessionIndex, SessionMeta};
 use zode_core::ZodeEngine;
 
 /// Run a single prompt, stream to stdout, return a process exit code.
-pub async fn run_print(engine: &ZodeEngine, prompt: &str) -> i32 {
+/// `resumed_id` is `Some` when `-p` ran with `--continue`/`--resume`; the
+/// appended turn is then persisted so the conversation survives.
+pub async fn run_print(engine: &ZodeEngine, prompt: &str, resumed_id: Option<String>) -> i32 {
+    // A `-p` run over a large `--continue`/`--resume` context could exceed
+    // the provider's input limit on the very first turn — compact it down
+    // first (byte estimate; no prior Usage in a fresh process).
+    engine.auto_compact_if_needed(None).await;
     let abort = AbortController::new();
     let mut stream = match engine.turn(prompt, abort).await {
         Ok(s) => s,
@@ -59,6 +65,11 @@ pub async fn run_print(engine: &ZodeEngine, prompt: &str) -> i32 {
     // Mine the completed turn for durable memories (no-op unless autoExtract
     // is on). Awaited so the process doesn't exit before the write lands.
     engine.extract_post_turn_inline().await;
+    // Persist the appended turn when resuming, so `-p --continue` builds a
+    // durable conversation instead of discarding each turn.
+    if let Some(id) = &resumed_id {
+        save_session(engine, id).await;
+    }
     // Token/cache usage to stderr (keeps stdout = the model's answer).
     eprintln!("{}", engine.cost.report().await);
     exit
@@ -114,6 +125,14 @@ pub async fn run_repl(engine: ZodeEngine, resumed_id: Option<String>) -> i32 {
                 if !titled {
                     stamp_title(&engine, &session_id, &line);
                     titled = true;
+                }
+                // Pre-turn safety compaction using the accurate provider-
+                // reported occupancy from the last turn — the runtime's own
+                // byte-estimate auto-compaction under-counts CJK, so a long
+                // REPL session could otherwise hard-400 at the input limit.
+                let last = engine.last_prompt_tokens().await;
+                if engine.auto_compact_if_needed(last).await {
+                    save_session(&engine, &session_id).await;
                 }
                 run_turn(&engine, &line).await;
                 engine.extract_post_turn_inline().await;
@@ -277,11 +296,21 @@ async fn dispatch_command(
                 }
             }
         }
-        "export" => {
-            let path = zode_core::export::resolve_export_path(&engine.cwd, args);
-            match std::fs::write(&path, engine.export_markdown()) {
+        "export" => match zode_core::export::try_resolve_export_path(&engine.cwd, args) {
+            Some(path) => match std::fs::write(&path, engine.export_markdown()) {
                 Ok(()) => println!("(exported to {})", path.display()),
                 Err(e) => println!("(export failed: {e})"),
+            },
+            None => println!(
+                "(export path escapes the workspace — use an absolute path to export elsewhere)"
+            ),
+        },
+        "currency" => {
+            let code = args.trim();
+            if code.is_empty() {
+                println!("currency: {}", engine.cost.currency_code());
+            } else {
+                println!("currency → {}", engine.cost.set_currency(code));
             }
         }
         _ => match cmd.action {

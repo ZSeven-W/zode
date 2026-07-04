@@ -138,10 +138,17 @@ async fn run(args: Args) -> i32 {
     // short-lived one-shot has nothing to gain from a background update, so it's
     // only started for the interactive surfaces below.
     if let Some(prompt) = args.print.clone() {
-        let Some(engine) = build(&cfg, cwd, headless_gate(args.yolo), sandbox, &today).await else {
+        // Resume in the session's original directory when `-p` is combined
+        // with `--continue`/`--resume`, so the one-shot appends to (and
+        // persists) that conversation instead of starting cold.
+        let resume_meta = resolve_resume_target(&args);
+        let eff_cwd = resume_dir(&resume_meta).unwrap_or(cwd);
+        let Some(engine) = build(&cfg, eff_cwd, headless_gate(args.yolo), sandbox, &today).await
+        else {
             return 1;
         };
-        return headless::run_print(&engine, &prompt).await;
+        let (engine, resumed_id) = attach_session(engine, resume_meta).await;
+        return headless::run_print(&engine, &prompt, resumed_id).await;
     }
 
     // Silently check GitHub Releases in the background and swap in a newer build
