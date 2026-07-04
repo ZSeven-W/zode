@@ -36,12 +36,13 @@ use crate::gated_tool::PermissionGatedTool;
 use crate::history::{EditHistory, EditHistoryHook};
 use crate::hooks_config::load_hook_handlers;
 use crate::instructions::{
-    build_system_prompt, discover_instructions, gather_env, openspec_detected,
+    build_system_prompt, discover_instructions, gather_env, gather_env_with_branch,
+    openspec_detected,
 };
 use crate::noema::ZodeNoema;
 use crate::plugin::PluginManager;
 use crate::provider::build_provider;
-use crate::skills::{load_skills_filtered, load_skills_from, skills_dirs, skills_index, SkillTool};
+use crate::skills::{skills_dirs, skills_index, SkillTool};
 use crate::task_factory::{ModelRuntimeState, ParentToolsCell, ZodeTaskFactory};
 
 const EDIT_HISTORY_CAPACITY: usize = 50;
@@ -259,6 +260,42 @@ fn sandbox_prompt_note(sandbox: &Option<crate::sandbox::SandboxConfig>) -> Strin
     }
 }
 
+/// Long-lived, session-scoped shared state carried across an engine
+/// reassembly so a model/provider/plugin/sandbox hot-swap doesn't reset it.
+/// Every field is `None` on a fresh build (assemble makes new instances);
+/// reassembly fills them from the outgoing engine. See
+/// [`ZodeEngine::assemble_with_carry`].
+#[derive(Clone, Default)]
+pub struct CarryState {
+    pub cost: Option<Arc<CostState>>,
+    pub history: Option<Arc<tokio::sync::Mutex<crate::history::EditHistory>>>,
+    pub bash_sessions: Option<BashSessionRegistry>,
+    pub todo_state: Option<TodoState>,
+    pub compact_state: Option<Arc<Mutex<AutoCompactState>>>,
+    pub subagents: Option<crate::subagents::SubAgentRegistry>,
+    pub file_cache: Option<Arc<FileStateCache>>,
+    pub bg_shells_meta: Option<BackgroundShellTracker>,
+    pub recent_files: Option<crate::compact_memory::RecentFiles>,
+}
+
+impl ZodeEngine {
+    /// Snapshot this engine's long-lived shared state for carry-over into a
+    /// reassembled engine (see [`CarryState`]).
+    pub fn carry_state(&self) -> CarryState {
+        CarryState {
+            cost: Some(self.cost.clone()),
+            history: Some(self.history.clone()),
+            bash_sessions: Some(self.bash_sessions.clone()),
+            todo_state: Some(self.todo_state.clone()),
+            compact_state: Some(self.compact_state.clone()),
+            subagents: Some(self.subagents.clone()),
+            file_cache: Some(self.file_cache.clone()),
+            bg_shells_meta: Some(self.bg_shells_meta.clone()),
+            recent_files: Some(self.recent_files.clone()),
+        }
+    }
+}
+
 fn cost_state_for_model(cfg: &ZodeConfig, model: String) -> Arc<CostState> {
     let mut catalog = agent::cost::ModelPriceCatalog::with_defaults();
     if let Some(prices) = cfg.provider.price_overrides() {
@@ -280,9 +317,15 @@ fn render_runtime_system_prompt(
     skills: &SkillRegistry,
     agent_type_list: &[(String, String)],
     workflow_defs: &[crate::workflows::WorkflowDef],
+    // `Some(branch)` when the caller precomputed it off-thread; `None` →
+    // detect inline (the synchronous hot-swap path).
+    git_branch: Option<Option<String>>,
 ) -> String {
     let skills_idx = skills_index(skills);
-    let mut env = gather_env(cwd, date);
+    let mut env = match git_branch {
+        Some(b) => gather_env_with_branch(cwd, date, b),
+        None => gather_env(cwd, date),
+    };
     // Tell the agent which model it's running on (so "what model are you?"
     // is answerable). Stable across a session, so it doesn't hurt caching.
     env.model = model.to_string();
@@ -379,6 +422,12 @@ pub struct ZodeEngine {
     pub store: Arc<Mutex<MessageStore>>,
     pub file_cache: Arc<FileStateCache>,
     pub compact_state: Arc<Mutex<AutoCompactState>>,
+    /// Mid-turn steering: the host sends user messages here while a turn is
+    /// running; the QueryLoop drains them between round-trips and injects
+    /// them as user turns. `sender` for the host, `receiver` (shared) handed
+    /// to each turn's loop.
+    steer_tx: futures::channel::mpsc::UnboundedSender<Vec<ContentBlock>>,
+    steer_rx: Arc<std::sync::Mutex<futures::channel::mpsc::UnboundedReceiver<Vec<ContentBlock>>>>,
     pub model: String,
     pub system: Option<String>,
     pub cwd: PathBuf,
@@ -523,6 +572,41 @@ impl ZodeEngine {
         op_consent: Option<Arc<dyn crate::openpencil::Consent>>,
         plan_mode: bool,
     ) -> Result<Self, CoreError> {
+        Self::assemble_with_carry(
+            cfg,
+            cwd,
+            gate,
+            sandbox,
+            date,
+            question_tool,
+            op_consent,
+            plan_mode,
+            CarryState::default(),
+        )
+        .await
+    }
+
+    /// Like [`assemble`] but reusing the caller-supplied long-lived session
+    /// state (`carry`) instead of building fresh instances. Used by
+    /// reassembly (model/provider/plugin/sandbox hot-swap) so the accumulated
+    /// cost, undo history, background-shell registry, todo list, sub-agent
+    /// overlay, compaction latches, and file-read cache SURVIVE the rebuild —
+    /// and crucially so the new engine's internal wiring (edit-history hook,
+    /// bg-shell hook, Task factory, cost observer) targets the SAME carried
+    /// instances the UI reads, avoiding a split-brain where new work writes
+    /// one copy while the UI shows another.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn assemble_with_carry(
+        cfg: &ZodeConfig,
+        cwd: PathBuf,
+        gate: Arc<dyn ApprovalGate>,
+        sandbox: Option<crate::sandbox::SandboxConfig>,
+        date: &str,
+        question_tool: Option<Arc<dyn Tool>>,
+        op_consent: Option<Arc<dyn crate::openpencil::Consent>>,
+        plan_mode: bool,
+        carry: CarryState,
+    ) -> Result<Self, CoreError> {
         let provider = build_provider(&cfg.provider)?;
         let model = cfg
             .provider
@@ -551,9 +635,9 @@ impl ZodeEngine {
         //    a TodoState so we keep the handle (Phase 07) and avoid the
         //    "no caller-provided TodoState" startup warning.
         let mut base = ToolRegistry::new();
-        let todo_state = TodoState::new();
+        let todo_state = carry.todo_state.clone().unwrap_or_default();
         register_default_with_todo(&mut base, policy.clone(), todo_state.clone());
-        let bash_sessions = BashSessionRegistry::new();
+        let bash_sessions = carry.bash_sessions.clone().unwrap_or_default();
         base.register(Arc::new(BashRunTool::new(
             policy.clone(),
             bash_sessions.clone(),
@@ -614,19 +698,39 @@ impl ZodeEngine {
             base.register(Arc::new(OpWriteTool::new(deps)));
         }
 
+        // MCP discovery + connect kicked off HERE (network) so it overlaps the
+        // skills-tree walk and LSP detection (disk) below — startup latency
+        // becomes max(disk, connect) instead of their sum. The lifecycle is
+        // awaited just before tools are wrapped, where its tools register.
+        let mut all_mcp_servers: Vec<String> = Vec::new();
+        let mcp_connect: Option<tokio::task::JoinHandle<Arc<agent::mcp::Lifecycle>>> =
+            match crate::mcp::discover_mcp_config(&cwd) {
+                Some(mut config) => {
+                    all_mcp_servers = config.servers.keys().cloned().collect();
+                    all_mcp_servers.sort();
+                    config.servers.retain(|name, _| plugins.mcp_enabled(name));
+                    // Plan mode filters MCP tools out anyway → skip the connect
+                    // (process spawn / network).
+                    if plan_mode || config.servers.is_empty() {
+                        None
+                    } else {
+                        Some(tokio::spawn(
+                            async move { crate::mcp::connect(config).await },
+                        ))
+                    }
+                }
+                None => None,
+            };
+
         // Skills: load the three-level SKILL.md tree. Disabled skills are
         // dropped from the registry + index, but the full list is kept for the
         // /plugin picker.
+        // Scan the skills tree ONCE: derive the full picker list and the
+        // enabled registry from a single walk (was two full walks + parses).
         let skill_dirs = skills_dirs(&cwd);
-        let mut all_skill_meta: Vec<(String, String)> = load_skills_from(&skill_dirs)
-            .list()
-            .iter()
-            .map(|s| (s.name.clone(), s.description.clone()))
-            .collect();
-        all_skill_meta.sort();
-        let skills = Arc::new(load_skills_filtered(&skill_dirs, |n| {
-            plugins.skill_enabled(n)
-        }));
+        let (all_skill_meta, skills_registry) =
+            crate::skills::load_skills_meta_and_registry(&skill_dirs, |n| plugins.skill_enabled(n));
+        let skills = Arc::new(skills_registry);
         base.register(Arc::new(SkillTool::new(skills.clone())));
 
         // OpenPencil design pipeline (op-bridge T6). Registered HERE — after the
@@ -645,27 +749,22 @@ impl ZodeEngine {
             base.register(Arc::new(OpDesignTool::new(design_deps)));
         }
 
-        // MCP: discover configured servers; connect only the enabled ones
-        // (disabled ones are still listed by /plugin). Register a ZodeMcpTool
-        // per discovered tool — they go through the approval gate.
-        let mut all_mcp_servers: Vec<String> = Vec::new();
-        let mcp = match crate::mcp::discover_mcp_config(&cwd) {
-            Some(mut config) => {
-                all_mcp_servers = config.servers.keys().cloned().collect();
-                all_mcp_servers.sort();
-                config.servers.retain(|name, _| plugins.mcp_enabled(name));
-                // In plan mode, MCP tools (SafetyClass::Unknown) get filtered
-                // out anyway — skip the connection (process spawn / network).
-                if plan_mode || config.servers.is_empty() {
-                    None
-                } else {
-                    let lifecycle = crate::mcp::connect(config).await;
+        // MCP: await the connect started above (overlapped the disk work) and
+        // register a ZodeMcpTool per discovered tool — they go through the
+        // approval gate.
+        let mcp = match mcp_connect {
+            Some(handle) => match handle.await {
+                Ok(lifecycle) => {
                     for tool in crate::mcp::mcp_tools(&lifecycle) {
                         base.register(tool);
                     }
                     Some(lifecycle)
                 }
-            }
+                Err(e) => {
+                    tracing::warn!("mcp connect task failed: {e}");
+                    None
+                }
+            },
             None => None,
         };
 
@@ -699,14 +798,18 @@ impl ZodeEngine {
         // the same file_cache (read-before-write tracking) and the same hook
         // runner (edit history, bg-shell tracking, external hook blockers all
         // apply to the child too — no bypass).
-        let file_cache = Arc::new(FileStateCache::new(
-            NonZeroUsize::new(FILE_CACHE_ENTRIES).expect("nonzero"),
-            FILE_CACHE_BYTES,
-        ));
-        let history = Arc::new(tokio::sync::Mutex::new(EditHistory::new(
-            EDIT_HISTORY_CAPACITY,
-        )));
-        let bg_shells_meta = BackgroundShellTracker::new();
+        let file_cache = carry.file_cache.clone().unwrap_or_else(|| {
+            Arc::new(FileStateCache::new(
+                NonZeroUsize::new(FILE_CACHE_ENTRIES).expect("nonzero"),
+                FILE_CACHE_BYTES,
+            ))
+        });
+        let history = carry.history.clone().unwrap_or_else(|| {
+            Arc::new(tokio::sync::Mutex::new(EditHistory::new(
+                EDIT_HISTORY_CAPACITY,
+            )))
+        });
+        let bg_shells_meta = carry.bg_shells_meta.clone().unwrap_or_default();
         let mut hook_runner = HookRunner::new();
         // EditHistoryHook resolves paths via the same policy the fs tools use.
         hook_runner.register(Arc::new(EditHistoryHook::new(
@@ -714,7 +817,7 @@ impl ZodeEngine {
             policy.clone(),
         )));
         hook_runner.register(Arc::new(BgShellHook::new(bg_shells_meta.clone())));
-        let recent_files = crate::compact_memory::RecentFiles::default();
+        let recent_files = carry.recent_files.clone().unwrap_or_default();
         let restore_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
         hook_runner.register(Arc::new(crate::compact_memory::compact_tracker_hook(
             recent_files.clone(),
@@ -744,7 +847,7 @@ impl ZodeEngine {
         let task_tools: ParentToolsCell = Arc::new(OnceLock::new());
         // Per-engine sub-agent registry; shared between engine and factory so
         // the Task observer writes here and the TUI reads a snapshot.
-        let subagents = crate::subagents::SubAgentRegistry::new();
+        let subagents = carry.subagents.clone().unwrap_or_default();
         // User-defined sub-agents (~/.zode/agents etc.), available alongside the
         // built-in types for the Task tool and listed by `/agents`.
         let agent_defs = crate::agents::load_agent_defs(&cwd);
@@ -798,8 +901,10 @@ impl ZodeEngine {
             None => base,
         };
 
-        // 2. Wrap mutating/destructive tools with the approval gate.
-        let mut gated = wrap_mutating_tools(base, &gate, &cfg.permissions.allow);
+        // 2. Wrap mutating/destructive tools with the approval gate. `ask`
+        //    force-gates its tools even when read-only / allowed.
+        let mut gated =
+            wrap_mutating_tools(base, &gate, &cfg.permissions.allow, &cfg.permissions.ask);
 
         // 3. ToolSearch over the full set (candidates = snapshot of the
         //    gated registry, taken before ToolSearch itself is added).
@@ -811,6 +916,16 @@ impl ZodeEngine {
         // registry now that wrapping is complete.
         let _ = task_tools.set(tools.clone());
 
+        // Detect the git branch off the runtime thread — `git rev-parse`
+        // is a subprocess that shouldn't block a tokio worker during
+        // startup (slow on a huge repo / network filesystem).
+        let git_branch = {
+            let cwd = cwd.clone();
+            tokio::task::spawn_blocking(move || crate::instructions::detect_git_branch(&cwd))
+                .await
+                .ok()
+                .flatten()
+        };
         let system = Some(render_runtime_system_prompt(
             cfg,
             &cwd,
@@ -822,8 +937,18 @@ impl ZodeEngine {
             &skills,
             &agent_type_list,
             &workflow_defs,
+            Some(git_branch),
         ));
-        let cost = cost_state_for_model(cfg, model.clone());
+        // Carry the accumulated cost across a reassembly so `/cost` doesn't
+        // reset to $0 on a plugin/sandbox/provider toggle.
+        let cost = carry
+            .cost
+            .clone()
+            .unwrap_or_else(|| cost_state_for_model(cfg, model.clone()));
+
+        // Mid-turn steering channel: host → running loop.
+        let (steer_tx, steer_rx) = futures::channel::mpsc::unbounded::<Vec<ContentBlock>>();
+        let steer_rx = Arc::new(std::sync::Mutex::new(steer_rx));
 
         let noema = ZodeNoema::from_settings(&cfg.noema);
         let session_store = (cfg.compact.memory_sink() && noema.is_enabled()).then(|| {
@@ -840,7 +965,14 @@ impl ZodeEngine {
             hooks,
             store: Arc::new(Mutex::new(MessageStore::new())),
             file_cache,
-            compact_state: Arc::new(Mutex::new(AutoCompactState::default())),
+            // Carry compaction latches (no-progress / failure breaker) so a
+            // reassembly mid-conversation doesn't silently re-arm them.
+            compact_state: carry
+                .compact_state
+                .clone()
+                .unwrap_or_else(|| Arc::new(Mutex::new(AutoCompactState::default()))),
+            steer_tx,
+            steer_rx,
             model,
             system,
             cwd: cwd.clone(),
@@ -928,6 +1060,13 @@ impl ZodeEngine {
 
     /// `(server, connected)` for every configured MCP server. Feeds both the
     /// plugin list and the sidebar MCP section (refreshed on the UI tick).
+    /// `(language, client-running)` for the enabled LSP servers the project
+    /// actually uses (workspace holds a matching file, or the client is
+    /// running); empty otherwise — the sidebar hides the section.
+    pub fn lsp_status(&self) -> Vec<(String, bool)> {
+        self.lsp.as_ref().map(|m| m.status()).unwrap_or_default()
+    }
+
     pub fn mcp_status(&self) -> Vec<(String, bool)> {
         self.all_mcp_servers
             .iter()
@@ -984,6 +1123,64 @@ impl ZodeEngine {
     pub fn with_store(mut self, store: MessageStore) -> Self {
         self.store = Arc::new(Mutex::new(store));
         self
+    }
+
+    /// Context occupancy (percent of window) at which a pre-turn compaction
+    /// fires — just under 100 so the next prompt clears the provider's hard
+    /// input limit. Matches the TUI's own guard.
+    const AUTO_COMPACT_PERCENT: u64 = 98;
+
+    /// Pre-turn safety compaction for headless callers (`-p` on a large
+    /// resumed context, long `--no-tui` sessions). The QueryLoop already
+    /// auto-compacts on a byte estimate, but that under-counts CJK; when the
+    /// caller has the provider-reported prompt size (`context_tokens`, the
+    /// last turn's Usage), this checks the ACCURATE occupancy and compacts
+    /// before the next turn so the conversation can't sail past the input
+    /// limit and hard-400. `None` falls back to a byte estimate of the store.
+    /// Best-effort: a compaction failure is logged, not surfaced. Returns
+    /// whether a compaction ran.
+    pub async fn auto_compact_if_needed(&self, context_tokens: Option<u32>) -> bool {
+        let window = self.model_max_tokens;
+        if window == 0 {
+            return false;
+        }
+        let tokens = context_tokens.unwrap_or_else(|| {
+            self.store
+                .lock()
+                .map(|s| {
+                    s.iter()
+                        .map(agent::compact::estimate_tokens)
+                        .fold(0u32, u32::saturating_add)
+                })
+                .unwrap_or(0)
+        });
+        if (tokens as u64) * 100 / (window as u64) < Self::AUTO_COMPACT_PERCENT {
+            return false;
+        }
+        match self
+            .compact_sized((tokens > 0).then_some(tokens), AbortController::new())
+            .await
+        {
+            Ok(o) => {
+                tracing::debug!(
+                    "headless pre-turn auto-compact: {} → {} tokens",
+                    o.pre_tokens,
+                    o.post_tokens
+                );
+                true
+            }
+            Err(e) => {
+                tracing::warn!("headless pre-turn auto-compact failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// The provider-reported prompt size of the most recent turn (input +
+    /// cache-read + cache-create from the last `Usage`), or `None` if no turn
+    /// has reported usage yet. Feeds [`auto_compact_if_needed`].
+    pub async fn last_prompt_tokens(&self) -> Option<u32> {
+        self.cost.last_prompt_tokens().await
     }
 
     /// Read-and-clear the goal-loop completion signal. Returns `true` exactly
@@ -1101,6 +1298,13 @@ impl ZodeEngine {
                 .map_err(|_| CoreError::Other("compact: message store poisoned".into()))?;
             apply_compaction_to_store(&mut store, &result)?;
         }
+        // This compaction rewrote the store, so a previously latched
+        // runtime "no progress" verdict is stale — clear it and let the
+        // QueryLoop re-evaluate on the next turn (it re-latches if the
+        // transcript really can't shrink).
+        if let Ok(mut s) = self.compact_state.lock() {
+            s.reset_no_progress();
+        }
         if let Some(sm) = &self.session_store {
             if let Err(err) = promote_to_store(sm.as_ref(), &result).await {
                 tracing::debug!(error = %err, "manual compact: memory sink failed");
@@ -1111,6 +1315,16 @@ impl ZodeEngine {
             post_tokens: result.post_compact_tokens,
             replaced: result.replaced_uuids.len(),
         })
+    }
+
+    /// Inject a user message into the CURRENTLY RUNNING multi-step turn
+    /// (mid-turn steering). The QueryLoop drains this between round-trips and
+    /// appends it as a user turn, so the model sees the new instruction on
+    /// its next call without the user having to interrupt and restart. A
+    /// no-op if no turn is running (the message is buffered and drained by
+    /// the next turn that starts). Returns whether the send succeeded.
+    pub fn steer(&self, content: Vec<ContentBlock>) -> bool {
+        self.steer_tx.unbounded_send(content).is_ok()
     }
 
     /// Run one turn. Rebuilds a QueryLoop from the shared Arcs.
@@ -1163,7 +1377,8 @@ impl ZodeEngine {
             .cwd(self.cwd.clone())
             .auto_compact(true)
             .microcompact(self.compact_settings.microcompact())
-            .use_prompt_cache(self.prompt_cache);
+            .use_prompt_cache(self.prompt_cache)
+            .steer(self.steer_rx.clone());
         if let Some(t) = self.temperature {
             builder = builder.temperature(t);
         }
@@ -1324,19 +1539,20 @@ impl ZodeEngine {
     /// transcript slice, parse candidates, and submit them through noema's
     /// governance. Best-effort — every failure path logs and returns.
     ///
-    /// Note: the extraction call's token usage is not folded into `self.cost`
-    /// (`llm_oneshot` ignores `Usage` events), so `/cost` undercounts by this
-    /// one small call per turn when `autoExtract` is on.
+    /// Uses the tracked one-shot so the extraction call retries transient
+    /// failures and its token usage folds into `self.cost` (no more `/cost`
+    /// undercount for the per-turn extraction when `autoExtract` is on).
     async fn extract_from_slice(&self, slice: String) {
         let cfg = &self.extract_config;
         let model = cfg.model.clone().unwrap_or_else(|| self.model.clone());
         let abort = AbortController::new();
-        let raw = match crate::openpencil::design::llm_oneshot(
+        let raw = match crate::openpencil::design::llm_oneshot_tracked(
             &self.provider,
             &model,
             crate::noema_extract::EXTRACT_SYSTEM_PROMPT,
             &slice,
             &abort,
+            Some(&self.cost),
         )
         .await
         {
@@ -1480,6 +1696,20 @@ impl EngineTemplate {
         cwd_override: Option<PathBuf>,
         label: Option<String>,
     ) -> Result<ZodeEngine, CoreError> {
+        self.assemble_tab_with_carry(cwd_override, label, CarryState::default())
+            .await
+    }
+
+    /// Like [`assemble_tab`] but carrying long-lived session state (cost,
+    /// history, bg shells, todos, sub-agents, compaction latches, file
+    /// cache) into the rebuilt engine — used by reassembly so a hot-swap
+    /// preserves them. See [`ZodeEngine::assemble_with_carry`].
+    pub async fn assemble_tab_with_carry(
+        &self,
+        cwd_override: Option<PathBuf>,
+        label: Option<String>,
+        carry: CarryState,
+    ) -> Result<ZodeEngine, CoreError> {
         let gate: Arc<dyn ApprovalGate> = match (&self.queue, self.yolo) {
             (Some(q), false) => Arc::new(QueueGate::with_label(q.clone(), label.clone())),
             _ => Arc::new(BypassGate),
@@ -1504,7 +1734,7 @@ impl EngineTemplate {
         // different repo, and the sandbox must confine to THAT directory (its
         // writable roots + .git/.zode carveouts), not the launch cwd.
         let sandbox = self.sandbox.as_ref().map(|sb| sb.clone().with_cwd(&cwd));
-        ZodeEngine::assemble(
+        ZodeEngine::assemble_with_carry(
             &self.cfg,
             cwd,
             gate,
@@ -1513,6 +1743,7 @@ impl EngineTemplate {
             question_tool,
             op_consent,
             self.plan_mode,
+            carry,
         )
         .await
     }
@@ -1736,7 +1967,9 @@ impl EngineTemplate {
         engine
             .model_runtime
             .update(engine.provider.clone(), model.clone());
-        engine.cost = cost_state_for_model(&template.cfg, model);
+        // Retarget cost to the new model IN PLACE so the accumulated session
+        // total survives the swap (was: replaced with a fresh $0 tracker).
+        engine.cost.set_model(model);
         engine.system = Some(system);
         Ok(template)
     }
@@ -1767,6 +2000,9 @@ impl EngineTemplate {
             &engine.skills,
             &engine.agent_types,
             &workflow_defs,
+            // Sync hot-swap path (user-triggered, off the startup critical
+            // path) — detect the branch inline.
+            None,
         )
     }
 
@@ -1887,11 +2123,18 @@ fn wrap_mutating_tools(
     src: ToolRegistry,
     gate: &Arc<dyn ApprovalGate>,
     allow: &[String],
+    ask: &[String],
 ) -> ToolRegistry {
     let mut out = ToolRegistry::new();
     for tool in src.list() {
-        let auto_allowed = allow.iter().any(|a| a == tool.name());
-        if matches!(tool.safety_class(), SafetyClass::ReadOnly) || auto_allowed {
+        // `ask` wins over everything: a tool the user explicitly wants to be
+        // prompted on is gated even if it's read-only or in `allow`. This is
+        // how a user forces confirmation on a normally auto-allowed tool or
+        // overrides a broad allow rule.
+        let force_ask = ask.iter().any(|a| a == tool.name());
+        let auto_allowed = !force_ask && allow.iter().any(|a| a == tool.name());
+        let read_only = matches!(tool.safety_class(), SafetyClass::ReadOnly);
+        if !force_ask && (read_only || auto_allowed) {
             out.register(tool);
         } else {
             out.register(Arc::new(PermissionGatedTool::new(tool, gate.clone())));
@@ -1903,8 +2146,85 @@ fn wrap_mutating_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::BypassGate;
+    use crate::approval::{Approval, ApprovalGate, BypassGate};
     use crate::config::{ProviderConfig, ProviderKind, ZodeConfig};
+
+    #[derive(Debug)]
+    struct DenyGate;
+    #[async_trait::async_trait]
+    impl ApprovalGate for DenyGate {
+        async fn approve(&self, _tool: &str, _input: &serde_json::Value) -> Approval {
+            Approval::Deny
+        }
+    }
+
+    #[derive(Debug)]
+    struct RoTool(&'static str);
+    #[async_trait::async_trait]
+    impl Tool for RoTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "read-only test tool"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn safety_class(&self) -> SafetyClass {
+            SafetyClass::ReadOnly
+        }
+        async fn call(
+            &self,
+            _ctx: &agent::tool::ToolUseContext,
+            _input: serde_json::Value,
+        ) -> Result<serde_json::Value, agent::error::AgentError> {
+            Ok(serde_json::json!({"ran": true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_forces_gate_on_a_read_only_tool() {
+        // A read-only tool would normally bypass the gate. Listing it in
+        // `ask` must force it through — proven by a deny gate turning its
+        // call into an error, while a sibling read-only tool NOT in `ask`
+        // still runs.
+        let gate: Arc<dyn ApprovalGate> = Arc::new(DenyGate);
+        let mut src = ToolRegistry::new();
+        src.register(Arc::new(RoTool("Peek")));
+        src.register(Arc::new(RoTool("Glance")));
+        let out = wrap_mutating_tools(src, &gate, &[], &["Peek".to_string()]);
+        let ctx = agent::tool::ToolUseContext::new(std::env::temp_dir());
+
+        let peek = out.get("Peek").unwrap();
+        assert!(
+            peek.call(&ctx, serde_json::json!({})).await.is_err(),
+            "ask-listed read-only tool must be gated (deny → error)"
+        );
+        let glance = out.get("Glance").unwrap();
+        assert!(
+            glance.call(&ctx, serde_json::json!({})).await.is_ok(),
+            "a read-only tool not in ask still bypasses the gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_overrides_allow() {
+        // `ask` beats `allow`: a tool in both is still prompted.
+        let gate: Arc<dyn ApprovalGate> = Arc::new(DenyGate);
+        let mut src = ToolRegistry::new();
+        src.register(Arc::new(RoTool("Edit")));
+        let out = wrap_mutating_tools(src, &gate, &["Edit".to_string()], &["Edit".to_string()]);
+        let ctx = agent::tool::ToolUseContext::new(std::env::temp_dir());
+        assert!(
+            out.get("Edit")
+                .unwrap()
+                .call(&ctx, serde_json::json!({}))
+                .await
+                .is_err(),
+            "ask must override allow"
+        );
+    }
 
     #[test]
     fn sandbox_prompt_note_tells_model_the_policy() {
@@ -2021,6 +2341,11 @@ mod tests {
                 1024,
             )),
             compact_state: Arc::new(Mutex::new(AutoCompactState::default())),
+            steer_tx: {
+                let (tx, _rx) = futures::channel::mpsc::unbounded();
+                tx
+            },
+            steer_rx: Arc::new(std::sync::Mutex::new(futures::channel::mpsc::unbounded().1)),
             model: "mock-model".into(),
             system: None,
             cwd: PathBuf::from("."),

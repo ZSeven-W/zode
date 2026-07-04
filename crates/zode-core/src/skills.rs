@@ -17,6 +17,13 @@ use crate::config::ConfigManager;
 /// skills). Cross-agent compat sources (opencode / Claude / agents.md / codex,
 /// each global then project) come first, then zode's own (global then project)
 /// last — so a zode skill always wins a name clash, per "zode highest priority".
+///
+/// Foreign PLUGIN trees (`~/.claude/plugins`, `~/.codex/plugins`, opencode
+/// plugins) ARE scanned: the plugins living there (e.g. Claude's
+/// `superpowers`) were installed by the USER through that product's plugin
+/// manager — user-installed content, not product built-ins (those ship
+/// inside the app bundle, not under `~/.claude`). Unwanted individual
+/// skills are disabled via `/plugin` (`plugins.disabled`).
 pub fn skills_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let home = dirs::home_dir();
@@ -32,10 +39,10 @@ pub fn skills_dirs(cwd: &Path) -> Vec<PathBuf> {
         dirs.push(h.join(".kilo").join("skills")); // kilo
         dirs.push(h.join(".cursor").join("skills")); // cursor
     }
-    // 1b. Skills bundled in installed plugins (e.g. Claude's `superpowers`
-    // lives at ~/.claude/plugins/cache/<mp>/<plugin>/<ver>/skills). load_dir
-    // only looks one level deep, so each `skills` dir must be listed; scan the
-    // plugin trees (claude / codex / opencode) for them.
+    // 1b. Skills bundled in user-installed plugins (e.g. Claude's
+    // `superpowers` lives at ~/.claude/plugins/cache/<mp>/<plugin>/<ver>/
+    // skills). load_dir only looks one level deep, so each `skills` dir must
+    // be listed; scan the plugin trees (claude / codex / opencode) for them.
     if let Some(h) = &home {
         collect_plugin_skill_dirs(&h.join(".claude").join("plugins"), &mut dirs);
         collect_plugin_skill_dirs(&h.join(".codex").join("plugins"), &mut dirs);
@@ -94,6 +101,34 @@ fn collect_plugin_skill_dirs(root: &Path, out: &mut Vec<PathBuf>) {
 /// replaces). Load warnings are logged via tracing.
 pub fn load_skills_from(dirs: &[PathBuf]) -> SkillRegistry {
     load_skills_filtered(dirs, |_| true)
+}
+
+/// Scan the dir tree ONCE and return both `(name, description)` for every
+/// discovered skill AND a registry containing only those for which
+/// `keep(name)` is true. Avoids walking + YAML-parsing the whole (large,
+/// cross-agent + plugin) skills tree twice per engine assembly — the
+/// previous pattern of a full `load_skills_from` for the meta list plus a
+/// separate `load_skills_filtered` for the live registry.
+pub fn load_skills_meta_and_registry(
+    dirs: &[PathBuf],
+    keep: impl Fn(&str) -> bool,
+) -> (Vec<(String, String)>, SkillRegistry) {
+    let all = load_skills_from(dirs);
+    let mut meta: Vec<(String, String)> = all
+        .list()
+        .iter()
+        .map(|s| (s.name.clone(), s.description.clone()))
+        .collect();
+    meta.sort();
+    // Derive the enabled registry in-memory (drop disabled names) rather
+    // than re-reading and re-parsing every SKILL.md from disk.
+    let enabled = SkillRegistry::new();
+    for skill in all.list() {
+        if keep(&skill.name) {
+            enabled.insert(skill);
+        }
+    }
+    (meta, enabled)
 }
 
 /// Like [`load_skills_from`], but only inserts skills for which `keep(name)`
@@ -245,6 +280,26 @@ mod tests {
             !idx.contains("claude-only"),
             "skill referencing a foreign host var must be filtered out"
         );
+    }
+
+    #[test]
+    fn meta_and_registry_from_one_scan_apply_keep_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(dir.path(), "keep-me", "enabled", "Body.");
+        write_skill(dir.path(), "drop-me", "disabled", "Body.");
+        let (meta, reg) =
+            load_skills_meta_and_registry(&[dir.path().to_path_buf()], |n| n != "drop-me");
+        // Meta lists BOTH (the /plugin picker shows disabled skills too)...
+        let names: Vec<&str> = meta.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"keep-me") && names.contains(&"drop-me"));
+        assert_eq!(meta, {
+            let mut m = meta.clone();
+            m.sort();
+            m
+        }); // sorted
+            // ...but the live registry only holds the enabled one.
+        assert!(reg.get("keep-me").is_some());
+        assert!(reg.get("drop-me").is_none());
     }
 
     #[tokio::test]

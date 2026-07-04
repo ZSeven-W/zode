@@ -36,8 +36,13 @@ impl CommandRegistry {
         &self.commands
     }
 
+    /// Case-insensitive: the autocomplete already matches `/HELP` to `help`,
+    /// so a literally-submitted uppercase name must resolve too instead of
+    /// falling through to "unknown command".
     pub fn get(&self, name: &str) -> Option<&SlashCommand> {
-        self.commands.iter().find(|c| c.name == name)
+        self.commands
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
     }
 
     /// Subsequence-fuzzy prefix match for autocomplete (Phase 05 reuses this).

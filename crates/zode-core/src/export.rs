@@ -13,26 +13,57 @@ const DEFAULT_EXPORT_NAME: &str = "zode-conversation.md";
 /// Resolve the `/export [path]` argument to a target file. Empty → a default
 /// file in `cwd`; a relative path → joined onto `cwd` (the active workspace,
 /// which may differ from the process launch dir for resumed/`--cwd` sessions);
-/// an absolute path → used as-is.
+/// an absolute path → used as-is (writing outside the workspace is then the
+/// user's EXPLICIT intent).
+///
+/// A relative path that climbs out of `cwd` via `..` is rejected: it silently
+/// lands the transcript somewhere the user probably didn't mean (and the
+/// workspace-confinement expectations elsewhere assume relative = inside the
+/// workspace). Use an absolute path to export elsewhere.
 ///
 /// When the argument points at a directory — either an existing dir, or a path
 /// written with a trailing separator (e.g. `~/notes/`) — the default file name
 /// is appended inside it. Without this, `std::fs::write` would fail with
 /// "Is a directory (os error 21)" (the user's `导出聊天记录失败`).
 pub fn resolve_export_path(cwd: &Path, arg: &str) -> PathBuf {
+    try_resolve_export_path(cwd, arg).unwrap_or_else(|| cwd.join(DEFAULT_EXPORT_NAME))
+}
+
+/// Like [`resolve_export_path`] but surfacing the escaping-relative-path case
+/// as `None` so callers can tell the user instead of silently defaulting.
+pub fn try_resolve_export_path(cwd: &Path, arg: &str) -> Option<PathBuf> {
     let arg = arg.trim();
     if arg.is_empty() {
-        return cwd.join(DEFAULT_EXPORT_NAME);
+        return Some(cwd.join(DEFAULT_EXPORT_NAME));
     }
     // A trailing separator means "into this directory" even if it doesn't exist
     // yet; detect it before `PathBuf` normalizes the slash away.
     let looks_like_dir = arg.ends_with('/') || arg.ends_with(std::path::MAIN_SEPARATOR);
     let p = PathBuf::from(arg);
-    let mut target = if p.is_absolute() { p } else { cwd.join(p) };
+    let mut target = if p.is_absolute() {
+        p
+    } else {
+        // Reject relative paths that escape the workspace (any `..` that
+        // climbs above cwd after lexical normalization).
+        let mut depth: i64 = 0;
+        for comp in p.components() {
+            match comp {
+                std::path::Component::ParentDir => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return None;
+                    }
+                }
+                std::path::Component::Normal(_) => depth += 1,
+                _ => {}
+            }
+        }
+        cwd.join(p)
+    };
     if looks_like_dir || target.is_dir() {
         target.push(DEFAULT_EXPORT_NAME);
     }
-    target
+    Some(target)
 }
 
 /// Truncate a one-line preview of a tool result / value for readability.
@@ -171,6 +202,24 @@ mod tests {
         assert_eq!(
             resolve_export_path(cwd, "/tmp/x.md"),
             PathBuf::from("/tmp/x.md")
+        );
+    }
+
+    #[test]
+    fn export_path_rejects_relative_escape_but_allows_absolute() {
+        let cwd = Path::new("/work/proj");
+        // Climbing out of the workspace via .. is rejected…
+        assert_eq!(try_resolve_export_path(cwd, "../secret.md"), None);
+        assert_eq!(try_resolve_export_path(cwd, "a/../../secret.md"), None);
+        // …but staying inside after normalization is fine…
+        assert_eq!(
+            try_resolve_export_path(cwd, "a/../out.md"),
+            Some(PathBuf::from("/work/proj/a/../out.md"))
+        );
+        // …and an absolute path is explicit intent, used as-is.
+        assert_eq!(
+            try_resolve_export_path(cwd, "/tmp/x.md"),
+            Some(PathBuf::from("/tmp/x.md"))
         );
     }
 

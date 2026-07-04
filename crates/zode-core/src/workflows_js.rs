@@ -108,6 +108,9 @@ impl JsAgentRunner for GatedTaskRunner {
             file_cache: self.file_cache.clone(),
             permissions: self.permissions.clone(),
             hooks: self.hooks.clone(),
+            // Workflow-dispatched Task calls are top-level (the JS
+            // orchestrator is the root), so start the depth chain at 0.
+            task_depth: 0,
         };
         let sem = self.sem.clone();
         Box::pin(async move {

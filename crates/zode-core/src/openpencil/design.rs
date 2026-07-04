@@ -311,7 +311,9 @@ impl ContentGenerator for DirectLlmContentGenerator {
 }
 
 /// One-shot LLM completion: sends a single user turn under `system` and
-/// collects the assistant's streamed text into a `String`.
+/// collects the assistant's streamed text into a `String`. No retries, no
+/// cost accounting — see [`llm_oneshot_tracked`] for the version that has
+/// both.
 pub async fn llm_oneshot(
     provider: &Arc<dyn Provider>,
     model: &str,
@@ -319,38 +321,116 @@ pub async fn llm_oneshot(
     user: &str,
     abort: &AbortController,
 ) -> Result<String, OpError> {
+    llm_oneshot_tracked(provider, model, system, user, abort, None).await
+}
+
+/// Like [`llm_oneshot`] but with the main loop's reliability: transient API
+/// failures (rate limits / 5xx / transport drops) are retried with jittered
+/// exponential backoff, and — when a [`CostState`](crate::cost::CostState)
+/// sink is supplied — the call's `Usage` is folded into it so `/cost`
+/// reflects these out-of-band completions (memory extraction, design steps).
+pub async fn llm_oneshot_tracked(
+    provider: &Arc<dyn Provider>,
+    model: &str,
+    system: &str,
+    user: &str,
+    abort: &AbortController,
+    cost: Option<&Arc<crate::cost::CostState>>,
+) -> Result<String, OpError> {
     use agent::message::{ContentBlock, Header, Message};
     use agent::stream::Event;
 
-    let req = StreamRequest::new(
-        model.to_string(),
-        vec![Message::User {
-            header: Header::new(),
-            content: vec![ContentBlock::Text {
-                text: user.to_string(),
+    const MAX_RETRIES: u32 = 3;
+    let mut attempt: u32 = 0;
+    loop {
+        let req = StreamRequest::new(
+            model.to_string(),
+            vec![Message::User {
+                header: Header::new(),
+                content: vec![ContentBlock::Text {
+                    text: user.to_string(),
+                }],
             }],
-        }],
-    )
-    .with_system(system.to_string());
+        )
+        .with_system(system.to_string());
 
-    // Pass the caller's controller so Esc cancels the in-flight stream.
-    let mut stream = provider
-        .stream(req, abort.clone())
-        .await
-        .map_err(|e| OpError::Rpc(e.to_string()))?;
-
-    let mut out = String::new();
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(Event::TextDelta { delta }) => out.push_str(&delta),
-            Ok(Event::Error { code, message }) => {
-                return Err(OpError::Rpc(format!("stream error code={code}: {message}")));
+        // Pass the caller's controller so Esc cancels the in-flight stream.
+        let stream_res = provider.stream(req, abort.clone()).await;
+        let mut stream = match stream_res {
+            Ok(s) => s,
+            Err(e) => {
+                if attempt < MAX_RETRIES && is_transient(&e.to_string()) && !abort.is_aborted() {
+                    attempt += 1;
+                    backoff_sleep(attempt, abort).await;
+                    continue;
+                }
+                return Err(OpError::Rpc(e.to_string()));
             }
-            Ok(_) => {} // Result / tool / thinking / usage / notice events ignored
-            Err(e) => return Err(OpError::Rpc(e.to_string())),
+        };
+
+        let mut out = String::new();
+        let mut stream_err: Option<String> = None;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(Event::TextDelta { delta }) => out.push_str(&delta),
+                Ok(ev @ Event::Usage { .. }) => {
+                    if let Some(c) = cost {
+                        c.observe(&ev).await;
+                    }
+                }
+                Ok(Event::Error { code, message }) => {
+                    stream_err = Some(format!("stream error code={code}: {message}"));
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    stream_err = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        match stream_err {
+            Some(e) if attempt < MAX_RETRIES && is_transient(&e) && !abort.is_aborted() => {
+                attempt += 1;
+                backoff_sleep(attempt, abort).await;
+                continue;
+            }
+            Some(e) => return Err(OpError::Rpc(e)),
+            None => return Ok(out),
         }
     }
-    Ok(out)
+}
+
+/// Whether an error string looks like a transient (retryable) API failure —
+/// the same shape the main query loop retries: rate limits, 5xx, transport
+/// drops; not auth / bad-request.
+fn is_transient(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("429") || m.contains("500") || m.contains("502") || m.contains("503") {
+        return true;
+    }
+    if m.contains("401") || m.contains("403") || m.contains("400") || m.contains("404") {
+        return false;
+    }
+    // Unclassified transport failures (connection reset/timeout) → retry.
+    m.contains("connection") || m.contains("timeout") || m.contains("sending request")
+}
+
+/// Jittered exponential backoff, abort-aware.
+async fn backoff_sleep(attempt: u32, abort: &AbortController) {
+    let base_ms = 500u64
+        .checked_shl(attempt.saturating_sub(1))
+        .unwrap_or(u64::MAX)
+        .min(8_000);
+    let noise = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_millis()))
+        .unwrap_or(0);
+    let delay = std::time::Duration::from_millis(base_ms / 2 + noise % (base_ms / 2 + 1));
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => {}
+        _ = abort.cancelled() => {}
+    }
 }
 
 // ─── Orchestrator ────────────────────────────────────────────────────────────

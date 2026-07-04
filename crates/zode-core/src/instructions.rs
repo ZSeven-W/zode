@@ -251,16 +251,32 @@ pub fn build_system_prompt(
     s
 }
 
-/// Gather environment info for the prompt. `git_branch` is best-effort.
-pub fn gather_env(cwd: &Path, date: &str) -> EnvInfo {
-    let git_branch = std::process::Command::new("git")
+/// The current git branch of `cwd`, or `None` outside a repo. Shells out
+/// to `git` (blocking) — callers on an async path should run it via
+/// `spawn_blocking` (see [`gather_env_with_branch`]).
+pub fn detect_git_branch(cwd: &Path) -> Option<String> {
+    std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(cwd)
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+}
+
+/// Gather environment info for the prompt, detecting the git branch inline
+/// (blocking). Kept for the synchronous hot-swap path + tests; the async
+/// assemble path precomputes the branch off-thread via
+/// [`gather_env_with_branch`].
+pub fn gather_env(cwd: &Path, date: &str) -> EnvInfo {
+    gather_env_with_branch(cwd, date, detect_git_branch(cwd))
+}
+
+/// Like [`gather_env`] but with the (possibly off-thread-computed) git
+/// branch supplied, so an async caller doesn't block a runtime worker on
+/// the `git` subprocess.
+pub fn gather_env_with_branch(cwd: &Path, date: &str, git_branch: Option<String>) -> EnvInfo {
     EnvInfo {
         cwd: cwd.display().to_string(),
         platform: std::env::consts::OS.to_string(),
