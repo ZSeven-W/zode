@@ -140,6 +140,41 @@ pub(crate) fn truncate_to_width(text: &str, max_width: usize) -> String {
     out
 }
 
+pub(crate) fn fit_line_to_width(
+    line: Line<'static>,
+    width: usize,
+    pad_style: Style,
+) -> Line<'static> {
+    if width == 0 {
+        return Line::from("");
+    }
+
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    for span in line.spans {
+        if used >= width {
+            break;
+        }
+        let mut content = String::new();
+        for ch in span.content.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if ch_width > 0 && used + ch_width > width {
+                break;
+            }
+            content.push(ch);
+            used += ch_width;
+        }
+        if !content.is_empty() {
+            spans.push(Span::styled(content, span.style));
+        }
+    }
+
+    if used < width {
+        spans.push(Span::styled(" ".repeat(width - used), pad_style));
+    }
+    Line::from(spans)
+}
+
 pub fn render_tabs(f: &mut Frame, area: Rect, tabs: &[SessionTab], active: usize, theme: &Theme) {
     render_tab_list(f, area, tabs, active, theme, 0);
 }
@@ -461,20 +496,32 @@ fn pad_to_width(text: &str, width: usize) -> String {
 fn header_line(width: usize, theme: &Theme) -> Line<'static> {
     let title = " Sessions";
     let padding = " ".repeat(width.saturating_sub(UnicodeWidthStr::width(title)));
-    Line::from(vec![
-        Span::styled(
-            title,
-            Style::default()
-                .fg(theme.fg_subtle)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(padding, Style::default().bg(theme.bg_secondary)),
-    ])
+    let bg = Style::default().bg(theme.bg_secondary);
+    fit_line_to_width(
+        Line::from(vec![
+            Span::styled(
+                title,
+                Style::default()
+                    .fg(theme.fg_subtle)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(padding, bg),
+        ]),
+        width,
+        bg,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line_width(line: &Line) -> usize {
+        line.spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum()
+    }
 
     #[test]
     fn tab_label_marks_busy_tabs() {
@@ -488,6 +535,19 @@ mod tests {
             format_tab_row(12, "very-long-session-title", true, 14),
             "12 ● very-lon…"
         );
+    }
+
+    #[test]
+    fn sidebar_header_line_never_exceeds_the_row_width() {
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("minimal"));
+        for width in 0..=8 {
+            let line = header_line(width, &theme);
+            assert!(
+                line_width(&line) <= width,
+                "line width {} exceeded {width}: {line:?}",
+                line_width(&line)
+            );
+        }
     }
 
     #[test]

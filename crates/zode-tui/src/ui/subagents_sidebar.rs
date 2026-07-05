@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 use zode_core::{SubAgent, SubAgentStatus};
 
 use crate::theme::Theme;
-use crate::ui::tabs::truncate_to_width;
+use crate::ui::tabs::{fit_line_to_width, truncate_to_width};
 
 /// Max sub-agent rows shown before collapsing into a "…+k more" row.
 const CAP: usize = 6;
@@ -72,14 +72,18 @@ pub(crate) fn section_lines(
     let left_w = 1 + UnicodeWidthStr::width(label);
     let right_w = UnicodeWidthStr::width(count.as_str()) + 1;
     let pad = width.saturating_sub(left_w + right_w);
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!(" {label}"),
-            bg.fg(theme.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ".repeat(pad), bg),
-        Span::styled(format!("{count} "), bg.fg(theme.fg_subtle)),
-    ]));
+    lines.push(fit_line_to_width(
+        Line::from(vec![
+            Span::styled(
+                format!(" {label}"),
+                bg.fg(theme.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ".repeat(pad), bg),
+            Span::styled(format!("{count} "), bg.fg(theme.fg_subtle)),
+        ]),
+        width,
+        bg,
+    ));
 
     // Item rows: " " (leading pad) + glyph + " " + label (truncated).
     let subject_width = width.saturating_sub(3);
@@ -94,16 +98,21 @@ pub(crate) fn section_lines(
             glyph(a.status),
             truncate_to_width(&row_label(a), subject_width)
         );
-        lines.push(Line::from(Span::styled(
-            text,
-            bg.fg(color(a.status, theme)),
-        )));
+        lines.push(fit_line_to_width(
+            Line::from(Span::styled(text, bg.fg(color(a.status, theme)))),
+            width,
+            bg,
+        ));
     }
     if overflow > 0 {
-        lines.push(Line::from(Span::styled(
-            format!("   …+{overflow} {}", crate::tr("more")),
-            bg.fg(theme.fg_subtle),
-        )));
+        lines.push(fit_line_to_width(
+            Line::from(Span::styled(
+                format!("   …+{overflow} {}", crate::tr("more")),
+                bg.fg(theme.fg_subtle),
+            )),
+            width,
+            bg,
+        ));
     }
     lines
 }
@@ -133,6 +142,13 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect()
+    }
+
+    fn line_width(line: &Line) -> usize {
+        line.spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum()
     }
 
     #[test]
@@ -168,5 +184,21 @@ mod tests {
         let j = joined(&section_lines(&agents, 30, &theme()));
         // CAP-1 item rows + a "…+k more" row (k = 10 - (CAP-1)).
         assert!(j.contains(&format!("…+{} more", 10 - (CAP - 1))));
+    }
+
+    #[test]
+    fn narrow_rows_never_exceed_the_section_width() {
+        let agents = vec![sa(
+            "very-long-researcher-agent-name",
+            SubAgentStatus::Running,
+        )];
+        let lines = section_lines(&agents, 8, &theme());
+        for line in &lines {
+            assert!(
+                line_width(line) <= 8,
+                "line width {} exceeded 8: {line:?}",
+                line_width(line)
+            );
+        }
     }
 }

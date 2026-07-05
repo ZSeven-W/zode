@@ -2322,6 +2322,10 @@ impl TuiApp {
                 // it rather than risk copying the wrong region on the next chord.
                 self.active_selection = None;
                 self.active_input_selection = None;
+                // Resizes can leave terminal-owned cells from the old layout
+                // behind (most visibly in the right sidebar). Ask the event
+                // loop to clear once before the next draw.
+                self.force_redraw = true;
                 return;
             }
             _ => return,
@@ -9247,10 +9251,22 @@ mod tests {
             ChatSelectionPoint { line: 0, column: 0 },
             ChatSelectionPoint { line: 2, column: 4 },
         ));
+        app.active_input_selection = Some(InputSelection::new(
+            crate::ui::input::InputSelectionPoint { row: 0, column: 0 },
+            crate::ui::input::InputSelectionPoint { row: 0, column: 1 },
+        ));
         app.handle_term(CtEvent::Resize(80, 24), &agent_tx).await;
         assert!(
             app.active_selection.is_none(),
             "a resize must drop the now-stale selection"
+        );
+        assert!(
+            app.active_input_selection.is_none(),
+            "a resize must drop the now-stale input selection"
+        );
+        assert!(
+            app.force_redraw,
+            "a resize must force a full repaint so stale sidebar cells cannot survive"
         );
     }
 

@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use zode_core::{TodoItem, TodoStatus};
 
 use crate::theme::Theme;
-use crate::ui::tabs::truncate_to_width;
+use crate::ui::tabs::{fit_line_to_width, truncate_to_width};
 
 /// Max item rows before the list collapses into a single "…+k more" row.
 const CAP: usize = 8;
@@ -119,11 +119,15 @@ pub(crate) fn section_lines(
     let pad = width.saturating_sub(
         UnicodeWidthStr::width(label.as_str()) + UnicodeWidthStr::width(count.as_str()) + 1,
     );
-    lines.push(Line::from(vec![
-        Span::styled(label, bg.fg(theme.accent).add_modifier(Modifier::BOLD)),
-        Span::styled(" ".repeat(pad), bg),
-        Span::styled(format!("{count} "), bg.fg(theme.fg_subtle)),
-    ]));
+    lines.push(fit_line_to_width(
+        Line::from(vec![
+            Span::styled(label, bg.fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(" ".repeat(pad), bg),
+            Span::styled(format!("{count} "), bg.fg(theme.fg_subtle)),
+        ]),
+        width,
+        bg,
+    ));
     if collapsed {
         return lines;
     }
@@ -135,10 +139,11 @@ pub(crate) fn section_lines(
             TodoRow::Item { status, .. } => bg.fg(color_for_status(*status, theme)),
             TodoRow::Overflow(_) => bg.fg(theme.fg_subtle),
         };
-        lines.push(Line::from(Span::styled(
-            format!(" {}", row_text(&row)),
-            style,
-        )));
+        lines.push(fit_line_to_width(
+            Line::from(Span::styled(format!(" {}", row_text(&row)), style)),
+            width,
+            bg,
+        ));
     }
     lines
 }
@@ -166,6 +171,13 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect()
+    }
+
+    fn line_width(line: &Line) -> usize {
+        line.spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum()
     }
 
     #[test]
@@ -245,5 +257,21 @@ mod tests {
         let j = joined(&lines);
         assert!(j.contains("▶ Todo · idle"));
         assert!(!j.contains("○ a"));
+    }
+
+    #[test]
+    fn narrow_rows_never_exceed_the_section_width() {
+        let todos = vec![item(
+            "wire an intentionally long todo subject into the sidebar",
+            TodoStatus::InProgress,
+        )];
+        let lines = section_lines(&todos, true, false, 8, &theme());
+        for line in &lines {
+            assert!(
+                line_width(line) <= 8,
+                "line width {} exceeded 8: {line:?}",
+                line_width(line)
+            );
+        }
     }
 }

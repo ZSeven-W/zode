@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::theme::Theme;
-use crate::ui::tabs::truncate_to_width;
+use crate::ui::tabs::{fit_line_to_width, truncate_to_width};
 
 /// Build a section's lines (empty when there are no items): a blank
 /// separator + a header, plus one row per item when expanded. Unlike the
@@ -40,11 +40,15 @@ pub(crate) fn section_lines(
     let pad = width.saturating_sub(
         UnicodeWidthStr::width(label.as_str()) + UnicodeWidthStr::width(count.as_str()) + 1,
     );
-    lines.push(Line::from(vec![
-        Span::styled(label, bg.fg(theme.accent).add_modifier(Modifier::BOLD)),
-        Span::styled(" ".repeat(pad), bg),
-        Span::styled(format!("{count} "), bg.fg(theme.fg_subtle)),
-    ]));
+    lines.push(fit_line_to_width(
+        Line::from(vec![
+            Span::styled(label, bg.fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(" ".repeat(pad), bg),
+            Span::styled(format!("{count} "), bg.fg(theme.fg_subtle)),
+        ]),
+        width,
+        bg,
+    ));
     if collapsed {
         return lines;
     }
@@ -65,12 +69,16 @@ pub(crate) fn section_lines(
         } else {
             (theme.fg_subtle, theme.fg_subtle)
         };
-        lines.push(Line::from(vec![
-            Span::styled(" ● ", bg.fg(dot_fg)),
-            Span::styled(name, bg.fg(theme.fg_text)),
-            Span::styled(" ".repeat(pad), bg),
-            Span::styled(format!("{state} "), bg.fg(state_fg)),
-        ]));
+        lines.push(fit_line_to_width(
+            Line::from(vec![
+                Span::styled(" ● ", bg.fg(dot_fg)),
+                Span::styled(name, bg.fg(theme.fg_text)),
+                Span::styled(" ".repeat(pad), bg),
+                Span::styled(format!("{state} "), bg.fg(state_fg)),
+            ]),
+            width,
+            bg,
+        ));
     }
     lines
 }
@@ -90,6 +98,13 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect()
+    }
+
+    fn line_width(line: &Line) -> usize {
+        line.spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum()
     }
 
     #[test]
@@ -134,5 +149,18 @@ mod tests {
         assert!(j.contains("rust"));
         assert!(j.contains("running"));
         assert!(j.contains("idle"));
+    }
+
+    #[test]
+    fn narrow_rows_never_exceed_the_section_width() {
+        let servers = vec![("very-long-devtools-server".to_string(), true)];
+        let lines = section_lines("MCP", &servers, MCP_STATES, false, 8, &theme());
+        for line in &lines {
+            assert!(
+                line_width(line) <= 8,
+                "line width {} exceeded 8: {line:?}",
+                line_width(line)
+            );
+        }
     }
 }

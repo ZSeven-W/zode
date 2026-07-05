@@ -9,6 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zode_core::GitFileStat;
 
 use crate::theme::Theme;
+use crate::ui::tabs::fit_line_to_width;
 
 /// Max file rows shown before collapsing into a "…+k more" row.
 const CAP: usize = 8;
@@ -73,11 +74,15 @@ pub(crate) fn section_lines(
     let pad = width.saturating_sub(
         UnicodeWidthStr::width(label.as_str()) + UnicodeWidthStr::width(count.as_str()) + 1,
     );
-    lines.push(Line::from(vec![
-        Span::styled(label, bg.fg(theme.accent).add_modifier(Modifier::BOLD)),
-        Span::styled(" ".repeat(pad), bg),
-        Span::styled(format!("{count} "), bg.fg(theme.fg_subtle)),
-    ]));
+    lines.push(fit_line_to_width(
+        Line::from(vec![
+            Span::styled(label, bg.fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(" ".repeat(pad), bg),
+            Span::styled(format!("{count} "), bg.fg(theme.fg_subtle)),
+        ]),
+        width,
+        bg,
+    ));
     if collapsed {
         return lines;
     }
@@ -111,13 +116,17 @@ pub(crate) fn section_lines(
             spans.push(Span::styled(removed, bg.fg(Color::Red)));
             spans.push(Span::styled(" ", bg));
         }
-        lines.push(Line::from(spans));
+        lines.push(fit_line_to_width(Line::from(spans), width, bg));
     }
     if overflow > 0 {
-        lines.push(Line::from(Span::styled(
-            format!("   …+{overflow} {}", crate::tr("more")),
-            bg.fg(theme.fg_subtle),
-        )));
+        lines.push(fit_line_to_width(
+            Line::from(Span::styled(
+                format!("   …+{overflow} {}", crate::tr("more")),
+                bg.fg(theme.fg_subtle),
+            )),
+            width,
+            bg,
+        ));
     }
     lines
 }
@@ -135,6 +144,13 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect()
+    }
+
+    fn line_width(line: &Line) -> usize {
+        line.spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum()
     }
 
     fn stat(path: &str, added: Option<u32>, removed: Option<u32>) -> GitFileStat {
@@ -195,5 +211,26 @@ mod tests {
         assert!(t.starts_with('…'));
         assert!(t.ends_with("modified_files.rs"));
         assert!(UnicodeWidthStr::width(t.as_str()) <= 18);
+    }
+
+    #[test]
+    fn narrow_rows_never_exceed_the_section_width() {
+        let files: Vec<GitFileStat> = (0..10)
+            .map(|i| {
+                stat(
+                    &format!("crates/zode-tui/src/ui/very-long-file-{i}.rs"),
+                    Some(1),
+                    Some(1),
+                )
+            })
+            .collect();
+        let lines = section_lines(&files, false, 8, &theme());
+        for line in &lines {
+            assert!(
+                line_width(line) <= 8,
+                "line width {} exceeded 8: {line:?}",
+                line_width(line)
+            );
+        }
     }
 }
