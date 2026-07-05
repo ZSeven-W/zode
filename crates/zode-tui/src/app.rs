@@ -479,6 +479,7 @@ impl TuiApp {
             .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
         let mut tab0 = SessionTab::new(0, Arc::new(engine), session_id);
         tab0.titled = resumed_id.is_some();
+        start_browser_bridge_listener(tab0.engine.browser.clone());
         // A resumed session (--continue/--resume): replay its transcript into
         // the chat and restore its title (the engine already holds the store).
         if let Some(id) = &resumed_id {
@@ -3610,10 +3611,17 @@ impl TuiApp {
     async fn start_browser_pairing(&mut self, _agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         let session = self.active_tab().engine.browser.clone();
         match session.start_pairing().await {
-            Ok(handle) => self.active_tab_mut().chat.push_system(&format!(
-                "Pairing code: {} (valid 2 min). Open the zode extension in Chrome and enter it. WS port {}.",
-                handle.code, handle.port
-            )),
+            Ok(handle) => {
+                let url = browser_extension_pairing_url(handle.port, &handle.code);
+                let open_note = match open_url_in_chrome(&url) {
+                    Ok(()) => "Opened the zode extension page in Chrome.".to_string(),
+                    Err(e) => format!("Could not open Chrome automatically: {e}."),
+                };
+                self.active_tab_mut().chat.push_system(&format!(
+                    "Pairing code: {} (valid 2 min). WS port {}. {open_note} If needed, open: {url}",
+                    handle.code, handle.port
+                ));
+            }
             Err(e) => self.active_tab_mut().chat.push_system(&e.to_string()),
         }
         if self.browser_panel.is_some() {
@@ -7312,6 +7320,65 @@ fn open_in_os_viewer(path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+fn browser_extension_pairing_url(port: u16, code: &str) -> String {
+    format!(
+        "chrome-extension://{}/popup.html?port={port}&code={code}&connect=1",
+        zode_core::browser::bridge::server::EXTENSION_ID
+    )
+}
+
+fn start_browser_bridge_listener(session: Arc<zode_core::browser::BrowserSession>) {
+    if cfg!(test) {
+        return;
+    }
+    if !session.enabled() {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        if let Err(e) = session.ensure_bridge_listening().await {
+            tracing::debug!(error = %e, "browser bridge listener start failed");
+        }
+    });
+}
+
+fn open_url_in_chrome(url: &str) -> Result<(), String> {
+    let mut candidates: Vec<std::process::Command> = Vec::new();
+    if cfg!(target_os = "macos") {
+        let mut chrome = std::process::Command::new("open");
+        chrome.args(["-a", "Google Chrome", url]);
+        candidates.push(chrome);
+
+        let mut fallback = std::process::Command::new("open");
+        fallback.arg(url);
+        candidates.push(fallback);
+    } else if cfg!(target_os = "windows") {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "start", ""]).arg(url);
+        candidates.push(cmd);
+    } else {
+        for binary in ["google-chrome", "chromium", "chromium-browser", "xdg-open"] {
+            let mut cmd = std::process::Command::new(binary);
+            cmd.arg(url);
+            candidates.push(cmd);
+        }
+    }
+
+    let mut last_err = None;
+    for mut cmd in candidates {
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        match cmd.spawn() {
+            Ok(_) => return Ok(()),
+            Err(e) => last_err = Some(e.to_string()),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "no browser opener configured".into()))
+}
+
 /// How many image chips render before collapsing the rest into a `+N` marker.
 /// Keyboard/mouse selection is capped to this so it never targets a hidden chip.
 const MAX_VISIBLE_CHIPS: usize = 4;
@@ -7713,6 +7780,19 @@ mod tests {
         assert!(empty.contains("`true`"));
         assert!(empty.contains("no output"));
         assert!(!empty.contains("```"));
+    }
+
+    #[test]
+    fn browser_extension_pairing_url_auto_connects() {
+        let url = browser_extension_pairing_url(17657, "123456");
+
+        assert!(url.starts_with(&format!(
+            "chrome-extension://{}/popup.html?",
+            zode_core::browser::bridge::server::EXTENSION_ID
+        )));
+        assert!(url.contains("port=17657"));
+        assert!(url.contains("code=123456"));
+        assert!(url.contains("connect=1"));
     }
 
     #[tokio::test]

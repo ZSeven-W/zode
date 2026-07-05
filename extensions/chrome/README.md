@@ -1,17 +1,19 @@
 # zode Chrome bridge
 
-This MV3 extension lets zode drive the Chrome window you are already using, including logged-in sites. It connects only to a local `ws://127.0.0.1:<port>` bridge started by `/browser pair`.
+This MV3 extension lets zode drive the Chrome window you are already using, including logged-in sites. It connects only to a local `ws://127.0.0.1:<port>` bridge started by zode.
 
 Stable extension ID: `hcabdgpfhoclfgnknddadgfhhdnlkloc`
+Default bridge port: `17657`
 
 ## Load unpacked
 
 1. Open `chrome://extensions`.
 2. Enable Developer mode.
 3. Click Load unpacked and choose this `extensions/chrome` directory.
-4. In zode, run `/browser pair`.
-5. Open the zode bridge extension popup, enter the WS port and 6-digit pairing code, then click Pair / Reconnect.
-6. Run `/browser target bridge` before using browser tools against this Chrome profile.
+4. In zode, run `/browser pair`; zode opens the extension page with the WS port and pairing code pre-filled and auto-connects it.
+5. Run `/browser target bridge` before using browser tools against this Chrome profile.
+
+After the first pairing, the extension stores a token and reconnects automatically to zode's default local bridge port when Chrome or zode restarts. Tabs opened through zode's bridge are grouped into a Chrome tab group named `zode`.
 
 ## Update
 
@@ -25,10 +27,10 @@ Run:
 extensions/chrome/pack.sh
 ```
 
-The script creates or reuses `extensions/chrome/zode-bridge.pem`, prints the manifest public key and extension ID, and writes `extensions/chrome/zode-bridge.crx`. Keep the `.pem` private; it is ignored by git. Reusing the same `.pem` preserves the extension ID across future CRX builds.
+The script creates or reuses `extensions/chrome/zode-bridge.pem`, or reuses an existing legacy `extensions/zode-bridge.pem`, prints the manifest public key and extension ID, and writes `extensions/chrome/zode-bridge.crx`. Keep the `.pem` private; it is ignored by git. Reusing the same `.pem` preserves the extension ID across future CRX builds.
 
 Modern Chrome restricts off-store CRX installs. Developer builds usually need Load unpacked, while managed environments can allow CRX installs with enterprise policy such as `ExtensionInstallAllowlist` for the fixed extension ID above.
 
 ## Smoke test
 
-Run `/browser pair`, enter the shown port and code in the popup, confirm the `/browser` panel shows `Extension: Paired`, switch to `/browser target bridge`, then ask the agent to take a browser screenshot.
+Run `/browser pair`, confirm the extension page opens and closes after connecting, confirm the `/browser` panel shows `Extension: Paired`, switch to `/browser target bridge`, then ask the agent to open a new tab and take a browser screenshot. The new tab should appear in the `zode` Chrome tab group.

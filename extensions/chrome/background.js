@@ -4,15 +4,22 @@
 
 const STORAGE_TOKEN = "zodeToken";
 const STORAGE_PORT = "zodePort";
+const DEFAULT_PORT = 17657;
 const KEEPALIVE_MS = 20_000;
 const RECONNECT_MS = 1_000;
+const RECONNECT_ALARM = "zodeReconnect";
+const RECONNECT_ALARM_MINUTES = 1;
 const BUF_CAP = 500;
+const PENDING_REQUEST_CAP = 500;
+const ZODE_TAB_GROUP_TITLE = "zode";
+const ZODE_TAB_GROUP_COLOR = "blue";
 
 let ws = null;
 let keepalive = null;
 let reconnectTimer = null;
 let lastPort = null;
 let attachedTabId = null;
+let zodeGroupId = null;
 let consoleBuf = [];
 let networkBuf = [];
 let pendingRequests = new Map();
@@ -44,7 +51,7 @@ async function getPort() {
     return lastPort;
   }
   const data = await getStored(STORAGE_PORT);
-  lastPort = Number(data[STORAGE_PORT]) || null;
+  lastPort = Number(data[STORAGE_PORT]) || DEFAULT_PORT;
   return lastPort;
 }
 
@@ -69,38 +76,70 @@ async function connect(port, code) {
   clearReconnect();
   closeSocket();
 
-  ws = new WebSocket(`ws://127.0.0.1:${numericPort}`);
-  ws.onopen = async () => {
-    try {
-      if (code) {
-        send({ type: "pair", code: String(code) });
-      } else if (token) {
-        send({ type: "auth", token });
+  await new Promise((resolve, reject) => {
+    let authenticated = false;
+    let settled = false;
+
+    const resolveAuth = () => {
+      authenticated = true;
+      if (!settled) {
+        settled = true;
+        resolve(status());
       }
-      keepalive = setInterval(() => {
-        try {
-          send({ type: "ping" });
-        } catch (_) {
-          // The close handler schedules reconnects.
+    };
+    const rejectAuth = (error) => {
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    };
+
+    ws = new WebSocket(`ws://127.0.0.1:${numericPort}`);
+    ws.onopen = async () => {
+      try {
+        if (code) {
+          send({ type: "pair", code: String(code) });
+        } else if (token) {
+          send({ type: "auth", token });
         }
-      }, KEEPALIVE_MS);
-    } catch (error) {
-      console.error("zode bridge open failed", error);
-      closeSocket();
-    }
-  };
-  ws.onmessage = (event) => {
-    handleMessage(event.data).catch((error) => {
-      console.error("zode bridge message failed", error);
-    });
-  };
-  ws.onerror = () => {};
-  ws.onclose = () => {
-    clearInterval(keepalive);
-    keepalive = null;
-    ws = null;
-    scheduleReconnect();
-  };
+        keepalive = setInterval(() => {
+          try {
+            send({ type: "ping" });
+          } catch (_) {
+            // The close handler schedules reconnects.
+          }
+        }, KEEPALIVE_MS);
+      } catch (error) {
+        console.error("zode bridge open failed", error);
+        rejectAuth(error);
+        closeSocket();
+      }
+    };
+    ws.onmessage = (event) => {
+      handleMessage(event.data)
+        .then((result) => {
+          if (result === "authenticated") {
+            resolveAuth();
+          }
+        })
+        .catch((error) => {
+          console.error("zode bridge message failed", error);
+          rejectAuth(error);
+        });
+    };
+    ws.onerror = () => {
+      rejectAuth(new Error("zode bridge websocket error"));
+    };
+    ws.onclose = () => {
+      clearInterval(keepalive);
+      keepalive = null;
+      ws = null;
+      if (!authenticated) {
+        rejectAuth(new Error("zode bridge connection closed"));
+      }
+      scheduleReconnect();
+    };
+  });
 }
 
 function closeSocket() {
@@ -129,12 +168,23 @@ function scheduleReconnect() {
   clearReconnect();
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
-    const token = await getToken();
-    const port = await getPort();
-    if (token && port) {
-      connect(port, "").catch((error) => console.error("zode bridge reconnect failed", error));
-    }
+    reconnectIfToken().catch((error) => console.error("zode bridge reconnect failed", error));
   }, RECONNECT_MS);
+}
+
+async function reconnectIfToken() {
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+    return;
+  }
+  const token = await getToken();
+  const port = await getPort();
+  if (token && port) {
+    await connect(port, "");
+  }
+}
+
+function installReconnectAlarm() {
+  chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: RECONNECT_ALARM_MINUTES });
 }
 
 function send(value) {
@@ -148,16 +198,20 @@ async function handleMessage(raw) {
   const msg = JSON.parse(raw);
   if (msg.type === "paired") {
     await setToken(msg.token);
-    return;
+    return "authenticated";
   }
-  if (msg.type === "ok" || msg.type === "ping") {
-    return;
+  if (msg.type === "ok") {
+    return "authenticated";
+  }
+  if (msg.type === "ping") {
+    return null;
   }
   if (msg.type === "rejected") {
     await clearToken();
     throw new Error(msg.reason || "zode bridge rejected authentication");
   }
   await handleRpc(msg);
+  return null;
 }
 
 async function handleRpc(request) {
@@ -186,6 +240,7 @@ async function dispatch(request) {
     }
     case "tabs.new": {
       const tab = await chrome.tabs.create({ url: params.url || undefined });
+      await groupZodeTab(tab);
       return toTabInfo(tab);
     }
     case "tabs.close": {
@@ -280,6 +335,52 @@ function push(buf, entry) {
   }
 }
 
+async function groupZodeTab(tab) {
+  if (!tab || tab.id == null || !chrome.tabs.group || !chrome.tabGroups) {
+    return;
+  }
+  if (zodeGroupId != null && (await addTabToGroup(tab.id, zodeGroupId))) {
+    return;
+  }
+  const existingGroupId = await findZodeGroup(tab.windowId);
+  if (existingGroupId != null && (await addTabToGroup(tab.id, existingGroupId))) {
+    return;
+  }
+  try {
+    zodeGroupId = await chrome.tabs.group({ tabIds: [tab.id] });
+    await chrome.tabGroups.update(zodeGroupId, {
+      title: ZODE_TAB_GROUP_TITLE,
+      color: ZODE_TAB_GROUP_COLOR,
+    });
+  } catch (error) {
+    zodeGroupId = null;
+    console.debug("zode tab grouping failed", error);
+  }
+}
+
+async function addTabToGroup(tabId, groupId) {
+  try {
+    await chrome.tabs.group({ groupId, tabIds: [tabId] });
+    zodeGroupId = groupId;
+    return true;
+  } catch (_) {
+    zodeGroupId = null;
+    return false;
+  }
+}
+
+async function findZodeGroup(windowId) {
+  try {
+    const groups = await chrome.tabGroups.query({
+      windowId,
+      title: ZODE_TAB_GROUP_TITLE,
+    });
+    return groups.length > 0 ? groups[0].id : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId === attachedTabId) {
     attachedTabId = null;
@@ -296,7 +397,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       text: (params.args || []).map(argText).join(" "),
     });
   } else if (method === "Network.requestWillBeSent") {
-    pendingRequests.set(params.requestId, {
+    rememberRequest(params.requestId, {
       method: params.request && params.request.method ? params.request.method : "",
       url: params.request && params.request.url ? params.request.url : "",
     });
@@ -309,14 +410,36 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       status: params.response.status || null,
       mime: params.response.mimeType || null,
     });
+  } else if (method === "Network.loadingFailed") {
+    pendingRequests.delete(params.requestId);
   }
 });
+
+function rememberRequest(requestId, request) {
+  if (!requestId) {
+    return;
+  }
+  pendingRequests.delete(requestId);
+  pendingRequests.set(requestId, request);
+  while (pendingRequests.size > PENDING_REQUEST_CAP) {
+    const oldest = pendingRequests.keys().next().value;
+    pendingRequests.delete(oldest);
+  }
+}
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (tabId === attachedTabId) {
     attachedTabId = null;
   }
 });
+
+if (chrome.tabGroups && chrome.tabGroups.onRemoved) {
+  chrome.tabGroups.onRemoved.addListener((group) => {
+    if (group.id === zodeGroupId) {
+      zodeGroupId = null;
+    }
+  });
+}
 
 function argText(arg) {
   if (arg.value != null) {
@@ -341,4 +464,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
-getPort().catch(() => {});
+chrome.runtime.onInstalled.addListener(() => {
+  installReconnectAlarm();
+  reconnectIfToken().catch((error) => console.error("zode bridge install reconnect failed", error));
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  installReconnectAlarm();
+  reconnectIfToken().catch((error) => console.error("zode bridge startup reconnect failed", error));
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RECONNECT_ALARM) {
+    reconnectIfToken().catch((error) => console.error("zode bridge alarm reconnect failed", error));
+  }
+});
+
+installReconnectAlarm();
+reconnectIfToken().catch((error) => console.error("zode bridge initial reconnect failed", error));
