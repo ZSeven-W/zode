@@ -3,6 +3,7 @@
 //! See docs/superpowers/specs/2026-07-03-zode-browser-control-design.md.
 
 pub mod backend;
+pub mod bridge;
 pub mod gate;
 pub mod managed;
 pub mod session;
