@@ -222,6 +222,10 @@ impl BrowserBackend for BridgeBackend {
         self.server.is_connected()
     }
 
+    fn is_bridge(&self) -> bool {
+        true
+    }
+
     async fn close(&self) -> Result<(), BrowserError> {
         self.ext("debugger.detach", serde_json::json!({})).await?;
         Ok(())

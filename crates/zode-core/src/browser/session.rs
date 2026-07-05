@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use crate::config::BrowserConfig;
 
 use super::backend::{BrowserBackend, BrowserError, BrowserTarget};
+use super::bridge::{BridgeBackend, BridgeServer, PairingHandle};
 
 #[async_trait]
 pub trait BackendFactory: Send + Sync + std::fmt::Debug {
@@ -20,6 +21,7 @@ pub trait BackendFactory: Send + Sync + std::fmt::Debug {
 pub struct BrowserSession {
     cfg: BrowserConfig,
     factory: Arc<dyn BackendFactory>,
+    bridge: Arc<BridgeServer>,
     target: StdMutex<BrowserTarget>,
     slot: tokio::sync::Mutex<Option<Arc<dyn BrowserBackend>>>,
     perm_flags: StdMutex<Vec<(String, Arc<AtomicBool>)>>,
@@ -42,16 +44,14 @@ impl BackendLease<'_> {
 
 impl BrowserSession {
     pub fn new(cfg: BrowserConfig, factory: Arc<dyn BackendFactory>) -> Arc<Self> {
-        // Bridge ships in M2; every startup target falls back to Managed for
-        // now, but log when the user explicitly asked for bridge so the
-        // fallback isn't silent.
-        if cfg.default_target() == "bridge" {
-            tracing::debug!("browser.defaultTarget=bridge requested but bridge ships in M2; falling back to managed");
-        }
-        let target = BrowserTarget::Managed;
+        let target = match cfg.default_target() {
+            "bridge" => BrowserTarget::Bridge,
+            _ => BrowserTarget::Managed,
+        };
         Arc::new(Self {
             cfg,
             factory,
+            bridge: BridgeServer::new(),
             target: StdMutex::new(target),
             slot: tokio::sync::Mutex::new(None),
             perm_flags: StdMutex::new(Vec::new()),
@@ -59,18 +59,24 @@ impl BrowserSession {
     }
 
     pub async fn lease(&self) -> Result<BackendLease<'_>, BrowserError> {
-        if matches!(self.target(), BrowserTarget::Bridge) {
-            return Err(BrowserError::Protocol(
-                "bridge target ships in M2; switch back with /browser target managed".into(),
-            ));
-        }
+        let want_bridge = matches!(self.target(), BrowserTarget::Bridge);
         let mut guard = self.slot.lock().await;
-        let dead = match guard.as_ref() {
-            Some(b) => !b.is_alive().await,
+        let needs_new = match guard.as_ref() {
+            Some(b) => !b.is_alive().await || b.is_bridge() != want_bridge,
             None => true,
         };
-        if dead {
-            *guard = Some(self.factory.create(&self.cfg).await?);
+        if needs_new {
+            *guard = Some(if want_bridge {
+                if !self.bridge.is_connected() {
+                    return Err(BrowserError::Dead(
+                        "bridge not connected; run /browser pair and click the extension".into(),
+                    ));
+                }
+                let backend: Arc<dyn BrowserBackend> = BridgeBackend::new(self.bridge.clone());
+                backend
+            } else {
+                self.factory.create(&self.cfg).await?
+            });
         }
         Ok(BackendLease { guard })
     }
@@ -89,13 +95,16 @@ impl BrowserSession {
     }
 
     pub fn set_target(&self, t: BrowserTarget) -> Result<(), BrowserError> {
-        if matches!(t, BrowserTarget::Bridge) {
-            return Err(BrowserError::Protocol(
-                "bridge target ships in M2 (extension pairing)".into(),
-            ));
-        }
         *self.target.lock().unwrap() = t;
         Ok(())
+    }
+
+    pub async fn start_pairing(&self) -> Result<PairingHandle, BrowserError> {
+        self.bridge.start_pairing().await
+    }
+
+    pub fn bridge_connected(&self) -> bool {
+        self.bridge.is_connected()
     }
 
     pub fn register_perm_flag(&self, tool: &str, flag: Arc<AtomicBool>) {
@@ -187,11 +196,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_target_is_rejected_in_m1() {
+    async fn set_target_bridge_now_succeeds() {
         let s = BrowserSession::new(BrowserConfig::default(), MockFactory::new());
-        let err = s.set_target(BrowserTarget::Bridge).unwrap_err();
-        assert!(err.to_string().contains("M2"));
-        assert!(matches!(s.target(), BrowserTarget::Managed));
+        s.set_target(BrowserTarget::Bridge).unwrap();
+        assert!(matches!(s.target(), BrowserTarget::Bridge));
+    }
+
+    #[tokio::test]
+    async fn default_target_bridge_selects_bridge() {
+        let cfg = BrowserConfig {
+            default_target: Some("bridge".into()),
+            ..BrowserConfig::default()
+        };
+        let s = BrowserSession::new(cfg, MockFactory::new());
+        assert!(matches!(s.target(), BrowserTarget::Bridge));
+    }
+
+    #[tokio::test]
+    async fn lease_bridge_without_pairing_is_dead_with_hint() {
+        let s = BrowserSession::new(BrowserConfig::default(), MockFactory::new());
+        s.set_target(BrowserTarget::Bridge).unwrap();
+        let err = match s.lease().await {
+            Ok(_) => panic!("bridge lease should require pairing first"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, BrowserError::Dead(_)));
+        assert!(err.to_string().contains("pair"));
     }
 
     #[tokio::test]

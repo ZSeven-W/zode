@@ -132,6 +132,11 @@ pub trait BrowserBackend: Send + Sync + std::fmt::Debug {
     /// Check if the browser instance is still alive.
     async fn is_alive(&self) -> bool;
 
+    /// Whether this backend talks to the external bridge instead of the managed browser.
+    fn is_bridge(&self) -> bool {
+        false
+    }
+
     /// Close the browser instance.
     async fn close(&self) -> Result<(), BrowserError>;
 }
