@@ -168,7 +168,7 @@ function scheduleReconnect() {
   clearReconnect();
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
-    reconnectIfToken().catch((error) => console.error("zode bridge reconnect failed", error));
+    reconnectAutomatically();
   }, RECONNECT_MS);
 }
 
@@ -185,6 +185,12 @@ async function reconnectIfToken() {
 
 function installReconnectAlarm() {
   chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: RECONNECT_ALARM_MINUTES });
+}
+
+function reconnectAutomatically() {
+  reconnectIfToken().catch((error) => {
+    console.debug("zode bridge automatic reconnect skipped", error);
+  });
 }
 
 function send(value) {
@@ -466,19 +472,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 chrome.runtime.onInstalled.addListener(() => {
   installReconnectAlarm();
-  reconnectIfToken().catch((error) => console.error("zode bridge install reconnect failed", error));
+  reconnectAutomatically();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   installReconnectAlarm();
-  reconnectIfToken().catch((error) => console.error("zode bridge startup reconnect failed", error));
+  reconnectAutomatically();
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === RECONNECT_ALARM) {
-    reconnectIfToken().catch((error) => console.error("zode bridge alarm reconnect failed", error));
+    reconnectAutomatically();
   }
 });
 
 installReconnectAlarm();
-reconnectIfToken().catch((error) => console.error("zode bridge initial reconnect failed", error));
+reconnectAutomatically();
