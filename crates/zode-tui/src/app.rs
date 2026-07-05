@@ -4232,11 +4232,17 @@ impl TuiApp {
                         zode_core::browser::BrowserTarget::Managed
                     }
                 };
+                let want_bridge = matches!(next, zode_core::browser::BrowserTarget::Bridge);
                 match engine.browser.set_target(next) {
                     // set_target mutates the shared session synchronously (no
                     // reassembly involved), so a fresh snapshot already
                     // reflects it.
-                    Ok(()) => status = self.browser_panel_status(),
+                    Ok(()) => {
+                        if want_bridge {
+                            ensure_browser_bridge_and_maybe_reconnect(engine.browser.clone()).await;
+                        }
+                        status = self.browser_panel_status();
+                    }
                     Err(e) => self.active_tab_mut().chat.push_system(&e.to_string()),
                 }
             }
@@ -5477,10 +5483,15 @@ impl TuiApp {
                         } else {
                             zode_core::browser::BrowserTarget::Managed
                         };
-                        let msg = match self.active_tab().engine.browser.set_target(t) {
+                        let want_bridge = matches!(t, zode_core::browser::BrowserTarget::Bridge);
+                        let session = self.active_tab().engine.browser.clone();
+                        let msg = match session.set_target(t) {
                             Ok(()) => format!("browser target: {target}"),
                             Err(e) => e.to_string(),
                         };
+                        if want_bridge {
+                            ensure_browser_bridge_and_maybe_reconnect(session).await;
+                        }
                         self.active_tab_mut().chat.push_system(&msg);
                     }
                     Ok(BrowserCommand::Screenshot { path }) => {
@@ -7327,6 +7338,13 @@ fn browser_extension_pairing_url(port: u16, code: &str) -> String {
     )
 }
 
+fn browser_extension_connect_url(port: u16) -> String {
+    format!(
+        "chrome-extension://{}/popup.html?port={port}&connect=1",
+        zode_core::browser::bridge::server::EXTENSION_ID
+    )
+}
+
 fn start_browser_bridge_listener(session: Arc<zode_core::browser::BrowserSession>) {
     if cfg!(test) {
         return;
@@ -7338,10 +7356,27 @@ fn start_browser_bridge_listener(session: Arc<zode_core::browser::BrowserSession
         return;
     };
     handle.spawn(async move {
-        if let Err(e) = session.ensure_bridge_listening().await {
+        if matches!(session.target(), zode_core::browser::BrowserTarget::Bridge) {
+            ensure_browser_bridge_and_maybe_reconnect(session).await;
+        } else if let Err(e) = session.ensure_bridge_listening().await {
             tracing::debug!(error = %e, "browser bridge listener start failed");
         }
     });
+}
+
+async fn ensure_browser_bridge_and_maybe_reconnect(
+    session: Arc<zode_core::browser::BrowserSession>,
+) {
+    match session.ensure_bridge_listening().await {
+        Ok(port) if session.bridge_token_available() => {
+            let url = browser_extension_connect_url(port);
+            if let Err(e) = open_url_in_chrome(&url) {
+                tracing::debug!(error = %e, "browser bridge reconnect page open failed");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::debug!(error = %e, "browser bridge listener start failed"),
+    }
 }
 
 fn open_url_in_chrome(url: &str) -> Result<(), String> {
@@ -7793,6 +7828,19 @@ mod tests {
         assert!(url.contains("port=17657"));
         assert!(url.contains("code=123456"));
         assert!(url.contains("connect=1"));
+    }
+
+    #[test]
+    fn browser_extension_connect_url_uses_stored_token() {
+        let url = browser_extension_connect_url(17657);
+
+        assert_eq!(
+            url,
+            format!(
+                "chrome-extension://{}/popup.html?port=17657&connect=1",
+                zode_core::browser::bridge::server::EXTENSION_ID
+            )
+        );
     }
 
     #[tokio::test]

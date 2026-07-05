@@ -16,13 +16,7 @@ function makeChrome(storage = {}) {
         remove: async () => {},
       },
     },
-    alarms: {
-      create: () => {},
-      onAlarm: { addListener: () => {} },
-    },
     runtime: {
-      onInstalled: { addListener: () => {} },
-      onStartup: { addListener: () => {} },
       onMessage: { addListener: () => {} },
     },
     tabs: {
@@ -47,29 +41,23 @@ function makeChrome(storage = {}) {
   };
 }
 
-class FailingWebSocket {
-  static CONNECTING = 0;
-  static OPEN = 1;
-
-  constructor() {
-    this.readyState = FailingWebSocket.CONNECTING;
-    setImmediate(() => {
-      this.onerror?.(new Error("connect refused"));
-      this.onclose?.();
-    });
-  }
-
-  close() {}
-}
-
 async function flushImmediates(count = 5) {
   for (let i = 0; i < count; i += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
 }
 
-async function testAutomaticReconnectFailureDoesNotLogError() {
+async function testBackgroundStartupDoesNotTouchWebSocket() {
   const consoleErrors = [];
+  let websocketAttempts = 0;
+  class CountingWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+
+    constructor() {
+      websocketAttempts += 1;
+    }
+  }
   const sandbox = {
     console: {
       ...console,
@@ -81,17 +69,18 @@ async function testAutomaticReconnectFailureDoesNotLogError() {
     clearTimeout: () => {},
     setInterval: () => 1,
     clearInterval: () => {},
-    WebSocket: FailingWebSocket,
+    WebSocket: CountingWebSocket,
     chrome: makeChrome({ zodeToken: "token" }),
   };
 
   vm.runInNewContext(backgroundSource, sandbox, { filename: backgroundPath });
   await flushImmediates();
 
+  assert.equal(websocketAttempts, 0);
   assert.deepEqual(consoleErrors, []);
 }
 
 (async () => {
-  await testAutomaticReconnectFailureDoesNotLogError();
+  await testBackgroundStartupDoesNotTouchWebSocket();
   console.log("background tests passed");
 })();
