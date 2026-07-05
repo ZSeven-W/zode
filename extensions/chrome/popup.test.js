@@ -85,7 +85,7 @@ function makeSandbox({ search = "", response }) {
 }
 
 async function flush() {
-  for (let i = 0; i < 5; i += 1) {
+  for (let i = 0; i < 10; i += 1) {
     await Promise.resolve();
   }
 }
@@ -129,6 +129,53 @@ async function testDisconnectedStatusShowsConnectView() {
   assert.equal(elements["form-status"].textContent, "Not connected");
 }
 
+async function testAutoConnectFromQueryPairsWithoutStatusRace() {
+  const { sandbox, elements, messages } = makeSandbox({
+    search: "?port=17657&code=127179&connect=1",
+    response: async (message) => {
+      if (message.type === "zode-pair") {
+        return { ok: true, status: { connected: true, port: message.port } };
+      }
+      throw new Error(`unexpected message ${message.type}`);
+    },
+  });
+
+  vm.runInNewContext(popupSource, sandbox, { filename: popupPath });
+  await flush();
+
+  assert.deepEqual(messages.map((message) => message.type), ["zode-pair"]);
+  assert.equal(messages[0].port, 17657);
+  assert.equal(messages[0].code, "127179");
+  assert.equal(elements["connected-view"].hidden, false);
+  assert.equal(elements["connect-view"].hidden, true);
+  assert.equal(elements["status-detail"].textContent, "Port 17657");
+}
+
+async function testDisconnectedStatusSilentlyReconnectsWhenTokenAvailable() {
+  const { sandbox, elements, messages } = makeSandbox({
+    response: async (message) => {
+      if (message.type === "zode-status") {
+        return {
+          ok: true,
+          status: { connected: false, port: 17657, canReconnect: true },
+        };
+      }
+      if (message.type === "zode-reconnect") {
+        return { ok: true, status: { connected: true, port: 17657 } };
+      }
+      throw new Error(`unexpected message ${message.type}`);
+    },
+  });
+
+  vm.runInNewContext(popupSource, sandbox, { filename: popupPath });
+  await flush();
+
+  assert.deepEqual(messages.map((message) => message.type), ["zode-status", "zode-reconnect"]);
+  assert.equal(elements["connected-view"].hidden, false);
+  assert.equal(elements["connect-view"].hidden, true);
+  assert.equal(elements["status-detail"].textContent, "Port 17657");
+}
+
 function testHiddenPanelsAreCssHidden() {
   assert.match(popupHtmlSource, /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/i);
 }
@@ -137,5 +184,7 @@ function testHiddenPanelsAreCssHidden() {
   testHiddenPanelsAreCssHidden();
   await testConnectedStatusShowsConnectedView();
   await testDisconnectedStatusShowsConnectView();
+  await testAutoConnectFromQueryPairsWithoutStatusRace();
+  await testDisconnectedStatusSilentlyReconnectsWhenTokenAvailable();
   console.log("popup tests passed");
 })();
