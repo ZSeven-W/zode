@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="104 104 816 816" role="img" aria-labelledby="title desc">
+  <title id="title">zode cold blue cropped transparent icon v7</title>
+  <desc id="desc">A cropped zode icon with transparent outer background, dark terminal panel, geometric Z mark, and no green cursor block.</desc>
+  <defs>
+    <radialGradient id="panel" cx="50%" cy="42%" r="72%">
+      <stop offset="0" stop-color="#0b1f3a"/>
+      <stop offset="0.58" stop-color="#071322"/>
+      <stop offset="1" stop-color="#050b16"/>
+    </radialGradient>
+    <linearGradient id="mark" x1="334" y1="285" x2="748" y2="716" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7dd3fc"/>
+      <stop offset="0.42" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <filter id="markShadow" x="-28%" y="-30%" width="156%" height="166%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="24" stdDeviation="30" flood-color="#2563eb" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <rect x="106" y="106" width="812" height="812" rx="176" fill="url(#panel)" stroke="#164672" stroke-width="3"/>
+
+  <g filter="url(#markShadow)">
+    <path
+      d="M274 428 L352 512 L274 596"
+      fill="none"
+      stroke="#7dd3fc"
+      stroke-width="54"
+      stroke-linecap="round"
+      stroke-linejoin="round"/>
+    <path
+      d="M418 326 H718 L440 696 H742"
+      fill="none"
+      stroke="url(#mark)"
+      stroke-width="84"
+      stroke-linecap="round"
+      stroke-linejoin="round"/>
+  </g>
+
+  <path d="M272 794H752" stroke="#164672" stroke-width="7" stroke-linecap="round" opacity="0.82"/>
+</svg>
