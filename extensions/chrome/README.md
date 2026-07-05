@@ -13,7 +13,7 @@ Default bridge port: `17657`
 4. In zode, run `/browser pair`; zode opens the extension page with the WS port and pairing code pre-filled and auto-connects it.
 5. Run `/browser target bridge` before using browser tools against this Chrome profile.
 
-After the first pairing, the extension stores a token and reconnects automatically to zode's default local bridge port when Chrome or zode restarts. Tabs opened through zode's bridge are grouped into a Chrome tab group named `zode`.
+After the first pairing, the extension stores a token. It stays idle while zode is not running; when zode is running with bridge target selected, zode opens the extension page to reconnect with the stored token. Tabs opened through zode's bridge are grouped into a Chrome tab group named `zode`.
 
 ## Update
 

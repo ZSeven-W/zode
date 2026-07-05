@@ -112,6 +112,10 @@ impl BrowserSession {
         self.bridge.is_connected()
     }
 
+    pub fn bridge_token_available(&self) -> bool {
+        self.bridge.has_saved_token()
+    }
+
     pub fn register_perm_flag(&self, tool: &str, flag: Arc<AtomicBool>) {
         self.perm_flags
             .lock()

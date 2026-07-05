@@ -116,6 +116,10 @@ impl BridgeServer {
             .unwrap_or(false)
     }
 
+    pub fn has_saved_token(&self) -> bool {
+        BridgeToken::load().is_some()
+    }
+
     pub(crate) async fn call(
         &self,
         kind: RpcKind,
