@@ -724,6 +724,11 @@ cargo deny check                        # licenses / advisories / bans
 
 Contributions welcome! Please follow [Conventional Commits](https://www.conventionalcommits.org/) — `<type>(<scope>): <subject>` with scopes like `core`, `tui`, `cli`, `tools`, `config`, `build`, `ci`, `docs`.
 
+## Acknowledgements
+
+Thanks to rtk for the output-compression ideas and to ripgrep for the fast
+search engine that powers Zode's Grep tool.
+
 ## License
 
 [MIT](LICENSE) &copy; ZSeven-W
