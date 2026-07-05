@@ -23,3 +23,6 @@ docs/superpowers
 
 # Chrome extension private keys
 extensions/chrome/*.pem
+extensions/chrome/*.crx
+extensions/*.pem
+extensions/*.crx
