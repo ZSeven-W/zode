@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 // Bridge types are introduced before the server/backend tasks wire them in.
 
+pub mod server;
+pub use server::{BridgeServer, PairingHandle};
+
 use rand::rngs::OsRng;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -14,6 +17,7 @@ const TOKEN_FILE: &str = "browser-bridge.json";
 
 /// One-shot pairing challenge. 6-digit code, 2-min TTL, single-use, invalidated
 /// after 5 wrong attempts.
+#[derive(Debug)]
 pub(crate) struct Pairing {
     code: String,
     expiry: Instant,
