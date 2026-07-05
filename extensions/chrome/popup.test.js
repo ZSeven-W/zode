@@ -190,13 +190,18 @@ function styleBlock(selector) {
 function testSettingsButtonIsLargerAndCentered() {
   const panelTop = styleBlock(".panel-top");
   const button = styleBlock(".icon-button");
+  const glyph = styleBlock(".icon-button-glyph");
 
-  assert.match(panelTop, /min-height:\s*32px/i);
-  assert.match(button, /height:\s*32px/i);
-  assert.match(button, /width:\s*32px/i);
-  assert.match(button, /font-size:\s*16px/i);
+  assert.match(popupHtmlSource, /<button[^>]+class="icon-button"[^>]*>\s*<span class="icon-button-glyph" aria-hidden="true">&#9881;<\/span>\s*<\/button>/i);
+  assert.match(panelTop, /min-height:\s*36px/i);
+  assert.match(button, /height:\s*36px/i);
+  assert.match(button, /width:\s*36px/i);
+  assert.match(button, /font-size:\s*18px/i);
   assert.match(button, /line-height:\s*1/i);
   assert.match(button, /place-items:\s*center/i);
+  assert.match(glyph, /display:\s*block/i);
+  assert.match(glyph, /line-height:\s*1/i);
+  assert.match(glyph, /transform:\s*translateY\(1px\)/i);
 }
 
 function testBrandMarkUsesExtensionIcon() {

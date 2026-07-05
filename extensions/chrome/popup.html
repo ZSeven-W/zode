@@ -14,7 +14,9 @@
           <span class="dot" aria-hidden="true"></span>
           <span id="status-text">Connected</span>
         </span>
-        <button class="icon-button" type="button" title="Bridge settings" aria-label="Bridge settings">&#9881;</button>
+        <button class="icon-button" type="button" title="Bridge settings" aria-label="Bridge settings">
+          <span class="icon-button-glyph" aria-hidden="true">&#9881;</span>
+        </button>
       </div>
       <p class="copy">Control Chrome with zode.</p>
       <p id="status-detail" class="meta"></p>
@@ -100,7 +102,7 @@
     align-items: center;
     display: flex;
     justify-content: space-between;
-    min-height: 32px;
+    min-height: 36px;
   }
 
   .pill {
@@ -133,12 +135,18 @@
     border-radius: 50%;
     color: #6b7178;
     display: inline-grid;
-    font-size: 16px;
-    height: 32px;
+    font-size: 18px;
+    height: 36px;
     line-height: 1;
     padding: 0;
     place-items: center;
-    width: 32px;
+    width: 36px;
+  }
+
+  .icon-button-glyph {
+    display: block;
+    line-height: 1;
+    transform: translateY(1px);
   }
 
   .icon-button:hover {
