@@ -28,6 +28,12 @@ async function getToken() {
   return data[STORAGE_TOKEN] || null;
 }
 
+async function getPort() {
+  const data = await getStored(STORAGE_PORT);
+  const port = Number(data[STORAGE_PORT]);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+}
+
 async function setToken(token) {
   await chrome.storage.local.set({ [STORAGE_TOKEN]: token });
 }
@@ -41,11 +47,13 @@ async function setPort(port) {
   await chrome.storage.local.set({ [STORAGE_PORT]: port });
 }
 
-function status() {
+function statusSnapshot(port = lastPort, token = null) {
+  const connected = ws != null && ws.readyState === WebSocket.OPEN;
   return {
-    connected: ws != null && ws.readyState === WebSocket.OPEN,
-    port: lastPort,
+    connected,
+    port,
     attachedTabId,
+    canReconnect: !connected && port != null && token != null,
   };
 }
 
@@ -61,7 +69,7 @@ async function connect(port, code) {
   await setPort(numericPort);
   closeSocket();
 
-  await new Promise((resolve, reject) => {
+  return await new Promise((resolve, reject) => {
     let authenticated = false;
     let settled = false;
 
@@ -69,7 +77,7 @@ async function connect(port, code) {
       authenticated = true;
       if (!settled) {
         settled = true;
-        resolve(status());
+        resolve(statusSnapshot(numericPort, token));
       }
     };
     const rejectAuth = (error) => {
@@ -124,6 +132,23 @@ async function connect(port, code) {
       }
     };
   });
+}
+
+async function connectionStatus() {
+  const [storedPort, token] = await Promise.all([getPort(), getToken()]);
+  const port = lastPort || storedPort;
+  if (lastPort == null && storedPort != null) {
+    lastPort = storedPort;
+  }
+  return statusSnapshot(port, token);
+}
+
+async function reconnectStored(port) {
+  const targetPort = port || (await getPort());
+  if (!targetPort) {
+    throw new Error("no stored zode bridge port");
+  }
+  return await connect(targetPort, "");
 }
 
 function closeSocket() {
@@ -413,12 +438,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
   if (message.type === "zode-status") {
-    sendResponse({ ok: true, status: status() });
-    return false;
+    connectionStatus()
+      .then((status) => sendResponse({ ok: true, status }))
+      .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
+    return true;
   }
   if (message.type === "zode-pair") {
     connect(message.port, message.code || "")
-      .then(() => sendResponse({ ok: true, status: status() }))
+      .then((status) => sendResponse({ ok: true, status }))
+      .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
+    return true;
+  }
+  if (message.type === "zode-reconnect") {
+    reconnectStored(message.port)
+      .then((status) => sendResponse({ ok: true, status }))
       .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
     return true;
   }

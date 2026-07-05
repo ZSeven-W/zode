@@ -11,9 +11,6 @@ const query = new URLSearchParams(window.location.search);
 
 hydrateFromQuery();
 renderVersion();
-refreshStatus().catch(() => {
-  renderDisconnected("Not connected");
-});
 
 button.addEventListener("click", async () => {
   await connectFromInputs({ closeOnSuccess: true });
@@ -22,6 +19,10 @@ button.addEventListener("click", async () => {
 if (query.get("connect") === "1") {
   queueMicrotask(() => {
     connectFromInputs({ closeOnSuccess: true }).catch(() => {});
+  });
+} else {
+  refreshStatus().catch(() => {
+    renderDisconnected("Not connected");
   });
 }
 
@@ -45,8 +46,30 @@ async function refreshStatus() {
   const response = await chrome.runtime.sendMessage({ type: "zode-status" });
   if (response && response.ok && response.status && response.status.connected) {
     renderConnected(response.status);
+  } else if (response && response.ok && response.status && response.status.canReconnect) {
+    await reconnectStored(response.status);
   } else {
     renderDisconnected("Not connected");
+  }
+}
+
+async function reconnectStored(status) {
+  renderDisconnected("Connecting...");
+  button.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "zode-reconnect",
+      port: status.port,
+    });
+    if (response && response.ok && response.status && response.status.connected) {
+      renderConnected(response.status);
+    } else {
+      renderDisconnected("Not connected");
+      button.disabled = false;
+    }
+  } catch (_) {
+    renderDisconnected("Not connected");
+    button.disabled = false;
   }
 }
 
