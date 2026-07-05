@@ -16,17 +16,44 @@ use zode_core::{EngineTemplate, ZodeEngine};
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("ZODE_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let args = Args::parse();
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    init_tracing(&args, stdout_is_tty);
     let exit = run(args).await;
     std::process::exit(exit);
+}
+
+fn init_tracing(args: &Args, stdout_is_tty: bool) {
+    let filter = tracing_subscriber::EnvFilter::try_from_env("ZODE_LOG").unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(default_tracing_filter(args, stdout_is_tty))
+    });
+    if tracing_writes_to_terminal(args, stdout_is_tty) {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::sink)
+            .init();
+    }
+}
+
+fn default_tracing_filter(args: &Args, stdout_is_tty: bool) -> &'static str {
+    if launches_full_tui(args, stdout_is_tty) {
+        "off"
+    } else {
+        "warn"
+    }
+}
+
+fn tracing_writes_to_terminal(args: &Args, stdout_is_tty: bool) -> bool {
+    !launches_full_tui(args, stdout_is_tty)
+}
+
+fn launches_full_tui(args: &Args, stdout_is_tty: bool) -> bool {
+    args.command.is_none() && args.print.is_none() && !args.no_tui && stdout_is_tty
 }
 
 async fn run(args: Args) -> i32 {
@@ -331,5 +358,40 @@ async fn attach_session(
             }
         },
         Err(_) => (engine, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn full_tui_defaults_tracing_filter_off() {
+        let args = Args::parse_from(["zode"]);
+
+        assert_eq!(default_tracing_filter(&args, true), "off");
+    }
+
+    #[test]
+    fn non_tui_surfaces_keep_warn_tracing_filter() {
+        let print = Args::parse_from(["zode", "--print", "hi"]);
+        let no_tui = Args::parse_from(["zode", "--no-tui"]);
+        let piped = Args::parse_from(["zode"]);
+        let doctor = Args::parse_from(["zode", "doctor"]);
+
+        assert_eq!(default_tracing_filter(&print, true), "warn");
+        assert_eq!(default_tracing_filter(&no_tui, true), "warn");
+        assert_eq!(default_tracing_filter(&piped, false), "warn");
+        assert_eq!(default_tracing_filter(&doctor, true), "warn");
+    }
+
+    #[test]
+    fn full_tui_tracing_does_not_write_to_terminal() {
+        let tui = Args::parse_from(["zode"]);
+        let print = Args::parse_from(["zode", "--print", "hi"]);
+
+        assert!(!tracing_writes_to_terminal(&tui, true));
+        assert!(tracing_writes_to_terminal(&print, true));
     }
 }
