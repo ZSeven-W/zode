@@ -249,6 +249,14 @@ pub struct PluginsConfig {
     pub disabled: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ToolsConfig {
+    /// Whether RTK-style Bash stdout compression is enabled. None -> true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compress_output: Option<bool>,
+}
+
 /// Default OpenPencil release the installer/launcher targets. zode and
 /// OpenPencil version independently — do NOT use zode's CARGO_PKG_VERSION.
 pub const DEFAULT_OPENPENCIL_VERSION: &str = "0.8.0";
@@ -599,6 +607,9 @@ pub struct ZodeConfig {
     /// LSP). Default-on, so this only records the disabled ones.
     #[serde(skip_serializing_if = "is_default")]
     pub plugins: PluginsConfig,
+    /// Built-in tool behavior knobs.
+    #[serde(skip_serializing_if = "is_default")]
+    pub tools: ToolsConfig,
     /// Language-server configuration for the built-in LSP plugin.
     #[serde(skip_serializing_if = "is_default")]
     pub lsp: LspConfig,
@@ -712,6 +723,11 @@ impl ZodeConfig {
     /// prompt (when the project uses OpenSpec). Defaults to `true`.
     pub fn openspec_awareness(&self) -> bool {
         self.openspec_awareness.unwrap_or(true)
+    }
+
+    /// Whether RTK-style Bash stdout compression is on. Default true.
+    pub fn compress_output(&self) -> bool {
+        self.tools.compress_output.unwrap_or(true)
     }
 
     /// Fill missing provider connection details from env vars. Anthropic /
@@ -1077,6 +1093,9 @@ impl ZodeConfig {
         }
         if !other.plugins.disabled.is_empty() {
             self.plugins.disabled = other.plugins.disabled;
+        }
+        if other.tools.compress_output.is_some() {
+            self.tools.compress_output = other.tools.compress_output;
         }
         // Project LSP servers extend (and override same-key) the global set.
         self.lsp.servers.extend(other.lsp.servers);
@@ -1866,6 +1885,15 @@ mod tests {
         };
         base2.merge_from(proj);
         assert!(base2.skill_discipline()); // project true wins
+    }
+
+    #[test]
+    fn compress_output_defaults_true_and_parses() {
+        let cfg: ZodeConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.compress_output());
+        let cfg2: ZodeConfig =
+            serde_json::from_str(r#"{"tools":{"compressOutput":false}}"#).unwrap();
+        assert!(!cfg2.compress_output());
     }
 
     #[test]

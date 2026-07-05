@@ -19,8 +19,8 @@ use agent::skills::SkillRegistry;
 use agent::stream::EventStream;
 use agent::tool::{SafetyClass, Tool, ToolRegistry, ToolUseContext};
 use agent_tools_code::{
-    register_default_with_todo, BashOutputTool, BashRunTool, BashSessionRegistry, KillShellTool,
-    TaskTool, TodoState, ToolSearchTool, WorkspacePolicy,
+    register_default_with_todo, BashOutputTool, BashRunTool, BashSessionRegistry, BashTool,
+    KillShellTool, TaskTool, TodoState, ToolSearchTool, WorkspacePolicy,
 };
 // QueryLoop's builder takes std::sync::Mutex (not tokio's). We never hold
 // these guards across an await — callers snapshot (MessageStore: Clone)
@@ -653,12 +653,19 @@ impl ZodeEngine {
         let mut base = ToolRegistry::new();
         let todo_state = carry.todo_state.clone().unwrap_or_default();
         register_default_with_todo(&mut base, policy.clone(), todo_state.clone());
+        base.register(Arc::new(BashTool::with_compress_output(
+            policy.clone(),
+            cfg.compress_output(),
+        )));
         let bash_sessions = carry.bash_sessions.clone().unwrap_or_default();
         base.register(Arc::new(BashRunTool::new(
             policy.clone(),
             bash_sessions.clone(),
         )));
-        base.register(Arc::new(BashOutputTool::new(bash_sessions.clone())));
+        base.register(Arc::new(BashOutputTool::with_compress_output(
+            bash_sessions.clone(),
+            cfg.compress_output(),
+        )));
         base.register(Arc::new(KillShellTool::new(bash_sessions.clone())));
 
         // Goal auto-loop completion signal. Created BEFORE tool registration so
