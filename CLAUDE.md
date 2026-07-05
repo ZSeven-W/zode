@@ -249,9 +249,10 @@ response — it is never sent as a credential.
 
 ## Browser control
 
-Zode has a built-in browser-automation subsystem (M1: a process-wide
-chromiumoxide-managed Chrome; extension pairing is M2). It is built across
-two crates plus the CLI entrypoint:
+Zode has a built-in browser-automation subsystem: a process-wide
+chromiumoxide-managed Chrome backend plus an extension bridge for the user's
+real Chrome profile. It is built across two crates, the CLI entrypoint, and a
+Chrome extension:
 
 - `zode-core/src/browser/` — `backend.rs` (`BrowserBackend` trait + types +
   `BrowserError`), `managed.rs` (chromiumoxide `ManagedBackend` + launch
@@ -259,10 +260,13 @@ two crates plus the CLI entrypoint:
   backend slot, serialized leases), `gate.rs` (`BrowserGateView`, via the
   generalized `PermissionGatedTool` `GateView` hook), `tools.rs` (the four
   `browser_*` tools), `snapshot_js.rs` (in-page JS that produces the
-  ref-annotated accessibility outline).
+  ref-annotated accessibility outline), and `bridge/` (pairing/token state,
+  localhost WebSocket server, and `BridgeBackend` RPC mapping).
 - `zode-core/src/commands/browser.rs` — `/browser <subcommand>` parser.
 - `zode-tui/src/ui/dialog/browser_panel.rs` — the `/browser` status panel;
   wired into `zode-tui/src/app.rs` alongside the slash-command handler.
+- `extensions/chrome/` — MV3 extension, popup, pack script, and CRX artifact
+  for controlling real Chrome through `chrome.debugger`.
 
 ### `browser_*` tools
 
@@ -304,8 +308,8 @@ Enter/Tab to confirm, Esc to dismiss).
 | `/browser status` | Print target/running/headless state (session-local, no MCP-style round trip) |
 | `/browser launch` | Launch the managed browser now |
 | `/browser close` | Close the managed browser |
-| `/browser pair` | Placeholder — replies "extension bridge ships in M2" |
-| `/browser target <managed\|bridge>` | Switch target; `bridge` is rejected with an M2 error message (see below) |
+| `/browser pair` | Start a localhost bridge listener and print a 6-digit pairing code plus WS port for the Chrome extension |
+| `/browser target <managed\|bridge>` | Switch target; `bridge` routes tools through the paired Chrome extension |
 | `/browser screenshot [path]` | Take a screenshot, optionally to an explicit path |
 
 ### `--browser` / `--no-browser` CLI flags
@@ -339,7 +343,9 @@ Defaults (all fields optional; getters supply these when absent):
 - `headless` → `false`.
 - `profileDir` → `null`, meaning `~/.zode/browser-profile` (or
   `$ZODE_CONFIG_DIR/browser-profile` when that env var is set).
-- `defaultTarget` → `"managed"`.
+- `defaultTarget` → `"managed"`. `"bridge"` is also valid; if zode starts
+  with bridge selected before the extension is connected, the first browser
+  tool returns a pairing hint instead of silently falling back to managed.
 - `viewport` → `1280x800`.
 
 ### Screenshot return path (content-blocks sentinel)
@@ -377,11 +383,18 @@ M1 story for retaining login state across sessions (cookies persist in
 that profile directory between launches). There is no cross-profile
 credential sharing with the user's everyday browser.
 
-Bridge/extension pairing (`BrowserTarget::Bridge`, `/browser pair`, the
-panel's "Reconnect extension" row) is explicitly out of scope for M1:
-`BrowserSession::set_target(Bridge)` and `BrowserSession::lease()` both
-return an error naming M2, and the TUI surfaces that as a plain message
-rather than attempting a connection.
+### Chrome extension bridge
+
+The bridge target controls the user's real Chrome profile. Run `/browser pair`
+to start a `127.0.0.1` WebSocket listener, then open the zode bridge extension
+popup and enter the displayed WS port and 6-digit code. A successful pairing
+stores a long-term token in Chrome storage and in `~/.zode/browser-bridge.json`
+(0600), so reconnects can authenticate with the token.
+
+Install and update details live in `extensions/chrome/README.md`. The shipped
+extension ID is `hcabdgpfhoclfgnknddadgfhhdnlkloc`; the manifest embeds the
+public key so unpacked and packed installs use the same ID, which the Rust
+bridge server checks in the WebSocket Origin header.
 
 ### Integration tests
 
