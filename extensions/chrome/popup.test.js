@@ -180,8 +180,33 @@ function testHiddenPanelsAreCssHidden() {
   assert.match(popupHtmlSource, /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/i);
 }
 
+function styleBlock(selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = popupHtmlSource.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "i"));
+  assert.ok(match, `${selector} style block should exist`);
+  return match[1];
+}
+
+function testSettingsButtonIsLargerAndCentered() {
+  const panelTop = styleBlock(".panel-top");
+  const button = styleBlock(".icon-button");
+
+  assert.match(panelTop, /min-height:\s*32px/i);
+  assert.match(button, /height:\s*32px/i);
+  assert.match(button, /width:\s*32px/i);
+  assert.match(button, /font-size:\s*16px/i);
+  assert.match(button, /line-height:\s*1/i);
+  assert.match(button, /place-items:\s*center/i);
+}
+
+function testBrandMarkUsesExtensionIcon() {
+  assert.match(popupHtmlSource, /<img[^>]+class="mark"[^>]+src="icons\/zode-48\.png"/i);
+}
+
 (async () => {
   testHiddenPanelsAreCssHidden();
+  testSettingsButtonIsLargerAndCentered();
+  testBrandMarkUsesExtensionIcon();
   await testConnectedStatusShowsConnectedView();
   await testDisconnectedStatusShowsConnectView();
   await testAutoConnectFromQueryPairsWithoutStatusRace();

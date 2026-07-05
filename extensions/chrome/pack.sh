@@ -64,6 +64,9 @@ if [ -z "$chrome" ]; then
 fi
 
 cp "$dir/manifest.json" "$dir/background.js" "$dir/popup.html" "$dir/popup.js" "$pack_dir/"
+if [ -d "$dir/icons" ]; then
+  cp -R "$dir/icons" "$pack_dir/"
+fi
 
 rm -f "$crx" "$pack_dir.crx"
 "$chrome" --pack-extension="$pack_dir" --pack-extension-key="$pem" >/tmp/zode-bridge-pack.log 2>&1 || {
