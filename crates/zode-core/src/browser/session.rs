@@ -67,9 +67,10 @@ impl BrowserSession {
         };
         if needs_new {
             *guard = Some(if want_bridge {
+                self.bridge.ensure_listening().await?;
                 if !self.bridge.is_connected() {
                     return Err(BrowserError::Dead(
-                        "bridge not connected; run /browser pair and click the extension".into(),
+                        "bridge not connected; run /browser pair to connect the extension".into(),
                     ));
                 }
                 let backend: Arc<dyn BrowserBackend> = BridgeBackend::new(self.bridge.clone());
@@ -97,6 +98,10 @@ impl BrowserSession {
     pub fn set_target(&self, t: BrowserTarget) -> Result<(), BrowserError> {
         *self.target.lock().unwrap() = t;
         Ok(())
+    }
+
+    pub async fn ensure_bridge_listening(&self) -> Result<u16, BrowserError> {
+        self.bridge.ensure_listening().await
     }
 
     pub async fn start_pairing(&self) -> Result<PairingHandle, BrowserError> {

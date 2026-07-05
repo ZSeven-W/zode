@@ -14,19 +14,23 @@ use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, 
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::Message;
 
-pub(crate) const EXTENSION_ID: &str = "hcabdgpfhoclfgnknddadgfhhdnlkloc";
+pub const DEFAULT_BRIDGE_PORT: u16 = 17657;
+pub const EXTENSION_ID: &str = "hcabdgpfhoclfgnknddadgfhhdnlkloc";
 
 #[derive(Debug)]
 pub struct BridgeServer {
     state: Arc<Mutex<State>>,
+    listen_lock: tokio::sync::Mutex<()>,
     next_rpc_id: AtomicU64,
     next_connection_id: AtomicU64,
+    preferred_port: u16,
 }
 
 #[derive(Debug, Default)]
 struct State {
     pairing: Option<Pairing>,
     active: Option<ActiveConnection>,
+    listen_port: Option<u16>,
     waiters: HashMap<u64, oneshot::Sender<Result<serde_json::Value, BrowserError>>>,
 }
 
@@ -46,29 +50,62 @@ impl BridgeServer {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Arc::new(Mutex::new(State::default())),
+            listen_lock: tokio::sync::Mutex::new(()),
             next_rpc_id: AtomicU64::new(1),
             next_connection_id: AtomicU64::new(1),
+            preferred_port: DEFAULT_BRIDGE_PORT,
         })
     }
 
-    pub async fn start_pairing(self: &Arc<Self>) -> Result<PairingHandle, BrowserError> {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|e| BrowserError::Launch(format!("bridge bind: {e}")))?;
-        let port = listener
+    #[cfg(test)]
+    fn new_with_preferred_port(preferred_port: u16) -> Arc<Self> {
+        Arc::new(Self {
+            state: Arc::new(Mutex::new(State::default())),
+            listen_lock: tokio::sync::Mutex::new(()),
+            next_rpc_id: AtomicU64::new(1),
+            next_connection_id: AtomicU64::new(1),
+            preferred_port,
+        })
+    }
+
+    pub async fn ensure_listening(self: &Arc<Self>) -> Result<u16, BrowserError> {
+        if let Some(port) = self.lock_state()?.listen_port {
+            return Ok(port);
+        }
+        let _listen_guard = self.listen_lock.lock().await;
+        if let Some(port) = self.lock_state()?.listen_port {
+            return Ok(port);
+        }
+
+        let listener = bind_listener(self.preferred_port).await?;
+        let bound_port = listener
             .local_addr()
             .map_err(|e| BrowserError::Launch(format!("bridge local addr: {e}")))?
             .port();
+        let (port, should_spawn) = {
+            let mut state = self.lock_state()?;
+            if let Some(port) = state.listen_port {
+                (port, false)
+            } else {
+                state.listen_port = Some(bound_port);
+                (bound_port, true)
+            }
+        };
+        if should_spawn {
+            let srv = self.clone();
+            tokio::spawn(async move {
+                srv.accept_loop(listener).await;
+            });
+        }
+
+        Ok(port)
+    }
+
+    pub async fn start_pairing(self: &Arc<Self>) -> Result<PairingHandle, BrowserError> {
         let pairing = Pairing::new(Instant::now());
         let code = pairing.code().to_string();
-        {
-            let mut state = self.lock_state()?;
-            state.pairing = Some(pairing);
-        }
-        let srv = self.clone();
-        tokio::spawn(async move {
-            srv.accept_loop(listener).await;
-        });
+        let port = self.ensure_listening().await?;
+        self.lock_state()?.pairing = Some(pairing);
         Ok(PairingHandle { code, port })
     }
 
@@ -323,6 +360,23 @@ async fn read_client_hello(
     }
 }
 
+async fn bind_listener(preferred_port: u16) -> Result<TcpListener, BrowserError> {
+    let preferred_addr = format!("127.0.0.1:{preferred_port}");
+    match TcpListener::bind(&preferred_addr).await {
+        Ok(listener) => return Ok(listener),
+        Err(err) if preferred_port != 0 && err.kind() == std::io::ErrorKind::AddrInUse => {}
+        Err(err) => {
+            return Err(BrowserError::Launch(format!(
+                "bridge bind {preferred_addr}: {err}"
+            )))
+        }
+    }
+
+    TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| BrowserError::Launch(format!("bridge bind fallback: {e}")))
+}
+
 fn pair_error_reason(err: PairError) -> String {
     match err {
         PairError::Expired => "pairing code expired".into(),
@@ -355,7 +409,7 @@ mod tests {
 
     #[tokio::test]
     async fn pair_then_rpc_roundtrip() {
-        let srv = BridgeServer::new();
+        let srv = BridgeServer::new_with_preferred_port(0);
         let h = srv.start_pairing().await.unwrap();
         let mut ws =
             connect_with_origin(h.port, &format!("chrome-extension://{}", EXTENSION_ID)).await;
@@ -398,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_origin_is_rejected() {
-        let srv = BridgeServer::new();
+        let srv = BridgeServer::new_with_preferred_port(0);
         let h = srv.start_pairing().await.unwrap();
         let mut req = format!("ws://127.0.0.1:{}", h.port)
             .into_client_request()
@@ -410,11 +464,44 @@ mod tests {
 
     #[tokio::test]
     async fn call_without_connection_is_dead() {
-        let srv = BridgeServer::new();
+        let srv = BridgeServer::new_with_preferred_port(0);
         let err = srv
             .call(RpcKind::Cdp, "Page.reload", serde_json::json!({}))
             .await
             .unwrap_err();
         assert!(matches!(err, crate::browser::BrowserError::Dead(_)));
+    }
+
+    #[tokio::test]
+    async fn start_pairing_reuses_listener_port() {
+        let srv = BridgeServer::new_with_preferred_port(0);
+        let first = srv.start_pairing().await.unwrap();
+        let second = srv.start_pairing().await.unwrap();
+
+        assert_eq!(first.port, second.port);
+        assert_ne!(first.code, second.code);
+    }
+
+    #[tokio::test]
+    async fn ensure_listening_is_idempotent_without_pairing() {
+        let srv = BridgeServer::new_with_preferred_port(0);
+        let first = srv.ensure_listening().await.unwrap();
+        let second = srv.ensure_listening().await.unwrap();
+
+        assert_eq!(first, second);
+
+        let mut ws =
+            connect_with_origin(first, &format!("chrome-extension://{}", EXTENSION_ID)).await;
+        ws.send(Message::text(
+            serde_json::to_string(&ClientHello::Pair {
+                code: "000000".into(),
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+        let rejected: ServerHello =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert!(matches!(rejected, ServerHello::Rejected { .. }));
     }
 }
