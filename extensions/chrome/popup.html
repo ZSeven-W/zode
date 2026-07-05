@@ -1,0 +1,67 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>zode bridge</title>
+<body>
+  <main>
+    <h1>zode bridge</h1>
+    <label>
+      WS port
+      <input id="port" inputmode="numeric" autocomplete="off" placeholder="from /browser pair">
+    </label>
+    <label>
+      Pairing code
+      <input id="code" inputmode="numeric" autocomplete="one-time-code" placeholder="6 digits">
+    </label>
+    <button id="go" type="button">Pair / Reconnect</button>
+    <p id="status" role="status"></p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+<style>
+  :root {
+    color-scheme: light dark;
+    font: 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  body {
+    margin: 0;
+    min-width: 240px;
+  }
+
+  main {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+  }
+
+  h1 {
+    font-size: 14px;
+    margin: 0;
+  }
+
+  label {
+    display: grid;
+    gap: 4px;
+  }
+
+  input,
+  button {
+    box-sizing: border-box;
+    font: inherit;
+    width: 100%;
+  }
+
+  input {
+    padding: 6px 7px;
+  }
+
+  button {
+    padding: 7px 8px;
+  }
+
+  #status {
+    color: #5b6572;
+    min-height: 16px;
+    margin: 0;
+  }
+</style>

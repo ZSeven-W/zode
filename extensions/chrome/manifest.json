@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "zode browser bridge",
+  "version": "0.1.0",
+  "description": "Pairs your Chrome with the local zode CLI so its agent can drive this browser.",
+  "permissions": ["debugger", "tabs", "storage"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "zode bridge"
+  }
+}
