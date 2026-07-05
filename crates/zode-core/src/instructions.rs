@@ -182,6 +182,14 @@ free-text 'Other'. You get back `{ answers: [{ question, header, answer }] }`, \
 where each `answer` is the chosen option text or the user's custom text. Use \
 plain prose only for open-ended questions that have no discrete options.\n";
 
+/// Steer the model toward bounded reads. Bash output caps are the hard guard;
+/// this guidance reduces how often the cap needs to trigger.
+const TOKEN_HYGIENE: &str = "\n### File reading\n\
+Use `FileRead` with offset/limit for large files and `Grep` to search. Do not \
+cat or dump whole files into the conversation. When using Bash to inspect files, \
+avoid dumping whole files; narrow output with `grep`/`head`/`tail`. Large Bash \
+output is truncated.\n";
+
 const IDENTITY: &str = "\
 You are Zode, an AI-native coding assistant developed by ZSeven-W, running in \
 a terminal. You help \
@@ -225,6 +233,7 @@ pub fn build_system_prompt(
     if let Some(b) = &env.git_branch {
         s.push_str(&format!("- git branch: {b}\n"));
     }
+    s.push_str(TOKEN_HYGIENE);
 
     if !instructions.is_empty() {
         s.push_str("\n## Project Instructions\n");
@@ -393,6 +402,23 @@ mod tests {
         // An empty model is omitted from the Environment block.
         assert!(!prompt.contains("- model:"));
         assert!(!prompt.contains("Project Instructions"));
+    }
+
+    #[test]
+    fn system_prompt_steers_away_from_cat() {
+        let env = EnvInfo {
+            cwd: "/p".into(),
+            platform: "linux".into(),
+            date: "2026-07-05".into(),
+            git_branch: None,
+            model: String::new(),
+        };
+        let prompt = build_system_prompt(&[], "", &env, false, false, false);
+        assert!(prompt.contains("FileRead"));
+        assert!(
+            prompt.to_lowercase().contains("do not cat")
+                || prompt.contains("avoid dumping whole files")
+        );
     }
 
     #[test]
