@@ -6,6 +6,8 @@ const vm = require("node:vm");
 
 const popupPath = path.join(__dirname, "popup.js");
 const popupSource = fs.readFileSync(popupPath, "utf8");
+const popupHtmlPath = path.join(__dirname, "popup.html");
+const popupHtmlSource = fs.readFileSync(popupHtmlPath, "utf8");
 
 function makeElement(id) {
   return {
@@ -127,7 +129,12 @@ async function testDisconnectedStatusShowsConnectView() {
   assert.equal(elements["form-status"].textContent, "Not connected");
 }
 
+function testHiddenPanelsAreCssHidden() {
+  assert.match(popupHtmlSource, /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/i);
+}
+
 (async () => {
+  testHiddenPanelsAreCssHidden();
   await testConnectedStatusShowsConnectedView();
   await testDisconnectedStatusShowsConnectView();
   console.log("popup tests passed");
