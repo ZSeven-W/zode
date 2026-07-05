@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="assets/brand/zode-logo.png" alt="Zode logo" width="96" />
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Rust-2021-f74c00?style=flat-square&logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/TUI-ratatui-7c3aed?style=flat-square" alt="ratatui" />
   <img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="MIT License" />
@@ -17,9 +21,10 @@
 
 - **Multi-provider** — Anthropic, OpenAI, and any OpenAI-compatible API (DeepSeek, Moonshot, OpenRouter dialects), plus local Ollama. Supports large-output and **1M-context** models (`contextWindow` / `maxOutputTokens` are configurable)
 - **Rich tool surface** — file read/write/edit, code & content search, foreground and background shells, git, web fetch, notebooks, TODO tracking
+- **Browser control** — built-in `browser_*` tools can drive a managed Chromium instance or your real Chrome profile through the zode Chrome bridge extension: navigate, click/type, inspect DOM, capture screenshots, read console/network logs, and group zode-opened tabs
 - **Non-blocking permissions** — every mutating tool is gated (allow once / always / deny), but the prompt docks inline and never blocks you: keep typing to queue a follow-up while a tool waits, with hard-deny rules
 - **OS sandbox, on by default** — shell commands run under sandbox-exec (macOS) / bwrap (Linux) in `read-only` or `workspace-write` mode, with **outbound network denied by default**. Toggle live with `/sandbox`; the model can request an escape for a single command (`dangerouslyDisableSandbox`) which **you authorize** at the prompt
-- **Full-screen TUI** — streaming markdown with syntax highlighting, diff previews, slash-command autocomplete, prompt history (Up/Down), 4 built-in themes, settings & help overlays, **15-language UI** (`/language`)
+- **Full-screen TUI** — streaming markdown with syntax highlighting, diff previews, slash-command autocomplete, prompt history (Up/Down), 4 built-in themes, settings & help overlays, resilient right sidebar sections, **15-language UI** (`/language`)
 - **Multi-session tabs** — run several conversations side by side (`Ctrl+T`), each an isolated agent; resume past sessions with full history replay
 - **Sub-agents & workflows** — delegate scoped work to child agents via the Task tool (they inherit the same gate, sandbox, and hooks), manage them with `/agents` / `/workflows`, and toggle autonomous orchestration
 - **Cross-agent ecosystem** — discovers skills, slash commands, and MCP servers from Claude / Codex / opencode / antigravity / pi / kilo / cursor (plus their plugin trees), with zode's own taking precedence; foreign integrations are off by default and non-portable ones are filtered out
@@ -146,6 +151,8 @@ zode --yolo                # bypass approval prompts (deny rules still apply)
 zode --no-sandbox          # disable the OS sandbox (it is ON by default)
 zode --sandbox-read-only   # sandbox in read-only mode (deny all writes)
 zode --sandbox-allow-network  # allow outbound network inside the sandbox
+zode --browser             # force-enable built-in browser tools for this run
+zode --no-browser          # disable built-in browser tools for this run
 zode --model <id>          # override the model
 zode --provider <name>     # pick a named provider from config.providers
 ```
@@ -169,6 +176,12 @@ Optional top-level config keys (all have sensible defaults):
     "mode": "workspace-write",   // "workspace-write" | "read-only"
     "network": false,            // allow outbound network inside the sandbox
     "writableRoots": []          // extra writable dirs (workspace-write)
+  },
+  "browser": {
+    "enabled": true,             // browser_* tools and /browser panel (default on)
+    "defaultTarget": "managed",  // "managed" | "bridge"
+    "headless": false,           // managed Chromium launch mode
+    "viewport": { "width": 1440, "height": 900 }
   }
 }
 ```
@@ -187,6 +200,44 @@ Optional top-level config keys (all have sensible defaults):
 > real window: overestimating makes requests overflow and the provider rejects
 > the turn.
 
+## Browser Control
+
+Zode includes a `tools:browser` group for browser automation. The agent can use
+`browser_read` for screenshots, DOM snapshots, console logs, network logs, and
+tab reads; `browser_act` for navigation, clicks, typing, key presses, and
+scrolling; `browser_eval` for JavaScript; and `browser_tabs` for tab
+management. Read-only browser inspection is ungated; mutating browser actions
+use the same allow-once / always / deny approval flow as other side-effecting
+tools.
+
+There are two browser targets:
+
+- **managed** — zode launches and controls a dedicated Chromium profile.
+- **bridge** — zode controls the Chrome profile you are already using through
+  the bundled MV3 extension in [`extensions/chrome/`](extensions/chrome/).
+
+For the bridge target, load the extension once from `extensions/chrome`, then
+run `/browser pair`. Zode opens the extension page with the local WebSocket
+port and pairing code pre-filled; after the first pairing, the extension stores
+a token and reconnects silently when zode is running. Tabs opened by zode are
+placed in a Chrome tab group named `zode`.
+
+Useful commands:
+
+```bash
+/browser                         # open the browser control panel
+/browser status                  # show target/running/paired state
+/browser launch                  # launch the managed browser
+/browser close                   # close the managed browser
+/browser pair                    # pair or reconnect the Chrome bridge extension
+/browser target managed          # use zode's managed Chromium
+/browser target bridge           # use your real Chrome profile via the extension
+/browser screenshot [path]       # capture a browser screenshot
+```
+
+See [`extensions/chrome/README.md`](extensions/chrome/README.md) for extension
+loading, update, CRX packaging, and smoke-test steps.
+
 ## Slash Commands
 
 | Command | What it does |
@@ -201,6 +252,7 @@ Optional top-level config keys (all have sensible defaults):
 | `/sessions`, `/resume` | Session picker — resume into a new tab with history |
 | `/connect` | Connect and switch the active provider |
 | `/sidebar [on\|off\|toggle\|auto\|mcp\|files\|todo]` | Show/hide the right sidebar; fold the MCP / modified-files / todo sections (also click their ▼ headers) |
+| `/browser [status\|launch\|close\|pair\|target <managed\|bridge>\|screenshot [path]]` | Browser control panel and commands; pair the Chrome bridge extension or switch between managed Chromium and your Chrome profile |
 | `/tasks` | Background shells + running turns panel |
 | `/undo`, `/redo` | Undo / redo the last file edit |
 | `/mcp` | Manage MCP servers — enable / disable in a dialog |
