@@ -3,7 +3,18 @@
 set -euo pipefail
 
 dir="$(cd "$(dirname "$0")" && pwd)"
-pem="${ZODE_EXT_PEM:-$dir/zode-bridge.pem}"
+default_pem="$dir/zode-bridge.pem"
+legacy_pem="$dir/../zode-bridge.pem"
+if [ -n "${ZODE_EXT_PEM:-}" ]; then
+  pem="$ZODE_EXT_PEM"
+elif [ -f "$default_pem" ]; then
+  pem="$default_pem"
+elif [ -f "$legacy_pem" ]; then
+  pem="$legacy_pem"
+else
+  pem="$default_pem"
+fi
+pem="$(cd "$(dirname "$pem")" && pwd)/$(basename "$pem")"
 crx="$dir/zode-bridge.crx"
 
 find_chrome() {
