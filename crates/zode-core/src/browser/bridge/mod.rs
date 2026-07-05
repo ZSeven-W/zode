@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 // Bridge types are introduced before the server/backend tasks wire them in.
 
+pub mod backend;
 pub mod server;
+pub use backend::BridgeBackend;
 pub use server::{BridgeServer, PairingHandle};
 
 use rand::rngs::OsRng;

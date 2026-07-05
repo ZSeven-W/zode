@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json;
 use std::fmt;
 
@@ -24,7 +24,7 @@ pub enum ClickTarget {
 }
 
 /// Information about an open browser tab.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabInfo {
     pub id: String,
     pub url: String,
@@ -33,14 +33,14 @@ pub struct TabInfo {
 }
 
 /// A single console log entry.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConsoleEntry {
     pub level: String,
     pub text: String,
 }
 
 /// A single network request/response entry.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NetworkEntry {
     pub method: String,
     pub url: String,
