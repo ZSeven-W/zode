@@ -1,10 +1,19 @@
+const connectedView = document.getElementById("connected-view");
+const connectView = document.getElementById("connect-view");
+const statusText = document.getElementById("status-text");
+const statusDetail = document.getElementById("status-detail");
+const versionText = document.getElementById("version");
 const portInput = document.getElementById("port");
 const codeInput = document.getElementById("code");
 const button = document.getElementById("go");
-const statusText = document.getElementById("status");
+const formStatus = document.getElementById("form-status");
 const query = new URLSearchParams(window.location.search);
 
 hydrateFromQuery();
+renderVersion();
+refreshStatus().catch(() => {
+  renderDisconnected("Not connected");
+});
 
 button.addEventListener("click", async () => {
   await connectFromInputs({ closeOnSuccess: true });
@@ -27,22 +36,51 @@ function hydrateFromQuery() {
   }
 }
 
+function renderVersion() {
+  const manifest = chrome.runtime.getManifest ? chrome.runtime.getManifest() : null;
+  versionText.textContent = manifest && manifest.version ? `Version v${manifest.version}` : "";
+}
+
+async function refreshStatus() {
+  const response = await chrome.runtime.sendMessage({ type: "zode-status" });
+  if (response && response.ok && response.status && response.status.connected) {
+    renderConnected(response.status);
+  } else {
+    renderDisconnected("Not connected");
+  }
+}
+
+function renderConnected(status) {
+  connectedView.hidden = false;
+  connectView.hidden = true;
+  statusText.textContent = "Connected";
+  statusDetail.textContent = status.port ? `Port ${status.port}` : "";
+  document.body.classList.add("connected");
+}
+
+function renderDisconnected(message) {
+  connectedView.hidden = true;
+  connectView.hidden = false;
+  formStatus.textContent = message;
+  document.body.classList.remove("connected");
+}
+
 async function connectFromInputs({ closeOnSuccess }) {
   const port = Number(portInput.value.trim());
   const code = codeInput.value.trim();
-  statusText.textContent = "Connecting...";
+  renderDisconnected("Connecting...");
   button.disabled = true;
   try {
     const response = await chrome.runtime.sendMessage({ type: "zode-pair", port, code });
     if (!response || !response.ok) {
       throw new Error((response && response.error) || "pairing failed");
     }
-    statusText.textContent = "Connected";
+    renderConnected(response.status || { connected: true, port });
     if (closeOnSuccess) {
       await closeSelf();
     }
   } catch (error) {
-    statusText.textContent = String(error.message || error);
+    renderDisconnected(String(error.message || error));
     button.disabled = false;
   }
 }

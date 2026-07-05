@@ -409,11 +409,18 @@ function argText(arg) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (!message || message.type !== "zode-pair") {
+  if (!message) {
     return false;
   }
-  connect(message.port, message.code || "")
-    .then(() => sendResponse({ ok: true, status: status() }))
-    .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
-  return true;
+  if (message.type === "zode-status") {
+    sendResponse({ ok: true, status: status() });
+    return false;
+  }
+  if (message.type === "zode-pair") {
+    connect(message.port, message.code || "")
+      .then(() => sendResponse({ ok: true, status: status() }))
+      .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
+    return true;
+  }
+  return false;
 });

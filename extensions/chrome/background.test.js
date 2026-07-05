@@ -8,7 +8,9 @@ const backgroundPath = path.join(__dirname, "background.js");
 const backgroundSource = fs.readFileSync(backgroundPath, "utf8");
 
 function makeChrome(storage = {}) {
+  const runtimeMessages = [];
   return {
+    runtimeMessages,
     storage: {
       local: {
         get: async () => storage,
@@ -17,7 +19,7 @@ function makeChrome(storage = {}) {
       },
     },
     runtime: {
-      onMessage: { addListener: () => {} },
+      onMessage: { addListener: (handler) => runtimeMessages.push(handler) },
     },
     tabs: {
       query: async () => [],
@@ -80,7 +82,33 @@ async function testBackgroundStartupDoesNotTouchWebSocket() {
   assert.deepEqual(consoleErrors, []);
 }
 
+async function testStatusMessageReturnsConnectionState() {
+  const chrome = makeChrome();
+  const sandbox = {
+    console,
+    setImmediate,
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+    WebSocket: class {},
+    chrome,
+  };
+
+  vm.runInNewContext(backgroundSource, sandbox, { filename: backgroundPath });
+  const handler = chrome.runtimeMessages[0];
+  let response = null;
+  const asyncResponse = handler({ type: "zode-status" }, {}, (value) => {
+    response = value;
+  });
+
+  assert.equal(asyncResponse, false);
+  assert.equal(response.ok, true);
+  assert.equal(response.status.connected, false);
+}
+
 (async () => {
   await testBackgroundStartupDoesNotTouchWebSocket();
+  await testStatusMessageReturnsConnectionState();
   console.log("background tests passed");
 })();
