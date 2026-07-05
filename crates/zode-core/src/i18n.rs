@@ -124,6 +124,134 @@ const EXTRA: &[[&str; 15]] = &[
     ["switch", "切换", "切換", "切替", "전환", "cambiar", "changer", "wechseln", "alternar", "переключить", "स्विच", "beralih", "สลับ", "geçiş", "chuyển"],
 ];
 
+/// Chinese-only overlay for newer UI strings that have not gone through the
+/// full 15-language bulk translation pass yet. Non-Chinese languages continue
+/// to fall back to English for these keys.
+#[rustfmt::skip]
+const ZH_ONLY: &[(&str, &str, &str)] = &[
+    ("Switch the display currency for cost (USD, CNY, EUR, …)", "切换费用显示货币（USD、CNY、EUR 等）", "切換費用顯示貨幣（USD、CNY、EUR 等）"),
+    ("Drive OpenPencil (e.g. /op status, /op generate <prompt>)", "驱动 OpenPencil（例如 /op status、/op generate <prompt>）", "驅動 OpenPencil（例如 /op status、/op generate <prompt>）"),
+    ("Browser control panel and commands (e.g. /browser, /browser status)", "浏览器控制面板和命令（例如 /browser、/browser status）", "瀏覽器控制面板和命令（例如 /browser、/browser status）"),
+    ("Manage Noema long-term memory", "管理 Noema 长期记忆", "管理 Noema 長期記憶"),
+    ("Open the sub-agent activity panel", "打开子代理活动面板", "開啟子代理活動面板"),
+    ("(clear with /goal clear)", "（用 /goal clear 清除）", "（用 /goal clear 清除）"),
+    ("(interrupted)", "（已中断）", "（已中斷）"),
+    ("(no hooks configured)", "（未配置 hooks）", "（未設定 hooks）"),
+    ("(no skills loaded)", "（未加载 skills）", "（未載入 skills）"),
+    ("Browser", "浏览器", "瀏覽器"),
+    ("agent created", "代理已创建", "代理已建立"),
+    ("agent deleted", "代理已删除", "代理已刪除"),
+    ("assemble failed", "组装失败", "組裝失敗"),
+    ("attached", "已附加", "已附加"),
+    ("attached image from clipboard", "已从剪贴板附加图片", "已從剪貼簿附加圖片"),
+    ("auto-compact paused after repeated failures — run /compact to retry manually, or /clear to start fresh", "自动压缩因连续失败已暂停 — 运行 /compact 手动重试，或用 /clear 重新开始", "自動壓縮因連續失敗已暫停 — 執行 /compact 手動重試，或用 /clear 重新開始"),
+    ("auto-compact paused: compaction is no longer shrinking the context — run /compact to retry manually, or /clear to start fresh", "自动压缩已暂停：压缩不再缩小上下文 — 运行 /compact 手动重试，或用 /clear 重新开始", "自動壓縮已暫停：壓縮不再縮小上下文 — 執行 /compact 手動重試，或用 /clear 重新開始"),
+    ("autonomous orchestration", "自主编排", "自主編排"),
+    ("autonomous orchestration: OFF", "自主编排：关闭", "自主編排：關閉"),
+    ("autonomous orchestration: ON — the agent may decompose tasks, spawn sub-agents, and define new ones", "自主编排：开启 — 代理可拆解任务、生成子代理并定义新代理", "自主編排：開啟 — 代理可拆解任務、產生子代理並定義新代理"),
+    ("available", "可用", "可用"),
+    ("bad session path", "会话路径无效", "會話路徑無效"),
+    ("busy — finish or interrupt the current turn before /compact", "忙碌中 — 完成或中断当前回合后再运行 /compact", "忙碌中 — 完成或中斷目前回合後再執行 /compact"),
+    ("busy — finish or interrupt the current turn first", "忙碌中 — 请先完成或中断当前回合", "忙碌中 — 請先完成或中斷目前回合"),
+    ("calling op", "正在调用 op", "正在呼叫 op"),
+    ("can't change plugins during a turn — Ctrl+C first", "回合进行中不能更改插件 — 请先按 Ctrl+C", "回合進行中不能變更外掛 — 請先按 Ctrl+C"),
+    ("can't clear during a turn — Ctrl+C first", "回合进行中不能清空 — 请先按 Ctrl+C", "回合進行中不能清空 — 請先按 Ctrl+C"),
+    ("can't clear the goal text during a turn — run /goal clear again when idle", "回合进行中不能清除目标文本 — 空闲后再运行 /goal clear", "回合進行中不能清除目標文字 — 閒置後再執行 /goal clear"),
+    ("can't set goal during a turn — Ctrl+C first", "回合进行中不能设置目标 — 请先按 Ctrl+C", "回合進行中不能設定目標 — 請先按 Ctrl+C"),
+    ("can't switch during a turn — Ctrl+C first", "回合进行中不能切换 — 请先按 Ctrl+C", "回合進行中不能切換 — 請先按 Ctrl+C"),
+    ("can't switch provider during a turn - Ctrl+C first", "回合进行中不能切换服务商 - 请先按 Ctrl+C", "回合進行中不能切換服務商 - 請先按 Ctrl+C"),
+    ("compact failed", "压缩失败", "壓縮失敗"),
+    ("compacting the conversation…", "正在压缩对话…", "正在壓縮對話…"),
+    ("configure /vision provider <name> first", "请先配置 /vision provider <name>", "請先設定 /vision provider <name>"),
+    ("copied input selection to clipboard", "已将输入选区复制到剪贴板", "已將輸入選區複製到剪貼簿"),
+    ("copied selection to clipboard", "已将选区复制到剪贴板", "已將選區複製到剪貼簿"),
+    ("copy failed", "复制失败", "複製失敗"),
+    ("create failed", "创建失败", "建立失敗"),
+    ("currency", "货币", "貨幣"),
+    ("currency set", "货币已设置", "貨幣已設定"),
+    ("current goal", "当前目标", "目前目標"),
+    ("current provider does not declare image support; set supportsImages=true or configure /vision provider <name>", "当前服务商未声明支持图像；请设置 supportsImages=true 或配置 /vision provider <name>", "目前服務商未宣告支援圖像；請設定 supportsImages=true 或設定 /vision provider <name>"),
+    ("delete failed", "删除失败", "刪除失敗"),
+    ("disabled", "已禁用", "已停用"),
+    ("effort reset to medium (default)", "推理强度已重置为 medium（默认）", "推理強度已重設為 medium（預設）"),
+    ("effort set", "推理强度已设置", "推理強度已設定"),
+    ("enabled", "已启用", "已啟用"),
+    ("esc to apply", "按 Esc 应用", "按 Esc 套用"),
+    ("export failed", "导出失败", "匯出失敗"),
+    ("export path escapes the workspace — use an absolute path to export elsewhere", "导出路径超出工作区 — 如需导出到其他位置请使用绝对路径", "匯出路徑超出工作區 — 如需匯出到其他位置請使用絕對路徑"),
+    ("exported conversation to", "对话已导出到", "對話已匯出到"),
+    ("generating design", "正在生成设计", "正在產生設計"),
+    ("goal cleared", "目标已清除", "目標已清除"),
+    ("goal set", "目标已设置", "目標已設定"),
+    ("goal-loop: no progress (no tool use) for several turns — paused (send a message to resume)", "目标循环：多个回合没有进展（未使用工具）— 已暂停（发送消息可恢复）", "目標循環：多個回合沒有進展（未使用工具）— 已暫停（傳送訊息可恢復）"),
+    ("goal-loop: reached the turn cap — paused (send a message to resume)", "目标循环：已达到回合上限 — 已暂停（发送消息可恢复）", "目標循環：已達到回合上限 — 已暫停（傳送訊息可恢復）"),
+    ("goal-loop: started", "目标循环：已启动", "目標循環：已啟動"),
+    ("images", "图片", "圖片"),
+    ("is built-in (not deletable)", "是内置项（不可删除）", "是內建項（不可刪除）"),
+    ("language", "语言", "語言"),
+    ("load config failed", "加载配置失败", "載入設定失敗"),
+    ("load failed", "加载失败", "載入失敗"),
+    ("loaded", "已加载", "已載入"),
+    ("mode", "模式", "模式"),
+    ("no file to view for this image", "此图片没有可查看的文件", "此圖片沒有可檢視的檔案"),
+    ("no goal set — use /goal <text> to set one", "未设置目标 — 使用 /goal <text> 设置", "未設定目標 — 使用 /goal <text> 設定"),
+    ("no named providers configured", "未配置具名服务商", "未設定具名服務商"),
+    ("no provider '{name}' in config", "配置中没有服务商 '{name}'", "設定中沒有服務商 '{name}'"),
+    ("no saved sessions yet", "暂无已保存会话", "尚無已儲存會話"),
+    ("not found", "未找到", "未找到"),
+    ("nothing to copy in selection", "选区中没有可复制内容", "選區中沒有可複製內容"),
+    ("off", "关闭", "關閉"),
+    ("on", "开启", "開啟"),
+    ("opening image…", "正在打开图片…", "正在開啟圖片…"),
+    ("paste failed", "粘贴失败", "貼上失敗"),
+    ("paste image failed", "粘贴图片失败", "貼上圖片失敗"),
+    ("plan mode: OFF — full tools restored", "计划模式：关闭 — 已恢复完整工具", "計畫模式：關閉 — 已恢復完整工具"),
+    ("plan mode: ON — read-only tools only; research and present a plan, then /plan to execute", "计划模式：开启 — 仅限只读工具；先调研并提出计划，然后用 /plan 执行", "計畫模式：開啟 — 僅限唯讀工具；先調研並提出計畫，然後用 /plan 執行"),
+    ("plugins updated", "插件已更新", "外掛已更新"),
+    ("press Esc again to clear the input", "再次按 Esc 清空输入", "再次按 Esc 清空輸入"),
+    ("provider", "服务商", "服務商"),
+    ("queued ({n}) — sends when the turn finishes (Esc to interrupt now)", "已排队（{n}）— 当前回合结束后发送（按 Esc 可立即中断）", "已排隊（{n}）— 目前回合結束後傳送（按 Esc 可立即中斷）"),
+    ("queued message removed", "已移除排队消息", "已移除排隊訊息"),
+    ("queued message updated", "已更新排队消息", "已更新排隊訊息"),
+    ("reload failed", "重新加载失败", "重新載入失敗"),
+    ("reloaded skills", "已重新加载 skills", "已重新載入 skills"),
+    ("reloaded — tools, MCP, skills, and LSP re-discovered", "已重新加载 — 已重新发现 tools、MCP、skills 和 LSP", "已重新載入 — 已重新探索 tools、MCP、skills 和 LSP"),
+    ("removed attached image", "已移除附加图片", "已移除附加圖片"),
+    ("run", "运行", "執行"),
+    ("running workflow", "正在运行工作流", "正在執行工作流"),
+    ("save config failed", "保存配置失败", "儲存設定失敗"),
+    ("session deleted", "会话已删除", "會話已刪除"),
+    ("sidebar", "侧边栏", "側邊欄"),
+    ("steered into the running turn — the agent will see it next step", "已转入正在运行的回合 — 代理会在下一步看到", "已導入正在執行的回合 — 代理會在下一步看到"),
+    ("switch failed", "切换失败", "切換失敗"),
+    ("thinking output", "思考输出", "思考輸出"),
+    ("tool details", "工具详情", "工具詳情"),
+    ("try /help", "试试 /help", "試試 /help"),
+    ("turn failed", "回合失败", "回合失敗"),
+    ("unavailable on this host (need sandbox-exec / bwrap)", "此主机不可用（需要 sandbox-exec / bwrap）", "此主機不可用（需要 sandbox-exec / bwrap）"),
+    ("unknown command", "未知命令", "未知命令"),
+    ("unknown theme", "未知主题", "未知主題"),
+    ("usage: /effort low|medium|high", "用法：/effort low|medium|high", "用法：/effort low|medium|high"),
+    ("usage: /vision [mode|provider|prompt|reset]", "用法：/vision [mode|provider|prompt|reset]", "用法：/vision [mode|provider|prompt|reset]"),
+    ("usage: /vision mode auto|direct|vision-model", "用法：/vision mode auto|direct|vision-model", "用法：/vision mode auto|direct|vision-model"),
+    ("usage: /vision prompt <text>", "用法：/vision prompt <text>", "用法：/vision prompt <text>"),
+    ("use /currency <code>", "使用 /currency <code>", "使用 /currency <code>"),
+    ("view failed", "查看失败", "檢視失敗"),
+    ("vision config reset", "图像理解配置已重置", "圖像理解設定已重設"),
+    ("vision mode", "图像理解模式", "圖像理解模式"),
+    ("vision model disabled (image mode → auto)", "视觉模型已禁用（图像模式 → auto）", "視覺模型已停用（圖像模式 → auto）"),
+    ("vision prompt updated", "视觉提示词已更新", "視覺提示詞已更新"),
+    ("vision provider", "视觉服务商", "視覺服務商"),
+    ("vision provider '{provider_name}' does not declare image support", "视觉服务商 '{provider_name}' 未声明支持图像", "視覺服務商 '{provider_name}' 未宣告支援圖像"),
+    ("vision provider '{provider_name}' is not configured", "未配置视觉服务商 '{provider_name}'", "未設定視覺服務商 '{provider_name}'"),
+    ("vision provider failed", "视觉服务商失败", "視覺服務商失敗"),
+    ("vision providers", "视觉服务商", "視覺服務商"),
+    ("workflow deleted", "工作流已删除", "工作流已刪除"),
+    ("yolo: OFF — tools prompt for approval", "yolo：关闭 — 工具会请求批准", "yolo：關閉 — 工具會請求批准"),
+    ("yolo: ON — tools auto-approve (deny rules still apply)", "yolo：开启 — 工具自动批准（deny 规则仍生效）", "yolo：開啟 — 工具自動批准（deny 規則仍生效）"),
+    ("✓ goal complete — auto-loop stopped", "✓ 目标完成 — 自动循环已停止", "✓ 目標完成 — 自動循環已停止"),
+];
+
 /// The 15 supported UI languages (OpenPencil set).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
@@ -258,6 +386,11 @@ pub fn t(s: &'static str) -> &'static str {
         let col = Lang::ALL.iter().position(|l| *l == lang).unwrap_or(0);
         return row[col];
     }
+    if matches!(lang, Lang::Zh | Lang::ZhTw) {
+        if let Some(row) = ZH_ONLY.iter().find(|r| r.0 == s) {
+            return if lang == Lang::Zh { row.1 } else { row.2 };
+        }
+    }
     let Some(row) = lang.locale_row() else {
         return s; // English (or an unmapped variant) → source string.
     };
@@ -338,11 +471,66 @@ mod tests {
     }
 
     #[test]
+    fn zh_only_rows_have_no_duplicate_or_shadowed_keys() {
+        for (i, row) in ZH_ONLY.iter().enumerate() {
+            assert_ne!(row.0, row.1, "missing simplified Chinese for {:?}", row.0);
+            assert_ne!(row.0, row.2, "missing traditional Chinese for {:?}", row.0);
+            assert!(
+                !SOURCE_STRINGS.contains(&row.0),
+                "ZH_ONLY key {:?} shadows the generated table",
+                row.0
+            );
+            assert!(
+                !EXTRA.iter().any(|extra| extra[0] == row.0),
+                "ZH_ONLY key {:?} shadows the full overlay",
+                row.0
+            );
+            for other in ZH_ONLY.iter().skip(i + 1) {
+                assert_ne!(row.0, other.0, "duplicate ZH_ONLY key {:?}", row.0);
+            }
+        }
+    }
+
+    #[test]
     #[serial]
     fn known_string_translates_when_language_set() {
         // "Settings" is in SOURCE_STRINGS; in zh it must differ from English.
         set_language(Lang::Zh);
         assert_ne!(t("Settings"), "Settings");
+        set_language(Lang::En);
+    }
+
+    #[test]
+    #[serial]
+    fn builtin_command_descriptions_translate_to_chinese() {
+        set_language(Lang::Zh);
+        for command in crate::commands::builtin::BUILTINS {
+            assert_ne!(
+                t(command.description),
+                command.description,
+                "/{} description is not translated",
+                command.name
+            );
+        }
+        set_language(Lang::En);
+    }
+
+    #[test]
+    #[serial]
+    fn recent_toast_and_status_strings_translate_to_chinese() {
+        set_language(Lang::Zh);
+        for key in [
+            "queued message removed",
+            "can't switch during a turn — Ctrl+C first",
+            "plugins updated",
+            "steered into the running turn — the agent will see it next step",
+            "current provider does not declare image support; set supportsImages=true or configure /vision provider <name>",
+            "vision provider '{provider_name}' is not configured",
+            "goal-loop: started",
+            "press Esc again to clear the input",
+        ] {
+            assert_ne!(t(key), key, "{key:?} is not translated");
+        }
         set_language(Lang::En);
     }
 }
