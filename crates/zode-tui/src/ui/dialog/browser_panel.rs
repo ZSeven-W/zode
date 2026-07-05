@@ -30,7 +30,7 @@ pub struct BrowserPanelStatus {
     pub group_enabled: bool,
     /// "managed" | "bridge".
     pub target: String,
-    /// Always false in M1 (extension bridge ships in M2).
+    /// Whether the extension bridge currently has an authenticated connection.
     pub paired: bool,
     /// Reserved for a future "is the managed browser currently up" indicator.
     pub running: bool,

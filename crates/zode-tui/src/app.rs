@@ -3582,8 +3582,8 @@ impl TuiApp {
     }
 
     /// Snapshot the active tab's browser session/plugin state into the shape
-    /// the `/browser` panel renders. Cheap: `target()` and `is_enabled` are
-    /// both plain reads, no I/O.
+    /// the `/browser` panel renders. Cheap: `target()`, `is_enabled`, and bridge
+    /// connection state are plain reads, no I/O.
     fn browser_panel_status(&self) -> BrowserPanelStatus {
         let engine = &self.active_tab().engine;
         BrowserPanelStatus {
@@ -3596,9 +3596,8 @@ impl TuiApp {
                 zode_core::browser::BrowserTarget::Managed => "managed".into(),
                 zode_core::browser::BrowserTarget::Bridge => "bridge".into(),
             },
-            // M1: the extension bridge isn't implemented yet, and there's no
-            // cheap sync "is the managed browser up" read — both stay fixed.
-            paired: false,
+            paired: engine.browser.bridge_connected(),
+            // There is no cheap sync "is the managed browser up" read yet.
             running: false,
         }
     }
@@ -3606,6 +3605,23 @@ impl TuiApp {
     /// Open the bare `/browser` status panel.
     fn open_browser_panel(&mut self) {
         self.browser_panel = Some(BrowserPanel::new(self.browser_panel_status()));
+    }
+
+    async fn start_browser_pairing(&mut self, _agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        let session = self.active_tab().engine.browser.clone();
+        match session.start_pairing().await {
+            Ok(handle) => self.active_tab_mut().chat.push_system(&format!(
+                "Pairing code: {} (valid 2 min). Open the zode extension in Chrome and enter it. WS port {}.",
+                handle.code, handle.port
+            )),
+            Err(e) => self.active_tab_mut().chat.push_system(&e.to_string()),
+        }
+        if self.browser_panel.is_some() {
+            let status = self.browser_panel_status();
+            if let Some(panel) = &mut self.browser_panel {
+                panel.set_status(status);
+            }
+        }
     }
 
     fn open_agents_dialog(&mut self) {
@@ -4230,9 +4246,8 @@ impl TuiApp {
                 self.active_tab_mut().chat.push_system(&msg);
             }
             BrowserPanelAction::Reconnect => {
-                self.active_tab_mut()
-                    .chat
-                    .push_system("extension bridge ships in M2");
+                self.start_browser_pairing(agent_tx).await;
+                status = self.browser_panel_status();
             }
             BrowserPanelAction::ToggleDefault => {
                 // Reuse the SAME toggle+persist+reassemble path the `/plugin`
@@ -5447,10 +5462,7 @@ impl TuiApp {
                         self.spawn_browser_op(BrowserOp::Launch, agent_tx)
                     }
                     Ok(BrowserCommand::Close) => self.spawn_browser_op(BrowserOp::Close, agent_tx),
-                    Ok(BrowserCommand::Pair) => self
-                        .active_tab_mut()
-                        .chat
-                        .push_system("extension bridge ships in M2"),
+                    Ok(BrowserCommand::Pair) => self.start_browser_pairing(agent_tx).await,
                     Ok(BrowserCommand::Target { target }) => {
                         let t = if target == "bridge" {
                             zode_core::browser::BrowserTarget::Bridge
