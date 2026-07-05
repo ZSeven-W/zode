@@ -11,7 +11,10 @@ agent = { workspace = true }
 agent-tools-code = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
+futures-util = { workspace = true }
 async-trait = { workspace = true }
+tokio-tungstenite = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Order-preserving map so the `providers` config keeps the user's file order
