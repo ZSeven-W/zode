@@ -20,3 +20,6 @@ docs/superpowers
 
 # `/export` default output (conversation transcripts are local artifacts)
 /zode-conversation.md
+
+# Chrome extension private keys
+extensions/chrome/*.pem

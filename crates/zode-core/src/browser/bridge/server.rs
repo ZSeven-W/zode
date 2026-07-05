@@ -14,7 +14,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, 
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::Message;
 
-pub(crate) const EXTENSION_ID: &str = "TBD_TASK9";
+pub(crate) const EXTENSION_ID: &str = "hcabdgpfhoclfgnknddadgfhhdnlkloc";
 
 #[derive(Debug)]
 pub struct BridgeServer {

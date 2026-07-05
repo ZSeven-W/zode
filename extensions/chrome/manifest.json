@@ -10,5 +10,6 @@
   "action": {
     "default_popup": "popup.html",
     "default_title": "zode bridge"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq75hQkQsowKh9E3NxJQ0BwYW1dxTQj0f76xEOgtIAaJIK/+OXGCBpaVREH/HMHf741lyW4SM5Ltz59R5trKVnraaeUEd+jbJxyfhyScejezm6HhRMgQ+r38rcJov3DG5m97KFhjlNncMYBpEREyapLPPoqTihQq7BMwemzdMlKGfkCNFS0DH7MnM3l1F22LMonwKkLWDAqMPLn0Xx8vs+/SufrAHwpe3kE9r7znUnOt2aNL+1BGsTWuI0H3V3ezo12FNrTUT9LZiYXd9bIKadl1XZMnVywM1khkbhcTYSBjNzk45QQrSjDhwmCMdPILmaaIYZH94wvOSBzxUPyecdQIDAQAB"
 }
