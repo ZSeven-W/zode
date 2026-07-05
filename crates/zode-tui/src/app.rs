@@ -7106,6 +7106,33 @@ fn estimate_store_tokens(store: &MessageStore) -> u32 {
         .fold(0u32, |acc, t| acc.saturating_add(t))
 }
 
+/// Strip a leading noema recall pack from a stored user message so a resumed
+/// transcript shows only what the user actually typed.
+///
+/// `ZodeEngine::inject_noema_memory` prepends `MemoryPack::to_markdown()` —
+/// `## Relevant Memories\n…\n## Subconscious Hints\n…` — plus a blank-line
+/// separator to the turn's first text block, and that whole thing is persisted.
+/// It's context for the model, not user input. Bullet lines never contain a
+/// blank line (noema sanitizes inner newlines), so the first blank line after
+/// the hints header is the separator before the user's text. Anything that
+/// doesn't match the exact pack shape is returned unchanged — better to show a
+/// stray header than to silently eat the user's own words.
+fn strip_recalled_memory(text: &str) -> &str {
+    const HEAD: &str = "## Relevant Memories\n";
+    const HINTS: &str = "\n## Subconscious Hints\n";
+    if !text.starts_with(HEAD) {
+        return text;
+    }
+    let Some(hints_at) = text.find(HINTS) else {
+        return text;
+    };
+    let after_hints = hints_at + HINTS.len();
+    match text[after_hints..].find("\n\n") {
+        Some(rel) => text[after_hints + rel..].trim_start_matches('\n'),
+        None => text,
+    }
+}
+
 fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
     let mut chat = ChatView::new();
     for msg in store.iter() {
@@ -7136,7 +7163,14 @@ fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
                     }
                 }
                 if !text_parts.is_empty() || !images.is_empty() {
-                    chat.push_user_with_images(&text_parts.join("\n"), images);
+                    // The noema recall pack is prepended to the stored user text
+                    // for the model's benefit; it isn't something the user typed,
+                    // so a resumed transcript must not render it.
+                    let joined = text_parts.join("\n");
+                    let shown = strip_recalled_memory(&joined);
+                    if !shown.trim().is_empty() || !images.is_empty() {
+                        chat.push_user_with_images(shown, images);
+                    }
                 }
             }
             Message::Assistant { content, .. } => {
@@ -9836,6 +9870,41 @@ mod tests {
             content.contains("TAILMARK79END"),
             "tail of resumed conversation must be visible; got:\n{content}"
         );
+    }
+
+    #[test]
+    fn strip_recalled_memory_removes_injected_pack() {
+        // Reproduce exactly what noema's `MemoryPack::to_markdown()` +
+        // `inject_noema_memory` persist: the pack, a blank-line separator, then
+        // the user's own text. If either format drifts, this test breaks.
+        let pack = "## Relevant Memories\n\
+            - [user/preference][mem_1] 王小明 prefers dark themes\n\
+            \n## Subconscious Hints\n\
+            - cue: noema -> memory\n";
+        let user = "帮我看下这个 bug";
+        let stored = format!("{pack}\n\n{user}");
+        assert_eq!(strip_recalled_memory(&stored), user);
+    }
+
+    #[test]
+    fn strip_recalled_memory_handles_empty_sections() {
+        // Pack with zero memories AND zero hints (headers only).
+        let stored = "## Relevant Memories\n\n## Subconscious Hints\n\n\nhello";
+        assert_eq!(strip_recalled_memory(stored), "hello");
+    }
+
+    #[test]
+    fn strip_recalled_memory_leaves_ordinary_text_untouched() {
+        assert_eq!(
+            strip_recalled_memory("just a normal message"),
+            "just a normal message"
+        );
+        // A message that merely mentions the header mid-body is not a pack.
+        let msg = "see the ## Relevant Memories section below";
+        assert_eq!(strip_recalled_memory(msg), msg);
+        // Malformed (head but no hints header) → returned unchanged, never eats text.
+        let malformed = "## Relevant Memories\n- orphan\n\nbody";
+        assert_eq!(strip_recalled_memory(malformed), malformed);
     }
 
     /// Diagnostic (not run in CI): load a REAL session file and render it the
