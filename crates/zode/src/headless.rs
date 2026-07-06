@@ -493,67 +493,6 @@ fn compact_text(text: &str, max_chars: usize) -> String {
     one_line
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn tool_result_line_surfaces_failed_error() {
-        let line = tool_result_line(
-            Some("FileEdit"),
-            false,
-            &json!({"error": "old_string not found\nretry with FileRead"}),
-            None,
-        )
-        .unwrap();
-        assert!(line.contains("FileEdit failed"), "{line}");
-        assert!(line.contains("old_string not found"), "{line}");
-        assert!(line.contains("FileRead"), "{line}");
-    }
-
-    #[test]
-    fn tool_result_line_surfaces_bash_exit_code_and_stderr() {
-        let line = tool_result_line(
-            Some("Bash"),
-            true,
-            &json!({"exit_code": 52, "stdout": "", "stderr": "Empty reply from server\n"}),
-            None,
-        )
-        .unwrap();
-        assert!(line.contains("Bash exit_code=52"), "{line}");
-        assert!(line.contains("Empty reply from server"), "{line}");
-    }
-
-    #[test]
-    fn tool_result_line_surfaces_failed_run_check() {
-        let line = tool_result_line(
-            Some("run_check"),
-            true,
-            &json!({"passed": false, "failures": ["expected stdout to contain ready"]}),
-            None,
-        )
-        .unwrap();
-        assert!(line.contains("run_check failed"), "{line}");
-        assert!(line.contains("expected stdout"), "{line}");
-    }
-
-    #[test]
-    fn tool_result_line_surfaces_file_result_location_and_cwd() {
-        let cwd = std::path::Path::new("/work/project");
-        let line = tool_result_line(
-            Some("FileWrite"),
-            true,
-            &json!({"path": "/work/project/created.txt", "status": "ok", "size_bytes": 1}),
-            Some(cwd),
-        )
-        .unwrap();
-        assert!(line.contains("FileWrite done"), "{line}");
-        assert!(line.contains("path=/work/project/created.txt"), "{line}");
-        assert!(line.contains("cwd=/work/project"), "{line}");
-    }
-}
-
 /// Snapshot the store (MessageStore: Clone) then persist. The std mutex
 /// guard is dropped before the await, so it never crosses an await point.
 async fn save_session(engine: &ZodeEngine, id: &str) {
@@ -626,4 +565,65 @@ fn history_path() -> Option<std::path::PathBuf> {
     ConfigManager::config_dir()
         .ok()
         .map(|d| d.join("input_history"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tool_result_line_surfaces_failed_error() {
+        let line = tool_result_line(
+            Some("FileEdit"),
+            false,
+            &json!({"error": "old_string not found\nretry with FileRead"}),
+            None,
+        )
+        .unwrap();
+        assert!(line.contains("FileEdit failed"), "{line}");
+        assert!(line.contains("old_string not found"), "{line}");
+        assert!(line.contains("FileRead"), "{line}");
+    }
+
+    #[test]
+    fn tool_result_line_surfaces_bash_exit_code_and_stderr() {
+        let line = tool_result_line(
+            Some("Bash"),
+            true,
+            &json!({"exit_code": 52, "stdout": "", "stderr": "Empty reply from server\n"}),
+            None,
+        )
+        .unwrap();
+        assert!(line.contains("Bash exit_code=52"), "{line}");
+        assert!(line.contains("Empty reply from server"), "{line}");
+    }
+
+    #[test]
+    fn tool_result_line_surfaces_failed_run_check() {
+        let line = tool_result_line(
+            Some("run_check"),
+            true,
+            &json!({"passed": false, "failures": ["expected stdout to contain ready"]}),
+            None,
+        )
+        .unwrap();
+        assert!(line.contains("run_check failed"), "{line}");
+        assert!(line.contains("expected stdout"), "{line}");
+    }
+
+    #[test]
+    fn tool_result_line_surfaces_file_result_location_and_cwd() {
+        let cwd = std::path::Path::new("/work/project");
+        let line = tool_result_line(
+            Some("FileWrite"),
+            true,
+            &json!({"path": "/work/project/created.txt", "status": "ok", "size_bytes": 1}),
+            Some(cwd),
+        )
+        .unwrap();
+        assert!(line.contains("FileWrite done"), "{line}");
+        assert!(line.contains("path=/work/project/created.txt"), "{line}");
+        assert!(line.contains("cwd=/work/project"), "{line}");
+    }
 }
