@@ -1,5 +1,5 @@
-//! Parse `/op <subcommand> …`. `status` is a zode-side connection report; the
-//! rest map to an MCP (tool, arguments) pair.
+//! Parse `/op <design request>`. `status` is a zode-side connection report;
+//! `generate`, `design`, and `call` remain compatibility paths.
 
 use serde_json::{json, Value};
 
@@ -23,15 +23,15 @@ pub fn map_subcommand(args: &str) -> Result<OpCommand, String> {
         None => (args, ""),
     };
     match head {
-        "" => Err("usage: /op <status|design '<dsl>'|<tool> <json>>".into()),
+        "" => Err("usage: /op <design request>".into()),
         "status" => Ok(OpCommand::Status),
         "design" => {
             if rest.is_empty() {
-                return Err("usage: /op design '<dsl>'".into());
+                return Err("usage: /op design '<operations>'".into());
             }
             Ok(OpCommand::Call {
                 tool: "batch_design".into(),
-                args: json!({ "dsl": rest }),
+                args: json!({ "operations": rest }),
             })
         }
         "call" => {
@@ -53,17 +53,9 @@ pub fn map_subcommand(args: &str) -> Result<OpCommand, String> {
                 prompt: rest.to_string(),
             })
         }
-        tool => {
-            let v: Value = if rest.is_empty() {
-                json!({})
-            } else {
-                serde_json::from_str(rest).map_err(|e| format!("bad JSON args: {e}"))?
-            };
-            Ok(OpCommand::Call {
-                tool: tool.into(),
-                args: v,
-            })
-        }
+        _ => Ok(OpCommand::Generate {
+            prompt: args.to_string(),
+        }),
     }
 }
 
@@ -72,7 +64,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_status_design_call_passthrough() {
+    fn maps_status_design_call_compatibility_paths() {
         assert!(matches!(
             map_subcommand("status").unwrap(),
             OpCommand::Status
@@ -80,7 +72,8 @@ mod tests {
         match map_subcommand("design F1=I(\"p\",{})").unwrap() {
             OpCommand::Call { tool, args } => {
                 assert_eq!(tool, "batch_design");
-                assert_eq!(args["dsl"], "F1=I(\"p\",{})");
+                assert_eq!(args["operations"], "F1=I(\"p\",{})");
+                assert!(args.get("dsl").is_none());
             }
             _ => panic!(),
         }
@@ -91,19 +84,29 @@ mod tests {
             }
             _ => panic!(),
         }
-        match map_subcommand("get_document_info").unwrap() {
-            OpCommand::Call { tool, .. } => assert_eq!(tool, "get_document_info"),
-            _ => panic!(),
+    }
+
+    #[test]
+    fn natural_language_maps_to_generate() {
+        for input in [
+            "a pricing dashboard",
+            "get_document_info",
+            "做一个移动端首页",
+        ] {
+            match map_subcommand(input).unwrap() {
+                OpCommand::Generate { prompt } => assert_eq!(prompt, input),
+                other => panic!("expected Generate for {input:?}, got {other:?}"),
+            }
         }
     }
 
     #[test]
-    fn maps_generate() {
+    fn maps_generate_alias() {
         match map_subcommand("generate a pricing page").unwrap() {
             OpCommand::Generate { prompt } => assert_eq!(prompt, "a pricing page"),
             _ => panic!(),
         }
-        assert!(map_subcommand("generate").is_err()); // needs a prompt
+        assert!(map_subcommand("generate").is_err());
     }
 
     #[test]
