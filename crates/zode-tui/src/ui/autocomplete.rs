@@ -650,10 +650,7 @@ mod tests {
     fn op_subcommands_constant_covers_public_entries() {
         let expected = ["status", "call"];
         assert_eq!(OP_SUBCOMMANDS, expected);
-        assert_eq!(
-            OP_SUBCOMMANDS.len(),
-            OP_SUBCOMMAND_DESCS.len(),
-        );
+        assert_eq!(OP_SUBCOMMANDS.len(), OP_SUBCOMMAND_DESCS.len(),);
     }
 
     // --- /browser subcommand hint tests ---

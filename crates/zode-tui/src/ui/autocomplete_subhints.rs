@@ -27,10 +27,8 @@ use super::autocomplete::{popup_area, COMMAND_COLUMN_WIDTH, MAX_VISIBLE, NAME_CO
 pub const OP_SUBCOMMANDS: &[&str] = &["status", "call"];
 
 /// Brief descriptions shown alongside each `/op` entry in the hint popup.
-pub(crate) const OP_SUBCOMMAND_DESCS: &[&str] = &[
-    "report connection state",
-    "call an MCP tool by name",
-];
+pub(crate) const OP_SUBCOMMAND_DESCS: &[&str] =
+    &["report connection state", "call an MCP tool by name"];
 
 /// `/op` entries that take a required argument, so `SubHints::confirm` should
 /// leave a trailing space instead of submitting bare.
