@@ -42,6 +42,10 @@ and values). Never invent details.";
 /// unresolved question is not a durable fact). Importance is a flat 0.6;
 /// entities are left empty so noema's own extractor fills them.
 pub fn candidate_from_entry(entry: &SessionMemoryEntry) -> Option<ExtractedCandidate> {
+    let body = entry.text.trim();
+    if body.is_empty() || is_compaction_meta_noise(body) {
+        return None;
+    }
     let (kind, confidence, extra_tag) = match entry.kind {
         SessionMemoryKind::Decision => (MemoryKindHint::Decision, 0.85, None),
         SessionMemoryKind::Constraint => (MemoryKindHint::Constraint, 0.85, None),
@@ -51,10 +55,6 @@ pub fn candidate_from_entry(entry: &SessionMemoryEntry) -> Option<ExtractedCandi
         SessionMemoryKind::Observation => (MemoryKindHint::Fact, 0.6, None),
         SessionMemoryKind::OpenQuestion => return None,
     };
-    let body = entry.text.trim();
-    if body.is_empty() {
-        return None;
-    }
     let mut tags = vec!["compact-sink".to_string()];
     if let Some(t) = extra_tag {
         tags.push(t.to_string());
@@ -69,6 +69,28 @@ pub fn candidate_from_entry(entry: &SessionMemoryEntry) -> Option<ExtractedCandi
         importance: 0.6,
         confidence,
     })
+}
+
+fn is_compaction_meta_noise(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let markers = [
+        "[context summary]",
+        "[old tool result content cleared]",
+        "<analysis>",
+        "</analysis>",
+        "<summary>",
+        "</summary>",
+        "analysis block",
+        "summary block",
+        "summary must",
+        "summarization prompt",
+        "compaction prompt",
+        "respond only with",
+        "response must be in the analysis",
+        "analysis channel and summary channel",
+        "tool result content cleared",
+    ];
+    markers.iter().any(|marker| lower.contains(marker))
 }
 
 /// [`SessionMemoryStore`] backed by noema. The QueryLoop (auto path) and
@@ -296,6 +318,29 @@ mod tests {
         ))
         .is_none());
         assert!(candidate_from_entry(&entry(SessionMemoryKind::Decision, "   ")).is_none());
+    }
+
+    #[test]
+    fn drops_compaction_meta_instructions_from_memory_sink() {
+        for text in [
+            "The summary must contain only an <analysis> block and a <summary> block.",
+            "[Context summary]\nThe previous turn was compacted.",
+            "[Old tool result content cleared]",
+            "System requires the response to be in the analysis channel and summary channel.",
+            "Assistant must respond only with compacted context.",
+        ] {
+            assert!(
+                candidate_from_entry(&entry(SessionMemoryKind::Observation, text)).is_none(),
+                "should drop meta noise: {text}"
+            );
+        }
+
+        let useful = candidate_from_entry(&entry(
+            SessionMemoryKind::Observation,
+            "crates/zode-core/src/engine.rs registers compact_tracker_hook before external hooks.",
+        ))
+        .unwrap();
+        assert!(useful.body.contains("compact_tracker_hook"));
     }
 
     #[test]

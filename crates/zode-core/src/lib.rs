@@ -43,9 +43,11 @@ pub mod session_meta;
 pub mod skills;
 pub mod subagents;
 pub mod task_factory;
+pub mod tool_trace;
 pub mod tools;
 pub mod updater;
 pub mod user_commands;
+pub mod verification;
 pub mod workflows;
 pub mod workflows_js;
 

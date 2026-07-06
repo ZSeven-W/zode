@@ -16,20 +16,17 @@ pub fn tr(s: &'static str) -> &'static str {
     zode_core::i18n::t(s)
 }
 
-/// Display prefix for the primary chord modifier: `Cmd+` on macOS, `Ctrl+` on
-/// Windows/Linux — matching each platform's native convention. The key handler
-/// (`is_primary_mod`) accepts the Command (⌘ / SUPER) key on macOS and Ctrl
-/// elsewhere (it also still accepts Ctrl on macOS as a fallback for terminals
-/// that don't forward ⌘).
-///
-/// We spell the macOS modifier `Cmd+` rather than the `⌘` glyph: `⌘` (U+2318)
-/// is East-Asian-Width *Ambiguous*, so `unicode-width` counts it as 1 column
-/// while a CJK-configured terminal renders it 2 — that drift overlaps following
-/// glyphs in fixed-width chrome. `Cmd+` is plain ASCII, width always correct.
+/// Display prefix for application shortcuts. Zode documents Control chords
+/// consistently across platforms; the key handler may accept additional
+/// terminal-specific aliases, but the UI should not advertise them.
 pub fn primary_key_prefix() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Cmd+"
-    } else {
-        "Ctrl+"
+    "Ctrl+"
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn primary_key_prefix_uses_control_label() {
+        assert_eq!(super::primary_key_prefix(), "Ctrl+");
     }
 }

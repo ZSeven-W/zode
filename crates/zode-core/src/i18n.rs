@@ -337,6 +337,11 @@ impl Lang {
     /// Parse a config code (case-insensitive; `zh_TW`/`zh-tw` both work).
     pub fn from_code(code: &str) -> Option<Lang> {
         let c = code.trim().to_ascii_lowercase().replace('_', "-");
+        match c.as_str() {
+            "zh-cn" | "zh-hans" | "zh-sg" => return Some(Lang::Zh),
+            "zh-hant" | "zh-hk" | "zh-mo" => return Some(Lang::ZhTw),
+            _ => {}
+        }
         Lang::ALL.into_iter().find(|l| l.code() == c)
     }
 
@@ -412,6 +417,21 @@ mod tests {
         }
         assert_eq!(Lang::from_code("zh_TW"), Some(Lang::ZhTw));
         assert_eq!(Lang::from_code("klingon"), None);
+    }
+
+    #[test]
+    #[serial]
+    fn zh_cn_alias_enables_recent_command_translations() {
+        set_language(Lang::En);
+        assert!(set_language_code("zh-CN"));
+        assert_eq!(current(), Lang::Zh);
+        assert_eq!(
+            t("Switch the display currency for cost (USD, CNY, EUR, …)"),
+            "切换费用显示货币（USD、CNY、EUR 等）"
+        );
+        assert_eq!(t("Manage Noema long-term memory"), "管理 Noema 长期记忆");
+        assert_eq!(t("Open the sub-agent activity panel"), "打开子代理活动面板");
+        set_language(Lang::En);
     }
 
     #[test]

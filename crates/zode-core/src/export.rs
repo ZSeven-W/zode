@@ -112,6 +112,13 @@ fn render_blocks(blocks: &[ContentBlock], out: &mut String) {
 /// Render the whole conversation to Markdown. Progress/Tombstone messages are
 /// internal and omitted.
 pub fn store_to_markdown(store: &MessageStore) -> String {
+    store_to_markdown_with_trace(store, None)
+}
+
+/// Render the conversation and optionally include the durable JSONL tool trace
+/// file path. Markdown remains human-readable while full stdout/stderr stays in
+/// the trace artifact for debugging and benchmark replay.
+pub fn store_to_markdown_with_trace(store: &MessageStore, trace_path: Option<&Path>) -> String {
     let mut out = String::from("# Conversation\n\n");
     for msg in store.iter() {
         match msg {
@@ -130,6 +137,12 @@ pub fn store_to_markdown(store: &MessageStore) -> String {
             }
             _ => {} // Progress / Tombstone: internal, skip.
         }
+    }
+    if let Some(path) = trace_path {
+        out.push_str("## Trace\n\n");
+        out.push_str("Full tool trace: ");
+        out.push_str(&path.display().to_string());
+        out.push_str("\n\n");
     }
     out
 }
@@ -186,6 +199,16 @@ mod tests {
             store_to_markdown(&MessageStore::new()),
             "# Conversation\n\n"
         );
+    }
+
+    #[test]
+    fn export_can_reference_full_tool_trace_file() {
+        let md = store_to_markdown_with_trace(
+            &MessageStore::new(),
+            Some(Path::new("/work/proj/.zode/traces/session.jsonl")),
+        );
+        assert!(md.contains("Full tool trace"));
+        assert!(md.contains("/work/proj/.zode/traces/session.jsonl"));
     }
 
     #[test]

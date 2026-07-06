@@ -88,6 +88,14 @@ pub struct SessionTab {
     /// Output of `!<cmd>` shell escapes run since the last turn, buffered to
     /// prepend to the next prompt so the agent sees what was run locally.
     pub pending_shell_context: Vec<String>,
+    /// Submitted prompts for Up/Down recall in this conversation only.
+    pub prompt_history: Vec<String>,
+    /// Persistent key for this conversation's prompt history bucket.
+    pub prompt_history_key: String,
+    /// Cursor into `prompt_history` while browsing (None = editing live text).
+    pub history_pos: Option<usize>,
+    /// In-progress text saved when history browsing began.
+    pub history_draft: String,
     /// Whether THIS tab is in plan mode (read-only tools). Per-tab, not global:
     /// the status badge reads it for the active tab, and reassembly re-applies
     /// it so a model/provider/yolo swap doesn't drop or leak plan mode.
@@ -131,6 +139,7 @@ pub struct SessionTab {
 
 impl SessionTab {
     pub fn new(id: usize, engine: Arc<ZodeEngine>, session_id: String) -> Self {
+        let prompt_history_key = format!("session:{session_id}");
         Self {
             id,
             title: format!("tab {}", id + 1),
@@ -156,6 +165,10 @@ impl SessionTab {
             queued_input: std::collections::VecDeque::new(),
             pending_images: Vec::new(),
             pending_shell_context: Vec::new(),
+            prompt_history: Vec::new(),
+            prompt_history_key,
+            history_pos: None,
+            history_draft: String::new(),
             plan_mode: false,
             todos: Vec::new(),
             git_files: None,

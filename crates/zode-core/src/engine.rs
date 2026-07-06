@@ -71,6 +71,7 @@ mode and execute.";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_384;
 const DEFAULT_MODEL_MAX_TOKENS: u32 = 200_000;
 const FILE_CACHE_ENTRIES: usize = 1024;
+const PRE_TURN_COMPACT_PERCENT: u64 = 98;
 
 /// Process-cached models.dev catalog (parsed once) used to look up a model's
 /// published context window when the config doesn't pin one.
@@ -151,6 +152,19 @@ fn resolve_max_output(
     } else {
         resolved.min(context_window - 1)
     }
+}
+
+fn pre_turn_compact_needed(input_tokens: u32, context_window: u32, max_output_tokens: u32) -> bool {
+    if context_window == 0 {
+        return false;
+    }
+    let threshold = ((context_window as u64) * PRE_TURN_COMPACT_PERCENT / 100) as u32;
+    let output_budget = if context_window <= 1 {
+        max_output_tokens
+    } else {
+        max_output_tokens.min(context_window - 1)
+    };
+    input_tokens.saturating_add(output_budget) >= threshold
 }
 
 /// Resolve the agent loop's runaway backstop. The loop already stops the moment
@@ -280,6 +294,8 @@ pub struct CarryState {
     pub file_cache: Option<Arc<FileStateCache>>,
     pub bg_shells_meta: Option<BackgroundShellTracker>,
     pub recent_files: Option<crate::compact_memory::RecentFiles>,
+    pub verification: Option<crate::verification::VerificationState>,
+    pub tool_trace: Option<crate::tool_trace::ToolTrace>,
 }
 
 impl ZodeEngine {
@@ -296,6 +312,8 @@ impl ZodeEngine {
             file_cache: Some(self.file_cache.clone()),
             bg_shells_meta: Some(self.bg_shells_meta.clone()),
             recent_files: Some(self.recent_files.clone()),
+            verification: Some(self.verification.clone()),
+            tool_trace: Some(self.tool_trace.clone()),
         }
     }
 }
@@ -358,11 +376,13 @@ fn render_runtime_system_prompt(
              You are working AUTONOMOUSLY toward this goal across multiple turns. \
              Each turn, take the next concrete step (research, edit, run, verify) — \
              do not just describe what you would do; actually do it. The loop \
-             continues automatically after every turn. When — and only when — the \
-             goal is FULLY achieved and verified, call the `goal_complete` tool \
-             with a short summary to end the loop. Do not call `goal_complete` \
-             prematurely, and do not stop early otherwise; if work remains, keep \
-             going on the next turn."
+             continues automatically after every turn. Before claiming completion, \
+             run the `run_check` tool with the exact verification command or \
+             invariant that proves the work is done. When — and only when — the \
+             goal is FULLY achieved and `run_check` has fresh passing evidence, \
+             call the `goal_complete` tool with a short summary to end the loop. \
+             Do not call `goal_complete` prematurely, and do not stop early \
+             otherwise; if work remains, keep going on the next turn."
         ));
     }
     // Effort level (`/effort`) tunes thoroughness vs. speed.
@@ -518,6 +538,11 @@ pub struct ZodeEngine {
     /// decide whether to stop looping. Created fresh in `assemble` so a rebuilt
     /// engine and its tool always share the same `Arc`.
     goal_completed: Arc<AtomicBool>,
+    /// Verification evidence produced by `run_check`; mutating tools make it
+    /// stale and `goal_complete` requires it to be fresh.
+    pub verification: crate::verification::VerificationState,
+    /// Durable JSONL trace file for full tool inputs/outputs, referenced by export.
+    pub tool_trace: crate::tool_trace::ToolTrace,
     /// Optional cap on autonomous goal-loop turns (`autoLoopMaxTurns`). `None`
     /// means unbounded — the loop runs until `goal_complete` or user interrupt.
     auto_loop_max_turns: Option<u32>,
@@ -652,6 +677,11 @@ impl ZodeEngine {
         //    "no caller-provided TodoState" startup warning.
         let mut base = ToolRegistry::new();
         let todo_state = carry.todo_state.clone().unwrap_or_default();
+        let verification = carry.verification.clone().unwrap_or_default();
+        let tool_trace = carry
+            .tool_trace
+            .clone()
+            .unwrap_or_else(|| crate::tool_trace::ToolTrace::new(&cwd));
         register_default_with_todo(&mut base, policy.clone(), todo_state.clone());
         base.register(Arc::new(BashTool::with_compress_output(
             policy.clone(),
@@ -675,6 +705,10 @@ impl ZodeEngine {
         let goal_completed = Arc::new(AtomicBool::new(false));
         base.register(Arc::new(crate::goal::GoalCompleteTool::new(
             goal_completed.clone(),
+            verification.clone(),
+        )));
+        base.register(Arc::new(crate::verification::RunCheckTool::new(
+            verification.clone(),
         )));
 
         // Git tools (Zode product tools, not in agent-tools-code).
@@ -877,6 +911,10 @@ impl ZodeEngine {
             recent_files.clone(),
             restore_pending.clone(),
         )));
+        hook_runner.register(Arc::new(crate::verification::verification_hook(
+            verification.clone(),
+        )));
+        hook_runner.register(Arc::new(tool_trace.hook()));
         // External hooks.json scripts (global ⊕ project).
         for h in load_hook_handlers(&cwd) {
             hook_runner.register(h);
@@ -1089,6 +1127,8 @@ impl ZodeEngine {
             user_commands: crate::user_commands::load_user_commands(&cwd),
             openpencil: cfg.openpencil.clone(),
             goal_completed,
+            verification,
+            tool_trace,
             auto_loop_max_turns: cfg.auto_loop_max_turns,
             browser: browser_session,
         })
@@ -1188,18 +1228,15 @@ impl ZodeEngine {
         self
     }
 
-    /// Context occupancy (percent of window) at which a pre-turn compaction
-    /// fires — just under 100 so the next prompt clears the provider's hard
-    /// input limit. Matches the TUI's own guard.
-    const AUTO_COMPACT_PERCENT: u64 = 98;
-
     /// Pre-turn safety compaction for headless callers (`-p` on a large
     /// resumed context, long `--no-tui` sessions). The QueryLoop already
     /// auto-compacts on a byte estimate, but that under-counts CJK; when the
-    /// caller has the provider-reported prompt size (`context_tokens`, the
-    /// last turn's Usage), this checks the ACCURATE occupancy and compacts
-    /// before the next turn so the conversation can't sail past the input
-    /// limit and hard-400. `None` falls back to a byte estimate of the store.
+    /// caller has the provider-reported prompt size (`context_tokens`, the last
+    /// turn's Usage), this checks the ACCURATE request budget (prompt tokens
+    /// plus the configured completion budget) and compacts before the next turn
+    /// so the conversation can't sail past provider `prompt + max_tokens`
+    /// validation and hard-400. `None` falls back to a byte estimate of the
+    /// store.
     /// Best-effort: a compaction failure is logged, not surfaced. Returns
     /// whether a compaction ran.
     pub async fn auto_compact_if_needed(&self, context_tokens: Option<u32>) -> bool {
@@ -1217,7 +1254,7 @@ impl ZodeEngine {
                 })
                 .unwrap_or(0)
         });
-        if (tokens as u64) * 100 / (window as u64) < Self::AUTO_COMPACT_PERCENT {
+        if !pre_turn_compact_needed(tokens, window, self.max_output_tokens) {
             return false;
         }
         match self
@@ -1270,7 +1307,9 @@ impl ZodeEngine {
     /// empty header-only document if the store mutex is poisoned.
     pub fn export_markdown(&self) -> String {
         match self.store.lock() {
-            Ok(store) => crate::export::store_to_markdown(&store),
+            Ok(store) => {
+                crate::export::store_to_markdown_with_trace(&store, Some(self.tool_trace.path()))
+            }
             Err(_) => "# Conversation\n\n".to_string(),
         }
     }
@@ -2422,6 +2461,10 @@ mod tests {
             model_max_tokens: DEFAULT_MODEL_MAX_TOKENS,
             max_iterations: usize::MAX,
             goal_completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            verification: crate::verification::VerificationState::default(),
+            tool_trace: crate::tool_trace::ToolTrace::with_path(
+                std::env::temp_dir().join("zode-test-tool-trace.jsonl"),
+            ),
             auto_loop_max_turns: None,
             max_api_retries: 10,
             temperature: None,
@@ -3058,6 +3101,7 @@ mod tests {
         let sys = eng.system.as_deref().unwrap_or("");
         assert!(sys.contains("Current goal"), "{sys}");
         assert!(sys.contains("ship v1 of the parser"), "{sys}");
+        assert!(sys.contains("run_check"), "{sys}");
         assert!(sys.contains("Effort: high"), "{sys}");
     }
 
@@ -3131,7 +3175,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(eng.hooks.len(), 3); // EditHistory + BgShell + compact-tracker
+        // EditHistory + BgShell + compact-tracker + verification + tool-trace.
+        assert_eq!(eng.hooks.len(), 5);
         assert!(eng.undo().await.is_err()); // empty history
     }
 
@@ -3354,6 +3399,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(resolve_max_output(&sane, None, None, &cat, 200_000), 32_768);
+    }
+
+    #[test]
+    fn pre_turn_compact_reserves_completion_budget() {
+        // Reported Anthropic failure:
+        // messages=871_190, completion=384_000, window=1_048_565.
+        // Input alone is only ~83% of the window, so an input-only 98% guard
+        // would skip compaction, but providers validate prompt + max_tokens.
+        assert!(pre_turn_compact_needed(871_190, 1_048_565, 384_000));
+
+        // The same prompt with a normal 16k completion still has enough room.
+        assert!(!pre_turn_compact_needed(871_190, 1_048_565, 16_384));
+
+        // Preserve the old near-full prompt behavior even with small outputs.
+        assert!(pre_turn_compact_needed(1_030_000, 1_048_565, 512));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! REPL). Both consume the agent Event stream without any TUI.
 
 use std::io::Write;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent::abort::AbortController;
@@ -36,6 +37,7 @@ pub async fn run_print(engine: &ZodeEngine, prompt: &str, resumed_id: Option<Str
 
     let mut exit = 0;
     let mut stdout = std::io::stdout();
+    let mut tool_names = std::collections::HashMap::<String, String>::new();
     while let Some(item) = stream.next().await {
         let event = match item {
             Ok(ev) => ev,
@@ -52,8 +54,20 @@ pub async fn run_print(engine: &ZodeEngine, prompt: &str, resumed_id: Option<Str
                 let _ = write!(stdout, "{delta}");
                 let _ = stdout.flush();
             }
-            Event::ToolUse { name, .. } => eprintln!("· {name}"),
-            Event::ToolResult { ok, .. } if !ok => eprintln!("· tool failed"),
+            Event::ToolUse { id, name, .. } => {
+                tool_names.insert(id, name.clone());
+                eprintln!("· {name}");
+            }
+            Event::ToolResult { id, ok, output } => {
+                if let Some(line) = tool_result_line(
+                    tool_names.get(&id).map(String::as_str),
+                    ok,
+                    &output,
+                    Some(engine.cwd.as_path()),
+                ) {
+                    eprintln!("· {line}");
+                }
+            }
             Event::Error { code, message } => {
                 eprintln!("\nzode error [{code}]: {message}");
                 exit = 1;
@@ -331,6 +345,7 @@ async fn run_turn(engine: &ZodeEngine, prompt: &str) {
         }
     };
     let mut out = std::io::stdout();
+    let mut tool_names = std::collections::HashMap::<String, String>::new();
     while let Some(item) = stream.next().await {
         let event = match item {
             Ok(ev) => ev,
@@ -346,12 +361,197 @@ async fn run_turn(engine: &ZodeEngine, prompt: &str) {
                 let _ = write!(out, "{delta}");
                 let _ = out.flush();
             }
-            Event::ToolUse { name, .. } => eprintln!("\n· {name}"),
+            Event::ToolUse { id, name, .. } => {
+                tool_names.insert(id, name.clone());
+                eprintln!("\n· {name}");
+            }
+            Event::ToolResult { id, ok, output } => {
+                if let Some(line) = tool_result_line(
+                    tool_names.get(&id).map(String::as_str),
+                    ok,
+                    &output,
+                    Some(engine.cwd.as_path()),
+                ) {
+                    eprintln!("\n· {line}");
+                }
+            }
             Event::Error { code, message } => eprintln!("\n[{code}] {message}"),
             _ => {}
         }
     }
     let _ = writeln!(out);
+}
+
+fn tool_result_line(
+    name: Option<&str>,
+    ok: bool,
+    output: &serde_json::Value,
+    cwd: Option<&Path>,
+) -> Option<String> {
+    let name = name.unwrap_or("tool");
+    if !ok {
+        return Some(format!("{name} failed: {}", compact_tool_payload(output)));
+    }
+    if output
+        .get("passed")
+        .and_then(|v| v.as_bool())
+        .is_some_and(|passed| !passed)
+    {
+        return Some(format!("{name} failed: {}", compact_tool_payload(output)));
+    }
+    if let Some(summary) = file_mutation_result_location_summary(name, output, cwd) {
+        return Some(format!("{name} done {summary}"));
+    }
+    if let Some(exit_code) = output.get("exit_code") {
+        let mut line = format!("{name} exit_code={}", display_json_atom(exit_code));
+        if let Some(stderr) = output.get("stderr").and_then(|v| v.as_str()) {
+            if !stderr.trim().is_empty() {
+                line.push_str(&format!(" stderr={}", compact_text(stderr, 160)));
+            }
+        }
+        if let Some(stdout) = output.get("stdout").and_then(|v| v.as_str()) {
+            if !stdout.trim().is_empty()
+                && output
+                    .get("stderr")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+            {
+                line.push_str(&format!(" stdout={}", compact_text(stdout, 160)));
+            }
+        }
+        return Some(line);
+    }
+    if name == "run_check" {
+        if let Some(command) = output.get("command").and_then(|v| v.as_str()) {
+            return Some(format!("{name} passed: {}", compact_text(command, 120)));
+        }
+    }
+    None
+}
+
+fn file_mutation_result_location_summary(
+    name: &str,
+    output: &serde_json::Value,
+    cwd: Option<&Path>,
+) -> Option<String> {
+    if !matches!(
+        name,
+        "FileWrite" | "FileEdit" | "Mkdir" | "Move" | "Remove" | "NotebookEdit"
+    ) {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    if let Some(obj) = output.as_object() {
+        for key in ["path", "from", "to"] {
+            if let Some(value) = obj.get(key).and_then(|v| v.as_str()) {
+                parts.push(format!("{key}={value}"));
+            }
+        }
+    }
+    if let Some(cwd) = cwd {
+        parts.push(format!("cwd={}", cwd.display()));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+fn compact_tool_payload(output: &serde_json::Value) -> String {
+    if let Some(error) = output.get("error").and_then(|v| v.as_str()) {
+        return compact_text(error, 220);
+    }
+    if let Some(failures) = output.get("failures").and_then(|v| v.as_array()) {
+        let joined = failures
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !joined.is_empty() {
+            return compact_text(&joined, 220);
+        }
+    }
+    compact_text(&output.to_string(), 220)
+}
+
+fn display_json_atom(value: &serde_json::Value) -> String {
+    value
+        .as_i64()
+        .map(|n| n.to_string())
+        .or_else(|| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn compact_text(text: &str, max_chars: usize) -> String {
+    let mut one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= max_chars {
+        return one_line;
+    }
+    let keep = max_chars.saturating_sub(3);
+    one_line = one_line.chars().take(keep).collect();
+    one_line.push_str("...");
+    one_line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tool_result_line_surfaces_failed_error() {
+        let line = tool_result_line(
+            Some("FileEdit"),
+            false,
+            &json!({"error": "old_string not found\nretry with FileRead"}),
+            None,
+        )
+        .unwrap();
+        assert!(line.contains("FileEdit failed"), "{line}");
+        assert!(line.contains("old_string not found"), "{line}");
+        assert!(line.contains("FileRead"), "{line}");
+    }
+
+    #[test]
+    fn tool_result_line_surfaces_bash_exit_code_and_stderr() {
+        let line = tool_result_line(
+            Some("Bash"),
+            true,
+            &json!({"exit_code": 52, "stdout": "", "stderr": "Empty reply from server\n"}),
+            None,
+        )
+        .unwrap();
+        assert!(line.contains("Bash exit_code=52"), "{line}");
+        assert!(line.contains("Empty reply from server"), "{line}");
+    }
+
+    #[test]
+    fn tool_result_line_surfaces_failed_run_check() {
+        let line = tool_result_line(
+            Some("run_check"),
+            true,
+            &json!({"passed": false, "failures": ["expected stdout to contain ready"]}),
+            None,
+        )
+        .unwrap();
+        assert!(line.contains("run_check failed"), "{line}");
+        assert!(line.contains("expected stdout"), "{line}");
+    }
+
+    #[test]
+    fn tool_result_line_surfaces_file_result_location_and_cwd() {
+        let cwd = std::path::Path::new("/work/project");
+        let line = tool_result_line(
+            Some("FileWrite"),
+            true,
+            &json!({"path": "/work/project/created.txt", "status": "ok", "size_bytes": 1}),
+            Some(cwd),
+        )
+        .unwrap();
+        assert!(line.contains("FileWrite done"), "{line}");
+        assert!(line.contains("path=/work/project/created.txt"), "{line}");
+        assert!(line.contains("cwd=/work/project"), "{line}");
+    }
 }
 
 /// Snapshot the store (MessageStore: Clone) then persist. The std mutex

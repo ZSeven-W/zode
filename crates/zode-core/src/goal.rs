@@ -13,6 +13,8 @@ use agent::tool::{SafetyClass, Tool, ToolUseContext};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use crate::verification::VerificationState;
+
 /// The `goal_complete` tool. Read-only in effect: it only flips a flag the host
 /// reads to end the autonomous goal loop — it mutates nothing outside the agent.
 #[derive(Debug)]
@@ -20,11 +22,15 @@ pub struct GoalCompleteTool {
     /// Shared with the owning [`ZodeEngine`](crate::engine::ZodeEngine); the
     /// same `Arc` is handed to the engine so the host can poll it after a turn.
     completed: Arc<AtomicBool>,
+    verification: VerificationState,
 }
 
 impl GoalCompleteTool {
-    pub fn new(completed: Arc<AtomicBool>) -> Self {
-        Self { completed }
+    pub fn new(completed: Arc<AtomicBool>, verification: VerificationState) -> Self {
+        Self {
+            completed,
+            verification,
+        }
     }
 }
 
@@ -37,7 +43,8 @@ impl Tool for GoalCompleteTool {
     fn description(&self) -> &str {
         "Call this ONLY when the current goal is fully achieved; it ends the \
          autonomous goal loop. Provide a short summary of what was accomplished. \
-         Do not call it prematurely — if more work remains, keep going instead."
+         Do not call it prematurely — if more work remains, keep going instead. \
+         A fresh passing run_check is required before this tool will succeed."
     }
 
     fn input_schema(&self) -> Value {
@@ -66,10 +73,18 @@ impl Tool for GoalCompleteTool {
             .unwrap_or("")
             .trim()
             .to_string();
+        let evidence = self
+            .verification
+            .completion_evidence()
+            .map_err(AgentError::other)?;
         self.completed.store(true, Ordering::SeqCst);
         Ok(json!({
             "ok": true,
             "summary": summary,
+            "verification": {
+                "tool": evidence.tool,
+                "command": evidence.command,
+            },
             "note": "goal marked complete; the autonomous goal loop will stop"
         }))
     }
@@ -82,7 +97,7 @@ mod tests {
     #[test]
     fn tool_metadata_is_stable() {
         let flag = Arc::new(AtomicBool::new(false));
-        let tool = GoalCompleteTool::new(flag);
+        let tool = GoalCompleteTool::new(flag, VerificationState::default());
         assert_eq!(tool.name(), "goal_complete");
         assert_eq!(tool.safety_class(), SafetyClass::ReadOnly);
         let schema = tool.input_schema();
@@ -90,11 +105,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_sets_the_shared_flag() {
+    async fn call_sets_the_shared_flag_only_after_a_fresh_passed_verification() {
+        let verification = crate::verification::VerificationState::default();
         let flag = Arc::new(AtomicBool::new(false));
-        let tool = GoalCompleteTool::new(flag.clone());
+        let tool = GoalCompleteTool::new(flag.clone(), verification.clone());
         assert!(!flag.load(Ordering::SeqCst));
         let ctx = ToolUseContext::new(".");
+        let premature = tool
+            .call(&ctx, json!({ "summary": "did the thing" }))
+            .await
+            .expect_err("goal_complete must reject completion before verification");
+        assert!(premature.to_string().contains("run_check"));
+        assert!(!flag.load(Ordering::SeqCst));
+
+        verification.record_pass("run_check", "cargo test");
         let out = tool
             .call(&ctx, json!({ "summary": "did the thing" }))
             .await

@@ -39,7 +39,7 @@ pub fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
             ))
         })
         .collect();
-    // Key labels use ⌘ on macOS (replace the "Ctrl+" in the static table).
+    // Key labels use the same Control prefix as the status bar.
     let mod_prefix = crate::primary_key_prefix();
     let key_lines: Vec<Line> = KEYMAP
         .iter()

@@ -66,7 +66,7 @@ use crate::ui::tabs::{render_sidebar, SidebarInfo};
 use crate::ui::toast::Toast;
 
 const PROMPT_HISTORY_FILE: &str = "prompt_history.json";
-/// Cap on persisted prompt-history entries PER PROJECT. When exceeded, the
+/// Cap on persisted prompt-history entries PER SESSION. When exceeded, the
 /// OLDEST are dropped first (FIFO) — see `record_prompt_history_entry`.
 const PROMPT_HISTORY_LIMIT: usize = 100;
 
@@ -97,37 +97,27 @@ fn prompt_history_path() -> Option<std::path::PathBuf> {
         .map(|dir| dir.join(PROMPT_HISTORY_FILE))
 }
 
-/// Stable key for a project's history bucket: the canonical cwd path (falling
-/// back to the raw path string if canonicalization fails, e.g. the dir was
-/// removed). The same cwd notion already keys `.zode/state.json`.
-fn prompt_history_key(cwd: &Path) -> String {
-    std::fs::canonicalize(cwd)
-        .unwrap_or_else(|_| cwd.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn load_prompt_history(project_key: &str) -> Vec<String> {
+fn load_prompt_history(history_key: &str) -> Vec<String> {
     prompt_history_path()
         .as_deref()
-        .map(|path| load_prompt_history_from_path(path, project_key))
+        .map(|path| load_prompt_history_from_path(path, history_key))
         .unwrap_or_default()
 }
 
-fn save_prompt_history(project_key: &str, history: &[String]) {
+fn save_prompt_history(history_key: &str, history: &[String]) {
     let Some(path) = prompt_history_path() else {
         return;
     };
-    if let Err(e) = save_prompt_history_to_path(&path, project_key, history) {
+    if let Err(e) = save_prompt_history_to_path(&path, history_key, history) {
         tracing::warn!(error = %e, path = %path.display(), "failed to save prompt history");
     }
 }
 
-/// Read the whole project-keyed history map from disk. A legacy flat-array
-/// file (`["a","b"]`) is migrated under `project_key` so existing records are
+/// Read the whole session-keyed history map from disk. A legacy flat-array
+/// file (`["a","b"]`) is migrated under `history_key` so existing records are
 /// never lost. Missing/corrupt files yield an empty map (logged), so a bad
 /// file never wipes the user's history on the next save.
-fn load_history_map(path: &Path, project_key: &str) -> BTreeMap<String, Vec<String>> {
+fn load_history_map(path: &Path, history_key: &str) -> BTreeMap<String, Vec<String>> {
     let Ok(text) = fs::read_to_string(path) else {
         return BTreeMap::new();
     };
@@ -158,7 +148,7 @@ fn load_history_map(path: &Path, project_key: &str) -> BTreeMap<String, Vec<Stri
             if let Ok(entries) = serde_json::from_value::<Vec<String>>(v) {
                 let entries = sanitize_prompt_history(entries);
                 if !entries.is_empty() {
-                    map.insert(project_key.to_string(), entries);
+                    map.insert(history_key.to_string(), entries);
                 }
             }
         }
@@ -169,29 +159,29 @@ fn load_history_map(path: &Path, project_key: &str) -> BTreeMap<String, Vec<Stri
     map
 }
 
-fn load_prompt_history_from_path(path: &Path, project_key: &str) -> Vec<String> {
-    load_history_map(path, project_key)
-        .remove(project_key)
+fn load_prompt_history_from_path(path: &Path, history_key: &str) -> Vec<String> {
+    load_history_map(path, history_key)
+        .remove(history_key)
         .unwrap_or_default()
 }
 
 fn save_prompt_history_to_path(
     path: &Path,
-    project_key: &str,
+    history_key: &str,
     history: &[String],
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    // Read-modify-write: preserve every OTHER project's bucket and migrate a
-    // legacy flat-array file, then replace only this project's entries. This is
-    // what keeps saving from one project from clearing another's records.
-    let mut map = load_history_map(path, project_key);
+    // Read-modify-write: preserve every OTHER session's bucket and migrate a
+    // legacy flat-array file, then replace only this session's entries. This is
+    // what keeps saving from one session from clearing another's records.
+    let mut map = load_history_map(path, history_key);
     let entries = sanitize_prompt_history(history.to_vec());
     if entries.is_empty() {
-        map.remove(project_key);
+        map.remove(history_key);
     } else {
-        map.insert(project_key.to_string(), entries);
+        map.insert(history_key.to_string(), entries);
     }
     let json = serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?;
     fs::write(path, json).map_err(|e| e.to_string())
@@ -222,6 +212,19 @@ fn record_prompt_history_entry(history: &mut Vec<String>, text: &str) -> bool {
         history.drain(0..excess);
     }
     true
+}
+
+fn seed_prompt_history_for_tab(tab: &mut SessionTab) {
+    tab.prompt_history_key = format!("session:{}", tab.session_id);
+    let mut history = load_prompt_history(&tab.prompt_history_key);
+    for msg in tab.chat.messages() {
+        if msg.role == crate::ui::chat::Role::User {
+            record_prompt_history_entry(&mut history, &msg.text);
+        }
+    }
+    tab.prompt_history = history;
+    tab.history_pos = None;
+    tab.history_draft.clear();
 }
 
 /// Render one design-pipeline phase as a transcript progress line. Kept in the
@@ -439,16 +442,6 @@ pub struct TuiApp {
     /// and applied to the active tab's chat each frame.
     show_thinking: bool,
     show_tool_details: bool,
-    /// Submitted prompts, oldest first, for Up/Down recall in the input box.
-    prompt_history: Vec<String>,
-    /// Project bucket key (the session cwd) under which `prompt_history` is
-    /// persisted in `~/.zode/prompt_history.json`.
-    prompt_history_key: String,
-    /// Cursor into `prompt_history` while browsing (None = editing live text).
-    history_pos: Option<usize>,
-    /// The in-progress text saved when history browsing began, restored when
-    /// the user pages back down past the newest entry.
-    history_draft: String,
     /// Index of the queued follow-up currently mirrored in the prompt editor.
     queued_edit_index: Option<usize>,
 }
@@ -516,18 +509,9 @@ impl TuiApp {
             );
         }
 
-        // Seed input-line history with the conversation's prompts so Up/Down
-        // recalls them immediately — even on a fresh/resumed session before
-        // anything is typed. Persisted entries (this project's bucket in
-        // prompt_history.json) come first; then this conversation's user
-        // messages (deduped, in order).
-        let prompt_history_key = prompt_history_key(template.cwd());
-        let mut prompt_history = load_prompt_history(&prompt_history_key);
-        for msg in tab0.chat.messages() {
-            if msg.role == crate::ui::chat::Role::User {
-                record_prompt_history_entry(&mut prompt_history, &msg.text);
-            }
-        }
+        // Seed input-line history from this session's own bucket plus the
+        // conversation's user prompts, so Up/Down never crosses sessions.
+        seed_prompt_history_for_tab(&mut tab0);
 
         // Read display prefs before `template` is moved into the struct.
         let show_thinking = template.show_thinking();
@@ -604,10 +588,6 @@ impl TuiApp {
             provider_names: ui.provider_names,
             show_thinking,
             show_tool_details,
-            prompt_history,
-            prompt_history_key,
-            history_pos: None,
-            history_draft: String::new(),
             queued_edit_index: None,
         }
     }
@@ -615,44 +595,47 @@ impl TuiApp {
     /// Record a submitted prompt for Up/Down recall (skips blanks and exact
     /// consecutive duplicates), and reset the browse cursor.
     fn record_prompt_history(&mut self, text: &str) {
-        if record_prompt_history_entry(&mut self.prompt_history, text) {
-            save_prompt_history(&self.prompt_history_key, &self.prompt_history);
+        let tab = &mut self.tabs[self.active];
+        if record_prompt_history_entry(&mut tab.prompt_history, text) {
+            save_prompt_history(&tab.prompt_history_key, &tab.prompt_history);
         }
-        self.history_pos = None;
-        self.history_draft.clear();
+        tab.history_pos = None;
+        tab.history_draft.clear();
     }
 
     /// Recall the previous (older) prompt into the input box. On first step it
     /// stashes the current draft so Down can restore it.
     fn history_prev(&mut self) {
-        if self.prompt_history.is_empty() {
+        let tab = &mut self.tabs[self.active];
+        if tab.prompt_history.is_empty() {
             return;
         }
-        let next = match self.history_pos {
+        let next = match tab.history_pos {
             None => {
-                self.history_draft = self.input.text();
-                self.prompt_history.len() - 1
+                tab.history_draft = self.input.text();
+                tab.prompt_history.len() - 1
             }
             Some(0) => 0,
             Some(p) => p - 1,
         };
-        self.history_pos = Some(next);
-        let entry = self.prompt_history[next].clone();
+        tab.history_pos = Some(next);
+        let entry = tab.prompt_history[next].clone();
         self.input.set_text(&entry);
     }
 
     /// Step to a newer prompt; past the newest, restore the stashed draft.
     fn history_next(&mut self) {
-        let Some(p) = self.history_pos else {
+        let tab = &mut self.tabs[self.active];
+        let Some(p) = tab.history_pos else {
             return;
         };
-        if p + 1 < self.prompt_history.len() {
-            self.history_pos = Some(p + 1);
-            let entry = self.prompt_history[p + 1].clone();
+        if p + 1 < tab.prompt_history.len() {
+            tab.history_pos = Some(p + 1);
+            let entry = tab.prompt_history[p + 1].clone();
             self.input.set_text(&entry);
         } else {
-            self.history_pos = None;
-            let draft = std::mem::take(&mut self.history_draft);
+            tab.history_pos = None;
+            let draft = std::mem::take(&mut tab.history_draft);
             self.input.set_text(&draft);
         }
     }
@@ -670,8 +653,10 @@ impl TuiApp {
     fn reset_input_browse_state(&mut self) {
         self.completion_hint = None;
         self.dismiss_input_popups();
-        self.history_pos = None;
-        self.history_draft.clear();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.history_pos = None;
+            tab.history_draft.clear();
+        }
         self.active_input_selection = None;
     }
 
@@ -1147,6 +1132,7 @@ impl TuiApp {
                     let tab = &mut self.tabs[tab_idx];
                     tab.chat = chat;
                     tab.context_tokens = tokens;
+                    seed_prompt_history_for_tab(tab);
                     // Seed the append watermark to the loaded length so the
                     // first post-resume save appends onto the existing file
                     // instead of mismatching and rewriting it.
@@ -2561,14 +2547,14 @@ impl TuiApp {
                 self.force_redraw = true;
                 return;
             }
-            // Paste uses the platform primary modifier (Cmd on macOS, Ctrl on
-            // Windows/Linux), like the other app chords — not Ctrl-only.
+            // Paste uses the documented Control chord; macOS Command/SUPER is
+            // accepted by `is_primary_mod` as a compatibility alias.
             (KeyCode::Char('v'), m) if is_primary_mod(m) => {
                 self.paste_from_clipboard();
                 return;
             }
-            // App chords use the platform primary modifier: Cmd (⌘) on macOS,
-            // Ctrl elsewhere (see `is_primary_mod`).
+            // App chords are documented as Ctrl; `is_primary_mod` also accepts
+            // macOS Command/SUPER where terminals deliver it.
             (KeyCode::Char('o'), m) if is_primary_mod(m) => {
                 self.open_settings();
                 return;
@@ -2596,7 +2582,8 @@ impl TuiApp {
                 self.tabs[self.active].chat.toggle_all_collapsed();
                 return;
             }
-            // ⌘/Ctrl + 1..9 jump to a tab by position.
+            // Ctrl+1..9 jumps to a tab by position; macOS Command/SUPER is an
+            // accepted alias where terminals deliver it.
             (KeyCode::Char(c), m) if is_primary_mod(m) && c.is_ascii_digit() && c != '0' => {
                 let n = (c as u8 - b'1') as usize;
                 self.switch_to(n);
@@ -2840,7 +2827,7 @@ impl TuiApp {
                 self.active_input_selection = None;
                 self.input.input(key);
                 // Editing the text exits history-browse mode.
-                self.history_pos = None;
+                self.tabs[self.active].history_pos = None;
                 // A file dragged into the terminal arrives as typed keystrokes
                 // (not a bracketed paste), so handle_paste never sees it. Once a
                 // complete, existing image path lands in the input, lift it into
@@ -5180,7 +5167,12 @@ impl TuiApp {
                     }
                     Event::ToolResult { ref id, .. } => {
                         let known_tool = tab.active_tool_names.remove(id);
-                        if let Some(line) = process_line_for_event(&event, known_tool.as_deref()) {
+                        let cwd = tab.engine.cwd.clone();
+                        if let Some(line) = process_line_for_event_with_cwd(
+                            &event,
+                            known_tool.as_deref(),
+                            Some(cwd.as_path()),
+                        ) {
                             tab.chat.push_tool(&line);
                         }
                     }
@@ -6468,9 +6460,8 @@ fn mode_label(mode: Mode) -> &'static str {
     }
 }
 
-/// The primary chord modifier for app shortcuts: Cmd (⌘ / SUPER) on macOS,
-/// Ctrl elsewhere. On macOS Ctrl is also accepted as a fallback, since many
-/// terminals don't deliver the Cmd modifier to TUI apps.
+/// The primary chord modifier for app shortcuts is Ctrl. On macOS we also
+/// accept Command/SUPER as a compatibility alias when the terminal delivers it.
 fn is_primary_mod(m: KeyModifiers) -> bool {
     if cfg!(target_os = "macos") {
         m.contains(KeyModifiers::SUPER) || m.contains(KeyModifiers::CONTROL)
@@ -6790,6 +6781,14 @@ fn tool_output_preview(output: &serde_json::Value) -> Option<String> {
 }
 
 fn process_line_for_event(event: &Event, known_tool: Option<&str>) -> Option<String> {
+    process_line_for_event_with_cwd(event, known_tool, None)
+}
+
+fn process_line_for_event_with_cwd(
+    event: &Event,
+    known_tool: Option<&str>,
+    cwd: Option<&Path>,
+) -> Option<String> {
     match event {
         Event::TextDelta { .. } => None,
         Event::Thinking { delta } => (!delta.is_empty()).then(|| format!("Thinking: {delta}")),
@@ -6805,6 +6804,10 @@ fn process_line_for_event(event: &Event, known_tool: Option<&str>) -> Option<Str
         Event::ToolResult { ok, output, .. } => {
             let status = if *ok { "done" } else { "failed" };
             let mut line = format!("{} {status}", tool_result_title(known_tool));
+            if let Some(summary) = file_mutation_result_location_summary(known_tool, output, cwd) {
+                line.push(' ');
+                line.push_str(&summary);
+            }
             // Show the tool's actual output (stdout / file content / …), indented
             // under the status line and truncated. Hidden by `/tool-details off`
             // like the rest of the tool rows.
@@ -6891,6 +6894,35 @@ fn tool_result_title(known_tool: Option<&str>) -> String {
     } else {
         format!("Tool {name}")
     }
+}
+
+fn file_mutation_result_location_summary(
+    known_tool: Option<&str>,
+    output: &serde_json::Value,
+    cwd: Option<&Path>,
+) -> Option<String> {
+    let tool = known_tool
+        .map(|name| name.strip_prefix("Tool ").unwrap_or(name))
+        .unwrap_or("");
+    if !matches!(
+        tool,
+        "FileWrite" | "FileEdit" | "Mkdir" | "Move" | "Remove" | "NotebookEdit"
+    ) {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    if let Some(obj) = output.as_object() {
+        for key in ["path", "from", "to"] {
+            if let Some(value) = obj.get(key).and_then(|v| v.as_str()) {
+                parts.push(format!("{key}={value}"));
+            }
+        }
+    }
+    if let Some(cwd) = cwd {
+        parts.push(format!("cwd={}", cwd.display()));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
@@ -7041,7 +7073,20 @@ async fn run_shell_capture(cmd: &str, cwd: &std::path::Path) -> String {
         c.arg("-c").arg(cmd);
         c
     };
-    command.current_dir(cwd).kill_on_drop(true);
+    command
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env(
+            "GIT_SSH_COMMAND",
+            "ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new",
+        )
+        .env("GCM_INTERACTIVE", "never");
+    detach_command_from_controlling_tty(&mut command);
 
     // Bound the worst case: a timeout caps a hung command and the output size
     // cap prevents `!yes`/`!find /` from growing chat + context until OOM.
@@ -7078,6 +7123,22 @@ async fn run_shell_capture(cmd: &str, cwd: &std::path::Path) -> String {
         Err(_) => format!("command timed out after {}s", TIMEOUT.as_secs()),
     }
 }
+
+#[cfg(unix)]
+fn detach_command_from_controlling_tty(command: &mut tokio::process::Command) {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn detach_command_from_controlling_tty(_command: &mut tokio::process::Command) {}
 
 /// Format a `!<cmd>` shell escape's command + output as a context note that's
 /// prepended to the next prompt, so the agent sees what the user ran locally.
@@ -7966,6 +8027,18 @@ mod tests {
         assert_eq!(app.active_tab().pending_shell_context.len(), 1);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_shell_runs_without_a_controlling_tty() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_shell_capture(
+            "if (: >/dev/tty) 2>/dev/null; then echo HAS_TTY; else echo NO_TTY; fi",
+            dir.path(),
+        )
+        .await;
+        assert_eq!(out.trim(), "NO_TTY");
+    }
+
     #[tokio::test]
     async fn new_tab_opens_a_busy_placeholder_then_installs_the_engine() {
         let (mut app, _tx, _dir) = make_test_app_with_dir().await;
@@ -8278,10 +8351,10 @@ mod tests {
             "  first prompt  "
         ));
         assert!(record_prompt_history_entry(&mut history, "second prompt"));
-        save_prompt_history_to_path(&path, "/proj/a", &history).unwrap();
+        save_prompt_history_to_path(&path, "session:a", &history).unwrap();
 
         assert_eq!(
-            load_prompt_history_from_path(&path, "/proj/a"),
+            load_prompt_history_from_path(&path, "session:a"),
             vec!["first prompt".to_string(), "second prompt".to_string()]
         );
     }
@@ -8289,8 +8362,8 @@ mod tests {
     #[tokio::test]
     async fn up_down_recalls_prompt_history_when_idle() {
         let (mut app, agent_tx) = make_test_app().await;
-        app.prompt_history = vec!["first prompt".into(), "写个 /tmp/hello.txt".into()];
-        app.history_pos = None;
+        app.tabs[0].prompt_history = vec!["first prompt".into(), "写个 /tmp/hello.txt".into()];
+        app.tabs[0].history_pos = None;
         app.input.take(); // empty input, idle, no queued messages
         assert!(!app.active_tab().is_busy());
 
@@ -8313,6 +8386,90 @@ mod tests {
             app.input.text(),
             "写个 /tmp/hello.txt",
             "Down → newer prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_history_is_isolated_between_session_tabs() {
+        let (mut app, _agent_tx) = make_test_app().await;
+        app.tabs[0].prompt_history.clear();
+        app.tabs[0].history_pos = None;
+        app.tabs[0].history_draft.clear();
+        app.record_prompt_history("tab zero prompt");
+
+        let tab1 = SessionTab::new(1, app.active_tab().engine.clone(), "session-one".into());
+        app.tabs.push(tab1);
+        app.active = 1;
+        app.reset_input_browse_state();
+        app.input.take();
+
+        app.history_prev();
+        assert_eq!(
+            app.input.text(),
+            "",
+            "a new session tab must not recall another session's prompt"
+        );
+
+        app.record_prompt_history("tab one prompt");
+        app.active = 0;
+        app.reset_input_browse_state();
+        app.input.take();
+
+        app.history_prev();
+        assert_eq!(
+            app.input.text(),
+            "tab zero prompt",
+            "switching back must restore only that session's prompt history"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_tool_result_line_shows_resolved_path_and_active_cwd() {
+        let (mut app, _tx, dir) = make_test_app_with_dir().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].active_turn_id = 7;
+        let resolved = dir.path().join("created.txt");
+
+        app.handle_agent_event(AppEvent::Agent {
+            tab_id,
+            turn_id: 7,
+            cost_label: None,
+            event: Event::ToolUse {
+                id: "tool-1".into(),
+                name: "FileWrite".into(),
+                input: serde_json::json!({"path": "created.txt", "content": "x"}),
+            },
+        });
+        app.handle_agent_event(AppEvent::Agent {
+            tab_id,
+            turn_id: 7,
+            cost_label: None,
+            event: Event::ToolResult {
+                id: "tool-1".into(),
+                ok: true,
+                output: serde_json::json!({
+                    "path": resolved.display().to_string(),
+                    "status": "ok",
+                    "size_bytes": 1,
+                }),
+            },
+        });
+
+        let result_line = app.tabs[0]
+            .chat
+            .messages()
+            .iter()
+            .rev()
+            .map(|m| m.text.as_str())
+            .find(|text| text.contains("Tool FileWrite done"))
+            .expect("tool result line");
+        assert!(
+            result_line.contains(&format!("path={}", resolved.display())),
+            "{result_line}"
+        );
+        assert!(
+            result_line.contains(&format!("cwd={}", dir.path().display())),
+            "{result_line}"
         );
     }
 
@@ -9091,93 +9248,91 @@ mod tests {
     #[test]
     fn tui_initialization_loads_local_prompt_history() {
         let source = include_str!("app.rs");
-        let init = source
-            .split("pub fn new(")
-            .nth(1)
-            .and_then(|tail| tail.split("history_pos: None").next())
-            .expect("TuiApp::new initialization block should exist");
-        assert!(init.contains("load_prompt_history(&prompt_history_key)"));
+        assert!(
+            source.contains("seed_prompt_history_for_tab(&mut tab0)"),
+            "TuiApp::new should seed prompt history from the active session"
+        );
     }
 
     #[test]
-    fn prompt_history_round_trips_per_project_bucket() {
+    fn prompt_history_round_trips_per_session_bucket() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prompt_history.json");
 
-        save_prompt_history_to_path(&path, "/proj/a", &["a1".into(), "a2".into()]).unwrap();
-        save_prompt_history_to_path(&path, "/proj/b", &["b1".into()]).unwrap();
+        save_prompt_history_to_path(&path, "session:a", &["a1".into(), "a2".into()]).unwrap();
+        save_prompt_history_to_path(&path, "session:b", &["b1".into()]).unwrap();
 
         assert_eq!(
-            load_prompt_history_from_path(&path, "/proj/a"),
+            load_prompt_history_from_path(&path, "session:a"),
             vec!["a1".to_string(), "a2".to_string()]
         );
         assert_eq!(
-            load_prompt_history_from_path(&path, "/proj/b"),
+            load_prompt_history_from_path(&path, "session:b"),
             vec!["b1".to_string()]
         );
-        // An unknown project starts empty.
-        assert!(load_prompt_history_from_path(&path, "/proj/c").is_empty());
+        // An unknown session starts empty.
+        assert!(load_prompt_history_from_path(&path, "session:c").is_empty());
     }
 
     #[test]
-    fn saving_one_project_preserves_other_projects_records() {
+    fn saving_one_session_preserves_other_sessions_records() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prompt_history.json");
 
-        save_prompt_history_to_path(&path, "/proj/a", &["a1".into()]).unwrap();
-        save_prompt_history_to_path(&path, "/proj/b", &["b1".into()]).unwrap();
-        // Overwrite project A — B must be untouched ("不要清空记录").
-        save_prompt_history_to_path(&path, "/proj/a", &["a1".into(), "a2".into()]).unwrap();
+        save_prompt_history_to_path(&path, "session:a", &["a1".into()]).unwrap();
+        save_prompt_history_to_path(&path, "session:b", &["b1".into()]).unwrap();
+        // Overwrite session A — B must be untouched ("不要清空记录").
+        save_prompt_history_to_path(&path, "session:a", &["a1".into(), "a2".into()]).unwrap();
 
         assert_eq!(
-            load_prompt_history_from_path(&path, "/proj/a"),
+            load_prompt_history_from_path(&path, "session:a"),
             vec!["a1".to_string(), "a2".to_string()]
         );
         assert_eq!(
-            load_prompt_history_from_path(&path, "/proj/b"),
+            load_prompt_history_from_path(&path, "session:b"),
             vec!["b1".to_string()]
         );
     }
 
     #[test]
-    fn legacy_flat_array_migrates_into_current_project_on_load() {
+    fn legacy_flat_array_migrates_into_current_session_on_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prompt_history.json");
         // Old format: a bare JSON array of prompts.
         fs::write(&path, r#"["old one","old two"]"#).unwrap();
 
-        // Loading from project A pulls the legacy entries into A's bucket.
+        // Loading from session A pulls the legacy entries into A's bucket.
         assert_eq!(
-            load_prompt_history_from_path(&path, "/proj/a"),
+            load_prompt_history_from_path(&path, "session:a"),
             vec!["old one".to_string(), "old two".to_string()]
         );
 
-        // Saving any project rewrites the file in the new map format while
-        // keeping the migrated legacy entries under the project that loaded them.
-        save_prompt_history_to_path(&path, "/proj/a", &["old one".into(), "old two".into()])
+        // Saving any session rewrites the file in the new map format while
+        // keeping the migrated legacy entries under the session that loaded them.
+        save_prompt_history_to_path(&path, "session:a", &["old one".into(), "old two".into()])
             .unwrap();
-        save_prompt_history_to_path(&path, "/proj/b", &["b1".into()]).unwrap();
+        save_prompt_history_to_path(&path, "session:b", &["b1".into()]).unwrap();
         assert_eq!(
-            load_prompt_history_from_path(&path, "/proj/a"),
+            load_prompt_history_from_path(&path, "session:a"),
             vec!["old one".to_string(), "old two".to_string()]
         );
         assert_eq!(
-            load_prompt_history_from_path(&path, "/proj/b"),
+            load_prompt_history_from_path(&path, "session:b"),
             vec!["b1".to_string()]
         );
     }
 
     #[test]
-    fn per_project_history_keeps_recent_limit() {
+    fn per_session_history_keeps_recent_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prompt_history.json");
         let entries: Vec<String> = (0..(PROMPT_HISTORY_LIMIT + 5))
             .map(|i| format!("prompt {i}"))
             .collect();
 
-        save_prompt_history_to_path(&path, "/proj/a", &entries).unwrap();
+        save_prompt_history_to_path(&path, "session:a", &entries).unwrap();
 
-        let loaded = load_prompt_history_from_path(&path, "/proj/a");
+        let loaded = load_prompt_history_from_path(&path, "session:a");
         assert_eq!(loaded.len(), PROMPT_HISTORY_LIMIT);
         assert_eq!(loaded.first().map(String::as_str), Some("prompt 5"));
     }
@@ -9298,7 +9453,7 @@ mod tests {
     #[tokio::test]
     async fn up_down_edit_queued_messages_while_turn_is_busy() {
         let (mut app, agent_tx) = make_test_app().await;
-        app.prompt_history.clear();
+        app.tabs[0].prompt_history.clear();
         app.active_tab_mut().turn_abort = Some(AbortController::new());
         app.active_tab_mut().queued_input.push_back("first".into());
         app.active_tab_mut().queued_input.push_back("second".into());
@@ -9344,7 +9499,7 @@ mod tests {
                 .count()
         };
 
-        app.prompt_history.clear();
+        app.tabs[0].prompt_history.clear();
         app.active_tab_mut().titled = true;
         app.active_tab_mut().turn_seq = 1;
         // Busy but NOT a live agent turn (a reassemble): no abort handle, so
@@ -9357,7 +9512,10 @@ mod tests {
 
         assert_eq!(app.active_tab().queued_input.len(), 1);
         // A queued follow-up is never recorded into recall/prompt history.
-        assert!(!app.prompt_history.iter().any(|p| p == "queued follow-up"));
+        assert!(!app.tabs[0]
+            .prompt_history
+            .iter()
+            .any(|p| p == "queued follow-up"));
         assert!(!app
             .active_tab()
             .chat
@@ -9394,7 +9552,7 @@ mod tests {
         // running loop (mid-turn steering) instead of queuing it for a later
         // turn — the message is shown in chat and NOT left in the queue.
         let (mut app, agent_tx) = make_test_app().await;
-        app.prompt_history.clear();
+        app.tabs[0].prompt_history.clear();
         app.active_tab_mut().titled = true;
         app.active_tab_mut().turn_seq = 1;
         app.active_tab_mut().active_turn_id = 1;

@@ -21,6 +21,8 @@ use agent::tool::ToolRegistry;
 use agent_tools_code::{TaskAgentConfig, TaskAgentFactory};
 use async_trait::async_trait;
 
+const SUBAGENT_MAX_ITERATIONS: usize = 8;
+
 /// Shared late-bound handle to the parent's final gated tool registry.
 pub type ParentToolsCell = Arc<OnceLock<Arc<ToolRegistry>>>;
 
@@ -189,9 +191,10 @@ impl TaskAgentFactory for ZodeTaskFactory {
             model,
             tools: self.child_tools(),
             system: Some(system),
-            // Unbounded, like the main loop — the sub-agent stops on a no-tool
-            // turn. (Leaving this None inherits the QueryLoop default.)
-            max_iterations: None,
+            // Child agents are for bounded delegation. Keep the main loop
+            // autonomous, but cap sub-agents so a bad decomposition cannot
+            // consume the whole harness budget.
+            max_iterations: Some(SUBAGENT_MAX_ITERATIONS),
             // Same gate/sandbox/hooks/cwd/file_cache as the parent so the
             // child cannot bypass approvals, sandboxing, or hook blockers.
             permissions: Some(self.permissions.clone()),
@@ -275,6 +278,7 @@ mod tests {
         assert!(cfg.cwd.is_some());
         assert!(cfg.file_cache.is_some());
         assert!(cfg.hooks.is_some());
+        assert_eq!(cfg.max_iterations, Some(SUBAGENT_MAX_ITERATIONS));
     }
 
     #[tokio::test]

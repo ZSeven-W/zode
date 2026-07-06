@@ -269,6 +269,9 @@ mod tests {
         assert!(content.contains("YOLO"));
         assert!(content.contains("SANDBOX"));
         assert!(content.contains("F1 help"));
+        assert!(content.contains("Ctrl+O settings"));
+        assert!(content.contains("Ctrl+B tasks"));
+        assert!(!content.contains("Cmd+"));
     }
 
     fn render_to_string(sb: &StatusBar) -> String {
