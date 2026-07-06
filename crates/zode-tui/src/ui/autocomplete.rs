@@ -553,22 +553,17 @@ mod tests {
     #[test]
     fn op_sub_filters_by_typed_prefix() {
         let mut ac = Autocomplete::new();
-        ac.update("/op des");
+        ac.update("/op sta");
         assert!(ac.is_op_sub_active());
-        let confirmed = ac.op_sub_confirm().expect("should match 'design'");
-        assert!(confirmed.contains("design"));
+        let confirmed = ac.op_sub_confirm().expect("should match 'status'");
+        assert_eq!(confirmed, "/op status");
     }
 
     #[test]
-    fn op_sub_confirm_appends_space_for_design_and_call() {
+    fn op_sub_confirm_appends_space_for_call_only() {
         let mut ac = Autocomplete::new();
-        // Navigate to "design" (it is second after "status"; easier to filter directly).
-        ac.update("/op design");
-        assert!(ac.is_op_sub_active());
-        let text = ac.op_sub_confirm().expect("design match");
-        assert_eq!(text, "/op design ");
-
         ac.update("/op call");
+        assert!(ac.is_op_sub_active());
         let text = ac.op_sub_confirm().expect("call match");
         assert_eq!(text, "/op call ");
     }
@@ -615,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn op_sub_renders_subcommand_names() {
+    fn op_sub_renders_user_facing_entries() {
         let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("cyberpunk"));
         let backend = ratatui::backend::TestBackend::new(110, 24);
         let mut term = ratatui::Terminal::new(backend).unwrap();
@@ -633,36 +628,31 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(content.contains("status"), "popup should show 'status'");
-        assert!(content.contains("design"), "popup should show 'design'");
+        assert!(
+            content.contains("call"),
+            "popup should show hidden raw-call escape hatch"
+        );
+        assert!(
+            !content.contains("design"),
+            "popup should not advertise legacy direct DSL"
+        );
+        assert!(
+            !content.contains("generate"),
+            "popup should not advertise prompt alias"
+        );
+        assert!(
+            !content.contains("get_document_info"),
+            "popup should hide raw MCP tools"
+        );
     }
 
     #[test]
-    fn op_subcommands_constant_covers_all_expected_entries() {
-        // Only the parser-known subcommands plus REAL OpenPencil tool names
-        // belong here — a hint that maps to no tool fails on submit
-        // (regression: the old bare verbs `insert`/`update`/`delete`/…).
-        let expected = [
-            "status",
-            "design",
-            "generate",
-            "call",
-            "get_document_info",
-            "get_selection",
-            "list_pages",
-            "list_variables",
-        ];
+    fn op_subcommands_constant_covers_public_entries() {
+        let expected = ["status", "call"];
         assert_eq!(OP_SUBCOMMANDS, expected);
-        // Every non-parser entry must be a real read-classified tool.
-        for name in &OP_SUBCOMMANDS[4..] {
-            assert!(
-                zode_core::openpencil::is_read_tool(name),
-                "{name} must be a real OpenPencil read tool"
-            );
-        }
         assert_eq!(
             OP_SUBCOMMANDS.len(),
             OP_SUBCOMMAND_DESCS.len(),
-            "each subcommand must have a description"
         );
     }
 
