@@ -98,28 +98,29 @@ The feature is built across three crates:
 
 - `zode-core/src/openpencil/` — config, port-file discovery, transport,
   client, installer, launcher, planner, tools (`op_read`/`op_write`).
-- `zode-core/src/commands/op.rs` — `/op <subcommand>` parser.
+- `zode-core/src/commands/op.rs` — `/op <design request>` parser.
 - `zode-tui/src/app.rs` — `/op` slash-command handler + consent modal.
 
 ### `/op` slash command
 
-Type `/op <subcommand>` in the TUI input.
-The TUI popup shows subcommand hints while typing `/op ` (Up/Down/Tab to
-navigate, Enter/Tab to confirm, Esc to dismiss).
+Type `/op <design request>` in the TUI input. This is the primary user-facing
+OpenPencil flow: zode connects to a running OpenPencil instance, launches it if
+needed after consent, then runs the design pipeline (plan → skeleton → content
+→ refine). Users do not need to know OpenPencil MCP tool names for normal
+design generation.
+
+Compatibility / diagnostic forms:
 
 | Command | Effect |
 |---------|--------|
+| `/op <design request>` | Run the design pipeline from natural language |
 | `/op status` | Print connection state (connected / port / none) |
-| `/op generate <prompt>` | Run the design pipeline (plan → skeleton → content → refine) |
-| `/op design 'F1=I("rect",{})'` | Run a batch_design DSL string |
-| `/op get_document_info` | Call the MCP tool with empty args |
-| `/op insert_node {"type":"rect","x":0,"y":0}` | Shorthand MCP call: any word passes through as a REAL tool name + JSON args |
-| `/op call <tool> <json>` | Explicit tool-name + JSON args |
+| `/op call <tool> <json>` | Hidden escape hatch for explicit MCP tool calls |
+| `/op design '<operations>'` | Hidden compatibility path for `batch_design` `operations` |
+| `/op generate <prompt>` | Hidden alias for `/op <prompt>` |
 
-Autocomplete hints list the four parser-known subcommands (`status`,
-`generate`, `design`, `call`) plus a few real read tools
-(`get_document_info`, `get_selection`, `list_pages`, `list_variables`);
-the passthrough accepts any real tool name.
+Autocomplete hints recommend only `status` and `call`. Raw OpenPencil MCP tool
+names are intentionally not advertised in the user-facing command flow.
 
 `/op status` is a zode-side connection report, not an MCP `tools/call`.
 
@@ -128,12 +129,14 @@ the passthrough accepts any real tool name.
 The agent can call OpenPencil tools directly via two tool wrappers:
 
 - **`op_read`** — calls any tool that matches the read-only classification
-  without requiring user approval. Classification is **prefix-based**: any
-  tool whose name starts with `get_`, `list_`, `snapshot_`, `count_`,
-  `find_`, `read_`, `export_`, or `search_` is read. In addition, a curated
-  explicit set is always treated as read regardless of prefix:
-  `read_nodes`, `batch_get`, `export_design_md`, `search_all_unique_properties`,
-  and the full set of per-prefix tools listed above.
+  without requiring user approval. Classification uses a small write override
+  for create-like tools such as `export_nodes`, then a curated read allowlist
+  plus read prefixes (`get_`, `list_`, `snapshot_`, `count_`, `find_`,
+  `read_`, `export_`, `search_`). The explicit read set includes
+  `open_document`, `get_editor_state`, `get_variables`, `get_guidelines`,
+  `get_style_guide`, `get_screenshot`, `ToolSearch`, `find_empty_space`,
+  `read_nodes`, `batch_get`, `export_design_md`, and
+  `search_all_unique_properties`.
 - **`op_write`** — calls any other MCP tool; gated by the standard
   `ApprovalGate` (asks the user before executing).
 
@@ -165,7 +168,7 @@ Notes:
 
 All keys are optional; absent keys fall back to built-in defaults.
 
-### Design generation (`op_design` / `/op generate`)
+### Design generation (`op_design` / `/op <prompt>`)
 
 Zode includes a deterministic design-pipeline orchestrator that generates a
 full OpenPencil page from a natural-language prompt. Zode owns all the op MCP
@@ -206,9 +209,9 @@ Safety class: `Mutating`; requires user approval via `ApprovalGate`. Input:
 `{ "prompt": "<string>" }`. Drives the full pipeline against a live
 OpenPencil instance and returns `{ sections, failures, refine }`.
 
-**`/op generate <prompt>`** — TUI slash command. Maps to `OpCommand::Generate`
-in `commands/op.rs`. The TUI autocomplete popup lists `generate` as a
-subcommand alongside `status`, `design`, `call`, etc.
+**`/op <prompt>`** — TUI slash command. Maps to `OpCommand::Generate` in
+`commands/op.rs`. `/op generate <prompt>` remains a hidden compatibility alias;
+autocomplete does not advertise it.
 
 **Key source locations:**
 
