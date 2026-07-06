@@ -21,40 +21,20 @@ use crate::theme::Theme;
 
 use super::autocomplete::{popup_area, COMMAND_COLUMN_WIDTH, MAX_VISIBLE, NAME_COLUMN_MAX};
 
-/// `/op` hint entries: the four subcommands the parser in
-/// `zode_core::commands::op` knows explicitly (`status` / `design` /
-/// `generate` / `call`), plus a few REAL OpenPencil read-tool names that
-/// work through the parser's tool-passthrough arm with empty args. Any
-/// other word passes through literally as an MCP tool name — so only
-/// names that actually exist on the OpenPencil side belong in this list
-/// (the previous bare verbs `insert`/`update`/`delete`/… matched no tool
-/// and failed on submit).
-pub const OP_SUBCOMMANDS: &[&str] = &[
-    "status",
-    "design",
-    "generate",
-    "call",
-    "get_document_info",
-    "get_selection",
-    "list_pages",
-    "list_variables",
-];
+/// `/op` hint entries. `/op <free text>` is the primary design-generation
+/// command, so the popup only advertises diagnostics plus the raw-call escape
+/// hatch. Legacy `design` / `generate` compatibility paths remain parser-only.
+pub const OP_SUBCOMMANDS: &[&str] = &["status", "call"];
 
-/// Brief descriptions shown alongside each `/op` subcommand in the hint popup.
+/// Brief descriptions shown alongside each `/op` entry in the hint popup.
 pub(crate) const OP_SUBCOMMAND_DESCS: &[&str] = &[
     "report connection state",
-    "run batch_design DSL",
-    "generate a page from a prompt",
-    "call any MCP tool by name",
-    "document info",
-    "current selection",
-    "list pages",
-    "list variables",
+    "call an MCP tool by name",
 ];
 
-/// `/op` subcommands that take a required argument, so `SubHints::confirm`
-/// should leave a trailing space instead of submitting bare.
-pub(crate) const OP_SUB_TRAILING_SPACE: &[&str] = &["design", "generate", "call"];
+/// `/op` entries that take a required argument, so `SubHints::confirm` should
+/// leave a trailing space instead of submitting bare.
+pub(crate) const OP_SUB_TRAILING_SPACE: &[&str] = &["call"];
 
 /// Known `/browser` subcommands — mirrors `zode_core::commands::browser::
 /// map_subcommand`, kept here so the hint popup never goes stale relative to
