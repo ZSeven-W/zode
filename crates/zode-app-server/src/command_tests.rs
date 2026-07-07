@@ -4,7 +4,7 @@ use zode_app_server_protocol::{JsonRpcRequest, RequestId};
 
 #[test]
 fn command_exec_captures_output() {
-    let mut registry = CommandRegistry::default();
+    let mut registry = CommandRegistry;
     let result = registry
         .exec_for_test(vec!["sh".into(), "-c".into(), "printf hi".into()])
         .unwrap();

@@ -53,6 +53,7 @@ impl Router {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn handle_request(
         &mut self,
         request: JsonRpcRequest,
