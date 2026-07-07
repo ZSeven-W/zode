@@ -1,0 +1,11 @@
+{
+  "id": "cmd",
+  "method": "command/exec",
+  "params": {
+    "command": [
+      "sh",
+      "-c",
+      "printf hi"
+    ]
+  }
+}

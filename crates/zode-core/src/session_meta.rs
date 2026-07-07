@@ -80,6 +80,29 @@ impl SessionIndex {
         self.sessions.len() != before
     }
 
+    pub async fn delete_session_file_and_index(id: &str) -> Result<(), CoreError> {
+        let path = Self::session_path(id)?;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(CoreError::Io(e)),
+        }
+        let mut idx = Self::load()?;
+        if idx.remove(id) {
+            idx.save()?;
+        }
+        Ok(())
+    }
+
+    pub fn set_title(id: &str, title: String) -> Result<(), CoreError> {
+        let mut idx = Self::load()?;
+        let Some(meta) = idx.sessions.iter_mut().find(|m| m.id == id) else {
+            return Err(CoreError::Other(format!("session not found: {id}")));
+        };
+        meta.title = title;
+        idx.save()
+    }
+
     /// Most recently updated session.
     pub fn latest(&self) -> Option<&SessionMeta> {
         self.sessions.iter().max_by_key(|m| m.updated_at)
@@ -115,11 +138,34 @@ pub fn title_from_prompt(prompt: &str) -> String {
 mod tests {
     use super::*;
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn upsert_then_latest_and_find() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ZODE_CONFIG_DIR", dir.path());
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
 
         let mut idx = SessionIndex::load().unwrap();
         idx.upsert(SessionMeta {
@@ -142,8 +188,6 @@ mod tests {
         assert_eq!(reloaded.latest().unwrap().id, "bbbb2222");
         assert_eq!(reloaded.find_prefix("aaaa").unwrap().title, "first");
         assert!(reloaded.find_prefix("zzz").is_none());
-
-        std::env::remove_var("ZODE_CONFIG_DIR");
     }
 
     #[test]
@@ -167,10 +211,9 @@ mod tests {
     #[serial_test::serial]
     fn session_path_under_config_dir() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ZODE_CONFIG_DIR", dir.path());
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
         let p = SessionIndex::session_path("abc").unwrap();
         assert!(p.ends_with("sessions/abc.jsonl"));
-        std::env::remove_var("ZODE_CONFIG_DIR");
     }
 
     #[test]
@@ -180,5 +223,55 @@ mod tests {
         assert_eq!(title_from_prompt("line one\nline two"), "line one");
         let long = "x".repeat(60);
         assert!(title_from_prompt(&long).chars().count() <= 48);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn delete_session_file_and_index_removes_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        let id = "deadbeef";
+        let path = SessionIndex::session_path(id).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}\n").unwrap();
+        let mut idx = SessionIndex::default();
+        idx.upsert(SessionMeta {
+            id: id.to_string(),
+            title: "delete me".to_string(),
+            cwd: "/tmp".to_string(),
+            model: "m".to_string(),
+            updated_at: 1,
+        });
+        idx.save().unwrap();
+        SessionIndex::delete_session_file_and_index(id)
+            .await
+            .unwrap();
+        assert!(!path.exists());
+        assert!(SessionIndex::load().unwrap().find_prefix(id).is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn set_title_updates_existing_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        let mut idx = SessionIndex::default();
+        idx.upsert(SessionMeta {
+            id: "rename-me".to_string(),
+            title: "old".to_string(),
+            cwd: "/tmp".to_string(),
+            model: "m".to_string(),
+            updated_at: 1,
+        });
+        idx.save().unwrap();
+        SessionIndex::set_title("rename-me", "new".to_string()).unwrap();
+        assert_eq!(
+            SessionIndex::load()
+                .unwrap()
+                .find_prefix("rename-me")
+                .unwrap()
+                .title,
+            "new"
+        );
     }
 }

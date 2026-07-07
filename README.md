@@ -155,6 +155,7 @@ zode --browser             # force-enable built-in browser tools for this run
 zode --no-browser          # disable built-in browser tools for this run
 zode --model <id>          # override the model
 zode --provider <name>     # pick a named provider from config.providers
+zode server                # JSON-RPC app-server mode over stdio
 ```
 
 You can also point at any provider without editing the config by exporting the
@@ -199,6 +200,58 @@ Optional top-level config keys (all have sensible defaults):
 > bundled models.dev catalog when neither is set. Do **not** set it above the
 > real window: overestimating makes requests overflow and the provider rejects
 > the turn.
+
+## Server Mode and SDKs
+
+`zode server` starts a newline-delimited JSON-RPC server on stdin/stdout. It is
+intended for editor integrations, local automation, tests, and SDK clients that
+want zode's existing capabilities without launching the TUI.
+
+```bash
+zode server
+zode server --listen stdio://
+zode server --listen off
+```
+
+Current-stage server mode exposes only zode-backed behavior:
+
+- initialization and capability discovery
+- thread metadata lifecycle and turn registry operations
+- filesystem read/write/create/stat/list/remove/copy
+- one-shot `command/exec`
+- read-only model, config, skills, hooks, MCP-server status, and plugin lists
+
+Codex-only or not-yet-backed product areas are intentionally absent for now:
+account/auth, marketplace, remote-control, Realtime, websocket runtime,
+standalone process spawn, background terminals, thread archive/fork, goals, and
+app connectors.
+
+SDKs live under [`sdk/`](sdk/):
+
+| SDK | Directory | Local test |
+|-----|-----------|------------|
+| Rust | [`sdk/rust`](sdk/rust/) | `cargo test -p zode-sdk-rust` |
+| TypeScript | [`sdk/typescript`](sdk/typescript/) | `pnpm --dir sdk/typescript test` |
+| Python | [`sdk/python`](sdk/python/) | `PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests` |
+| Go | [`sdk/go`](sdk/go/) | `(cd sdk/go && go test ./...)` |
+| Kotlin/JVM | [`sdk/kotlin`](sdk/kotlin/) | `(cd sdk/kotlin && gradle test)` |
+
+Each SDK exposes a native `ProtocolMethod` enum/constant set for the current
+stable method names, so integrations can avoid hard-coded JSON-RPC strings.
+Every supported method's params, result shape, and SDK enum/constant name are
+documented in the [`sdk/` method reference](sdk/README.md#method-reference).
+
+Run the SDK checks that are available on your machine with:
+
+```bash
+scripts/test-sdks.sh
+```
+
+Protocol fixtures are generated from `zode-app-server-protocol`:
+
+```bash
+cargo run -p zode-app-server-protocol --bin export -- sdk/fixtures/jsonrpc
+```
 
 ## Browser Control
 

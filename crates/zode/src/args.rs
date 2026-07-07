@@ -72,11 +72,20 @@ pub struct Args {
     pub sandbox_strict_read: bool,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct ServerArgs {
+    /// Transport endpoint URL: stdio://, ws://IP:PORT, or off.
+    #[arg(long = "listen", default_value = "stdio://")]
+    pub listen: String,
+}
+
 /// Subcommands. Kept minimal — the default (no subcommand) launches the CLI.
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
     /// Diagnose environment / config problems and check for a newer release.
     Doctor,
+    /// Run zode as a JSON-RPC app server.
+    Server(ServerArgs),
 }
 
 #[cfg(test)]
@@ -126,5 +135,23 @@ mod tests {
         assert!(a.browser && !a.no_browser);
         let a = Args::parse_from(["zode", "--no-browser"]);
         assert!(!a.browser && a.no_browser);
+    }
+
+    #[test]
+    fn parses_server_subcommand_default_stdio() {
+        let a = Args::parse_from(["zode", "server"]);
+        match a.command {
+            Some(Command::Server(s)) => assert_eq!(s.listen, "stdio://"),
+            other => panic!("expected server command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_server_listen_override() {
+        let a = Args::parse_from(["zode", "server", "--listen", "ws://127.0.0.1:0"]);
+        match a.command {
+            Some(Command::Server(s)) => assert_eq!(s.listen, "ws://127.0.0.1:0"),
+            other => panic!("expected server command, got {other:?}"),
+        }
     }
 }

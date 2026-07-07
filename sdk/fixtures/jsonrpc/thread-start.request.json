@@ -1,0 +1,8 @@
+{
+  "id": "thread",
+  "method": "thread/start",
+  "params": {
+    "cwd": "/tmp/project",
+    "model": "default"
+  }
+}

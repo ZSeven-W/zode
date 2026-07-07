@@ -1,0 +1,34 @@
+{
+  "requests": [
+    {
+      "id": "init",
+      "method": "initialize",
+      "params": {
+        "clientInfo": {
+          "name": "contract",
+          "version": "0.0.0"
+        }
+      }
+    },
+    {
+      "id": "thread",
+      "method": "thread/start",
+      "params": {}
+    },
+    {
+      "id": "turn",
+      "method": "turn/start",
+      "params": {
+        "threadId": "${threadId}",
+        "input": "Say hello."
+      }
+    },
+    {
+      "id": "cmd",
+      "method": "command/exec",
+      "params": {
+        "command": ["sh", "-c", "printf hi"]
+      }
+    }
+  ]
+}

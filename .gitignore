@@ -26,3 +26,6 @@ extensions/chrome/*.pem
 extensions/chrome/*.crx
 extensions/*.pem
 extensions/*.crx
+sdk/typescript/node_modules
+sdk/typescript/dist
+sdk/python/**/__pycache__

@@ -1,0 +1,61 @@
+{
+  "envelope": {
+    "error": {
+      "required": [
+        "id",
+        "error"
+      ]
+    },
+    "notification": {
+      "optional": [
+        "params"
+      ],
+      "required": [
+        "method"
+      ]
+    },
+    "request": {
+      "optional": [
+        "params"
+      ],
+      "required": [
+        "id",
+        "method"
+      ]
+    },
+    "response": {
+      "required": [
+        "id",
+        "result"
+      ]
+    }
+  },
+  "methods": [
+    "initialize",
+    "thread/start",
+    "thread/resume",
+    "thread/list",
+    "thread/read",
+    "thread/delete",
+    "thread/name/set",
+    "turn/start",
+    "fs/readFile",
+    "fs/writeFile",
+    "fs/createDirectory",
+    "fs/getMetadata",
+    "fs/readDirectory",
+    "fs/remove",
+    "fs/copy",
+    "command/exec",
+    "model/list",
+    "config/read",
+    "config/list",
+    "skills/list",
+    "skills/read",
+    "hooks/list",
+    "mcpServerStatus/list",
+    "plugin/list"
+  ],
+  "name": "zode-app-server",
+  "version": "0.1.0-beta.5"
+}

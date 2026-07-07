@@ -13,6 +13,7 @@ name = "zode"
 path = "src/main.rs"
 
 [dependencies]
+zode-app-server = { path = "../zode-app-server" }
 zode-core = { path = "../zode-core" }
 zode-tui = { path = "../zode-tui" }
 agent = { workspace = true }

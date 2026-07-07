@@ -1,6 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/zode", "crates/zode-core", "crates/zode-tui"]
+members = [
+  "crates/zode",
+  "crates/zode-core",
+  "crates/zode-tui",
+  "crates/zode-app-server-protocol",
+  "crates/zode-app-server-transport",
+  "crates/zode-app-server",
+  "sdk/rust",
+]
 # vendor/agent is its own (agent-rs) workspace; keep it out of ours so its
 # crates resolve `*.workspace = true` against agent-rs's root, not zode's.
 exclude = ["vendor/agent", "vendor/noema"]

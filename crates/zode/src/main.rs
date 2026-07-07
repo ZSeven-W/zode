@@ -1,6 +1,7 @@
 mod args;
 mod doctor;
 mod headless;
+mod server;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -62,8 +63,11 @@ async fn run(args: Args) -> i32 {
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
     // Subcommands short-circuit the normal launch.
-    if let Some(args::Command::Doctor) = args.command {
-        return doctor::run(&cwd).await;
+    if let Some(command) = &args.command {
+        match command {
+            args::Command::Doctor => return doctor::run(&cwd).await,
+            args::Command::Server(server_args) => return server::run(server_args, &cwd).await,
+        }
     }
     // First run: drop a starter config the user can edit. Best-effort — a
     // failure here (e.g. read-only home) must never stop zode from launching.
