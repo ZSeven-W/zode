@@ -11,7 +11,9 @@
 .env.*
 
 # Docs (local working artifacts — plans/specs live on disk, not pushed)
-docs/
+docs/*
+!docs/readme/
+!docs/readme/**
 
 # Python
 __pycache__/

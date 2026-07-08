@@ -15,6 +15,24 @@
   Reads your code. Runs commands. Searches files. Manages git. All from a fast Rust TUI.
 </p>
 
+<p align="center">
+  <a href="README.md">English</a> |
+  <a href="docs/readme/README.zh.md">简体中文</a> |
+  <a href="docs/readme/README.zh-tw.md">繁體中文</a> |
+  <a href="docs/readme/README.ja.md">日本語</a> |
+  <a href="docs/readme/README.ko.md">한국어</a> |
+  <a href="docs/readme/README.es.md">Español</a> |
+  <a href="docs/readme/README.fr.md">Français</a> |
+  <a href="docs/readme/README.de.md">Deutsch</a> |
+  <a href="docs/readme/README.pt.md">Português</a> |
+  <a href="docs/readme/README.ru.md">Русский</a> |
+  <a href="docs/readme/README.hi.md">हिन्दी</a> |
+  <a href="docs/readme/README.id.md">Bahasa Indonesia</a> |
+  <a href="docs/readme/README.th.md">ไทย</a> |
+  <a href="docs/readme/README.tr.md">Türkçe</a> |
+  <a href="docs/readme/README.vi.md">Tiếng Việt</a>
+</p>
+
 ---
 
 ## Highlights
@@ -485,6 +503,17 @@ appends your arguments after it. Commands in `~/.claude/commands` and
 `~/.codex/commands` (and their project-level equivalents) are loaded too;
 commands inside a *foreign plugin tree* are off by default — copy the `.md`
 into a `.zode/commands/` dir to opt in.
+
+## ZSeven-W Ecosystem
+
+Zode is part of a broader ZSeven-W stack for AI-native development tools:
+
+| Product | What it is |
+|---------|------------|
+| [`agent-rs`](https://github.com/ZSeven-W/agent-rs) | A pure-Rust async runtime for shipping LLM agents: multi-provider streaming, tool dispatch, permissions, MCP, cost tracking, attachments, sessions, and optional coding tools. |
+| [`jian`](https://github.com/ZSeven-W/jian) | A Rust-native cross-platform UI framework where an `.op` file is an app, connecting OpenPencil-style design artifacts to runnable software. |
+| [`noema`](https://github.com/ZSeven-W/noema) | A local-first, non-vector memory system for coding agents, with lexical recall, review queues, MCP access, S3 offload, and enterprise policy controls. |
+| [`openpencil`](https://github.com/ZSeven-W/openpencil) | An open-source AI-native vector design tool for design-as-code workflows, turning prompts into UI directly on a live canvas with concurrent agent teams. |
 
 ## Benchmark
 
