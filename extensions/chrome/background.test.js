@@ -401,6 +401,64 @@ async function testTabRpcsManageControlledTab() {
   assert.equal(h.chrome.calls.created.length, 2);
 }
 
+async function testHumanNavigationHandsOffControlledTab() {
+  const h = makeRpcHarness();
+  await h.connect();
+  await h.rpc({
+    id: 30,
+    kind: "cdp",
+    method: "Page.navigate",
+    params: { url: "https://zode.example/" },
+  });
+  const zodeTabId = h.chrome.calls.attached[0];
+
+  // zode's own navigate is rewritten away from the CDP default ("typed"),
+  // so it can never look like a human address-bar navigation
+  const nav = h.chrome.calls.commands.find((c) => c.method === "Page.navigate");
+  assert.equal(nav.params.transitionType, "link");
+  assert.equal(nav.params.url, "https://zode.example/");
+
+  // link/redirect commits do not hand off
+  h.chrome.fireNavCommitted({
+    tabId: zodeTabId,
+    frameId: 0,
+    transitionType: "link",
+    transitionQualifiers: [],
+  });
+  await h.rpc({ id: 31, kind: "cdp", method: "Runtime.evaluate", params: { expression: "1" } });
+  assert.equal(h.chrome.calls.created.length, 1);
+
+  // an address-bar commit hands off: detach now, fresh tab on the next action
+  h.chrome.fireNavCommitted({
+    tabId: zodeTabId,
+    frameId: 0,
+    transitionType: "typed",
+    transitionQualifiers: ["from_address_bar"],
+  });
+  await flushImmediates();
+  assert.equal(h.chrome.calls.detached.at(-1), zodeTabId);
+  await h.rpc({ id: 32, kind: "cdp", method: "Runtime.evaluate", params: { expression: "1" } });
+  assert.equal(h.chrome.calls.created.length, 2);
+}
+
+async function testDebuggerDetachReasonControlsHandoff() {
+  const h = makeRpcHarness();
+  await h.connect();
+  await h.rpc({ id: 40, kind: "cdp", method: "Runtime.evaluate", params: { expression: "1" } });
+  const zodeTabId = h.chrome.calls.attached[0];
+
+  // target_closed-style detach keeps control: the next action re-attaches the same tab
+  h.chrome.fireDebuggerDetach({ tabId: zodeTabId }, "target_closed");
+  await h.rpc({ id: 41, kind: "cdp", method: "Runtime.evaluate", params: { expression: "1" } });
+  assert.equal(h.chrome.calls.created.length, 1);
+  assert.deepEqual(h.chrome.calls.attached, [zodeTabId, zodeTabId]);
+
+  // the user clicking "Cancel" on the debugger bar releases the tab entirely
+  h.chrome.fireDebuggerDetach({ tabId: zodeTabId }, "canceled_by_user");
+  await h.rpc({ id: 42, kind: "cdp", method: "Runtime.evaluate", params: { expression: "1" } });
+  assert.equal(h.chrome.calls.created.length, 2);
+}
+
 (async () => {
   await testBackgroundStartupDoesNotTouchWebSocket();
   await testStatusMessageReturnsConnectionState();
@@ -408,5 +466,7 @@ async function testTabRpcsManageControlledTab() {
   await testReconnectMessageUsesStoredTokenAndPort();
   await testCdpActionCreatesAndReusesControlledTab();
   await testTabRpcsManageControlledTab();
+  await testHumanNavigationHandsOffControlledTab();
+  await testDebuggerDetachReasonControlsHandoff();
   console.log("background tests passed");
 })();

@@ -206,7 +206,13 @@ async function handleRpc(request) {
 async function dispatch(request) {
   if (request.kind === "cdp") {
     await ensureControlledTab();
-    return await cdp(request.method, request.params || {});
+    let params = request.params || {};
+    if (request.method === "Page.navigate") {
+      // CDP defaults transitionType to "typed", which would look like a
+      // human address-bar navigation to the handoff listener below.
+      params = { transitionType: "link", ...params };
+    }
+    return await cdp(request.method, params);
   }
   if (request.kind !== "ext") {
     throw new Error(`unknown rpc kind ${request.kind}`);
@@ -383,9 +389,13 @@ async function findZodeGroup(windowId) {
   }
 }
 
-chrome.debugger.onDetach.addListener((source) => {
+chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId === attachedTabId) {
     attachedTabId = null;
+  }
+  // "Cancel" on Chrome's debugging bar means "stop driving my browser".
+  if (reason === "canceled_by_user" && source.tabId === controlledTabId) {
+    controlledTabId = null;
   }
 });
 
@@ -437,6 +447,25 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     controlledTabId = null;
   }
 });
+
+const HUMAN_TRANSITIONS = new Set(["typed", "auto_bookmark", "keyword", "generated"]);
+
+function isHumanNavigation(details) {
+  return (
+    details.frameId === 0 &&
+    (HUMAN_TRANSITIONS.has(details.transitionType) ||
+      (details.transitionQualifiers || []).includes("from_address_bar"))
+  );
+}
+
+if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
+  chrome.webNavigation.onCommitted.addListener((details) => {
+    if (details.tabId === controlledTabId && isHumanNavigation(details)) {
+      controlledTabId = null;
+      detachAttached();
+    }
+  });
+}
 
 if (chrome.tabGroups && chrome.tabGroups.onRemoved) {
   chrome.tabGroups.onRemoved.addListener((group) => {
