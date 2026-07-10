@@ -299,7 +299,9 @@ async function ensureControlledTab() {
     await attachTo(existing.id);
     return existing;
   }
-  const tab = await chrome.tabs.create({ active: false });
+  // Explicit about:blank: a URL-less create opens chrome://newtab/, and
+  // chrome.debugger.attach cannot attach to chrome:// targets.
+  const tab = await chrome.tabs.create({ active: false, url: "about:blank" });
   await groupZodeTab(tab);
   controlledTabId = tab.id;
   await attachTo(tab.id);

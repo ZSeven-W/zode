@@ -346,6 +346,8 @@ async function testCdpActionCreatesAndReusesControlledTab() {
   // acquired a fresh background tab, not the human's active tab
   assert.equal(h.chrome.calls.created.length, 1);
   assert.equal(h.chrome.calls.created[0].active, false);
+  // about:blank, not the NTP: the debugger cannot attach to chrome:// targets
+  assert.equal(h.chrome.calls.created[0].url, "about:blank");
   const zodeTabId = h.chrome.calls.attached[0];
   assert.notEqual(zodeTabId, 5);
   assert.equal(h.chrome.tabsById.get(5).active, true);
