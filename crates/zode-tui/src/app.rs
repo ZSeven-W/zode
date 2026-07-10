@@ -8011,6 +8011,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clicking_a_sidebar_tab_row_switches_the_active_tab() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let (mut app, _tx) = make_test_app().await;
+        let engine = app.active_tab().engine.clone();
+        app.tabs
+            .push(crate::tab::SessionTab::new(2, engine, String::new()));
+        app.active = 0;
+        // A draw populates sidebar_area + sidebar_hits (like the real loop).
+        let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        let area = app.sidebar_area.expect("sidebar visible at 120 cols");
+        let start = app
+            .sidebar_hits
+            .tabs_rows_start
+            .expect("tab rows recorded during render");
+        assert_eq!(app.sidebar_hits.tab_index_at(start + 1), Some(1));
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + 2,
+            row: start + 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.active, 1, "click on the second tab row switches to it");
+        // A click below the tab list does nothing.
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + 2,
+            row: start + app.sidebar_hits.tabs_shown,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.active, 1);
+    }
+
+    #[tokio::test]
     async fn local_shell_runs_off_loop_and_posts_output() {
         let (mut app, _tx, _dir) = make_test_app_with_dir().await;
         let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();

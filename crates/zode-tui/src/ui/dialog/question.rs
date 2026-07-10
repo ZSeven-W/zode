@@ -746,6 +746,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clicking_options_chips_and_submit_drives_the_dialog() {
+        use crate::theme::ThemeStore;
+        use ratatui::{backend::TestBackend, Terminal};
+        let (queue, mut rx) = question_queue();
+        let asker = tokio::spawn(async move {
+            queue
+                .ask_specs(vec![spec("q1", &["a", "b"]), spec("q2", &["x", "y"])], None)
+                .await
+        });
+        let req = rx.next().await.unwrap();
+        let mut d = QuestionDialog::new(req);
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
+
+        // Click option "b" in q1 → selected, auto-advances to q2.
+        term.draw(|f| d.render(f, f.area(), &theme)).unwrap();
+        let (col, row) = d.test_option_point(1).expect("option row rendered");
+        assert!(!d.on_mouse(col, row));
+        assert_eq!(d.tab, 1);
+
+        // A click outside the popup is ignored.
+        assert!(!d.on_mouse(0, 0));
+        assert_eq!(d.tab, 1);
+
+        // Click the FIRST question's chip in the strip → back to q1.
+        term.draw(|f| d.render(f, f.area(), &theme)).unwrap();
+        let (col, row) = d.test_chip_point(0).expect("chip rendered");
+        assert!(!d.on_mouse(col, row));
+        assert_eq!(d.tab, 0);
+
+        // Answer q2 by clicking "y", landing on the Submit tab.
+        term.draw(|f| d.render(f, f.area(), &theme)).unwrap();
+        let (col, row) = d.test_chip_point(1).unwrap();
+        assert!(!d.on_mouse(col, row));
+        term.draw(|f| d.render(f, f.area(), &theme)).unwrap();
+        let (col, row) = d.test_option_point(1).unwrap();
+        assert!(!d.on_mouse(col, row));
+        assert!(d.on_submit_tab());
+
+        // Click the submit row → dialog done, answers delivered.
+        term.draw(|f| d.render(f, f.area(), &theme)).unwrap();
+        let (col, row) = d.test_submit_point().expect("submit row rendered");
+        assert!(d.on_mouse(col, row));
+        assert_eq!(
+            asker.await.unwrap(),
+            Some(vec!["b".to_string(), "y".to_string()])
+        );
+    }
+
+    #[tokio::test]
     async fn esc_dismisses_with_none() {
         let (queue, mut rx) = question_queue();
         let asker =

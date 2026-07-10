@@ -347,6 +347,32 @@ mod tests {
         drop(queue);
     }
 
+    #[tokio::test]
+    async fn clicking_an_answer_chip_maps_to_its_approval() {
+        let (queue, mut rx) = approval_queue();
+        let q = queue.clone();
+        tokio::spawn(async move { q.request("Bash", &serde_json::json!({}), None).await });
+        let req = rx.next().await.unwrap();
+        let mut dialog = PermissionDialog::new(req, std::env::temp_dir());
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut term = Terminal::new(TestBackend::new(70, 10)).unwrap();
+        term.draw(|f| dialog.render_inline(f, f.area(), &theme))
+            .unwrap();
+        // One recorded hitbox per chip, in display order.
+        let chips = dialog.test_chip_points();
+        assert_eq!(chips.len(), 3);
+        assert_eq!(
+            chips.iter().map(|c| c.2).collect::<Vec<_>>(),
+            vec![Approval::AllowOnce, Approval::AllowAlways, Approval::Deny]
+        );
+        // A click inside a chip resolves to its approval; elsewhere to None.
+        let (col, row, _) = chips[1];
+        assert_eq!(dialog.approval_at(col, row), Some(Approval::AllowAlways));
+        assert_eq!(dialog.approval_at(col, row + 3), None);
+        assert_eq!(dialog.approval_at(0, row), None);
+        drop(queue);
+    }
+
     #[test]
     fn key_maps_to_approval() {
         assert_eq!(approval_for_key('1'), Some(Approval::AllowOnce));
