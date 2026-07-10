@@ -162,6 +162,16 @@ async fn run(args: Args) -> i32 {
             }
         }
     };
+    // Prove the sandbox actually ENFORCES on this host before trusting it —
+    // some systems have a backend that runs but does not confine (e.g. a
+    // kernel without unprivileged user namespaces). FAIL-CLOSED like resolve:
+    // stop and tell the user rather than run with a false sense of isolation.
+    if let Some(sb) = &sandbox {
+        if let Err(e) = sb.verify().await {
+            eprintln!("zode: {e}");
+            return 1;
+        }
+    }
 
     // --browser / --no-browser: session-only override, never persisted.
     if args.no_browser {

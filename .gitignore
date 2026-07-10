@@ -31,3 +31,5 @@ extensions/*.crx
 sdk/typescript/node_modules
 sdk/typescript/dist
 sdk/python/**/__pycache__
+.superpowers
+.zode

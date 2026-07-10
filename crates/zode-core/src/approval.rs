@@ -19,6 +19,14 @@ pub enum Approval {
 #[async_trait]
 pub trait ApprovalGate: Send + Sync + std::fmt::Debug {
     async fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval;
+
+    /// Whether this gate can actually put a question to a HUMAN. Auto-answering
+    /// gates (yolo / bypass) must say `false` — consent-style questions, like
+    /// authorizing a sandbox escape, must never be "approved" by a gate that
+    /// answers by itself. Defaults to `false` so a new gate is safe-by-default.
+    fn interactive(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug)]
@@ -47,6 +55,10 @@ impl StdinGate {
 
 #[async_trait]
 impl ApprovalGate for StdinGate {
+    fn interactive(&self) -> bool {
+        true
+    }
+
     async fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval {
         // Hold the prompt lock across the whole prompt+read so concurrent
         // approvals queue instead of interleaving on the terminal.
@@ -250,6 +262,10 @@ impl QueueGate {
 
 #[async_trait]
 impl ApprovalGate for QueueGate {
+    fn interactive(&self) -> bool {
+        true
+    }
+
     async fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval {
         self.queue.request(tool, input, self.label.clone()).await
     }

@@ -531,10 +531,13 @@ impl TuiApp {
             active: 0,
             next_tab_id: 1,
             // Capture the startup strict-read bit before `template` is moved.
+            // Falls back to the config section when the sandbox starts
+            // disabled (e.g. --no-sandbox), so a later `/sandbox on` still
+            // honors a configured `restrictReads`.
             sandbox_restrict_reads: template
                 .sandbox()
                 .map(|c| c.restrict_reads())
-                .unwrap_or(false),
+                .unwrap_or(template.sandbox_settings().restrict_reads.unwrap_or(false)),
             template,
             sidebar_visibility: SidebarVisibility::Auto,
             selection_mode: mouse_capture,
@@ -3524,10 +3527,23 @@ impl TuiApp {
         mode: zode_core::sandbox::SandboxMode,
         net: bool,
     ) -> Result<Option<zode_core::sandbox::SandboxConfig>, ()> {
-        match zode_core::sandbox::resolve(cwd, true, mode, net, &[], false, false) {
-            // Re-apply the startup strict-read bit (a fresh resolve, e.g. on
-            // `/sandbox on` from off, would otherwise drop it).
-            Ok(opt) => Ok(opt.map(|c| c.with_restrict_reads(self.sandbox_restrict_reads))),
+        // Rebuild from the persisted config section so a runtime toggle keeps
+        // the configured writableRoots / excludeSlashTmp / excludeTmpdirEnvVar
+        // (previously it rebuilt from bare defaults, silently re-widening /tmp
+        // for a user who had excluded it).
+        match zode_core::sandbox::resolve_with_settings(
+            cwd,
+            self.template.sandbox_settings(),
+            mode,
+            net,
+        ) {
+            // Strict-read: config OR the remembered startup bit (a CLI flag can
+            // enable it beyond config; a fresh resolve, e.g. on `/sandbox on`
+            // from off, would otherwise drop it).
+            Ok(c) => {
+                let restrict = c.restrict_reads() || self.sandbox_restrict_reads;
+                Ok(Some(c.with_restrict_reads(restrict)))
+            }
             Err(e) => {
                 self.active_tab_mut()
                     .chat
@@ -3596,6 +3612,17 @@ impl TuiApp {
             }
         };
         if let Some(new_sandbox) = target {
+            // Prove the sandbox actually enforces before applying the toggle
+            // (some hosts have a backend that runs but does not confine).
+            // FAIL-CLOSED: report and keep the previous state.
+            if let Some(sb) = &new_sandbox {
+                if let Err(e) = sb.verify().await {
+                    self.active_tab_mut()
+                        .chat
+                        .push_system(&format!("{}: {e}", crate::tr("sandbox")));
+                    return;
+                }
+            }
             let t = self.template.with_sandbox(new_sandbox);
             if !self.start_reassemble_active(t, ReassembleEffect::Sandbox, agent_tx) {
                 self.active_tab_mut().chat.push_system(&format!(
@@ -7370,8 +7397,11 @@ fn sandbox_status_line(sandbox: Option<&zode_core::sandbox::SandboxConfig>) -> S
         None => "sandbox: OFF — shell commands AND file writes run unconfined".to_string(),
         Some(c) => {
             let mode = match c.mode() {
-                SandboxMode::ReadOnly => "read-only (no file writes — shell or tools)",
-                SandboxMode::WorkspaceWrite => "workspace-write (writes confined to the workspace)",
+                SandboxMode::ReadOnly => "read-only (no file writes — shell or tools)".to_string(),
+                SandboxMode::WorkspaceWrite => format!(
+                    "workspace-write (writes confined to {})",
+                    c.write_scope_summary()
+                ),
             };
             let net = if c.allow_network() {
                 "network allowed"
@@ -7955,6 +7985,27 @@ mod tests {
     use super::*;
     use crate::ui::chat::Role;
     use zode_core::config::{NoemaSettings, ProviderConfig, ProviderKind, ZodeConfig};
+
+    #[test]
+    fn sandbox_status_line_names_tmp_when_writable() {
+        use zode_core::sandbox::{SandboxConfig, SandboxMode};
+        let Ok(c) = SandboxConfig::new(
+            std::path::Path::new("/x"),
+            SandboxMode::WorkspaceWrite,
+            false,
+            &[],
+        ) else {
+            return; // unsupported OS
+        };
+        // /tmp is writable by default — the status line must say so, or a user
+        // testing the sandbox with /tmp concludes it is broken.
+        let line = sandbox_status_line(Some(&c));
+        assert!(line.contains("/tmp"), "{line}");
+        // Excluded via config → not advertised.
+        let line = sandbox_status_line(Some(&c.with_temp_policy(true, true)));
+        assert!(!line.contains("/tmp"), "{line}");
+        assert!(sandbox_status_line(None).contains("OFF"));
+    }
 
     #[test]
     fn shell_context_note_includes_command_and_output() {

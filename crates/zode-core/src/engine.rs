@@ -184,6 +184,16 @@ fn resolve_max_api_retries(cfg: Option<u32>) -> u32 {
 }
 const FILE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Test-only re-export so `fs_escalate`'s end-to-end test can build the very
+/// same confined / unconfined policies the engine assembles.
+#[cfg(test)]
+pub(crate) fn build_workspace_policy_for_test(
+    cwd: &std::path::Path,
+    sandbox: &Option<crate::sandbox::SandboxConfig>,
+) -> Result<WorkspacePolicy, CoreError> {
+    build_workspace_policy(cwd, sandbox)
+}
+
 /// Build the file-tool [`WorkspacePolicy`] from the active sandbox so file
 /// writes obey the SAME policy as shell commands (Codex-style — the sandbox
 /// governs all writes):
@@ -250,11 +260,12 @@ fn sandbox_prompt_note(sandbox: &Option<crate::sandbox::SandboxConfig>) -> Strin
         Some(sb) => {
             let mode = match sb.mode() {
                 SandboxMode::ReadOnly => {
-                    "READ-ONLY — file writes are denied everywhere (reads are fine)"
+                    "READ-ONLY — file writes are denied everywhere (reads are fine)".to_string()
                 }
-                SandboxMode::WorkspaceWrite => {
-                    "workspace-write — file writes are confined to the workspace directory (+ tmp)"
-                }
+                SandboxMode::WorkspaceWrite => format!(
+                    "workspace-write — file writes are confined to {}",
+                    sb.write_scope_summary()
+                ),
             };
             let net = if sb.allow_network() {
                 "Network is allowed."
@@ -268,11 +279,13 @@ fn sandbox_prompt_note(sandbox: &Option<crate::sandbox::SandboxConfig>) -> Strin
             };
             format!(
                 "\n\n# Sandbox\nShell commands and file writes run in an OS sandbox: {mode}. {net}{reads} \
-                 To write outside the workspace or reach the network, either ask the user to relax it \
-                 with `/sandbox` (e.g. off / workspace-write / network on), or — for a shell command — \
-                 set `dangerouslyDisableSandbox: true` to request running it outside the sandbox (the \
-                 user will be asked to authorize the escape). Do not claim something is impossible \
-                 without trying these."
+                 When the sandbox blocks a file write, zode asks the user whether to perform it outside \
+                 the workspace and completes it on consent — so do NOT retry the same write, and do NOT \
+                 route around it with a shell command. For a shell command that genuinely needs the \
+                 network or an outside write, set `sandbox_permissions: \"require_escalated\"` with a \
+                 short `justification`; the user is asked to authorize that escape before it runs. \
+                 A refusal means the user declined: report it, do not look for another way around. \
+                 The user can also relax the sandbox with `/sandbox` (off / workspace-write / network on)."
             )
         }
     }
@@ -683,6 +696,18 @@ impl ZodeEngine {
             .clone()
             .unwrap_or_else(|| crate::tool_trace::ToolTrace::new(&cwd));
         register_default_with_todo(&mut base, policy.clone(), todo_state.clone());
+        // A sandbox-blocked file write must ask the user to escalate rather than
+        // dead-end: otherwise the model retries the same write and finally works
+        // around it with a `Bash` heredoc + `require_escalated`, which is both
+        // noisy and a worse audit trail than a single, explicit prompt. Wrap the
+        // mutating file tools with an unconfined twin they can replay onto once
+        // the user consents. Only meaningful when a sandbox is actually active.
+        if sandbox.is_some() {
+            let mut unconfined = ToolRegistry::new();
+            let unconfined_policy = build_workspace_policy(&cwd, &None)?.into_arc();
+            register_default_with_todo(&mut unconfined, unconfined_policy, todo_state.clone());
+            base = crate::fs_escalate::apply_fs_escalation(base, &unconfined, &gate);
+        }
         base.register(Arc::new(BashTool::with_compress_output(
             policy.clone(),
             cfg.compress_output(),
@@ -1949,6 +1974,13 @@ impl EngineTemplate {
     }
 
     /// The current sandbox config (for the `/sandbox` command to show + toggle).
+    /// The persisted `sandbox` config section. Runtime `/sandbox` toggles use
+    /// it to rebuild a config with the SAME writable roots / temp policy /
+    /// strict-read as startup, instead of bare defaults.
+    pub fn sandbox_settings(&self) -> &crate::config::SandboxSettings {
+        &self.cfg.sandbox
+    }
+
     pub fn sandbox(&self) -> Option<&crate::sandbox::SandboxConfig> {
         self.sandbox.as_ref()
     }
@@ -2351,9 +2383,33 @@ mod tests {
         ) {
             let note = sandbox_prompt_note(&Some(ww));
             assert!(note.contains("workspace-write"));
-            assert!(note.contains("dangerouslyDisableSandbox"));
+            // The canonical escape flag is advertised (not the legacy boolean),
+            // and a blocked write must steer the model to the escalation prompt
+            // rather than to retries / shell workarounds.
+            assert!(note.contains("require_escalated"), "{note}");
+            assert!(!note.contains("dangerouslyDisableSandbox"), "{note}");
+            assert!(note.contains("do NOT retry"), "{note}");
             assert!(note.contains("DENIED"), "network denied by default: {note}");
         }
+    }
+
+    #[test]
+    fn sandbox_prompt_note_names_tmp_only_when_writable() {
+        use crate::sandbox::{SandboxConfig, SandboxMode};
+        let Ok(ww) = SandboxConfig::new(
+            std::path::Path::new("/x"),
+            SandboxMode::WorkspaceWrite,
+            false,
+            &[],
+        ) else {
+            return; // unsupported OS
+        };
+        // /tmp is writable by default — the model must be told exactly that.
+        let note = sandbox_prompt_note(&Some(ww.clone()));
+        assert!(note.contains("/tmp"), "{note}");
+        // Excluded → the note must not advertise /tmp as writable.
+        let note = sandbox_prompt_note(&Some(ww.with_temp_policy(true, true)));
+        assert!(!note.contains("+ /tmp"), "{note}");
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub mod diff;
 pub mod engine;
 pub mod error;
 pub mod export;
+pub mod fs_escalate;
 pub mod gated_tool;
 pub mod git_stat;
 pub mod goal;

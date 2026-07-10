@@ -162,6 +162,28 @@ impl SandboxConfig {
     pub fn writable_roots(&self) -> &[PathBuf] {
         &self.writable_roots
     }
+    /// Human-readable summary of WHERE workspace-write allows writes, e.g.
+    /// "the workspace + /tmp + $TMPDIR". Used for user-facing text (TUI status
+    /// line, tool description, system prompt). Naming /tmp explicitly matters:
+    /// the default policy keeps it writable (Codex-aligned), and a message
+    /// claiming "confined to the workspace" reads as a broken sandbox the
+    /// moment a user tests it with /tmp.
+    pub fn write_scope_summary(&self) -> String {
+        let mut s = String::from("the workspace");
+        for r in &self.writable_roots {
+            s.push_str(&format!(" + {}", r.display()));
+        }
+        if !self.exclude_slash_tmp {
+            s.push_str(" + /tmp");
+        }
+        if !self.exclude_tmpdir_env_var
+            && std::env::var_os("TMPDIR").is_some_and(|t| Path::new(&t).is_absolute())
+        {
+            s.push_str(" + $TMPDIR");
+        }
+        s
+    }
+
     /// Return a copy rebased on a different workspace cwd, preserving mode /
     /// network / writable roots / temp policy. Used when a tab resumes a
     /// session in another directory, so the sandbox confines to THAT repo.
@@ -274,6 +296,127 @@ impl SandboxConfig {
                 out
             }
         }
+    }
+
+    /// Runtime effectiveness probe, run when the sandbox is (re-)enabled.
+    /// Static checks (OS type, `bwrap` on PATH) can't prove the sandbox
+    /// actually confines on THIS host — e.g. a kernel with unprivileged user
+    /// namespaces disabled runs `bwrap` from PATH but can't sandbox, and an OS
+    /// update could regress Seatbelt semantics. Two probes, FAIL-CLOSED:
+    ///
+    /// 1. a trivial command must SUCCEED under the wrap (backend can run),
+    /// 2. a canary write OUTSIDE every writable root must be DENIED, and
+    /// 3. with network denied, a sandboxed client must FAIL to reach an
+    ///    in-process localhost listener (no external traffic involved) —
+    ///    catching hosts/OS versions where the write rules enforce but the
+    ///    network rules do not.
+    ///
+    /// If (2) or (3) succeeds the sandbox is silently ineffective; refuse to
+    /// run with a false sense of isolation instead. Returns `Ok(())` when
+    /// enforcement is proven, or when a probe has nothing to work with (no
+    /// probe location / no client tool).
+    pub async fn verify(&self) -> Result<(), CoreError> {
+        if !self.probe("true").await? {
+            return Err(sandbox_unavailable(
+                "the backend failed to run a probe command (on Linux this \
+                 usually means the kernel disallows unprivileged user \
+                 namespaces, so `bwrap` cannot sandbox)",
+            ));
+        }
+        if let Some(canary) = self.canary_path() {
+            let touch = shell_join(&["touch".to_string(), canary.display().to_string()]);
+            if self.probe(&touch).await? {
+                let _ = std::fs::remove_file(&canary);
+                return Err(CoreError::Other(format!(
+                    "the sandbox is INEFFECTIVE on this host: a probe write outside \
+                     the writable roots ({}) was NOT blocked by the OS backend. \
+                     Refusing to run with a false sense of isolation — fix the \
+                     backend, or pass `--no-sandbox` (or set `\"sandbox\": {{ \
+                     \"enabled\": false }}` in config) to explicitly run WITHOUT \
+                     isolation.",
+                    canary.display()
+                )));
+            }
+        }
+        if !self.allow_network && self.network_canary_leaked().await? == Some(true) {
+            return Err(CoreError::Other(
+                "the sandbox does NOT block network on this host even though \
+                 network is denied (a sandboxed probe reached a local listener). \
+                 Refusing to run with a false sense of isolation — either allow \
+                 network honestly (`/sandbox network on` or `\"sandbox\": {{ \
+                 \"network\": true }}` in config), or pass `--no-sandbox` to \
+                 explicitly run WITHOUT isolation."
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Network canary: bind an in-process listener on 127.0.0.1 and run a tiny
+    /// client under the wrap. The client's exit code is irrelevant — what
+    /// counts is whether a TCP handshake reached the listener's accept queue
+    /// (a completed handshake stays queued after the client exits). No traffic
+    /// ever leaves the machine. `Ok(None)` when there is no client tool to
+    /// probe with.
+    async fn network_canary_leaked(&self) -> Result<Option<bool>, CoreError> {
+        if !binary_on_path("curl") {
+            return Ok(None);
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .map_err(|e| CoreError::Other(format!("sandbox network probe: bind failed: {e}")))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| CoreError::Other(format!("sandbox network probe: no local addr: {e}")))?
+            .port();
+        let _ = self
+            .probe(&format!(
+                "curl -s -m 2 -o /dev/null http://127.0.0.1:{port}/"
+            ))
+            .await?;
+        let leaked = tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept())
+            .await
+            .is_ok();
+        Ok(Some(leaked))
+    }
+
+    /// Run `sh -c <command>` under the sandbox wrap, discarding output.
+    /// `Ok(true)` = exit 0. Spawn failures and a 10s timeout are hard errors
+    /// (a probe that can't run proves nothing — fail closed at the caller).
+    async fn probe(&self, command: &str) -> Result<bool, CoreError> {
+        let argv = self.wrap(command);
+        let (program, rest) = argv
+            .split_first()
+            .ok_or_else(|| CoreError::Other("empty sandbox probe argv".into()))?;
+        let mut cmd = Command::new(program);
+        cmd.args(rest)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let status = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.status())
+            .await
+            .map_err(|_| CoreError::Other("the sandbox probe timed out".into()))?
+            .map_err(|e| CoreError::Other(format!("the sandbox probe failed to spawn: {e}")))?;
+        Ok(status.success())
+    }
+
+    /// Where the canary probe tries to write: a per-process file in $HOME,
+    /// which is user-writable WITHOUT the sandbox but outside every writable
+    /// root — so its success proves non-enforcement, not a permission quirk.
+    /// `None` when no such location exists (no home dir, or the workspace IS
+    /// the home dir, making it a writable root).
+    fn canary_path(&self) -> Option<PathBuf> {
+        let home = canonical(&dirs::home_dir()?);
+        let path = home.join(format!(".zode-sandbox-canary-{}", std::process::id()));
+        if self.mode == SandboxMode::WorkspaceWrite
+            && self
+                .writable_dirs()
+                .iter()
+                .any(|d| path.starts_with(Path::new(d)))
+        {
+            return None;
+        }
+        Some(path)
     }
 
     /// sandbox-exec profile. `(allow default)` baseline, then deny network
@@ -568,6 +711,35 @@ pub fn resolve(
     Ok(Some(config))
 }
 
+/// Resolve a config for ENABLING the sandbox at runtime (`/sandbox on` and the
+/// mode / network toggles) from the persisted `sandbox` config section, so a
+/// runtime toggle honors the same `writableRoots` / `excludeSlashTmp` /
+/// `excludeTmpdirEnvVar` / `restrictReads` the startup path applies.
+/// Previously the toggle rebuilt from bare defaults, silently re-widening /tmp
+/// (and dropping extra roots) for a user who had configured otherwise. `mode`
+/// and `allow_network` come from the caller — they are session state owned by
+/// the toggle itself, not the config.
+pub fn resolve_with_settings(
+    cwd: &Path,
+    settings: &crate::config::SandboxSettings,
+    mode: SandboxMode,
+    allow_network: bool,
+) -> Result<SandboxConfig, CoreError> {
+    let roots: Vec<PathBuf> = settings.writable_roots.iter().map(PathBuf::from).collect();
+    let config = resolve(
+        cwd,
+        true,
+        mode,
+        allow_network,
+        &roots,
+        settings.exclude_slash_tmp.unwrap_or(false),
+        settings.exclude_tmpdir_env_var.unwrap_or(false),
+    )?
+    // `resolve` returns `Ok(None)` only when `enabled == false`.
+    .expect("resolve(enabled=true) always yields a config");
+    Ok(config.with_restrict_reads(settings.restrict_reads.unwrap_or(false)))
+}
+
 /// Whether the OS sandbox backend is actually present — a PURE function so the
 /// fail-closed decision is testable without the host's real backend. Linux
 /// needs `bwrap` (bubblewrap); macOS has Seatbelt built in.
@@ -677,8 +849,10 @@ pub struct SandboxedBashTool {
 impl SandboxedBashTool {
     pub fn new(inner: Arc<dyn Tool>, config: SandboxConfig, gate: Arc<dyn ApprovalGate>) -> Self {
         let mode = match config.mode {
-            SandboxMode::ReadOnly => "read-only (no filesystem writes)",
-            SandboxMode::WorkspaceWrite => "writes confined to the workspace",
+            SandboxMode::ReadOnly => "read-only (no filesystem writes)".to_string(),
+            SandboxMode::WorkspaceWrite => {
+                format!("writes confined to {}", config.write_scope_summary())
+            }
         };
         let net = if config.allow_network {
             "network allowed"
@@ -690,7 +864,9 @@ impl SandboxedBashTool {
              genuinely needs network or to write outside the workspace, set \
              `{SANDBOX_PERMISSIONS_FLAG}: \"require_escalated\"` (with a short \
              `{JUSTIFICATION_FLAG}`) to request running it outside the sandbox — \
-             the user is asked to authorize the escape.",
+             the user is asked to authorize the escape. In a non-interactive \
+             session (yolo / headless bypass) there is no one to ask, so the \
+             request is not honored and the command runs sandboxed.",
             inner.description()
         );
         Self {
@@ -822,20 +998,37 @@ impl Tool for SandboxedBashTool {
         ctx: &ToolUseContext,
         mut input: serde_json::Value,
     ) -> Result<serde_json::Value, AgentError> {
-        // If the model requested (and the gate authorized) a sandbox escape,
-        // strip the control keys and run the command raw — no sandbox wrap.
         let escape = wants_escape(&input);
         if let Some(obj) = input.as_object_mut() {
             obj.remove(SANDBOX_PERMISSIONS_FLAG);
             obj.remove(JUSTIFICATION_FLAG);
             obj.remove(ESCAPE_FLAG);
         }
+        // Keep the raw input so an authorized escape can run unsandboxed.
+        let raw_input = input.clone();
+
+        // A model-requested escape needs its OWN human authorization here.
+        // The outer approval (PermissionGatedTool) cannot double as consent:
+        // it is skipped entirely under always-allow / yolo, which would let
+        // the model silently disable the sandbox by setting a flag on its own
+        // tool call. Non-interactive gates auto-answer, so with them the
+        // request is not honored and the command runs sandboxed like any
+        // other — in yolo the sandbox config is the user's only contract.
+        let mut escape_declined = false;
         if escape {
-            return self.inner.call(ctx, input).await;
+            if self.gate.interactive() {
+                let label = "Bash — run OUTSIDE the sandbox (model-requested escalation)";
+                match self.gate.approve(label, &raw_input).await {
+                    Approval::AllowOnce | Approval::AllowAlways => {
+                        return self.inner.call(ctx, raw_input).await;
+                    }
+                    Approval::Deny => escape_declined = true,
+                }
+            } else {
+                escape_declined = true;
+            }
         }
 
-        // Keep the raw input so we can re-run unsandboxed if the user escalates.
-        let raw_input = input.clone();
         let mut wrapped = input;
         if let Some(cmd) = wrapped.get("command").and_then(|v| v.as_str()) {
             wrapped["command"] = serde_json::Value::String(shell_join(&self.config.wrap(cmd)));
@@ -845,8 +1038,10 @@ impl Tool for SandboxedBashTool {
         // The command ran (1st prompt already approved it). If it failed on
         // what looks like a sandbox restriction, ASK the user whether to
         // ESCALATE — re-run the command OUTSIDE the sandbox (提权). This is a
-        // second, distinct authorization.
-        if looks_like_sandbox_denial(&result) {
+        // second, distinct authorization, so it too is interactive-only (a
+        // bypass gate would silently "approve" the escape) and is skipped
+        // when an escape was already declined for this very call.
+        if !escape_declined && self.gate.interactive() && looks_like_sandbox_denial(&result) {
             let label = "Bash — escalate: re-run this command OUTSIDE the sandbox";
             match self.gate.approve(label, &raw_input).await {
                 Approval::AllowOnce | Approval::AllowAlways => {
@@ -1081,14 +1276,41 @@ mod tests {
     }
 
     fn allow_gate() -> Arc<dyn ApprovalGate> {
-        Arc::new(crate::approval::BypassGate) // auto-approves (AllowOnce)
+        Arc::new(crate::approval::BypassGate) // auto-approves, NOT interactive
+    }
+
+    /// Interactive mock gate: records every approve() label, returns a fixed
+    /// answer — stands in for a human at the TUI/stdin prompt.
+    #[derive(Debug)]
+    struct PromptGate {
+        answer: Approval,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+    impl PromptGate {
+        fn new(answer: Approval) -> Arc<Self> {
+            Arc::new(Self {
+                answer,
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+    #[async_trait]
+    impl ApprovalGate for PromptGate {
+        fn interactive(&self) -> bool {
+            true
+        }
+        async fn approve(&self, tool: &str, _input: &serde_json::Value) -> Approval {
+            self.asked.lock().unwrap().push(tool.to_string());
+            self.answer
+        }
     }
 
     #[tokio::test]
     async fn escape_flag_runs_raw_and_is_stripped() {
         let rec = Arc::new(RecordingTool::default());
         let cfg = SandboxConfig::for_current_os(Path::new("/tmp")).unwrap();
-        let tool = SandboxedBashTool::new(rec.clone(), cfg, allow_gate());
+        let gate = PromptGate::new(Approval::AllowOnce);
+        let tool = SandboxedBashTool::new(rec.clone(), cfg, gate.clone());
         let ctx = ToolUseContext::new(std::env::temp_dir());
 
         // Without the escape flag → command is wrapped under the sandbox.
@@ -1102,7 +1324,8 @@ mod tests {
             "command should be sandbox-wrapped: {cmd}"
         );
 
-        // With the escape flag → command runs raw and the flag is stripped.
+        // With the escape flag (and the user approving the dedicated escape
+        // prompt) → command runs raw and the flag is stripped.
         tool.call(
             &ctx,
             serde_json::json!({"command": "echo hi", ESCAPE_FLAG: true}),
@@ -1112,6 +1335,65 @@ mod tests {
         let raw = rec.seen.lock().unwrap().clone().unwrap();
         assert_eq!(raw["command"].as_str().unwrap(), "echo hi", "ran raw");
         assert!(raw.get(ESCAPE_FLAG).is_none(), "escape flag stripped");
+        assert_eq!(
+            gate.asked.lock().unwrap().len(),
+            1,
+            "the escape must have its own approval prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn escape_is_not_honored_without_an_interactive_gate() {
+        // yolo / bypass: no human to ask, so a model-requested escape must NOT
+        // run raw — the sandbox config is the user's only contract there.
+        let rec = Arc::new(RecordingTool::default());
+        let cfg = SandboxConfig::for_current_os(Path::new("/tmp")).unwrap();
+        let tool = SandboxedBashTool::new(rec.clone(), cfg, allow_gate());
+        let ctx = ToolUseContext::new(std::env::temp_dir());
+        tool.call(
+            &ctx,
+            json!({"command": "curl example.com", SANDBOX_PERMISSIONS_FLAG: "require_escalated"}),
+        )
+        .await
+        .unwrap();
+        let seen = rec.seen.lock().unwrap().clone().unwrap();
+        let cmd = seen["command"].as_str().unwrap();
+        assert!(
+            cmd.contains("sandbox-exec") || cmd.contains("bwrap"),
+            "escape under a bypass gate must stay sandboxed: {cmd}"
+        );
+    }
+
+    #[tokio::test]
+    async fn escape_denied_by_user_runs_sandboxed_without_second_offer() {
+        // The user says no to the escape → run sandboxed; and even if that
+        // fails on a sandbox denial, do NOT immediately re-ask to escalate.
+        let inner = Arc::new(DenyThenRecord::default());
+        let cfg = SandboxConfig::for_current_os(Path::new("/tmp")).unwrap();
+        let gate = PromptGate::new(Approval::Deny);
+        let tool = SandboxedBashTool::new(inner.clone(), cfg, gate.clone());
+        let ctx = ToolUseContext::new(std::env::temp_dir());
+        tool.call(
+            &ctx,
+            json!({"command": "curl example.com", SANDBOX_PERMISSIONS_FLAG: "require_escalated"}),
+        )
+        .await
+        .unwrap();
+        let calls = inner.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "sandboxed run only, no raw re-run: {calls:?}"
+        );
+        assert!(
+            calls[0].contains("sandbox-exec") || calls[0].contains("bwrap"),
+            "the one run was sandboxed"
+        );
+        assert_eq!(
+            gate.asked.lock().unwrap().len(),
+            1,
+            "asked once for the escape, not again for escalation"
+        );
     }
 
     #[test]
@@ -1142,7 +1424,8 @@ mod tests {
     async fn sandbox_permissions_require_escalated_runs_raw() {
         let rec = Arc::new(RecordingTool::default());
         let cfg = SandboxConfig::for_current_os(Path::new("/tmp")).unwrap();
-        let tool = SandboxedBashTool::new(rec.clone(), cfg, allow_gate());
+        let gate = PromptGate::new(Approval::AllowOnce);
+        let tool = SandboxedBashTool::new(rec.clone(), cfg, gate.clone());
         let ctx = ToolUseContext::new(std::env::temp_dir());
         tool.call(
             &ctx,
@@ -1159,6 +1442,11 @@ mod tests {
             seen["command"].as_str().unwrap(),
             "curl example.com",
             "ran raw"
+        );
+        assert_eq!(
+            gate.asked.lock().unwrap().len(),
+            1,
+            "escape authorized via its own prompt"
         );
         assert!(
             seen.get(SANDBOX_PERMISSIONS_FLAG).is_none(),
@@ -1219,6 +1507,82 @@ mod tests {
     }
 
     #[test]
+    fn write_scope_summary_names_tmp_only_when_writable() {
+        // Default policy: /tmp IS writable, so user-facing text must say so —
+        // claiming "confined to the workspace" reads as a broken sandbox the
+        // moment a user tests it with /tmp.
+        let s = cfg(SandboxMode::WorkspaceWrite, false).write_scope_summary();
+        assert!(s.contains("workspace"), "{s}");
+        assert!(
+            s.contains("/tmp"),
+            "default /tmp writability must be named: {s}"
+        );
+        // Excluded → not advertised.
+        let s = cfg(SandboxMode::WorkspaceWrite, false)
+            .with_temp_policy(true, true)
+            .write_scope_summary();
+        assert!(
+            !s.contains("/tmp"),
+            "excluded /tmp must not be advertised: {s}"
+        );
+        // Extra writable roots are surfaced too.
+        let mut c = cfg(SandboxMode::WorkspaceWrite, false);
+        c.writable_roots = vec![PathBuf::from("/data/cache")];
+        assert!(c.write_scope_summary().contains("/data/cache"));
+    }
+
+    #[test]
+    fn bash_tool_description_names_the_real_write_scope() {
+        let rec = Arc::new(RecordingTool::default());
+        let dir = tempfile::tempdir().unwrap();
+        let Ok(config) = SandboxConfig::for_current_os(dir.path()) else {
+            return; // unsupported OS
+        };
+        let tool = SandboxedBashTool::new(rec, config, allow_gate());
+        assert!(
+            tool.description().contains("/tmp"),
+            "description must not claim workspace-only while /tmp is writable: {}",
+            tool.description()
+        );
+    }
+
+    #[test]
+    fn resolve_with_settings_honors_config_roots_and_temp_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        let settings = crate::config::SandboxSettings {
+            writable_roots: vec![extra.path().display().to_string()],
+            exclude_slash_tmp: Some(true),
+            exclude_tmpdir_env_var: Some(true),
+            restrict_reads: Some(true),
+            ..Default::default()
+        };
+        let c = match resolve_with_settings(
+            dir.path(),
+            &settings,
+            SandboxMode::WorkspaceWrite,
+            false,
+        ) {
+            Ok(c) => c,
+            Err(_) => return, // unsupported host / missing backend
+        };
+        let canon_extra = canonical(extra.path());
+        assert!(
+            c.writable_roots().iter().any(|r| r == &canon_extra),
+            "config writableRoots must survive a runtime toggle: {:?}",
+            c.writable_roots()
+        );
+        assert!(
+            !c.writable_dirs().iter().any(|d| d == "/tmp"),
+            "excludeSlashTmp must survive a runtime toggle: {:?}",
+            c.writable_dirs()
+        );
+        assert!(c.restrict_reads(), "restrictReads must be applied");
+        assert_eq!(c.mode(), SandboxMode::WorkspaceWrite);
+        assert!(!c.allow_network());
+    }
+
+    #[test]
     fn exclude_slash_tmp_drops_tmp_from_writable_roots() {
         let with_tmp = cfg(SandboxMode::WorkspaceWrite, false);
         assert!(with_tmp.writable_dirs().iter().any(|d| d == "/tmp"));
@@ -1270,14 +1634,15 @@ mod tests {
     async fn sandbox_denial_offers_escalation_and_reruns_raw() {
         let inner = Arc::new(DenyThenRecord::default());
         let cfg = SandboxConfig::for_current_os(Path::new("/tmp")).unwrap();
-        let tool = SandboxedBashTool::new(inner.clone(), cfg, allow_gate());
+        let gate = PromptGate::new(Approval::AllowOnce);
+        let tool = SandboxedBashTool::new(inner.clone(), cfg, gate.clone());
         let ctx = ToolUseContext::new(std::env::temp_dir());
 
         let out = tool
             .call(&ctx, json!({"command": "echo hi"}))
             .await
             .unwrap();
-        // The escalation (auto-approved) re-ran the raw command, which succeeded.
+        // The escalation (user-approved) re-ran the raw command, which succeeded.
         assert_eq!(out["exit_code"], 0, "escalated raw run returned success");
         let calls = inner.calls.lock().unwrap();
         assert_eq!(
@@ -1290,6 +1655,25 @@ mod tests {
             "first run was sandboxed"
         );
         assert_eq!(calls[1], "echo hi", "re-run uses the original command");
+        assert_eq!(gate.asked.lock().unwrap().len(), 1, "user was asked");
+    }
+
+    #[tokio::test]
+    async fn sandbox_denial_does_not_escalate_under_a_bypass_gate() {
+        // yolo / bypass: an auto-answering gate must NOT "approve" the
+        // escalation — the failed command stays failed and stays sandboxed.
+        let inner = Arc::new(DenyThenRecord::default());
+        let cfg = SandboxConfig::for_current_os(Path::new("/tmp")).unwrap();
+        let tool = SandboxedBashTool::new(inner.clone(), cfg, allow_gate());
+        let ctx = ToolUseContext::new(std::env::temp_dir());
+
+        let out = tool
+            .call(&ctx, json!({"command": "echo hi"}))
+            .await
+            .unwrap();
+        assert_eq!(out["exit_code"], 1, "sandboxed failure surfaces as-is");
+        let calls = inner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "no silent unsandboxed re-run: {calls:?}");
     }
 
     #[tokio::test]
@@ -1322,7 +1706,9 @@ mod tests {
         }
         let inner = Arc::new(AlwaysFail::default());
         let cfg = SandboxConfig::for_current_os(Path::new("/tmp")).unwrap();
-        let tool = SandboxedBashTool::new(inner.clone(), cfg, allow_gate());
+        // Interactive gate, so a false escalation offer WOULD be visible here.
+        let gate = PromptGate::new(Approval::AllowOnce);
+        let tool = SandboxedBashTool::new(inner.clone(), cfg, gate.clone());
         let ctx = ToolUseContext::new(std::env::temp_dir());
         tool.call(&ctx, json!({"command": "frobnicate"}))
             .await
@@ -1331,6 +1717,10 @@ mod tests {
             *inner.0.lock().unwrap(),
             1,
             "ran once, no escalation re-run"
+        );
+        assert!(
+            gate.asked.lock().unwrap().is_empty(),
+            "no escalation prompt for a non-sandbox failure"
         );
     }
 
@@ -1393,6 +1783,78 @@ mod tests {
             !protected.exists(),
             "the protected file must not have been created"
         );
+    }
+
+    #[test]
+    fn canary_path_is_outside_writable_roots_or_absent() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        // Workspace == home → every home path is writable; nothing provable.
+        let mut at_home = cfg(SandboxMode::WorkspaceWrite, false);
+        at_home.cwd = canonical(&home);
+        assert!(
+            at_home.canary_path().is_none(),
+            "home-as-workspace must skip the canary"
+        );
+        // Normal workspace → canary lives in home, outside the writable roots.
+        let c = cfg(SandboxMode::WorkspaceWrite, false); // cwd /work/proj
+        if let Some(p) = c.canary_path() {
+            assert!(p.starts_with(canonical(&home)), "{}", p.display());
+            assert!(
+                !c.writable_dirs()
+                    .iter()
+                    .any(|d| p.starts_with(Path::new(d))),
+                "canary must be outside every writable root: {}",
+                p.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_proves_enforcement_on_a_working_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let Ok(config) = SandboxConfig::new(dir.path(), SandboxMode::WorkspaceWrite, false, &[])
+        else {
+            return; // unsupported OS
+        };
+        if config.os == SandboxOs::Linux && !binary_on_path("bwrap") {
+            return; // backend unavailable
+        }
+        match config.verify().await {
+            // Working host: enforcement proven.
+            Ok(()) => {}
+            // A CI container may run bwrap without user namespaces — verify
+            // must then FAIL (closed) with the actionable backend message,
+            // never claim enforcement.
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains("sandbox"), "{msg}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn network_canary_detects_traffic_when_network_allowed() {
+        // True-positive path: with network ALLOWED, the sandboxed client must
+        // reach the in-process listener — proving the canary detects traffic
+        // whenever the OS lets it through (the leak case verify() rejects).
+        let dir = tempfile::tempdir().unwrap();
+        let Ok(config) = SandboxConfig::new(dir.path(), SandboxMode::WorkspaceWrite, true, &[])
+        else {
+            return; // unsupported OS
+        };
+        if config.os == SandboxOs::Linux && !binary_on_path("bwrap") {
+            return; // backend unavailable
+        }
+        if !config.probe("true").await.unwrap_or(false) {
+            return; // backend present but can't run (e.g. CI without userns)
+        }
+        match config.network_canary_leaked().await {
+            Ok(Some(leaked)) => assert!(leaked, "allowed network must reach the listener"),
+            Ok(None) => {} // no curl on this host — nothing to prove
+            Err(e) => panic!("network canary errored: {e}"),
+        }
     }
 
     #[test]
