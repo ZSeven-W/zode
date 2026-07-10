@@ -459,6 +459,32 @@ async function testDebuggerDetachReasonControlsHandoff() {
   assert.equal(h.chrome.calls.created.length, 2);
 }
 
+async function testScreenshotActivatesControlledTabAndRestores() {
+  const h = makeRpcHarness();
+  h.chrome.addTab({ id: 5, url: "https://human.example/", active: true });
+  await h.connect();
+  await h.rpc({ id: 50, kind: "cdp", method: "Runtime.evaluate", params: { expression: "1" } });
+  const zodeTabId = h.chrome.calls.attached[0];
+  assert.equal(h.chrome.tabsById.get(5).active, true);
+
+  await h.rpc({ id: 51, kind: "cdp", method: "Page.captureScreenshot", params: { format: "jpeg" } });
+  const activations = h.chrome.calls.updated.filter(([, props]) => props && props.active);
+  assert.deepEqual(
+    activations.map(([id]) => id),
+    [zodeTabId, 5],
+  );
+  assert.equal(h.chrome.tabsById.get(5).active, true);
+  assert.equal(
+    h.chrome.calls.commands.filter((c) => c.method === "Page.captureScreenshot").length,
+    1,
+  );
+
+  // no activate/restore churn when the controlled tab is already active
+  h.chrome.setActive(zodeTabId);
+  await h.rpc({ id: 52, kind: "cdp", method: "Page.captureScreenshot", params: {} });
+  assert.equal(h.chrome.calls.updated.filter(([, props]) => props && props.active).length, 2);
+}
+
 (async () => {
   await testBackgroundStartupDoesNotTouchWebSocket();
   await testStatusMessageReturnsConnectionState();
@@ -468,5 +494,6 @@ async function testDebuggerDetachReasonControlsHandoff() {
   await testTabRpcsManageControlledTab();
   await testHumanNavigationHandsOffControlledTab();
   await testDebuggerDetachReasonControlsHandoff();
+  await testScreenshotActivatesControlledTabAndRestores();
   console.log("background tests passed");
 })();

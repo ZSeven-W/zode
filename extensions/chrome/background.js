@@ -212,6 +212,9 @@ async function dispatch(request) {
       // human address-bar navigation to the handoff listener below.
       params = { transitionType: "link", ...params };
     }
+    if (request.method === "Page.captureScreenshot") {
+      return await captureControlledTab(params);
+    }
     return await cdp(request.method, params);
   }
   if (request.kind !== "ext") {
@@ -301,6 +304,28 @@ async function ensureControlledTab() {
   controlledTabId = tab.id;
   await attachTo(tab.id);
   return tab;
+}
+
+// Headful Chrome does not render captureScreenshot for hidden tabs:
+// briefly activate the controlled tab, then give the user their tab back.
+async function captureControlledTab(params) {
+  const tab = await controlledTab();
+  if (!tab || tab.active) {
+    return await cdp("Page.captureScreenshot", params);
+  }
+  const [previous] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+  await chrome.tabs.update(tab.id, { active: true });
+  try {
+    return await cdp("Page.captureScreenshot", params);
+  } finally {
+    if (previous && previous.id != null && previous.id !== tab.id) {
+      try {
+        await chrome.tabs.update(previous.id, { active: true });
+      } catch (_) {
+        // The previous tab may have closed mid-capture.
+      }
+    }
+  }
 }
 
 async function detachAttached() {
