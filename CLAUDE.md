@@ -394,6 +394,15 @@ popup and enter the displayed WS port and 6-digit code. A successful pairing
 stores a long-term token in Chrome storage and in `~/.zode/browser-bridge.json`
 (0600), so reconnects can authenticate with the token.
 
+The bridge drives one sticky zode-owned tab: acquisition always creates a
+fresh background `about:blank` tab in the "zode" tab group (never taking over
+or focusing a human tab); explicit human navigation of that tab (address-bar
+/ bookmark / omnibox `webNavigation` transitions) or a `canceled_by_user`
+debugger detach hands it back, and the next action acquires a new tab. zode's
+own `Page.navigate` calls are rewritten to `transitionType: "link"` so they
+never trigger the handoff listener. Screenshots briefly activate the tab and
+restore the previously active one.
+
 Install and update details live in `extensions/chrome/README.md`. The shipped
 extension ID is `hcabdgpfhoclfgnknddadgfhhdnlkloc`; the manifest embeds the
 public key so unpacked and packed installs use the same ID, which the Rust
