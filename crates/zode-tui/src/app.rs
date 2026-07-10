@@ -5864,7 +5864,7 @@ impl TuiApp {
                         serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
                     let mut line = format!("workflow '{name}' → {pretty}");
                     if line.len() > 4000 {
-                        line.truncate(4000);
+                        truncate_at_char_boundary(&mut line, 4000);
                         line.push('…');
                     }
                     line
@@ -7869,6 +7869,20 @@ fn csi_private_reply(buf: &[u8], terminator: u8) -> bool {
     false
 }
 
+/// Truncate to at most `max_bytes`, backing up to the previous char boundary —
+/// a raw `String::truncate` panics when the cut lands inside a multi-byte
+/// (e.g. CJK) character.
+fn truncate_at_char_boundary(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> std::io::Result<()> {
     // If teardown happens between Begin/EndSynchronizedUpdate (draw error,
     // panic path), unlock the terminal or it keeps presenting the old frame.
@@ -7945,6 +7959,21 @@ mod tests {
                 zode_core::browser::bridge::server::EXTENSION_ID
             )
         );
+    }
+
+    #[test]
+    fn workflow_result_cap_respects_char_boundaries() {
+        // The 4000-byte cap on workflow results must never split a multi-byte
+        // char — String::truncate panics mid-UTF-8 (CJK results would crash).
+        let mut s = "汉".repeat(2000); // 3 bytes each → 6000 bytes
+        truncate_at_char_boundary(&mut s, 4000);
+        assert!(s.len() <= 4000);
+        assert!(s.is_char_boundary(s.len()));
+        assert!(s.chars().all(|c| c == '汉'));
+        // No-op when already under the cap.
+        let mut short = String::from("ok");
+        truncate_at_char_boundary(&mut short, 4000);
+        assert_eq!(short, "ok");
     }
 
     #[tokio::test]

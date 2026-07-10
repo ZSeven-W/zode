@@ -1165,17 +1165,31 @@ fn wrap_spans_with_prefix(
             if ch == '\r' {
                 continue; // drop CR from CRLF; the \n above did the break
             }
-            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            let has_body = current.len() > 1;
-            if has_body && current_width + ch_width > max_width {
-                out.push(Line::from(std::mem::take(&mut current)));
-                prefix = continuation_prefix.clone();
-                current_width = continuation_width;
-                current = vec![prefix.clone()];
+            // Tabs expand to the next 4-column stop and every other control
+            // char (ESC, DEL, C1) is dropped: the terminal advances to a tab
+            // stop or interprets them while this width math counts 0, which
+            // desyncs every later cell in the row — the terminal then shows
+            // stray fragments ratatui believes it never painted.
+            let (repeat, ch) = if ch == '\t' {
+                (4 - (current_width % 4), ' ')
+            } else if ch.is_control() {
+                continue;
+            } else {
+                (1, ch)
+            };
+            for _ in 0..repeat {
+                let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                let has_body = current.len() > 1;
+                if has_body && current_width + ch_width > max_width {
+                    out.push(Line::from(std::mem::take(&mut current)));
+                    prefix = continuation_prefix.clone();
+                    current_width = continuation_width;
+                    current = vec![prefix.clone()];
+                }
+                current.push(Span::styled(ch.to_string(), span.style));
+                current_width += ch_width;
+                saw_content = true;
             }
-            current.push(Span::styled(ch.to_string(), span.style));
-            current_width += ch_width;
-            saw_content = true;
         }
     }
 
@@ -1517,6 +1531,44 @@ mod tests {
                 "newest streamed line {i} must stay visible at the bottom"
             );
         }
+    }
+
+    #[test]
+    fn wrap_expands_tabs_and_strips_control_chars() {
+        // Raw tabs/control bytes must never reach the terminal: the wrapper
+        // counts them as width 0 while the terminal advances to a tab stop or
+        // interprets them (ESC), desyncing every later cell in the row — the
+        // stray-fragment / garbled-gutter artifacts around CJK tool output.
+        let spans = vec![Span::raw("a\tb\u{1b}[31mc\u{7f}d".to_string())];
+        let lines = wrap_spans_with_prefix(spans, Span::raw(""), Span::raw(""), 40);
+        assert_eq!(lines.len(), 1);
+        let text = plain_line_text(&lines[0]);
+        // Tab expands to the next 4-column stop ('a' at col 0 → 'b' at col 4);
+        // ESC and DEL are dropped outright.
+        assert_eq!(text, "a   b[31mcd");
+        assert!(
+            text.chars().all(|c| !c.is_control()),
+            "no control char may survive wrapping: {text:?}"
+        );
+    }
+
+    #[test]
+    fn wrap_counts_expanded_tabs_toward_the_row_width() {
+        // A tab-indented row must wrap by its true display width — with the
+        // expansion counted, nothing can overflow the pane and bleed into
+        // cells ratatui thinks are already painted (sidebar seam artifacts).
+        let spans = vec![Span::raw("\t\t一二三四五六七八九十".to_string())];
+        let lines = wrap_spans_with_prefix(spans, Span::raw(""), Span::raw(""), 16);
+        for l in &lines {
+            let w: usize = l
+                .spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            assert!(w <= 16, "row must fit the pane: width {w}");
+        }
+        // 8 cols of indent + 20 cols of CJK → must wrap (2+ rows).
+        assert!(lines.len() >= 2, "over-wide row must wrap: {}", lines.len());
     }
 
     #[test]
