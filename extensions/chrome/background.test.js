@@ -367,11 +367,46 @@ async function testCdpActionCreatesAndReusesControlledTab() {
   );
 }
 
+async function testTabRpcsManageControlledTab() {
+  const h = makeRpcHarness();
+  await h.connect();
+
+  const created = await h.rpc({
+    id: 20,
+    kind: "ext",
+    method: "tabs.new",
+    params: { url: "https://a.example/" },
+  });
+  assert.equal(created.error, undefined);
+  const newTabId = Number(created.result.id);
+
+  // tabs.new took control: the next cdp action reuses it
+  await h.rpc({ id: 21, kind: "cdp", method: "Runtime.evaluate", params: { expression: "1" } });
+  assert.equal(h.chrome.calls.created.length, 1);
+  assert.equal(h.chrome.calls.attached.at(-1), newTabId);
+
+  // tabs.select repoints control at an arbitrary existing tab
+  h.chrome.addTab({ id: 7, url: "https://b.example/" });
+  await h.rpc({ id: 22, kind: "ext", method: "tabs.select", params: { id: "7" } });
+  assert.equal(h.chrome.calls.attached.at(-1), 7);
+
+  // tabs.current reports the controlled tab, not the active one
+  h.chrome.addTab({ id: 8, url: "https://active.example/", active: true });
+  const current = await h.rpc({ id: 23, kind: "ext", method: "tabs.current" });
+  assert.equal(current.result, "https://b.example/");
+
+  // closing the controlled tab clears control; next action acquires afresh
+  h.chrome.fireTabRemoved(7);
+  await h.rpc({ id: 24, kind: "cdp", method: "Runtime.evaluate", params: { expression: "1" } });
+  assert.equal(h.chrome.calls.created.length, 2);
+}
+
 (async () => {
   await testBackgroundStartupDoesNotTouchWebSocket();
   await testStatusMessageReturnsConnectionState();
   await testStatusLoadsStoredPortAndReconnectCapability();
   await testReconnectMessageUsesStoredTokenAndPort();
   await testCdpActionCreatesAndReusesControlledTab();
+  await testTabRpcsManageControlledTab();
   console.log("background tests passed");
 })();
