@@ -331,10 +331,47 @@ async function testReconnectMessageUsesStoredTokenAndPort() {
   assert.equal(response.status.port, 17657);
 }
 
+async function testCdpActionCreatesAndReusesControlledTab() {
+  const h = makeRpcHarness();
+  h.chrome.addTab({ id: 5, url: "https://human.example/", active: true });
+  await h.connect();
+
+  const first = await h.rpc({
+    id: 10,
+    kind: "cdp",
+    method: "Runtime.evaluate",
+    params: { expression: "1" },
+  });
+  assert.equal(first.error, undefined);
+  // acquired a fresh background tab, not the human's active tab
+  assert.equal(h.chrome.calls.created.length, 1);
+  assert.equal(h.chrome.calls.created[0].active, false);
+  const zodeTabId = h.chrome.calls.attached[0];
+  assert.notEqual(zodeTabId, 5);
+  assert.equal(h.chrome.tabsById.get(5).active, true);
+
+  const second = await h.rpc({
+    id: 11,
+    kind: "cdp",
+    method: "Runtime.evaluate",
+    params: { expression: "2" },
+  });
+  assert.equal(second.error, undefined);
+  // reused: no second create, no re-attach
+  assert.equal(h.chrome.calls.created.length, 1);
+  assert.equal(h.chrome.calls.attached.length, 1);
+  const evals = h.chrome.calls.commands.filter((c) => c.method === "Runtime.evaluate");
+  assert.deepEqual(
+    evals.map((c) => c.tabId),
+    [zodeTabId, zodeTabId],
+  );
+}
+
 (async () => {
   await testBackgroundStartupDoesNotTouchWebSocket();
   await testStatusMessageReturnsConnectionState();
   await testStatusLoadsStoredPortAndReconnectCapability();
   await testReconnectMessageUsesStoredTokenAndPort();
+  await testCdpActionCreatesAndReusesControlledTab();
   console.log("background tests passed");
 })();

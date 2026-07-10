@@ -14,6 +14,7 @@ let ws = null;
 let keepalive = null;
 let lastPort = null;
 let attachedTabId = null;
+let controlledTabId = null;
 let zodeGroupId = null;
 let consoleBuf = [];
 let networkBuf = [];
@@ -204,7 +205,7 @@ async function handleRpc(request) {
 
 async function dispatch(request) {
   if (request.kind === "cdp") {
-    await ensureAttached();
+    await ensureControlledTab();
     return await cdp(request.method, request.params || {});
   }
   if (request.kind !== "ext") {
@@ -220,6 +221,8 @@ async function dispatch(request) {
     case "tabs.new": {
       const tab = await chrome.tabs.create({ url: params.url || undefined });
       await groupZodeTab(tab);
+      controlledTabId = tab.id;
+      await attachTo(tab.id);
       return toTabInfo(tab);
     }
     case "tabs.close": {
@@ -227,17 +230,20 @@ async function dispatch(request) {
       if (attachedTabId === Number(params.id)) {
         attachedTabId = null;
       }
+      if (controlledTabId === Number(params.id)) {
+        controlledTabId = null;
+      }
       return null;
     }
     case "tabs.select": {
       const tabId = Number(params.id);
       await chrome.tabs.update(tabId, { active: true });
-      attachedTabId = null;
-      await ensureAttached();
+      controlledTabId = tabId;
+      await attachTo(tabId);
       return null;
     }
     case "tabs.current": {
-      const tab = await activeTab();
+      const tab = await ensureControlledTab();
       return tab.url || "";
     }
     case "logs.console":
@@ -252,25 +258,42 @@ async function dispatch(request) {
   }
 }
 
-async function activeTab() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs[0];
-  if (!tab || tab.id == null) {
-    throw new Error("no active Chrome tab");
+async function controlledTab() {
+  if (controlledTabId == null) {
+    return null;
   }
-  return tab;
+  try {
+    return await chrome.tabs.get(controlledTabId);
+  } catch (_) {
+    controlledTabId = null;
+    return null;
+  }
 }
 
-async function ensureAttached() {
-  const tab = await activeTab();
-  if (attachedTabId !== tab.id) {
-    await detachAttached();
-    await chrome.debugger.attach({ tabId: tab.id }, "1.3");
-    attachedTabId = tab.id;
-    await cdp("Runtime.enable", {});
-    await cdp("Network.enable", {});
-    await cdp("Page.enable", {});
+async function attachTo(tabId) {
+  if (attachedTabId === tabId) {
+    return;
   }
+  await detachAttached();
+  await chrome.debugger.attach({ tabId }, "1.3");
+  attachedTabId = tabId;
+  await cdp("Runtime.enable", {});
+  await cdp("Network.enable", {});
+  await cdp("Page.enable", {});
+}
+
+// zode never takes over a human tab: when it has no controlled tab it
+// always creates a fresh background one inside the zode tab group.
+async function ensureControlledTab() {
+  const existing = await controlledTab();
+  if (existing) {
+    await attachTo(existing.id);
+    return existing;
+  }
+  const tab = await chrome.tabs.create({ active: false });
+  await groupZodeTab(tab);
+  controlledTabId = tab.id;
+  await attachTo(tab.id);
   return tab;
 }
 
@@ -409,6 +432,9 @@ function rememberRequest(requestId, request) {
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (tabId === attachedTabId) {
     attachedTabId = null;
+  }
+  if (tabId === controlledTabId) {
+    controlledTabId = null;
   }
 });
 
