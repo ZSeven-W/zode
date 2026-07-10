@@ -6768,13 +6768,16 @@ fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
         && row < area.y.saturating_add(area.height)
 }
 
-/// A short, human-readable preview of a tool's result payload for the chat —
-/// stdout for shells, `content` for file reads, etc. Truncated so a chatty tool
-/// can't flood the transcript. `None` when there's nothing worth showing beyond
-/// the "done" status (e.g. an edit that only returns `{path, status}`).
+/// A tool's result payload rendered for the chat — stdout for shells,
+/// `content` for file reads, etc. The FULL output is kept: tool rows are
+/// collapsed to a `▸ … (+N)` header by default, and expanding one must show
+/// everything, not a 12-line teaser. Only a distant safety net caps
+/// pathological payloads (e.g. a runaway MCP tool). `None` when there's
+/// nothing worth showing beyond the "done" status (e.g. an edit that only
+/// returns `{path, status}`).
 fn tool_output_preview(output: &serde_json::Value) -> Option<String> {
-    const MAX_LINES: usize = 12;
-    const MAX_CHARS: usize = 1000;
+    const MAX_LINES: usize = 10_000;
+    const MAX_CHARS: usize = 500_000;
 
     let raw = match output {
         serde_json::Value::String(s) => s.clone(),
@@ -8918,14 +8921,23 @@ mod tests {
         // Status-only payloads (an edit/write) have nothing to preview.
         assert!(tool_output_preview(&json!({"path": "/x", "status": "ok"})).is_none());
         assert!(tool_output_preview(&json!({"stdout": "   "})).is_none());
-        // Long output is truncated with a marker.
+        // Full output is kept — expanding a tool block must show everything
+        // (the collapsed header hides it by default anyway).
         let many = (0..30)
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
             .join("\n");
         let p = tool_output_preview(&json!({"stdout": many})).unwrap();
+        assert_eq!(p.lines().count(), 30);
+        assert!(
+            !p.contains("truncated"),
+            "no truncation under the safety net"
+        );
+        // A distant safety net still guards pathological payloads.
+        let huge = "x".repeat(600_000);
+        let p = tool_output_preview(&json!({"stdout": huge})).unwrap();
         assert!(p.contains("truncated"));
-        assert!(p.lines().count() <= 13);
+        assert!(p.chars().count() <= 500_100);
     }
 
     #[tokio::test]
