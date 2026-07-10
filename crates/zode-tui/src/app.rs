@@ -19,7 +19,8 @@ use crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
+    EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
 use futures::{FutureExt, StreamExt};
@@ -1735,7 +1736,10 @@ impl TuiApp {
             || self.subagents_panel.is_some()
             || self.files_panel.is_some()
             || self.show_help
-            || self.toast.is_some()
+        // NB: toasts are deliberately NOT overlays here. They're small, they
+        // expire on their own, and the ratatui diff restores the cells under
+        // them — counting them would full-clear the terminal on every expiry
+        // (a visible flash a few seconds after every copy/notification).
     }
 
     /// Left-click on a collapsible sidebar section header toggles its fold;
@@ -1891,17 +1895,31 @@ impl TuiApp {
             // Full repaint when an overlay just closed (or Ctrl+L asked): see
             // `overlay_was_open` — repairs cells the terminal lost under it.
             let overlay_open = self.any_overlay_open();
-            if self.force_redraw || (self.overlay_was_open && !overlay_open) {
-                self.force_redraw = false;
-                terminal.clear()?;
-            }
+            let full_clear =
+                std::mem::take(&mut self.force_redraw) || (self.overlay_was_open && !overlay_open);
             self.overlay_was_open = overlay_open;
             // An idle tick (nothing animatable changed) skips the redraw — a
             // fully idle app shouldn't rebuild the widget tree 10×/second.
-            if std::mem::take(&mut self.skip_next_draw) {
+            // A pending full clear always draws: clearing without repainting
+            // would leave the screen blank until the next event.
+            if std::mem::take(&mut self.skip_next_draw) && !full_clear {
                 // still fell through the tick handler's state refresh below
             } else {
-                terminal.draw(|f| self.draw(f))?;
+                // Bracket erase + repaint in a synchronized update (CSI ?2026)
+                // so the terminal presents them as one atomic frame — without
+                // it, the blank screen between `clear()` and the repaint shows
+                // as a full-screen flash, and a scroll's whole-transcript diff
+                // can tear mid-write. Unsupporting terminals ignore the marks.
+                let mut out = std::io::stdout();
+                let _ = out.execute(BeginSynchronizedUpdate);
+                let drawn = (|| {
+                    if full_clear {
+                        terminal.clear()?;
+                    }
+                    terminal.draw(|f| self.draw(f)).map(|_| ())
+                })();
+                let _ = out.execute(EndSynchronizedUpdate);
+                drawn?;
             }
             if self.should_quit {
                 // Sweep any clipboard preview temp files still held by any tab.
@@ -7837,6 +7855,9 @@ fn csi_private_reply(buf: &[u8], terminator: u8) -> bool {
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> std::io::Result<()> {
+    // If teardown happens between Begin/EndSynchronizedUpdate (draw error,
+    // panic path), unlock the terminal or it keeps presenting the old frame.
+    let _ = terminal.backend_mut().execute(EndSynchronizedUpdate);
     disable_raw_mode()?;
     if KITTY_KEYBOARD_PUSHED.swap(false, std::sync::atomic::Ordering::SeqCst) {
         let _ = terminal.backend_mut().execute(PopKeyboardEnhancementFlags);
@@ -7852,6 +7873,9 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> std::i
 fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // A panic mid-frame can leave a synchronized update open — unlock
+        // first or the terminal keeps showing the frozen frame.
+        let _ = std::io::stdout().execute(EndSynchronizedUpdate);
         let _ = disable_raw_mode();
         if KITTY_KEYBOARD_PUSHED.swap(false, std::sync::atomic::Ordering::SeqCst) {
             let _ = std::io::stdout().execute(PopKeyboardEnhancementFlags);
@@ -10097,6 +10121,58 @@ mod tests {
         assert!(setup.contains("(mouse_capture: bool)"));
         assert!(setup.contains(concat!("Enable", "Mouse", "Capture")));
         assert!(source.contains(concat!("Disable", "Mouse", "Capture")));
+    }
+
+    #[test]
+    fn frame_paints_inside_synchronized_update() {
+        let source = include_str!("app.rs");
+        let event_loop = source
+            .split("async fn event_loop")
+            .nth(1)
+            .and_then(|tail| tail.split("fn print_resume_hint").next().or(Some(tail)))
+            .expect("event_loop source block should exist");
+        // The full-repaint clear and the draw must be bracketed by a
+        // synchronized update (CSI ?2026): the erased screen between
+        // `terminal.clear()` and the repaint is otherwise visible as a
+        // full-screen flash (e.g. every time a toast expired).
+        assert!(event_loop.contains(concat!("Begin", "SynchronizedUpdate")));
+        assert!(event_loop.contains(concat!("End", "SynchronizedUpdate")));
+        let begin = event_loop
+            .find(concat!("Begin", "SynchronizedUpdate"))
+            .unwrap();
+        let clear = event_loop
+            .find("terminal.clear()")
+            .expect("full-repaint clear should exist");
+        let draw = event_loop
+            .find("terminal.draw(")
+            .expect("draw call should exist");
+        let end = event_loop
+            .find(concat!("End", "SynchronizedUpdate"))
+            .unwrap();
+        assert!(begin < clear && clear < draw && draw < end);
+        // Defensive unlock on teardown: a crash between Begin/End must not
+        // leave the terminal holding a frozen frame.
+        let restore = source
+            .split("fn restore_terminal")
+            .nth(1)
+            .and_then(|tail| tail.split("fn install_panic_hook").next())
+            .expect("restore_terminal source block should exist");
+        assert!(restore.contains(concat!("End", "SynchronizedUpdate")));
+    }
+
+    #[test]
+    fn toast_expiry_does_not_trigger_full_clear() {
+        let source = include_str!("app.rs");
+        let overlay_fn = source
+            .split("fn any_overlay_open")
+            .nth(1)
+            .and_then(|tail| tail.split("\n    }\n").next())
+            .expect("any_overlay_open source block should exist");
+        // Toasts are drawn from the ratatui buffer, so the normal diff
+        // restores the cells under them when they expire. Counting them as
+        // overlays made every toast expiry issue a terminal.clear() — a
+        // visible full-screen flash a few seconds after every copy.
+        assert!(!overlay_fn.contains("self.toast.is_some()"));
     }
 
     #[test]
