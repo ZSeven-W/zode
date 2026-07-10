@@ -43,6 +43,17 @@ function testPackScriptCopiesDeclaredIconDirectory() {
   }
 }
 
+function testManifestDeclaresRequiredPermissions() {
+  assert.deepEqual(manifest.permissions, [
+    "debugger",
+    "tabs",
+    "storage",
+    "tabGroups",
+    "webNavigation",
+  ]);
+}
+
 testExtensionIconsAreDeclaredAndSized();
+testManifestDeclaresRequiredPermissions();
 testPackScriptCopiesDeclaredIconDirectory();
 console.log("manifest tests passed");
