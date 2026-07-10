@@ -9,8 +9,38 @@ const backgroundSource = fs.readFileSync(backgroundPath, "utf8");
 
 function makeChrome(storage = {}) {
   const runtimeMessages = [];
-  return {
+  const calls = { created: [], updated: [], attached: [], detached: [], commands: [], queries: [] };
+  const listeners = { tabRemoved: [], debuggerDetach: [], webNavCommitted: [] };
+  const tabsById = new Map();
+  let nextTabId = 100;
+
+  const api = {
     runtimeMessages,
+    calls,
+    tabsById,
+    addTab({ id = nextTabId++, url = "", active = false, windowId = 1 } = {}) {
+      const tab = { id, url, title: "", active, windowId };
+      tabsById.set(id, tab);
+      if (active) {
+        api.setActive(id);
+      }
+      return tab;
+    },
+    setActive(id) {
+      for (const tab of tabsById.values()) {
+        tab.active = tab.id === id;
+      }
+    },
+    fireTabRemoved(id) {
+      tabsById.delete(id);
+      listeners.tabRemoved.forEach((listener) => listener(id));
+    },
+    fireDebuggerDetach(source, reason) {
+      listeners.debuggerDetach.forEach((listener) => listener(source, reason));
+    },
+    fireNavCommitted(details) {
+      listeners.webNavCommitted.forEach((listener) => listener(details));
+    },
     storage: {
       local: {
         get: async () => storage,
@@ -26,11 +56,40 @@ function makeChrome(storage = {}) {
       onMessage: { addListener: (handler) => runtimeMessages.push(handler) },
     },
     tabs: {
-      query: async () => [],
-      create: async () => ({ id: 1, windowId: 1 }),
-      remove: async () => {},
-      update: async () => {},
-      onRemoved: { addListener: () => {} },
+      query: async (filter = {}) => {
+        calls.queries.push(filter);
+        let list = [...tabsById.values()];
+        if (filter.active) {
+          list = list.filter((tab) => tab.active);
+        }
+        if (filter.windowId != null) {
+          list = list.filter((tab) => tab.windowId === filter.windowId);
+        }
+        return list;
+      },
+      get: async (id) => {
+        const tab = tabsById.get(id);
+        if (!tab) {
+          throw new Error(`no tab ${id}`);
+        }
+        return tab;
+      },
+      create: async (opts = {}) => {
+        calls.created.push(opts);
+        return api.addTab({ url: opts.url || "", active: opts.active !== false });
+      },
+      remove: async (id) => {
+        tabsById.delete(id);
+      },
+      update: async (id, props = {}) => {
+        calls.updated.push([id, props]);
+        if (props.active) {
+          api.setActive(id);
+        }
+        return tabsById.get(id);
+      },
+      group: async () => 1,
+      onRemoved: { addListener: (listener) => listeners.tabRemoved.push(listener) },
     },
     tabGroups: {
       query: async () => [],
@@ -38,19 +97,93 @@ function makeChrome(storage = {}) {
       onRemoved: { addListener: () => {} },
     },
     debugger: {
-      attach: async () => {},
-      detach: async () => {},
-      sendCommand: async () => ({}),
-      onDetach: { addListener: () => {} },
+      attach: async (target) => {
+        calls.attached.push(target.tabId);
+      },
+      detach: async (target) => {
+        calls.detached.push(target.tabId);
+      },
+      sendCommand: async (target, method, params) => {
+        calls.commands.push({ tabId: target.tabId, method, params });
+        return {};
+      },
+      onDetach: { addListener: (listener) => listeners.debuggerDetach.push(listener) },
       onEvent: { addListener: () => {} },
     },
+    webNavigation: {
+      onCommitted: { addListener: (listener) => listeners.webNavCommitted.push(listener) },
+    },
   };
+  return api;
 }
 
 async function flushImmediates(count = 5) {
   for (let i = 0; i < count; i += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
+}
+
+function makeRpcHarness(storage = { zodePort: 17657, zodeToken: "token" }) {
+  const chrome = makeChrome(storage);
+  const frames = [];
+
+  class RpcWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+
+    constructor(url) {
+      this.url = url;
+      this.readyState = RpcWebSocket.CONNECTING;
+      RpcWebSocket.last = this;
+      setImmediate(() => {
+        this.readyState = RpcWebSocket.OPEN;
+        this.onopen();
+      });
+    }
+
+    send(text) {
+      const frame = JSON.parse(text);
+      frames.push(frame);
+      if (frame.type === "auth") {
+        setImmediate(() => {
+          this.onmessage({ data: JSON.stringify({ type: "ok" }) });
+        });
+      }
+    }
+
+    close() {
+      this.readyState = 3;
+    }
+  }
+
+  const sandbox = {
+    console,
+    setImmediate,
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+    WebSocket: RpcWebSocket,
+    chrome,
+  };
+  vm.runInNewContext(backgroundSource, sandbox, { filename: backgroundPath });
+
+  return {
+    chrome,
+    frames,
+    async connect() {
+      const handler = chrome.runtimeMessages[0];
+      handler({ type: "zode-reconnect" }, {}, () => {});
+      await flushImmediates();
+    },
+    async rpc(frame) {
+      RpcWebSocket.last.onmessage({ data: JSON.stringify(frame) });
+      await flushImmediates(10);
+      const reply = frames.filter((f) => f.id === frame.id).at(-1);
+      assert.notEqual(reply, undefined, `no reply frame for rpc id ${frame.id}`);
+      return reply;
+    },
+  };
 }
 
 async function testBackgroundStartupDoesNotTouchWebSocket() {
