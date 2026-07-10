@@ -53,7 +53,7 @@ use crate::ui::dialog::mcp_dialog::McpDialog;
 use crate::ui::dialog::permission::PermissionDialog;
 use crate::ui::dialog::plugin_picker::PluginPicker;
 use crate::ui::dialog::question::QuestionDialog;
-use crate::ui::dialog::session_picker::SessionPicker;
+use crate::ui::dialog::session_picker::{DeletePress, SessionPicker};
 use crate::ui::dialog::settings::{SettingsAction, SettingsDialog, SettingsLevel};
 use crate::ui::dialog::tasks_panel::TasksPanel;
 use crate::ui::dialog::workflows_dialog::{WorkflowRow, WorkflowsAction, WorkflowsDialog};
@@ -1521,7 +1521,17 @@ impl TuiApp {
         agent_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
         match code {
-            KeyCode::Esc => self.session_picker = None,
+            KeyCode::Esc => {
+                // First Esc only disarms a pending delete; the picker closes
+                // on the next one.
+                let armed = self
+                    .session_picker
+                    .as_mut()
+                    .is_some_and(|p| p.cancel_pending_delete());
+                if !armed {
+                    self.session_picker = None;
+                }
+            }
             KeyCode::Up => {
                 if let Some(p) = &mut self.session_picker {
                     p.prev();
@@ -1538,8 +1548,13 @@ impl TuiApp {
                 }
             }
             KeyCode::Delete => {
-                let target = self.session_picker.as_ref().and_then(|p| p.selected());
-                if let Some(meta) = target {
+                // Two-press confirmation: the first Delete arms (the picker
+                // shows the prompt + red highlight), the second one deletes.
+                let confirmed = match self.session_picker.as_mut().and_then(|p| p.press_delete()) {
+                    Some(DeletePress::Confirmed(meta)) => Some(meta),
+                    Some(DeletePress::Armed) | None => None,
+                };
+                if let Some(meta) = confirmed {
                     self.delete_session(&meta.id).await;
                     if let Some(p) = &mut self.session_picker {
                         p.remove(&meta.id);
@@ -10173,6 +10188,21 @@ mod tests {
         // overlays made every toast expiry issue a terminal.clear() — a
         // visible full-screen flash a few seconds after every copy.
         assert!(!overlay_fn.contains("self.toast.is_some()"));
+    }
+
+    #[test]
+    fn picker_delete_requires_confirmation_and_esc_cancels_first() {
+        let source = include_str!("app.rs");
+        let picker_fn = source
+            .split("async fn handle_picker_key")
+            .nth(1)
+            .and_then(|tail| tail.split("\n    fn ").next())
+            .expect("handle_picker_key source block should exist");
+        // Delete must go through the picker's two-press confirmation, never
+        // straight to delete_session on the first press.
+        assert!(picker_fn.contains("press_delete"));
+        // Esc cancels a pending delete before it closes the picker.
+        assert!(picker_fn.contains("cancel_pending_delete"));
     }
 
     #[test]
