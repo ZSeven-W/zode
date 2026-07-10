@@ -64,6 +64,23 @@ pub struct SidebarHits {
     pub files_header_row: Option<u16>,
     pub files_more_row: Option<u16>,
     pub todo_header_row: Option<u16>,
+    /// First screen row of the session-tab list (rows are contiguous).
+    pub tabs_rows_start: Option<u16>,
+    /// Tab index of the first VISIBLE row (the list windows when it overflows).
+    pub tabs_first_index: usize,
+    /// Number of tab rows currently shown.
+    pub tabs_shown: u16,
+}
+
+impl SidebarHits {
+    /// Map a clicked screen row to the session-tab index it shows.
+    pub fn tab_index_at(&self, row: u16) -> Option<usize> {
+        let start = self.tabs_rows_start?;
+        if row < start || row >= start.saturating_add(self.tabs_shown) {
+            return None;
+        }
+        Some(self.tabs_first_index + (row - start) as usize)
+    }
 }
 
 pub fn tab_label(index: usize, title: &str, busy: bool) -> String {
@@ -243,7 +260,13 @@ pub fn render_sidebar(
     // Cap the tab list so everything below it fits.
     let tabs_budget =
         (area.height as usize).saturating_sub(sub_h + files_h + todo_h + version_foot);
-    append_tab_rows(&mut lines, row_width, tabs_budget, tabs, active, theme);
+    // Tab rows render contiguously starting at the current line count —
+    // remember the window so a click can map back to a tab index.
+    let tabs_top = area.y + lines.len() as u16;
+    let (first, shown) = append_tab_rows(&mut lines, row_width, tabs_budget, tabs, active, theme);
+    hits.tabs_rows_start = (shown > 0).then_some(tabs_top);
+    hits.tabs_first_index = first;
+    hits.tabs_shown = shown;
     // Flow the subagents section right after the tabs (no-op when empty).
     lines.extend(crate::ui::subagents_sidebar::section_lines(
         info.subagents,
@@ -329,6 +352,8 @@ fn render_tab_list(
     render_sidebar_block(f, area, lines, theme);
 }
 
+/// Returns `(first_index, shown)`: the tab index of the first rendered row and
+/// how many rows were rendered — the click hit-test needs both.
 fn append_tab_rows(
     lines: &mut Vec<Line<'static>>,
     row_width: usize,
@@ -336,10 +361,11 @@ fn append_tab_rows(
     tabs: &[SessionTab],
     active: usize,
     theme: &Theme,
-) {
+) -> (usize, u16) {
     let content_width = row_width.saturating_sub(2);
     let remaining_rows = area_height.saturating_sub(lines.len());
     let start = tab_window_start(active, tabs.len(), remaining_rows);
+    let shown = tabs.len().saturating_sub(start).min(remaining_rows) as u16;
     for (i, tab) in tabs.iter().enumerate().skip(start).take(remaining_rows) {
         let row_active = i == active;
         let row_bg = if row_active {
@@ -384,6 +410,7 @@ fn append_tab_rows(
             Span::styled(parts.padding, Style::default().bg(row_bg)),
         ]));
     }
+    (start, shown)
 }
 
 fn tab_window_start(active: usize, total: usize, visible_rows: usize) -> usize {

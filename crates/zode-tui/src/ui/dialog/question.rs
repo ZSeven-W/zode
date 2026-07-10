@@ -43,6 +43,20 @@ fn is_custom_like(label: &str) -> bool {
     .any(|p| l.starts_with(p))
 }
 
+/// Screen geometry recorded on render so mouse clicks can hit-test: the popup
+/// rect, the tab strip's chips, the focusable body rows, and the submit row.
+#[derive(Default)]
+struct QuestionHits {
+    popup: Rect,
+    strip_row: u16,
+    /// `(x_start, x_end, tab)` per chip — `tab == specs.len()` is Submit.
+    chips: Vec<(u16, u16, usize)>,
+    /// `(screen_row, focusable option index)` for the visible body rows.
+    rows: Vec<(u16, Option<usize>)>,
+    /// The `➤ Submit` action row on the Submit tab.
+    submit_row: Option<u16>,
+}
+
 pub struct QuestionDialog {
     request: Option<QuestionRequest>,
     /// Specs with custom-like preset options already filtered out.
@@ -56,6 +70,7 @@ pub struct QuestionDialog {
     customs: Vec<String>,
     /// Editing the active question's "Other" text.
     editing: bool,
+    hits: QuestionHits,
 }
 
 impl QuestionDialog {
@@ -78,7 +93,78 @@ impl QuestionDialog {
             selections: vec![None; n],
             customs: vec![String::new(); n],
             editing: false,
+            hits: QuestionHits::default(),
         }
+    }
+
+    /// Handle a left click at a screen position. Same done-semantics as
+    /// [`Self::on_key`]: true once submitted. Geometry comes from the hits
+    /// recorded on the previous render; clicks outside the popup are ignored
+    /// (Esc remains the only way to dismiss).
+    pub fn on_mouse(&mut self, column: u16, row: u16) -> bool {
+        if self.request.is_none() {
+            return false;
+        }
+        let popup = self.hits.popup;
+        if popup.width == 0
+            || column < popup.x
+            || column >= popup.x + popup.width
+            || row < popup.y
+            || row >= popup.y + popup.height
+        {
+            return false;
+        }
+        if row == self.hits.strip_row {
+            let chip = self
+                .hits
+                .chips
+                .iter()
+                .find(|(x0, x1, _)| column >= *x0 && column < *x1)
+                .map(|&(_, _, tab)| tab);
+            if let Some(tab) = chip {
+                self.editing = false;
+                self.goto_tab(tab);
+            }
+            return false;
+        }
+        if self.hits.submit_row == Some(row) {
+            return self.activate();
+        }
+        let opt = self
+            .hits
+            .rows
+            .iter()
+            .find(|(y, tag)| *y == row && tag.is_some())
+            .and_then(|(_, tag)| *tag);
+        if let Some(opt) = opt {
+            self.editing = false;
+            self.cursor = opt;
+            return self.activate();
+        }
+        false
+    }
+
+    #[cfg(test)]
+    fn test_option_point(&self, opt: usize) -> Option<(u16, u16)> {
+        self.hits
+            .rows
+            .iter()
+            .find(|(_, tag)| *tag == Some(opt))
+            .map(|(y, _)| (self.hits.popup.x + 3, *y))
+    }
+
+    #[cfg(test)]
+    fn test_chip_point(&self, tab: usize) -> Option<(u16, u16)> {
+        self.hits
+            .chips
+            .iter()
+            .find(|(_, _, t)| *t == tab)
+            .map(|(x0, _, _)| (*x0, self.hits.strip_row))
+    }
+
+    #[cfg(test)]
+    fn test_submit_point(&self) -> Option<(u16, u16)> {
+        self.hits.submit_row.map(|y| (self.hits.popup.x + 3, y))
     }
 
     /// The asking tab's id, so the app can focus that conversation.
@@ -246,10 +332,15 @@ impl QuestionDialog {
     }
 
     /// The tab strip: one chip per question (its header, or `Q<n>`) plus the
-    /// Submit chip. Active chip inverts; answered chips get a ✓.
-    fn tab_strip(&self, theme: &Theme) -> Line<'static> {
+    /// Submit chip. Active chip inverts; answered chips get a ✓. Also returns
+    /// each chip's `(x_start, x_end, tab)` RELATIVE to the line start, so the
+    /// render can anchor click hitboxes.
+    fn tab_strip(&self, theme: &Theme) -> (Line<'static>, Vec<(u16, u16, usize)>) {
+        use unicode_width::UnicodeWidthStr;
         let bg = Style::default().bg(theme.bg_secondary);
         let mut spans: Vec<Span<'static>> = vec![Span::styled(" ", bg)];
+        let mut chips = Vec::new();
+        let mut x = 1u16;
         for (q, spec) in self.specs.iter().enumerate() {
             let label = spec.header.clone().unwrap_or_else(|| format!("Q{}", q + 1));
             let mark = if self.selections[q].is_some() {
@@ -267,7 +358,11 @@ impl QuestionDialog {
             } else {
                 bg.fg(theme.fg_subtle)
             };
-            spans.push(Span::styled(format!(" {mark}{label} "), style));
+            let chip = format!(" {mark}{label} ");
+            let w = UnicodeWidthStr::width(chip.as_str()) as u16;
+            chips.push((x, x + w, q));
+            x += w + 1; // the 1-col separator span below
+            spans.push(Span::styled(chip, style));
             spans.push(Span::styled(" ", bg));
         }
         let submit_label = crate::tr("Submit");
@@ -281,8 +376,11 @@ impl QuestionDialog {
         } else {
             bg.fg(theme.fg_subtle)
         };
-        spans.push(Span::styled(format!(" ➤ {submit_label} "), submit_style));
-        Line::from(spans)
+        let chip = format!(" ➤ {submit_label} ");
+        let w = UnicodeWidthStr::width(chip.as_str()) as u16;
+        chips.push((x, x + w, self.submit_tab()));
+        spans.push(Span::styled(chip, submit_style));
+        (Line::from(spans), chips)
     }
 
     /// Body lines for the active tab. `Some(row)` tags focusable rows.
@@ -423,7 +521,8 @@ impl QuestionDialog {
         }
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
+        self.hits = QuestionHits::default();
         if self.request.is_none() {
             return;
         }
@@ -431,6 +530,7 @@ impl QuestionDialog {
         // borders(2) + tabs(1) + blank(1) + body + blank(1) + footer(1).
         let want_h = (body.len() as u16).saturating_add(6);
         let popup = modal_area(area, 76, want_h);
+        self.hits.popup = popup;
         f.render_widget(Clear, popup);
 
         let bg = Style::default().bg(theme.bg_secondary);
@@ -458,9 +558,16 @@ impl QuestionDialog {
             inner.height,
         );
 
-        // Tab strip.
+        // Tab strip (chips recorded for click hit-testing).
+        let (strip, chips) = self.tab_strip(theme);
+        self.hits.strip_row = inner.y;
+        self.hits.chips = chips
+            .into_iter()
+            .filter(|(_, x1, _)| *x1 <= inner.width)
+            .map(|(x0, x1, t)| (inner.x + x0, inner.x + x1, t))
+            .collect();
         f.render_widget(
-            Paragraph::new(self.tab_strip(theme)).style(bg),
+            Paragraph::new(strip).style(bg),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
 
@@ -474,7 +581,12 @@ impl QuestionDialog {
             .unwrap_or(0);
         let start = scroll_start(cursor_row, body.len(), body_h);
         let mut y = body_top;
-        for (line, _) in body.iter().skip(start).take(body_h) {
+        for (idx, (line, tag)) in body.iter().enumerate().skip(start).take(body_h) {
+            self.hits.rows.push((y, *tag));
+            // On the Submit tab the action row is the last body row.
+            if self.on_submit_tab() && idx == body.len() - 1 {
+                self.hits.submit_row = Some(y);
+            }
             f.render_widget(
                 Paragraph::new(line.clone()).style(bg),
                 Rect::new(inner.x, y, inner.width, 1),

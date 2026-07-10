@@ -36,6 +36,9 @@ pub struct PermissionDialog {
     cwd: std::path::PathBuf,
     /// Highlighted action for arrow-key + Enter selection (index into OPTIONS).
     selected: usize,
+    /// Screen hitboxes of the answer chips, recorded on render:
+    /// `(x_start, x_end, row, approval)` — so a mouse click can answer.
+    chip_hits: Vec<(u16, u16, u16, Approval)>,
 }
 
 impl PermissionDialog {
@@ -44,7 +47,24 @@ impl PermissionDialog {
             request: Some(request),
             cwd,
             selected: 0,
+            chip_hits: Vec::new(),
         }
+    }
+
+    /// The approval chip under a screen position, if any (mouse click target).
+    pub fn approval_at(&self, column: u16, row: u16) -> Option<Approval> {
+        self.chip_hits
+            .iter()
+            .find(|(x0, x1, y, _)| row == *y && column >= *x0 && column < *x1)
+            .map(|(_, _, _, a)| *a)
+    }
+
+    #[cfg(test)]
+    fn test_chip_points(&self) -> Vec<(u16, u16, Approval)> {
+        self.chip_hits
+            .iter()
+            .map(|(x0, _, y, a)| (*x0, *y, *a))
+            .collect()
     }
 
     pub fn tool(&self) -> &str {
@@ -71,6 +91,7 @@ impl PermissionDialog {
     pub fn answer(&mut self, approval: Approval) -> bool {
         if let Some(req) = self.request.take() {
             let _ = req.respond(approval);
+            self.chip_hits.clear();
             true
         } else {
             false
@@ -81,7 +102,7 @@ impl PermissionDialog {
     /// All card lines (body + footer), used only for height/width estimation.
     fn lines(&self, theme: &Theme) -> Vec<Line<'static>> {
         let mut lines = self.body_lines(theme);
-        lines.extend(self.footer_lines(theme));
+        lines.extend(self.footer_lines(theme).0);
         lines
     }
 
@@ -108,7 +129,9 @@ impl PermissionDialog {
 
     /// The PINNED footer: the answer keys (always row 0 so they survive a tight
     /// card) plus the non-blocking hint (row 1, dropped first if space is short).
-    fn footer_lines(&self, theme: &Theme) -> Vec<Line<'static>> {
+    /// Also returns each chip's `(x_start, x_end)` RELATIVE to the line start,
+    /// paired with its approval — render_card turns these into screen hitboxes.
+    fn footer_lines(&self, theme: &Theme) -> (Vec<Line<'static>>, Vec<(u16, u16, Approval)>) {
         // Each action is a chip; the arrow-key/Enter highlight marks the active
         // one. The leading digit keeps the 1/2/3 direct-pick affordance.
         let labels = [
@@ -124,24 +147,32 @@ impl PermissionDialog {
             .bg(theme.accent)
             .add_modifier(Modifier::BOLD);
         let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut chips = Vec::new();
+        let mut x = 0u16;
         for (i, lbl) in labels.iter().enumerate() {
             if i > 0 {
                 spans.push(Span::raw("  "));
+                x += 2;
             }
             let style = if i == self.selected { active } else { normal };
-            spans.push(Span::styled(format!(" {lbl} "), style));
+            let chip = format!(" {lbl} ");
+            let w = UnicodeWidthStr::width(chip.as_str()) as u16;
+            chips.push((x, x + w, OPTIONS[i]));
+            x += w;
+            spans.push(Span::styled(chip, style));
         }
         spans.push(Span::styled(
             format!("   ↑↓/1-3 · enter · esc {}", crate::tr("deny")),
             Style::default().fg(theme.fg_subtle),
         ));
-        vec![
+        let lines = vec![
             Line::from(spans),
             Line::styled(
                 crate::tr("…or just keep typing to queue a message — this prompt won't block you."),
                 Style::default().fg(theme.fg_subtle),
             ),
-        ]
+        ];
+        (lines, chips)
     }
 
     /// Rows the inline card wants, given the available `width` (accounts for a
@@ -162,7 +193,7 @@ impl PermissionDialog {
 
     /// Render the prompt as an inline card filling `area` (docked above the
     /// input). Does not center; does not cover the conversation.
-    pub fn render_inline(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render_inline(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
         if self.request.is_none() || area.height == 0 {
             return;
         }
@@ -171,7 +202,7 @@ impl PermissionDialog {
 
     /// Fallback centered popup, used only when the terminal is too short to
     /// dock the card inline above the input.
-    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
         if self.request.is_none() {
             return;
         }
@@ -183,7 +214,8 @@ impl PermissionDialog {
     /// top and the answer-key footer PINNED to the bottom rows so a long file
     /// write can never push the `[1] [2] [3]` keys off the card. The body
     /// clips/truncates instead.
-    fn render_card(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+    fn render_card(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
+        self.chip_hits.clear();
         f.render_widget(Clear, area);
         let block = Block::default()
             .title(format!(" {}: {} ", crate::tr("Permission"), self.tool()))
@@ -197,9 +229,17 @@ impl PermissionDialog {
         }
 
         // Reserve the bottom rows for the footer (≤2; at least the keys row).
-        let footer = self.footer_lines(theme);
+        let (footer, chips) = self.footer_lines(theme);
         let footer_h = (footer.len() as u16).min(inner.height);
         let body_h = inner.height.saturating_sub(footer_h);
+        // The keys row is the footer's first line; anchor the chip hitboxes to
+        // its screen position so a click can answer.
+        let keys_row = inner.y.saturating_add(body_h);
+        self.chip_hits = chips
+            .into_iter()
+            .filter(|(_, x1, _)| inner.x + x1 <= inner.x + inner.width)
+            .map(|(x0, x1, a)| (inner.x + x0, inner.x + x1, keys_row, a))
+            .collect();
 
         if body_h > 0 {
             let body_area = Rect::new(inner.x, inner.y, inner.width, body_h);
@@ -286,7 +326,7 @@ mod tests {
                 .await
         });
         let req = rx.next().await.unwrap();
-        let dialog = PermissionDialog::new(req, std::env::temp_dir());
+        let mut dialog = PermissionDialog::new(req, std::env::temp_dir());
         let theme = ThemeStore::with_builtins().resolve(None);
         // A deliberately short card so a long body would otherwise overflow it.
         let backend = TestBackend::new(70, 8);

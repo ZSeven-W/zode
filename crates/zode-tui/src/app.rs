@@ -1789,6 +1789,14 @@ impl TuiApp {
             self.todo_section_collapsed = !self.todo_section_collapsed;
             return true;
         }
+        // A session-tab row focuses that tab (same as the keyboard switch).
+        if let Some(i) = self.sidebar_hits.tab_index_at(mouse.row) {
+            if i < self.tabs.len() && i != self.active {
+                self.active = i;
+                self.dismiss_input_popups();
+            }
+            return true;
+        }
         false
     }
 
@@ -2200,7 +2208,7 @@ impl TuiApp {
         let active_chat = &mut self.tabs[self.active].chat;
         active_chat.set_display_prefs(show_thinking, show_tool_details);
         active_chat.render_with_selection(f, chat_area, &theme, chat_meta, selection);
-        if let (Some(strip), Some(dialog)) = (perm_inline, &self.active_dialog) {
+        if let (Some(strip), Some(dialog)) = (perm_inline, self.active_dialog.as_mut()) {
             dialog.render_inline(f, strip, &theme);
         }
         let mut input_area: Rect = areas.composer;
@@ -2310,7 +2318,7 @@ impl TuiApp {
         if let Some(toast) = &self.toast {
             toast.render(f, area, &theme);
         }
-        if let Some(q) = &self.active_question {
+        if let Some(q) = &mut self.active_question {
             q.render(f, area, &theme);
         }
         // The permission prompt normally renders INLINE above the input (see
@@ -2318,7 +2326,7 @@ impl TuiApp {
         // Only fall back to the centered popup when the terminal was too short
         // to dock it inline.
         if perm_inline.is_none() {
-            if let Some(dialog) = &self.active_dialog {
+            if let Some(dialog) = &mut self.active_dialog {
                 dialog.render(f, area, &theme);
             }
         }
@@ -3162,8 +3170,31 @@ impl TuiApp {
             return;
         }
 
-        if self.active_dialog.is_some()
-            || self.active_question.is_some()
+        // Left clicks drive the question modal (options/chips/submit) and the
+        // permission prompt (answer chips) — mirroring their key paths.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if let Some(q) = &mut self.active_question {
+                if q.on_mouse(mouse.column, mouse.row) {
+                    self.active_question = None;
+                    if let Some(next) = self.pending_questions.pop_front() {
+                        self.open_question(next);
+                    }
+                }
+                return;
+            }
+            if let Some(d) = &self.active_dialog {
+                if let Some(approval) = d.approval_at(mouse.column, mouse.row) {
+                    self.answer_permission(approval);
+                    return;
+                }
+                // A click elsewhere falls through — the prompt is non-blocking.
+            }
+        }
+
+        // NB: an open permission prompt (`active_dialog`) deliberately does NOT
+        // gate the mouse — it's non-blocking like its keyboard handling, so
+        // scroll and clicks outside its chips keep working on the chat below.
+        if self.active_question.is_some()
             || self.settings.is_some()
             || self.connect.is_some()
             || self.plugin_picker.is_some()
