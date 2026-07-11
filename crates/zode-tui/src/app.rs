@@ -6466,6 +6466,7 @@ const INPUT_COALESCE_CAP: usize = 1024;
 const WINDOWS_BRACKETED_PASTE_START: &str = "\u{1b}[200~";
 const WINDOWS_BRACKETED_PASTE_END: &str = "\u{1b}[201~";
 const WINDOWS_PASTE_EVENT_CAP: usize = 65_536;
+const WINDOWS_PASTE_TEXT_BYTE_CAP: usize = WINDOWS_PASTE_EVENT_CAP * 4;
 
 /// Max agent events (streaming text deltas, tool updates) drained per loop
 /// iteration before redrawing. Each delta otherwise triggers a full-transcript
@@ -6515,6 +6516,8 @@ fn windows_key_burst_text(events: &[CtEvent]) -> Option<String> {
         let CtEvent::Key(key) = event else {
             return None;
         };
+        // As in handle_term, ignore Release. Press/Repeat still need exact
+        // marker framing or clipboard equality before paste classification.
         if key.kind == crossterm::event::KeyEventKind::Release {
             continue;
         }
@@ -6532,15 +6535,24 @@ fn windows_key_burst_text(events: &[CtEvent]) -> Option<String> {
     (key_count >= 2).then_some(text)
 }
 
+fn windows_bracketed_paste_body(raw: &str) -> Option<&str> {
+    let after_start = raw.strip_prefix(WINDOWS_BRACKETED_PASTE_START)?;
+    let end_index = after_start.find(WINDOWS_BRACKETED_PASTE_END)?;
+    let body = &after_start[..end_index];
+    let after_end = &after_start[end_index + WINDOWS_BRACKETED_PASTE_END.len()..];
+
+    if !after_end.is_empty() || body.contains(WINDOWS_BRACKETED_PASTE_START) {
+        return None;
+    }
+    Some(body)
+}
+
 fn windows_multiline_paste_text(
     events: &[CtEvent],
     clipboard_text: Option<&str>,
 ) -> Option<String> {
     let raw = windows_key_burst_text(events)?;
-    if let Some(body) = raw
-        .strip_prefix(WINDOWS_BRACKETED_PASTE_START)
-        .and_then(|text| text.strip_suffix(WINDOWS_BRACKETED_PASTE_END))
-    {
+    if let Some(body) = windows_bracketed_paste_body(&raw) {
         return Some(normalize_paste_newlines(body));
     }
 
@@ -6549,7 +6561,11 @@ fn windows_multiline_paste_text(
         return None;
     }
 
-    let clipboard = normalize_paste_newlines(clipboard_text?);
+    let clipboard_text = clipboard_text?;
+    if clipboard_text.len() > WINDOWS_PASTE_TEXT_BYTE_CAP {
+        return None;
+    }
+    let clipboard = normalize_paste_newlines(clipboard_text);
     (candidate == clipboard).then_some(candidate)
 }
 
@@ -6557,7 +6573,7 @@ fn windows_burst_needs_clipboard(events: &[CtEvent]) -> bool {
     let Some(raw) = windows_key_burst_text(events) else {
         return false;
     };
-    if raw.starts_with(WINDOWS_BRACKETED_PASTE_START) {
+    if windows_bracketed_paste_body(&raw).is_some() {
         return false;
     }
 
@@ -8476,6 +8492,43 @@ mod tests {
     }
 
     #[test]
+    fn windows_bracketed_burst_rejects_data_after_first_end_marker() {
+        let raw = format!(
+            "{WINDOWS_BRACKETED_PASTE_START}first\nsecond{WINDOWS_BRACKETED_PASTE_END}junk{WINDOWS_BRACKETED_PASTE_END}"
+        );
+        let events = windows_key_burst(&raw);
+
+        assert_eq!(windows_multiline_paste_text(&events, None), None);
+    }
+
+    #[test]
+    fn windows_bracketed_burst_rejects_nested_start_marker() {
+        let raw = format!(
+            "{WINDOWS_BRACKETED_PASTE_START}first\n{WINDOWS_BRACKETED_PASTE_START}second{WINDOWS_BRACKETED_PASTE_END}"
+        );
+        let events = windows_key_burst(&raw);
+
+        assert_eq!(windows_multiline_paste_text(&events, None), None);
+    }
+
+    #[test]
+    fn windows_bracketed_burst_without_end_marker_is_not_complete() {
+        let raw = format!("{WINDOWS_BRACKETED_PASTE_START}first\nsecond");
+        let events = windows_key_burst(&raw);
+
+        assert_eq!(windows_multiline_paste_text(&events, None), None);
+    }
+
+    #[test]
+    fn windows_malformed_bracket_start_needs_clipboard_match() {
+        let raw = format!("{WINDOWS_BRACKETED_PASTE_START}first\nsecond");
+        let events = windows_key_burst(&raw);
+
+        assert!(windows_burst_needs_clipboard(&events));
+        assert_eq!(windows_multiline_paste_text(&events, Some(&raw)), Some(raw));
+    }
+
+    #[test]
     fn windows_unbracketed_multiline_burst_requires_clipboard_match() {
         let events = windows_key_burst("first\nsecond");
         assert_eq!(
@@ -8513,6 +8566,22 @@ mod tests {
         assert!(!windows_burst_needs_clipboard(&bracketed));
         assert!(windows_burst_needs_clipboard(&unbracketed));
         assert!(!windows_burst_needs_clipboard(&single_line));
+    }
+
+    #[test]
+    fn windows_oversized_clipboard_is_rejected() {
+        let events = windows_key_burst("first\nsecond");
+        let oversized_clipboard = "x".repeat(WINDOWS_PASTE_TEXT_BYTE_CAP + 1);
+
+        assert_eq!(
+            windows_multiline_paste_text(&events, Some(&oversized_clipboard)),
+            None
+        );
+    }
+
+    #[test]
+    fn windows_paste_text_byte_cap_is_four_bytes_per_event() {
+        assert_eq!(WINDOWS_PASTE_TEXT_BYTE_CAP, WINDOWS_PASTE_EVENT_CAP * 4);
     }
 
     #[tokio::test]
