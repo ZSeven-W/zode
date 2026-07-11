@@ -1981,7 +1981,11 @@ impl TuiApp {
                             );
                         }
                         let clipboard = if cfg!(windows) && windows_burst_needs_clipboard(&burst) {
-                            zode_core::clipboard::read_from_clipboard().ok()
+                            zode_core::clipboard::read_from_clipboard_with_timeout(
+                                WINDOWS_CLIPBOARD_READ_TIMEOUT,
+                            )
+                            .await
+                            .ok()
                         } else {
                             None
                         };
@@ -6530,6 +6534,7 @@ const WINDOWS_BRACKETED_PASTE_START: &str = "\u{1b}[200~";
 const WINDOWS_BRACKETED_PASTE_END: &str = "\u{1b}[201~";
 const WINDOWS_PASTE_EVENT_CAP: usize = 65_536;
 const WINDOWS_PASTE_TEXT_BYTE_CAP: usize = WINDOWS_PASTE_EVENT_CAP * 4;
+const WINDOWS_CLIPBOARD_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Max agent events (streaming text deltas, tool updates) drained per loop
 /// iteration before redrawing. Each delta otherwise triggers a full-transcript
@@ -6870,65 +6875,6 @@ fn windows_paste_segments(
     }
     segments.sort_by_key(|segment| segment.events.start);
     segments
-}
-
-fn windows_key_burst_text(events: &[CtEvent]) -> Option<String> {
-    if events.len() > WINDOWS_PASTE_EVENT_CAP {
-        return None;
-    }
-
-    let mut text = String::new();
-    let mut key_count = 0;
-
-    for event in events {
-        let CtEvent::Key(key) = event else {
-            return None;
-        };
-        // As in handle_term, ignore Release. Press/Repeat still need exact
-        // marker framing or clipboard equality before paste classification.
-        if key.kind == crossterm::event::KeyEventKind::Release {
-            continue;
-        }
-
-        key_count += 1;
-        text.push(windows_supported_key_char(key)?);
-    }
-
-    (key_count >= 2).then_some(text)
-}
-
-fn windows_bracketed_paste_body(raw: &str) -> Option<&str> {
-    let after_start = raw.strip_prefix(WINDOWS_BRACKETED_PASTE_START)?;
-    let end_index = after_start.find(WINDOWS_BRACKETED_PASTE_END)?;
-    let body = &after_start[..end_index];
-    let after_end = &after_start[end_index + WINDOWS_BRACKETED_PASTE_END.len()..];
-
-    if !after_end.is_empty() || body.contains(WINDOWS_BRACKETED_PASTE_START) {
-        return None;
-    }
-    Some(body)
-}
-
-fn windows_multiline_paste_text(
-    events: &[CtEvent],
-    clipboard_text: Option<&str>,
-) -> Option<String> {
-    let raw = windows_key_burst_text(events)?;
-    if let Some(body) = windows_bracketed_paste_body(&raw) {
-        return Some(normalize_paste_newlines(body));
-    }
-
-    let candidate = normalize_paste_newlines(&raw);
-    if !candidate.contains('\n') {
-        return None;
-    }
-
-    let clipboard_text = clipboard_text?;
-    if clipboard_text.len() > WINDOWS_PASTE_TEXT_BYTE_CAP {
-        return None;
-    }
-    let clipboard = normalize_paste_newlines(clipboard_text);
-    (candidate == clipboard).then_some(candidate)
 }
 
 fn windows_burst_needs_clipboard(events: &[CtEvent]) -> bool {
@@ -8855,19 +8801,31 @@ mod tests {
     fn windows_bracketed_multiline_burst_decodes_without_clipboard() {
         let events = windows_key_burst("\u{1b}[200~first\nsecond\u{1b}[201~");
         assert_eq!(
-            windows_multiline_paste_text(&events, None),
-            Some("first\nsecond".to_string())
+            windows_paste_segments(&events, None),
+            vec![WindowsPasteSegment {
+                events: 0..events.len(),
+                text: "first\nsecond".to_string(),
+            }]
         );
     }
 
     #[test]
-    fn windows_bracketed_burst_rejects_data_after_first_end_marker() {
-        let raw = format!(
-            "{WINDOWS_BRACKETED_PASTE_START}first\nsecond{WINDOWS_BRACKETED_PASTE_END}junk{WINDOWS_BRACKETED_PASTE_END}"
-        );
-        let events = windows_key_burst(&raw);
+    fn windows_bracketed_frame_leaves_data_after_end_replayable() {
+        let frame =
+            format!("{WINDOWS_BRACKETED_PASTE_START}first\nsecond{WINDOWS_BRACKETED_PASTE_END}");
+        let mut events = windows_key_burst(&frame);
+        let frame_end = events.len();
+        events.extend(windows_key_burst(&format!(
+            "junk{WINDOWS_BRACKETED_PASTE_END}"
+        )));
 
-        assert_eq!(windows_multiline_paste_text(&events, None), None);
+        assert_eq!(
+            windows_paste_segments(&events, None),
+            vec![WindowsPasteSegment {
+                events: 0..frame_end,
+                text: "first\nsecond".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -8877,7 +8835,7 @@ mod tests {
         );
         let events = windows_key_burst(&raw);
 
-        assert_eq!(windows_multiline_paste_text(&events, None), None);
+        assert!(windows_paste_segments(&events, None).is_empty());
     }
 
     #[test]
@@ -8885,7 +8843,7 @@ mod tests {
         let raw = format!("{WINDOWS_BRACKETED_PASTE_START}first\nsecond");
         let events = windows_key_burst(&raw);
 
-        assert_eq!(windows_multiline_paste_text(&events, None), None);
+        assert!(windows_paste_segments(&events, None).is_empty());
     }
 
     #[test]
@@ -8894,35 +8852,45 @@ mod tests {
         let events = windows_key_burst(&raw);
 
         assert!(windows_burst_needs_clipboard(&events));
-        assert_eq!(windows_multiline_paste_text(&events, Some(&raw)), Some(raw));
+        assert_eq!(
+            windows_paste_segments(&events, Some(&raw)),
+            vec![WindowsPasteSegment {
+                events: 0..events.len(),
+                text: raw,
+            }]
+        );
     }
 
     #[test]
     fn windows_unbracketed_multiline_burst_requires_clipboard_match() {
         let events = windows_key_burst("first\nsecond");
         assert_eq!(
-            windows_multiline_paste_text(&events, Some("first\r\nsecond")),
-            Some("first\nsecond".to_string())
+            windows_paste_segments(&events, Some("first\r\nsecond")),
+            vec![WindowsPasteSegment {
+                events: 0..events.len(),
+                text: "first\nsecond".to_string(),
+            }]
         );
-        assert_eq!(
-            windows_multiline_paste_text(&events, Some("different")),
-            None
-        );
+        assert!(windows_paste_segments(&events, Some("different")).is_empty());
     }
 
     #[test]
     fn windows_standalone_enter_is_never_a_paste() {
         let events = windows_key_pair(KeyCode::Enter).to_vec();
-        assert_eq!(windows_multiline_paste_text(&events, Some("\n")), None);
+        assert!(windows_paste_segments(&events, Some("\n")).is_empty());
     }
 
     #[test]
-    fn windows_burst_with_navigation_key_is_rejected() {
+    fn windows_paste_before_navigation_does_not_swallow_the_navigation() {
         let mut events = windows_key_burst("first\nsecond");
+        let paste_end = events.len();
         events.extend(windows_key_pair(KeyCode::Left));
         assert_eq!(
-            windows_multiline_paste_text(&events, Some("first\nsecond")),
-            None
+            windows_paste_segments(&events, Some("first\nsecond")),
+            vec![WindowsPasteSegment {
+                events: 0..paste_end,
+                text: "first\nsecond".to_string(),
+            }]
         );
     }
 
@@ -9111,15 +9079,20 @@ mod tests {
         let events = windows_key_burst("first\nsecond");
         let oversized_clipboard = "x".repeat(WINDOWS_PASTE_TEXT_BYTE_CAP + 1);
 
-        assert_eq!(
-            windows_multiline_paste_text(&events, Some(&oversized_clipboard)),
-            None
-        );
+        assert!(windows_paste_segments(&events, Some(&oversized_clipboard)).is_empty());
     }
 
     #[test]
     fn windows_paste_text_byte_cap_is_four_bytes_per_event() {
         assert_eq!(WINDOWS_PASTE_TEXT_BYTE_CAP, WINDOWS_PASTE_EVENT_CAP * 4);
+    }
+
+    #[test]
+    fn windows_automatic_clipboard_read_has_a_one_second_budget() {
+        assert_eq!(
+            WINDOWS_CLIPBOARD_READ_TIMEOUT,
+            std::time::Duration::from_secs(1)
+        );
     }
 
     #[tokio::test]

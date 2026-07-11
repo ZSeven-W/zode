@@ -33,6 +33,14 @@ pub fn read_from_clipboard() -> Result<String, String> {
     Err(last_err)
 }
 
+/// Read UTF-8 clipboard text without allowing a platform helper to block
+/// longer than `timeout` per candidate.
+pub async fn read_from_clipboard_with_timeout(
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    read_from_clipboard_candidates_with_timeout(paste_candidates(), timeout).await
+}
+
 /// Read raw IMAGE bytes from the system clipboard (a screenshot or a copied
 /// image — not a file path). `Ok(None)` means the clipboard holds no image, so
 /// the caller falls back to a text paste. Returns PNG bytes on macOS/Linux;
@@ -180,6 +188,43 @@ fn try_paste(bin: &str, args: &[&str]) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|e| e.to_string())
 }
 
+async fn read_from_clipboard_candidates_with_timeout(
+    candidates: &[(&str, &[&str])],
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    let mut last_err = "no clipboard paste helper found".to_string();
+    for &(bin, args) in candidates {
+        let mut command = tokio::process::Command::new(bin);
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+
+        let output = match tokio::time::timeout(timeout, command.output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                last_err = format!("{bin}: {error}");
+                continue;
+            }
+            Err(_) => {
+                last_err = format!("{bin}: helper timed out after {timeout:?}");
+                continue;
+            }
+        };
+
+        if !output.status.success() {
+            last_err = format!("{bin}: helper exited with {}", output.status);
+            continue;
+        }
+        match String::from_utf8(output.stdout) {
+            Ok(text) => return Ok(text),
+            Err(error) => last_err = format!("{bin}: {error}"),
+        }
+    }
+    Err(last_err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +247,65 @@ mod tests {
         // Every supported target has at least one helper to try.
         assert!(!clipboard_candidates().is_empty());
         assert!(!paste_candidates().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn async_paste_helper_preserves_exact_utf8_output() {
+        let candidates: &[(&str, &[&str])] = &[("sh", &["-c", "printf 'first\\n第二行\\n'"])];
+
+        let text = read_from_clipboard_candidates_with_timeout(
+            candidates,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(text, "first\n第二行\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn async_paste_helper_times_out_and_names_the_helper() {
+        let timeout = std::time::Duration::from_millis(20);
+        let candidates: &[(&str, &[&str])] = &[("sh", &["-c", "exec sleep 5"])];
+
+        let error = read_from_clipboard_candidates_with_timeout(candidates, timeout)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, format!("sh: helper timed out after {timeout:?}"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn async_paste_helper_reports_nonzero_exit() {
+        let candidates: &[(&str, &[&str])] = &[("sh", &["-c", "exit 7"])];
+
+        let error = read_from_clipboard_candidates_with_timeout(
+            candidates,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.starts_with("sh: helper exited with "));
+        assert!(error.contains('7'));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn async_paste_helper_reports_invalid_utf8() {
+        let candidates: &[(&str, &[&str])] = &[("sh", &["-c", "printf '\\377'"])];
+
+        let error = read_from_clipboard_candidates_with_timeout(
+            candidates,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.starts_with("sh: "));
+        assert!(error.contains("invalid utf-8"));
     }
 }
