@@ -11,6 +11,10 @@ use crate::session::{SessionActor, SessionMsg};
 use crate::turn_host::HostFactory;
 
 /// Route one decoded inbound frame to the session actor.
+///
+/// A false result always means the session is over and the caller must stop
+/// reading. The actor-closed short circuit therefore returns false even for a
+/// frame type that would otherwise be ignored.
 pub(crate) async fn route_inbound(
     msg: JsonRpcMessage,
     actor_tx: &tokio::sync::mpsc::Sender<SessionMsg>,

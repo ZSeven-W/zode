@@ -9,11 +9,13 @@ pub mod outbound;
 pub mod policy;
 pub mod router;
 pub mod runtime;
+pub mod server_file;
 pub mod session;
 pub mod stdio_server;
 pub mod threads;
 pub mod turn_host;
 pub mod turns;
+pub mod ws_server;
 
 #[cfg(test)]
 #[path = "accumulator_tests.rs"]
@@ -37,6 +39,9 @@ mod outbound_tests;
 #[path = "policy_tests.rs"]
 mod policy_tests;
 #[cfg(test)]
+#[path = "server_file_tests.rs"]
+mod server_file_tests;
+#[cfg(test)]
 #[path = "session_tests.rs"]
 mod session_tests;
 #[cfg(test)]
@@ -51,3 +56,6 @@ mod turn_host_tests;
 #[cfg(test)]
 #[path = "turns_tests.rs"]
 mod turns_tests;
+#[cfg(test)]
+#[path = "ws_server_tests.rs"]
+mod ws_server_tests;
