@@ -63,7 +63,7 @@ if [ -z "$chrome" ]; then
   exit 1
 fi
 
-cp "$dir/manifest.json" "$dir/background.js" "$dir/popup.html" "$dir/popup.js" "$pack_dir/"
+cp "$dir/manifest.json" "$dir/background.js" "$dir/popup.html" "$dir/popup.js" "$dir/offscreen.html" "$dir/offscreen.js" "$pack_dir/"
 if [ -d "$dir/icons" ]; then
   cp -R "$dir/icons" "$pack_dir/"
 fi

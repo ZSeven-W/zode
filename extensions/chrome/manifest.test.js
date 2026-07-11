@@ -50,6 +50,11 @@ function testPackScriptCopiesDeclaredIconDirectory() {
   }
 }
 
+function testPackScriptCopiesOffscreenFiles() {
+  assert.match(packScript, /offscreen\.html/);
+  assert.match(packScript, /offscreen\.js/);
+}
+
 function testManifestDeclaresRequiredPermissions() {
   assert.deepEqual(manifest.permissions, [
     "debugger",
@@ -57,6 +62,7 @@ function testManifestDeclaresRequiredPermissions() {
     "storage",
     "tabGroups",
     "webNavigation",
+    "offscreen",
   ]);
 }
 
@@ -64,4 +70,5 @@ testExtensionIconsAreDeclaredAndSized();
 testLightIconVariantsExistAndSized();
 testManifestDeclaresRequiredPermissions();
 testPackScriptCopiesDeclaredIconDirectory();
+testPackScriptCopiesOffscreenFiles();
 console.log("manifest tests passed");
