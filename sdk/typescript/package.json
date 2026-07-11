@@ -1,6 +1,6 @@
 {
   "name": "@zseven/zode-sdk",
-  "version": "0.1.0-beta.5",
+  "version": "0.1.0-beta.6",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -8,9 +8,12 @@
     "build": "tsc -p tsconfig.json",
     "test": "pnpm run build && node --test tests/*.test.mjs"
   },
-  "dependencies": {},
+  "dependencies": {
+    "ws": "^8.21.0"
+  },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.9.0"
   }
 }

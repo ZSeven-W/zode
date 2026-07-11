@@ -44,6 +44,19 @@ stdio. Raw string method names are still accepted for low-level JSON-RPC use.
 Every supported method's params, result shape, and enum name are documented in
 the [SDK method reference](../README.md#method-reference).
 
+## WebSocket (Node only)
+
+The WebSocket transport uses the runtime `ws` dependency because zode
+authenticates the upgrade with an `Authorization: Bearer` header. Browser
+WebSocket APIs cannot set that header.
+
+```ts
+const client = await ZodeClient.connectWebSocket({
+  url: "ws://127.0.0.1:9876",
+  token: "server-token",
+});
+```
+
 ## Test
 
 ```sh
