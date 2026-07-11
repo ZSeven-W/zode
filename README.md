@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/brand/zode-logo.png" alt="Zode logo" width="96" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo.png">
+    <img src="assets/logo-light.png" alt="Zode logo" width="96" />
+  </picture>
 </p>
 
 <p align="center">
