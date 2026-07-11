@@ -18,14 +18,17 @@ The library name is `zode_sdk`.
 
 ```rust
 use serde_json::json;
+use zode_app_server_protocol::ApprovalPolicy;
 use zode_sdk::{ClientOptions, ProtocolMethod, ZodeClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = ZodeClient::new(ClientOptions::default());
-    let mut server = client.spawn_stdio().await?;
+    let server = client.spawn_stdio().await?;
 
-    let init = server.initialize("example", "0.1.0").await?;
+    let init = server
+        .initialize("example", "0.1.0", ApprovalPolicy::ReadOnly)
+        .await?;
     println!("server: {}", init.server_info.name);
 
     let command: serde_json::Value = server
