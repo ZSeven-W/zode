@@ -7,6 +7,10 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use tokio::io::AsyncReadExt;
+
+const ASYNC_CLIPBOARD_TEXT_BYTE_CAP: usize = 262_144;
+
 /// Copy `text` to the system clipboard. On success returns the helper used
 /// (e.g. `"pbcopy"`); on failure returns a human-readable error.
 pub fn copy_to_clipboard(text: &str) -> Result<&'static str, String> {
@@ -34,7 +38,7 @@ pub fn read_from_clipboard() -> Result<String, String> {
 }
 
 /// Read UTF-8 clipboard text without allowing a platform helper to block
-/// longer than `timeout` per candidate.
+/// longer than `timeout` per candidate. Stdout is bounded to 262,144 bytes.
 pub async fn read_from_clipboard_with_timeout(
     timeout: std::time::Duration,
 ) -> Result<String, String> {
@@ -192,6 +196,55 @@ async fn read_from_clipboard_candidates_with_timeout(
     candidates: &[(&str, &[&str])],
     timeout: std::time::Duration,
 ) -> Result<String, String> {
+    read_from_clipboard_candidates_with_timeout_and_cap(
+        candidates,
+        timeout,
+        ASYNC_CLIPBOARD_TEXT_BYTE_CAP,
+    )
+    .await
+}
+
+enum BoundedClipboardOutput {
+    Complete {
+        status: std::process::ExitStatus,
+        bytes: Vec<u8>,
+    },
+    Oversized,
+}
+
+async fn read_bounded_clipboard_output(
+    child: &mut tokio::process::Child,
+    stdout: tokio::process::ChildStdout,
+    max_stdout_bytes: usize,
+) -> std::io::Result<BoundedClipboardOutput> {
+    let read_limit = max_stdout_bytes
+        .checked_add(1)
+        .and_then(|limit| u64::try_from(limit).ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "clipboard stdout byte cap is too large",
+            )
+        })?;
+    let mut bytes = Vec::new();
+    stdout.take(read_limit).read_to_end(&mut bytes).await?;
+    if bytes.len() > max_stdout_bytes {
+        return Ok(BoundedClipboardOutput::Oversized);
+    }
+    let status = child.wait().await?;
+    Ok(BoundedClipboardOutput::Complete { status, bytes })
+}
+
+async fn kill_and_wait_for_clipboard_helper(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
+async fn read_from_clipboard_candidates_with_timeout_and_cap(
+    candidates: &[(&str, &[&str])],
+    timeout: std::time::Duration,
+    max_stdout_bytes: usize,
+) -> Result<String, String> {
     let mut last_err = "no clipboard paste helper found".to_string();
     for &(bin, args) in candidates {
         let mut command = tokio::process::Command::new(bin);
@@ -201,23 +254,47 @@ async fn read_from_clipboard_candidates_with_timeout(
             .stderr(Stdio::null())
             .kill_on_drop(true);
 
-        let output = match tokio::time::timeout(timeout, command.output()).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(error)) => {
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
                 last_err = format!("{bin}: {error}");
                 continue;
             }
+        };
+        let Some(stdout) = child.stdout.take() else {
+            kill_and_wait_for_clipboard_helper(&mut child).await;
+            last_err = format!("{bin}: no stdout handle");
+            continue;
+        };
+
+        let outcome = {
+            let read = read_bounded_clipboard_output(&mut child, stdout, max_stdout_bytes);
+            tokio::time::timeout(timeout, read).await
+        };
+        let (status, bytes) = match outcome {
             Err(_) => {
+                kill_and_wait_for_clipboard_helper(&mut child).await;
                 last_err = format!("{bin}: helper timed out after {timeout:?}");
                 continue;
             }
+            Ok(Err(error)) => {
+                kill_and_wait_for_clipboard_helper(&mut child).await;
+                last_err = format!("{bin}: {error}");
+                continue;
+            }
+            Ok(Ok(BoundedClipboardOutput::Oversized)) => {
+                kill_and_wait_for_clipboard_helper(&mut child).await;
+                last_err = format!("{bin}: helper output exceeded {max_stdout_bytes} bytes");
+                continue;
+            }
+            Ok(Ok(BoundedClipboardOutput::Complete { status, bytes })) => (status, bytes),
         };
 
-        if !output.status.success() {
-            last_err = format!("{bin}: helper exited with {}", output.status);
+        if !status.success() {
+            last_err = format!("{bin}: helper exited with {status}");
             continue;
         }
-        match String::from_utf8(output.stdout) {
+        match String::from_utf8(bytes) {
             Ok(text) => return Ok(text),
             Err(error) => last_err = format!("{bin}: {error}"),
         }
@@ -307,5 +384,70 @@ mod tests {
 
         assert!(error.starts_with("sh: "));
         assert!(error.contains("invalid utf-8"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn async_paste_helper_accepts_output_at_the_byte_cap() {
+        let candidates: &[(&str, &[&str])] = &[("sh", &["-c", "printf 1234"])];
+
+        let text = read_from_clipboard_candidates_with_timeout_and_cap(
+            candidates,
+            std::time::Duration::from_secs(1),
+            4,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(text, "1234");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn async_paste_helper_rejects_cap_plus_one_without_waiting_for_exit() {
+        let candidates: &[(&str, &[&str])] = &[("sh", &["-c", "printf 12345; exec sleep 5"])];
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read_from_clipboard_candidates_with_timeout_and_cap(
+                candidates,
+                std::time::Duration::from_secs(5),
+                4,
+            ),
+        )
+        .await
+        .expect("cap+1 output should be rejected before the helper exits")
+        .unwrap_err();
+
+        assert_eq!(error, "sh: helper output exceeded 4 bytes");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn async_paste_helper_reaps_the_process_after_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_path = temp.path().join("helper.pid");
+        let pid_path = pid_path.to_string_lossy().into_owned();
+        let args = [
+            "-c",
+            "printf '%s' \"$$\" > \"$1\"; exec sleep 5",
+            "sh",
+            pid_path.as_str(),
+        ];
+        let candidates: &[(&str, &[&str])] = &[("sh", &args)];
+        let timeout = std::time::Duration::from_millis(500);
+
+        let error = read_from_clipboard_candidates_with_timeout_and_cap(candidates, timeout, 4)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, format!("sh: helper timed out after {timeout:?}"));
+        let pid = std::fs::read_to_string(pid_path).unwrap();
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -0 {pid} 2>/dev/null"))
+            .status()
+            .unwrap();
+        assert!(!status.success(), "timed-out helper {pid} is still alive");
     }
 }
