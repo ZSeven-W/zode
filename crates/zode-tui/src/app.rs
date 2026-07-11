@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Stdout;
+use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -2358,15 +2359,40 @@ impl TuiApp {
         windows_console: bool,
         clipboard_text: Option<&str>,
     ) {
-        if windows_console {
-            if let Some(text) = windows_multiline_paste_text(&events, clipboard_text) {
-                self.handle_paste(&text);
-                return;
-            }
-        }
-        for event in events {
+        let mut segments = if windows_console {
+            windows_paste_segments(&events, clipboard_text)
+                .into_iter()
+                .peekable()
+        } else {
+            Vec::new().into_iter().peekable()
+        };
+        let mut paste_end = 0;
+
+        for (index, event) in events.into_iter().enumerate() {
             if self.should_quit {
                 break;
+            }
+
+            if segments
+                .peek()
+                .is_some_and(|segment| segment.events.start == index)
+            {
+                let segment = segments.next().expect("peeked paste segment");
+                paste_end = segment.events.end;
+                self.handle_paste(&segment.text);
+            }
+
+            if index < paste_end {
+                if matches!(
+                    event,
+                    CtEvent::Key(KeyEvent {
+                        kind: crossterm::event::KeyEventKind::Release,
+                        ..
+                    })
+                ) {
+                    self.handle_term(event, agent_tx).await;
+                }
+                continue;
             }
             self.handle_term(event, agent_tx).await;
         }
@@ -6546,7 +6572,7 @@ fn extend_windows_text_burst<S>(
 {
     while previous_chunk_full
         && burst.len() < WINDOWS_PASTE_EVENT_CAP
-        && windows_key_burst_text(burst).is_some()
+        && windows_burst_has_text_tail(burst)
     {
         let cap = INPUT_COALESCE_CAP.min(WINDOWS_PASTE_EVENT_CAP - burst.len());
         let mut more = drain_ready_events(stream, cap);
@@ -6557,6 +6583,293 @@ fn extend_windows_text_burst<S>(
 
 fn normalize_paste_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn windows_supported_key_char(key: &KeyEvent) -> Option<char> {
+    let command_modifiers = KeyModifiers::CONTROL
+        | KeyModifiers::ALT
+        | KeyModifiers::SUPER
+        | KeyModifiers::HYPER
+        | KeyModifiers::META;
+    if key.modifiers.intersects(command_modifiers) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(character) => Some(character),
+        KeyCode::Enter => Some('\n'),
+        KeyCode::Tab => Some('\t'),
+        KeyCode::Esc => Some('\u{1b}'),
+        _ => None,
+    }
+}
+
+fn windows_burst_has_text_tail(events: &[CtEvent]) -> bool {
+    for event in events.iter().rev() {
+        match event {
+            CtEvent::Key(key) if key.kind == crossterm::event::KeyEventKind::Release => continue,
+            CtEvent::Key(key) => return windows_supported_key_char(key).is_some(),
+            _ => return false,
+        }
+    }
+    false
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsPasteSegment {
+    events: Range<usize>,
+    text: String,
+}
+
+#[derive(Debug)]
+struct WindowsTextBoundary {
+    byte: usize,
+    event: usize,
+    keys: usize,
+}
+
+#[derive(Debug)]
+struct WindowsTextUnit {
+    byte_start: usize,
+    event_start: usize,
+    key_count: usize,
+}
+
+#[derive(Debug)]
+struct WindowsTextRunBuilder {
+    text: String,
+    units: Vec<WindowsTextUnit>,
+    event_end: usize,
+    previous_was_cr: bool,
+}
+
+impl WindowsTextRunBuilder {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            units: Vec::new(),
+            event_end: 0,
+            previous_was_cr: false,
+        }
+    }
+
+    fn push(&mut self, event: usize, character: char) {
+        self.event_end = event + 1;
+        let was_cr = character == '\r';
+        if character == '\n' && self.previous_was_cr {
+            if let Some(unit) = self.units.last_mut() {
+                unit.key_count += 1;
+            }
+            self.previous_was_cr = false;
+            return;
+        }
+
+        let character = if character == '\r' { '\n' } else { character };
+        let byte_start = self.text.len();
+        self.text.push(character);
+        self.units.push(WindowsTextUnit {
+            byte_start,
+            event_start: event,
+            key_count: 1,
+        });
+        self.previous_was_cr = was_cr;
+    }
+
+    fn finish(self) -> WindowsTextRun {
+        let mut boundaries = Vec::with_capacity(self.units.len() + 1);
+        let mut keys = 0;
+        for unit in &self.units {
+            boundaries.push(WindowsTextBoundary {
+                byte: unit.byte_start,
+                event: unit.event_start,
+                keys,
+            });
+            keys += unit.key_count;
+        }
+        boundaries.push(WindowsTextBoundary {
+            byte: self.text.len(),
+            event: self.event_end,
+            keys,
+        });
+        WindowsTextRun {
+            text: self.text,
+            boundaries,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WindowsTextRun {
+    text: String,
+    boundaries: Vec<WindowsTextBoundary>,
+}
+
+impl WindowsTextRun {
+    fn boundary(&self, byte: usize) -> Option<&WindowsTextBoundary> {
+        self.boundaries
+            .binary_search_by_key(&byte, |boundary| boundary.byte)
+            .ok()
+            .map(|index| &self.boundaries[index])
+    }
+
+    fn event_range(&self, bytes: &Range<usize>) -> Option<Range<usize>> {
+        let start = self.boundary(bytes.start)?;
+        let end = self.boundary(bytes.end)?;
+        Some(start.event..end.event)
+    }
+
+    fn key_count(&self, bytes: &Range<usize>) -> Option<usize> {
+        let start = self.boundary(bytes.start)?;
+        let end = self.boundary(bytes.end)?;
+        Some(end.keys.saturating_sub(start.keys))
+    }
+}
+
+fn finish_windows_text_run(
+    current: &mut Option<WindowsTextRunBuilder>,
+    runs: &mut Vec<WindowsTextRun>,
+) {
+    if let Some(run) = current.take() {
+        runs.push(run.finish());
+    }
+}
+
+fn windows_text_runs(events: &[CtEvent]) -> Vec<WindowsTextRun> {
+    if events.len() > WINDOWS_PASTE_EVENT_CAP {
+        return Vec::new();
+    }
+
+    let mut runs = Vec::new();
+    let mut current: Option<WindowsTextRunBuilder> = None;
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            CtEvent::Key(key) if key.kind == crossterm::event::KeyEventKind::Release => {
+                if let Some(run) = &mut current {
+                    run.event_end = index + 1;
+                }
+            }
+            CtEvent::Key(key) => {
+                if let Some(character) = windows_supported_key_char(key) {
+                    current
+                        .get_or_insert_with(WindowsTextRunBuilder::new)
+                        .push(index, character);
+                } else {
+                    finish_windows_text_run(&mut current, &mut runs);
+                }
+            }
+            _ => finish_windows_text_run(&mut current, &mut runs),
+        }
+    }
+    finish_windows_text_run(&mut current, &mut runs);
+    runs
+}
+
+#[derive(Debug)]
+struct WindowsBracketedFrame {
+    source: Range<usize>,
+    body: Range<usize>,
+}
+
+fn windows_bracketed_frames(text: &str) -> Vec<WindowsBracketedFrame> {
+    let mut frames = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = text[cursor..].find(WINDOWS_BRACKETED_PASTE_START) {
+        let start = cursor + relative_start;
+        let body_start = start + WINDOWS_BRACKETED_PASTE_START.len();
+        let Some(relative_end) = text[body_start..].find(WINDOWS_BRACKETED_PASTE_END) else {
+            break;
+        };
+        let body_end = body_start + relative_end;
+        let frame_end = body_end + WINDOWS_BRACKETED_PASTE_END.len();
+        if text[body_start..body_end].contains(WINDOWS_BRACKETED_PASTE_START) {
+            cursor = frame_end;
+            continue;
+        }
+        frames.push(WindowsBracketedFrame {
+            source: start..frame_end,
+            body: body_start..body_end,
+        });
+        cursor = frame_end;
+    }
+    frames
+}
+
+fn windows_unoccupied_ranges(
+    text_len: usize,
+    frames: &[WindowsBracketedFrame],
+) -> Vec<Range<usize>> {
+    let mut ranges = Vec::with_capacity(frames.len() + 1);
+    let mut start = 0;
+    for frame in frames {
+        if start < frame.source.start {
+            ranges.push(start..frame.source.start);
+        }
+        start = frame.source.end;
+    }
+    if start < text_len {
+        ranges.push(start..text_len);
+    }
+    ranges
+}
+
+fn normalized_windows_clipboard(clipboard_text: Option<&str>) -> Option<String> {
+    let clipboard_text = clipboard_text?;
+    if clipboard_text.len() > WINDOWS_PASTE_TEXT_BYTE_CAP {
+        return None;
+    }
+    let clipboard = normalize_paste_newlines(clipboard_text);
+    (clipboard.contains('\n') && clipboard.chars().count() >= 2).then_some(clipboard)
+}
+
+fn append_windows_clipboard_segments(
+    run: &WindowsTextRun,
+    gap: Range<usize>,
+    clipboard: &str,
+    segments: &mut Vec<WindowsPasteSegment>,
+) {
+    let mut cursor = gap.start;
+    while cursor <= gap.end && clipboard.len() <= gap.end - cursor {
+        let Some(relative_start) = run.text[cursor..gap.end].find(clipboard) else {
+            break;
+        };
+        let start = cursor + relative_start;
+        let end = start + clipboard.len();
+        let bytes = start..end;
+        if run.key_count(&bytes).is_some_and(|count| count >= 2) {
+            if let Some(events) = run.event_range(&bytes) {
+                segments.push(WindowsPasteSegment {
+                    events,
+                    text: clipboard.to_string(),
+                });
+            }
+        }
+        cursor = end;
+    }
+}
+
+fn windows_paste_segments(
+    events: &[CtEvent],
+    clipboard_text: Option<&str>,
+) -> Vec<WindowsPasteSegment> {
+    let clipboard = normalized_windows_clipboard(clipboard_text);
+    let mut segments = Vec::new();
+    for run in windows_text_runs(events) {
+        let frames = windows_bracketed_frames(&run.text);
+        for frame in &frames {
+            if let Some(events) = run.event_range(&frame.source) {
+                segments.push(WindowsPasteSegment {
+                    events,
+                    text: run.text[frame.body.clone()].to_string(),
+                });
+            }
+        }
+        if let Some(clipboard) = clipboard.as_deref() {
+            for gap in windows_unoccupied_ranges(run.text.len(), &frames) {
+                append_windows_clipboard_segments(&run, gap, clipboard, &mut segments);
+            }
+        }
+    }
+    segments.sort_by_key(|segment| segment.events.start);
+    segments
 }
 
 fn windows_key_burst_text(events: &[CtEvent]) -> Option<String> {
@@ -6578,13 +6891,7 @@ fn windows_key_burst_text(events: &[CtEvent]) -> Option<String> {
         }
 
         key_count += 1;
-        match key.code {
-            KeyCode::Char(character) => text.push(character),
-            KeyCode::Enter => text.push('\n'),
-            KeyCode::Tab => text.push('\t'),
-            KeyCode::Esc => text.push('\u{1b}'),
-            _ => return None,
-        }
+        text.push(windows_supported_key_char(key)?);
     }
 
     (key_count >= 2).then_some(text)
@@ -6625,14 +6932,17 @@ fn windows_multiline_paste_text(
 }
 
 fn windows_burst_needs_clipboard(events: &[CtEvent]) -> bool {
-    let Some(raw) = windows_key_burst_text(events) else {
-        return false;
-    };
-    if windows_bracketed_paste_body(&raw).is_some() {
-        return false;
+    for run in windows_text_runs(events) {
+        let frames = windows_bracketed_frames(&run.text);
+        for gap in windows_unoccupied_ranges(run.text.len(), &frames) {
+            if run.text[gap.clone()].contains('\n')
+                && run.key_count(&gap).is_some_and(|count| count >= 2)
+            {
+                return true;
+            }
+        }
     }
-
-    normalize_paste_newlines(&raw).contains('\n')
+    false
 }
 
 /// Context occupancy (real tokens / model window, as a percent) at which zode
@@ -8508,19 +8818,23 @@ mod tests {
         .await;
     }
 
-    fn windows_key_pair(code: KeyCode) -> [CtEvent; 2] {
+    fn windows_key_pair_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> [CtEvent; 2] {
         [
             CtEvent::Key(KeyEvent::new_with_kind(
                 code.clone(),
-                KeyModifiers::NONE,
+                modifiers,
                 crossterm::event::KeyEventKind::Press,
             )),
             CtEvent::Key(KeyEvent::new_with_kind(
                 code,
-                KeyModifiers::NONE,
+                modifiers,
                 crossterm::event::KeyEventKind::Release,
             )),
         ]
+    }
+
+    fn windows_key_pair(code: KeyCode) -> [CtEvent; 2] {
+        windows_key_pair_with_modifiers(code, KeyModifiers::NONE)
     }
 
     fn windows_key_burst(text: &str) -> Vec<CtEvent> {
@@ -8624,6 +8938,175 @@ mod tests {
     }
 
     #[test]
+    fn windows_mixed_burst_requests_clipboard_for_an_inner_multiline_run() {
+        let mut mixed = windows_key_pair(KeyCode::Left).to_vec();
+        mixed.extend(windows_key_burst("first\nsecond"));
+
+        assert!(windows_burst_needs_clipboard(&mixed));
+
+        let mut bracketed_only = windows_key_burst("\u{1b}[200~first\nsecond\u{1b}[201~");
+        bracketed_only.extend(windows_key_burst("x"));
+        assert!(!windows_burst_needs_clipboard(&bracketed_only));
+    }
+
+    #[test]
+    fn windows_paste_segments_map_unicode_text_to_exact_event_pairs() {
+        let events = windows_key_burst("x🦀\ny");
+
+        assert_eq!(
+            windows_paste_segments(&events, Some("🦀\r\n")),
+            vec![WindowsPasteSegment {
+                events: 2..6,
+                text: "🦀\n".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn windows_paste_segments_preserve_consecutive_enters() {
+        let events = windows_key_burst("a\n\nb");
+
+        assert_eq!(
+            windows_paste_segments(&events, Some("a\n\nb")),
+            vec![WindowsPasteSegment {
+                events: 0..events.len(),
+                text: "a\n\nb".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn windows_paste_segments_collapse_crlf_key_producers() {
+        let mut events = windows_key_burst("a");
+        events.extend(windows_key_pair(KeyCode::Char('\r')));
+        events.extend(windows_key_pair(KeyCode::Enter));
+        events.extend(windows_key_burst("b"));
+
+        assert_eq!(
+            windows_paste_segments(&events, Some("a\r\nb")),
+            vec![WindowsPasteSegment {
+                events: 0..events.len(),
+                text: "a\nb".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn windows_control_shortcut_is_a_boundary_before_a_text_run() {
+        let mut events =
+            windows_key_pair_with_modifiers(KeyCode::Char('v'), KeyModifiers::CONTROL).to_vec();
+        let paste_start = events.len();
+        events.extend(windows_key_burst("first\nsecond"));
+
+        let runs = windows_text_runs(&events);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "first\nsecond");
+        assert!(windows_paste_segments(&events, Some("vfirst\nsecond")).is_empty());
+        assert_eq!(
+            windows_paste_segments(&events, Some("first\nsecond")),
+            vec![WindowsPasteSegment {
+                events: paste_start..events.len(),
+                text: "first\nsecond".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_control_shortcut_replays_before_a_segmented_paste() {
+        let (mut app, agent_tx) = make_test_app().await;
+        app.tabs[0].chat.push_tool("Bash done\n    output");
+        let mut events =
+            windows_key_pair_with_modifiers(KeyCode::Char('e'), KeyModifiers::CONTROL).to_vec();
+        events.extend(windows_key_burst("first\nsecond"));
+
+        app.handle_term_burst(events, &agent_tx, true, Some("first\nsecond"))
+            .await;
+
+        assert!(!app.tabs[0].chat.messages()[0].collapsed);
+        assert_eq!(app.input.text(), "first\nsecond");
+        assert!(!app.active_tab().is_busy());
+    }
+
+    #[test]
+    fn windows_paste_segments_leave_a_trailing_enter_replayable() {
+        let mut events = windows_key_burst("first\nsecond");
+        let paste_end = events.len();
+        events.extend(windows_key_pair(KeyCode::Enter));
+
+        assert_eq!(
+            windows_paste_segments(&events, Some("first\r\nsecond")),
+            vec![WindowsPasteSegment {
+                events: 0..paste_end,
+                text: "first\nsecond".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn windows_paste_segments_find_repeated_unbracketed_occurrences() {
+        let mut events = windows_key_burst("a\nb");
+        let first_end = events.len();
+        events.extend(windows_key_burst("x"));
+        let second_start = events.len();
+        events.extend(windows_key_burst("a\nb"));
+
+        assert_eq!(
+            windows_paste_segments(&events, Some("a\nb")),
+            vec![
+                WindowsPasteSegment {
+                    events: 0..first_end,
+                    text: "a\nb".to_string(),
+                },
+                WindowsPasteSegment {
+                    events: second_start..events.len(),
+                    text: "a\nb".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_paste_segments_find_multiple_bracketed_frames_in_order() {
+        let mut events = windows_key_burst("\u{1b}[200~first\nsecond\u{1b}[201~");
+        let first_end = events.len();
+        events.extend(windows_key_burst("x"));
+        let second_start = events.len();
+        events.extend(windows_key_burst("\u{1b}[200~third\nfourth\u{1b}[201~"));
+
+        assert_eq!(
+            windows_paste_segments(&events, None),
+            vec![
+                WindowsPasteSegment {
+                    events: 0..first_end,
+                    text: "first\nsecond".to_string(),
+                },
+                WindowsPasteSegment {
+                    events: second_start..events.len(),
+                    text: "third\nfourth".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_paste_segments_reject_nested_frame_but_find_a_later_frame() {
+        let nested = format!(
+            "{WINDOWS_BRACKETED_PASTE_START}first{WINDOWS_BRACKETED_PASTE_START}second{WINDOWS_BRACKETED_PASTE_END}"
+        );
+        let mut events = windows_key_burst(&nested);
+        let later_start = events.len();
+        events.extend(windows_key_burst("\u{1b}[200~third\nfourth\u{1b}[201~"));
+
+        assert_eq!(
+            windows_paste_segments(&events, None),
+            vec![WindowsPasteSegment {
+                events: later_start..events.len(),
+                text: "third\nfourth".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn windows_oversized_clipboard_is_rejected() {
         let events = windows_key_burst("first\nsecond");
         let oversized_clipboard = "x".repeat(WINDOWS_PASTE_TEXT_BYTE_CAP + 1);
@@ -8660,6 +9143,87 @@ mod tests {
         app.handle_term_burst(events, &agent_tx, true, None).await;
 
         assert_eq!(app.input.text(), "first\nsecond");
+        assert!(app.active_tab().chat.messages().is_empty());
+        assert!(!app.active_tab().is_busy());
+    }
+
+    #[tokio::test]
+    async fn windows_bracketed_paste_followed_by_enter_submits_the_full_paste() {
+        let (mut app, agent_tx) = make_test_app().await;
+        let mut events = windows_key_burst("\u{1b}[200~first\nsecond\u{1b}[201~");
+        events.extend(windows_key_pair(KeyCode::Enter));
+
+        app.handle_term_burst(events, &agent_tx, true, None).await;
+
+        let user_messages: Vec<_> = app
+            .active_tab()
+            .chat
+            .messages()
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(user_messages, vec!["first\nsecond"]);
+        assert!(app.input.text().is_empty());
+    }
+
+    #[tokio::test]
+    async fn windows_unbracketed_paste_followed_by_enter_submits_the_full_paste() {
+        let (mut app, agent_tx) = make_test_app().await;
+        let mut events = windows_key_burst("first\nsecond");
+        events.extend(windows_key_pair(KeyCode::Enter));
+
+        app.handle_term_burst(events, &agent_tx, true, Some("first\r\nsecond"))
+            .await;
+
+        let user_messages: Vec<_> = app
+            .active_tab()
+            .chat
+            .messages()
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(user_messages, vec!["first\nsecond"]);
+        assert!(app.input.text().is_empty());
+    }
+
+    #[tokio::test]
+    async fn windows_leading_navigation_does_not_hide_an_unbracketed_paste() {
+        let (mut app, agent_tx) = make_test_app().await;
+        let mut events = windows_key_pair(KeyCode::Left).to_vec();
+        events.extend(windows_key_burst("first\nsecond"));
+
+        app.handle_term_burst(events, &agent_tx, true, Some("first\nsecond"))
+            .await;
+
+        assert_eq!(app.input.text(), "first\nsecond");
+        assert!(app.active_tab().chat.messages().is_empty());
+        assert!(!app.active_tab().is_busy());
+    }
+
+    #[tokio::test]
+    async fn windows_two_bracketed_pastes_are_inserted_in_order() {
+        let (mut app, agent_tx) = make_test_app().await;
+        let mut events = windows_key_burst("\u{1b}[200~first\nsecond\u{1b}[201~");
+        events.extend(windows_key_burst("\u{1b}[200~\nthird\nfourth\u{1b}[201~"));
+
+        app.handle_term_burst(events, &agent_tx, true, None).await;
+
+        assert_eq!(app.input.text(), "first\nsecond\nthird\nfourth");
+        assert!(app.active_tab().chat.messages().is_empty());
+        assert!(!app.active_tab().is_busy());
+    }
+
+    #[tokio::test]
+    async fn windows_bracketed_paste_replays_a_trailing_character() {
+        let (mut app, agent_tx) = make_test_app().await;
+        let mut events = windows_key_burst("\u{1b}[200~first\nsecond\u{1b}[201~");
+        events.extend(windows_key_burst("x"));
+
+        app.handle_term_burst(events, &agent_tx, true, None).await;
+
+        assert_eq!(app.input.text(), "first\nsecondx");
         assert!(app.active_tab().chat.messages().is_empty());
         assert!(!app.active_tab().is_busy());
     }
@@ -8747,6 +9311,25 @@ mod tests {
         let mut stream = futures::stream::iter(events.into_iter().skip(1).map(Ok));
         let mut burst = vec![CtEvent::Key(KeyEvent::new(
             KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        ))];
+        let mut first = drain_ready_events(&mut stream, INPUT_COALESCE_CAP);
+        let first_chunk_full = first.len() == INPUT_COALESCE_CAP;
+        burst.append(&mut first);
+
+        extend_windows_text_burst(&mut stream, &mut burst, first_chunk_full);
+
+        assert!(burst.len() > INPUT_COALESCE_CAP);
+        assert!(burst.len() <= WINDOWS_PASTE_EVENT_CAP);
+    }
+
+    #[test]
+    fn windows_text_tail_drain_extends_after_leading_navigation() {
+        let mut events = windows_key_pair(KeyCode::Left).to_vec();
+        events.extend(windows_key_burst(&"a".repeat(INPUT_COALESCE_CAP + 10)));
+        let mut stream = futures::stream::iter(events.into_iter().skip(1).map(Ok));
+        let mut burst = vec![CtEvent::Key(KeyEvent::new(
+            KeyCode::Left,
             KeyModifiers::NONE,
         ))];
         let mut first = drain_ready_events(&mut stream, INPUT_COALESCE_CAP);
