@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use zode_app_server_protocol::types::{ApprovalPolicy, Thread};
-use zode_app_server_protocol::{JsonRpcMessage, RequestId};
+use zode_app_server_protocol::{ErrorObject, JsonRpcMessage, RequestId};
 
 use crate::accumulator::{TurnEndState, TurnOutcome};
 use crate::approval_broker::BrokerMsg;
@@ -28,10 +28,17 @@ struct EmptyHost;
 
 #[async_trait]
 impl TurnHost for EmptyHost {
+    async fn set_model(&mut self, _thread_id: &str, _model: &str) -> Result<(), ErrorObject> {
+        Ok(())
+    }
+
+    async fn restore_model(&mut self, _thread_id: &str) {}
+
     async fn start_turn(
         &mut self,
         _thread: &Thread,
         _input: String,
+        _model_override: Option<String>,
         _abort: AbortController,
         _msgs: mpsc::Sender<SessionMsg>,
     ) {
@@ -57,10 +64,17 @@ struct HangingHost {
 
 #[async_trait]
 impl TurnHost for HangingHost {
+    async fn set_model(&mut self, _thread_id: &str, _model: &str) -> Result<(), ErrorObject> {
+        Ok(())
+    }
+
+    async fn restore_model(&mut self, _thread_id: &str) {}
+
     async fn start_turn(
         &mut self,
         thread: &Thread,
         _input: String,
+        _model_override: Option<String>,
         abort: AbortController,
         msgs: mpsc::Sender<SessionMsg>,
     ) {

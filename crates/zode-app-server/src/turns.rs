@@ -13,6 +13,7 @@ pub struct ActiveTurn {
     pub turn: Turn,
     pub abort: AbortController,
     pub interrupted: bool,
+    pub has_model_override: bool,
 }
 
 impl TurnRegistry {
@@ -36,9 +37,16 @@ impl TurnRegistry {
                 turn: turn.clone(),
                 abort: abort.clone(),
                 interrupted: false,
+                has_model_override: false,
             },
         );
         Ok((turn, abort))
+    }
+
+    pub fn mark_model_override(&mut self, thread_id: &str) {
+        if let Some(active) = self.active.get_mut(thread_id) {
+            active.has_model_override = true;
+        }
     }
 
     pub fn generate_id() -> String {

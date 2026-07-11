@@ -4,13 +4,13 @@ use tokio::sync::{mpsc, oneshot};
 use zode_app_server_protocol::notify;
 use zode_app_server_protocol::rpc::{
     JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, RequestId,
-    INVALID_PARAMS, METHOD_NOT_FOUND, NOT_INITIALIZED, TURN_ACTIVE,
+    METHOD_NOT_FOUND, NOT_INITIALIZED, TURN_ACTIVE,
 };
 use zode_app_server_protocol::server_requests::{ApprovalDecision, ApprovalKind};
 use zode_app_server_protocol::types::{
-    ApprovalPolicy, EmptyResponse, InitializeParams, ThreadListResponse, ThreadNameSetParams,
-    ThreadRefParams, ThreadResponse, ThreadStartParams, TurnInterruptParams, TurnResponse,
-    TurnStartParams,
+    ApprovalPolicy, EmptyResponse, InitializeParams, ModelSetParams, ThreadListResponse,
+    ThreadNameSetParams, ThreadRefParams, ThreadResponse, ThreadStartParams, TurnInterruptParams,
+    TurnResponse, TurnStartParams,
 };
 use zode_core::sandbox::SandboxConfig;
 
@@ -148,6 +148,7 @@ impl SessionActor {
             }
             "thread/read" | "thread/resume" => self.thread_read(request).await,
             "thread/name/set" => self.thread_name(request).await,
+            "model/set" => self.model_set(request).await,
             "thread/delete" => self.thread_delete(request).await,
             "turn/start" => self.turn_start(request).await,
             "turn/interrupt" => self.turn_interrupt(request).await,
@@ -291,6 +292,34 @@ impl SessionActor {
             Err(e) => self.send_error(id, e).await,
         }
     }
+    async fn model_set(&mut self, request: JsonRpcRequest) {
+        let id = request.id;
+        let p: ModelSetParams = match parse_params(request.params) {
+            Ok(v) => v,
+            Err(e) => return self.send_error(id, e).await,
+        };
+        if self.turns.get(&p.thread_id).is_some() {
+            return self
+                .send_error(id, error(TURN_ACTIVE, "turn active for thread"))
+                .await;
+        }
+        if let Err(e) = self.threads.read(&p.thread_id) {
+            return self.send_error(id, e).await;
+        }
+        let result = self
+            .host
+            .as_mut()
+            .expect("initialized session has a turn host")
+            .set_model(&p.thread_id, &p.model)
+            .await;
+        match result {
+            Ok(()) => match self.threads.set_model(&p.thread_id, &p.model) {
+                Ok(()) => self.send_value(id, EmptyResponse {}).await,
+                Err(e) => self.send_error(id, e).await,
+            },
+            Err(e) => self.send_error(id, e).await,
+        }
+    }
     async fn thread_delete(&mut self, request: JsonRpcRequest) {
         let id = request.id;
         let p: ThreadRefParams = match parse_params(request.params) {
@@ -318,11 +347,6 @@ impl SessionActor {
             Ok(v) => v,
             Err(e) => return self.send_error(id, e).await,
         };
-        if p.model.is_some() {
-            return self
-                .send_error(id, error(INVALID_PARAMS, "model override lands in S2"))
-                .await;
-        }
         let thread = match self.threads.read(&p.thread_id) {
             Ok(v) => v,
             Err(e) => return self.send_error(id, e).await,
@@ -332,6 +356,9 @@ impl SessionActor {
             Ok(v) => v,
             Err(e) => return self.send_error(id, error(TURN_ACTIVE, e)).await,
         };
+        if p.model.is_some() {
+            self.turns.mark_model_override(&p.thread_id);
+        }
         self.send_value(id, TurnResponse { turn }).await;
         let _ = self
             .outbound
@@ -342,7 +369,7 @@ impl SessionActor {
             .await;
         if let (Some(turn_ids), Some(host)) = (&self.turn_ids, &mut self.host) {
             let _ = turn_ids.send(turn_id);
-            host.start_turn(&thread, p.input, abort, self.self_tx.clone())
+            host.start_turn(&thread, p.input, p.model, abort, self.self_tx.clone())
                 .await;
         }
     }
@@ -381,6 +408,11 @@ impl SessionActor {
             .outbound
             .send(JsonRpcMessage::Notification(notification))
             .await;
+        if active.has_model_override {
+            if let Some(host) = &mut self.host {
+                host.restore_model(&thread_id).await;
+            }
+        }
         if let Some(ids) = self.pending_deletes.remove(&thread_id) {
             let result = self.threads.delete(&thread_id);
             for id in ids {

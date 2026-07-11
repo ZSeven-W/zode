@@ -48,6 +48,15 @@ impl ThreadRegistry {
         Ok(())
     }
 
+    pub fn set_model(&mut self, id: &str, model: &str) -> ServerResult<()> {
+        let thread = self
+            .threads
+            .get_mut(id)
+            .ok_or_else(|| error(INVALID_PARAMS, format!("thread not found: {id}")))?;
+        thread.model = model.to_string();
+        Ok(())
+    }
+
     pub fn delete(&mut self, id: &str) -> ServerResult<()> {
         self.threads
             .remove(id)

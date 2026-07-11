@@ -16,6 +16,7 @@ use crate::policy::DirectKind;
 
 pub fn method_kind(method: &str) -> Option<Option<DirectKind>> {
     match method {
+        "model/set" => Some(None),
         "command/exec" => Some(Some(DirectKind::Command)),
         "fs/writeFile" | "fs/createDirectory" | "fs/remove" | "fs/copy" => {
             Some(Some(DirectKind::FsWrite))
