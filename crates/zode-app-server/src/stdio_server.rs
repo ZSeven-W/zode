@@ -10,6 +10,41 @@ use crate::runtime::ServerRuntimeOptions;
 use crate::session::{SessionActor, SessionMsg};
 use crate::turn_host::HostFactory;
 
+/// Route one decoded inbound frame to the session actor.
+pub(crate) async fn route_inbound(
+    msg: JsonRpcMessage,
+    actor_tx: &tokio::sync::mpsc::Sender<SessionMsg>,
+) -> bool {
+    if actor_tx.is_closed() {
+        return false;
+    }
+
+    let routed = match msg {
+        JsonRpcMessage::Request(request) => Some(SessionMsg::Rpc(request)),
+        JsonRpcMessage::Response(response) => match response.id {
+            RequestId::String(id) if id.starts_with("srv-") => {
+                let decision = serde_json::from_value::<ApprovalResponseResult>(response.result)
+                    .ok()
+                    .map(|result| result.decision);
+                Some(SessionMsg::ClientResponse { id, decision })
+            }
+            _ => None,
+        },
+        JsonRpcMessage::Error(response) => match response.id {
+            RequestId::String(id) if id.starts_with("srv-") => {
+                Some(SessionMsg::ClientResponse { id, decision: None })
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+
+    match routed {
+        Some(msg) => actor_tx.send(msg).await.is_ok(),
+        None => true,
+    }
+}
+
 pub async fn serve<R, W>(
     read: R,
     write: W,
@@ -37,32 +72,9 @@ where
 
     while let Some(line) = lines.next_line().await? {
         match zode_app_server_transport::stdio::decode_line(&line) {
-            Ok(JsonRpcMessage::Request(request)) => {
-                let _ = actor_tx.send(SessionMsg::Rpc(request)).await;
+            Ok(message) => {
+                let _ = route_inbound(message, &actor_tx).await;
             }
-            Ok(JsonRpcMessage::Response(response)) => {
-                if let RequestId::String(id) = response.id {
-                    if id.starts_with("srv-") {
-                        let decision =
-                            serde_json::from_value::<ApprovalResponseResult>(response.result)
-                                .ok()
-                                .map(|result| result.decision);
-                        let _ = actor_tx
-                            .send(SessionMsg::ClientResponse { id, decision })
-                            .await;
-                    }
-                }
-            }
-            Ok(JsonRpcMessage::Error(response)) => {
-                if let RequestId::String(id) = response.id {
-                    if id.starts_with("srv-") {
-                        let _ = actor_tx
-                            .send(SessionMsg::ClientResponse { id, decision: None })
-                            .await;
-                    }
-                }
-            }
-            Ok(_) => {}
             Err(_) => {
                 let _ = out_tx
                     .send(JsonRpcMessage::Error(JsonRpcError::new(

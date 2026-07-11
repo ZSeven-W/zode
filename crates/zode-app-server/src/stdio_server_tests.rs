@@ -8,10 +8,86 @@ use zode_app_server_protocol::{ErrorObject, JsonRpcMessage, RequestId};
 use crate::accumulator::{TurnEndState, TurnOutcome};
 use crate::approval_broker::BrokerMsg;
 use crate::session::SessionMsg;
-use crate::stdio_server::serve;
+use crate::stdio_server::{route_inbound, serve};
 use crate::turn_host::{HostFactory, TurnHost};
 
 struct EmptyHostFactory;
+
+fn decode_frame(frame: &str) -> JsonRpcMessage {
+    zode_app_server_transport::stdio::decode_line(frame).unwrap()
+}
+
+#[tokio::test]
+async fn route_inbound_routes_request() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let routed = route_inbound(
+        decode_frame(r#"{"jsonrpc":"2.0","id":1,"method":"thread/list"}"#),
+        &tx,
+    )
+    .await;
+
+    assert!(routed);
+    assert!(
+        matches!(rx.recv().await, Some(SessionMsg::Rpc(request)) if request.method == "thread/list")
+    );
+}
+
+#[tokio::test]
+async fn route_inbound_routes_srv_response_decision() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let routed = route_inbound(
+        decode_frame(r#"{"jsonrpc":"2.0","id":"srv-1","result":{"decision":"allow"}}"#),
+        &tx,
+    )
+    .await;
+
+    assert!(routed);
+    assert!(matches!(
+        rx.recv().await,
+        Some(SessionMsg::ClientResponse { id, decision: Some(_) }) if id == "srv-1"
+    ));
+}
+
+#[tokio::test]
+async fn route_inbound_routes_srv_error_without_decision() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let routed = route_inbound(
+        decode_frame(
+            r#"{"jsonrpc":"2.0","id":"srv-2","error":{"code":-32603,"message":"failed"}}"#,
+        ),
+        &tx,
+    )
+    .await;
+
+    assert!(routed);
+    assert!(matches!(
+        rx.recv().await,
+        Some(SessionMsg::ClientResponse { id, decision: None }) if id == "srv-2"
+    ));
+}
+
+#[tokio::test]
+async fn route_inbound_ignores_non_srv_response() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let routed = route_inbound(decode_frame(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#), &tx).await;
+
+    assert!(routed);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn route_inbound_returns_false_when_actor_is_closed() {
+    let (tx, rx) = mpsc::channel(1);
+    drop(rx);
+
+    assert!(
+        !route_inbound(
+            decode_frame(r#"{"jsonrpc":"2.0","id":1,"method":"thread/list"}"#),
+            &tx,
+        )
+        .await
+    );
+}
 
 impl HostFactory for EmptyHostFactory {
     fn build_host(
