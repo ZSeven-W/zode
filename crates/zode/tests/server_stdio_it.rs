@@ -7,6 +7,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
+/// First-frame budget. macOS security assessment (Gatekeeper/XProtect) of a
+/// freshly built, ad-hoc-signed debug binary can stall exec in `_dyld_start`
+/// for tens of seconds, so the spawn-to-first-response step gets a much wider
+/// window than the steady-state steps.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(60);
 const POLICY_DENIED: i64 = -32010;
 
 struct ServerProcess {
@@ -68,9 +73,19 @@ impl ServerProcess {
     }
 
     async fn read(&mut self) -> Value {
-        let line = tokio::time::timeout(STEP_TIMEOUT, self.stdout.next_line())
+        self.read_within(STEP_TIMEOUT).await
+    }
+
+    /// First read after spawn: covers the exec/loader stall (see
+    /// FIRST_FRAME_TIMEOUT) on top of normal request handling.
+    async fn read_first(&mut self) -> Value {
+        self.read_within(FIRST_FRAME_TIMEOUT).await
+    }
+
+    async fn read_within(&mut self, budget: Duration) -> Value {
+        let line = tokio::time::timeout(budget, self.stdout.next_line())
             .await
-            .expect("server did not produce a frame within 10 seconds")
+            .expect("server did not produce a frame within the step budget")
             .expect("read server stdout")
             .expect("server stdout closed before the expected frame");
         serde_json::from_str(&line)
@@ -106,7 +121,7 @@ async fn auto_policy_runs_full_stdio_contract() {
             }),
         ))
         .await;
-    let initialize = server.read().await;
+    let initialize = server.read_first().await;
     assert_eq!(initialize["id"], 1);
     assert_eq!(initialize["result"]["serverInfo"]["name"], "zode");
     assert_eq!(initialize["result"]["approvalPolicy"], "auto");
@@ -176,7 +191,7 @@ async fn default_read_only_policy_denies_command_exec() {
             json!({"clientInfo":{"name":"stdio-it","version":"0"}}),
         ))
         .await;
-    let initialize = server.read().await;
+    let initialize = server.read_first().await;
     assert_eq!(initialize["id"], 1);
     assert_eq!(initialize["result"]["approvalPolicy"], "readOnly");
 
