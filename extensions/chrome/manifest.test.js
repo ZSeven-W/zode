@@ -36,6 +36,13 @@ function testExtensionIconsAreDeclaredAndSized() {
   }
 }
 
+function testLightIconVariantsExistAndSized() {
+  for (const size of [16, 32, 48, 128]) {
+    const dimensions = readPngSize(`icons/zode-light-${size}.png`);
+    assert.deepEqual(dimensions, { width: size, height: size });
+  }
+}
+
 function testPackScriptCopiesDeclaredIconDirectory() {
   const iconPaths = Object.values(manifest.icons || {});
   if (iconPaths.some((iconPath) => iconPath.startsWith("icons/"))) {
@@ -54,6 +61,7 @@ function testManifestDeclaresRequiredPermissions() {
 }
 
 testExtensionIconsAreDeclaredAndSized();
+testLightIconVariantsExistAndSized();
 testManifestDeclaresRequiredPermissions();
 testPackScriptCopiesDeclaredIconDirectory();
 console.log("manifest tests passed");
