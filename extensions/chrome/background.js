@@ -9,6 +9,18 @@ const BUF_CAP = 500;
 const PENDING_REQUEST_CAP = 500;
 const ZODE_TAB_GROUP_TITLE = "zode";
 const ZODE_TAB_GROUP_COLOR = "blue";
+const DARK_ICONS = {
+  16: "icons/zode-16.png",
+  32: "icons/zode-32.png",
+  48: "icons/zode-48.png",
+  128: "icons/zode-128.png",
+};
+const LIGHT_ICONS = {
+  16: "icons/zode-light-16.png",
+  32: "icons/zode-light-32.png",
+  48: "icons/zode-light-48.png",
+  128: "icons/zode-light-128.png",
+};
 
 let ws = null;
 let keepalive = null;
@@ -19,6 +31,7 @@ let zodeGroupId = null;
 let consoleBuf = [];
 let networkBuf = [];
 let pendingRequests = new Map();
+let offscreenCreation = null;
 
 async function getStored(keys) {
   return await chrome.storage.local.get(keys);
@@ -142,6 +155,47 @@ async function connectionStatus() {
     lastPort = storedPort;
   }
   return statusSnapshot(port, token);
+}
+
+function applyThemeIcon(dark) {
+  if (!chrome.action || !chrome.action.setIcon) {
+    return;
+  }
+  Promise.resolve(chrome.action.setIcon({ path: dark ? DARK_ICONS : LIGHT_ICONS })).catch(
+    (error) => console.debug("zode theme icon update failed", error),
+  );
+}
+
+// Chrome allows one offscreen document per extension; share the in-flight
+// creation promise instead of sniffing duplicate-creation error text.
+async function ensureThemeWatcher() {
+  if (!chrome.offscreen || !chrome.runtime.getContexts) {
+    return;
+  }
+  try {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"],
+    });
+    if (contexts.length > 0) {
+      // The document survived a worker restart: ask it to re-post.
+      await chrome.runtime.sendMessage({ type: "zode-theme-ping" }).catch(() => {});
+      return;
+    }
+    if (!offscreenCreation) {
+      offscreenCreation = chrome.offscreen
+        .createDocument({
+          url: "offscreen.html",
+          reasons: ["MATCH_MEDIA"],
+          justification: "detect light/dark appearance for the toolbar icon",
+        })
+        .finally(() => {
+          offscreenCreation = null;
+        });
+    }
+    await offscreenCreation;
+  } catch (error) {
+    console.debug("zode theme watcher unavailable", error);
+  }
 }
 
 async function reconnectStored(port) {
@@ -537,5 +591,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
     return true;
   }
+  if (message.type === "zode-theme") {
+    applyThemeIcon(Boolean(message.dark));
+    return false;
+  }
   return false;
 });
+
+ensureThemeWatcher();

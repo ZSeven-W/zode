@@ -9,13 +9,24 @@ const backgroundSource = fs.readFileSync(backgroundPath, "utf8");
 
 function makeChrome(storage = {}) {
   const runtimeMessages = [];
-  const calls = { created: [], updated: [], attached: [], detached: [], commands: [], queries: [] };
+  const calls = {
+    created: [],
+    updated: [],
+    attached: [],
+    detached: [],
+    commands: [],
+    queries: [],
+    offscreenCreated: [],
+    iconPaths: [],
+    runtimeSent: [],
+  };
   const listeners = { tabRemoved: [], debuggerDetach: [], webNavCommitted: [] };
   const tabsById = new Map();
   let nextTabId = 100;
 
   const api = {
     runtimeMessages,
+    offscreenContexts: [],
     calls,
     tabsById,
     addTab({ id = nextTabId++, url = "", active = false, windowId = 1 } = {}) {
@@ -54,6 +65,10 @@ function makeChrome(storage = {}) {
     },
     runtime: {
       onMessage: { addListener: (handler) => runtimeMessages.push(handler) },
+      getContexts: async () => api.offscreenContexts,
+      sendMessage: async (message) => {
+        calls.runtimeSent.push(JSON.parse(JSON.stringify(message)));
+      },
     },
     tabs: {
       query: async (filter = {}) => {
@@ -109,6 +124,16 @@ function makeChrome(storage = {}) {
       },
       onDetach: { addListener: (listener) => listeners.debuggerDetach.push(listener) },
       onEvent: { addListener: () => {} },
+    },
+    offscreen: {
+      createDocument: async (opts) => {
+        calls.offscreenCreated.push(JSON.parse(JSON.stringify(opts)));
+      },
+    },
+    action: {
+      setIcon: async (opts) => {
+        calls.iconPaths.push(JSON.parse(JSON.stringify(opts.path)));
+      },
     },
     webNavigation: {
       onCommitted: { addListener: (listener) => listeners.webNavCommitted.push(listener) },
@@ -487,7 +512,70 @@ async function testScreenshotActivatesControlledTabAndRestores() {
   assert.equal(h.chrome.calls.updated.filter(([, props]) => props && props.active).length, 2);
 }
 
+async function testStartupCreatesThemeWatcher() {
+  const chrome = makeChrome();
+  const sandbox = {
+    console,
+    setImmediate,
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+    WebSocket: class {},
+    chrome,
+  };
+  vm.runInNewContext(backgroundSource, sandbox, { filename: backgroundPath });
+  await flushImmediates();
+  assert.equal(chrome.calls.offscreenCreated.length, 1);
+  assert.equal(chrome.calls.offscreenCreated[0].url, "offscreen.html");
+  assert.deepEqual(chrome.calls.offscreenCreated[0].reasons, ["MATCH_MEDIA"]);
+  assert.deepEqual(chrome.calls.runtimeSent, []);
+}
+
+async function testStartupPingsExistingThemeWatcher() {
+  const chrome = makeChrome();
+  chrome.offscreenContexts.push({ contextType: "OFFSCREEN_DOCUMENT" });
+  const sandbox = {
+    console,
+    setImmediate,
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+    WebSocket: class {},
+    chrome,
+  };
+  vm.runInNewContext(backgroundSource, sandbox, { filename: backgroundPath });
+  await flushImmediates();
+  assert.equal(chrome.calls.offscreenCreated.length, 0);
+  assert.deepEqual(chrome.calls.runtimeSent, [{ type: "zode-theme-ping" }]);
+}
+
+async function testThemeMessageSwitchesIcon() {
+  const h = makeRpcHarness();
+  const handler = h.chrome.runtimeMessages[0];
+  assert.equal(handler({ type: "zode-theme", dark: false }, {}, () => {}), false);
+  await flushImmediates();
+  assert.deepEqual(h.chrome.calls.iconPaths.at(-1), {
+    16: "icons/zode-light-16.png",
+    32: "icons/zode-light-32.png",
+    48: "icons/zode-light-48.png",
+    128: "icons/zode-light-128.png",
+  });
+  handler({ type: "zode-theme", dark: true }, {}, () => {});
+  await flushImmediates();
+  assert.deepEqual(h.chrome.calls.iconPaths.at(-1), {
+    16: "icons/zode-16.png",
+    32: "icons/zode-32.png",
+    48: "icons/zode-48.png",
+    128: "icons/zode-128.png",
+  });
+}
+
 (async () => {
+  await testStartupCreatesThemeWatcher();
+  await testStartupPingsExistingThemeWatcher();
+  await testThemeMessageSwitchesIcon();
   await testBackgroundStartupDoesNotTouchWebSocket();
   await testStatusMessageReturnsConnectionState();
   await testStatusLoadsStoredPortAndReconnectCapability();
