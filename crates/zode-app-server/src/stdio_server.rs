@@ -1,79 +1,64 @@
-use agent::abort::AbortController;
-use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
-use zode_app_server_protocol::types::Thread;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
+use zode_app_server_protocol::rpc::{JsonRpcError, RequestId, INVALID_REQUEST};
 use zode_app_server_protocol::JsonRpcMessage;
+use zode_core::sandbox::SandboxConfig;
 
-use crate::accumulator::{TurnEndState, TurnOutcome};
+use crate::error::error;
 use crate::outbound::{outbound, writer_task};
+use crate::runtime::ServerRuntimeOptions;
 use crate::session::{SessionActor, SessionMsg};
-use crate::turn_host::{HostFactory, TurnHost};
+use crate::turn_host::HostFactory;
 
-struct UnavailableHost {
-    turn_ids: mpsc::UnboundedReceiver<String>,
-}
-
-struct UnavailableHostFactory;
-
-impl HostFactory for UnavailableHostFactory {
-    fn build_host(
-        &mut self,
-        _policy: zode_app_server_protocol::types::ApprovalPolicy,
-        turn_ids: mpsc::UnboundedReceiver<String>,
-    ) -> Box<dyn TurnHost> {
-        // Task 8 replaces this temporary stdio wiring with ServerRuntimeOptions.
-        Box::new(UnavailableHost { turn_ids })
-    }
-}
-
-#[async_trait]
-impl TurnHost for UnavailableHost {
-    async fn start_turn(
-        &mut self,
-        thread: &Thread,
-        _input: String,
-        _abort: AbortController,
-        msgs: mpsc::Sender<SessionMsg>,
-    ) {
-        let Some(turn_id) = self.turn_ids.recv().await else {
-            return;
-        };
-        let _ = msgs
-            .send(SessionMsg::TurnFinished {
-                thread_id: thread.id.clone(),
-                turn_id,
-                outcome: TurnOutcome {
-                    state: TurnEndState::Failed {
-                        error: "EngineHost lands in Task 7".into(),
-                    },
-                    final_text: String::new(),
-                    usage: Default::default(),
-                },
-            })
-            .await;
-    }
-}
-
-pub async fn run_stdio(zode_home: String) -> std::io::Result<()> {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+pub async fn serve<R, W>(
+    read: R,
+    write: W,
+    factory: Box<dyn HostFactory>,
+    zode_home: String,
+    sandbox: Option<SandboxConfig>,
+) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let (out_tx, out_rx) = outbound();
-    let writer = tokio::spawn(writer_task(out_rx, tokio::io::stdout()));
-    let (session, actor) =
-        SessionActor::spawn(Box::new(UnavailableHostFactory), out_tx, zode_home, None);
+    let writer = tokio::spawn(writer_task(out_rx, write));
+    let (actor_tx, actor) = SessionActor::spawn(factory, out_tx.clone(), zode_home, sandbox);
+    let mut lines = BufReader::new(read).lines();
+
     while let Some(line) = lines.next_line().await? {
-        let Ok(JsonRpcMessage::Request(request)) =
-            zode_app_server_transport::stdio::decode_line(&line)
-        else {
-            continue;
-        };
-        if session.send(SessionMsg::Rpc(request)).await.is_err() {
-            break;
+        match zode_app_server_transport::stdio::decode_line(&line) {
+            Ok(JsonRpcMessage::Request(request)) => {
+                let _ = actor_tx.send(SessionMsg::Rpc(request)).await;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                let _ = out_tx
+                    .send(JsonRpcMessage::Error(JsonRpcError::new(
+                        RequestId::Null,
+                        error(INVALID_REQUEST, "invalid frame"),
+                    )))
+                    .await;
+            }
         }
     }
-    let _ = session.send(SessionMsg::Shutdown).await;
-    drop(session);
-    let _ = actor.await;
+
+    let _ = actor_tx.send(SessionMsg::Shutdown).await;
+    drop(actor_tx);
+    drop(out_tx);
+    actor.await.map_err(std::io::Error::other)?;
     writer.await.map_err(std::io::Error::other)??;
     Ok(())
+}
+
+pub async fn run_stdio(options: ServerRuntimeOptions) -> std::io::Result<()> {
+    let zode_home = options.zode_home.clone();
+    let sandbox = options.sandbox.clone();
+    serve(
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+        Box::new(options),
+        zode_home,
+        sandbox,
+    )
+    .await
 }

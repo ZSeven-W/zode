@@ -36,6 +36,9 @@ mod policy_tests;
 #[path = "session_tests.rs"]
 mod session_tests;
 #[cfg(test)]
+#[path = "stdio_server_tests.rs"]
+mod stdio_server_tests;
+#[cfg(test)]
 #[path = "threads_tests.rs"]
 mod threads_tests;
 #[cfg(test)]
