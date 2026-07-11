@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.zseven.zode"
-version = "0.1.0-beta.6"
+version = "0.1.0-beta.5"
 
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")

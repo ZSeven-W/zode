@@ -4,6 +4,35 @@
 
 > ⚠️ **Beta.** APIs, config, and behavior may change before 1.0. Please file issues!
 
+## Server mode & SDKs
+
+`zode server` graduates from a metadata-only registry to a **streaming
+JSON-RPC runtime**. New in this release:
+
+- **Streaming turns** — `turn/start` returns immediately and streams model
+  output and tool calls as notifications (`turn/started`,
+  `item/agentMessage/delta`, `item/started` / `item/completed`,
+  `turn/completed` with `finalText` + token `usage`, plus `turn/interrupted` /
+  `turn/failed`). `turn/interrupt` cancels a running turn.
+- **Interactive approvals** — the `prompt` policy drives server→client
+  `approval/request` frames the client answers with
+  `{ "decision": "allow" | "allowAlways" | "deny" }`.
+- **WebSocket transport** — `zode server --listen ws://127.0.0.1:0` serves over
+  a loopback WebSocket, publishing a `0600` `<config-dir>/server.json`
+  credentials file (`{port, pid, token}`) and authenticating upgrades with
+  `Authorization: Bearer <token>`. stdio (`zode server`) remains the default.
+- **New methods** — `model/set` and `config/write` join the surface.
+- **Five SDKs** (Rust, TypeScript, Python, Go, Kotlin/JVM) ship event
+  subscription + approval handlers. See [`sdk/README.md`](sdk/README.md).
+
+> 🚨 **BREAKING CHANGE — default approval policy is now `readOnly`.**
+> `initialize` previously left side-effecting work effectively unrestricted;
+> it now **denies** tool calls, `command/exec`, and filesystem writes unless
+> the client passes `approvalPolicy: "auto"` (run without asking) or
+> `"prompt"` (confirm each operation via `approval/request`). Clients that ran
+> commands or wrote files without setting a policy **must** now set one. The
+> accepted policy is echoed back in the `initialize` result.
+
 ## What's new in beta.5
 
 - **OpenPencil single-command design flow** — `/op <design request>` is now the primary user-facing OpenPencil path. Raw MCP tool access is hidden from normal autocomplete, with `/op status` and the explicit `/op call <tool> <json>` escape hatch still available.

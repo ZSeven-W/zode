@@ -229,21 +229,31 @@ intended for editor integrations, local automation, tests, and SDK clients that
 want zode's existing capabilities without launching the TUI.
 
 ```bash
-zode server
-zode server --listen stdio://
-zode server --listen off
+zode server                      # stdio (default) — what the SDKs spawn
+zode server --listen stdio://    # same thing, spelled out
+zode server --listen ws://127.0.0.1:0   # loopback WebSocket + Bearer auth
+zode server --listen off         # start nothing and exit
 ```
 
-Current-stage server mode exposes only zode-backed behavior:
+Server mode exposes zode-backed behavior:
 
-- initialization and capability discovery
-- thread metadata lifecycle and turn registry operations
-- filesystem read/write/create/stat/list/remove/copy
-- one-shot `command/exec`
-- read-only model, config, skills, hooks, MCP-server status, and plugin lists
+- initialization + capability discovery (with an `approvalPolicy` of
+  `readOnly` (default) / `auto` / `prompt`)
+- thread metadata lifecycle and **streaming turns** — model output and tool
+  calls arrive as JSON-RPC notifications; `turn/interrupt` cancels a turn
+- **interactive approvals** — `prompt` policy drives server→client
+  `approval/request` frames answered with `allow` / `allowAlways` / `deny`
+- filesystem read/write/create/stat/list/remove/copy and one-shot `command/exec`
+- model list/set, config read/list/write, and read-only skills, hooks,
+  MCP-server status, and plugin lists
 
-Codex-only or not-yet-backed product areas are intentionally absent for now:
-account/auth, marketplace, remote-control, Realtime, websocket runtime,
+The WebSocket transport binds loopback only and writes a `0600`
+`<config-dir>/server.json` credentials file (`{port, pid, token}`); clients
+authenticate with `Authorization: Bearer <token>`. See
+[`sdk/README.md`](sdk/README.md) for the full protocol, notification field
+names, and per-language examples.
+
+Still out of scope: account/auth, marketplace, remote-control, Realtime,
 standalone process spawn, background terminals, thread archive/fork, goals, and
 app connectors.
 

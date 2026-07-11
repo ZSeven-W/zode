@@ -46,6 +46,55 @@ methods, or pass a raw string when you intentionally need low-level JSON-RPC.
 Every supported method's params, result shape, and enum name are documented in
 the [SDK method reference](../README.md#method-reference).
 
+## Streaming turns and approvals
+
+Register handlers before starting a turn. Pass `approvalPolicy = "auto"` (or
+`"prompt"` with an approval handler) so side-effecting work runs — the default
+`readOnly` denies it.
+
+```kotlin
+import com.zseven.zode.ApprovalDecision
+import com.zseven.zode.ProtocolMethod
+import com.zseven.zode.ZodeClient
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+
+fun main() {
+    ZodeClient().use { client ->
+        client.onNotification { method, params ->
+            if (method == "item/agentMessage/delta") {
+                print(params?.jsonObject?.get("delta")?.jsonPrimitive?.content ?: "")
+            }
+        }
+        client.onApprovalRequest { params ->
+            System.err.println("approve ${params.kind}: ${params.summary}")
+            ApprovalDecision.Allow // Allow | AllowAlways | Deny
+        }
+
+        client.initialize("example", "0.1.0", approvalPolicy = "auto")
+        val thread = client.request(ProtocolMethod.ThreadStart, buildJsonObject { })
+        val threadId = thread.jsonObject["thread"]!!.jsonObject["id"]!!.jsonPrimitive.content
+        client.request(
+            ProtocolMethod.TurnStart,
+            buildJsonObject {
+                put("threadId", threadId)
+                put("input", "list the repo files")
+            },
+        )
+    }
+}
+```
+
+`onNotification` receives `(method, params)` where `params` is a nullable
+`JsonElement`. `onApprovalRequest` returns an `ApprovalDecision`; an
+unregistered or throwing handler denies.
+
+## Version
+
+`0.1.0-beta.5`.
+
 ## Test
 
 ```sh
