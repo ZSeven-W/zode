@@ -1,4 +1,5 @@
 pub mod accumulator;
+pub mod approval_broker;
 pub mod capabilities;
 pub mod command;
 pub mod error;
@@ -17,6 +18,9 @@ pub mod turns;
 #[cfg(test)]
 #[path = "accumulator_tests.rs"]
 mod accumulator_tests;
+#[cfg(test)]
+#[path = "approval_broker_tests.rs"]
+mod approval_broker_tests;
 #[cfg(test)]
 #[path = "command_tests.rs"]
 mod command_tests;

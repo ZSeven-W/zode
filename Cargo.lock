@@ -5066,6 +5066,7 @@ dependencies = [
  "serial_test",
  "tempfile",
  "tokio",
+ "tracing",
  "uuid",
  "zode-app-server-protocol",
  "zode-app-server-transport",
