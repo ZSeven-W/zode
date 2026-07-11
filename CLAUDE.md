@@ -403,6 +403,12 @@ own `Page.navigate` calls are rewritten to `transitionType: "link"` so they
 never trigger the handoff listener. Screenshots briefly activate the tab and
 restore the previously active one.
 
+The toolbar icon is theme-adaptive: an offscreen document (`offscreen.html`,
+`MATCH_MEDIA` reason, `offscreen` permission) posts `zode-theme` messages on
+load/change/ping and the worker calls `chrome.action.setIcon` to swap between
+the dark `icons/zode-*.png` and light `icons/zode-light-*.png` sets. Static
+manifest icons stay dark.
+
 Install and update details live in `extensions/chrome/README.md`. The shipped
 extension ID is `hcabdgpfhoclfgnknddadgfhhdnlkloc`; the manifest embeds the
 public key so unpacked and packed installs use the same ID, which the Rust

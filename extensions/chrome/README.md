@@ -32,6 +32,15 @@ viewing:
 - Screenshots briefly activate the zode tab (hidden tabs do not render) and
   then restore the tab you were on.
 
+## Theme-adaptive icon
+
+The toolbar icon follows the browser's light/dark appearance: an offscreen
+document watches `prefers-color-scheme` and the service worker swaps between
+`icons/zode-*.png` (dark appearance) and `icons/zode-light-*.png` (light
+appearance) at runtime. The icon on `chrome://extensions` stays the static
+manifest one — Chrome offers no way to switch it. Light icons are generated
+from `assets/logo-light.png` at the repo root with `sips -Z <size>`.
+
 ## Update
 
 After changing files in this directory, open `chrome://extensions` and click the reload button on the zode browser bridge card. The manifest embeds a public key so unpacked and packed installs keep the same extension ID, which zode uses for the WebSocket Origin check.
