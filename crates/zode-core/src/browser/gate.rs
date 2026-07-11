@@ -18,6 +18,12 @@ pub struct BrowserGateView {
     session: Arc<BrowserSession>,
 }
 
+impl BrowserGateView {
+    pub(crate) fn new(session: Arc<BrowserSession>) -> Self {
+        Self { session }
+    }
+}
+
 #[async_trait]
 impl GateView for BrowserGateView {
     async fn view(&self, input: &serde_json::Value) -> serde_json::Value {
@@ -48,9 +54,7 @@ pub fn browser_gated(
     session: Arc<BrowserSession>,
 ) -> Arc<PermissionGatedTool> {
     let name = inner.name().to_string();
-    let view = Arc::new(BrowserGateView {
-        session: session.clone(),
-    });
+    let view = Arc::new(BrowserGateView::new(session.clone()));
     let gated = Arc::new(PermissionGatedTool::with_view(inner, gate, view));
     session.register_perm_flag(&name, gated.always_flag());
     gated

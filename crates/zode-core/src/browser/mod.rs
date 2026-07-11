@@ -4,18 +4,24 @@
 
 pub mod backend;
 pub mod bridge;
+#[path = "file-input.rs"]
+mod file_input;
 pub mod gate;
 pub mod managed;
+#[path = "managed-downloads.rs"]
+mod managed_downloads;
 pub mod session;
 mod snapshot_js;
 pub mod tools;
+pub mod upload;
 
 pub use backend::{
-    BrowserBackend, BrowserError, BrowserTarget, ClickTarget, ConsoleEntry, NetworkEntry,
-    Screenshot, TabInfo,
+    BrowserBackend, BrowserError, BrowserTarget, ClickTarget, ConsoleEntry, DownloadEntry,
+    DownloadStatus, NetworkEntry, Screenshot, TabInfo,
 };
 pub use managed::ManagedFactory;
 pub use session::{BackendFactory, BackendLease, BrowserSession};
 pub use tools::{
     BrowserActTool, BrowserEvalTool, BrowserReadTool, BrowserTabsTool, BrowserToolDeps,
 };
+pub use upload::BrowserUploadTool;

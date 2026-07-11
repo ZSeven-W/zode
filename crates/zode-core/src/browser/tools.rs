@@ -1,5 +1,5 @@
 //! Agent-facing browser tools: `browser_read` (screenshot / DOM snapshot /
-//! console / network / tabs), `browser_act` (navigate / click / type / key /
+//! console / network / tabs / downloads), `browser_act` (navigate / click / type / key /
 //! scroll), `browser_eval` (arbitrary JS), and `browser_tabs` (open / close /
 //! select). All four share a `BrowserSession` lease per call, following the
 //! `op_read`/`op_write` pattern in `openpencil/tools.rs`.
@@ -67,7 +67,7 @@ impl Tool for BrowserReadTool {
 
     fn description(&self) -> &str {
         "Read the controlled browser: screenshot, DOM snapshot (with clickable refs), console \
-         logs, network log, tab list. No approval needed."
+         logs, network log, tab list, recent downloads. No approval needed."
     }
 
     fn input_schema(&self) -> Value {
@@ -77,12 +77,14 @@ impl Tool for BrowserReadTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["screenshot", "snapshot", "console", "network", "tabs"],
+                    "enum": ["screenshot", "snapshot", "console", "network", "tabs", "downloads"],
                     "description": "Which read to perform"
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max entries for console/network (default 100)"
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Max entries for console/network/downloads (default 100)"
                 }
             }
         })
@@ -131,6 +133,16 @@ impl Tool for BrowserReadTool {
                 let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
                 Ok(json!({
                     "entries": lease.backend().network_log(limit).await.map_err(to_agent_err)?
+                }))
+            }
+            "downloads" => {
+                let limit = input
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(100)
+                    .clamp(1, 100) as usize;
+                Ok(json!({
+                    "entries": lease.backend().downloads(limit).await.map_err(to_agent_err)?
                 }))
             }
             "tabs" => Ok(json!({
@@ -442,6 +454,23 @@ mod tests {
         assert_eq!(c["entries"][0]["text"], "hi");
         let tabs = t.call(&ctx(), json!({"action": "tabs"})).await.unwrap();
         assert_eq!(tabs["tabs"][0]["id"], "t1");
+        let downloads = t
+            .call(&ctx(), json!({"action": "downloads", "limit": 500}))
+            .await
+            .unwrap();
+        assert_eq!(
+            downloads["entries"][0]["url"],
+            "https://example.test/file-100.txt"
+        );
+        assert_eq!(downloads["entries"][0]["status"], "complete");
+        let downloads = t
+            .call(&ctx(), json!({"action": "downloads", "limit": 0}))
+            .await
+            .unwrap();
+        assert_eq!(
+            downloads["entries"][0]["url"],
+            "https://example.test/file-1.txt"
+        );
         let err = t.call(&ctx(), json!({"action": "fly"})).await.unwrap_err();
         assert!(err.to_string().contains("unknown action"));
     }

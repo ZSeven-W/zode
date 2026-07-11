@@ -1,6 +1,9 @@
 //! Real-Chrome integration tests. Opt-in:
 //!   ZODE_BROWSER_IT=1 cargo test -p zode-core --test browser_it -- --ignored
-use zode_core::browser::{BrowserSession, ManagedFactory};
+use agent::tool::{Tool, ToolUseContext};
+use zode_core::browser::{
+    BrowserReadTool, BrowserSession, BrowserToolDeps, ClickTarget, ManagedFactory,
+};
 use zode_core::config::BrowserConfig;
 
 /// Builds a headless `BrowserConfig` pointed at a fresh temp profile dir.
@@ -111,5 +114,72 @@ async fn tab_switch_a_b_a_does_not_duplicate_console_entries() {
     );
 
     drop(lease);
+    session.close().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn upload_and_download_end_to_end() {
+    if std::env::var("ZODE_BROWSER_IT").as_deref() != Ok("1") {
+        eprintln!("skipped: set ZODE_BROWSER_IT=1");
+        return;
+    }
+    let (_profile_dir, cfg) = isolated_headless_cfg();
+    let upload_dir = tempfile::tempdir().expect("upload tempdir");
+    let upload = upload_dir.path().join("upload.txt");
+    std::fs::write(&upload, b"upload-probe").unwrap();
+    let upload = std::fs::canonicalize(upload).unwrap();
+    let session = BrowserSession::new(cfg, std::sync::Arc::new(ManagedFactory));
+    let lease = session.lease().await.expect("launch");
+    let backend = lease.backend();
+    backend
+        .navigate("data:text/html,<input id=f type=file><button id=d>download</button>")
+        .await
+        .unwrap();
+    backend
+        .set_file_input(&ClickTarget::Selector("#f".into()), &[upload])
+        .await
+        .unwrap();
+    assert_eq!(
+        backend
+            .evaluate("document.querySelector('#f').files.length")
+            .await
+            .unwrap(),
+        serde_json::json!(1)
+    );
+    backend
+        .evaluate(
+            "(()=>{const a=document.createElement('a');a.download='zode-download.txt';a.href=URL.createObjectURL(new Blob(['download-probe']));a.click();return true})()",
+        )
+        .await
+        .unwrap();
+    drop(lease);
+
+    let read = BrowserReadTool::new(BrowserToolDeps {
+        session: session.clone(),
+        shots_dir: upload_dir.path().join("shots"),
+    });
+    let ctx = ToolUseContext::new(std::env::temp_dir());
+    let mut completed = None;
+    for _ in 0..100 {
+        let value = read
+            .call(&ctx, serde_json::json!({"action":"downloads", "limit":10}))
+            .await
+            .unwrap();
+        completed = value["entries"]
+            .as_array()
+            .and_then(|entries| entries.iter().find(|entry| entry["status"] == "complete"))
+            .cloned();
+        if completed.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let completed = completed.expect("download did not complete");
+    let path = completed["path"].as_str().expect("completed download path");
+    assert!(
+        std::path::Path::new(path).is_file(),
+        "missing download: {path}"
+    );
     session.close().await;
 }

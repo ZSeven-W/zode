@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::fmt;
+use std::path::PathBuf;
 
 /// Which browser instance to control.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +47,28 @@ pub struct NetworkEntry {
     pub url: String,
     pub status: Option<u16>,
     pub mime: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadStatus {
+    InProgress,
+    Complete,
+    Canceled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DownloadEntry {
+    pub status: DownloadStatus,
+    pub path: Option<PathBuf>,
+    pub url: String,
+    pub received_bytes: u64,
+    pub total_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
 }
 
 /// A screenshot image.
@@ -113,6 +136,16 @@ pub trait BrowserBackend: Send + Sync + std::fmt::Debug {
 
     /// Get recent network request/response entries (up to limit).
     async fn network_log(&self, limit: usize) -> Result<Vec<NetworkEntry>, BrowserError>;
+
+    /// Get downloads observed during this backend's current session.
+    async fn downloads(&self, limit: usize) -> Result<Vec<DownloadEntry>, BrowserError>;
+
+    /// Set local files on a page `<input type="file">` element.
+    async fn set_file_input(
+        &self,
+        target: &ClickTarget,
+        paths: &[PathBuf],
+    ) -> Result<(), BrowserError>;
 
     /// List all open tabs.
     async fn tabs(&self) -> Result<Vec<TabInfo>, BrowserError>;
@@ -208,6 +241,26 @@ pub(crate) mod mock {
         }
         async fn network_log(&self, _n: usize) -> Result<Vec<NetworkEntry>, BrowserError> {
             self.track(Ok(vec![])).await
+        }
+        async fn downloads(&self, n: usize) -> Result<Vec<DownloadEntry>, BrowserError> {
+            self.track(Ok(vec![DownloadEntry {
+                status: DownloadStatus::Complete,
+                path: Some(std::path::PathBuf::from("/tmp/file.txt")),
+                url: format!("https://example.test/file-{n}.txt"),
+                received_bytes: 4,
+                total_bytes: 4,
+                error: None,
+                attribution: None,
+            }]))
+            .await
+        }
+        async fn set_file_input(
+            &self,
+            _target: &ClickTarget,
+            paths: &[PathBuf],
+        ) -> Result<(), BrowserError> {
+            assert!(paths.iter().all(|path| path.is_absolute()));
+            self.track(Ok(())).await
         }
         async fn tabs(&self) -> Result<Vec<TabInfo>, BrowserError> {
             self.track(Ok(vec![TabInfo {

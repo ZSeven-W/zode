@@ -31,7 +31,7 @@ use crate::approval::{ApprovalGate, ApprovalQueue, BypassGate, QueueGate};
 use crate::bg_shells::{BackgroundShellTracker, BgShellHook};
 use crate::browser::{
     BrowserActTool, BrowserEvalTool, BrowserReadTool, BrowserSession, BrowserTabsTool,
-    BrowserToolDeps, ManagedFactory,
+    BrowserToolDeps, BrowserUploadTool, ManagedFactory,
 };
 use crate::config::ZodeConfig;
 use crate::cost::CostState;
@@ -822,6 +822,10 @@ impl ZodeEngine {
                 shots_dir,
             };
             base.register(Arc::new(BrowserReadTool::new(deps.clone())));
+            base.register(Arc::new(BrowserUploadTool::new(
+                browser_session.clone(),
+                gate.clone(),
+            )));
             for tool in [
                 Arc::new(BrowserActTool::new(deps.clone())) as Arc<dyn Tool>,
                 Arc::new(BrowserEvalTool::new(deps.clone())),
@@ -1025,7 +1029,12 @@ impl ZodeEngine {
         // does not double-gate them behind a second, plain PermissionGatedTool.
         let mut mutating_allow = cfg.permissions.allow.clone();
         if cfg.browser.enabled() {
-            for name in ["browser_act", "browser_eval", "browser_tabs"] {
+            for name in [
+                "browser_act",
+                "browser_eval",
+                "browser_tabs",
+                "browser_upload",
+            ] {
                 mutating_allow.push(name.to_string());
             }
         }
@@ -2278,6 +2287,13 @@ fn wrap_mutating_tools(
 ) -> ToolRegistry {
     let mut out = ToolRegistry::new();
     for tool in src.list() {
+        // browser_upload performs canonical-path preflight before its own
+        // per-call approval and must never be wrapped by a gate outside that
+        // validation boundary.
+        if tool.name() == "browser_upload" {
+            out.register(tool);
+            continue;
+        }
         // `ask` wins over everything: a tool the user explicitly wants to be
         // prompted on is gated even if it's read-only or in `allow`. This is
         // how a user forces confirmation on a normally auto-allowed tool or
@@ -3294,6 +3310,7 @@ mod tests {
             "browser_act",
             "browser_eval",
             "browser_tabs",
+            "browser_upload",
         ] {
             assert!(names.iter().any(|n| n == t), "missing {t}: {names:?}");
         }
@@ -3302,7 +3319,12 @@ mod tests {
         // wrap_mutating_tools).
         let read = eng.tools.get("browser_read").expect("browser_read");
         assert_eq!(read.safety_class(), SafetyClass::ReadOnly);
-        for t in ["browser_act", "browser_eval", "browser_tabs"] {
+        for t in [
+            "browser_act",
+            "browser_eval",
+            "browser_tabs",
+            "browser_upload",
+        ] {
             let tool = eng.tools.get(t).unwrap_or_else(|| panic!("missing {t}"));
             assert_eq!(tool.safety_class(), SafetyClass::Mutating);
         }

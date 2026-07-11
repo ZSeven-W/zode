@@ -142,6 +142,28 @@ pub(crate) fn summarize_input(tool: &str, input: &serde_json::Value) -> String {
         "browser_tabs" => format!("{} tab {}", pick("action"), pick("id"))
             .trim()
             .to_string(),
+        "browser_upload" => {
+            let target = pick("_target");
+            let count = input.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let files = input
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|files| {
+                    files
+                        .iter()
+                        .map(|file| {
+                            format!(
+                                "{} ({} bytes)",
+                                file.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                                file.get("size").and_then(|v| v.as_u64()).unwrap_or(0)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            format!("upload {count} file(s) [{target}]: {files}")
+        }
         _ => {
             let compact = serde_json::to_string(input).unwrap_or_default();
             let max_chars = 120;

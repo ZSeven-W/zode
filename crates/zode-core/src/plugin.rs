@@ -123,6 +123,7 @@ pub const TOOL_GROUPS: &[(&str, &str, &[&str])] = &[
             "browser_act",
             "browser_eval",
             "browser_tabs",
+            "browser_upload",
         ],
     ),
 ];
@@ -298,6 +299,7 @@ mod tests {
         assert_eq!(group_of("browser_act"), Some("browser"));
         assert_eq!(group_of("browser_eval"), Some("browser"));
         assert_eq!(group_of("browser_tabs"), Some("browser"));
+        assert_eq!(group_of("browser_upload"), Some("browser"));
     }
 
     #[test]

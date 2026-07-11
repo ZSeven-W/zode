@@ -9,11 +9,13 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use chromiumoxide::browser::Browser;
+use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
 use chromiumoxide::cdp::browser_protocol::input::{DispatchKeyEventParams, DispatchKeyEventType};
 use chromiumoxide::cdp::browser_protocol::network::{
     EventRequestWillBeSent, EventResponseReceived, RequestId,
 };
 use chromiumoxide::cdp::js_protocol::runtime::EventConsoleApiCalled;
+use chromiumoxide::cdp::js_protocol::runtime::{EvaluateParams, ReleaseObjectParams};
 use chromiumoxide::handler::viewport::Viewport;
 use chromiumoxide::layout::Point;
 use chromiumoxide::BrowserConfig as CdpBrowserConfig;
@@ -168,6 +170,7 @@ pub struct ManagedBackend {
     // and read by the `console_logs`/`network_log` trait methods.
     console_buf: Arc<StdMutex<VecDeque<ConsoleEntry>>>,
     network_buf: Arc<StdMutex<VecDeque<NetworkEntry>>>,
+    downloads: Arc<StdMutex<super::managed_downloads::DownloadCache>>,
     // Last accessibility-snapshot ref counter, for click-by-ref validation.
     snapshot_refs: StdMutex<u32>,
     // Join handles for the listener tasks bound to the CURRENT page (see
@@ -196,6 +199,10 @@ impl ManagedBackend {
         let exe = locate_executable(cfg)?;
         let profile = resolve_profile_dir(cfg);
         create_profile_dir(&profile)?;
+        let downloads_dir = crate::config::ConfigManager::config_dir()
+            .unwrap_or_else(|_| PathBuf::from(".zode"))
+            .join("downloads");
+        create_profile_dir(&downloads_dir)?;
         let (w, h) = cfg.viewport();
         let mut builder = CdpBrowserConfig::builder()
             .chrome_executable(&exe)
@@ -218,6 +225,8 @@ impl ManagedBackend {
         let (browser, mut handler) = Browser::launch(cdp_cfg)
             .await
             .map_err(|e| BrowserError::Launch(e.to_string()))?;
+
+        let downloads = super::managed_downloads::configure(&browser, &downloads_dir).await?;
 
         // Supervisor: the handler stream MUST be polled continuously;
         // stream end == browser gone (crash or user closed the window).
@@ -249,6 +258,7 @@ impl ManagedBackend {
             alive,
             console_buf: Arc::new(StdMutex::new(VecDeque::new())),
             network_buf: Arc::new(StdMutex::new(VecDeque::new())),
+            downloads,
             snapshot_refs: StdMutex::new(0),
             listener_handles: StdMutex::new(Vec::new()),
         });
@@ -558,6 +568,61 @@ impl BrowserBackend for ManagedBackend {
     async fn network_log(&self, limit: usize) -> Result<Vec<NetworkEntry>, BrowserError> {
         let buf = self.network_buf.lock().unwrap();
         Ok(buf.iter().rev().take(limit).rev().cloned().collect())
+    }
+
+    async fn downloads(&self, limit: usize) -> Result<Vec<DownloadEntry>, BrowserError> {
+        Ok(self.downloads.lock().unwrap().list(limit))
+    }
+
+    async fn set_file_input(
+        &self,
+        target: &ClickTarget,
+        paths: &[PathBuf],
+    ) -> Result<(), BrowserError> {
+        let expression = super::file_input::expression(target, paths.len() > 1)?;
+        let page = self.page.lock().await;
+        let evaluated = page
+            .execute(
+                EvaluateParams::builder()
+                    .expression(expression)
+                    .return_by_value(false)
+                    .build()
+                    .map_err(BrowserError::Protocol)?,
+            )
+            .await
+            .map_err(|e| BrowserError::Protocol(format!("file input evaluate: {e}")))?;
+        if let Some(details) = evaluated.result.exception_details {
+            let message = details
+                .exception
+                .and_then(|exception| exception.description)
+                .unwrap_or(details.text);
+            return Err(BrowserError::Protocol(format!(
+                "file input evaluate: {}",
+                message
+            )));
+        }
+        let object_id = evaluated.result.result.object_id.ok_or_else(|| {
+            BrowserError::Protocol("file input evaluate returned no objectId".into())
+        })?;
+        let files = paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let set_result = page
+            .execute(
+                SetFileInputFilesParams::builder()
+                    .files(files)
+                    .object_id(object_id.clone())
+                    .build()
+                    .map_err(BrowserError::Protocol)?,
+            )
+            .await
+            .map_err(|e| BrowserError::Protocol(format!("set file input: {e}")));
+        let release_result = page.execute(ReleaseObjectParams::new(object_id)).await;
+        set_result?;
+        release_result
+            .map_err(|e| BrowserError::Protocol(format!("release file input object: {e}")))?;
+        Ok(())
     }
 
     async fn tabs(&self) -> Result<Vec<TabInfo>, BrowserError> {

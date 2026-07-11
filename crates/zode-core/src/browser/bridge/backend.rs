@@ -1,10 +1,12 @@
 use super::{BridgeServer, RpcKind};
 use crate::browser::backend::{
-    BrowserBackend, BrowserError, ClickTarget, ConsoleEntry, NetworkEntry, Screenshot, TabInfo,
+    BrowserBackend, BrowserError, ClickTarget, ConsoleEntry, DownloadEntry, NetworkEntry,
+    Screenshot, TabInfo,
 };
 use crate::browser::snapshot_js::SNAPSHOT_JS;
 use async_trait::async_trait;
 use base64::Engine as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -186,6 +188,72 @@ impl BrowserBackend for BridgeBackend {
         Ok(parse_network(&payload))
     }
 
+    async fn downloads(&self, limit: usize) -> Result<Vec<DownloadEntry>, BrowserError> {
+        let payload = self
+            .ext(
+                "downloads.list",
+                serde_json::json!({ "limit": limit.clamp(1, 100) }),
+            )
+            .await
+            .map_err(translate_downloads_error)?;
+        serde_json::from_value(payload)
+            .map_err(|e| BrowserError::Protocol(format!("bridge downloads payload: {e}")))
+    }
+
+    async fn set_file_input(
+        &self,
+        target: &ClickTarget,
+        paths: &[PathBuf],
+    ) -> Result<(), BrowserError> {
+        let evaluated = self
+            .cdp(
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": crate::browser::file_input::expression(target, paths.len() > 1)?,
+                    "returnByValue": false
+                }),
+            )
+            .await?;
+        if let Some(details) = evaluated.get("exceptionDetails") {
+            let text = details
+                .get("exception")
+                .and_then(|exception| exception.get("description"))
+                .or_else(|| details.get("text"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("JavaScript exception");
+            return Err(BrowserError::Protocol(format!(
+                "file input evaluate: {text}"
+            )));
+        }
+        let object_id = evaluated
+            .get("result")
+            .and_then(|result| result.get("objectId"))
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                BrowserError::Protocol("file input evaluate returned no objectId".into())
+            })?
+            .to_string();
+        let files = paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let set_result = self
+            .cdp(
+                "DOM.setFileInputFiles",
+                serde_json::json!({"files": files, "objectId": object_id}),
+            )
+            .await;
+        let release_result = self
+            .cdp(
+                "Runtime.releaseObject",
+                serde_json::json!({"objectId": object_id}),
+            )
+            .await;
+        set_result?;
+        release_result?;
+        Ok(())
+    }
+
     async fn tabs(&self) -> Result<Vec<TabInfo>, BrowserError> {
         let payload = self.ext("tabs.list", serde_json::json!({})).await?;
         parse_tabs(&payload)
@@ -229,6 +297,20 @@ impl BrowserBackend for BridgeBackend {
     async fn close(&self) -> Result<(), BrowserError> {
         self.ext("debugger.detach", serde_json::json!({})).await?;
         Ok(())
+    }
+}
+
+fn translate_downloads_error(error: BrowserError) -> BrowserError {
+    match error {
+        BrowserError::Protocol(message)
+            if message.contains("unknown ext method") && message.contains("downloads.list") =>
+        {
+            BrowserError::Protocol(
+                "bridge extension too old / downloads unsupported; update the zode Chrome extension"
+                    .into(),
+            )
+        }
+        other => other,
     }
 }
 
@@ -341,5 +423,13 @@ mod tests {
         let shot = screenshot_from_payload(&v).unwrap();
         assert_eq!(shot.bytes, vec![1u8]);
         assert_eq!(shot.media_type, "image/jpeg");
+    }
+
+    #[test]
+    fn old_extension_download_error_is_actionable() {
+        let error = translate_downloads_error(BrowserError::Protocol(
+            "unknown ext method downloads.list".into(),
+        ));
+        assert!(error.to_string().contains("bridge extension too old"));
     }
 }
