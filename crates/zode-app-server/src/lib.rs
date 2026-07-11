@@ -4,6 +4,7 @@ pub mod command;
 pub mod error;
 pub mod fs;
 pub mod initialize;
+pub mod outbound;
 pub mod router;
 pub mod runtime;
 pub mod stdio_server;
@@ -25,6 +26,9 @@ mod fs_tests;
 #[cfg(test)]
 #[path = "initialize_tests.rs"]
 mod initialize_tests;
+#[cfg(test)]
+#[path = "outbound_tests.rs"]
+mod outbound_tests;
 #[cfg(test)]
 #[path = "router_tests.rs"]
 mod router_tests;
