@@ -6,6 +6,7 @@ use zode_app_server_protocol::types::{ApprovalPolicy, Thread};
 use zode_app_server_protocol::{JsonRpcMessage, RequestId};
 
 use crate::accumulator::{TurnEndState, TurnOutcome};
+use crate::approval_broker::BrokerMsg;
 use crate::session::SessionMsg;
 use crate::stdio_server::serve;
 use crate::turn_host::{HostFactory, TurnHost};
@@ -17,6 +18,7 @@ impl HostFactory for EmptyHostFactory {
         &mut self,
         _policy: ApprovalPolicy,
         _turn_ids: mpsc::UnboundedReceiver<String>,
+        _broker: Option<mpsc::Sender<BrokerMsg>>,
     ) -> Box<dyn TurnHost> {
         Box::new(EmptyHost)
     }
@@ -43,6 +45,7 @@ impl HostFactory for HangingHostFactory {
         &mut self,
         _policy: ApprovalPolicy,
         turn_ids: mpsc::UnboundedReceiver<String>,
+        _broker: Option<mpsc::Sender<BrokerMsg>>,
     ) -> Box<dyn TurnHost> {
         Box::new(HangingHost { turn_ids })
     }
@@ -94,6 +97,7 @@ async fn run_frames(input: &str, factory: Box<dyn HostFactory>) -> Vec<JsonRpcMe
         factory,
         "/tmp/zode".into(),
         None,
+        60_000,
     ));
 
     client_write.write_all(input.as_bytes()).await.unwrap();
@@ -143,6 +147,7 @@ async fn eof_with_hanging_turn_emits_interrupted_before_exit() {
         Box::new(HangingHostFactory),
         "/tmp/zode".into(),
         None,
+        60_000,
     ));
     let mut lines = BufReader::new(client_read).lines();
 
@@ -192,4 +197,139 @@ async fn eof_with_hanging_turn_emits_interrupted_before_exit() {
         message,
         JsonRpcMessage::Notification(notification) if notification.method == "turn/interrupted"
     )));
+}
+
+async fn start_prompt_command(
+    timeout_ms: u64,
+) -> (
+    tokio::io::Lines<BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
+    tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+    String,
+) {
+    let (client, server) = tokio::io::duplex(16 * 1024);
+    let (client_read, mut client_write) = tokio::io::split(client);
+    let (server_read, server_write) = tokio::io::split(server);
+    let task = tokio::spawn(serve(
+        server_read,
+        server_write,
+        Box::new(EmptyHostFactory),
+        "/tmp/zode".into(),
+        None,
+        timeout_ms,
+    ));
+    let mut lines = BufReader::new(client_read).lines();
+
+    client_write
+        .write_all(concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"test","version":"0"},"approvalPolicy":"prompt"}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"command/exec","params":{"command":["sh","-c","printf hi"]}}"#,
+            "\n",
+        ).as_bytes())
+        .await
+        .unwrap();
+
+    let initialize: serde_json::Value =
+        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(initialize["result"]["approvalPolicy"], "prompt");
+    let approval_line = lines.next_line().await.unwrap().unwrap();
+    let approval: serde_json::Value = serde_json::from_str(&approval_line).unwrap();
+    assert_eq!(approval["method"], "approval/request");
+    assert_eq!(approval["params"]["kind"], "command");
+    let id = approval["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with("srv-"));
+
+    (lines, client_write, task, id)
+}
+
+#[tokio::test]
+async fn prompt_command_allow_response_executes() {
+    let (mut lines, mut write, task, id) = start_prompt_command(60_000).await;
+    write
+        .write_all(
+            format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id:?},\"result\":{{\"decision\":\"allow\"}}}}\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let response: serde_json::Value =
+        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(response["id"], 2);
+    assert_eq!(response["result"]["stdout"], "hi");
+    write.shutdown().await.unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn prompt_command_deny_response_is_policy_denied() {
+    let (mut lines, mut write, task, id) = start_prompt_command(60_000).await;
+    write
+        .write_all(
+            format!("{{\"jsonrpc\":\"2.0\",\"id\":{id:?},\"result\":{{\"decision\":\"deny\"}}}}\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let response: serde_json::Value =
+        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(response["id"], 2);
+    assert_eq!(
+        response["error"]["code"],
+        zode_app_server_protocol::rpc::POLICY_DENIED
+    );
+    write.shutdown().await.unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn prompt_command_timeout_is_policy_denied() {
+    let (mut lines, mut write, task, _id) = start_prompt_command(200).await;
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(
+        response["error"]["code"],
+        zode_app_server_protocol::rpc::POLICY_DENIED
+    );
+    write.shutdown().await.unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn prompt_command_error_frame_is_policy_denied() {
+    let (mut lines, mut write, task, id) = start_prompt_command(60_000).await;
+    write
+        .write_all(
+            format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id:?},\"error\":{{\"code\":-32000,\"message\":\"client refused\"}}}}\n"
+            )
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let response: serde_json::Value =
+        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(
+        response["error"]["code"],
+        zode_app_server_protocol::rpc::POLICY_DENIED
+    );
+    write.shutdown().await.unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn eof_with_pending_prompt_approval_exits_cleanly() {
+    let (_lines, mut write, task, _id) = start_prompt_command(60_000).await;
+    write.shutdown().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .expect("server did not exit after EOF")
+        .unwrap()
+        .unwrap();
 }

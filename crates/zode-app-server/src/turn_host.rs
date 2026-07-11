@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::approval_broker::BrokerMsg;
 use agent::abort::AbortController;
 use agent::stream::Event;
 use async_trait::async_trait;
@@ -35,6 +36,7 @@ pub trait HostFactory: Send + 'static {
         &mut self,
         policy: ApprovalPolicy,
         turn_ids: mpsc::UnboundedReceiver<String>,
+        broker: Option<mpsc::Sender<BrokerMsg>>,
     ) -> Box<dyn TurnHost>;
 }
 
@@ -42,7 +44,7 @@ pub struct EngineHost {
     template: EngineTemplate,
     engines: Arc<Mutex<HashMap<String, Arc<ZodeEngine>>>>,
     turn_ids: mpsc::UnboundedReceiver<String>,
-    deny_broker: Option<tokio::task::JoinHandle<()>>,
+    approval_pump: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl EngineHost {
@@ -53,11 +55,11 @@ impl EngineHost {
         date: String,
         policy: ApprovalPolicy,
         turn_ids: mpsc::UnboundedReceiver<String>,
+        broker: Option<mpsc::Sender<BrokerMsg>>,
     ) -> Self {
-        let (queue, deny_broker) = match policy {
+        let (queue, approval_pump) = match policy {
             ApprovalPolicy::Auto => (None, None),
-            // Prompt is rejected by initialize; S2 will replace this broker.
-            ApprovalPolicy::ReadOnly | ApprovalPolicy::Prompt => {
+            ApprovalPolicy::ReadOnly => {
                 let (queue, mut receiver) = approval_queue();
                 let broker = tokio::spawn(async move {
                     while let Some(request) = receiver.next().await {
@@ -66,20 +68,32 @@ impl EngineHost {
                 });
                 (Some(queue), Some(broker))
             }
+            ApprovalPolicy::Prompt => {
+                let (queue, mut receiver) = approval_queue();
+                let broker = broker.expect("prompt host requires approval broker");
+                let pump = tokio::spawn(async move {
+                    while let Some(request) = receiver.next().await {
+                        if broker.send(BrokerMsg::Engine(request)).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                (Some(queue), Some(pump))
+            }
         };
         let yolo = policy == ApprovalPolicy::Auto;
         Self {
             template: EngineTemplate::new(cfg, cwd, queue, yolo, sandbox, date),
             engines: Arc::new(Mutex::new(HashMap::new())),
             turn_ids,
-            deny_broker,
+            approval_pump,
         }
     }
 }
 
 impl Drop for EngineHost {
     fn drop(&mut self) {
-        if let Some(broker) = self.deny_broker.take() {
+        if let Some(broker) = self.approval_pump.take() {
             broker.abort();
         }
     }

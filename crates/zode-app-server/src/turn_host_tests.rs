@@ -64,6 +64,7 @@ async fn engine_host_runs_turn_to_failed_without_credentials() {
         "2026-07-11".into(),
         ApprovalPolicy::Auto,
         turn_ids_rx,
+        None,
     );
     let thread = Thread {
         id: "thread-real".into(),

@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use zode_app_server_protocol::notify;
 use zode_app_server_protocol::rpc::{
     JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, RequestId,
     INVALID_PARAMS, METHOD_NOT_FOUND, NOT_INITIALIZED, TURN_ACTIVE,
 };
+use zode_app_server_protocol::server_requests::{ApprovalDecision, ApprovalKind};
 use zode_app_server_protocol::types::{
     ApprovalPolicy, EmptyResponse, InitializeParams, ThreadListResponse, ThreadNameSetParams,
     ThreadRefParams, ThreadResponse, ThreadStartParams, TurnInterruptParams, TurnResponse,
@@ -14,9 +15,10 @@ use zode_app_server_protocol::types::{
 use zode_core::sandbox::SandboxConfig;
 
 use crate::accumulator::{TurnEndState, TurnOutcome};
+use crate::approval_broker::{ApprovalBroker, BrokerMsg};
 use crate::error::error;
 use crate::initialize::{handle_initialize, ConnectionState};
-use crate::policy::check_direct;
+use crate::policy::{direct_gate, DirectGate, DirectKind};
 use crate::router::{dispatch_stateless, method_kind, parse_params};
 use crate::threads::ThreadRegistry;
 use crate::turn_host::{HostFactory, TurnHost};
@@ -31,6 +33,10 @@ pub enum SessionMsg {
         thread_id: String,
         turn_id: String,
         outcome: TurnOutcome,
+    },
+    ClientResponse {
+        id: String,
+        decision: Option<ApprovalDecision>,
     },
     Shutdown,
 }
@@ -49,6 +55,8 @@ pub struct SessionActor {
     self_tx: mpsc::Sender<SessionMsg>,
     pending_deletes: BTreeMap<String, Vec<RequestId>>,
     shutting_down: bool,
+    approval_timeout_ms: u64,
+    broker: Option<mpsc::Sender<BrokerMsg>>,
 }
 
 impl SessionActor {
@@ -57,6 +65,7 @@ impl SessionActor {
         outbound: mpsc::Sender<JsonRpcMessage>,
         zode_home: String,
         sandbox: Option<SandboxConfig>,
+        approval_timeout_ms: u64,
     ) -> (mpsc::Sender<SessionMsg>, tokio::task::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(1024);
         let actor = Self {
@@ -73,6 +82,8 @@ impl SessionActor {
             self_tx: tx.clone(),
             pending_deletes: BTreeMap::new(),
             shutting_down: false,
+            approval_timeout_ms,
+            broker: None,
         };
         let handle = tokio::spawn(actor.run(rx));
         (tx, handle)
@@ -93,9 +104,19 @@ impl SessionActor {
                     turn_id,
                     outcome,
                 } => self.finished(thread_id, turn_id, outcome).await,
+                SessionMsg::ClientResponse { id, decision } => {
+                    if let Some(broker) = &self.broker {
+                        let _ = broker
+                            .send(BrokerMsg::ClientResponse { id, decision })
+                            .await;
+                    }
+                }
                 SessionMsg::Shutdown => {
                     self.shutting_down = true;
                     self.turns.abort_all();
+                    if let Some(broker) = &self.broker {
+                        let _ = broker.send(BrokerMsg::Shutdown).await;
+                    }
                 }
                 SessionMsg::Rpc(_) => {}
             }
@@ -140,8 +161,58 @@ impl SessionActor {
                         .await;
                 };
                 if let Some(direct) = kind {
-                    if let Err(err) = check_direct(self.policy, direct) {
-                        return self.send_error(request.id, err).await;
+                    match direct_gate(self.policy, direct) {
+                        DirectGate::Deny(err) => return self.send_error(request.id, err).await,
+                        DirectGate::Allow => {}
+                        DirectGate::Prompt => {
+                            let outbound = self.outbound.clone();
+                            let sandbox = self.sandbox.clone();
+                            let broker =
+                                self.broker.clone().expect("prompt policy requires broker");
+                            tokio::spawn(async move {
+                                let id = request.id;
+                                let method = request.method;
+                                let params = request.params;
+                                let summary = format!(
+                                    "{method} {}",
+                                    params
+                                        .as_ref()
+                                        .map_or_else(|| "{}".into(), ToString::to_string)
+                                );
+                                let (reply, decision) = oneshot::channel();
+                                let allowed = broker
+                                    .send(BrokerMsg::Direct {
+                                        kind: approval_kind(direct),
+                                        summary,
+                                        reply,
+                                    })
+                                    .await
+                                    .is_ok()
+                                    && decision.await.unwrap_or(false);
+                                let message = if allowed {
+                                    match dispatch_stateless(&method, params, sandbox.as_ref())
+                                        .await
+                                    {
+                                        Ok(value) => JsonRpcMessage::Response(
+                                            JsonRpcResponse::new(id, value),
+                                        ),
+                                        Err(err) => {
+                                            JsonRpcMessage::Error(JsonRpcError::new(id, err))
+                                        }
+                                    }
+                                } else {
+                                    JsonRpcMessage::Error(JsonRpcError::new(
+                                        id,
+                                        error(
+                                            zode_app_server_protocol::rpc::POLICY_DENIED,
+                                            "denied by user",
+                                        ),
+                                    ))
+                                };
+                                let _ = outbound.send(message).await;
+                            });
+                            return;
+                        }
                     }
                 }
                 let outbound = self.outbound.clone();
@@ -166,23 +237,21 @@ impl SessionActor {
             Ok(v) => v,
             Err(e) => return self.send_error(request.id, e).await,
         };
-        if params.approval_policy == ApprovalPolicy::Prompt {
-            return self
-                .send_error(
-                    request.id,
-                    error(
-                        INVALID_PARAMS,
-                        "approvalPolicy 'prompt' is not supported yet",
-                    ),
-                )
-                .await;
-        }
         let policy = params.approval_policy;
         match handle_initialize(&mut self.state, params, self.zode_home.clone()) {
             Ok(response) => {
                 self.policy = policy;
+                if policy == ApprovalPolicy::Prompt {
+                    let (broker, _task) =
+                        ApprovalBroker::spawn(self.outbound.clone(), self.approval_timeout_ms);
+                    self.broker = Some(broker);
+                }
                 let (turn_ids, turn_ids_rx) = mpsc::unbounded_channel();
-                self.host = Some(self.host_factory.build_host(policy, turn_ids_rx));
+                self.host = Some(self.host_factory.build_host(
+                    policy,
+                    turn_ids_rx,
+                    self.broker.clone(),
+                ));
                 self.turn_ids = Some(turn_ids);
                 self.send_value(request.id, response).await;
             }
@@ -334,5 +403,12 @@ impl SessionActor {
             .outbound
             .send(JsonRpcMessage::Error(JsonRpcError::new(id, err)))
             .await;
+    }
+}
+
+fn approval_kind(kind: DirectKind) -> ApprovalKind {
+    match kind {
+        DirectKind::Command => ApprovalKind::Command,
+        DirectKind::FsWrite => ApprovalKind::FsWrite,
     }
 }

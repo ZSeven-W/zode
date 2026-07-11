@@ -10,13 +10,20 @@ pub enum DirectKind {
     FsWrite,
 }
 
-/// Read-only denies mutating direct methods with `POLICY_DENIED`; auto allows.
-pub fn check_direct(policy: ApprovalPolicy, kind: DirectKind) -> Result<(), ErrorObject> {
+pub enum DirectGate {
+    Allow,
+    Deny(ErrorObject),
+    Prompt,
+}
+
+/// Classifies a mutating direct method without collapsing prompt into allow.
+pub fn direct_gate(policy: ApprovalPolicy, kind: DirectKind) -> DirectGate {
     match policy {
-        ApprovalPolicy::ReadOnly => Err(error(
+        ApprovalPolicy::ReadOnly => DirectGate::Deny(error(
             POLICY_DENIED,
             format!("approval policy denies direct {kind:?}"),
         )),
-        ApprovalPolicy::Auto | ApprovalPolicy::Prompt => Ok(()),
+        ApprovalPolicy::Auto => DirectGate::Allow,
+        ApprovalPolicy::Prompt => DirectGate::Prompt,
     }
 }

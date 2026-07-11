@@ -7,6 +7,7 @@ use zode_app_server_protocol::types::Thread;
 use zode_app_server_protocol::{notify, JsonRpcMessage, JsonRpcRequest, RequestId};
 
 use crate::accumulator::{TurnEndState, TurnOutcome};
+use crate::approval_broker::BrokerMsg;
 use crate::outbound::outbound;
 use crate::session::{SessionActor, SessionMsg};
 use crate::turn_host::{HostFactory, TurnHost};
@@ -32,6 +33,7 @@ impl HostFactory for ScriptedHostFactory {
         &mut self,
         _policy: zode_app_server_protocol::types::ApprovalPolicy,
         turn_ids: mpsc::UnboundedReceiver<String>,
+        _broker: Option<mpsc::Sender<BrokerMsg>>,
     ) -> Box<dyn TurnHost> {
         Box::new(ScriptedHost {
             script: self.script.clone(),
@@ -118,7 +120,8 @@ impl Harness {
     fn new(script: Vec<ScriptStep>) -> Self {
         let (out, rx) = outbound();
         let factory = ScriptedHostFactory { script };
-        let (tx, actor) = SessionActor::spawn(Box::new(factory), out, "/tmp/zode".into(), None);
+        let (tx, actor) =
+            SessionActor::spawn(Box::new(factory), out, "/tmp/zode".into(), None, 60_000);
         Self { tx, rx, actor }
     }
     async fn rpc(&self, id: i64, method: &str, params: serde_json::Value) {
@@ -326,7 +329,7 @@ async fn thread_delete_twice_answers_both_requests() {
 }
 
 #[tokio::test]
-async fn prompt_policy_rejected_at_initialize() {
+async fn prompt_policy_initializes_and_echoes_policy() {
     let mut h = Harness::new(vec![]);
     h.rpc(
         0,
@@ -334,9 +337,7 @@ async fn prompt_policy_rejected_at_initialize() {
         serde_json::json!({"clientInfo":{"name":"test","version":"0"},"approvalPolicy":"prompt"}),
     )
     .await;
-    assert!(
-        matches!(h.next().await,JsonRpcMessage::Error(e) if e.error.code==zode_app_server_protocol::rpc::INVALID_PARAMS && e.error.message=="approvalPolicy 'prompt' is not supported yet")
-    );
+    assert_eq!(h.response().await["approvalPolicy"], "prompt");
     h.shutdown().await;
 }
 
