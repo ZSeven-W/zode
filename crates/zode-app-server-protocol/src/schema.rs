@@ -1,5 +1,11 @@
 use serde_json::{json, Value};
 
+use crate::ClientRequest;
+
+pub const CAPABILITIES: &[&str] = &[
+    "threads", "turns", "fs", "command", "models", "config", "skills", "hooks", "mcp", "plugins",
+];
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FixtureMessage {
     pub name: &'static str,
@@ -7,35 +13,7 @@ pub struct FixtureMessage {
 }
 
 pub fn supported_methods() -> &'static [&'static str] {
-    &[
-        "initialize",
-        "thread/start",
-        "thread/resume",
-        "thread/list",
-        "thread/read",
-        "thread/delete",
-        "thread/name/set",
-        "turn/start",
-        "turn/interrupt",
-        "fs/readFile",
-        "fs/writeFile",
-        "fs/createDirectory",
-        "fs/getMetadata",
-        "fs/readDirectory",
-        "fs/remove",
-        "fs/copy",
-        "command/exec",
-        "model/list",
-        "model/set",
-        "config/read",
-        "config/list",
-        "config/write",
-        "skills/list",
-        "skills/read",
-        "hooks/list",
-        "mcpServerStatus/list",
-        "plugin/list",
-    ]
+    ClientRequest::ALL
 }
 
 pub fn protocol_schema() -> Value {
@@ -80,7 +58,7 @@ pub fn fixture_messages() -> Vec<FixtureMessage> {
                     "zodeHome": "/tmp/zode",
                     "platformFamily": "unix",
                     "platformOs": "macos",
-                    "capabilities": ["threads", "turns", "fs", "command", "skills", "mcp"],
+                    "capabilities": CAPABILITIES,
                     "approvalPolicy": "readOnly"
                 }
             }),

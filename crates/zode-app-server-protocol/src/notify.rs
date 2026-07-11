@@ -1,3 +1,7 @@
+//! Server notifications follow a single-construction-point convention: construct each wire
+//! notification through this module. The method names and wire field names defined here are the
+//! protocol contract.
+
 use crate::rpc::JsonRpcNotification;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

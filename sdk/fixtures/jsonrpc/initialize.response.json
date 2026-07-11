@@ -8,8 +8,12 @@
       "turns",
       "fs",
       "command",
+      "models",
+      "config",
       "skills",
-      "mcp"
+      "hooks",
+      "mcp",
+      "plugins"
     ],
     "platformFamily": "unix",
     "platformOs": "macos",

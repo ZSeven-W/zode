@@ -140,6 +140,36 @@ pub enum ClientRequest {
 }
 
 impl ClientRequest {
+    pub const ALL: &'static [&'static str] = &[
+        "initialize",
+        "thread/start",
+        "thread/resume",
+        "thread/list",
+        "thread/read",
+        "thread/delete",
+        "thread/name/set",
+        "turn/start",
+        "turn/interrupt",
+        "fs/readFile",
+        "fs/writeFile",
+        "fs/createDirectory",
+        "fs/getMetadata",
+        "fs/readDirectory",
+        "fs/remove",
+        "fs/copy",
+        "command/exec",
+        "model/list",
+        "model/set",
+        "config/read",
+        "config/list",
+        "config/write",
+        "skills/list",
+        "skills/read",
+        "hooks/list",
+        "mcpServerStatus/list",
+        "plugin/list",
+    ];
+
     pub fn id(&self) -> &RequestId {
         match self {
             Self::Initialize { id, .. }

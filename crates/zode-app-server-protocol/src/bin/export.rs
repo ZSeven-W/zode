@@ -1,10 +1,18 @@
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
-    let out = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("sdk/fixtures/jsonrpc"));
+    let mut args = std::env::args().skip(1);
+    let out = match args.next().as_deref() {
+        None => PathBuf::from("sdk/fixtures/jsonrpc"),
+        Some("--out") => PathBuf::from(
+            args.next()
+                .ok_or_else(|| anyhow::anyhow!("--out requires a directory"))?,
+        ),
+        Some(argument) => anyhow::bail!("unexpected argument: {argument}"),
+    };
+    if let Some(argument) = args.next() {
+        anyhow::bail!("unexpected argument: {argument}");
+    }
     std::fs::create_dir_all(&out)?;
     for fixture in zode_app_server_protocol::schema::fixture_messages() {
         std::fs::write(

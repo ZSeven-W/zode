@@ -1,5 +1,6 @@
 use crate::error::{error, ServerResult};
 use zode_app_server_protocol::rpc::ALREADY_INITIALIZED;
+use zode_app_server_protocol::schema::CAPABILITIES;
 use zode_app_server_protocol::types::{InitializeParams, InitializeResponse, ServerInfo};
 
 #[derive(Debug, Default)]
@@ -27,18 +28,10 @@ pub fn handle_initialize(
         zode_home,
         platform_family: std::env::consts::FAMILY.to_string(),
         platform_os: std::env::consts::OS.to_string(),
-        capabilities: vec![
-            "threads".to_string(),
-            "turns".to_string(),
-            "fs".to_string(),
-            "command".to_string(),
-            "models".to_string(),
-            "config".to_string(),
-            "skills".to_string(),
-            "hooks".to_string(),
-            "mcp".to_string(),
-            "plugins".to_string(),
-        ],
+        capabilities: CAPABILITIES
+            .iter()
+            .map(|capability| capability.to_string())
+            .collect(),
         approval_policy,
     })
 }

@@ -73,7 +73,7 @@ impl StdioZodeClient {
                     name: name.into(),
                     version: version.into(),
                 },
-                approval_policy: ApprovalPolicy::ReadOnly,
+                approval_policy: ApprovalPolicy::default(),
             },
         )
         .await
