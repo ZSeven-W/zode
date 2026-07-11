@@ -128,7 +128,7 @@ const WINDOWS_PASTE_ARGS: &[&str] = &[
     "-NoProfile",
     "-NonInteractive",
     "-Command",
-    "[Console]::Out.Write([string](Get-Clipboard -Raw))",
+    "$text = [string](Get-Clipboard -Raw); $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($text); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)",
 ];
 
 fn paste_candidates() -> &'static [(&'static str, &'static [&'static str])] {
@@ -192,7 +192,7 @@ mod tests {
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                "[Console]::Out.Write([string](Get-Clipboard -Raw))",
+                "$text = [string](Get-Clipboard -Raw); $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($text); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)",
             ]
         );
     }
