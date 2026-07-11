@@ -6463,6 +6463,9 @@ const SESSION_PICKER_MOUSE_SCROLL_ROWS: usize = 1;
 /// dozens to hundreds of scroll events at once; the cap keeps a sustained flood
 /// from starving the agent/approval/question `select!` branches.
 const INPUT_COALESCE_CAP: usize = 1024;
+const WINDOWS_BRACKETED_PASTE_START: &str = "\u{1b}[200~";
+const WINDOWS_BRACKETED_PASTE_END: &str = "\u{1b}[201~";
+const WINDOWS_PASTE_EVENT_CAP: usize = 65_536;
 
 /// Max agent events (streaming text deltas, tool updates) drained per loop
 /// iteration before redrawing. Each delta otherwise triggers a full-transcript
@@ -6494,6 +6497,71 @@ where
         }
     }
     out
+}
+
+fn normalize_paste_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn windows_key_burst_text(events: &[CtEvent]) -> Option<String> {
+    if events.len() > WINDOWS_PASTE_EVENT_CAP {
+        return None;
+    }
+
+    let mut text = String::new();
+    let mut key_count = 0;
+
+    for event in events {
+        let CtEvent::Key(key) = event else {
+            return None;
+        };
+        if key.kind == crossterm::event::KeyEventKind::Release {
+            continue;
+        }
+
+        key_count += 1;
+        match key.code {
+            KeyCode::Char(character) => text.push(character),
+            KeyCode::Enter => text.push('\n'),
+            KeyCode::Tab => text.push('\t'),
+            KeyCode::Esc => text.push('\u{1b}'),
+            _ => return None,
+        }
+    }
+
+    (key_count >= 2).then_some(text)
+}
+
+fn windows_multiline_paste_text(
+    events: &[CtEvent],
+    clipboard_text: Option<&str>,
+) -> Option<String> {
+    let raw = windows_key_burst_text(events)?;
+    if let Some(body) = raw
+        .strip_prefix(WINDOWS_BRACKETED_PASTE_START)
+        .and_then(|text| text.strip_suffix(WINDOWS_BRACKETED_PASTE_END))
+    {
+        return Some(normalize_paste_newlines(body));
+    }
+
+    let candidate = normalize_paste_newlines(&raw);
+    if !candidate.contains('\n') {
+        return None;
+    }
+
+    let clipboard = normalize_paste_newlines(clipboard_text?);
+    (candidate == clipboard).then_some(candidate)
+}
+
+fn windows_burst_needs_clipboard(events: &[CtEvent]) -> bool {
+    let Some(raw) = windows_key_burst_text(events) else {
+        return false;
+    };
+    if raw.starts_with(WINDOWS_BRACKETED_PASTE_START) {
+        return false;
+    }
+
+    normalize_paste_newlines(&raw).contains('\n')
 }
 
 /// Context occupancy (real tokens / model window, as a percent) at which zode
@@ -8367,6 +8435,84 @@ mod tests {
             agent_tx,
         )
         .await;
+    }
+
+    fn windows_key_pair(code: KeyCode) -> [CtEvent; 2] {
+        [
+            CtEvent::Key(KeyEvent::new_with_kind(
+                code.clone(),
+                KeyModifiers::NONE,
+                crossterm::event::KeyEventKind::Press,
+            )),
+            CtEvent::Key(KeyEvent::new_with_kind(
+                code,
+                KeyModifiers::NONE,
+                crossterm::event::KeyEventKind::Release,
+            )),
+        ]
+    }
+
+    fn windows_key_burst(text: &str) -> Vec<CtEvent> {
+        text.chars()
+            .flat_map(|character| {
+                let code = match character {
+                    '\n' | '\r' => KeyCode::Enter,
+                    '\t' => KeyCode::Tab,
+                    '\u{1b}' => KeyCode::Esc,
+                    character => KeyCode::Char(character),
+                };
+                windows_key_pair(code)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn windows_bracketed_multiline_burst_decodes_without_clipboard() {
+        let events = windows_key_burst("\u{1b}[200~first\nsecond\u{1b}[201~");
+        assert_eq!(
+            windows_multiline_paste_text(&events, None),
+            Some("first\nsecond".to_string())
+        );
+    }
+
+    #[test]
+    fn windows_unbracketed_multiline_burst_requires_clipboard_match() {
+        let events = windows_key_burst("first\nsecond");
+        assert_eq!(
+            windows_multiline_paste_text(&events, Some("first\r\nsecond")),
+            Some("first\nsecond".to_string())
+        );
+        assert_eq!(
+            windows_multiline_paste_text(&events, Some("different")),
+            None
+        );
+    }
+
+    #[test]
+    fn windows_standalone_enter_is_never_a_paste() {
+        let events = windows_key_pair(KeyCode::Enter).to_vec();
+        assert_eq!(windows_multiline_paste_text(&events, Some("\n")), None);
+    }
+
+    #[test]
+    fn windows_burst_with_navigation_key_is_rejected() {
+        let mut events = windows_key_burst("first\nsecond");
+        events.extend(windows_key_pair(KeyCode::Left));
+        assert_eq!(
+            windows_multiline_paste_text(&events, Some("first\nsecond")),
+            None
+        );
+    }
+
+    #[test]
+    fn windows_clipboard_lookup_is_only_needed_for_unbracketed_multiline_bursts() {
+        let bracketed = windows_key_burst("\u{1b}[200~first\nsecond\u{1b}[201~");
+        let unbracketed = windows_key_burst("first\nsecond");
+        let single_line = windows_key_burst("first second");
+
+        assert!(!windows_burst_needs_clipboard(&bracketed));
+        assert!(windows_burst_needs_clipboard(&unbracketed));
+        assert!(!windows_burst_needs_clipboard(&single_line));
     }
 
     #[tokio::test]
