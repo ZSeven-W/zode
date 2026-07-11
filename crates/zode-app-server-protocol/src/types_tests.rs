@@ -1,8 +1,8 @@
 use super::methods::ClientRequest;
 use super::rpc::RequestId;
 use super::types::{
-    ApprovalPolicy, ClientInfo, CommandExecParams, InitializeParams, ModelSetParams,
-    ThreadStartParams, TurnStartParams,
+    ApprovalPolicy, ClientInfo, CommandExecParams, ConfigWriteParams, ConfigWriteResponse,
+    InitializeParams, ModelSetParams, ThreadStartParams, TurnStartParams,
 };
 use super::{notify, schema};
 use serde_json::json;
@@ -142,7 +142,41 @@ fn model_set_params_use_camel_case_thread_id() {
 #[test]
 fn supported_methods_include_model_set_only_as_the_new_client_method() {
     let methods = schema::supported_methods();
-    assert_eq!(methods.len(), 26);
+    assert_eq!(methods.len(), 27);
     assert!(methods.contains(&"model/set"));
+    assert!(methods.contains(&"config/write"));
     assert!(!methods.contains(&"approval/request"));
+}
+
+#[test]
+fn config_write_uses_camel_case_response_and_defaults_persist() {
+    let params: ConfigWriteParams =
+        serde_json::from_value(json!({"patch": {"theme": "dark"}})).unwrap();
+    assert!(!params.persist);
+    assert_eq!(
+        serde_json::to_value(ConfigWriteResponse {
+            applies_to: "newEngines".into(),
+        })
+        .unwrap(),
+        json!({"appliesTo": "newEngines"})
+    );
+}
+
+#[test]
+fn config_write_request_uses_config_write_method() {
+    let req = ClientRequest::ConfigWrite {
+        id: RequestId::Number(4),
+        params: ConfigWriteParams {
+            patch: json!({"theme": "dark"}),
+            persist: true,
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(req).unwrap(),
+        json!({
+            "id": 4,
+            "method": "config/write",
+            "params": {"patch": {"theme": "dark"}, "persist": true}
+        })
+    );
 }

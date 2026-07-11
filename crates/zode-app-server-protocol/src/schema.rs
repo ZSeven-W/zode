@@ -29,6 +29,7 @@ pub fn supported_methods() -> &'static [&'static str] {
         "model/set",
         "config/read",
         "config/list",
+        "config/write",
         "skills/list",
         "skills/read",
         "hooks/list",

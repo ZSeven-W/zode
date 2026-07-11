@@ -1815,6 +1815,15 @@ impl EngineTemplate {
         self
     }
 
+    /// Clone this template with a new base configuration for engines assembled
+    /// later, preserving its runtime queues, sandbox, date, and mode flags.
+    pub fn with_config(&self, cfg: ZodeConfig) -> Self {
+        let mut template = self.clone();
+        template.browser = BrowserSession::new(cfg.browser.clone(), Arc::new(ManagedFactory));
+        template.cfg = cfg;
+        template
+    }
+
     /// Assemble a fresh engine using the template's default cwd and no source
     /// label.
     pub async fn assemble(&self) -> Result<ZodeEngine, CoreError> {

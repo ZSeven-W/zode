@@ -55,6 +55,10 @@ impl ServerRuntimeOptions {
 }
 
 impl HostFactory for ServerRuntimeOptions {
+    fn base_config(&self) -> ZodeConfig {
+        self.cfg.clone()
+    }
+
     fn build_host(
         &mut self,
         policy: ApprovalPolicy,

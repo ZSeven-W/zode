@@ -53,6 +53,9 @@ pub(crate) async fn drive_stream(
 
 #[async_trait]
 pub trait TurnHost: Send + 'static {
+    /// Replaces the base config used only when assembling future engines.
+    async fn apply_config(&mut self, _cfg: ZodeConfig) {}
+
     async fn set_model(&mut self, thread_id: &str, model: &str) -> Result<(), ErrorObject>;
 
     /// Restores a thread's persistent model after a turn-level override.
@@ -70,6 +73,10 @@ pub trait TurnHost: Send + 'static {
 }
 
 pub trait HostFactory: Send + 'static {
+    fn base_config(&self) -> ZodeConfig {
+        ZodeConfig::default()
+    }
+
     fn build_host(
         &mut self,
         policy: ApprovalPolicy,
@@ -187,6 +194,10 @@ impl Drop for EngineHost {
 
 #[async_trait]
 impl TurnHost for EngineHost {
+    async fn apply_config(&mut self, cfg: ZodeConfig) {
+        self.template = self.template.with_config(cfg);
+    }
+
     async fn set_model(&mut self, thread_id: &str, model: &str) -> Result<(), ErrorObject> {
         let template = self
             .thread_templates

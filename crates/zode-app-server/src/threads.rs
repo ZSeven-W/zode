@@ -32,6 +32,10 @@ impl ThreadRegistry {
         self.threads.values().cloned().collect()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.threads.is_empty()
+    }
+
     pub fn read(&self, id: &str) -> ServerResult<Thread> {
         self.threads
             .get(id)

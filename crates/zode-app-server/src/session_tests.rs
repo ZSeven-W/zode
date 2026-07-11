@@ -3,8 +3,12 @@ use std::sync::Arc;
 use agent::abort::AbortController;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
+use zode_app_server_protocol::server_requests::ApprovalDecision;
 use zode_app_server_protocol::types::Thread;
 use zode_app_server_protocol::{notify, ErrorObject, JsonRpcMessage, JsonRpcRequest, RequestId};
+use zode_core::config::ZodeConfig;
+
+use zode_app_server_protocol::types::ConfigWriteParams;
 
 use crate::accumulator::{TurnEndState, TurnOutcome};
 use crate::approval_broker::BrokerMsg;
@@ -35,6 +39,7 @@ struct HostCalls {
     set_models: Vec<(String, String)>,
     overrides: Vec<Option<String>>,
     restores: Vec<String>,
+    configs: Vec<ZodeConfig>,
 }
 
 impl HostFactory for ScriptedHostFactory {
@@ -54,6 +59,10 @@ impl HostFactory for ScriptedHostFactory {
 
 #[async_trait]
 impl TurnHost for ScriptedHost {
+    async fn apply_config(&mut self, cfg: ZodeConfig) {
+        self.calls.lock().await.configs.push(cfg);
+    }
+
     async fn set_model(&mut self, thread_id: &str, model: &str) -> Result<(), ErrorObject> {
         self.calls
             .lock()
@@ -596,6 +605,181 @@ async fn shutdown_aborts_active_turn_emits_terminal_then_exits() {
     h.started().await;
 
     h.tx.send(SessionMsg::Shutdown).await.unwrap();
+    assert!(
+        matches!(h.next().await, JsonRpcMessage::Notification(n) if n.method == "turn/interrupted")
+    );
+    drop(h.tx);
+    tokio::time::timeout(std::time::Duration::from_secs(2), h.actor)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn config_write_auto_applies_to_future_engines() {
+    let mut h = Harness::new(vec![]);
+    h.init(Some("auto")).await;
+    h.rpc(
+        1,
+        "config/write",
+        serde_json::json!({"patch":{"theme":"dark"}}),
+    )
+    .await;
+    assert_eq!(h.response().await["appliesTo"], "newEngines");
+    assert_eq!(
+        h.calls
+            .lock()
+            .await
+            .configs
+            .last()
+            .unwrap()
+            .theme
+            .as_deref(),
+        Some("dark")
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn config_write_rejects_sandbox_when_a_thread_exists() {
+    let mut h = Harness::new(vec![]);
+    h.init(Some("auto")).await;
+    h.thread().await;
+    h.rpc(
+        2,
+        "config/write",
+        serde_json::json!({"patch":{"sandbox":{}}}),
+    )
+    .await;
+    match h.next().await {
+        JsonRpcMessage::Error(error) => {
+            assert_eq!(error.error.code, zode_app_server_protocol::rpc::TURN_ACTIVE);
+            assert_eq!(
+                error.error.message,
+                "sandbox changes require an empty session"
+            );
+        }
+        message => panic!("expected error, got {message:?}"),
+    }
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn config_write_is_denied_by_read_only_policy() {
+    let mut h = Harness::new(vec![]);
+    h.init(None).await;
+    h.rpc(
+        1,
+        "config/write",
+        serde_json::json!({"patch":{"theme":"dark"}}),
+    )
+    .await;
+    match h.next().await {
+        JsonRpcMessage::Error(error) => {
+            assert_eq!(
+                error.error.code,
+                zode_app_server_protocol::rpc::POLICY_DENIED
+            );
+        }
+        message => panic!("expected error, got {message:?}"),
+    }
+    assert!(h.calls.lock().await.configs.is_empty());
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn config_write_read_only_gate_precedes_parameter_parsing() {
+    let mut h = Harness::new(vec![]);
+    h.init(None).await;
+    h.rpc(1, "config/write", serde_json::json!({})).await;
+    match h.next().await {
+        JsonRpcMessage::Error(error) => {
+            assert_eq!(
+                error.error.code,
+                zode_app_server_protocol::rpc::POLICY_DENIED
+            );
+        }
+        message => panic!("expected error, got {message:?}"),
+    }
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn config_write_prompt_allow_returns_to_actor_before_applying() {
+    let mut h = Harness::new(vec![]);
+    h.init(Some("prompt")).await;
+    h.rpc(
+        1,
+        "config/write",
+        serde_json::json!({"patch":{"theme":"dark"}}),
+    )
+    .await;
+    let approval_id = match h.next().await {
+        JsonRpcMessage::Request(request) => {
+            assert_eq!(request.method, "approval/request");
+            assert_eq!(request.params.as_ref().unwrap()["kind"], "fsWrite");
+            assert_eq!(request.params.as_ref().unwrap()["summary"], "config/write");
+            match request.id {
+                RequestId::String(id) => id,
+                id => panic!("expected string approval id, got {id:?}"),
+            }
+        }
+        message => panic!("expected approval request, got {message:?}"),
+    };
+    assert!(h.calls.lock().await.configs.is_empty());
+    h.tx.send(SessionMsg::ClientResponse {
+        id: approval_id,
+        decision: Some(ApprovalDecision::Allow),
+    })
+    .await
+    .unwrap();
+    assert_eq!(h.response().await["appliesTo"], "newEngines");
+    assert_eq!(h.calls.lock().await.configs.len(), 1);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn approved_config_write_queued_during_shutdown_gets_error_not_silence() {
+    // Reproduce the exactly-once violation: a turn is active so the actor
+    // keeps draining its queue past Shutdown (has_active() stays true until
+    // TurnFinished arrives). We enqueue Shutdown and then an
+    // ApprovedConfigWrite behind it on the same channel, in that order, so
+    // the actor is guaranteed to observe `shutting_down == true` when it
+    // processes the queued config write. Before the fix this fell into the
+    // silent catch-all arm and the requester never got a response.
+    let mut h = Harness::new(vec![ScriptStep::Hang]);
+    h.init(None).await;
+    let thread_id = h.thread().await;
+    h.rpc(
+        2,
+        "turn/start",
+        serde_json::json!({"threadId":thread_id,"input":"hi"}),
+    )
+    .await;
+    h.response().await;
+    h.started().await;
+
+    h.tx.send(SessionMsg::Shutdown).await.unwrap();
+    h.tx.send(SessionMsg::ApprovedConfigWrite {
+        request_id: RequestId::Number(99),
+        params: ConfigWriteParams {
+            patch: serde_json::json!({"theme":"dark"}),
+            persist: false,
+        },
+    })
+    .await
+    .unwrap();
+
+    match h.next().await {
+        JsonRpcMessage::Error(e) => {
+            assert_eq!(e.id, RequestId::Number(99));
+            assert_eq!(e.error.code, zode_app_server_protocol::rpc::POLICY_DENIED);
+            assert_eq!(e.error.message, "server shutting down");
+        }
+        message => {
+            panic!("expected an error response for the queued config write, got {message:?}")
+        }
+    }
     assert!(
         matches!(h.next().await, JsonRpcMessage::Notification(n) if n.method == "turn/interrupted")
     );

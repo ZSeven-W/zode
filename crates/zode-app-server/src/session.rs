@@ -5,18 +5,20 @@ use tokio::task::JoinSet;
 use zode_app_server_protocol::notify;
 use zode_app_server_protocol::rpc::{
     JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, RequestId,
-    METHOD_NOT_FOUND, NOT_INITIALIZED, TURN_ACTIVE,
+    INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, NOT_INITIALIZED, POLICY_DENIED, TURN_ACTIVE,
 };
 use zode_app_server_protocol::server_requests::{ApprovalDecision, ApprovalKind};
 use zode_app_server_protocol::types::{
-    ApprovalPolicy, EmptyResponse, InitializeParams, ModelSetParams, ThreadListResponse,
-    ThreadNameSetParams, ThreadRefParams, ThreadResponse, ThreadStartParams, TurnInterruptParams,
-    TurnResponse, TurnStartParams,
+    ApprovalPolicy, ConfigWriteParams, ConfigWriteResponse, EmptyResponse, InitializeParams,
+    ModelSetParams, ThreadListResponse, ThreadNameSetParams, ThreadRefParams, ThreadResponse,
+    ThreadStartParams, TurnInterruptParams, TurnResponse, TurnStartParams,
 };
+use zode_core::config::{ConfigManager, ZodeConfig};
 use zode_core::sandbox::SandboxConfig;
 
 use crate::accumulator::{TurnEndState, TurnOutcome};
 use crate::approval_broker::{ApprovalBroker, BrokerMsg};
+use crate::config_write::{merge_patch, persist_patch};
 use crate::error::error;
 use crate::initialize::{handle_initialize, ConnectionState};
 use crate::policy::{direct_gate, DirectGate, DirectKind};
@@ -39,6 +41,10 @@ pub enum SessionMsg {
         id: String,
         decision: Option<ApprovalDecision>,
     },
+    ApprovedConfigWrite {
+        request_id: RequestId,
+        params: ConfigWriteParams,
+    },
     Shutdown,
 }
 
@@ -47,6 +53,7 @@ pub struct SessionActor {
     threads: ThreadRegistry,
     turns: TurnRegistry,
     policy: ApprovalPolicy,
+    config: ZodeConfig,
     host_factory: Box<dyn HostFactory>,
     host: Option<Box<dyn TurnHost>>,
     turn_ids: Option<mpsc::UnboundedSender<String>>,
@@ -72,11 +79,13 @@ impl SessionActor {
         dispatch_join_timeout_ms: u64,
     ) -> (mpsc::Sender<SessionMsg>, tokio::task::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(1024);
+        let config = host_factory.base_config();
         let actor = Self {
             state: ConnectionState::default(),
             threads: ThreadRegistry::default(),
             turns: TurnRegistry::default(),
             policy: ApprovalPolicy::default(),
+            config,
             host_factory,
             host: None,
             turn_ids: None,
@@ -117,6 +126,9 @@ impl SessionActor {
                             .await;
                     }
                 }
+                SessionMsg::ApprovedConfigWrite { request_id, params } if !self.shutting_down => {
+                    self.config_write(request_id, params).await;
+                }
                 SessionMsg::Shutdown => {
                     self.shutting_down = true;
                     self.turns.abort_all();
@@ -125,6 +137,10 @@ impl SessionActor {
                     }
                 }
                 SessionMsg::Rpc(_) => {}
+                SessionMsg::ApprovedConfigWrite { request_id, .. } => {
+                    self.send_error(request_id, error(POLICY_DENIED, "server shutting down"))
+                        .await;
+                }
             }
             if self.shutting_down && !self.turns.has_active() {
                 self.join_dispatch_tasks().await;
@@ -156,6 +172,7 @@ impl SessionActor {
             "thread/read" | "thread/resume" => self.thread_read(request).await,
             "thread/name/set" => self.thread_name(request).await,
             "model/set" => self.model_set(request).await,
+            "config/write" => self.config_write_request(request).await,
             "thread/delete" => self.thread_delete(request).await,
             "turn/start" => self.turn_start(request).await,
             "turn/interrupt" => self.turn_interrupt(request).await,
@@ -280,6 +297,117 @@ impl SessionActor {
             Err(err) => self.send_error(request.id, err).await,
         }
     }
+
+    async fn config_write_request(&mut self, request: JsonRpcRequest) {
+        let id = request.id;
+        match direct_gate(self.policy, DirectKind::FsWrite) {
+            DirectGate::Deny(err) => self.send_error(id, err).await,
+            DirectGate::Allow => {
+                let params: ConfigWriteParams = match parse_params(request.params) {
+                    Ok(value) => value,
+                    Err(err) => return self.send_error(id, err).await,
+                };
+                self.config_write(id, params).await;
+            }
+            DirectGate::Prompt => {
+                let params: ConfigWriteParams = match parse_params(request.params) {
+                    Ok(value) => value,
+                    Err(err) => return self.send_error(id, err).await,
+                };
+                let broker = self.broker.clone().expect("prompt policy requires broker");
+                let self_tx = self.self_tx.clone();
+                let outbound = self.outbound.clone();
+                self.dispatch_tasks.spawn(async move {
+                    let (reply, decision) = oneshot::channel();
+                    let allowed = broker
+                        .send(BrokerMsg::Direct {
+                            kind: ApprovalKind::FsWrite,
+                            summary: "config/write".into(),
+                            reply,
+                        })
+                        .await
+                        .is_ok()
+                        && decision.await.unwrap_or(false);
+                    if allowed {
+                        let _ = self_tx
+                            .send(SessionMsg::ApprovedConfigWrite {
+                                request_id: id,
+                                params,
+                            })
+                            .await;
+                    } else {
+                        let _ = outbound
+                            .send(JsonRpcMessage::Error(JsonRpcError::new(
+                                id,
+                                error(POLICY_DENIED, "denied by user"),
+                            )))
+                            .await;
+                    }
+                });
+            }
+        }
+    }
+
+    async fn config_write(&mut self, id: RequestId, params: ConfigWriteParams) {
+        let patch = match params.patch.as_object() {
+            Some(patch) => patch,
+            None => {
+                return self
+                    .send_error(id, error(INVALID_PARAMS, "config patch must be an object"))
+                    .await;
+            }
+        };
+        if patch.contains_key("sandbox") && !self.threads.is_empty() {
+            return self
+                .send_error(
+                    id,
+                    error(TURN_ACTIVE, "sandbox changes require an empty session"),
+                )
+                .await;
+        }
+        let config = match merge_patch(&self.config, params.patch.clone()) {
+            Ok(config) => config,
+            Err(err) => return self.send_error(id, err).await,
+        };
+        if params.persist {
+            let config_dir = match ConfigManager::config_dir() {
+                Ok(dir) => dir,
+                Err(err) => {
+                    return self
+                        .send_error(
+                            id,
+                            error(
+                                INTERNAL_ERROR,
+                                format!("could not resolve config dir: {err}"),
+                            ),
+                        )
+                        .await;
+                }
+            };
+            if let Err(err) = persist_patch(&config_dir, &params.patch) {
+                return self
+                    .send_error(
+                        id,
+                        error(INTERNAL_ERROR, format!("could not persist config: {err}")),
+                    )
+                    .await;
+            }
+        }
+        self.config = config.clone();
+        self.host
+            .as_mut()
+            .expect("initialized session has a turn host")
+            .apply_config(config)
+            .await;
+        self.send_value(
+            id,
+            ConfigWriteResponse {
+                applies_to: "newEngines".into(),
+            },
+        )
+        .await;
+    }
+
     async fn thread_start(&mut self, request: JsonRpcRequest) {
         let id = request.id;
         let p: ThreadStartParams = match parse_params(request.params) {

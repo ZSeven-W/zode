@@ -2,6 +2,7 @@ pub mod accumulator;
 pub mod approval_broker;
 pub mod capabilities;
 pub mod command;
+pub mod config_write;
 pub mod error;
 pub mod fs;
 pub mod initialize;
@@ -26,6 +27,9 @@ mod approval_broker_tests;
 #[cfg(test)]
 #[path = "command_tests.rs"]
 mod command_tests;
+#[cfg(test)]
+#[path = "config_write_tests.rs"]
+mod config_write_tests;
 #[cfg(test)]
 #[path = "fs_tests.rs"]
 mod fs_tests;

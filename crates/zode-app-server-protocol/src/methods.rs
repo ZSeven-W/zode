@@ -107,6 +107,11 @@ pub enum ClientRequest {
         id: RequestId,
         params: EmptyResponse,
     },
+    #[serde(rename = "config/write")]
+    ConfigWrite {
+        id: RequestId,
+        params: ConfigWriteParams,
+    },
     #[serde(rename = "skills/list")]
     SkillsList {
         id: RequestId,
@@ -158,6 +163,7 @@ impl ClientRequest {
             | Self::ModelSet { id, .. }
             | Self::ConfigRead { id, .. }
             | Self::ConfigList { id, .. }
+            | Self::ConfigWrite { id, .. }
             | Self::SkillsList { id, .. }
             | Self::SkillsRead { id, .. }
             | Self::HooksList { id, .. }
