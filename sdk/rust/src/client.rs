@@ -201,6 +201,10 @@ impl StdioZodeClient {
     pub async fn close(mut self) -> Result<(), SdkError> {
         self.child.kill().await?;
         self.reader.abort();
+        // The abort can land mid-loop and skip the reader's own cleanup;
+        // resolve any in-flight requests to Closed instead of leaving their
+        // callers hanging (reachable when the client is shared via Arc).
+        self.pending.lock().await.clear();
         Ok(())
     }
 }
