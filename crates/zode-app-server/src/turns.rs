@@ -12,16 +12,21 @@ pub struct TurnRegistry {
 pub struct ActiveTurn {
     pub turn: Turn,
     pub abort: AbortController,
+    pub interrupted: bool,
 }
 
 impl TurnRegistry {
-    pub fn start(&mut self, thread_id: &str) -> Result<(Turn, AbortController), String> {
+    pub fn start(
+        &mut self,
+        thread_id: &str,
+        turn_id: String,
+    ) -> Result<(Turn, AbortController), String> {
         if self.active.contains_key(thread_id) {
             return Err(format!("turn already running for thread: {thread_id}"));
         }
         let abort = AbortController::new();
         let turn = Turn {
-            id: Uuid::new_v4().simple().to_string(),
+            id: turn_id,
             thread_id: thread_id.to_string(),
             status: TurnStatus::Running,
         };
@@ -30,30 +35,57 @@ impl TurnRegistry {
             ActiveTurn {
                 turn: turn.clone(),
                 abort: abort.clone(),
+                interrupted: false,
             },
         );
         Ok((turn, abort))
     }
 
+    pub fn generate_id() -> String {
+        Uuid::new_v4().simple().to_string()
+    }
+    pub fn get(&self, thread_id: &str) -> Option<&ActiveTurn> {
+        self.active.get(thread_id)
+    }
+    pub fn has_active(&self) -> bool {
+        !self.active.is_empty()
+    }
+    pub fn abort_all(&mut self) {
+        for active in self.active.values_mut() {
+            active.interrupted = true;
+            active.abort.abort();
+        }
+    }
+
     pub fn interrupt(&mut self, thread_id: &str, turn_id: &str) -> bool {
-        let Some(active) = self.active.get(thread_id) else {
+        let Some(active) = self.active.get_mut(thread_id) else {
             return false;
         };
         if active.turn.id != turn_id {
             return false;
         }
+        active.interrupted = true;
         active.abort.abort();
         true
     }
 
-    pub fn finish(&mut self, thread_id: &str, turn_id: &str) -> bool {
-        let Some(active) = self.active.get(thread_id) else {
+    pub fn abort_thread(&mut self, thread_id: &str) -> bool {
+        let Some(active) = self.active.get_mut(thread_id) else {
             return false;
         };
-        if active.turn.id != turn_id {
-            return false;
-        }
-        self.active.remove(thread_id);
+        active.interrupted = true;
+        active.abort.abort();
         true
+    }
+
+    pub fn finish(&mut self, thread_id: &str, turn_id: &str) -> Option<ActiveTurn> {
+        if self
+            .active
+            .get(thread_id)
+            .is_none_or(|active| active.turn.id != turn_id)
+        {
+            return None;
+        }
+        self.active.remove(thread_id)
     }
 }

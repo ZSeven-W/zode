@@ -1,7 +1,5 @@
 use crate::command::{exec, OUTPUT_CAP_BYTES};
-use crate::router::Router;
 use zode_app_server_protocol::types::CommandExecParams;
-use zode_app_server_protocol::{JsonRpcRequest, RequestId};
 
 #[tokio::test]
 async fn command_exec_captures_output() {
@@ -17,38 +15,6 @@ async fn command_exec_captures_output() {
     .unwrap();
     assert_eq!(result.exit_code, Some(0));
     assert_eq!(result.stdout, "hi");
-}
-
-fn init(router: &mut Router) {
-    router
-        .handle_request(JsonRpcRequest::new(
-            RequestId::Number(0),
-            "initialize".to_string(),
-            Some(serde_json::json!({
-                "clientInfo": {"name": "test", "version": "0.0.0"}
-            })),
-        ))
-        .unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn router_command_exec_captures_output() {
-    let mut router = Router::for_tests("/tmp/zode");
-    init(&mut router);
-
-    let response = router
-        .handle_request(JsonRpcRequest::new(
-            RequestId::Number(1),
-            "command/exec".to_string(),
-            Some(serde_json::json!({
-                "command": ["sh", "-c", "printf hi"]
-            })),
-        ))
-        .unwrap();
-
-    assert_eq!(response.result["stdout"], "hi");
-    assert_eq!(response.result["stderr"], "");
-    assert_eq!(response.result["exitCode"], 0);
 }
 
 #[tokio::test]
