@@ -6679,6 +6679,13 @@ impl WindowsTextRunBuilder {
         self.previous_was_cr = was_cr;
     }
 
+    fn include_duplicate_press(&mut self, event: usize) {
+        self.event_end = event + 1;
+        if let Some(unit) = self.units.last_mut() {
+            unit.key_count += 1;
+        }
+    }
+
     fn finish(self) -> WindowsTextRun {
         let mut boundaries = Vec::with_capacity(self.units.len() + 1);
         let mut keys = 0;
@@ -6738,6 +6745,25 @@ fn finish_windows_text_run(
     }
 }
 
+fn windows_duplicate_non_bmp_press(events: &[CtEvent], index: usize) -> Option<char> {
+    // Crossterm's Windows surrogate decoder loses key-up kind information:
+    // the UTF-16 down and up pairs both become identical Press events. Collapse
+    // that adjacent non-BMP pair here while retaining both source event slots.
+    let (CtEvent::Key(first), CtEvent::Key(second)) = (events.get(index)?, events.get(index + 1)?)
+    else {
+        return None;
+    };
+    if first.kind != crossterm::event::KeyEventKind::Press
+        || second.kind != crossterm::event::KeyEventKind::Press
+        || first.modifiers != second.modifiers
+        || first.code != second.code
+    {
+        return None;
+    }
+    let character = windows_supported_key_char(first)?;
+    (character.len_utf16() == 2).then_some(character)
+}
+
 fn windows_text_runs(events: &[CtEvent]) -> Vec<WindowsTextRun> {
     if events.len() > WINDOWS_PASTE_EVENT_CAP {
         return Vec::new();
@@ -6745,7 +6771,17 @@ fn windows_text_runs(events: &[CtEvent]) -> Vec<WindowsTextRun> {
 
     let mut runs = Vec::new();
     let mut current: Option<WindowsTextRunBuilder> = None;
-    for (index, event) in events.iter().enumerate() {
+    let mut index = 0;
+    while index < events.len() {
+        if let Some(character) = windows_duplicate_non_bmp_press(events, index) {
+            let run = current.get_or_insert_with(WindowsTextRunBuilder::new);
+            run.push(index, character);
+            run.include_duplicate_press(index + 1);
+            index += 2;
+            continue;
+        }
+
+        let event = &events[index];
         match event {
             CtEvent::Key(key) if key.kind == crossterm::event::KeyEventKind::Release => {
                 if let Some(run) = &mut current {
@@ -6763,6 +6799,7 @@ fn windows_text_runs(events: &[CtEvent]) -> Vec<WindowsTextRun> {
             }
             _ => finish_windows_text_run(&mut current, &mut runs),
         }
+        index += 1;
     }
     finish_windows_text_run(&mut current, &mut runs);
     runs
@@ -8928,6 +8965,86 @@ mod tests {
                 text: "🦀\n".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn windows_duplicate_non_bmp_presses_form_one_text_unit() {
+        let crab = KeyCode::Char('🦀');
+        let mut events = vec![
+            CtEvent::Key(KeyEvent::new_with_kind(
+                crab.clone(),
+                KeyModifiers::NONE,
+                crossterm::event::KeyEventKind::Press,
+            )),
+            CtEvent::Key(KeyEvent::new_with_kind(
+                crab,
+                KeyModifiers::NONE,
+                crossterm::event::KeyEventKind::Press,
+            )),
+        ];
+        events.extend(windows_key_burst("\n"));
+
+        let runs = windows_text_runs(&events);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "🦀\n");
+        assert_eq!(runs[0].event_range(&(0..'🦀'.len_utf8())), Some(0..2));
+        assert_eq!(
+            windows_paste_segments(&events, Some("🦀\n")),
+            vec![WindowsPasteSegment {
+                events: 0..events.len(),
+                text: "🦀\n".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn windows_four_non_bmp_presses_preserve_two_logical_characters() {
+        let press = || {
+            CtEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('🦀'),
+                KeyModifiers::NONE,
+                crossterm::event::KeyEventKind::Press,
+            ))
+        };
+        let mut events = vec![press(), press(), press(), press()];
+        events.extend(windows_key_burst("\n"));
+
+        let runs = windows_text_runs(&events);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "🦀🦀\n");
+        assert_eq!(runs[0].event_range(&(0..'🦀'.len_utf8())), Some(0..2));
+        assert_eq!(
+            runs[0].event_range(&('🦀'.len_utf8()..('🦀'.len_utf8() * 2))),
+            Some(2..4)
+        );
+        assert_eq!(
+            windows_paste_segments(&events, Some("🦀🦀\n")),
+            vec![WindowsPasteSegment {
+                events: 0..events.len(),
+                text: "🦀🦀\n".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_bracketed_paste_collapses_duplicate_non_bmp_presses() {
+        let (mut app, agent_tx) = make_test_app().await;
+        let mut events = windows_key_burst("\u{1b}[200~first ");
+        events.push(CtEvent::Key(KeyEvent::new(
+            KeyCode::Char('🦀'),
+            KeyModifiers::NONE,
+        )));
+        events.push(CtEvent::Key(KeyEvent::new(
+            KeyCode::Char('🦀'),
+            KeyModifiers::NONE,
+        )));
+        events.extend(windows_key_burst("\nsecond\u{1b}[201~"));
+
+        app.handle_term_burst(events, &agent_tx, true, None).await;
+
+        assert_eq!(app.input.text(), "first 🦀\nsecond");
+        assert!(app.active_tab().chat.messages().is_empty());
+        assert!(!app.active_tab().is_busy());
     }
 
     #[test]
