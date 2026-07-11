@@ -8804,7 +8804,7 @@ mod tests {
     fn windows_key_pair_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> [CtEvent; 2] {
         [
             CtEvent::Key(KeyEvent::new_with_kind(
-                code.clone(),
+                code,
                 modifiers,
                 crossterm::event::KeyEventKind::Press,
             )),
@@ -8972,7 +8972,7 @@ mod tests {
         let crab = KeyCode::Char('🦀');
         let mut events = vec![
             CtEvent::Key(KeyEvent::new_with_kind(
-                crab.clone(),
+                crab,
                 KeyModifiers::NONE,
                 crossterm::event::KeyEventKind::Press,
             )),
