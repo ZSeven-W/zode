@@ -21,6 +21,36 @@ use crate::accumulator::{TurnAccumulator, TurnEndState};
 use crate::error::error;
 use crate::session::SessionMsg;
 
+pub(crate) async fn drive_stream(
+    mut stream: Box<dyn agent::stream::EventStream>,
+    accumulator: &mut TurnAccumulator,
+    msgs: &mpsc::Sender<SessionMsg>,
+) -> TurnEndState {
+    let mut last_error = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(event) => {
+                for notification in accumulator.on_event(&event) {
+                    let _ = msgs.send(SessionMsg::TurnEvent { notification }).await;
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                for notification in accumulator.on_event(&Event::Error {
+                    code: "engine_error".into(),
+                    message: message.clone(),
+                }) {
+                    let _ = msgs.send(SessionMsg::TurnEvent { notification }).await;
+                }
+                last_error = Some(message);
+            }
+        }
+    }
+    last_error.map_or(TurnEndState::Completed, |error| TurnEndState::Failed {
+        error,
+    })
+}
+
 #[async_trait]
 pub trait TurnHost: Send + 'static {
     async fn set_model(&mut self, thread_id: &str, model: &str) -> Result<(), ErrorObject>;
@@ -386,34 +416,12 @@ impl TurnHost for EngineHost {
             };
 
             let mut accumulator = TurnAccumulator::new(&thread_id, &turn_id);
-            let mut last_error = None;
-            match engine.turn(&input, abort.clone()).await {
-                Ok(mut stream) => {
-                    while let Some(item) = stream.next().await {
-                        match item {
-                            Ok(event) => {
-                                for notification in accumulator.on_event(&event) {
-                                    let _ = msgs.send(SessionMsg::TurnEvent { notification }).await;
-                                }
-                            }
-                            Err(error) => {
-                                let message = error.to_string();
-                                for notification in accumulator.on_event(&Event::Error {
-                                    code: "engine_error".into(),
-                                    message: message.clone(),
-                                }) {
-                                    let _ = msgs.send(SessionMsg::TurnEvent { notification }).await;
-                                }
-                                last_error = Some(message);
-                            }
-                        }
-                    }
-                }
-                Err(error) => last_error = Some(error.to_string()),
-            }
-            let state = last_error.map_or(TurnEndState::Completed, |error| TurnEndState::Failed {
-                error,
-            });
+            let state = match engine.turn(&input, abort.clone()).await {
+                Ok(stream) => drive_stream(stream, &mut accumulator, &msgs).await,
+                Err(error) => TurnEndState::Failed {
+                    error: error.to_string(),
+                },
+            };
             drop(engine);
             let _ = msgs
                 .send(SessionMsg::TurnFinished {

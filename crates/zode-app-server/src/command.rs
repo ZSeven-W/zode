@@ -28,6 +28,10 @@ pub async fn exec(
         command.current_dir(cwd);
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Reap the child if the dispatch task is aborted mid-flight (e.g. the
+    // session actor's shutdown join timeout fires) — without this the OS
+    // process would outlive the cancelled future.
+    command.kill_on_drop(true);
 
     let mut child = command
         .spawn()

@@ -71,6 +71,7 @@ pub async fn run(args: &ServerArgs, cwd: &Path) -> i32 {
             date: today_date(),
             zode_home,
             approval_timeout_ms: 60_000,
+            dispatch_join_timeout_ms: 5_000,
         };
         return match zode_app_server::stdio_server::run_stdio(options).await {
             Ok(()) => 0,

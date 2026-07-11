@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
 use zode_app_server_protocol::notify;
 use zode_app_server_protocol::rpc::{
     JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, RequestId,
@@ -57,6 +58,8 @@ pub struct SessionActor {
     shutting_down: bool,
     approval_timeout_ms: u64,
     broker: Option<mpsc::Sender<BrokerMsg>>,
+    dispatch_tasks: JoinSet<()>,
+    dispatch_join_timeout_ms: u64,
 }
 
 impl SessionActor {
@@ -66,6 +69,7 @@ impl SessionActor {
         zode_home: String,
         sandbox: Option<SandboxConfig>,
         approval_timeout_ms: u64,
+        dispatch_join_timeout_ms: u64,
     ) -> (mpsc::Sender<SessionMsg>, tokio::task::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(1024);
         let actor = Self {
@@ -84,6 +88,8 @@ impl SessionActor {
             shutting_down: false,
             approval_timeout_ms,
             broker: None,
+            dispatch_tasks: JoinSet::new(),
+            dispatch_join_timeout_ms,
         };
         let handle = tokio::spawn(actor.run(rx));
         (tx, handle)
@@ -121,6 +127,7 @@ impl SessionActor {
                 SessionMsg::Rpc(_) => {}
             }
             if self.shutting_down && !self.turns.has_active() {
+                self.join_dispatch_tasks().await;
                 break;
             }
         }
@@ -170,7 +177,7 @@ impl SessionActor {
                             let sandbox = self.sandbox.clone();
                             let broker =
                                 self.broker.clone().expect("prompt policy requires broker");
-                            tokio::spawn(async move {
+                            self.dispatch_tasks.spawn(async move {
                                 let id = request.id;
                                 let method = request.method;
                                 let params = request.params;
@@ -218,7 +225,7 @@ impl SessionActor {
                 }
                 let outbound = self.outbound.clone();
                 let sandbox = self.sandbox.clone();
-                tokio::spawn(async move {
+                self.dispatch_tasks.spawn(async move {
                     let id = request.id;
                     let message =
                         match dispatch_stateless(&request.method, request.params, sandbox.as_ref())
@@ -230,6 +237,20 @@ impl SessionActor {
                     let _ = outbound.send(message).await;
                 });
             }
+        }
+    }
+
+    async fn join_dispatch_tasks(&mut self) {
+        let join_all = async { while self.dispatch_tasks.join_next().await.is_some() {} };
+        if tokio::time::timeout(
+            std::time::Duration::from_millis(self.dispatch_join_timeout_ms),
+            join_all,
+        )
+        .await
+        .is_err()
+        {
+            self.dispatch_tasks.abort_all();
+            while self.dispatch_tasks.join_next().await.is_some() {}
         }
     }
 
@@ -388,6 +409,11 @@ impl SessionActor {
     }
     async fn finished(&mut self, thread_id: String, turn_id: String, outcome: TurnOutcome) {
         let Some(active) = self.turns.finish(&thread_id, &turn_id) else {
+            tracing::debug!(
+                thread_id = %thread_id,
+                turn_id = %turn_id,
+                "ignoring turn completion for an unknown active turn"
+            );
             return;
         };
         let notification = if active.interrupted {

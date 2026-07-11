@@ -1,13 +1,69 @@
 use std::time::Duration;
 
 use agent::abort::AbortController;
+use agent::error::AgentError;
+use agent::stream::Event;
+use futures_util::stream;
 use tokio::sync::mpsc;
 use zode_app_server_protocol::types::{ApprovalPolicy, Thread, ThreadStatus};
 use zode_core::config::ConfigManager;
 
-use crate::accumulator::TurnEndState;
+use crate::accumulator::{TurnAccumulator, TurnEndState};
 use crate::session::SessionMsg;
-use crate::turn_host::{EngineHost, TurnHost};
+use crate::turn_host::{drive_stream, EngineHost, TurnHost};
+
+#[tokio::test]
+async fn drive_stream_emits_turn_error_and_returns_failed() {
+    let stream = stream::iter([
+        Ok(Event::TextDelta { delta: "hi".into() }),
+        Err(AgentError::other("stream broke")),
+    ]);
+    let mut accumulator = TurnAccumulator::new("thread", "turn");
+    let (msgs, mut rx) = mpsc::channel(4);
+
+    let state = drive_stream(Box::new(stream), &mut accumulator, &msgs).await;
+
+    assert_eq!(
+        state,
+        TurnEndState::Failed {
+            error: "stream broke".into()
+        }
+    );
+    assert!(
+        matches!(rx.recv().await, Some(SessionMsg::TurnEvent { notification })
+        if notification.method == "item/agentMessage/delta")
+    );
+    assert!(
+        matches!(rx.recv().await, Some(SessionMsg::TurnEvent { notification })
+        if notification.method == "turn/error"
+            && notification.params.as_ref().unwrap()["error"]["message"] == "stream broke")
+    );
+}
+
+#[tokio::test]
+async fn drive_stream_returns_completed_with_accumulated_usage() {
+    let stream = stream::iter([
+        Ok(Event::TextDelta { delta: "hi".into() }),
+        Ok(Event::Usage {
+            input_tokens: 2,
+            output_tokens: 3,
+            cache_read: 4,
+            cache_create: 5,
+        }),
+    ]);
+    let mut accumulator = TurnAccumulator::new("thread", "turn");
+    let (msgs, _rx) = mpsc::channel(4);
+
+    let state = drive_stream(Box::new(stream), &mut accumulator, &msgs).await;
+    let outcome = accumulator.finish(state);
+
+    assert_eq!(outcome.state, TurnEndState::Completed);
+    assert_eq!(outcome.final_text, "hi");
+    assert_eq!(outcome.usage.input_tokens, 2);
+    assert_eq!(outcome.usage.output_tokens, 3);
+    assert_eq!(outcome.usage.cache_read, 4);
+    assert_eq!(outcome.usage.cache_create, 5);
+}
 
 /// RAII guard that saves an env var's prior value on construction and
 /// restores it (set or remove) on drop, so a test panic never leaks a

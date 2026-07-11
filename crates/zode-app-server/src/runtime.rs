@@ -18,6 +18,7 @@ pub struct ServerRuntimeOptions {
     pub date: String,
     pub zode_home: String,
     pub approval_timeout_ms: u64,
+    pub dispatch_join_timeout_ms: u64,
 }
 
 impl Default for ServerRuntimeOptions {
@@ -29,6 +30,7 @@ impl Default for ServerRuntimeOptions {
             date: String::new(),
             zode_home: String::new(),
             approval_timeout_ms: 60_000,
+            dispatch_join_timeout_ms: 5_000,
         }
     }
 }

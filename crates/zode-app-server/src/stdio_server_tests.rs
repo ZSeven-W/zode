@@ -112,6 +112,7 @@ async fn run_frames(input: &str, factory: Box<dyn HostFactory>) -> Vec<JsonRpcMe
         "/tmp/zode".into(),
         None,
         60_000,
+        5_000,
     ));
 
     client_write.write_all(input.as_bytes()).await.unwrap();
@@ -162,6 +163,7 @@ async fn eof_with_hanging_turn_emits_interrupted_before_exit() {
         "/tmp/zode".into(),
         None,
         60_000,
+        5_000,
     ));
     let mut lines = BufReader::new(client_read).lines();
 
@@ -231,6 +233,7 @@ async fn start_prompt_command(
         "/tmp/zode".into(),
         None,
         timeout_ms,
+        5_000,
     ));
     let mut lines = BufReader::new(client_read).lines();
 
@@ -346,4 +349,43 @@ async fn eof_with_pending_prompt_approval_exits_cleanly() {
         .expect("server did not exit after EOF")
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn eof_aborts_hanging_direct_dispatch_after_join_timeout() {
+    let (client, server) = tokio::io::duplex(16 * 1024);
+    let (mut client_read, mut client_write) = tokio::io::split(client);
+    let (server_read, server_write) = tokio::io::split(server);
+    let task = tokio::spawn(serve(
+        server_read,
+        server_write,
+        Box::new(EmptyHostFactory),
+        "/tmp/zode".into(),
+        None,
+        60_000,
+        50,
+    ));
+
+    client_write
+        .write_all(
+            concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"test","version":"0"},"approvalPolicy":"auto"}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","id":2,"method":"command/exec","params":{"command":["sh","-c","sleep 10"],"timeout_ms":20000}}"#,
+                "\n",
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    client_write.shutdown().await.unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .expect("server did not abort hanging direct dispatch")
+        .unwrap()
+        .unwrap();
+    let mut output = String::new();
+    client_read.read_to_string(&mut output).await.unwrap();
+    assert!(output.contains("\"id\":1"));
 }

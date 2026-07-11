@@ -17,6 +17,7 @@ pub async fn serve<R, W>(
     zode_home: String,
     sandbox: Option<SandboxConfig>,
     approval_timeout_ms: u64,
+    dispatch_join_timeout_ms: u64,
 ) -> std::io::Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -30,6 +31,7 @@ where
         zode_home,
         sandbox,
         approval_timeout_ms,
+        dispatch_join_timeout_ms,
     );
     let mut lines = BufReader::new(read).lines();
 
@@ -84,6 +86,7 @@ pub async fn run_stdio(options: ServerRuntimeOptions) -> std::io::Result<()> {
     let zode_home = options.zode_home.clone();
     let sandbox = options.sandbox.clone();
     let approval_timeout_ms = options.approval_timeout_ms;
+    let dispatch_join_timeout_ms = options.dispatch_join_timeout_ms;
     serve(
         tokio::io::stdin(),
         tokio::io::stdout(),
@@ -91,6 +94,7 @@ pub async fn run_stdio(options: ServerRuntimeOptions) -> std::io::Result<()> {
         zode_home,
         sandbox,
         approval_timeout_ms,
+        dispatch_join_timeout_ms,
     )
     .await
 }

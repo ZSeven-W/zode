@@ -150,8 +150,14 @@ impl Harness {
             script,
             calls: calls.clone(),
         };
-        let (tx, actor) =
-            SessionActor::spawn(Box::new(factory), out, "/tmp/zode".into(), None, 60_000);
+        let (tx, actor) = SessionActor::spawn(
+            Box::new(factory),
+            out,
+            "/tmp/zode".into(),
+            None,
+            60_000,
+            5_000,
+        );
         Self {
             tx,
             rx,

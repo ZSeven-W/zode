@@ -48,3 +48,34 @@ async fn frames_never_interleave_order() {
     let lines: Vec<&str> = std::str::from_utf8(&buf).unwrap().trim().lines().collect();
     assert!(lines[0].contains("\"id\":1") && lines[1].contains("turn/started"));
 }
+
+#[tokio::test]
+async fn adjacent_deltas_from_different_turns_are_not_merged() {
+    let (tx, rx) = outbound();
+    let mut buf = Vec::new();
+    tx.send(JsonRpcMessage::Notification(notify::agent_message_delta(
+        "thread", "turn-1", "first",
+    )))
+    .await
+    .unwrap();
+    tx.send(JsonRpcMessage::Notification(notify::agent_message_delta(
+        "thread", "turn-2", "second",
+    )))
+    .await
+    .unwrap();
+    drop(tx);
+
+    writer_task(rx, &mut buf).await.unwrap();
+
+    let lines: Vec<serde_json::Value> = std::str::from_utf8(&buf)
+        .unwrap()
+        .trim()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["params"]["turnId"], "turn-1");
+    assert_eq!(lines[0]["params"]["delta"], "first");
+    assert_eq!(lines[1]["params"]["turnId"], "turn-2");
+    assert_eq!(lines[1]["params"]["delta"], "second");
+}
