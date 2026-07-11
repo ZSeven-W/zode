@@ -89,6 +89,9 @@ pub async fn run_ws(
                 connections.spawn(async move {
                     let _permit = permit;
                     let capacity_available = _permit.is_some();
+                    // tungstenite's handshake contract fixes the closure's Err
+                    // type to a full ErrorResponse; boxing is not an option here.
+                    #[allow(clippy::result_large_err)]
                     let callback = move |request: &Request, response: Response| {
                         if !capacity_available {
                             return Err(rejection(StatusCode::SERVICE_UNAVAILABLE, "connection limit reached"));
@@ -101,9 +104,11 @@ pub async fn run_ws(
                             Err(rejection(StatusCode::UNAUTHORIZED, "unauthorized"))
                         }
                     };
-                    let mut ws_config = WebSocketConfig::default();
-                    ws_config.max_message_size = Some(max_frame_bytes);
-                    ws_config.max_frame_size = Some(max_frame_bytes);
+                    let ws_config = WebSocketConfig {
+                        max_message_size: Some(max_frame_bytes),
+                        max_frame_size: Some(max_frame_bytes),
+                        ..WebSocketConfig::default()
+                    };
                     if let Ok(socket) = tokio_tungstenite::accept_hdr_async_with_config(
                         stream, callback, Some(ws_config)
                     ).await {
