@@ -14,13 +14,13 @@ fn command_exec_captures_output() {
 
 fn init(router: &mut Router) {
     router
-        .handle_request(JsonRpcRequest {
-            id: RequestId::Number(0),
-            method: "initialize".to_string(),
-            params: Some(serde_json::json!({
+        .handle_request(JsonRpcRequest::new(
+            RequestId::Number(0),
+            "initialize".to_string(),
+            Some(serde_json::json!({
                 "clientInfo": {"name": "test", "version": "0.0.0"}
             })),
-        })
+        ))
         .unwrap();
 }
 
@@ -30,13 +30,13 @@ fn router_command_exec_captures_output() {
     init(&mut router);
 
     let response = router
-        .handle_request(JsonRpcRequest {
-            id: RequestId::Number(1),
-            method: "command/exec".to_string(),
-            params: Some(serde_json::json!({
+        .handle_request(JsonRpcRequest::new(
+            RequestId::Number(1),
+            "command/exec".to_string(),
+            Some(serde_json::json!({
                 "command": ["sh", "-c", "printf hi"]
             })),
-        })
+        ))
         .unwrap();
 
     assert_eq!(response.result["stdout"], "hi");

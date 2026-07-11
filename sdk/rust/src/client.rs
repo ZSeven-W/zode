@@ -83,11 +83,11 @@ impl StdioZodeClient {
     {
         let id = RequestId::Number(self.next_id);
         self.next_id += 1;
-        let request = JsonRpcRequest {
-            id: id.clone(),
-            method: method.to_string(),
-            params: Some(serde_json::to_value(params)?),
-        };
+        let request = JsonRpcRequest::new(
+            id.clone(),
+            method.to_string(),
+            Some(serde_json::to_value(params)?),
+        );
         self.write_message(&JsonRpcMessage::Request(request))
             .await?;
 
@@ -123,10 +123,11 @@ impl StdioZodeClient {
     where
         P: Serialize,
     {
-        let message = JsonRpcMessage::Notification(zode_app_server_protocol::JsonRpcNotification {
-            method: method.to_string(),
-            params: params.map(serde_json::to_value).transpose()?,
-        });
+        let message =
+            JsonRpcMessage::Notification(zode_app_server_protocol::JsonRpcNotification::new(
+                method.to_string(),
+                params.map(serde_json::to_value).transpose()?,
+            ));
         self.write_message(&message).await
     }
 

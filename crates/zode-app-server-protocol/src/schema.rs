@@ -58,6 +58,7 @@ pub fn fixture_messages() -> Vec<FixtureMessage> {
         FixtureMessage {
             name: "initialize.request",
             value: json!({
+                "jsonrpc": "2.0",
                 "id": "init",
                 "method": "initialize",
                 "params": {"clientInfo": {"name": "fixture", "version": "0.0.0"}}
@@ -66,6 +67,7 @@ pub fn fixture_messages() -> Vec<FixtureMessage> {
         FixtureMessage {
             name: "initialize.response",
             value: json!({
+                "jsonrpc": "2.0",
                 "id": "init",
                 "result": {
                     "serverInfo": {"name": "zode", "version": "0.1.0-beta.5"},
@@ -79,6 +81,7 @@ pub fn fixture_messages() -> Vec<FixtureMessage> {
         FixtureMessage {
             name: "thread-start.request",
             value: json!({
+                "jsonrpc": "2.0",
                 "id": "thread",
                 "method": "thread/start",
                 "params": {"cwd": "/tmp/project", "model": "default"}
@@ -87,6 +90,7 @@ pub fn fixture_messages() -> Vec<FixtureMessage> {
         FixtureMessage {
             name: "fs-read-file.request",
             value: json!({
+                "jsonrpc": "2.0",
                 "id": "read",
                 "method": "fs/readFile",
                 "params": {"path": "/tmp/project/hello.txt"}
@@ -95,6 +99,7 @@ pub fn fixture_messages() -> Vec<FixtureMessage> {
         FixtureMessage {
             name: "command-exec.request",
             value: json!({
+                "jsonrpc": "2.0",
                 "id": "cmd",
                 "method": "command/exec",
                 "params": {"command": ["sh", "-c", "printf hi"]}

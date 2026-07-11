@@ -59,42 +59,30 @@ impl Router {
         request: JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         if request.method == "initialize" {
-            let params: InitializeParams =
-                parse_params(request.params).map_err(|error| JsonRpcError {
-                    id: request.id.clone(),
-                    error,
-                })?;
+            let params: InitializeParams = parse_params(request.params)
+                .map_err(|error| JsonRpcError::new(request.id.clone(), error))?;
             let result = handle_initialize(&mut self.state, params, self.zode_home.clone())
-                .map_err(|error| JsonRpcError {
-                    id: request.id.clone(),
-                    error,
-                })?;
-            return Ok(JsonRpcResponse {
-                id: request.id,
-                result: serde_json::to_value(result).unwrap_or(Value::Null),
-            });
+                .map_err(|error| JsonRpcError::new(request.id.clone(), error))?;
+            return Ok(JsonRpcResponse::new(
+                request.id,
+                serde_json::to_value(result).unwrap_or(Value::Null),
+            ));
         }
         if !self.state.initialized {
-            return Err(JsonRpcError {
-                id: request.id,
-                error: error(NOT_INITIALIZED, "Not initialized"),
-            });
+            return Err(JsonRpcError::new(
+                request.id,
+                error(NOT_INITIALIZED, "Not initialized"),
+            ));
         }
         let id = request.id;
         let result = match request.method.as_str() {
             "thread/start" => {
-                let params: ThreadStartParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                let params: ThreadStartParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 let thread = self
                     .threads
                     .start_metadata_only(params, "(untitled)".to_string())
-                    .map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 serde_json::to_value(ThreadResponse { thread }).unwrap_or(Value::Null)
             }
             "thread/list" => serde_json::to_value(ThreadListResponse {
@@ -102,124 +90,89 @@ impl Router {
             })
             .unwrap_or(Value::Null),
             "thread/read" | "thread/resume" => {
-                let params: ThreadRefParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
-                let thread =
-                    self.threads
-                        .read(&params.thread_id)
-                        .map_err(|error| JsonRpcError {
-                            id: id.clone(),
-                            error,
-                        })?;
+                let params: ThreadRefParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
+                let thread = self
+                    .threads
+                    .read(&params.thread_id)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 serde_json::to_value(ThreadResponse { thread }).unwrap_or(Value::Null)
             }
             "thread/name/set" => {
-                let params: ThreadNameSetParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                let params: ThreadNameSetParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 self.threads
                     .set_name(&params.thread_id, &params.name)
-                    .map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 serde_json::to_value(EmptyResponse {}).unwrap_or(Value::Null)
             }
             "thread/delete" => {
-                let params: ThreadRefParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                let params: ThreadRefParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 self.threads
                     .delete(&params.thread_id)
-                    .map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 serde_json::to_value(EmptyResponse {}).unwrap_or(Value::Null)
             }
             "turn/start" => {
-                let params: TurnStartParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                let params: TurnStartParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 self.threads
                     .read(&params.thread_id)
-                    .map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
-                let (turn, _abort) =
-                    self.turns
-                        .start(&params.thread_id)
-                        .map_err(|message| JsonRpcError {
-                            id: id.clone(),
-                            error: error(INVALID_PARAMS, message),
-                        })?;
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
+                let (turn, _abort) = self.turns.start(&params.thread_id).map_err(|message| {
+                    JsonRpcError::new(id.clone(), error(INVALID_PARAMS, message))
+                })?;
                 serde_json::to_value(TurnResponse { turn }).unwrap_or(Value::Null)
             }
             "fs/readFile" => {
-                let params: FsReadFileParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
-                let data_base64 =
-                    read_file_base64(Path::new(&params.path)).map_err(|err| JsonRpcError {
-                        id: id.clone(),
-                        error: error(INVALID_PARAMS, format!("fs/readFile: {err}")),
-                    })?;
+                let params: FsReadFileParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
+                let data_base64 = read_file_base64(Path::new(&params.path)).map_err(|err| {
+                    JsonRpcError::new(
+                        id.clone(),
+                        error(INVALID_PARAMS, format!("fs/readFile: {err}")),
+                    )
+                })?;
                 serde_json::to_value(FsReadFileResponse { data_base64 }).unwrap_or(Value::Null)
             }
             "fs/writeFile" => {
-                let params: FsWriteFileParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                let params: FsWriteFileParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 write_file_base64(Path::new(&params.path), &params.data_base64).map_err(|err| {
-                    JsonRpcError {
-                        id: id.clone(),
-                        error: error(INVALID_PARAMS, format!("fs/writeFile: {err}")),
-                    }
+                    JsonRpcError::new(
+                        id.clone(),
+                        error(INVALID_PARAMS, format!("fs/writeFile: {err}")),
+                    )
                 })?;
                 serde_json::to_value(EmptyResponse {}).unwrap_or(Value::Null)
             }
             "fs/createDirectory" => {
-                let params: FsCreateDirectoryParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                let params: FsCreateDirectoryParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 let path = Path::new(&params.path);
                 if params.recursive.unwrap_or(true) {
                     std::fs::create_dir_all(path)
                 } else {
                     std::fs::create_dir(path)
                 }
-                .map_err(|err| JsonRpcError {
-                    id: id.clone(),
-                    error: error(INVALID_PARAMS, format!("fs/createDirectory: {err}")),
+                .map_err(|err| {
+                    JsonRpcError::new(
+                        id.clone(),
+                        error(INVALID_PARAMS, format!("fs/createDirectory: {err}")),
+                    )
                 })?;
                 serde_json::to_value(EmptyResponse {}).unwrap_or(Value::Null)
             }
             "fs/getMetadata" => {
-                let params: FsGetMetadataParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                let params: FsGetMetadataParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 let path = Path::new(&params.path);
-                let symlink_meta = std::fs::symlink_metadata(path).map_err(|err| JsonRpcError {
-                    id: id.clone(),
-                    error: error(INVALID_PARAMS, format!("fs/getMetadata: {err}")),
+                let symlink_meta = std::fs::symlink_metadata(path).map_err(|err| {
+                    JsonRpcError::new(
+                        id.clone(),
+                        error(INVALID_PARAMS, format!("fs/getMetadata: {err}")),
+                    )
                 })?;
                 let meta = std::fs::metadata(path).unwrap_or_else(|_| symlink_meta.clone());
                 serde_json::to_value(FsGetMetadataResponse {
@@ -232,25 +185,26 @@ impl Router {
                 .unwrap_or(Value::Null)
             }
             "fs/readDirectory" => {
-                let params: FsReadDirectoryParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                let params: FsReadDirectoryParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 let mut entries = Vec::new();
-                for entry in
-                    std::fs::read_dir(Path::new(&params.path)).map_err(|err| JsonRpcError {
-                        id: id.clone(),
-                        error: error(INVALID_PARAMS, format!("fs/readDirectory: {err}")),
-                    })?
-                {
-                    let entry = entry.map_err(|err| JsonRpcError {
-                        id: id.clone(),
-                        error: error(INVALID_PARAMS, format!("fs/readDirectory: {err}")),
+                for entry in std::fs::read_dir(Path::new(&params.path)).map_err(|err| {
+                    JsonRpcError::new(
+                        id.clone(),
+                        error(INVALID_PARAMS, format!("fs/readDirectory: {err}")),
+                    )
+                })? {
+                    let entry = entry.map_err(|err| {
+                        JsonRpcError::new(
+                            id.clone(),
+                            error(INVALID_PARAMS, format!("fs/readDirectory: {err}")),
+                        )
                     })?;
-                    let metadata = entry.metadata().map_err(|err| JsonRpcError {
-                        id: id.clone(),
-                        error: error(INVALID_PARAMS, format!("fs/readDirectory: {err}")),
+                    let metadata = entry.metadata().map_err(|err| {
+                        JsonRpcError::new(
+                            id.clone(),
+                            error(INVALID_PARAMS, format!("fs/readDirectory: {err}")),
+                        )
                     })?;
                     entries.push(FsReadDirectoryEntry {
                         file_name: entry.file_name().to_string_lossy().into_owned(),
@@ -262,82 +216,61 @@ impl Router {
                 serde_json::to_value(FsReadDirectoryResponse { entries }).unwrap_or(Value::Null)
             }
             "fs/remove" => {
-                let params: FsRemoveParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                let params: FsRemoveParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 remove_path(Path::new(&params.path), params.recursive, params.force).map_err(
-                    |err| JsonRpcError {
-                        id: id.clone(),
-                        error: error(INVALID_PARAMS, format!("fs/remove: {err}")),
+                    |err| {
+                        JsonRpcError::new(
+                            id.clone(),
+                            error(INVALID_PARAMS, format!("fs/remove: {err}")),
+                        )
                     },
                 )?;
                 serde_json::to_value(EmptyResponse {}).unwrap_or(Value::Null)
             }
             "fs/copy" => {
-                let params: FsCopyParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                let params: FsCopyParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 copy_path(
                     Path::new(&params.source_path),
                     Path::new(&params.destination_path),
                     params.recursive.unwrap_or(false),
                 )
-                .map_err(|err| JsonRpcError {
-                    id: id.clone(),
-                    error: error(INVALID_PARAMS, format!("fs/copy: {err}")),
+                .map_err(|err| {
+                    JsonRpcError::new(id.clone(), error(INVALID_PARAMS, format!("fs/copy: {err}")))
                 })?;
                 serde_json::to_value(EmptyResponse {}).unwrap_or(Value::Null)
             }
             "command/exec" => {
-                let params: CommandExecParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
-                let output = self.commands.exec(params).map_err(|error| JsonRpcError {
-                    id: id.clone(),
-                    error,
-                })?;
+                let params: CommandExecParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
+                let output = self
+                    .commands
+                    .exec(params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 serde_json::to_value(output).unwrap_or(Value::Null)
             }
             "model/list" => serde_json::to_value(model_list()).unwrap_or(Value::Null),
             "config/read" => {
-                let output = config_read().map_err(|error| JsonRpcError {
-                    id: id.clone(),
-                    error,
-                })?;
+                let output = config_read().map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 serde_json::to_value(output).unwrap_or(Value::Null)
             }
             "config/list" => {
-                let output = config_list().map_err(|error| JsonRpcError {
-                    id: id.clone(),
-                    error,
-                })?;
+                let output = config_list().map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 serde_json::to_value(output).unwrap_or(Value::Null)
             }
             "skills/list" => {
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                let output = skills_list(&cwd).map_err(|error| JsonRpcError {
-                    id: id.clone(),
-                    error,
-                })?;
+                let output =
+                    skills_list(&cwd).map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 serde_json::to_value(output).unwrap_or(Value::Null)
             }
             "skills/read" => {
-                let params: SkillReadParams =
-                    parse_params(request.params).map_err(|error| JsonRpcError {
-                        id: id.clone(),
-                        error,
-                    })?;
+                let params: SkillReadParams = parse_params(request.params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                let output = skills_read(&cwd, params).map_err(|error| JsonRpcError {
-                    id: id.clone(),
-                    error,
-                })?;
+                let output = skills_read(&cwd, params)
+                    .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 serde_json::to_value(output).unwrap_or(Value::Null)
             }
             "hooks/list" => {
@@ -350,23 +283,21 @@ impl Router {
             }
             "plugin/list" => {
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                let output = plugin_list(&cwd).map_err(|error| JsonRpcError {
-                    id: id.clone(),
-                    error,
-                })?;
+                let output =
+                    plugin_list(&cwd).map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 serde_json::to_value(output).unwrap_or(Value::Null)
             }
             _ => {
-                return Err(JsonRpcError {
+                return Err(JsonRpcError::new(
                     id,
-                    error: error(
+                    error(
                         METHOD_NOT_FOUND,
                         format!("Method not found: {}", request.method),
                     ),
-                });
+                ));
             }
         };
-        Ok(JsonRpcResponse { id, result })
+        Ok(JsonRpcResponse::new(id, result))
     }
 }
 

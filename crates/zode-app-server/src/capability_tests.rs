@@ -3,13 +3,13 @@ use zode_app_server_protocol::{JsonRpcRequest, RequestId};
 
 fn init(router: &mut Router) {
     router
-        .handle_request(JsonRpcRequest {
-            id: RequestId::Number(0),
-            method: "initialize".to_string(),
-            params: Some(serde_json::json!({
+        .handle_request(JsonRpcRequest::new(
+            RequestId::Number(0),
+            "initialize".to_string(),
+            Some(serde_json::json!({
                 "clientInfo": {"name": "test", "version": "0.0.0"}
             })),
-        })
+        ))
         .unwrap();
 }
 
@@ -26,11 +26,11 @@ fn read_only_capability_methods_return_arrays_or_objects() {
         (5, "plugin/list", "plugins"),
     ] {
         let response = router
-            .handle_request(JsonRpcRequest {
-                id: RequestId::Number(id),
-                method: method.to_string(),
-                params: Some(serde_json::json!({})),
-            })
+            .handle_request(JsonRpcRequest::new(
+                RequestId::Number(id),
+                method.to_string(),
+                Some(serde_json::json!({})),
+            ))
             .unwrap();
         assert!(
             response.result[key].is_array(),
@@ -39,11 +39,11 @@ fn read_only_capability_methods_return_arrays_or_objects() {
     }
 
     let config = router
-        .handle_request(JsonRpcRequest {
-            id: RequestId::Number(6),
-            method: "config/read".to_string(),
-            params: Some(serde_json::json!({})),
-        })
+        .handle_request(JsonRpcRequest::new(
+            RequestId::Number(6),
+            "config/read".to_string(),
+            Some(serde_json::json!({})),
+        ))
         .unwrap();
     assert!(config.result["config"].is_object());
 }
