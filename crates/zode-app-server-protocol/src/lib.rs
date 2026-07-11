@@ -1,4 +1,5 @@
 pub mod methods;
+pub mod notify;
 pub mod rpc;
 pub mod schema;
 pub mod types;

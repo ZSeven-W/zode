@@ -1,7 +1,9 @@
 {
   "id": "init",
+  "jsonrpc": "2.0",
   "method": "initialize",
   "params": {
+    "approvalPolicy": "readOnly",
     "clientInfo": {
       "name": "fixture",
       "version": "0.0.0"

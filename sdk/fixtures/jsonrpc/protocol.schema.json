@@ -2,6 +2,7 @@
   "envelope": {
     "error": {
       "required": [
+        "jsonrpc",
         "id",
         "error"
       ]
@@ -11,6 +12,7 @@
         "params"
       ],
       "required": [
+        "jsonrpc",
         "method"
       ]
     },
@@ -19,12 +21,14 @@
         "params"
       ],
       "required": [
+        "jsonrpc",
         "id",
         "method"
       ]
     },
     "response": {
       "required": [
+        "jsonrpc",
         "id",
         "result"
       ]
@@ -39,6 +43,7 @@
     "thread/delete",
     "thread/name/set",
     "turn/start",
+    "turn/interrupt",
     "fs/readFile",
     "fs/writeFile",
     "fs/createDirectory",

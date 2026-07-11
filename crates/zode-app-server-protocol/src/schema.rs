@@ -16,6 +16,7 @@ pub fn supported_methods() -> &'static [&'static str] {
         "thread/delete",
         "thread/name/set",
         "turn/start",
+        "turn/interrupt",
         "fs/readFile",
         "fs/writeFile",
         "fs/createDirectory",
@@ -40,10 +41,10 @@ pub fn protocol_schema() -> Value {
         "name": "zode-app-server",
         "version": env!("CARGO_PKG_VERSION"),
         "envelope": {
-            "request": {"required": ["id", "method"], "optional": ["params"]},
-            "response": {"required": ["id", "result"]},
-            "error": {"required": ["id", "error"]},
-            "notification": {"required": ["method"], "optional": ["params"]}
+            "request": {"required": ["jsonrpc", "id", "method"], "optional": ["params"]},
+            "response": {"required": ["jsonrpc", "id", "result"]},
+            "error": {"required": ["jsonrpc", "id", "error"]},
+            "notification": {"required": ["jsonrpc", "method"], "optional": ["params"]}
         },
         "methods": supported_methods(),
     })
@@ -61,7 +62,10 @@ pub fn fixture_messages() -> Vec<FixtureMessage> {
                 "jsonrpc": "2.0",
                 "id": "init",
                 "method": "initialize",
-                "params": {"clientInfo": {"name": "fixture", "version": "0.0.0"}}
+                "params": {
+                    "clientInfo": {"name": "fixture", "version": "0.0.0"},
+                    "approvalPolicy": "readOnly"
+                }
             }),
         },
         FixtureMessage {
@@ -74,7 +78,8 @@ pub fn fixture_messages() -> Vec<FixtureMessage> {
                     "zodeHome": "/tmp/zode",
                     "platformFamily": "unix",
                     "platformOs": "macos",
-                    "capabilities": ["threads", "turns", "fs", "command", "skills", "mcp"]
+                    "capabilities": ["threads", "turns", "fs", "command", "skills", "mcp"],
+                    "approvalPolicy": "readOnly"
                 }
             }),
         },

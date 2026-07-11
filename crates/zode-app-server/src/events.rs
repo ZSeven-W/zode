@@ -1,55 +1,22 @@
 use agent::stream::Event;
-use serde_json::json;
-use zode_app_server_protocol::JsonRpcNotification;
+use zode_app_server_protocol::{notify, JsonRpcNotification};
 
 pub fn event_to_notification(
     thread_id: &str,
     turn_id: &str,
     event: Event,
 ) -> Option<JsonRpcNotification> {
-    let params_prefix = |item: serde_json::Value| {
-        Some(json!({
-            "threadId": thread_id,
-            "turnId": turn_id,
-            "item": item
-        }))
-    };
     match event {
-        Event::TextDelta { delta } => Some(JsonRpcNotification::new(
-            "item/agentMessage/delta".to_string(),
-            Some(json!({
-                "threadId": thread_id,
-                "turnId": turn_id,
-                "delta": delta
-            })),
-        )),
-        Event::ToolUse { id, name, input } => Some(JsonRpcNotification::new(
-            "item/started".to_string(),
-            params_prefix(json!({
-                "id": id,
-                "type": "dynamicToolCall",
-                "tool": name,
-                "arguments": input,
-                "status": "inProgress"
-            })),
-        )),
-        Event::ToolResult { id, ok, output } => Some(JsonRpcNotification::new(
-            "item/completed".to_string(),
-            params_prefix(json!({
-                "id": id,
-                "type": "dynamicToolCall",
-                "status": if ok { "completed" } else { "failed" },
-                "output": output
-            })),
-        )),
-        Event::Error { code, message } => Some(JsonRpcNotification::new(
-            "turn/error".to_string(),
-            Some(json!({
-                "threadId": thread_id,
-                "turnId": turn_id,
-                "error": {"code": code, "message": message}
-            })),
-        )),
+        Event::TextDelta { delta } => Some(notify::agent_message_delta(thread_id, turn_id, &delta)),
+        Event::ToolUse { id, name, input } => {
+            Some(notify::item_started(thread_id, turn_id, &id, &name, &input))
+        }
+        Event::ToolResult { id, ok, output } => {
+            Some(notify::item_completed(thread_id, turn_id, &id, ok, &output))
+        }
+        Event::Error { code, message } => {
+            Some(notify::turn_error(thread_id, turn_id, &code, &message))
+        }
         _ => None,
     }
 }

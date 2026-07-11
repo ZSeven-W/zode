@@ -1,5 +1,6 @@
 {
   "id": "cmd",
+  "jsonrpc": "2.0",
   "method": "command/exec",
   "params": {
     "command": [

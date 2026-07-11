@@ -18,6 +18,7 @@ pub fn handle_initialize(
     }
     state.initialized = true;
     state.client_name = Some(params.client_info.name);
+    let approval_policy = params.approval_policy;
     Ok(InitializeResponse {
         server_info: ServerInfo {
             name: "zode".to_string(),
@@ -38,5 +39,6 @@ pub fn handle_initialize(
             "mcp".to_string(),
             "plugins".to_string(),
         ],
+        approval_policy,
     })
 }

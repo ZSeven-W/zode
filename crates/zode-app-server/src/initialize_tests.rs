@@ -1,5 +1,5 @@
 use crate::initialize::{handle_initialize, ConnectionState};
-use zode_app_server_protocol::types::{ClientInfo, InitializeParams};
+use zode_app_server_protocol::types::{ApprovalPolicy, ClientInfo, InitializeParams};
 
 #[test]
 fn initialize_sets_connection_state() {
@@ -11,6 +11,7 @@ fn initialize_sets_connection_state() {
                 name: "test".to_string(),
                 version: "0.0.0".to_string(),
             },
+            approval_policy: ApprovalPolicy::ReadOnly,
         },
         "/tmp/zode".into(),
     )
@@ -39,6 +40,24 @@ fn initialize_sets_connection_state() {
 }
 
 #[test]
+fn initialize_echoes_approval_policy() {
+    let mut state = ConnectionState::default();
+    let response = handle_initialize(
+        &mut state,
+        InitializeParams {
+            client_info: ClientInfo {
+                name: "test".to_string(),
+                version: "0.0.0".to_string(),
+            },
+            approval_policy: ApprovalPolicy::Auto,
+        },
+        "/tmp/zode".into(),
+    )
+    .unwrap();
+    assert_eq!(response.approval_policy, ApprovalPolicy::Auto);
+}
+
+#[test]
 fn initialize_twice_is_rejected() {
     let mut state = ConnectionState {
         initialized: true,
@@ -51,6 +70,7 @@ fn initialize_twice_is_rejected() {
                 name: "second".to_string(),
                 version: "0.0.0".to_string(),
             },
+            approval_policy: ApprovalPolicy::ReadOnly,
         },
         "/tmp/zode".into(),
     )

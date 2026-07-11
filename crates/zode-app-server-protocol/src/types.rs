@@ -8,10 +8,21 @@ pub struct ClientInfo {
     pub version: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalPolicy {
+    #[default]
+    ReadOnly,
+    Auto,
+    Prompt,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
     pub client_info: ClientInfo,
+    #[serde(default)]
+    pub approval_policy: ApprovalPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +40,7 @@ pub struct InitializeResponse {
     pub platform_family: String,
     pub platform_os: String,
     pub capabilities: Vec<String>,
+    pub approval_policy: ApprovalPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +104,15 @@ pub struct EmptyResponse {}
 pub struct TurnStartParams {
     pub thread_id: String,
     pub input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnInterruptParams {
+    pub thread_id: String,
+    pub turn_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -3,7 +3,9 @@ use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use zode_app_server_protocol::rpc::{ErrorObject, JsonRpcMessage, JsonRpcRequest, RequestId};
-use zode_app_server_protocol::types::{ClientInfo, InitializeParams, InitializeResponse};
+use zode_app_server_protocol::types::{
+    ApprovalPolicy, ClientInfo, InitializeParams, InitializeResponse,
+};
 
 use crate::ProtocolMethod;
 
@@ -71,6 +73,7 @@ impl StdioZodeClient {
                     name: name.into(),
                     version: version.into(),
                 },
+                approval_policy: ApprovalPolicy::ReadOnly,
             },
         )
         .await

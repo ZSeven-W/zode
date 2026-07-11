@@ -1,5 +1,6 @@
 {
   "id": "thread",
+  "jsonrpc": "2.0",
   "method": "thread/start",
   "params": {
     "cwd": "/tmp/project",

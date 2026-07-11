@@ -45,6 +45,11 @@ pub enum ClientRequest {
         id: RequestId,
         params: TurnStartParams,
     },
+    #[serde(rename = "turn/interrupt")]
+    TurnInterrupt {
+        id: RequestId,
+        params: TurnInterruptParams,
+    },
     #[serde(rename = "fs/readFile")]
     FsReadFile {
         id: RequestId,
@@ -135,6 +140,7 @@ impl ClientRequest {
             | Self::ThreadDelete { id, .. }
             | Self::ThreadNameSet { id, .. }
             | Self::TurnStart { id, .. }
+            | Self::TurnInterrupt { id, .. }
             | Self::FsReadFile { id, .. }
             | Self::FsWriteFile { id, .. }
             | Self::FsCreateDirectory { id, .. }

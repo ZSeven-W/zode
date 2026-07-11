@@ -1,8 +1,10 @@
 use super::methods::ClientRequest;
 use super::rpc::RequestId;
 use super::types::{
-    ClientInfo, CommandExecParams, InitializeParams, ThreadStartParams, TurnStartParams,
+    ApprovalPolicy, ClientInfo, CommandExecParams, InitializeParams, ThreadStartParams,
+    TurnStartParams,
 };
+use super::{notify, schema};
 use serde_json::json;
 
 #[test]
@@ -14,6 +16,7 @@ fn initialize_request_uses_codex_method_name() {
                 name: "zode-sdk-test".to_string(),
                 version: "0.0.0".to_string(),
             },
+            approval_policy: ApprovalPolicy::ReadOnly,
         },
     };
     assert_eq!(
@@ -21,7 +24,10 @@ fn initialize_request_uses_codex_method_name() {
         json!({
             "id":"init",
             "method":"initialize",
-            "params":{"clientInfo":{"name":"zode-sdk-test","version":"0.0.0"}}
+            "params":{
+                "clientInfo":{"name":"zode-sdk-test","version":"0.0.0"},
+                "approvalPolicy":"readOnly"
+            }
         })
     );
 }
@@ -52,6 +58,7 @@ fn turn_start_request_uses_turn_start_method() {
         params: TurnStartParams {
             thread_id: "thread-1".to_string(),
             input: "hello".to_string(),
+            model: None,
         },
     };
     assert_eq!(
@@ -81,4 +88,39 @@ fn command_exec_request_uses_command_exec_method() {
             "params":{"command":["sh","-c","printf hi"],"cwd":"/tmp"}
         })
     );
+}
+
+#[test]
+fn initialize_params_default_policy_is_read_only() {
+    let p: InitializeParams =
+        serde_json::from_str(r#"{"clientInfo":{"name":"t","version":"0"}}"#).unwrap();
+    assert_eq!(p.approval_policy, ApprovalPolicy::ReadOnly);
+}
+
+#[test]
+fn approval_policy_wire_names_are_camel_case() {
+    assert_eq!(
+        serde_json::to_value(ApprovalPolicy::ReadOnly).unwrap(),
+        "readOnly"
+    );
+    assert_eq!(serde_json::to_value(ApprovalPolicy::Auto).unwrap(), "auto");
+    assert_eq!(
+        serde_json::to_value(ApprovalPolicy::Prompt).unwrap(),
+        "prompt"
+    );
+}
+
+#[test]
+fn turn_notifications_carry_ids() {
+    let n = notify::turn_completed("t1", "u1", "hi", &notify::TurnUsage::default());
+    assert_eq!(n.method, "turn/completed");
+    let p = n.params.unwrap();
+    assert_eq!(p["threadId"], "t1");
+    assert_eq!(p["turnId"], "u1");
+    assert_eq!(p["finalText"], "hi");
+}
+
+#[test]
+fn turn_interrupt_method_exists() {
+    assert!(schema::supported_methods().contains(&"turn/interrupt"));
 }

@@ -149,3 +149,7 @@ pub const INTERNAL_ERROR: i64 = -32603;
 pub const SERVER_OVERLOADED: i64 = -32001;
 pub const NOT_INITIALIZED: i64 = -32002;
 pub const ALREADY_INITIALIZED: i64 = -32003;
+pub const POLICY_DENIED: i64 = -32010;
+pub const TURN_ACTIVE: i64 = -32011;
+pub const APPROVAL_TIMEOUT: i64 = -32012;
+pub const UNAUTHORIZED: i64 = -32013;

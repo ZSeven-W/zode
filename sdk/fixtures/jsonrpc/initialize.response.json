@@ -1,6 +1,8 @@
 {
   "id": "init",
+  "jsonrpc": "2.0",
   "result": {
+    "approvalPolicy": "readOnly",
     "capabilities": [
       "threads",
       "turns",
