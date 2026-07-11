@@ -28,6 +28,7 @@ pub struct WsServerConfig {
     pub addr: SocketAddr,
     pub max_connections: usize,
     pub max_frame_bytes: usize,
+    pub drain_timeout_ms: u64,
 }
 
 impl Default for WsServerConfig {
@@ -36,6 +37,7 @@ impl Default for WsServerConfig {
             addr: "127.0.0.1:0".parse().expect("valid default address"),
             max_connections: 8,
             max_frame_bytes: 1024 * 1024,
+            drain_timeout_ms: 5_000,
         }
     }
 }
@@ -70,6 +72,7 @@ pub async fn run_ws(
 
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
     let max_frame_bytes = config.max_frame_bytes;
+    let drain_timeout = std::time::Duration::from_millis(config.drain_timeout_ms);
     let (stop_tx, _) = broadcast::channel::<()>(1);
     let mut connections = JoinSet::new();
     tokio::pin!(shutdown);
@@ -113,7 +116,15 @@ pub async fn run_ws(
 
     drop(listener);
     let _ = stop_tx.send(());
-    while connections.join_next().await.is_some() {}
+    if tokio::time::timeout(drain_timeout, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
+    }
     drop(cleanup);
     Ok(())
 }
