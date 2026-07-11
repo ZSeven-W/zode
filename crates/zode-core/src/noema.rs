@@ -167,37 +167,16 @@ impl ZodeNoema {
         #[cfg(feature = "noema")]
         {
             use noema_core::api::{
-                NoemaEngine, RememberRequest, ReviewAction, ReviewDecisionRequest, ReviewOutcome,
-                SubmitOutcome,
+                NoemaEngine, ReviewAction, ReviewDecisionRequest, ReviewOutcome, SubmitOutcome,
             };
-            use noema_core::memory::{MemoryKind, Scope};
-            use noema_core::sensitivity::SensitivityLevel;
 
             let engine = NoemaEngine::new(root).map_err(|err| err.to_string())?;
-            let noema_scope = match scope {
-                ZodeMemoryScope::User => Scope::User,
-                ZodeMemoryScope::Project => Scope::Project,
-            };
-            let project_path = matches!(scope, ZodeMemoryScope::Project)
-                .then(|| cwd.map(Path::to_path_buf))
-                .flatten();
             // The old direct-write remember_text was removed to close the governance
             // bypass, so we go through submit_candidate. An explicit user "remember"
             // should persist immediately (the review queue is for auto-extracted
             // candidates, not explicit requests), so if it queues we accept it now.
             let outcome = engine
-                .submit_candidate(RememberRequest {
-                    principal: self.principal(),
-                    text: text.to_string(),
-                    scope: noema_scope,
-                    project_path,
-                    kind: MemoryKind::Preference,
-                    sensitivity: SensitivityLevel::Internal,
-                    tags: Vec::new(),
-                    entities: Vec::new(),
-                    confidence: 1.0,
-                    importance: 0.5,
-                })
+                .submit_candidate(self.build_remember_request(text, scope, cwd))
                 .map_err(|err| err.to_string())?;
             let memory_id = match outcome {
                 SubmitOutcome::AutoAccepted { memory_id } => memory_id,
@@ -214,6 +193,10 @@ impl ZodeNoema {
                 },
                 SubmitOutcome::RejectedSecret => {
                     return Err("rejected: secret-class content cannot be stored".to_string())
+                }
+                SubmitOutcome::DuplicatePending { candidate_id } => {
+                    tracing::debug!(%candidate_id, "memory already pending review");
+                    candidate_id
                 }
             };
             Ok(format!("remembered {memory_id}"))
@@ -286,6 +269,10 @@ impl ZodeNoema {
                     Ok(SubmitOutcome::RejectedSecret) => {
                         Err("rejected: secret-class content".to_string())
                     }
+                    Ok(SubmitOutcome::DuplicatePending { candidate_id }) => {
+                        tracing::debug!(%candidate_id, "extracted memory already pending review");
+                        Ok(format!("queued {candidate_id}"))
+                    }
                     Err(err) => Err(err.to_string()),
                 }
             })
@@ -321,6 +308,7 @@ impl ZodeNoema {
             MemoryKindHint::Reference => MemoryKind::Reference,
             MemoryKindHint::Workflow => MemoryKind::Workflow,
             MemoryKindHint::Warning => MemoryKind::Warning,
+            MemoryKindHint::ErrorFix => MemoryKind::ErrorFix,
         };
         let sensitivity = match item.sensitivity {
             SensitivityHint::Public => SensitivityLevel::Public,
@@ -331,12 +319,66 @@ impl ZodeNoema {
             text: item.body.clone(),
             scope,
             project_path,
+            context_cwd: cwd.map(Path::to_path_buf),
+            code: item
+                .code
+                .as_ref()
+                .map(|code| noema_core::memory::CodeAnchor {
+                    repo: None,
+                    paths: code
+                        .paths
+                        .iter()
+                        .filter_map(|path| {
+                            cwd.and_then(|cwd| {
+                                noema_core::project::host_relativize(Path::new(path), cwd)
+                            })
+                        })
+                        .collect(),
+                    symbols: code.symbols.clone(),
+                    head_commit: code.head_commit.clone(),
+                    ref_commits: code.ref_commits.clone(),
+                    lang: code.lang.clone(),
+                    error_sig: code.error_sig.clone(),
+                    commands: code.commands.clone(),
+                }),
             kind,
             sensitivity,
             tags: item.tags.clone(),
             entities: item.entities.clone(),
             confidence: item.confidence,
             importance: item.importance,
+        }
+    }
+
+    #[cfg(feature = "noema")]
+    pub(crate) fn build_remember_request(
+        &self,
+        text: &str,
+        scope: ZodeMemoryScope,
+        cwd: Option<&Path>,
+    ) -> noema_core::api::RememberRequest {
+        use noema_core::api::RememberRequest;
+        use noema_core::memory::{MemoryKind, Scope};
+        use noema_core::sensitivity::SensitivityLevel;
+
+        RememberRequest {
+            principal: self.principal(),
+            text: text.to_string(),
+            scope: match scope {
+                ZodeMemoryScope::User => Scope::User,
+                ZodeMemoryScope::Project => Scope::Project,
+            },
+            project_path: matches!(scope, ZodeMemoryScope::Project)
+                .then(|| cwd.map(Path::to_path_buf))
+                .flatten(),
+            context_cwd: cwd.map(Path::to_path_buf),
+            code: None,
+            kind: MemoryKind::Preference,
+            sensitivity: SensitivityLevel::Internal,
+            tags: Vec::new(),
+            entities: Vec::new(),
+            confidence: 1.0,
+            importance: 0.5,
         }
     }
 
@@ -681,7 +723,66 @@ mod tests {
             sensitivity: SensitivityHint::Internal,
             importance,
             confidence,
+            code: None,
         }
+    }
+
+    #[cfg(feature = "noema")]
+    #[test]
+    fn noema_mapping_produces_error_fix_request() {
+        use crate::noema_extract::{ExtractedCode, MemoryKindHint};
+        use noema_core::memory::MemoryKind;
+
+        let adapter = ZodeNoema::from_root_with_user("/tmp/noema", Some("kay".to_string()));
+        let mut item = candidate("Convert before returning", 0.9, 0.7);
+        item.kind = MemoryKindHint::ErrorFix;
+        item.code = Some(ExtractedCode {
+            error_sig: Some("error[E0308]: mismatched types".into()),
+            ..Default::default()
+        });
+        let cwd = Path::new("/tmp/project");
+        let request = adapter.candidate_request(&item, Some(cwd));
+        assert_eq!(request.kind, MemoryKind::ErrorFix);
+        assert_eq!(request.context_cwd.as_deref(), Some(cwd));
+    }
+
+    #[cfg(feature = "noema")]
+    #[test]
+    fn cwd_relative_paths_convert_in_submit_extracted() {
+        use crate::noema_extract::ExtractedCode;
+
+        // Keep the fixture off macOS's /var -> /private/var symlink so the
+        // lexical (deliberately non-canonicalizing) path contract is tested.
+        let repo = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+        std::fs::create_dir_all(repo.path().join("src")).unwrap();
+        std::fs::write(repo.path().join("src/a.rs"), "pub fn a() {}\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let cwd = repo.path().join("docs");
+        let adapter = ZodeNoema::from_root("/tmp/noema");
+        let mut item = candidate("Use the source fix", 0.9, 0.7);
+        item.code = Some(ExtractedCode {
+            paths: vec!["../src/a.rs".into()],
+            ..Default::default()
+        });
+        let request = adapter.candidate_request(&item, Some(&cwd));
+        assert_eq!(request.code.unwrap().paths, vec!["src/a.rs"]);
+    }
+
+    #[cfg(feature = "noema")]
+    #[test]
+    fn explicit_remember_passes_capture_cwd() {
+        let adapter = ZodeNoema::from_root_with_user("/tmp/noema", Some("kay".to_string()));
+        let cwd = Path::new("/tmp/capture-cwd");
+        let request =
+            adapter.build_remember_request("Prefer Rust", ZodeMemoryScope::User, Some(cwd));
+        assert_eq!(request.context_cwd.as_deref(), Some(cwd));
+        assert!(request.code.is_none());
     }
 
     #[cfg(feature = "noema")]
@@ -737,6 +838,12 @@ mod tests {
         // It must NOT be recallable yet (only the inbox holds it).
         let recalled = adapter.recall_for_turn("vim", None).unwrap();
         assert!(recalled.is_none(), "queued item must not be recallable");
+
+        // Submitting the same low-confidence item again yields
+        // DuplicatePending, which is benign and remains a successful result.
+        let duplicate = adapter.submit_extracted(&items, None);
+        assert!(duplicate[0].is_ok());
+        assert!(duplicate[0].as_ref().unwrap().starts_with("queued "));
     }
 
     #[cfg(feature = "noema")]

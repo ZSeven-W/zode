@@ -2238,6 +2238,7 @@ dependencies = [
  "hmac",
  "jieba-rs",
  "jsonwebtoken",
+ "regex",
  "rust-stemmers",
  "serde",
  "serde_json",

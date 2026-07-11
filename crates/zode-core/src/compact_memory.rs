@@ -68,6 +68,7 @@ pub fn candidate_from_entry(entry: &SessionMemoryEntry) -> Option<ExtractedCandi
         sensitivity: SensitivityHint::Internal,
         importance: 0.6,
         confidence,
+        code: None,
     })
 }
 

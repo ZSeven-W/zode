@@ -1690,7 +1690,8 @@ impl ZodeEngine {
             }
         };
 
-        let items = crate::noema_extract::parse_extraction(&raw, cfg.max_memories_per_turn);
+        let parsed = crate::noema_extract::parse_extraction(&raw, cfg.max_memories_per_turn);
+        let items = parsed.items;
         if items.is_empty() {
             return;
         }
@@ -1703,6 +1704,7 @@ impl ZodeEngine {
             tracing::debug!(
                 candidates = items.len(),
                 submitted = stored,
+                degradation_count = parsed.degradation_count,
                 "post-turn memory extraction complete"
             );
         }
