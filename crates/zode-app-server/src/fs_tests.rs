@@ -2,11 +2,11 @@ use crate::fs::{read_file_base64, write_file_base64};
 use crate::router::Router;
 use zode_app_server_protocol::{JsonRpcRequest, RequestId};
 
-#[test]
-fn write_then_read_base64_file() {
+#[tokio::test]
+async fn write_then_read_base64_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hello.txt");
-    write_file_base64(&path, "aGVsbG8=").unwrap();
+    write_file_base64(&path, "aGVsbG8=").await.unwrap();
     assert_eq!(read_file_base64(&path).unwrap(), "aGVsbG8=");
 }
 
@@ -22,8 +22,8 @@ fn init(router: &mut Router) {
         .unwrap();
 }
 
-#[test]
-fn router_write_read_stat_list_copy_remove() {
+#[tokio::test(flavor = "multi_thread")]
+async fn router_write_read_stat_list_copy_remove() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("nested").join("hello.txt");
     let copy = dir.path().join("copy.txt");

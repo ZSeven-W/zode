@@ -2,7 +2,6 @@ use crate::capabilities::{
     config_list, config_read, hooks_list, mcp_server_status_list, model_list, plugin_list,
     skills_list, skills_read,
 };
-use crate::command::CommandRegistry;
 use crate::error::error;
 use crate::fs::{read_file_base64, write_file_base64};
 use crate::initialize::{handle_initialize, ConnectionState};
@@ -29,7 +28,6 @@ pub struct Router {
     zode_home: String,
     threads: ThreadRegistry,
     turns: TurnRegistry,
-    commands: CommandRegistry,
 }
 
 impl Router {
@@ -39,7 +37,6 @@ impl Router {
             zode_home: zode_home.to_string(),
             threads: ThreadRegistry::default(),
             turns: TurnRegistry::default(),
-            commands: CommandRegistry,
         }
     }
 
@@ -49,7 +46,6 @@ impl Router {
             zode_home,
             threads: ThreadRegistry::default(),
             turns: TurnRegistry::default(),
-            commands: CommandRegistry,
         }
     }
 
@@ -139,7 +135,11 @@ impl Router {
             "fs/writeFile" => {
                 let params: FsWriteFileParams = parse_params(request.params)
                     .map_err(|error| JsonRpcError::new(id.clone(), error))?;
-                write_file_base64(Path::new(&params.path), &params.data_base64).map_err(|err| {
+                block_on(write_file_base64(
+                    Path::new(&params.path),
+                    &params.data_base64,
+                ))
+                .map_err(|err| {
                     JsonRpcError::new(
                         id.clone(),
                         error(INVALID_PARAMS, format!("fs/writeFile: {err}")),
@@ -152,9 +152,9 @@ impl Router {
                     .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 let path = Path::new(&params.path);
                 if params.recursive.unwrap_or(true) {
-                    std::fs::create_dir_all(path)
+                    block_on(tokio::fs::create_dir_all(path))
                 } else {
-                    std::fs::create_dir(path)
+                    block_on(tokio::fs::create_dir(path))
                 }
                 .map_err(|err| {
                     JsonRpcError::new(
@@ -218,24 +218,27 @@ impl Router {
             "fs/remove" => {
                 let params: FsRemoveParams = parse_params(request.params)
                     .map_err(|error| JsonRpcError::new(id.clone(), error))?;
-                remove_path(Path::new(&params.path), params.recursive, params.force).map_err(
-                    |err| {
-                        JsonRpcError::new(
-                            id.clone(),
-                            error(INVALID_PARAMS, format!("fs/remove: {err}")),
-                        )
-                    },
-                )?;
+                block_on(remove_path(
+                    Path::new(&params.path),
+                    params.recursive,
+                    params.force,
+                ))
+                .map_err(|err| {
+                    JsonRpcError::new(
+                        id.clone(),
+                        error(INVALID_PARAMS, format!("fs/remove: {err}")),
+                    )
+                })?;
                 serde_json::to_value(EmptyResponse {}).unwrap_or(Value::Null)
             }
             "fs/copy" => {
                 let params: FsCopyParams = parse_params(request.params)
                     .map_err(|error| JsonRpcError::new(id.clone(), error))?;
-                copy_path(
+                block_on(copy_path(
                     Path::new(&params.source_path),
                     Path::new(&params.destination_path),
                     params.recursive.unwrap_or(false),
-                )
+                ))
                 .map_err(|err| {
                     JsonRpcError::new(id.clone(), error(INVALID_PARAMS, format!("fs/copy: {err}")))
                 })?;
@@ -244,9 +247,7 @@ impl Router {
             "command/exec" => {
                 let params: CommandExecParams = parse_params(request.params)
                     .map_err(|error| JsonRpcError::new(id.clone(), error))?;
-                let output = self
-                    .commands
-                    .exec(params)
+                let output = block_on(crate::command::exec(params, None))
                     .map_err(|error| JsonRpcError::new(id.clone(), error))?;
                 serde_json::to_value(output).unwrap_or(Value::Null)
             }
@@ -313,8 +314,17 @@ fn system_time_ms(value: Option<std::time::SystemTime>) -> i64 {
         .unwrap_or(0)
 }
 
-fn remove_path(path: &Path, recursive: Option<bool>, force: Option<bool>) -> std::io::Result<()> {
-    let metadata = match std::fs::symlink_metadata(path) {
+// Task 6 makes the router async and removes this synchronous bridge.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
+}
+
+async fn remove_path(
+    path: &Path,
+    recursive: Option<bool>,
+    force: Option<bool>,
+) -> std::io::Result<()> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && force.unwrap_or(true) => {
             return Ok(());
@@ -323,17 +333,17 @@ fn remove_path(path: &Path, recursive: Option<bool>, force: Option<bool>) -> std
     };
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         if recursive.unwrap_or(true) {
-            std::fs::remove_dir_all(path)
+            tokio::fs::remove_dir_all(path).await
         } else {
-            std::fs::remove_dir(path)
+            tokio::fs::remove_dir(path).await
         }
     } else {
-        std::fs::remove_file(path)
+        tokio::fs::remove_file(path).await
     }
 }
 
-fn copy_path(source: &Path, destination: &Path, recursive: bool) -> std::io::Result<()> {
-    let metadata = std::fs::metadata(source)?;
+async fn copy_path(source: &Path, destination: &Path, recursive: bool) -> std::io::Result<()> {
+    let metadata = tokio::fs::metadata(source).await?;
     if metadata.is_dir() {
         if !recursive {
             return Err(std::io::Error::new(
@@ -341,28 +351,31 @@ fn copy_path(source: &Path, destination: &Path, recursive: bool) -> std::io::Res
                 "recursive must be true to copy directories",
             ));
         }
-        copy_dir_recursive(source, destination)
+        copy_dir_recursive(source, destination).await
     } else {
         if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
-        std::fs::copy(source, destination).map(|_| ())
+        tokio::fs::copy(source, destination).await.map(|_| ())
     }
 }
 
-fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(destination)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let destination_path = PathBuf::from(destination).join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&source_path, &destination_path)?;
-        } else {
-            if let Some(parent) = destination_path.parent() {
-                std::fs::create_dir_all(parent)?;
+async fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
+    while let Some((source_dir, destination_dir)) = pending.pop() {
+        tokio::fs::create_dir_all(&destination_dir).await?;
+        let mut entries = tokio::fs::read_dir(&source_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let source_path = entry.path();
+            let destination_path = destination_dir.join(entry.file_name());
+            if entry.file_type().await?.is_dir() {
+                pending.push((source_path, destination_path));
+            } else {
+                if let Some(parent) = destination_path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                tokio::fs::copy(&source_path, &destination_path).await?;
             }
-            std::fs::copy(&source_path, &destination_path)?;
         }
     }
     Ok(())

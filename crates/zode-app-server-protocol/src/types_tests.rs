@@ -78,6 +78,7 @@ fn command_exec_request_uses_command_exec_method() {
         params: CommandExecParams {
             command: vec!["sh".to_string(), "-c".to_string(), "printf hi".to_string()],
             cwd: Some("/tmp".to_string()),
+            timeout_ms: None,
         },
     };
     assert_eq!(
