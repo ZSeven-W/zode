@@ -19,7 +19,7 @@ use crate::initialize::{handle_initialize, ConnectionState};
 use crate::policy::check_direct;
 use crate::router::{dispatch_stateless, method_kind, parse_params};
 use crate::threads::ThreadRegistry;
-use crate::turn_host::TurnHost;
+use crate::turn_host::{HostFactory, TurnHost};
 use crate::turns::TurnRegistry;
 
 pub enum SessionMsg {
@@ -40,7 +40,9 @@ pub struct SessionActor {
     threads: ThreadRegistry,
     turns: TurnRegistry,
     policy: ApprovalPolicy,
-    host: Box<dyn TurnHost>,
+    host_factory: Box<dyn HostFactory>,
+    host: Option<Box<dyn TurnHost>>,
+    turn_ids: Option<mpsc::UnboundedSender<String>>,
     outbound: mpsc::Sender<JsonRpcMessage>,
     zode_home: String,
     sandbox: Option<SandboxConfig>,
@@ -51,7 +53,7 @@ pub struct SessionActor {
 
 impl SessionActor {
     pub fn spawn(
-        host: Box<dyn TurnHost>,
+        host_factory: Box<dyn HostFactory>,
         outbound: mpsc::Sender<JsonRpcMessage>,
         zode_home: String,
         sandbox: Option<SandboxConfig>,
@@ -62,7 +64,9 @@ impl SessionActor {
             threads: ThreadRegistry::default(),
             turns: TurnRegistry::default(),
             policy: ApprovalPolicy::default(),
-            host,
+            host_factory,
+            host: None,
+            turn_ids: None,
             outbound,
             zode_home,
             sandbox,
@@ -177,6 +181,9 @@ impl SessionActor {
         match handle_initialize(&mut self.state, params, self.zode_home.clone()) {
             Ok(response) => {
                 self.policy = policy;
+                let (turn_ids, turn_ids_rx) = mpsc::unbounded_channel();
+                self.host = Some(self.host_factory.build_host(policy, turn_ids_rx));
+                self.turn_ids = Some(turn_ids);
                 self.send_value(request.id, response).await;
             }
             Err(err) => self.send_error(request.id, err).await,
@@ -264,9 +271,11 @@ impl SessionActor {
                 &turn_id,
             )))
             .await;
-        self.host
-            .start_turn(&thread, p.input, abort, self.self_tx.clone())
-            .await;
+        if let (Some(turn_ids), Some(host)) = (&self.turn_ids, &mut self.host) {
+            let _ = turn_ids.send(turn_id);
+            host.start_turn(&thread, p.input, abort, self.self_tx.clone())
+                .await;
+        }
     }
     async fn turn_interrupt(&mut self, request: JsonRpcRequest) {
         let id = request.id;

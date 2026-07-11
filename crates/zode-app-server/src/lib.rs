@@ -39,5 +39,8 @@ mod session_tests;
 #[path = "threads_tests.rs"]
 mod threads_tests;
 #[cfg(test)]
+#[path = "turn_host_tests.rs"]
+mod turn_host_tests;
+#[cfg(test)]
 #[path = "turns_tests.rs"]
 mod turns_tests;

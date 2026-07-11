@@ -9,7 +9,7 @@ use zode_app_server_protocol::{notify, JsonRpcMessage, JsonRpcRequest, RequestId
 use crate::accumulator::{TurnEndState, TurnOutcome};
 use crate::outbound::outbound;
 use crate::session::{SessionActor, SessionMsg};
-use crate::turn_host::TurnHost;
+use crate::turn_host::{HostFactory, TurnHost};
 
 #[derive(Clone)]
 enum ScriptStep {
@@ -21,6 +21,23 @@ enum ScriptStep {
 struct ScriptedHost {
     script: Vec<ScriptStep>,
     turn_ids: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
+}
+
+struct ScriptedHostFactory {
+    script: Vec<ScriptStep>,
+}
+
+impl HostFactory for ScriptedHostFactory {
+    fn build_host(
+        &mut self,
+        _policy: zode_app_server_protocol::types::ApprovalPolicy,
+        turn_ids: mpsc::UnboundedReceiver<String>,
+    ) -> Box<dyn TurnHost> {
+        Box::new(ScriptedHost {
+            script: self.script.clone(),
+            turn_ids: Arc::new(Mutex::new(turn_ids)),
+        })
+    }
 }
 
 #[async_trait]
@@ -95,19 +112,14 @@ impl TurnHost for ScriptedHost {
 struct Harness {
     tx: mpsc::Sender<SessionMsg>,
     rx: mpsc::Receiver<JsonRpcMessage>,
-    ids: mpsc::UnboundedSender<String>,
     actor: tokio::task::JoinHandle<()>,
 }
 impl Harness {
     fn new(script: Vec<ScriptStep>) -> Self {
         let (out, rx) = outbound();
-        let (ids, ids_rx) = mpsc::unbounded_channel();
-        let host = ScriptedHost {
-            script,
-            turn_ids: Arc::new(Mutex::new(ids_rx)),
-        };
-        let (tx, actor) = SessionActor::spawn(Box::new(host), out, "/tmp/zode".into(), None);
-        Self { tx, rx, ids, actor }
+        let factory = ScriptedHostFactory { script };
+        let (tx, actor) = SessionActor::spawn(Box::new(factory), out, "/tmp/zode".into(), None);
+        Self { tx, rx, actor }
     }
     async fn rpc(&self, id: i64, method: &str, params: serde_json::Value) {
         self.tx
@@ -150,7 +162,6 @@ impl Harness {
         match self.next().await {
             JsonRpcMessage::Notification(n) if n.method == "turn/started" => {
                 let id = n.params.unwrap()["turnId"].as_str().unwrap().to_string();
-                self.ids.send(id.clone()).unwrap();
                 id
             }
             m => panic!("expected turn/started, got {m:?}"),

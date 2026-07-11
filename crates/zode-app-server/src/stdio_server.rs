@@ -8,9 +8,24 @@ use zode_app_server_protocol::JsonRpcMessage;
 use crate::accumulator::{TurnEndState, TurnOutcome};
 use crate::outbound::{outbound, writer_task};
 use crate::session::{SessionActor, SessionMsg};
-use crate::turn_host::TurnHost;
+use crate::turn_host::{HostFactory, TurnHost};
 
-struct UnavailableHost;
+struct UnavailableHost {
+    turn_ids: mpsc::UnboundedReceiver<String>,
+}
+
+struct UnavailableHostFactory;
+
+impl HostFactory for UnavailableHostFactory {
+    fn build_host(
+        &mut self,
+        _policy: zode_app_server_protocol::types::ApprovalPolicy,
+        turn_ids: mpsc::UnboundedReceiver<String>,
+    ) -> Box<dyn TurnHost> {
+        // Task 8 replaces this temporary stdio wiring with ServerRuntimeOptions.
+        Box::new(UnavailableHost { turn_ids })
+    }
+}
 
 #[async_trait]
 impl TurnHost for UnavailableHost {
@@ -21,10 +36,13 @@ impl TurnHost for UnavailableHost {
         _abort: AbortController,
         msgs: mpsc::Sender<SessionMsg>,
     ) {
+        let Some(turn_id) = self.turn_ids.recv().await else {
+            return;
+        };
         let _ = msgs
             .send(SessionMsg::TurnFinished {
                 thread_id: thread.id.clone(),
-                turn_id: "unavailable".into(),
+                turn_id,
                 outcome: TurnOutcome {
                     state: TurnEndState::Failed {
                         error: "EngineHost lands in Task 7".into(),
@@ -41,7 +59,8 @@ pub async fn run_stdio(zode_home: String) -> std::io::Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let (out_tx, out_rx) = outbound();
     let writer = tokio::spawn(writer_task(out_rx, tokio::io::stdout()));
-    let (session, actor) = SessionActor::spawn(Box::new(UnavailableHost), out_tx, zode_home, None);
+    let (session, actor) =
+        SessionActor::spawn(Box::new(UnavailableHostFactory), out_tx, zode_home, None);
     while let Some(line) = lines.next_line().await? {
         let Ok(JsonRpcMessage::Request(request)) =
             zode_app_server_transport::stdio::decode_line(&line)
