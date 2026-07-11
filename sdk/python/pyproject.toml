@@ -1,8 +1,16 @@
 [project]
 name = "zode-sdk"
-version = "0.1.0b5"
+version = "0.1.0b6"
+description = "Zero-dependency Python SDK for the zode app-server JSON-RPC 2.0 stdio protocol."
+readme = "README.md"
 requires-python = ">=3.9"
+license = "MIT"
+authors = [{ name = "zode" }]
+maintainers = [{ name = "zode" }]
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/zode/zode"
 
 [build-system]
 requires = ["hatchling"]
