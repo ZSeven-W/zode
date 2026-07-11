@@ -63,6 +63,7 @@ function testManifestDeclaresRequiredPermissions() {
     "tabGroups",
     "webNavigation",
     "offscreen",
+    "downloads",
   ]);
 }
 

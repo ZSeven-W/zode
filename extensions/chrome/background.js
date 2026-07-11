@@ -7,6 +7,7 @@ const STORAGE_PORT = "zodePort";
 const KEEPALIVE_MS = 20_000;
 const BUF_CAP = 500;
 const PENDING_REQUEST_CAP = 500;
+const DOWNLOAD_LIMIT_CAP = 100;
 const ZODE_TAB_GROUP_TITLE = "zode";
 const ZODE_TAB_GROUP_COLOR = "blue";
 const DARK_ICONS = {
@@ -32,6 +33,8 @@ let consoleBuf = [];
 let networkBuf = [];
 let pendingRequests = new Map();
 let offscreenCreation = null;
+let downloadSessionActive = false;
+let downloadBuf = [];
 
 async function getStored(keys) {
   return await chrome.storage.local.get(keys);
@@ -104,6 +107,8 @@ async function connect(port, code) {
     ws = new WebSocket(`ws://127.0.0.1:${numericPort}`);
     ws.onopen = async () => {
       try {
+        downloadBuf = [];
+        downloadSessionActive = true;
         if (code) {
           send({ type: "pair", code: String(code) });
         } else if (token) {
@@ -141,6 +146,7 @@ async function connect(port, code) {
       clearInterval(keepalive);
       keepalive = null;
       ws = null;
+      downloadSessionActive = false;
       if (!authenticated) {
         rejectAuth(new Error("zode bridge connection closed"));
       }
@@ -207,6 +213,7 @@ async function reconnectStored(port) {
 }
 
 function closeSocket() {
+  downloadSessionActive = false;
   if (ws != null) {
     const old = ws;
     ws = null;
@@ -313,6 +320,13 @@ async function dispatch(request) {
       return tail(consoleBuf, Number(params.limit) || 100);
     case "logs.network":
       return tail(networkBuf, Number(params.limit) || 100);
+    case "downloads.list": {
+      const limit = Number(params.limit == null ? DOWNLOAD_LIMIT_CAP : params.limit);
+      if (!Number.isInteger(limit) || limit < 1) {
+        throw new Error("downloads.list limit must be a positive integer");
+      }
+      return downloadBuf.slice(-Math.min(limit, DOWNLOAD_LIMIT_CAP)).reverse();
+    }
     case "debugger.detach":
       await detachAttached();
       return null;
@@ -422,6 +436,77 @@ function push(buf, entry) {
   while (buf.length > BUF_CAP) {
     buf.shift();
   }
+}
+
+function downloadStatus(state, error) {
+  if (state === "complete") {
+    return "complete";
+  }
+  if (state === "interrupted") {
+    return error === "USER_CANCELED" ? "canceled" : "interrupted";
+  }
+  return "in_progress";
+}
+
+function downloadAttribution(item) {
+  if (item.tabId != null && item.tabId === controlledTabId) {
+    return "controlled_tab";
+  }
+  return item.tabId != null ? "profile" : "unknown";
+}
+
+function downloadEntry(item) {
+  const error = item.error || null;
+  const status = downloadStatus(item.state, error);
+  return {
+    id: item.id,
+    status,
+    path: status === "complete" && item.filename ? item.filename : null,
+    url: item.finalUrl || item.url || "",
+    received_bytes: Math.max(0, Number(item.bytesReceived) || 0),
+    total_bytes: Math.max(0, Number(item.totalBytes) || 0),
+    error,
+    attribution: downloadAttribution(item),
+  };
+}
+
+if (chrome.downloads && chrome.downloads.onCreated) {
+  chrome.downloads.onCreated.addListener((item) => {
+    if (!downloadSessionActive) {
+      return;
+    }
+    push(downloadBuf, downloadEntry(item));
+  });
+  chrome.downloads.onChanged.addListener((delta) => {
+    if (!downloadSessionActive) {
+      return;
+    }
+    const entry = downloadBuf.find((candidate) => candidate.id === delta.id);
+    if (!entry) {
+      return;
+    }
+    const current = (field) => (delta[field] ? delta[field].current : undefined);
+    const error = current("error");
+    if (error !== undefined) {
+      entry.error = error || null;
+    }
+    const state = current("state");
+    if (state !== undefined) {
+      entry.status = downloadStatus(state, entry.error);
+    }
+    const filename = current("filename");
+    if (entry.status === "complete" && filename) {
+      entry.path = filename;
+    }
+    const received = current("bytesReceived");
+    if (received !== undefined) {
+      entry.received_bytes = Math.max(0, Number(received) || 0);
+    }
+    const total = current("totalBytes");
+    if (total !== undefined) {
+      entry.total_bytes = Math.max(0, Number(total) || 0);
+    }
+  });
 }
 
 async function groupZodeTab(tab) {

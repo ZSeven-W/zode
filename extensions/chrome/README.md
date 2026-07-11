@@ -15,6 +15,11 @@ Default bridge port: `17657`
 
 After the first pairing, the extension stores a token. It stays idle while zode is not running; when zode is running with bridge target selected, zode opens the extension page to reconnect with the stored token. Tabs opened through zode's bridge are grouped into a Chrome tab group named `zode`.
 
+The extension also reports downloads created after the current bridge WebSocket
+connection was established. It never searches or returns earlier Chrome profile
+download history. Downloads that cannot be tied to the controlled zode tab are
+reported with `profile` or `unknown` attribution.
+
 ## Tab behavior
 
 The bridge drives one sticky zode-owned tab instead of whatever tab you are
@@ -43,7 +48,7 @@ from `assets/logo-light.png` at the repo root with `sips -Z <size>`.
 
 ## Update
 
-After changing files in this directory, open `chrome://extensions` and click the reload button on the zode browser bridge card. The manifest embeds a public key so unpacked and packed installs keep the same extension ID, which zode uses for the WebSocket Origin check.
+After changing files in this directory, open `chrome://extensions` and click the reload button on the zode browser bridge card. This version adds the `downloads` permission, so existing installs must be updated before `browser_read` can list downloads. The manifest embeds a public key so unpacked and packed installs keep the same extension ID, which zode uses for the WebSocket Origin check.
 
 ## Pack CRX
 

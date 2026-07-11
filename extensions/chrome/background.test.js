@@ -20,7 +20,13 @@ function makeChrome(storage = {}) {
     iconPaths: [],
     runtimeSent: [],
   };
-  const listeners = { tabRemoved: [], debuggerDetach: [], webNavCommitted: [] };
+  const listeners = {
+    tabRemoved: [],
+    debuggerDetach: [],
+    webNavCommitted: [],
+    downloadCreated: [],
+    downloadChanged: [],
+  };
   const tabsById = new Map();
   let nextTabId = 100;
 
@@ -51,6 +57,12 @@ function makeChrome(storage = {}) {
     },
     fireNavCommitted(details) {
       listeners.webNavCommitted.forEach((listener) => listener(details));
+    },
+    fireDownloadCreated(item) {
+      listeners.downloadCreated.forEach((listener) => listener(item));
+    },
+    fireDownloadChanged(delta) {
+      listeners.downloadChanged.forEach((listener) => listener(delta));
     },
     storage: {
       local: {
@@ -137,6 +149,10 @@ function makeChrome(storage = {}) {
     },
     webNavigation: {
       onCommitted: { addListener: (listener) => listeners.webNavCommitted.push(listener) },
+    },
+    downloads: {
+      onCreated: { addListener: (listener) => listeners.downloadCreated.push(listener) },
+      onChanged: { addListener: (listener) => listeners.downloadChanged.push(listener) },
     },
   };
   return api;
@@ -572,6 +588,68 @@ async function testThemeMessageSwitchesIcon() {
   });
 }
 
+async function testDownloadsAreConnectionLocalAndNewestFirst() {
+  const h = makeRpcHarness();
+  h.chrome.fireDownloadCreated({
+    id: 1,
+    url: "https://before.example/file",
+    state: "complete",
+    filename: "/secret/history",
+    bytesReceived: 1,
+    totalBytes: 1,
+  });
+  await h.connect();
+  h.chrome.fireDownloadCreated({
+    id: 2,
+    url: "https://after.example/a",
+    state: "in_progress",
+    filename: "",
+    bytesReceived: 2,
+    totalBytes: 10,
+    tabId: 999,
+  });
+  h.chrome.fireDownloadCreated({
+    id: 3,
+    url: "https://after.example/b",
+    state: "in_progress",
+    filename: "",
+    bytesReceived: 0,
+    totalBytes: 4,
+  });
+  h.chrome.fireDownloadChanged({
+    id: 2,
+    state: { current: "complete" },
+    filename: { current: "/downloads/a" },
+    bytesReceived: { current: 10 },
+  });
+  const reply = await h.rpc({ id: 60, kind: "ext", method: "downloads.list", params: { limit: 1000 } });
+  assert.equal(reply.error, undefined);
+  assert.deepEqual(
+    reply.result.map((entry) => entry.url),
+    ["https://after.example/b", "https://after.example/a"],
+  );
+  assert.equal(reply.result[1].status, "complete");
+  assert.equal(reply.result[1].path, "/downloads/a");
+  assert.equal(reply.result[0].attribution, "unknown");
+  assert.equal(reply.result.some((entry) => entry.url.includes("before")), false);
+}
+
+async function testDownloadCancellationAndLimitValidation() {
+  const h = makeRpcHarness();
+  await h.connect();
+  h.chrome.fireDownloadCreated({ id: 4, url: "https://x/4", state: "in_progress" });
+  h.chrome.fireDownloadChanged({
+    id: 4,
+    state: { current: "interrupted" },
+    error: { current: "USER_CANCELED" },
+  });
+  const one = await h.rpc({ id: 61, kind: "ext", method: "downloads.list", params: { limit: 1 } });
+  assert.equal(one.result[0].status, "canceled");
+  assert.equal(one.result[0].error, "USER_CANCELED");
+  const invalid = await h.rpc({ id: 62, kind: "ext", method: "downloads.list", params: { limit: 0 } });
+  assert.match(invalid.error, /limit/);
+}
+
 (async () => {
   await testStartupCreatesThemeWatcher();
   await testStartupPingsExistingThemeWatcher();
@@ -585,5 +663,7 @@ async function testThemeMessageSwitchesIcon() {
   await testHumanNavigationHandsOffControlledTab();
   await testDebuggerDetachReasonControlsHandoff();
   await testScreenshotActivatesControlledTabAndRestores();
+  await testDownloadsAreConnectionLocalAndNewestFirst();
+  await testDownloadCancellationAndLimitValidation();
   console.log("background tests passed");
 })();
