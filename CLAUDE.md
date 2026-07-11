@@ -261,8 +261,10 @@ Chrome extension:
   `BrowserError`), `managed.rs` (chromiumoxide `ManagedBackend` + launch
   supervisor), `session.rs` (process-wide `BrowserSession`, one shared
   backend slot, serialized leases), `gate.rs` (`BrowserGateView`, via the
-  generalized `PermissionGatedTool` `GateView` hook), `tools.rs` (the four
-  `browser_*` tools), `snapshot_js.rs` (in-page JS that produces the
+  generalized `PermissionGatedTool` `GateView` hook), `tools.rs` (the shared
+  browser tools), `upload.rs` (upload preflight and per-call approval),
+  `managed-downloads.rs` (browser-lifetime download event cache),
+  `snapshot_js.rs` (in-page JS that produces the
   ref-annotated accessibility outline), and `bridge/` (pairing/token state,
   localhost WebSocket server, and `BridgeBackend` RPC mapping).
 - `zode-core/src/commands/browser.rs` — `/browser <subcommand>` parser.
@@ -275,12 +277,13 @@ Chrome extension:
 
 | Tool | Actions | Safety | Approval |
 |------|---------|--------|----------|
-| `browser_read` | `screenshot`, `snapshot`, `console`, `network`, `tabs` | `ReadOnly` | None — registered ungated, like `op_read` |
+| `browser_read` | `screenshot`, `snapshot`, `console`, `network`, `tabs`, `downloads` | `ReadOnly` | None — registered ungated, like `op_read` |
 | `browser_act` | `navigate`, `click`, `type`, `key`, `scroll` | `Mutating` | `PermissionGatedTool` + `BrowserGateView` |
 | `browser_eval` | arbitrary JS expression | `Mutating` | `PermissionGatedTool` + `BrowserGateView`, own independent always-allow flag |
 | `browser_tabs` | `new`, `close`, `select` | `Mutating` | `PermissionGatedTool` + `BrowserGateView` |
+| `browser_upload` | set absolute local paths on a file input selected by `selector` or `ref` | `Mutating` | Independent per-call approval; no always-allow |
 
-All four tools take a lease on the session (`BrowserSession::lease`), which
+All browser tools take a lease on the session (`BrowserSession::lease`), which
 serializes every backend operation across tabs and concurrent tool calls —
 the browser has one "current tab", so overlapping navigate/click/eval calls
 from different agent turns would otherwise race.
@@ -292,6 +295,9 @@ behind a second, context-blind `PermissionGatedTool`. `browser_eval` gets
 its own `PermissionGatedTool` instance (and thus its own always-allow flag)
 independent of `browser_act`/`browser_tabs` — allowing "always allow" for
 navigation doesn't silently also allow-always arbitrary JS execution.
+`browser_upload` canonicalizes and validates every path before prompting,
+shows canonical paths and sizes in the approval, and deliberately treats an
+"always" response as one-call approval. Invalid paths never open a prompt.
 `BrowserGateView` enriches every approval prompt with `_target`
 (`"managed"`/`"bridge"`) and, when resolvable without blocking, `_page_url`
 — session state the model's own tool-call input cannot be trusted to
@@ -386,7 +392,21 @@ M1 story for retaining login state across sessions (cookies persist in
 that profile directory between launches). There is no cross-profile
 credential sharing with the user's everyday browser.
 
+Managed downloads are allowed into `<config-dir>/downloads` (normally
+`~/.zode/downloads`), which is created with owner-only permissions on Unix.
+`browser_read {"action":"downloads"}` returns only downloads observed by the
+current backend session, newest first. A completed entry includes `path` only
+when CDP reports the actual saved path.
+
 ### Chrome extension bridge
+
+The bridge extension requires its `downloads` permission and must be reloaded
+or redistributed after this feature update. Its download cache starts when the
+bridge WebSocket connects and never queries `chrome.downloads` history, so
+downloads from before that connection cannot leak through `browser_read`.
+Entries not provably caused by the controlled tab are marked with conservative
+`profile` or `unknown` attribution. An older extension returns an explicit
+`bridge extension too old / downloads unsupported` error.
 
 The bridge target controls the user's real Chrome profile. Run `/browser pair`
 to start a `127.0.0.1` WebSocket listener, then open the zode bridge extension
