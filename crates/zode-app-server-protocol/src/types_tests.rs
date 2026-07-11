@@ -1,8 +1,8 @@
 use super::methods::ClientRequest;
 use super::rpc::RequestId;
 use super::types::{
-    ApprovalPolicy, ClientInfo, CommandExecParams, InitializeParams, ThreadStartParams,
-    TurnStartParams,
+    ApprovalPolicy, ClientInfo, CommandExecParams, InitializeParams, ModelSetParams,
+    ThreadStartParams, TurnStartParams,
 };
 use super::{notify, schema};
 use serde_json::json;
@@ -124,4 +124,25 @@ fn turn_notifications_carry_ids() {
 #[test]
 fn turn_interrupt_method_exists() {
     assert!(schema::supported_methods().contains(&"turn/interrupt"));
+}
+
+#[test]
+fn model_set_params_use_camel_case_thread_id() {
+    let params = ModelSetParams {
+        thread_id: "thread-1".to_string(),
+        model: "gpt-5".to_string(),
+    };
+
+    assert_eq!(
+        serde_json::to_value(params).unwrap(),
+        json!({"threadId": "thread-1", "model": "gpt-5"})
+    );
+}
+
+#[test]
+fn supported_methods_include_model_set_only_as_the_new_client_method() {
+    let methods = schema::supported_methods();
+    assert_eq!(methods.len(), 26);
+    assert!(methods.contains(&"model/set"));
+    assert!(!methods.contains(&"approval/request"));
 }

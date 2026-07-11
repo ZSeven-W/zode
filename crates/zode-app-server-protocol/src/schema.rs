@@ -26,6 +26,7 @@ pub fn supported_methods() -> &'static [&'static str] {
         "fs/copy",
         "command/exec",
         "model/list",
+        "model/set",
         "config/read",
         "config/list",
         "skills/list",

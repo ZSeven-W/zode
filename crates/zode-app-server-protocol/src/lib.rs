@@ -2,6 +2,7 @@ pub mod methods;
 pub mod notify;
 pub mod rpc;
 pub mod schema;
+pub mod server_requests;
 pub mod types;
 
 pub use methods::ClientRequest;

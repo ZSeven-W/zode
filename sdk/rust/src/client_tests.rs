@@ -19,9 +19,10 @@ fn protocol_method_enum_exposes_wire_names() {
     assert_eq!(ProtocolMethod::Initialize.as_str(), "initialize");
     assert_eq!(ProtocolMethod::CommandExec.as_str(), "command/exec");
     assert_eq!(ProtocolMethod::TurnInterrupt.as_str(), "turn/interrupt");
+    assert_eq!(ProtocolMethod::ModelSet.as_str(), "model/set");
     assert_eq!(
         ProtocolMethod::McpServerStatusList.as_str(),
         "mcpServerStatus/list"
     );
-    assert_eq!(ProtocolMethod::ALL.len(), 25);
+    assert_eq!(ProtocolMethod::ALL.len(), 26);
 }

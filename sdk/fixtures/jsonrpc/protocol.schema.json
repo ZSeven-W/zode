@@ -53,6 +53,7 @@
     "fs/copy",
     "command/exec",
     "model/list",
+    "model/set",
     "config/read",
     "config/list",
     "skills/list",

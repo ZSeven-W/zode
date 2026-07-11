@@ -92,6 +92,11 @@ pub enum ClientRequest {
         id: RequestId,
         params: EmptyResponse,
     },
+    #[serde(rename = "model/set")]
+    ModelSet {
+        id: RequestId,
+        params: ModelSetParams,
+    },
     #[serde(rename = "config/read")]
     ConfigRead {
         id: RequestId,
@@ -150,6 +155,7 @@ impl ClientRequest {
             | Self::FsCopy { id, .. }
             | Self::CommandExec { id, .. }
             | Self::ModelList { id, .. }
+            | Self::ModelSet { id, .. }
             | Self::ConfigRead { id, .. }
             | Self::ConfigList { id, .. }
             | Self::SkillsList { id, .. }
