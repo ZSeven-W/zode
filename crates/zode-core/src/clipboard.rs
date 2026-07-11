@@ -124,11 +124,18 @@ fn clipboard_candidates() -> &'static [(&'static str, &'static [&'static str])] 
     }
 }
 
+const WINDOWS_PASTE_ARGS: &[&str] = &[
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    "[Console]::Out.Write([string](Get-Clipboard -Raw))",
+];
+
 fn paste_candidates() -> &'static [(&'static str, &'static [&'static str])] {
     if cfg!(target_os = "macos") {
         &[("pbpaste", &[])]
     } else if cfg!(target_os = "windows") {
-        &[("powershell", &["-NoProfile", "-Command", "Get-Clipboard"])]
+        &[("powershell", WINDOWS_PASTE_ARGS)]
     } else {
         &[
             ("wl-paste", &["-n"]),
@@ -176,6 +183,19 @@ fn try_paste(bin: &str, args: &[&str]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_paste_helper_writes_raw_clipboard_text() {
+        assert_eq!(
+            WINDOWS_PASTE_ARGS,
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::Out.Write([string](Get-Clipboard -Raw))",
+            ]
+        );
+    }
 
     #[test]
     fn candidates_are_non_empty_for_this_platform() {
