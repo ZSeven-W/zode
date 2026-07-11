@@ -1963,18 +1963,34 @@ impl TuiApp {
             tokio::select! {
                 maybe_ev = term_events.next() => {
                     if let Some(Ok(ev)) = maybe_ev {
-                        self.handle_term(ev, &agent_tx).await;
+                        let mut burst = vec![ev];
                         // Coalesce the rest of an input burst before redrawing.
                         // A trackpad/wheel momentum flick floods scroll events;
                         // handling them all here (then one draw at the top of
                         // the loop) stops over-scrolling at the top/bottom from
                         // backing up into a multi-second redraw storm.
-                        for ev in drain_ready_events(&mut term_events, INPUT_COALESCE_CAP) {
-                            if self.should_quit {
-                                break;
-                            }
-                            self.handle_term(ev, &agent_tx).await;
+                        let mut ready = drain_ready_events(&mut term_events, INPUT_COALESCE_CAP);
+                        let first_chunk_full = ready.len() == INPUT_COALESCE_CAP;
+                        burst.append(&mut ready);
+                        if cfg!(target_os = "windows") {
+                            extend_windows_text_burst(
+                                &mut term_events,
+                                &mut burst,
+                                first_chunk_full,
+                            );
                         }
+                        let clipboard = if cfg!(windows) && windows_burst_needs_clipboard(&burst) {
+                            zode_core::clipboard::read_from_clipboard().ok()
+                        } else {
+                            None
+                        };
+                        self.handle_term_burst(
+                            burst,
+                            &agent_tx,
+                            cfg!(windows),
+                            clipboard.as_deref(),
+                        )
+                        .await;
                         // Switching to a tab that has queued input (and is now
                         // idle) flushes it here, not just on its own turn-done.
                         self.dispatch_queued_input(&agent_tx).await;
@@ -2332,6 +2348,27 @@ impl TuiApp {
             if let Some(dialog) = &mut self.active_dialog {
                 dialog.render(f, area, &theme);
             }
+        }
+    }
+
+    async fn handle_term_burst(
+        &mut self,
+        events: Vec<CtEvent>,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+        windows_console: bool,
+        clipboard_text: Option<&str>,
+    ) {
+        if windows_console {
+            if let Some(text) = windows_multiline_paste_text(&events, clipboard_text) {
+                self.handle_paste(&text);
+                return;
+            }
+        }
+        for event in events {
+            if self.should_quit {
+                break;
+            }
+            self.handle_term(event, agent_tx).await;
         }
     }
 
@@ -6500,6 +6537,24 @@ where
     out
 }
 
+fn extend_windows_text_burst<S>(
+    stream: &mut S,
+    burst: &mut Vec<CtEvent>,
+    mut previous_chunk_full: bool,
+) where
+    S: futures::Stream<Item = std::io::Result<CtEvent>> + Unpin,
+{
+    while previous_chunk_full
+        && burst.len() < WINDOWS_PASTE_EVENT_CAP
+        && windows_key_burst_text(burst).is_some()
+    {
+        let cap = INPUT_COALESCE_CAP.min(WINDOWS_PASTE_EVENT_CAP - burst.len());
+        let mut more = drain_ready_events(stream, cap);
+        previous_chunk_full = more.len() == cap;
+        burst.append(&mut more);
+    }
+}
+
 fn normalize_paste_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
@@ -8585,6 +8640,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn windows_multiline_key_burst_stays_in_composer_without_submitting() {
+        let (mut app, agent_tx) = make_test_app().await;
+        let events = windows_key_burst("first\nsecond");
+
+        app.handle_term_burst(events, &agent_tx, true, Some("first\r\nsecond"))
+            .await;
+
+        assert_eq!(app.input.text(), "first\nsecond");
+        assert!(app.active_tab().chat.messages().is_empty());
+        assert!(!app.active_tab().is_busy());
+    }
+
+    #[tokio::test]
+    async fn windows_bracketed_multiline_key_burst_stays_in_composer_without_submitting() {
+        let (mut app, agent_tx) = make_test_app().await;
+        let events = windows_key_burst("\u{1b}[200~first\nsecond\u{1b}[201~");
+
+        app.handle_term_burst(events, &agent_tx, true, None).await;
+
+        assert_eq!(app.input.text(), "first\nsecond");
+        assert!(app.active_tab().chat.messages().is_empty());
+        assert!(!app.active_tab().is_busy());
+    }
+
+    #[tokio::test]
     async fn ctrl_e_toggles_tool_block_folds() {
         let (mut app, agent_tx) = make_test_app().await;
         app.tabs[0].chat.push_tool("Bash done\n    output");
@@ -8659,6 +8739,24 @@ mod tests {
         let mut stream = futures::stream::iter(burst);
         let drained = drain_ready_events(&mut stream, 4);
         assert_eq!(drained.len(), 4);
+    }
+
+    #[test]
+    fn windows_text_burst_drain_extends_past_normal_coalescing_cap() {
+        let events = windows_key_burst(&"a".repeat(INPUT_COALESCE_CAP + 10));
+        let mut stream = futures::stream::iter(events.into_iter().skip(1).map(Ok));
+        let mut burst = vec![CtEvent::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        ))];
+        let mut first = drain_ready_events(&mut stream, INPUT_COALESCE_CAP);
+        let first_chunk_full = first.len() == INPUT_COALESCE_CAP;
+        burst.append(&mut first);
+
+        extend_windows_text_burst(&mut stream, &mut burst, first_chunk_full);
+
+        assert!(burst.len() > INPUT_COALESCE_CAP);
+        assert!(burst.len() <= WINDOWS_PASTE_EVENT_CAP);
     }
 
     #[test]
