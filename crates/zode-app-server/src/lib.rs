@@ -1,7 +1,7 @@
+pub mod accumulator;
 pub mod capabilities;
 pub mod command;
 pub mod error;
-pub mod events;
 pub mod fs;
 pub mod initialize;
 pub mod router;
@@ -11,14 +11,14 @@ pub mod threads;
 pub mod turns;
 
 #[cfg(test)]
+#[path = "accumulator_tests.rs"]
+mod accumulator_tests;
+#[cfg(test)]
 #[path = "capability_tests.rs"]
 mod capability_tests;
 #[cfg(test)]
 #[path = "command_tests.rs"]
 mod command_tests;
-#[cfg(test)]
-#[path = "events_tests.rs"]
-mod events_tests;
 #[cfg(test)]
 #[path = "fs_tests.rs"]
 mod fs_tests;

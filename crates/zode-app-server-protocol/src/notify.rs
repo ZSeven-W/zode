@@ -41,6 +41,7 @@ pub fn item_started(
         json!({
             "threadId": thread_id,
             "turnId": turn_id,
+            "itemId": item_id,
             "item": {
                 "id": item_id,
                 "type": "dynamicToolCall",
@@ -64,6 +65,7 @@ pub fn item_completed(
         json!({
             "threadId": thread_id,
             "turnId": turn_id,
+            "itemId": item_id,
             "item": {
                 "id": item_id,
                 "type": "dynamicToolCall",
