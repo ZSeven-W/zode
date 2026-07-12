@@ -46,6 +46,13 @@ impl LspManager {
         }
     }
 
+    /// The enabled language keys, sorted — what the system prompt advertises.
+    pub fn langs(&self) -> Vec<String> {
+        let mut langs: Vec<String> = self.servers.keys().cloned().collect();
+        langs.sort();
+        langs
+    }
+
     /// Resolve a possibly-relative file argument against the workspace root.
     pub fn resolve(&self, file: &str) -> PathBuf {
         let p = Path::new(file);

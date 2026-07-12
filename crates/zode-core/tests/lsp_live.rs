@@ -127,3 +127,84 @@ fn auto_installs_bash_language_server_via_npm() {
 
     std::env::remove_var("ZODE_CONFIG_DIR");
 }
+
+/// Whatever `resolve()` hands back must actually run. rustup pre-creates a
+/// proxy shim in `~/.cargo/bin` for every component it knows about, installed
+/// or not — the one for a missing component just prints "Unknown binary
+/// 'rust-analyzer' in official toolchain" and exits. `resolve()` used to accept
+/// that shim on sight, which short-circuited the auto-install and left every
+/// `lsp_*` call on a Rust file dying in `initialize`. Live because the answer
+/// depends on the machine's actual toolchain.
+#[test]
+#[ignore]
+fn resolved_rust_analyzer_is_runnable() {
+    let spec = zode_core::lsp::install::spec_for_lang("rust").expect("rust spec");
+    let Some(path) = zode_core::lsp::install::resolve(spec) else {
+        // Not installed here — `ensure()` will `rustup component add` it, which
+        // is exactly the outcome the dead shim used to prevent.
+        println!("rust-analyzer unresolved: ensure() would install the component");
+        return;
+    };
+    println!("resolved rust-analyzer at {}", path.display());
+    let out = std::process::Command::new(&path)
+        .arg("--version")
+        .output()
+        .expect("run the resolved binary");
+    assert!(
+        out.status.success(),
+        "resolve() returned a binary that does not run: {} → {}",
+        path.display(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+}
+
+/// The rust path end to end: `ensure()` provisions rust-analyzer via rustup
+/// (the step the dead proxy shim used to skip), the manager spawns it, and
+/// `lsp_symbols` comes back with the file's real symbols. Live: it may install
+/// the rustup component, and it drives a real rust-analyzer.
+#[tokio::test]
+#[ignore]
+async fn rust_analyzer_serves_symbols_after_ensure() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("lib.rs"),
+        "pub struct Widget {\n    pub id: u32,\n}\n\npub fn assemble() -> Widget {\n    Widget { id: 1 }\n}\n",
+    )
+    .unwrap();
+
+    let spec = zode_core::lsp::install::spec_for_lang("rust").expect("rust spec");
+    let mut servers = HashMap::new();
+    servers.insert(
+        "rust".to_string(),
+        LspServerConfig {
+            command: spec.command.to_string(),
+            args: spec.args.iter().map(|s| (*s).to_string()).collect(),
+            extensions: spec.extensions.iter().map(|s| (*s).to_string()).collect(),
+        },
+    );
+    let mgr = Arc::new(LspManager::new(LspConfig { servers }, root.clone()));
+    let tools = lsp_tools(&mgr);
+    let ctx = ToolUseContext::new(root);
+
+    let out: Value = tool(&tools, "lsp_symbols")
+        .call(&ctx, json!({ "file": "src/lib.rs" }))
+        .await
+        .expect("rust-analyzer answers documentSymbol");
+
+    let names: Vec<&str> = out["symbols"]
+        .as_array()
+        .expect("symbols array")
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    println!("rust-analyzer symbols: {names:?}");
+    assert!(names.contains(&"Widget"), "{names:?}");
+    assert!(names.contains(&"assemble"), "{names:?}");
+}

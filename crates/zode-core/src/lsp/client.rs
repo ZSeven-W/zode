@@ -10,13 +10,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Mutex, Notify};
 
 use crate::config::LspServerConfig;
@@ -27,9 +27,16 @@ const REQUEST_TIMEOUT_SECS: u64 = 15;
 /// bash-language-server loading tree-sitter) can take far longer to hand back
 /// its first response than steady-state queries.
 const INIT_TIMEOUT_SECS: u64 = 45;
+/// How many trailing stderr lines to keep as the death diagnostic.
+const STDERR_TAIL_LINES: usize = 5;
+/// How long to let the stderr reader finish after stdout hits EOF, so the
+/// server's last words make it into the error we report.
+const STDERR_DRAIN: Duration = Duration::from_millis(500);
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>;
 type Diagnostics = Arc<Mutex<HashMap<String, Vec<Value>>>>;
+/// Trailing stderr lines, for when the server dies and we must say why.
+type StderrTail = Arc<Mutex<Vec<String>>>;
 
 #[derive(Debug)]
 pub struct LspClient {
@@ -41,6 +48,9 @@ pub struct LspClient {
     diagnostics: Diagnostics,
     /// Notified whenever new diagnostics land, so a waiter can re-check.
     diag_notify: Arc<Notify>,
+    /// Set once the server's stdout closes: the process is gone, so further
+    /// requests fail immediately instead of waiting out their timeout.
+    dead: Arc<AtomicBool>,
     /// URIs already sent via `didOpen` (so we open each file once).
     open: Mutex<HashSet<String>>,
     root: PathBuf,
@@ -57,7 +67,9 @@ impl LspClient {
             .current_dir(&root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Captured, not discarded: when a server refuses to start, its
+            // stderr is the only thing that says why.
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("spawn {}: {e}", cfg.command))?;
@@ -66,17 +78,24 @@ impl LspClient {
             child.stdin.take().ok_or("language server has no stdin")?,
         ));
         let stdout = child.stdout.take().ok_or("language server has no stdout")?;
+        let stderr = child.stderr.take().ok_or("language server has no stderr")?;
 
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let diagnostics: Diagnostics = Arc::new(Mutex::new(HashMap::new()));
         let diag_notify = Arc::new(Notify::new());
+        let dead = Arc::new(AtomicBool::new(false));
+        let stderr_tail: StderrTail = Arc::new(Mutex::new(Vec::new()));
 
+        let stderr_task = tokio::spawn(stderr_loop(BufReader::new(stderr), stderr_tail.clone()));
         tokio::spawn(read_loop(
             BufReader::new(stdout),
             stdin.clone(),
             pending.clone(),
             diagnostics.clone(),
             diag_notify.clone(),
+            dead.clone(),
+            stderr_tail,
+            stderr_task,
         ));
 
         let client = Self {
@@ -86,6 +105,7 @@ impl LspClient {
             pending,
             diagnostics,
             diag_notify,
+            dead,
             open: Mutex::new(HashSet::new()),
             root,
             _child: child,
@@ -127,6 +147,9 @@ impl LspClient {
         params: Value,
         timeout_secs: u64,
     ) -> Result<Value, String> {
+        if self.dead.load(Ordering::SeqCst) {
+            return Err(format!("lsp {method}: language server is not running"));
+        }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
@@ -218,13 +241,60 @@ impl LspClient {
     }
 }
 
-/// Background reader: frame messages off stdout and route them.
+/// Background reader: frame messages off stdout and route them. When the
+/// stream ends — the server exited or the pipe broke — fail everything still
+/// waiting instead of leaving it parked until its timeout.
+#[allow(clippy::too_many_arguments)]
 async fn read_loop(
-    mut reader: BufReader<ChildStdout>,
+    reader: BufReader<ChildStdout>,
     stdin: Arc<Mutex<ChildStdin>>,
     pending: Pending,
     diagnostics: Diagnostics,
     diag_notify: Arc<Notify>,
+    dead: Arc<AtomicBool>,
+    stderr_tail: StderrTail,
+    stderr_task: tokio::task::JoinHandle<()>,
+) {
+    read_frames(reader, &stdin, &pending, &diagnostics, &diag_notify).await;
+    dead.store(true, Ordering::SeqCst);
+    // Let the stderr reader catch up so the server's own words become the
+    // error, rather than a bare "it exited".
+    let _ = tokio::time::timeout(STDERR_DRAIN, stderr_task).await;
+    let tail = stderr_tail.lock().await.join("; ");
+    let message = if tail.is_empty() {
+        "language server exited unexpectedly".to_string()
+    } else {
+        format!("language server exited unexpectedly: {tail}")
+    };
+    for (_, tx) in pending.lock().await.drain() {
+        let _ = tx.send(json!({ "error": { "message": message.clone() } }));
+    }
+}
+
+/// Collect the server's stderr, keeping only the last [`STDERR_TAIL_LINES`]
+/// lines — a chatty server must not grow this without bound.
+async fn stderr_loop(reader: BufReader<ChildStderr>, tail: StderrTail) {
+    let mut lines = reader.lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        let mut tail = tail.lock().await;
+        if tail.len() == STDERR_TAIL_LINES {
+            tail.remove(0);
+        }
+        tail.push(line);
+    }
+}
+
+/// Read framed messages until the stream ends.
+async fn read_frames(
+    mut reader: BufReader<ChildStdout>,
+    stdin: &Arc<Mutex<ChildStdin>>,
+    pending: &Pending,
+    diagnostics: &Diagnostics,
+    diag_notify: &Arc<Notify>,
 ) {
     loop {
         // Read headers until a blank line; only Content-Length matters.
@@ -254,7 +324,7 @@ async fn read_loop(
         let Ok(msg) = serde_json::from_slice::<Value>(&body) else {
             continue;
         };
-        dispatch(&stdin, &pending, &diagnostics, &diag_notify, msg).await;
+        dispatch(stdin, pending, diagnostics, diag_notify, msg).await;
     }
 }
 
@@ -364,6 +434,39 @@ pub fn path_to_uri(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that dies on startup must fail its pending `initialize` at
+    /// once, carrying the process's own stderr as the reason. Before this, the
+    /// read loop hit EOF and simply returned, leaving the request's sender
+    /// parked in `pending` — so the caller waited out the full 45s
+    /// `INIT_TIMEOUT_SECS` only to get a contentless "lsp initialize: timed
+    /// out", and did it again on every retry.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_fails_fast_with_stderr_when_the_server_dies() {
+        // Absolute path: sibling tests rewrite PATH, and this one must not
+        // depend on it.
+        let cfg = LspServerConfig {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "echo 'Unknown binary' >&2; exit 1".into()],
+            extensions: vec!["rs".into()],
+        };
+        let began = Instant::now();
+        let err = LspClient::start("rust".into(), &cfg, std::env::temp_dir())
+            .await
+            .expect_err("a server that exits immediately cannot initialize");
+
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "should fail fast, not wait out the initialize timeout (took {:?})",
+            began.elapsed()
+        );
+        assert!(err.contains("exited"), "{err}");
+        assert!(
+            err.contains("Unknown binary"),
+            "the server's own stderr is the only useful diagnostic: {err}"
+        );
+    }
 
     #[test]
     fn uri_round_trips_absolute_path() {

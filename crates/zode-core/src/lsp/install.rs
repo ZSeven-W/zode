@@ -300,8 +300,17 @@ fn first_file_in(dir: &std::path::Path, cmd: &str) -> Option<PathBuf> {
 
 /// Full path of `cmd` on `PATH`, if any.
 pub fn find_on_path(cmd: &str) -> Option<PathBuf> {
+    find_on_path_excluding(cmd, None)
+}
+
+/// Full path of `cmd` on `PATH`, ignoring one known-bad hit (a dead rustup
+/// proxy shim — see [`rustup_resolved`]). `~/.cargo/bin` is normally on `PATH`,
+/// so without this exclusion the shim we just rejected would come straight back.
+fn find_on_path_excluding(cmd: &str, skip: Option<&std::path::Path>) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find_map(|dir| first_file_in(&dir, cmd))
+    std::env::split_paths(&path)
+        .filter_map(|dir| first_file_in(&dir, cmd))
+        .find(|p| Some(p.as_path()) != skip)
 }
 
 /// Whether `cmd` resolves to a file on `PATH`.
@@ -361,6 +370,50 @@ fn cargo_bin_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".cargo").join("bin"))
 }
 
+/// Whether `component` appears in `rustup component list --installed` output.
+/// Lines are target-suffixed (`rust-analyzer-aarch64-apple-darwin`), so match
+/// the exact name or the name followed by the `-<target>` separator — never a
+/// bare prefix, which would let `rustc` satisfy a query for `rust`.
+fn component_listed(stdout: &str, component: &str) -> bool {
+    stdout.lines().map(str::trim).any(|line| {
+        line == component
+            || line
+                .strip_prefix(component)
+                .is_some_and(|rest| rest.starts_with('-'))
+    })
+}
+
+/// Whether rustup reports `component` as installed. Not cached: `ensure()` asks
+/// again right after `rustup component add`, and a stale "no" there would make
+/// a successful install read as a failure.
+fn rustup_component_installed(component: &str) -> bool {
+    Command::new("rustup")
+        .args(["component", "list", "--installed"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_some_and(|o| component_listed(&String::from_utf8_lossy(&o.stdout), component))
+}
+
+/// Resolve a rustup-provided command, given its `~/.cargo/bin` proxy shim (if
+/// present) and whether the component is actually installed.
+///
+/// rustup pre-creates a proxy shim for every component it knows about, so the
+/// shim's existence says nothing about the component: running the one for a
+/// missing component just prints `error: Unknown binary 'rust-analyzer' in
+/// official toolchain` and exits. Only trust it once rustup confirms the
+/// component; otherwise ignore it (including the `PATH` hit that resolves back
+/// to it) so a real binary installed by other means still wins, and `ensure()`
+/// can run `rustup component add` when there is none.
+fn rustup_resolved(command: &str, shim: Option<PathBuf>, installed: bool) -> Option<PathBuf> {
+    if installed {
+        if let Some(p) = shim {
+            return Some(p);
+        }
+    }
+    find_on_path_excluding(command, shim.as_deref())
+}
+
 /// The runnable path for a spec if it's already available: the npm-managed
 /// bin under `~/.zode/lsp`, the recipe's install destination (go bin dirs /
 /// cargo bin), or the command on `PATH`.
@@ -380,10 +433,10 @@ pub fn resolve(spec: &ServerSpec) -> Option<PathBuf> {
                 }
             }
         }
-        Install::Rustup { .. } => {
-            if let Some(p) = cargo_bin_dir().and_then(|d| first_file_in(&d, spec.command)) {
-                return Some(p);
-            }
+        Install::Rustup { component } => {
+            let shim = cargo_bin_dir().and_then(|d| first_file_in(&d, spec.command));
+            let installed = shim.is_some() && rustup_component_installed(component);
+            return rustup_resolved(spec.command, shim, installed);
         }
         Install::Manual => {}
     }
@@ -521,6 +574,77 @@ mod tests {
             None => std::env::remove_var("GOBIN"),
         }
         assert_eq!(found, Some(fake));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn rustup_proxy_shim_is_not_mistaken_for_an_installed_component() {
+        // Regression: rustup pre-creates a proxy shim in ~/.cargo/bin for EVERY
+        // component it knows about, installed or not — running the one for a
+        // missing component just errors ("Unknown binary 'rust-analyzer' in
+        // official toolchain"). Treating the shim's mere existence as "already
+        // installed" short-circuits `ensure()`, so `rustup component add` never
+        // runs and the spawn dies instantly.
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("rust-analyzer");
+        std::fs::write(&shim, b"#!/bin/sh\n").unwrap();
+        // An empty PATH, so the developer's own rust-analyzer can't answer for
+        // the fixture.
+        let empty = tempfile::tempdir().unwrap();
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", empty.path());
+
+        // Component NOT installed → the shim must not resolve.
+        let absent = rustup_resolved("rust-analyzer", Some(shim.clone()), false);
+        // Component installed → the shim is the real proxy, use it.
+        let present = rustup_resolved("rust-analyzer", Some(shim.clone()), true);
+
+        match old_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(absent, None);
+        assert_eq!(present, Some(shim));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_real_binary_on_path_wins_over_a_dead_rustup_shim() {
+        // rust-analyzer installed by other means (brew, manual) while the rustup
+        // component is absent: the dead shim must be skipped, not preferred.
+        let cargo_bin = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let shim = cargo_bin.path().join("rust-analyzer");
+        let real = other.path().join("rust-analyzer");
+        std::fs::write(&shim, b"#!/bin/sh\n").unwrap();
+        std::fs::write(&real, b"#!/bin/sh\n").unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        let joined =
+            std::env::join_paths([cargo_bin.path().to_path_buf(), other.path().to_path_buf()])
+                .unwrap();
+        std::env::set_var("PATH", &joined);
+        let found = rustup_resolved("rust-analyzer", Some(shim), false);
+        match old_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(found, Some(real));
+    }
+
+    #[test]
+    fn parses_installed_components_with_target_suffixes() {
+        let out = "cargo-aarch64-apple-darwin\n\
+                   clippy-aarch64-apple-darwin\n\
+                   rust-analyzer-aarch64-apple-darwin\n\
+                   rustc-aarch64-apple-darwin\n";
+        assert!(component_listed(out, "rust-analyzer"));
+        assert!(component_listed(out, "clippy"));
+        assert!(!component_listed(out, "rustfmt"));
+        // A partial name must not match: only the exact component, or the
+        // component followed by its `-<target>` suffix, counts.
+        assert!(!component_listed(out, "rust-anal"));
+        assert!(!component_listed(out, "car"));
     }
 
     #[test]
