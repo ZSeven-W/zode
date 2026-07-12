@@ -190,6 +190,27 @@ cat or dump whole files into the conversation. When using Bash to inspect files,
 avoid dumping whole files; narrow output with `grep`/`head`/`tail`. Large Bash \
 output is truncated.\n";
 
+/// Appended when at least one language server is enabled. The `lsp_*` tools are
+/// registered either way, but nothing in the prompt said what they were for —
+/// so the model reached for grep and `cargo check` and left them unused.
+const LSP_TOOLS: &str = "\n### Language servers\n\
+Language servers are running for the languages listed below. For code questions \
+in those languages, prefer the `lsp_*` tools over text search: `lsp_definition` \
+and `lsp_references` resolve a symbol exactly (grep matches text, not bindings), \
+`lsp_hover` gives the real type signature, `lsp_symbols` outlines a file, and \
+`lsp_diagnostics` reports compiler/linter errors for one file without building \
+the whole project. Positions are 0-based. `lsp_rename` and `lsp_format` return a \
+PREVIEW of the server's edits — apply them yourself with FileEdit. A server \
+starts on first use and may take a few seconds to index.\n";
+
+/// The language-server section, or empty when no server is enabled.
+pub fn lsp_prompt_note(langs: &[String]) -> String {
+    if langs.is_empty() {
+        return String::new();
+    }
+    format!("{LSP_TOOLS}Enabled: {}.\n", langs.join(", "))
+}
+
 const IDENTITY: &str = "\
 You are Zode, an AI-native coding assistant developed by ZSeven-W, running in \
 a terminal. You help \
@@ -386,6 +407,14 @@ mod tests {
         assert!(prompt.contains("main"));
         // The active model is surfaced so the agent can answer "what model?".
         assert!(prompt.contains("deepseek-v4-pro"));
+    }
+
+    #[test]
+    fn lsp_note_lists_enabled_languages_and_is_absent_when_none() {
+        assert_eq!(lsp_prompt_note(&[]), "");
+        let note = lsp_prompt_note(&["go".to_string(), "rust".to_string()]);
+        assert!(note.contains("lsp_definition"));
+        assert!(note.contains("Enabled: go, rust."));
     }
 
     #[test]

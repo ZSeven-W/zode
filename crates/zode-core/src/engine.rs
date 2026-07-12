@@ -352,6 +352,9 @@ fn render_runtime_system_prompt(
     skills: &SkillRegistry,
     agent_type_list: &[(String, String)],
     workflow_defs: &[crate::workflows::WorkflowDef],
+    // Enabled LSP languages — advertised so the agent actually reaches for the
+    // `lsp_*` tools instead of grepping.
+    lsp_langs: &[String],
     // `Some(branch)` when the caller precomputed it off-thread; `None` →
     // detect inline (the synchronous hot-swap path).
     git_branch: Option<Option<String>>,
@@ -377,6 +380,7 @@ fn render_runtime_system_prompt(
     // Declare the live sandbox / write policy so the agent knows whether it may
     // write outside cwd or reach the network.
     system.push_str(&sandbox_prompt_note(sandbox));
+    system.push_str(&crate::instructions::lsp_prompt_note(lsp_langs));
     if plan_mode {
         system.push_str(PLAN_MODE_PROMPT);
     }
@@ -1071,6 +1075,7 @@ impl ZodeEngine {
             &skills,
             &agent_type_list,
             &workflow_defs,
+            &lsp.as_ref().map(|m| m.langs()).unwrap_or_default(),
             Some(git_branch),
         ));
         // Carry the accumulated cost across a reassembly so `/cost` doesn't
@@ -2160,6 +2165,7 @@ impl EngineTemplate {
             &engine.skills,
             &engine.agent_types,
             &workflow_defs,
+            &engine.lsp.as_ref().map(|m| m.langs()).unwrap_or_default(),
             // Sync hot-swap path (user-triggered, off the startup critical
             // path) — detect the branch inline.
             None,
