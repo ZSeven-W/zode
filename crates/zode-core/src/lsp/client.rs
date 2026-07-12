@@ -213,17 +213,22 @@ impl LspClient {
 
     /// Collect diagnostics for `uri`, waiting up to `wait` for the server to
     /// publish its first batch (servers analyze asynchronously after didOpen).
-    pub async fn diagnostics_for(&self, uri: &str, wait: Duration) -> Vec<Value> {
+    ///
+    /// `None` means the server never published within `wait` — it is still
+    /// indexing. That is NOT the same as a clean file, and the caller must not
+    /// present it as one: a cold rust-analyzer takes far longer to load a
+    /// workspace than any wait we're willing to block a tool call for.
+    pub async fn diagnostics_for(&self, uri: &str, wait: Duration) -> Option<Vec<Value>> {
         let deadline = Instant::now() + wait;
         loop {
             // Presence of the key means the server has published at least once
             // (even an empty list = "analyzed, no problems").
             if let Some(d) = self.diagnostics.lock().await.get(uri) {
-                return d.clone();
+                return Some(d.clone());
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Vec::new();
+                return None;
             }
             let tick = remaining.min(Duration::from_millis(150));
             tokio::select! {
@@ -466,6 +471,36 @@ mod tests {
             err.contains("Unknown binary"),
             "the server's own stderr is the only useful diagnostic: {err}"
         );
+    }
+
+    /// A server that has not published yet must be reported as such, not as an
+    /// empty (i.e. clean) result. A cold rust-analyzer spends far longer than
+    /// `DIAG_WAIT_SECS` loading the workspace before it says anything, so
+    /// "nothing published" is the common first answer — and "no errors" would
+    /// be a lie.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pending_diagnostics_are_distinct_from_a_clean_file() {
+        // A server that initializes and then says nothing more.
+        let cfg = LspServerConfig {
+            command: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                // Answer `initialize` (id 1), then idle.
+                r#"read -r a; read -r b; body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+                   printf 'Content-Length: %d\r\n\r\n%s' ${#body} "$body"; sleep 30"#
+                    .into(),
+            ],
+            extensions: vec!["rs".into()],
+        };
+        let client = LspClient::start("rust".into(), &cfg, std::env::temp_dir())
+            .await
+            .expect("handshake completes");
+
+        let pending = client
+            .diagnostics_for("file:///x.rs", Duration::from_millis(200))
+            .await;
+        assert!(pending.is_none(), "never published ≠ published nothing");
     }
 
     #[test]

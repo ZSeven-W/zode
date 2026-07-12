@@ -57,9 +57,16 @@ async fn clangd_diagnostics_hover_symbols() {
         "diagnostics: {}",
         serde_json::to_string_pretty(&diags).unwrap()
     );
+    // `ready` (not `analyzing`) — the count below only means something once the
+    // server has actually published.
+    assert_eq!(diags["status"], "ready");
     assert!(
-        diags.get("diagnostics").is_some(),
-        "has a diagnostics array"
+        diags["diagnostics"]
+            .as_array()
+            .expect("has a diagnostics array")
+            .iter()
+            .any(|d| d["severity"] == "error"),
+        "clangd must flag the string-literal return in `bad`: {diags}"
     );
 
     // Hover over `greet` (line 0, the `g` of greet at column 4).

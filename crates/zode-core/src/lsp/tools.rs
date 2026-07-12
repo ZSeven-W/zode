@@ -179,11 +179,29 @@ impl Tool for LspDiagnosticsTool {
     async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let file = file_arg(&input)?;
         let (client, uri) = open(&self.0, &file).await?;
-        let diags = client
+        // A server that hasn't published yet is still indexing — say so rather
+        // than reporting zero diagnostics, which reads as "the file is clean".
+        let Some(diags) = client
             .diagnostics_for(&uri, Duration::from_secs(DIAG_WAIT_SECS))
-            .await;
+            .await
+        else {
+            return Ok(json!({
+                "file": file,
+                "status": "analyzing",
+                "note": format!(
+                    "the language server has not finished analyzing this file after {DIAG_WAIT_SECS}s \
+                     (a cold server indexes the workspace first) — call again in a few seconds. \
+                     This is NOT a clean result."
+                ),
+            }));
+        };
         let simplified: Vec<Value> = diags.iter().map(simplify_diagnostic).collect();
-        Ok(json!({ "file": file, "count": simplified.len(), "diagnostics": simplified }))
+        Ok(json!({
+            "file": file,
+            "status": "ready",
+            "count": simplified.len(),
+            "diagnostics": simplified,
+        }))
     }
 }
 
