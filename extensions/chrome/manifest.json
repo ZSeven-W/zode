@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "116",
   "name": "zode browser bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Pairs your Chrome with the local zode CLI so its agent can drive this browser.",
-  "permissions": ["debugger", "tabs", "storage", "tabGroups", "webNavigation", "offscreen", "downloads"],
+  "permissions": ["debugger", "tabs", "storage", "tabGroups", "webNavigation", "offscreen", "downloads", "sidePanel"],
   "icons": {
     "16": "icons/zode-16.png",
     "32": "icons/zode-32.png",
@@ -13,6 +14,9 @@
   "background": {
     "service_worker": "background.js"
   },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   "action": {
     "default_icon": {
       "16": "icons/zode-16.png",
@@ -20,7 +24,6 @@
       "48": "icons/zode-48.png",
       "128": "icons/zode-128.png"
     },
-    "default_popup": "popup.html",
     "default_title": "zode bridge"
   },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq75hQkQsowKh9E3NxJQ0BwYW1dxTQj0f76xEOgtIAaJIK/+OXGCBpaVREH/HMHf741lyW4SM5Ltz59R5trKVnraaeUEd+jbJxyfhyScejezm6HhRMgQ+r38rcJov3DG5m97KFhjlNncMYBpEREyapLPPoqTihQq7BMwemzdMlKGfkCNFS0DH7MnM3l1F22LMonwKkLWDAqMPLn0Xx8vs+/SufrAHwpe3kE9r7znUnOt2aNL+1BGsTWuI0H3V3ezo12FNrTUT9LZiYXd9bIKadl1XZMnVywM1khkbhcTYSBjNzk45QQrSjDhwmCMdPILmaaIYZH94wvOSBzxUPyecdQIDAQAB"

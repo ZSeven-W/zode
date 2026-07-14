@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use crate::config::BrowserConfig;
 
 use super::backend::{BrowserBackend, BrowserError, BrowserTarget};
-use super::bridge::{BridgeBackend, BridgeServer, PairingHandle};
+use super::bridge::{BridgeBackend, BridgeServer, PairingHandle, TaskReceiver, TaskServerFrame};
 
 #[async_trait]
 pub trait BackendFactory: Send + Sync + std::fmt::Debug {
@@ -100,12 +100,34 @@ impl BrowserSession {
         Ok(())
     }
 
+    pub async fn open_extension_url(&self, url: &str) -> Result<(), BrowserError> {
+        super::executable::open_extension_url(&self.cfg, url).await
+    }
+
     pub async fn ensure_bridge_listening(&self) -> Result<u16, BrowserError> {
         self.bridge.ensure_listening().await
     }
 
     pub async fn start_pairing(&self) -> Result<PairingHandle, BrowserError> {
         self.bridge.start_pairing().await
+    }
+
+    pub fn take_extension_task_receiver(&self) -> Option<TaskReceiver> {
+        self.bridge.take_task_receiver()
+    }
+
+    pub fn send_extension_task(
+        &self,
+        connection_id: u64,
+        frame: TaskServerFrame,
+    ) -> Result<(), BrowserError> {
+        self.bridge.send_task(connection_id, frame)
+    }
+
+    /// Whether this connection still owns the authenticated extension task
+    /// channel. Used to fence asynchronous TUI work after reconnect/replacement.
+    pub fn is_extension_task_connection_active(&self, connection_id: u64) -> bool {
+        self.bridge.is_task_connection_active(connection_id)
     }
 
     pub fn bridge_connected(&self) -> bool {
@@ -161,6 +183,7 @@ impl BrowserSession {
 mod tests {
     use super::*;
     use crate::browser::backend::mock::MockFactory;
+    use crate::browser::bridge::TaskServerFrame;
     use std::sync::atomic::Ordering;
 
     #[tokio::test]
@@ -244,5 +267,34 @@ mod tests {
             s.current_url_hint().await.as_deref(),
             Some("https://example.test/")
         );
+    }
+
+    #[test]
+    fn extension_task_receiver_is_single_consumer_through_session() {
+        let session = BrowserSession::new(BrowserConfig::default(), MockFactory::new());
+
+        assert!(session.take_extension_task_receiver().is_some());
+        assert!(session.take_extension_task_receiver().is_none());
+    }
+
+    #[test]
+    fn extension_task_send_without_connection_is_dead() {
+        let session = BrowserSession::new(BrowserConfig::default(), MockFactory::new());
+
+        let error = session
+            .send_extension_task(
+                1,
+                TaskServerFrame::event("task/test", serde_json::json!({})),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, BrowserError::Dead(_)));
+    }
+
+    #[test]
+    fn extension_task_active_query_is_false_without_connection() {
+        let session = BrowserSession::new(BrowserConfig::default(), MockFactory::new());
+
+        assert!(!session.is_extension_task_connection_active(1));
     }
 }

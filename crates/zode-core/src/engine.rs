@@ -660,6 +660,36 @@ impl ZodeEngine {
         browser: Option<Arc<BrowserSession>>,
         carry: CarryState,
     ) -> Result<Self, CoreError> {
+        Self::assemble_with_carry_and_access(
+            cfg,
+            cwd,
+            gate,
+            sandbox,
+            date,
+            question_tool,
+            op_consent,
+            plan_mode,
+            false,
+            browser,
+            carry,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn assemble_with_carry_and_access(
+        cfg: &ZodeConfig,
+        cwd: PathBuf,
+        gate: Arc<dyn ApprovalGate>,
+        sandbox: Option<crate::sandbox::SandboxConfig>,
+        date: &str,
+        question_tool: Option<Arc<dyn Tool>>,
+        op_consent: Option<Arc<dyn crate::openpencil::Consent>>,
+        plan_mode: bool,
+        read_only_tools: bool,
+        browser: Option<Arc<BrowserSession>>,
+        carry: CarryState,
+    ) -> Result<Self, CoreError> {
         // Reuse the caller's session (all tabs share ONE browser process) or
         // build a fresh one — cheap: the managed backend only launches
         // chromium lazily, on the first `lease()`.
@@ -1012,7 +1042,7 @@ impl ZodeEngine {
 
         // Plan mode: keep only read-only tools so the agent can research but
         // not change anything until the user approves the plan and exits.
-        let base = if plan_mode {
+        let base = if plan_mode || read_only_tools {
             filter_read_only(base)
         } else {
             base
@@ -1772,6 +1802,15 @@ fn last_user_assistant_text(store: &MessageStore) -> (Option<String>, Option<Str
     (user, assistant)
 }
 
+/// Access policy for tools exposed by an engine assembled for one task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ToolAccessMode {
+    ReadOnly,
+    Prompt,
+    Auto,
+}
+
 /// How a tab's engine obtains its approval gate.
 /// Everything needed to assemble a fresh `ZodeEngine`. The TUI keeps one of
 /// these so it can spin up an independent engine per session tab and rebuild a
@@ -1792,6 +1831,9 @@ pub struct EngineTemplate {
     /// Plan mode: only read-only tools are registered and the system prompt
     /// directs the agent to research and present a plan, not make changes.
     plan_mode: bool,
+    /// Restrict the registry to read-only tools without enabling plan mode or
+    /// changing the system prompt.
+    read_only_tools: bool,
     sandbox: Option<crate::sandbox::SandboxConfig>,
     date: String,
     /// Process-wide browser session, shared by every tab assembled from this
@@ -1816,6 +1858,7 @@ impl EngineTemplate {
             question_queue: None,
             yolo,
             plan_mode: false,
+            read_only_tools: false,
             sandbox,
             date,
             browser,
@@ -1891,7 +1934,7 @@ impl EngineTemplate {
         // different repo, and the sandbox must confine to THAT directory (its
         // writable roots + .git/.zode carveouts), not the launch cwd.
         let sandbox = self.sandbox.as_ref().map(|sb| sb.clone().with_cwd(&cwd));
-        ZodeEngine::assemble_with_carry(
+        ZodeEngine::assemble_with_carry_and_access(
             &self.cfg,
             cwd,
             gate,
@@ -1900,6 +1943,7 @@ impl EngineTemplate {
             question_tool,
             op_consent,
             self.plan_mode,
+            self.read_only_tools,
             Some(self.browser.clone()),
             carry,
         )
@@ -1908,6 +1952,43 @@ impl EngineTemplate {
 
     pub fn cwd(&self) -> &std::path::Path {
         &self.cwd
+    }
+
+    /// Bind approval requests from `source` to the active turn. Cloned and
+    /// reconfigured templates share the queue's registry.
+    pub fn bind_approval_turn(&self, source: &str, turn_id: u64) {
+        if let Some(queue) = &self.queue {
+            queue.bind_turn(source, turn_id);
+        }
+    }
+
+    /// Bind approval requests from `source` to a local operation. This is a
+    /// distinct owner domain from agent turns even when their ids are equal.
+    pub fn bind_approval_local_operation(&self, source: &str, local_op_id: u64) {
+        if let Some(queue) = &self.queue {
+            queue.bind_local_operation(source, local_op_id);
+        }
+    }
+
+    /// Clear an approval binding only if it still belongs to `expected`.
+    pub fn clear_approval_turn_if(&self, source: &str, expected: u64) {
+        if let Some(queue) = &self.queue {
+            queue.clear_turn_if(source, expected);
+        }
+    }
+
+    /// Clear a local-operation approval binding only for the exact generation.
+    pub fn clear_approval_local_operation_if(&self, source: &str, expected: u64) {
+        if let Some(queue) = &self.queue {
+            queue.clear_local_operation_if(source, expected);
+        }
+    }
+
+    /// Remove approval turn ownership for a source that no longer exists.
+    pub fn remove_approval_source(&self, source: &str) {
+        if let Some(queue) = &self.queue {
+            queue.remove_source(source);
+        }
     }
 
     pub fn model(&self) -> Option<&str> {
@@ -1960,6 +2041,26 @@ impl EngineTemplate {
         self.plan_mode
     }
 
+    pub fn tool_access(&self) -> ToolAccessMode {
+        if self.read_only_tools {
+            ToolAccessMode::ReadOnly
+        } else if self.yolo {
+            ToolAccessMode::Auto
+        } else {
+            ToolAccessMode::Prompt
+        }
+    }
+
+    /// Clone with a task-local tool access policy. Read-only access filters
+    /// the registry independently from plan mode; prompt and auto select the
+    /// existing queue and bypass gate paths respectively.
+    pub fn with_tool_access(&self, access: ToolAccessMode) -> Self {
+        let mut t = self.clone();
+        t.read_only_tools = matches!(access, ToolAccessMode::ReadOnly);
+        t.yolo = matches!(access, ToolAccessMode::Auto);
+        t
+    }
+
     /// Clone with plan mode toggled (for `/plan`). Read-only tools only + a
     /// plan-mode system prompt; carried across reassembly clones.
     pub fn with_plan_mode(&self, plan_mode: bool) -> Self {
@@ -1995,6 +2096,11 @@ impl EngineTemplate {
     pub fn with_yolo(&self, yolo: bool) -> Self {
         let mut t = self.clone();
         t.yolo = yolo;
+        // `/yolo` is the legacy normal-tool access switch. Clear a previous
+        // task-local read-only override so the result remains one of the three
+        // explicit access modes instead of an unrepresentable read-only+yolo
+        // hybrid. Plan mode remains independent and can still filter tools.
+        t.read_only_tools = false;
         t
     }
 
@@ -2622,6 +2728,89 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn template_clones_share_approval_turn_bindings() {
+        let (queue, mut approvals) = crate::approval::approval_queue();
+        let template = EngineTemplate::new(
+            test_cfg(),
+            std::path::PathBuf::from("/tmp/zode"),
+            Some(queue.clone()),
+            false,
+            None,
+            "2026-06-14".into(),
+        );
+        let rebuilt = template.with_config(test_cfg());
+
+        template.bind_approval_turn("tab-7", 41);
+        rebuilt.bind_approval_turn("tab-7", 42);
+        template.clear_approval_turn_if("tab-7", 41);
+
+        let pending = tokio::spawn(async move {
+            queue
+                .request("Bash", &serde_json::json!({}), Some("tab-7".into()))
+                .await
+        });
+        let request = approvals.next().await.expect("request should be queued");
+        assert_eq!(request.turn_id, Some(42));
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn template_clones_share_typed_local_approval_bindings() {
+        let (queue, mut approvals) = crate::approval::approval_queue();
+        let template = EngineTemplate::new(
+            test_cfg(),
+            std::path::PathBuf::from("/tmp/zode"),
+            Some(queue.clone()),
+            false,
+            None,
+            "2026-06-14".into(),
+        );
+        let rebuilt = template.with_config(test_cfg());
+
+        template.bind_approval_local_operation("tab-7", 41);
+        rebuilt.bind_approval_local_operation("tab-7", 42);
+        template.clear_approval_local_operation_if("tab-7", 41);
+
+        let pending = tokio::spawn(async move {
+            queue
+                .request("Bash", &serde_json::json!({}), Some("tab-7".into()))
+                .await
+        });
+        let request = approvals.next().await.expect("request should be queued");
+        assert_eq!(request.turn_id, None);
+        assert_eq!(request.local_op_id, Some(42));
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn template_remove_approval_source_clears_shared_binding() {
+        let (queue, mut approvals) = crate::approval::approval_queue();
+        let template = EngineTemplate::new(
+            test_cfg(),
+            std::path::PathBuf::from("/tmp/zode"),
+            Some(queue.clone()),
+            false,
+            None,
+            "2026-06-14".into(),
+        );
+        let clone = template.clone();
+        template.bind_approval_turn("tab-7", 41);
+        clone.remove_approval_source("tab-7");
+
+        let pending = tokio::spawn(async move {
+            queue
+                .request("Bash", &serde_json::json!({}), Some("tab-7".into()))
+                .await
+        });
+        let request = approvals.next().await.expect("request should be queued");
+        assert_eq!(request.turn_id, None);
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
     #[test]
     fn template_with_provider_config_replaces_active_provider() {
         let template = EngineTemplate::new(
@@ -3166,6 +3355,207 @@ mod tests {
         assert!(!names.contains(&"Task".to_string()), "{names:?}");
         // The plan-mode preamble is in the system prompt.
         assert!(eng.system.as_deref().unwrap_or("").contains("PLAN MODE"));
+    }
+
+    #[test]
+    fn tool_access_mode_serializes_as_camel_case() {
+        assert_eq!(
+            serde_json::to_value(ToolAccessMode::ReadOnly).unwrap(),
+            serde_json::json!("readOnly")
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolAccessMode>(serde_json::json!("prompt")).unwrap(),
+            ToolAccessMode::Prompt
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolAccessMode>(serde_json::json!("auto")).unwrap(),
+            ToolAccessMode::Auto
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_tools_does_not_add_plan_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let template = EngineTemplate::new(
+            test_cfg(),
+            dir.path().to_path_buf(),
+            None,
+            false,
+            None,
+            "2026-06-13".into(),
+        )
+        .with_tool_access(ToolAccessMode::ReadOnly);
+
+        let eng = template.assemble().await.unwrap();
+        let names: Vec<String> = eng.tools.names().map(str::to_string).collect();
+        assert!(names.contains(&"FileRead".to_string()), "{names:?}");
+        assert!(!names.contains(&"FileWrite".to_string()), "{names:?}");
+        assert!(
+            eng.tools
+                .list()
+                .iter()
+                .all(|tool| matches!(tool.safety_class(), SafetyClass::ReadOnly)),
+            "read-only access exposed a mutating tool"
+        );
+        assert!(!template.plan_mode());
+        assert!(
+            !eng.system.as_deref().unwrap_or("").contains("# Plan mode"),
+            "read-only access must not inject the plan-mode prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_tool_access_uses_queue_gate_for_ask_listed_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("input.txt"), "secret").unwrap();
+        let mut cfg = test_cfg();
+        cfg.permissions.ask.push("FileRead".into());
+        let (queue, mut approvals) = crate::approval::approval_queue();
+        let template = EngineTemplate::new(
+            cfg,
+            dir.path().to_path_buf(),
+            Some(queue),
+            true,
+            None,
+            "2026-06-13".into(),
+        )
+        .with_tool_access(ToolAccessMode::ReadOnly);
+        let eng = template.assemble().await.unwrap();
+        let tool = eng.tools.get("FileRead").expect("FileRead registered");
+        let ctx = ToolUseContext::new(dir.path());
+
+        let call = tokio::spawn(async move {
+            tool.call(&ctx, serde_json::json!({"path": "input.txt"}))
+                .await
+        });
+        let request = tokio::time::timeout(std::time::Duration::from_secs(1), approvals.next())
+            .await
+            .expect("read-only access should retain the queue gate")
+            .expect("approval queue should remain open");
+        assert_eq!(request.tool, "FileRead");
+        request.respond(Approval::Deny).unwrap();
+        assert!(call.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn plan_mode_still_adds_prompt_with_explicit_tool_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let template = EngineTemplate::new(
+            test_cfg(),
+            dir.path().to_path_buf(),
+            None,
+            false,
+            None,
+            "2026-06-13".into(),
+        )
+        .with_tool_access(ToolAccessMode::Auto)
+        .with_plan_mode(true);
+
+        let eng = template.assemble().await.unwrap();
+        assert!(eng.system.as_deref().unwrap_or("").contains("# Plan mode"));
+        assert!(
+            eng.tools
+                .list()
+                .iter()
+                .all(|tool| matches!(tool.safety_class(), SafetyClass::ReadOnly)),
+            "plan mode must remain read-only regardless of task access"
+        );
+    }
+
+    #[test]
+    fn legacy_yolo_switch_replaces_explicit_tool_access() {
+        let template = EngineTemplate::new(
+            test_cfg(),
+            std::path::PathBuf::from("/tmp/zode"),
+            None,
+            false,
+            None,
+            "2026-06-13".into(),
+        )
+        .with_tool_access(ToolAccessMode::ReadOnly);
+
+        let yolo = template.with_yolo(true);
+        assert!(yolo.yolo());
+        assert_eq!(yolo.tool_access(), ToolAccessMode::Auto);
+        let prompt = yolo.with_yolo(false);
+        assert!(!prompt.yolo());
+        assert_eq!(prompt.tool_access(), ToolAccessMode::Prompt);
+    }
+
+    #[tokio::test]
+    async fn prompt_tool_access_uses_approval_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, mut approvals) = crate::approval::approval_queue();
+        let template = EngineTemplate::new(
+            test_cfg(),
+            dir.path().to_path_buf(),
+            Some(queue),
+            true,
+            None,
+            "2026-06-13".into(),
+        )
+        .with_tool_access(ToolAccessMode::Prompt);
+        let eng = template.assemble().await.unwrap();
+        let tool = eng.tools.get("FileWrite").expect("FileWrite registered");
+        let ctx = ToolUseContext::new(dir.path());
+
+        let call = tokio::spawn(async move {
+            tool.call(
+                &ctx,
+                serde_json::json!({"path": "prompt.txt", "content": "blocked"}),
+            )
+            .await
+        });
+        let request = tokio::time::timeout(std::time::Duration::from_secs(1), approvals.next())
+            .await
+            .expect("prompt access should request approval")
+            .expect("approval queue should remain open");
+        assert_eq!(request.tool, "FileWrite");
+        request.respond(Approval::Deny).unwrap();
+        assert!(call.await.unwrap().is_err());
+        assert!(!dir.path().join("prompt.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn auto_tool_access_bypasses_approval_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, mut approvals) = crate::approval::approval_queue();
+        let template = EngineTemplate::new(
+            test_cfg(),
+            dir.path().to_path_buf(),
+            Some(queue),
+            false,
+            None,
+            "2026-06-13".into(),
+        )
+        .with_tool_access(ToolAccessMode::Auto);
+        let eng = template.assemble().await.unwrap();
+        let tool = eng.tools.get("FileWrite").expect("FileWrite registered");
+        let ctx = ToolUseContext::new(dir.path());
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            tool.call(
+                &ctx,
+                serde_json::json!({"path": "auto.txt", "content": "allowed"}),
+            ),
+        )
+        .await
+        .expect("auto access must not wait for approval");
+        assert!(
+            result.is_ok(),
+            "auto access should execute the tool: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("auto.txt")).unwrap(),
+            "allowed"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), approvals.next())
+                .await
+                .is_err(),
+            "auto access must not enqueue an approval"
+        );
     }
 
     #[tokio::test]

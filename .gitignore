@@ -33,3 +33,4 @@ sdk/typescript/dist
 sdk/python/**/__pycache__
 .superpowers
 .zode
+.worktrees/

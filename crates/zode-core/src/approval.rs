@@ -5,7 +5,9 @@
 //! carrying only hard-deny rules and gate interactively here.
 
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Approval {
@@ -197,6 +199,14 @@ pub struct ApprovalRequest {
     /// Opaque label identifying the source (the TUI sets this to the
     /// requesting tab's id) so the UI can focus the right conversation.
     pub source: Option<String>,
+    /// Turn bound to `source` when this request entered the queue. This is a
+    /// snapshot: rebinding the source for a later turn cannot retag an older
+    /// pending approval.
+    pub turn_id: Option<u64>,
+    /// Local operation bound to `source` when this request entered the queue.
+    /// This is mutually exclusive with [`Self::turn_id`], so equal numeric
+    /// generations from the two domains can never be confused.
+    pub local_op_id: Option<u64>,
     sender: oneshot::Sender<Approval>,
 }
 
@@ -217,6 +227,13 @@ impl ApprovalRequest {
 #[derive(Debug, Clone)]
 pub struct ApprovalQueue {
     sender: mpsc::UnboundedSender<ApprovalRequest>,
+    owner_by_source: Arc<Mutex<HashMap<String, ApprovalOwner>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalOwner {
+    Turn(u64),
+    LocalOperation(u64),
 }
 
 /// UI-facing handle — single consumer; drain in the TUI select! loop.
@@ -234,12 +251,91 @@ impl ApprovalReceiver {
 pub fn approval_queue() -> (ApprovalQueue, ApprovalReceiver) {
     let (tx, rx) = mpsc::unbounded_channel();
     (
-        ApprovalQueue { sender: tx },
+        ApprovalQueue {
+            sender: tx,
+            owner_by_source: Arc::new(Mutex::new(HashMap::new())),
+        },
         ApprovalReceiver { receiver: rx },
     )
 }
 
 impl ApprovalQueue {
+    /// Bind future requests from `source` to `turn_id`. Zero is not a valid
+    /// turn and clears any older binding so an invalid transition fails closed.
+    pub fn bind_turn(&self, source: &str, turn_id: u64) {
+        let Ok(mut owners) = self.owner_by_source.lock() else {
+            return;
+        };
+        if source.is_empty() || turn_id == 0 {
+            owners.remove(source);
+        } else {
+            owners.insert(source.to_owned(), ApprovalOwner::Turn(turn_id));
+        }
+    }
+
+    /// Bind future requests from `source` to a local operation. This replaces
+    /// any turn binding for the source so ownership remains type-exclusive.
+    pub fn bind_local_operation(&self, source: &str, local_op_id: u64) {
+        let Ok(mut owners) = self.owner_by_source.lock() else {
+            return;
+        };
+        if source.is_empty() || local_op_id == 0 {
+            owners.remove(source);
+        } else {
+            owners.insert(
+                source.to_owned(),
+                ApprovalOwner::LocalOperation(local_op_id),
+            );
+        }
+    }
+
+    /// Remove `source` only while it still names `expected`. A delayed terminal
+    /// for an older turn therefore cannot clear a newer turn's binding.
+    pub fn clear_turn_if(&self, source: &str, expected: u64) {
+        let Ok(mut owners) = self.owner_by_source.lock() else {
+            return;
+        };
+        if owners.get(source).copied() == Some(ApprovalOwner::Turn(expected)) {
+            owners.remove(source);
+        }
+    }
+
+    /// Remove `source` only while it still names the expected local operation.
+    pub fn clear_local_operation_if(&self, source: &str, expected: u64) {
+        let Ok(mut owners) = self.owner_by_source.lock() else {
+            return;
+        };
+        if owners.get(source).copied() == Some(ApprovalOwner::LocalOperation(expected)) {
+            owners.remove(source);
+        }
+    }
+
+    /// Remove all turn ownership for a source (for example, a closed tab).
+    pub fn remove_source(&self, source: &str) {
+        let Ok(mut owners) = self.owner_by_source.lock() else {
+            return;
+        };
+        owners.remove(source);
+    }
+
+    fn owner_for_source(&self, source: Option<&str>) -> (Option<u64>, Option<u64>) {
+        let Some(source) = source.filter(|source| !source.is_empty()) else {
+            return (None, None);
+        };
+        match self
+            .owner_by_source
+            .lock()
+            .ok()
+            .and_then(|owners| owners.get(source).copied())
+        {
+            Some(ApprovalOwner::Turn(turn_id)) if turn_id > 0 => (Some(turn_id), None),
+            Some(ApprovalOwner::LocalOperation(local_op_id)) if local_op_id > 0 => {
+                (None, Some(local_op_id))
+            }
+            _ => (None, None),
+        }
+    }
+
     /// Submit a request and await the user's decision. A closed queue (no
     /// UI draining) or a dropped responder fails closed -> Deny. `source`
     /// labels the requester (the TUI tab id) so the UI can focus it.
@@ -250,10 +346,13 @@ impl ApprovalQueue {
         source: Option<String>,
     ) -> Approval {
         let (tx, rx) = oneshot::channel();
+        let (turn_id, local_op_id) = self.owner_for_source(source.as_deref());
         let req = ApprovalRequest {
             tool: tool.to_string(),
             input: input.clone(),
             source,
+            turn_id,
+            local_op_id,
             sender: tx,
         };
         if self.sender.send(req).is_err() {
@@ -297,6 +396,14 @@ impl ApprovalGate for QueueGate {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn spawn_request(
+        queue: ApprovalQueue,
+        source: Option<&str>,
+    ) -> tokio::task::JoinHandle<Approval> {
+        let source = source.map(str::to_owned);
+        tokio::spawn(async move { queue.request("Bash", &json!({}), source).await })
+    }
 
     #[tokio::test]
     async fn bypass_gate_always_allows() {
@@ -360,6 +467,197 @@ mod tests {
         drop(rx);
         let gate = QueueGate::new(queue);
         assert_eq!(gate.approve("Bash", &json!({})).await, Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn queued_request_keeps_turn_snapshot_after_rebind() {
+        let (queue, mut rx) = approval_queue();
+        queue.bind_turn("tab-1", 1);
+
+        let pending = spawn_request(queue.clone(), Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+        queue.bind_turn("tab-1", 2);
+
+        assert_eq!(request.turn_id, Some(1));
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn queue_clones_share_turn_bindings() {
+        let (queue, mut rx) = approval_queue();
+        let clone = queue.clone();
+        clone.bind_turn("tab-1", 7);
+
+        let pending = spawn_request(queue, Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+
+        assert_eq!(request.turn_id, Some(7));
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn local_operation_binding_is_shared_and_exclusive_with_turn_binding() {
+        let (queue, mut rx) = approval_queue();
+        let clone = queue.clone();
+        clone.bind_local_operation("tab-1", 7);
+
+        let pending = spawn_request(queue.clone(), Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+        assert_eq!(request.turn_id, None);
+        assert_eq!(request.local_op_id, Some(7));
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+
+        queue.bind_turn("tab-1", 8);
+        let pending = spawn_request(queue, Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+        assert_eq!(request.turn_id, Some(8));
+        assert_eq!(request.local_op_id, None);
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn clear_turn_if_preserves_newer_binding() {
+        let (queue, mut rx) = approval_queue();
+        queue.bind_turn("tab-1", 1);
+        queue.bind_turn("tab-1", 2);
+        queue.clear_turn_if("tab-1", 1);
+
+        let pending = spawn_request(queue, Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+
+        assert_eq!(request.turn_id, Some(2));
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn clear_turn_if_removes_matching_binding() {
+        let (queue, mut rx) = approval_queue();
+        queue.bind_turn("tab-1", 2);
+        queue.clear_turn_if("tab-1", 2);
+
+        let pending = spawn_request(queue, Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+
+        assert_eq!(request.turn_id, None);
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn clear_local_operation_if_preserves_newer_binding() {
+        let (queue, mut rx) = approval_queue();
+        queue.bind_local_operation("tab-1", 1);
+        queue.bind_local_operation("tab-1", 2);
+        queue.clear_local_operation_if("tab-1", 1);
+
+        let pending = spawn_request(queue, Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+        assert_eq!(request.turn_id, None);
+        assert_eq!(request.local_op_id, Some(2));
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn typed_exact_clear_does_not_cross_turn_and_local_operation_owners() {
+        let (queue, mut rx) = approval_queue();
+        queue.bind_local_operation("tab-1", 9);
+        queue.clear_turn_if("tab-1", 9);
+
+        let pending = spawn_request(queue.clone(), Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+        assert_eq!(request.turn_id, None);
+        assert_eq!(request.local_op_id, Some(9));
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+
+        queue.bind_turn("tab-1", 9);
+        queue.clear_local_operation_if("tab-1", 9);
+
+        let pending = spawn_request(queue, Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+        assert_eq!(request.turn_id, Some(9));
+        assert_eq!(request.local_op_id, None);
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn remove_source_clears_turn_binding() {
+        let (queue, mut rx) = approval_queue();
+        queue.bind_turn("tab-1", 3);
+        queue.remove_source("tab-1");
+
+        let pending = spawn_request(queue, Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+
+        assert_eq!(request.turn_id, None);
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn unbound_source_has_no_turn_id() {
+        let (queue, mut rx) = approval_queue();
+
+        let pending = spawn_request(queue, Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+
+        assert_eq!(request.turn_id, None);
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn source_less_request_has_no_turn_id() {
+        let (queue, mut rx) = approval_queue();
+        queue.bind_turn("tab-1", 4);
+
+        let pending = spawn_request(queue, None);
+        let request = rx.next().await.expect("request should be queued");
+
+        assert_eq!(request.turn_id, None);
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn zero_turn_id_fails_closed_without_a_binding() {
+        let (queue, mut rx) = approval_queue();
+        queue.bind_turn("tab-1", 5);
+        queue.bind_turn("tab-1", 0);
+
+        let pending = spawn_request(queue, Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+
+        assert_eq!(request.turn_id, None);
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn poisoned_turn_registry_fails_closed_without_a_turn_id() {
+        let (queue, mut rx) = approval_queue();
+        queue.bind_turn("tab-1", 6);
+        let owner_by_source = queue.owner_by_source.clone();
+        let poisoned = std::thread::spawn(move || {
+            let _guard = owner_by_source.lock().unwrap();
+            panic!("poison turn registry");
+        });
+        assert!(poisoned.join().is_err());
+
+        let pending = spawn_request(queue, Some("tab-1"));
+        let request = rx.next().await.expect("request should be queued");
+
+        assert_eq!(request.turn_id, None);
+        assert_eq!(request.local_op_id, None);
+        request.respond(Approval::Deny).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::Deny);
     }
 
     #[test]

@@ -37,34 +37,26 @@ function makeElement(id) {
 
 function makeSandbox({ search = "", response }) {
   const elements = {};
-  for (const id of [
-    "body",
-    "connected-view",
-    "connect-view",
-    "status-pill",
-    "status-text",
-    "status-detail",
-    "version",
-    "port",
-    "code",
-    "go",
-    "form-status",
-  ]) {
+  for (const id of ["body", "port", "code", "go", "form-status"]) {
     elements[id] = makeElement(id);
   }
   elements.body.classList = elements.body.classList;
 
   const messages = [];
+  const closeEvents = [];
   const sandbox = {
     URLSearchParams,
     queueMicrotask: (fn) => fn(),
     document: {
       body: elements.body,
-      getElementById: (id) => elements[id],
+      getElementById: (id) => {
+        assert.ok(Object.hasOwn(elements, id), `unexpected pairing-page element: ${id}`);
+        return elements[id];
+      },
     },
     window: {
       location: { search },
-      close: () => {},
+      close: () => closeEvents.push("window.close"),
     },
     chrome: {
       runtime: {
@@ -72,7 +64,6 @@ function makeSandbox({ search = "", response }) {
           messages.push(message);
           return response(message);
         },
-        getManifest: () => ({ version: "0.1.0" }),
       },
       tabs: {
         getCurrent: async () => null,
@@ -81,7 +72,7 @@ function makeSandbox({ search = "", response }) {
     },
   };
 
-  return { sandbox, elements, messages };
+  return { sandbox, elements, messages, closeEvents };
 }
 
 async function flush() {
@@ -90,8 +81,8 @@ async function flush() {
   }
 }
 
-async function testConnectedStatusShowsConnectedView() {
-  const { sandbox, elements, messages } = makeSandbox({
+async function testAlreadyConnectedStatusClosesPairingPage() {
+  const { sandbox, messages, closeEvents } = makeSandbox({
     response: async (message) => {
       if (message.type === "zode-status") {
         return { ok: true, status: { connected: true, port: 17657 } };
@@ -104,11 +95,7 @@ async function testConnectedStatusShowsConnectedView() {
   await flush();
 
   assert.deepEqual(messages.map((message) => message.type), ["zode-status"]);
-  assert.equal(elements["connected-view"].hidden, false);
-  assert.equal(elements["connect-view"].hidden, true);
-  assert.equal(elements["status-text"].textContent, "Connected");
-  assert.equal(elements["status-detail"].textContent, "Port 17657");
-  assert.equal(elements.version.textContent, "Version v0.1.0");
+  assert.deepEqual(closeEvents, ["window.close"]);
 }
 
 async function testDisconnectedStatusShowsConnectView() {
@@ -124,13 +111,11 @@ async function testDisconnectedStatusShowsConnectView() {
   vm.runInNewContext(popupSource, sandbox, { filename: popupPath });
   await flush();
 
-  assert.equal(elements["connected-view"].hidden, true);
-  assert.equal(elements["connect-view"].hidden, false);
   assert.equal(elements["form-status"].textContent, "Not connected");
 }
 
 async function testAutoConnectFromQueryPairsWithoutStatusRace() {
-  const { sandbox, elements, messages } = makeSandbox({
+  const { sandbox, messages, closeEvents } = makeSandbox({
     search: "?port=17657&code=127179&connect=1",
     response: async (message) => {
       if (message.type === "zode-pair") {
@@ -146,13 +131,11 @@ async function testAutoConnectFromQueryPairsWithoutStatusRace() {
   assert.deepEqual(messages.map((message) => message.type), ["zode-pair"]);
   assert.equal(messages[0].port, 17657);
   assert.equal(messages[0].code, "127179");
-  assert.equal(elements["connected-view"].hidden, false);
-  assert.equal(elements["connect-view"].hidden, true);
-  assert.equal(elements["status-detail"].textContent, "Port 17657");
+  assert.deepEqual(closeEvents, ["window.close"]);
 }
 
 async function testDisconnectedStatusSilentlyReconnectsWhenTokenAvailable() {
-  const { sandbox, elements, messages } = makeSandbox({
+  const { sandbox, messages, closeEvents } = makeSandbox({
     response: async (message) => {
       if (message.type === "zode-status") {
         return {
@@ -171,37 +154,21 @@ async function testDisconnectedStatusSilentlyReconnectsWhenTokenAvailable() {
   await flush();
 
   assert.deepEqual(messages.map((message) => message.type), ["zode-status", "zode-reconnect"]);
-  assert.equal(elements["connected-view"].hidden, false);
-  assert.equal(elements["connect-view"].hidden, true);
-  assert.equal(elements["status-detail"].textContent, "Port 17657");
+  assert.equal(messages[1].port, 17657);
+  assert.deepEqual(closeEvents, ["window.close"]);
 }
 
-function testHiddenPanelsAreCssHidden() {
-  assert.match(popupHtmlSource, /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/i);
-}
-
-function styleBlock(selector) {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = popupHtmlSource.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "i"));
-  assert.ok(match, `${selector} style block should exist`);
-  return match[1];
-}
-
-function testSettingsButtonIsLargerAndCentered() {
-  const panelTop = styleBlock(".panel-top");
-  const button = styleBlock(".icon-button");
-  const glyph = styleBlock(".icon-button-glyph");
-
-  assert.match(popupHtmlSource, /<button[^>]+class="icon-button"[^>]*>\s*<span class="icon-button-glyph" aria-hidden="true">&#9881;<\/span>\s*<\/button>/i);
-  assert.match(panelTop, /min-height:\s*36px/i);
-  assert.match(button, /height:\s*36px/i);
-  assert.match(button, /width:\s*36px/i);
-  assert.match(button, /font-size:\s*18px/i);
-  assert.match(button, /line-height:\s*1/i);
-  assert.match(button, /place-items:\s*center/i);
-  assert.match(glyph, /display:\s*block/i);
-  assert.match(glyph, /line-height:\s*1/i);
-  assert.match(glyph, /transform:\s*translateY\(1px\)/i);
+function testMarkupAndScriptRemainPairingOnly() {
+  assert.match(popupHtmlSource, /id="port"/i);
+  assert.match(popupHtmlSource, /id="code"/i);
+  assert.match(popupHtmlSource, /id="go"/i);
+  assert.match(popupHtmlSource, /id="form-status"/i);
+  assert.doesNotMatch(
+    popupHtmlSource,
+    /connected-view|status-pill|status-detail|Bridge settings|id="version"/i,
+  );
+  assert.doesNotMatch(popupSource, /renderConnected|statusText|statusDetail|versionText/);
+  assert.doesNotMatch(popupSource, /zode-task-call|task\/|model\/|permission\/|attachment\//);
 }
 
 function testBrandMarkUsesExtensionIcon() {
@@ -209,10 +176,9 @@ function testBrandMarkUsesExtensionIcon() {
 }
 
 (async () => {
-  testHiddenPanelsAreCssHidden();
-  testSettingsButtonIsLargerAndCentered();
+  testMarkupAndScriptRemainPairingOnly();
   testBrandMarkUsesExtensionIcon();
-  await testConnectedStatusShowsConnectedView();
+  await testAlreadyConnectedStatusClosesPairingPage();
   await testDisconnectedStatusShowsConnectView();
   await testAutoConnectFromQueryPairsWithoutStatusRace();
   await testDisconnectedStatusSilentlyReconnectsWhenTokenAvailable();

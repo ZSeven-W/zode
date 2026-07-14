@@ -5,6 +5,10 @@
 const STORAGE_TOKEN = "zodeToken";
 const STORAGE_PORT = "zodePort";
 const KEEPALIVE_MS = 20_000;
+const AUTH_ATTEMPT_TIMEOUT_MS = 15_000;
+const TASK_REQUEST_TIMEOUT_MS = 30_000;
+const TASK_PROTOCOL_VERSION = 1;
+const TASK_PENDING_CAP = 500;
 const BUF_CAP = 500;
 const PENDING_REQUEST_CAP = 500;
 const DOWNLOAD_LIMIT_CAP = 100;
@@ -35,6 +39,11 @@ let pendingRequests = new Map();
 let offscreenCreation = null;
 let downloadSessionActive = false;
 let downloadBuf = [];
+let nextTaskRequestId = 1;
+let nextTaskConnectionId = 1;
+const pendingTaskRequests = new Map();
+let tokenMutationQueue = Promise.resolve();
+let authAttempt = null;
 
 async function getStored(keys) {
   return await chrome.storage.local.get(keys);
@@ -64,48 +73,152 @@ async function setPort(port) {
   await chrome.storage.local.set({ [STORAGE_PORT]: port });
 }
 
+function mutateTokenForSocket(socket, mutation) {
+  if (ws !== socket) {
+    return Promise.resolve(false);
+  }
+  const nextMutation = tokenMutationQueue.catch(() => {}).then(async () => {
+    await mutation();
+    return true;
+  });
+  tokenMutationQueue = nextMutation;
+  return nextMutation;
+}
+
+function persistTokenForSocket(socket, token) {
+  return mutateTokenForSocket(socket, () => setToken(token));
+}
+
+function clearTokenForSocket(socket) {
+  return mutateTokenForSocket(socket, clearToken);
+}
+
 function statusSnapshot(port = lastPort, token = null) {
   const connected = ws != null && ws.readyState === WebSocket.OPEN;
+  const taskClientSupported = connected && ws.taskProtocolVersion === TASK_PROTOCOL_VERSION;
   return {
     connected,
     port,
     attachedTabId,
     canReconnect: !connected && port != null && token != null,
+    taskClientSupported,
+    taskConnectionId: taskClientSupported ? ws.taskConnectionId : null,
   };
 }
 
-async function connect(port, code) {
-  const numericPort = Number(port);
+function createTaskConnectionId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  const sequence = nextTaskConnectionId++;
+  return `task-${Date.now().toString(36)}-${sequence}-${Math.random().toString(36).slice(2)}`;
+}
+
+function announceTaskTransport(socket) {
+  if (socket.taskProtocolVersion === TASK_PROTOCOL_VERSION) {
+    socket.taskConnectionId ||= createTaskConnectionId();
+    broadcastRuntime({
+      type: "zode-task-connected",
+      connectionId: socket.taskConnectionId,
+      protocolVersion: socket.taskProtocolVersion,
+    });
+    return;
+  }
+  socket.taskConnectionId = null;
+  broadcastRuntime({
+    type: "zode-task-unsupported",
+    message: "Current zode version does not support the task client",
+  });
+}
+
+function connect(port, code) {
+  if (authAttempt) {
+    return Promise.reject(new Error("zode bridge authentication already in progress"));
+  }
+  const attempt = { socket: null, expired: false, timeout: null };
+  authAttempt = attempt;
+  const timeout = new Promise((_, reject) => {
+    attempt.timeout = setTimeout(() => {
+      attempt.expired = true;
+      reject(new Error("zode bridge authentication timed out"));
+      if (attempt.socket && ws === attempt.socket) {
+        closeSocket();
+      }
+    }, AUTH_ATTEMPT_TIMEOUT_MS);
+  });
+  return Promise.race([connectAttempt(port, code, attempt), timeout]).finally(() => {
+    clearTimeout(attempt.timeout);
+    if (authAttempt === attempt) {
+      authAttempt = null;
+    }
+  });
+}
+
+function requireCurrentAuthAttempt(attempt) {
+  if (authAttempt !== attempt || attempt.expired) {
+    throw new Error("zode bridge authentication attempt is no longer active");
+  }
+}
+
+async function connectAttempt(port, code, attempt) {
+  let targetPort = port;
+  if (!targetPort && !code) {
+    targetPort = await getPort();
+    requireCurrentAuthAttempt(attempt);
+    if (!targetPort) {
+      throw new Error("no stored zode bridge port");
+    }
+  }
+  const numericPort = Number(targetPort);
   if (!Number.isInteger(numericPort) || numericPort <= 0 || numericPort > 65535) {
     throw new Error("enter the WS port shown by /browser pair");
   }
+  await tokenMutationQueue.catch(() => {});
+  requireCurrentAuthAttempt(attempt);
   const token = await getToken();
+  requireCurrentAuthAttempt(attempt);
   if (!code && !token) {
     throw new Error("enter the pairing code shown by /browser pair");
   }
   await setPort(numericPort);
+  requireCurrentAuthAttempt(attempt);
   closeSocket();
 
   return await new Promise((resolve, reject) => {
     let authenticated = false;
     let settled = false;
+    let socket = null;
 
     const resolveAuth = () => {
-      authenticated = true;
       if (!settled) {
+        authenticated = true;
         settled = true;
+        socket.cancelConnect = null;
+        announceTaskTransport(socket);
         resolve(statusSnapshot(numericPort, token));
       }
     };
     const rejectAuth = (error) => {
       if (!settled) {
         settled = true;
+        if (socket) {
+          socket.cancelConnect = null;
+        }
         reject(error);
       }
     };
 
-    ws = new WebSocket(`ws://127.0.0.1:${numericPort}`);
-    ws.onopen = async () => {
+    socket = new WebSocket(`ws://127.0.0.1:${numericPort}`);
+    attempt.socket = socket;
+    socket.authToken = token;
+    socket.taskProtocolVersion = null;
+    socket.taskConnectionId = null;
+    socket.cancelConnect = (error) => rejectAuth(error);
+    ws = socket;
+    socket.onopen = async () => {
+      if (ws !== socket) {
+        return;
+      }
       try {
         downloadBuf = [];
         downloadSessionActive = true;
@@ -127,26 +240,42 @@ async function connect(port, code) {
         closeSocket();
       }
     };
-    ws.onmessage = (event) => {
-      handleMessage(event.data)
+    socket.onmessage = (event) => {
+      if (ws !== socket) {
+        return;
+      }
+      handleMessage(event.data, socket)
         .then((result) => {
+          if (ws !== socket) {
+            return;
+          }
           if (result === "authenticated") {
             resolveAuth();
           }
         })
         .catch((error) => {
+          if (ws !== socket) {
+            return;
+          }
           console.error("zode bridge message failed", error);
           rejectAuth(error);
         });
     };
-    ws.onerror = () => {
+    socket.onerror = () => {
+      if (ws !== socket) {
+        return;
+      }
       rejectAuth(new Error("zode bridge websocket error"));
     };
-    ws.onclose = () => {
+    socket.onclose = () => {
+      if (ws !== socket) {
+        return;
+      }
       clearInterval(keepalive);
       keepalive = null;
       ws = null;
       downloadSessionActive = false;
+      disconnectTaskTransport("zode task connection closed");
       if (!authenticated) {
         rejectAuth(new Error("zode bridge connection closed"));
       }
@@ -170,6 +299,19 @@ function applyThemeIcon(dark) {
   Promise.resolve(chrome.action.setIcon({ path: dark ? DARK_ICONS : LIGHT_ICONS })).catch(
     (error) => console.debug("zode theme icon update failed", error),
   );
+}
+
+function enableActionOpenedSidePanel() {
+  if (!chrome.sidePanel || typeof chrome.sidePanel.setPanelBehavior !== "function") {
+    return;
+  }
+  try {
+    Promise.resolve(
+      chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }),
+    ).catch((error) => console.debug("zode side panel behavior unavailable", error));
+  } catch (error) {
+    console.debug("zode side panel behavior unavailable", error);
+  }
 }
 
 // Chrome allows one offscreen document per extension; share the in-flight
@@ -204,12 +346,8 @@ async function ensureThemeWatcher() {
   }
 }
 
-async function reconnectStored(port) {
-  const targetPort = port || (await getPort());
-  if (!targetPort) {
-    throw new Error("no stored zode bridge port");
-  }
-  return await connect(targetPort, "");
+function reconnectStored(port) {
+  return connect(port || null, "");
 }
 
 function closeSocket() {
@@ -218,6 +356,11 @@ function closeSocket() {
     const old = ws;
     ws = null;
     old.onclose = null;
+    if (old.cancelConnect) {
+      old.cancelConnect(new Error("zode bridge connection replaced"));
+      old.cancelConnect = null;
+    }
+    disconnectTaskTransport("zode task connection replaced");
     try {
       old.close();
     } catch (_) {
@@ -228,40 +371,158 @@ function closeSocket() {
   keepalive = null;
 }
 
-function send(value) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    throw new Error("zode bridge is not connected");
+function sendOnSocket(socket, value) {
+  if (!socket || ws !== socket || socket.readyState !== WebSocket.OPEN) {
+    return false;
   }
-  ws.send(JSON.stringify(value));
+  socket.send(JSON.stringify(value));
+  return true;
 }
 
-async function handleMessage(raw) {
+function send(value) {
+  const socket = ws;
+  if (!sendOnSocket(socket, value)) {
+    throw new Error("zode bridge is not connected");
+  }
+}
+
+function broadcastRuntime(message) {
+  try {
+    Promise.resolve(chrome.runtime.sendMessage(message)).catch((error) => {
+      console.debug("zode task runtime broadcast failed", error);
+    });
+  } catch (error) {
+    console.debug("zode task runtime broadcast failed", error);
+  }
+}
+
+function rejectTaskPending(reason) {
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  for (const [id, pending] of pendingTaskRequests) {
+    pendingTaskRequests.delete(id);
+    clearTimeout(pending.timeout);
+    pending.reject(error);
+  }
+}
+
+function disconnectTaskTransport(reason) {
+  rejectTaskPending(reason);
+  broadcastRuntime({ type: "zode-task-disconnected" });
+}
+
+function requestTask(method, params = {}) {
+  if (typeof method !== "string" || method.trim().length === 0) {
+    return Promise.reject(new Error("zode task method must be a non-empty string"));
+  }
+  if (
+    ws != null &&
+    ws.readyState === WebSocket.OPEN &&
+    ws.taskProtocolVersion !== TASK_PROTOCOL_VERSION
+  ) {
+    const error = new Error("Current zode version does not support the task client");
+    error.code = "unsupported_task_client";
+    return Promise.reject(error);
+  }
+  if (pendingTaskRequests.size >= TASK_PENDING_CAP) {
+    return Promise.reject(new Error(`zode task pending request limit is ${TASK_PENDING_CAP}`));
+  }
+  const id = `ext-${nextTaskRequestId++}`;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      const pending = pendingTaskRequests.get(id);
+      if (!pending) {
+        return;
+      }
+      pendingTaskRequests.delete(id);
+      pending.reject(new Error(`zode task request ${method} (${id}) timed out`));
+    }, TASK_REQUEST_TIMEOUT_MS);
+    pendingTaskRequests.set(id, { resolve, reject, timeout });
+    try {
+      send({ channel: "tasks", kind: "request", id, method, params });
+    } catch (error) {
+      pendingTaskRequests.delete(id);
+      clearTimeout(timeout);
+      reject(error);
+    }
+  });
+}
+
+function handleTaskFrame(msg) {
+  if (msg.kind === "event") {
+    broadcastRuntime({
+      type: "zode-task-event",
+      event: msg.event,
+      params: msg.params,
+    });
+    return;
+  }
+  if (msg.kind !== "response" && msg.kind !== "error") {
+    return;
+  }
+  const pending = pendingTaskRequests.get(msg.id);
+  if (!pending) {
+    return;
+  }
+  pendingTaskRequests.delete(msg.id);
+  clearTimeout(pending.timeout);
+  if (msg.kind === "response") {
+    pending.resolve(msg.result);
+  } else {
+    const error = new Error(msg.message || msg.code || "zode task request failed");
+    if (msg.code != null) {
+      error.code = msg.code;
+    }
+    pending.reject(error);
+  }
+}
+
+async function handleMessage(raw, sourceSocket) {
+  if (ws !== sourceSocket) {
+    return null;
+  }
   const msg = JSON.parse(raw);
+  if (msg.channel === "tasks") {
+    handleTaskFrame(msg);
+    return null;
+  }
   if (msg.type === "paired") {
-    await setToken(msg.token);
-    return "authenticated";
+    sourceSocket.taskProtocolVersion = Number.isInteger(msg.taskProtocol)
+      ? msg.taskProtocol
+      : null;
+    sourceSocket.authToken = msg.token;
+    const current = await persistTokenForSocket(sourceSocket, msg.token);
+    return current ? "authenticated" : null;
   }
   if (msg.type === "ok") {
-    return "authenticated";
+    sourceSocket.taskProtocolVersion = Number.isInteger(msg.taskProtocol)
+      ? msg.taskProtocol
+      : null;
+    const current = await persistTokenForSocket(sourceSocket, sourceSocket.authToken);
+    return current ? "authenticated" : null;
   }
   if (msg.type === "ping") {
     return null;
   }
   if (msg.type === "rejected") {
-    await clearToken();
+    const current = await clearTokenForSocket(sourceSocket);
+    if (!current) {
+      return null;
+    }
     throw new Error(msg.reason || "zode bridge rejected authentication");
   }
-  await handleRpc(msg);
+  await handleRpc(msg, sourceSocket);
   return null;
 }
 
-async function handleRpc(request) {
+async function handleRpc(request, sourceSocket) {
+  let response;
   try {
     const result = await dispatch(request);
-    send({ id: request.id, result });
+    response = { id: request.id, result };
   } catch (error) {
-    send({ id: request.id, error: String((error && error.message) || error) });
+    response = { id: request.id, error: String((error && error.message) || error) };
   }
+  sendOnSocket(sourceSocket, response);
 }
 
 async function dispatch(request) {
@@ -676,6 +937,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
     return true;
   }
+  if (message.type === "zode-task-request") {
+    requestTask(message.method, message.params)
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => {
+        const response = { ok: false, error: String(error.message || error) };
+        if (error && error.code != null) {
+          response.code = error.code;
+        }
+        sendResponse(response);
+      });
+    return true;
+  }
   if (message.type === "zode-theme") {
     applyThemeIcon(Boolean(message.dark));
     return false;
@@ -683,4 +956,5 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
+enableActionOpenedSidePanel();
 ensureThemeWatcher();

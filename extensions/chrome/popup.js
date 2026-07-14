@@ -1,8 +1,3 @@
-const connectedView = document.getElementById("connected-view");
-const connectView = document.getElementById("connect-view");
-const statusText = document.getElementById("status-text");
-const statusDetail = document.getElementById("status-detail");
-const versionText = document.getElementById("version");
 const portInput = document.getElementById("port");
 const codeInput = document.getElementById("code");
 const button = document.getElementById("go");
@@ -10,19 +5,18 @@ const formStatus = document.getElementById("form-status");
 const query = new URLSearchParams(window.location.search);
 
 hydrateFromQuery();
-renderVersion();
 
 button.addEventListener("click", async () => {
-  await connectFromInputs({ closeOnSuccess: true });
+  await connectFromInputs();
 });
 
 if (query.get("connect") === "1") {
   queueMicrotask(() => {
-    connectFromInputs({ closeOnSuccess: true }).catch(() => {});
+    connectFromInputs().catch(() => {});
   });
 } else {
-  refreshStatus().catch(() => {
-    renderDisconnected("Not connected");
+  refreshPairing().catch(() => {
+    renderStatus("Not connected");
   });
 }
 
@@ -37,73 +31,54 @@ function hydrateFromQuery() {
   }
 }
 
-function renderVersion() {
-  const manifest = chrome.runtime.getManifest ? chrome.runtime.getManifest() : null;
-  versionText.textContent = manifest && manifest.version ? `Version v${manifest.version}` : "";
-}
-
-async function refreshStatus() {
+async function refreshPairing() {
   const response = await chrome.runtime.sendMessage({ type: "zode-status" });
   if (response && response.ok && response.status && response.status.connected) {
-    renderConnected(response.status);
-  } else if (response && response.ok && response.status && response.status.canReconnect) {
-    await reconnectStored(response.status);
-  } else {
-    renderDisconnected("Not connected");
+    await closeSelf();
+    return;
   }
+  if (response && response.ok && response.status && response.status.canReconnect) {
+    await reconnectStored(response.status);
+    return;
+  }
+  renderStatus("Not connected");
 }
 
 async function reconnectStored(status) {
-  renderDisconnected("Connecting...");
+  renderStatus("Connecting...");
   button.disabled = true;
   try {
     const response = await chrome.runtime.sendMessage({
       type: "zode-reconnect",
       port: status.port,
     });
-    if (response && response.ok && response.status && response.status.connected) {
-      renderConnected(response.status);
-    } else {
-      renderDisconnected("Not connected");
-      button.disabled = false;
+    if (!response || !response.ok || !response.status || !response.status.connected) {
+      throw new Error((response && response.error) || "reconnect failed");
     }
-  } catch (_) {
-    renderDisconnected("Not connected");
+    await closeSelf();
+  } catch (error) {
+    renderStatus(String(error.message || error));
     button.disabled = false;
   }
 }
 
-function renderConnected(status) {
-  connectedView.hidden = false;
-  connectView.hidden = true;
-  statusText.textContent = "Connected";
-  statusDetail.textContent = status.port ? `Port ${status.port}` : "";
-  document.body.classList.add("connected");
-}
-
-function renderDisconnected(message) {
-  connectedView.hidden = true;
-  connectView.hidden = false;
+function renderStatus(message) {
   formStatus.textContent = message;
-  document.body.classList.remove("connected");
 }
 
-async function connectFromInputs({ closeOnSuccess }) {
+async function connectFromInputs() {
   const port = Number(portInput.value.trim());
   const code = codeInput.value.trim();
-  renderDisconnected("Connecting...");
+  renderStatus("Connecting...");
   button.disabled = true;
   try {
     const response = await chrome.runtime.sendMessage({ type: "zode-pair", port, code });
     if (!response || !response.ok) {
       throw new Error((response && response.error) || "pairing failed");
     }
-    renderConnected(response.status || { connected: true, port });
-    if (closeOnSuccess) {
-      await closeSelf();
-    }
+    await closeSelf();
   } catch (error) {
-    renderDisconnected(String(error.message || error));
+    renderStatus(String(error.message || error));
     button.disabled = false;
   }
 }
@@ -116,7 +91,7 @@ async function closeSelf() {
       return;
     }
   } catch (_) {
-    // Browser action popups have no tab; window.close handles that case.
+    // Pairing opened in a popup has no tab; window.close handles that case.
   }
   window.close();
 }

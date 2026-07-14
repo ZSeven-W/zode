@@ -41,6 +41,13 @@ pub struct PermissionDialog {
     chip_hits: Vec<(u16, u16, u16, Approval)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PermissionRequestIdentity {
+    pub(crate) source: Option<String>,
+    pub(crate) turn_id: Option<u64>,
+    pub(crate) local_op_id: Option<u64>,
+}
+
 impl PermissionDialog {
     pub fn new(request: ApprovalRequest, cwd: std::path::PathBuf) -> Self {
         Self {
@@ -71,6 +78,28 @@ impl PermissionDialog {
         self.request.as_ref().map(|r| r.tool.as_str()).unwrap_or("")
     }
 
+    pub(crate) fn identity(&self) -> Option<PermissionRequestIdentity> {
+        self.request
+            .as_ref()
+            .map(|request| PermissionRequestIdentity {
+                source: request.source.clone(),
+                turn_id: request.turn_id,
+                local_op_id: request.local_op_id,
+            })
+    }
+
+    pub(crate) fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    /// Remove and return the still-pending request. Lifecycle cleanup and the
+    /// main answer path use this so sender failure and typed ownership can be
+    /// handled explicitly by the app rather than hidden inside the dialog.
+    pub(crate) fn take_request(&mut self) -> Option<ApprovalRequest> {
+        self.chip_hits.clear();
+        self.request.take()
+    }
+
     /// Move the highlight to the previous action (↑/←), wrapping.
     pub fn select_prev(&mut self) {
         self.selected = self.selected.checked_sub(1).unwrap_or(OPTIONS.len() - 1);
@@ -89,13 +118,8 @@ impl PermissionDialog {
     /// Respond with `approval` and report done. Returns true if a pending
     /// request was answered (false if it had already been taken).
     pub fn answer(&mut self, approval: Approval) -> bool {
-        if let Some(req) = self.request.take() {
-            let _ = req.respond(approval);
-            self.chip_hits.clear();
-            true
-        } else {
-            false
-        }
+        self.take_request()
+            .is_some_and(|request| request.respond(approval).is_ok())
     }
 
     /// The card's body lines (summary + optional diff preview + options hint).
@@ -395,6 +419,44 @@ mod tests {
         assert!(dialog.answer(Approval::AllowOnce)); // responded
         assert!(!dialog.answer(Approval::AllowOnce)); // request already taken
         assert_eq!(join.await.unwrap(), Approval::AllowOnce);
+    }
+
+    #[tokio::test]
+    async fn answer_reports_failure_when_requester_has_gone_away() {
+        let (queue, mut rx) = approval_queue();
+        let q = queue.clone();
+        let join =
+            tokio::spawn(async move { q.request("Bash", &serde_json::json!({}), None).await });
+        let req = rx.next().await.unwrap();
+        let mut dialog = PermissionDialog::new(req, std::env::temp_dir());
+        join.abort();
+        assert!(join.await.is_err());
+
+        assert!(!dialog.answer(Approval::AllowAlways));
+        assert!(dialog.take_request().is_none());
+    }
+
+    #[tokio::test]
+    async fn dialog_exposes_typed_request_identity_before_take() {
+        let (queue, mut rx) = approval_queue();
+        queue.bind_local_operation("tab-4", 12);
+        let q = queue.clone();
+        let join = tokio::spawn(async move {
+            q.request("Bash", &serde_json::json!({}), Some("tab-4".to_string()))
+                .await
+        });
+        let req = rx.next().await.unwrap();
+        let mut dialog = PermissionDialog::new(req, std::env::temp_dir());
+
+        let identity = dialog.identity().expect("request remains pending");
+        assert_eq!(identity.source.as_deref(), Some("tab-4"));
+        assert_eq!(identity.turn_id, None);
+        assert_eq!(identity.local_op_id, Some(12));
+        let req = dialog.take_request().expect("request can be taken once");
+        assert!(dialog.identity().is_none());
+        assert!(dialog.take_request().is_none());
+        req.respond(Approval::Deny).unwrap();
+        assert_eq!(join.await.unwrap(), Approval::Deny);
     }
 
     #[tokio::test]

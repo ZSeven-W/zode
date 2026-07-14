@@ -53,7 +53,7 @@ pub mod workflows;
 pub mod workflows_js;
 
 pub use agent_tools_code::{TodoItem, TodoStatus};
-pub use engine::{EngineTemplate, ZodeEngine};
+pub use engine::{EngineTemplate, ToolAccessMode, ZodeEngine};
 pub use error::CoreError;
 pub use git_stat::GitFileStat;
 pub use models_dev::{Catalog, CatalogModel, CatalogProvider};

@@ -4,6 +4,7 @@
 
 pub mod backend;
 pub mod bridge;
+mod executable;
 #[path = "file-input.rs"]
 mod file_input;
 pub mod gate;

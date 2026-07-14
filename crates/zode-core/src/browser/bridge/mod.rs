@@ -1,7 +1,13 @@
 pub mod backend;
 pub mod server;
+mod task_channel;
+pub mod task_protocol;
 pub use backend::BridgeBackend;
 pub use server::{BridgeServer, PairingHandle};
+pub use task_channel::{TaskInbound, TaskInboundKind, TaskReceiver};
+pub use task_protocol::{
+    TaskChannel, TaskClientBody, TaskClientFrame, TaskServerBody, TaskServerFrame,
+};
 
 use rand::rngs::OsRng;
 use rand::{Rng, RngCore};

@@ -239,7 +239,8 @@ async fn run(args: Args) -> i32 {
     // Tab 0 is assembled here; the app assigns it id 0, so label it "0".
     // Resume in the session's original directory when it still exists.
     let resume_meta = resolve_resume_target(&args);
-    let engine = match template
+    let engine_template = tui_engine_template(&template, resume_meta.as_ref());
+    let engine = match engine_template
         .assemble_tab(resume_dir(&resume_meta), Some("0".to_string()))
         .await
     {
@@ -253,6 +254,7 @@ async fn run(args: Args) -> i32 {
     let ui = zode_tui::UiConfig {
         theme_id: cfg.theme.clone(),
         yolo: args.yolo,
+        initial_access: engine_template.tool_access(),
         sandbox: args.sandbox,
         provider_names: cfg.providers.keys().cloned().collect(),
         needs_setup,
@@ -350,6 +352,20 @@ fn resume_dir(meta: &Option<SessionMeta>) -> Option<PathBuf> {
     })
 }
 
+/// Derive the engine used for the initial TUI tab without mutating the clean
+/// process-wide defaults retained by `TuiApp`. Saved sessions deliberately
+/// fail safe to prompted tool access because access is not persisted in
+/// `SessionMeta`.
+fn tui_engine_template(template: &EngineTemplate, meta: Option<&SessionMeta>) -> EngineTemplate {
+    match meta {
+        Some(meta) => template
+            .with_model(meta.model.clone())
+            .with_tool_access(zode_core::ToolAccessMode::Prompt)
+            .with_plan_mode(false),
+        None => template.clone(),
+    }
+}
+
 /// Load the resolved session's store into `engine`. Returns the (possibly
 /// updated) engine and the resumed session id.
 async fn attach_session(
@@ -407,5 +423,44 @@ mod tests {
 
         assert!(!tracing_writes_to_terminal(&tui, true));
         assert!(tracing_writes_to_terminal(&print, true));
+    }
+
+    #[test]
+    fn initial_tui_resume_uses_saved_model_and_prompt_without_dirtying_clean_template() {
+        use zode_core::config::{ProviderConfig, ProviderKind, ZodeConfig};
+
+        let cwd = tempfile::tempdir().unwrap();
+        let template = EngineTemplate::new(
+            ZodeConfig {
+                provider: ProviderConfig {
+                    r#type: Some(ProviderKind::Ollama),
+                    base_url: Some("http://localhost:11434".into()),
+                    model: Some("global-model".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            cwd.path().to_path_buf(),
+            None,
+            true,
+            None,
+            "2026-07-13".into(),
+        );
+        let meta = SessionMeta {
+            id: "saved".into(),
+            title: "Saved".into(),
+            cwd: cwd.path().display().to_string(),
+            model: "saved-model".into(),
+            updated_at: 1,
+        };
+
+        let effective = tui_engine_template(&template, Some(&meta));
+
+        assert_eq!(effective.model(), Some("saved-model"));
+        assert_eq!(effective.tool_access(), zode_core::ToolAccessMode::Prompt);
+        assert!(!effective.plan_mode());
+        assert_eq!(template.model(), Some("global-model"));
+        assert_eq!(template.tool_access(), zode_core::ToolAccessMode::Auto);
+        assert!(!template.plan_mode());
     }
 }

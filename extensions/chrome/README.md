@@ -13,12 +13,57 @@ Default bridge port: `17657`
 4. In zode, run `/browser pair`; zode opens the extension page with the WS port and pairing code pre-filled and auto-connects it.
 5. Run `/browser target bridge` before using browser tools against this Chrome profile.
 
+## Task side panel
+
+Zode must be running before the extension can connect. Run `/browser pair` once
+to open the lightweight pairing page with its local port and one-time code. The
+page closes after pairing; on later launches, its stored token is used only to
+reconnect. Clicking the toolbar icon opens the side panel where tasks run.
+
+Side-panel tasks are shared with the TUI sessions: creating or selecting a task
+does not switch the terminal's focused tab, and the same history remains
+available from either surface. The side panel supports text tasks, model
+selection, access modes `readOnly`, `prompt`, and `auto`, streaming output, and
+Stop for the active turn. `prompt` displays approval choices; `readOnly` does
+not expose mutating tools, while `auto` allows eligible interactions without a
+prompt but does not bypass hard deny or sandbox rules.
+
+Each turn accepts at most 8 files and 20 MiB total. Supported images are PNG,
+JPEG, GIF, and WebP, up to 5 MiB each. UTF-8 text and code files are supported
+up to 1 MiB each, including Markdown, JSON, Rust, JavaScript/TypeScript, Python,
+Go, Java/Kotlin, shell, CSS, HTML, TOML, and YAML. PDF, Office documents,
+archives, executables, and non-UTF-8 text are rejected.
+
+After updating the extension, use the Reload button on `chrome://extensions`
+before testing the side panel. Older extension versions remain compatible with
+existing browser automation, but they do not contain the task side panel;
+reload or update to version 0.3.0 or newer for task dispatch.
+
 After the first pairing, the extension stores a token. It stays idle while zode is not running; when zode is running with bridge target selected, zode opens the extension page to reconnect with the stored token. Tabs opened through zode's bridge are grouped into a Chrome tab group named `zode`.
 
 The extension also reports downloads created after the current bridge WebSocket
 connection was established. It never searches or returns earlier Chrome profile
 download history. Downloads that cannot be tied to the controlled zode tab are
 reported with `profile` or `unknown` attribution.
+
+## Opening the extension on Windows
+
+On Windows, zode launches Chrome directly for extension pairing and reconnect
+URLs instead of delegating them to the default-browser shell.
+
+On Windows, zode locates Chrome in this exact order:
+
+1. The `browser.executable` configuration value.
+2. Chrome under `%LOCALAPPDATA%`.
+3. Chrome under `%ProgramFiles%`.
+4. Chrome under `%ProgramFiles(x86)%`.
+5. `chrome.exe`, then `google-chrome.exe`, from `PATH`.
+
+Zode executes Chrome directly instead of using `cmd` or the default browser.
+This avoids Microsoft Store and default-browser indirection for the
+`chrome-extension://` URL, which is tied to zode's stable extension ID. If no
+Chrome executable is found, the error lists every attempted location and keeps
+the full extension URL so you can open it manually.
 
 ## Tab behavior
 
@@ -48,7 +93,12 @@ from `assets/logo-light.png` at the repo root with `sips -Z <size>`.
 
 ## Update
 
-After changing files in this directory, open `chrome://extensions` and click the reload button on the zode browser bridge card. This version adds the `downloads` permission, so existing installs must be updated before `browser_read` can list downloads. The manifest embeds a public key so unpacked and packed installs keep the same extension ID, which zode uses for the WebSocket Origin check.
+After changing files in this directory, open `chrome://extensions` and click
+the Reload button on the zode browser bridge card. Version 0.3.0 adds the native
+task side panel and its permission, so an older extension must be reloaded or
+updated before clicking the toolbar icon can open it. The manifest embeds a
+public key so unpacked and packed installs keep the same extension ID, which
+zode uses for the WebSocket Origin check.
 
 ## Pack CRX
 

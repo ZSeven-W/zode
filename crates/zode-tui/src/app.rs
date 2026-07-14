@@ -51,7 +51,7 @@ use crate::ui::dialog::agents_dialog::{AgentKind, AgentRow, AgentsAction, Agents
 use crate::ui::dialog::browser_panel::{BrowserPanel, BrowserPanelAction, BrowserPanelStatus};
 use crate::ui::dialog::connect::{ConnectAction, ConnectDialog, ConnectField, ConnectStage};
 use crate::ui::dialog::mcp_dialog::McpDialog;
-use crate::ui::dialog::permission::PermissionDialog;
+use crate::ui::dialog::permission::{PermissionDialog, PermissionRequestIdentity};
 use crate::ui::dialog::plugin_picker::PluginPicker;
 use crate::ui::dialog::question::QuestionDialog;
 use crate::ui::dialog::session_picker::{DeletePress, SessionPicker};
@@ -66,6 +66,9 @@ use crate::ui::mention::{
 use crate::ui::status::{Mode, StatusBar};
 use crate::ui::tabs::{render_sidebar, SidebarInfo};
 use crate::ui::toast::Toast;
+
+mod extension_attachments;
+mod extension_tasks;
 
 const PROMPT_HISTORY_FILE: &str = "prompt_history.json";
 /// Cap on persisted prompt-history entries PER SESSION. When exceeded, the
@@ -322,9 +325,60 @@ enum ImageSubmitRoute {
     Unsupported,
 }
 
+struct PreparedTabInterrupt {
+    tab_id: usize,
+    turn_id: Option<u64>,
+    abort: AbortController,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiApprovalCleanupTarget {
+    Source { tab_id: usize },
+    Turn { tab_id: usize, turn_id: u64 },
+    LocalOperation { tab_id: usize, op_id: u64 },
+}
+
+impl TuiApprovalCleanupTarget {
+    fn matches(self, source: Option<&str>, turn_id: Option<u64>, local_op_id: Option<u64>) -> bool {
+        let Some(source_tab_id) = source.and_then(|source| source.parse::<usize>().ok()) else {
+            return false;
+        };
+        match self {
+            Self::Source { tab_id } => source_tab_id == tab_id,
+            Self::Turn {
+                tab_id,
+                turn_id: id,
+            } => source_tab_id == tab_id && turn_id == Some(id) && local_op_id.is_none(),
+            Self::LocalOperation { tab_id, op_id } => {
+                source_tab_id == tab_id && turn_id.is_none() && local_op_id == Some(op_id)
+            }
+        }
+    }
+
+    fn matches_request(self, request: &ApprovalRequest) -> bool {
+        self.matches(
+            request.source.as_deref(),
+            request.turn_id,
+            request.local_op_id,
+        )
+    }
+
+    fn matches_identity(self, identity: &PermissionRequestIdentity) -> bool {
+        self.matches(
+            identity.source.as_deref(),
+            identity.turn_id,
+            identity.local_op_id,
+        )
+    }
+}
+
 pub struct UiConfig {
     pub theme_id: Option<String>,
     pub yolo: bool,
+    /// Tool access actually used to assemble the initial engine. It can differ
+    /// from the clean global `yolo` default during resume (including a failed
+    /// transcript load), so the initial tab must record it explicitly.
+    pub initial_access: zode_core::ToolAccessMode,
     pub sandbox: bool,
     /// Named providers (config.providers keys) for the settings dialog.
     pub provider_names: Vec<String>,
@@ -342,6 +396,15 @@ pub struct TuiApp {
     next_tab_id: usize,
     /// Assembly context for spinning up a fresh engine on Ctrl+T / resume.
     template: EngineTemplate,
+    /// Stable task-channel owner from the initially assembled engine. Engine
+    /// rebuilds may replace `template.browser`; extension replies must stay on
+    /// the socket that delivered the request.
+    extension_browser: Arc<zode_core::browser::BrowserSession>,
+    /// Single consumer for the authenticated extension task channel. `None`
+    /// after closure; the select branch then parks instead of busy-looping.
+    extension_task_rx: Option<zode_core::browser::bridge::TaskReceiver>,
+    extension_tasks: extension_tasks::ExtensionTaskState,
+    extension_attachments: extension_attachments::AttachmentRegistry,
     /// Startup strict-read preference, remembered so a `/sandbox off` → `on`
     /// toggle re-applies it (mode/network toggles carry it via with_mode/network,
     /// but re-enabling from off rebuilds a fresh config that would otherwise drop
@@ -448,6 +511,66 @@ pub struct TuiApp {
     queued_edit_index: Option<usize>,
 }
 
+async fn forward_agent_turn_stream(
+    engine: Arc<ZodeEngine>,
+    stream_result: Result<Box<dyn agent::stream::EventStream>, String>,
+    tab_id: usize,
+    turn_id: u64,
+    tx: mpsc::UnboundedSender<AppEvent>,
+) {
+    let result = match stream_result {
+        Ok(mut stream) => {
+            if let Some(note) = engine.take_restore_note() {
+                let _ = tx.send(AppEvent::Agent {
+                    tab_id,
+                    turn_id,
+                    cost_label: None,
+                    event: Event::Notice {
+                        code: "zode.compact.restore".into(),
+                        message: note,
+                    },
+                });
+            }
+            let mut result = Ok(());
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(event) => {
+                        engine.cost.observe(&event).await;
+                        let cost_label =
+                            if matches!(event, Event::Usage { .. } | Event::ToolResult { .. }) {
+                                Some(engine.cost.sidebar_label().await)
+                            } else {
+                                None
+                            };
+                        if tx
+                            .send(AppEvent::Agent {
+                                tab_id,
+                                turn_id,
+                                cost_label,
+                                event,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        result = Err(error.to_string());
+                        break;
+                    }
+                }
+            }
+            result
+        }
+        Err(error) => Err(error),
+    };
+    let _ = tx.send(AppEvent::TurnDone {
+        tab_id,
+        turn_id,
+        result,
+    });
+}
+
 impl TuiApp {
     pub fn new(
         engine: ZodeEngine,
@@ -473,8 +596,15 @@ impl TuiApp {
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
         let mut tab0 = SessionTab::new(0, Arc::new(engine), session_id);
+        // The engine may have been assembled from a task-local resume template
+        // even when loading its transcript later failed (`resumed_id=None`).
+        // Record the actual gate used to assemble it; never infer access from
+        // persistence outcome or the clean global defaults.
+        tab0.extension_access = ui.initial_access;
         tab0.titled = resumed_id.is_some();
-        start_browser_bridge_listener(tab0.engine.browser.clone());
+        let extension_browser = tab0.engine.browser.clone();
+        let extension_task_rx = extension_browser.take_extension_task_receiver();
+        start_browser_bridge_listener(extension_browser.clone());
         // A resumed session (--continue/--resume): replay its transcript into
         // the chat and restore its title (the engine already holds the store).
         if let Some(id) = &resumed_id {
@@ -540,6 +670,10 @@ impl TuiApp {
                 .map(|c| c.restrict_reads())
                 .unwrap_or(template.sandbox_settings().restrict_reads.unwrap_or(false)),
             template,
+            extension_browser,
+            extension_task_rx,
+            extension_tasks: extension_tasks::ExtensionTaskState::default(),
+            extension_attachments: extension_attachments::AttachmentRegistry::new(),
             sidebar_visibility: SidebarVisibility::Auto,
             selection_mode: mouse_capture,
             active_selection: None,
@@ -767,6 +901,7 @@ impl TuiApp {
         let session_id = Uuid::new_v4().simple().to_string();
         let placeholder = self.active_tab().engine.clone();
         let mut tab = SessionTab::new(id, placeholder, session_id);
+        tab.extension_access = self.template.tool_access();
         tab.reassemble_pending = true;
         tab.reassemble_seq = 1;
         tab.mode = Mode::Switching;
@@ -803,7 +938,19 @@ impl TuiApp {
         for path in &temps {
             cleanup_clipboard_temp(&mut self.clipboard_temps, path);
         }
+        let closing_tab_id = self.tabs[self.active].id;
+        let closing_task_id = self.tabs[self.active].session_id.clone();
+        self.extension_attachments.remove_task(&closing_task_id);
+        self.template
+            .remove_approval_source(&closing_tab_id.to_string());
+        self.deny_tui_approvals(TuiApprovalCleanupTarget::Source {
+            tab_id: closing_tab_id,
+        });
+        self.clear_extension_turn_state_for_closed_tab(closing_tab_id);
         if self.tabs.len() == 1 {
+            if let Some(abort) = self.tabs[self.active].turn_abort.take() {
+                abort.abort_with_reason("tab closed");
+            }
             self.should_quit = true;
             return;
         }
@@ -822,27 +969,73 @@ impl TuiApp {
     /// was actually interrupted (false when the tab was already idle). Shared
     /// by Ctrl+C and Esc.
     fn interrupt_active_turn(&mut self) -> bool {
-        let tab = &mut self.tabs[self.active];
-        if let Some(abort) = tab.turn_abort.take() {
-            abort.abort_with_reason("user interrupted");
+        let Some(interrupt) = self.prepare_tab_interrupt(self.active, None) else {
+            return false;
+        };
+        if let Some(turn_id) = interrupt.turn_id {
+            self.resolve_extension_approvals_before_tui_interrupt(interrupt.tab_id, turn_id);
+            self.mark_extension_turn_interrupt_requested(interrupt.tab_id, turn_id, None);
+        }
+        interrupt.abort.abort_with_reason("user interrupted");
+        true
+    }
+
+    fn prepare_tab_interrupt(
+        &mut self,
+        tab_idx: usize,
+        expected_turn_id: Option<u64>,
+    ) -> Option<PreparedTabInterrupt> {
+        let (prepared, local_op_id) = {
+            let tab = self.tabs.get_mut(tab_idx)?;
+            let active_turn_id = (tab.active_turn_id > 0).then_some(tab.active_turn_id);
+            if expected_turn_id.is_some() && expected_turn_id != active_turn_id {
+                return None;
+            }
+            let abort = tab.turn_abort.take()?;
+            let local_op_id = if active_turn_id.is_none() {
+                // The interrupted handle belonged to a local operation.
+                // Invalidate its generation immediately; its eventual
+                // completion/progress is stale even if another operation
+                // starts before the event arrives.
+                tab.active_local_op_id.take()
+            } else {
+                None
+            };
             tab.active_turn_id = 0;
-            // The aborted task is still tearing down (may hold the store lock /
-            // emit late events); stay busy until its terminal TurnDone lands so
-            // a fast resubmit can't spawn a second turn onto the same store.
-            tab.draining = true;
-            // Clear stale in-flight tool titles so the next turn doesn't
-            // inherit them (TurnDone / submit clear these; interrupt did not).
+            // Only real agent turns emit TurnDone and therefore get a draining
+            // latch. Local shell / compact / background abort users keep None.
+            tab.draining_turn_id = active_turn_id;
             tab.active_tool_names.clear();
-            // Esc / Ctrl+C also halts the goal auto-loop (and purges any queued
-            // continuation) so it doesn't restart.
             stop_goal_loop(tab);
             tab.chat.end_turn();
             tab.chat.push_system(crate::tr("(interrupted)"));
             tab.mode = Mode::Ready;
-            true
-        } else {
-            false
+            (
+                PreparedTabInterrupt {
+                    tab_id: tab.id,
+                    turn_id: active_turn_id,
+                    abort,
+                },
+                local_op_id,
+            )
+        };
+        if let Some(local_op_id) = local_op_id {
+            self.template
+                .clear_approval_local_operation_if(&prepared.tab_id.to_string(), local_op_id);
+            self.deny_tui_approvals(TuiApprovalCleanupTarget::LocalOperation {
+                tab_id: prepared.tab_id,
+                op_id: local_op_id,
+            });
         }
+        if let Some(turn_id) = prepared.turn_id {
+            self.template
+                .clear_approval_turn_if(&prepared.tab_id.to_string(), turn_id);
+            self.deny_tui_approvals(TuiApprovalCleanupTarget::Turn {
+                tab_id: prepared.tab_id,
+                turn_id,
+            });
+        }
+        Some(prepared)
     }
 
     /// Focus the tab at position `idx` (Ctrl+digit), if it exists.
@@ -868,6 +1061,157 @@ impl TuiApp {
     /// The tab whose id matches, if still open (events from closed tabs drop).
     fn tab_by_id(&mut self, id: usize) -> Option<&mut SessionTab> {
         self.tabs.iter_mut().find(|t| t.id == id)
+    }
+
+    /// Reserve one tab's shared abort/busy slot for a non-agent operation.
+    /// Every producer uses the checked monotonic id returned here; completion
+    /// and progress events are accepted only while this exact id still owns
+    /// the slot.
+    fn begin_local_operation(&mut self, tab_idx: usize) -> Option<(u64, AbortController)> {
+        let tab = self.tabs.get_mut(tab_idx)?;
+        if tab.is_busy() {
+            return None;
+        }
+        let Some(op_id) = tab.local_op_seq.checked_add(1) else {
+            self.toast = Some(Toast::error(crate::tr("local operation id exhausted")));
+            return None;
+        };
+        let abort = AbortController::new();
+        tab.local_op_seq = op_id;
+        tab.active_local_op_id = Some(op_id);
+        tab.turn_abort = Some(abort.clone());
+        let tab_id = tab.id;
+        self.template
+            .bind_approval_local_operation(&tab_id.to_string(), op_id);
+        Some((op_id, abort))
+    }
+
+    /// Route one immutable core approval request exactly once. The request's
+    /// stamped `(source, typed owner)` is authoritative; current source
+    /// bindings are never consulted here, so an old N request cannot attach to
+    /// N+1 or cross from the turn domain into a same-numbered local operation.
+    fn route_approval_request(&mut self, request: ApprovalRequest) {
+        let Some(source) = request.source.as_deref() else {
+            let _ = request.respond(Approval::Deny);
+            return;
+        };
+        let Ok(tab_id) = source.parse::<usize>() else {
+            let _ = request.respond(Approval::Deny);
+            return;
+        };
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            let _ = request.respond(Approval::Deny);
+            return;
+        };
+
+        match (request.turn_id, request.local_op_id) {
+            (Some(turn_id), None) => {
+                if tab.active_turn_id != turn_id
+                    || tab.turn_abort.is_none()
+                    || tab.draining_turn_id.is_some()
+                    || tab.reassemble_pending
+                {
+                    let _ = request.respond(Approval::Deny);
+                    return;
+                }
+                let task_id = tab.session_id.clone();
+                match self.classify_extension_approval_route(tab_id, turn_id, &task_id) {
+                    extension_tasks::ExtensionApprovalRoute::Tui => {
+                        self.enqueue_tui_approval(request);
+                    }
+                    extension_tasks::ExtensionApprovalRoute::Extension { connection_id } => {
+                        self.enqueue_extension_approval(
+                            request,
+                            tab_id,
+                            turn_id,
+                            task_id,
+                            connection_id,
+                        );
+                    }
+                    extension_tasks::ExtensionApprovalRoute::Deny => {
+                        let _ = request.respond(Approval::Deny);
+                    }
+                }
+            }
+            (None, Some(local_op_id))
+                if tab.active_turn_id == 0
+                    && tab.active_local_op_id == Some(local_op_id)
+                    && tab.turn_abort.is_some()
+                    && tab.draining_turn_id.is_none()
+                    && !tab.reassemble_pending =>
+            {
+                // Extension routes own agent turns only. A local operation's
+                // exact approval always remains in the terminal UI.
+                self.enqueue_tui_approval(request);
+            }
+            // Missing or ambiguous typed ownership, a stale local operation,
+            // or an otherwise non-live tab fails closed.
+            _ => {
+                let _ = request.respond(Approval::Deny);
+            }
+        }
+    }
+
+    fn enqueue_tui_approval(&mut self, request: ApprovalRequest) {
+        // An approval is the highest-priority modal: dismiss overlays that
+        // could hide the prompt now capturing input.
+        self.settings = None;
+        self.connect = None;
+        self.session_picker = None;
+        self.tasks_panel = None;
+        self.subagents_panel = None;
+        self.files_panel = None;
+        self.browser_panel = None;
+        self.show_help = false;
+        if self.active_dialog.is_none() {
+            self.active_dialog = Some(self.open_approval(request));
+        } else {
+            self.pending_requests.push_back(request);
+        }
+    }
+
+    /// Deny every terminal-UI approval matching one immutable typed owner.
+    /// This is deliberately independent from busy-slot acceptance: a stale
+    /// terminal still owns cleanup of its old cards, but cannot release a
+    /// newer turn/local-operation slot or its core approval binding.
+    fn deny_tui_approvals(&mut self, target: TuiApprovalCleanupTarget) {
+        let active_matches = self
+            .active_dialog
+            .as_ref()
+            .and_then(PermissionDialog::identity)
+            .is_some_and(|identity| target.matches_identity(&identity));
+        if active_matches {
+            if let Some(request) = self
+                .active_dialog
+                .as_mut()
+                .and_then(PermissionDialog::take_request)
+            {
+                let _ = request.respond(Approval::Deny);
+            }
+            self.active_dialog = None;
+        }
+
+        let mut kept = VecDeque::with_capacity(self.pending_requests.len());
+        while let Some(request) = self.pending_requests.pop_front() {
+            if target.matches_request(&request) {
+                let _ = request.respond(Approval::Deny);
+            } else {
+                kept.push_back(request);
+            }
+        }
+        self.pending_requests = kept;
+        self.promote_next_tui_approval();
+    }
+
+    fn promote_next_tui_approval(&mut self) {
+        while self.active_dialog.is_none() {
+            let Some(request) = self.pending_requests.pop_front() else {
+                break;
+            };
+            // Revalidate at promotion time: its immutable owner may have gone
+            // stale while another dialog was ahead of it.
+            self.route_approval_request(request);
+        }
     }
 
     /// Build the permission dialog for `req`, first focusing the tab that
@@ -901,33 +1245,58 @@ impl TuiApp {
     /// Respond to the active permission prompt, then surface the next queued
     /// request (if any), focusing its source tab/cwd.
     fn answer_permission(&mut self, approval: Approval) {
-        // Capture the tool before answering (responding consumes the request).
-        let tool = self.active_dialog.as_ref().map(|d| d.tool().to_string());
-        let responded = self
-            .active_dialog
-            .as_mut()
-            .map(|d| d.answer(approval))
-            .unwrap_or(false);
-        if responded {
-            // Persist an "allow always" decision to the project state so the
-            // tool is auto-allowed (no prompt) in future sessions here.
-            if approval == Approval::AllowAlways {
-                if let Some(tool) = tool {
-                    self.persist_allow_always(&tool);
-                }
+        let Some(mut dialog) = self.active_dialog.take() else {
+            return;
+        };
+        let identity = dialog.identity();
+        let exact_live = identity
+            .as_ref()
+            .is_some_and(|identity| self.tui_approval_identity_is_live(identity));
+        let cwd = dialog.cwd().to_path_buf();
+        if let Some(request) = dialog.take_request() {
+            let tool = request.tool.clone();
+            let actual = if exact_live { approval } else { Approval::Deny };
+            let respond_ok = request.respond(actual).is_ok();
+            if exact_live && respond_ok && approval == Approval::AllowAlways {
+                self.persist_allow_always_at(&cwd, &tool);
             }
-            let next = self.pending_requests.pop_front();
-            self.active_dialog = next.map(|r| self.open_approval(r));
+        }
+        // `had_request` dismisses the card even if its receiver disappeared;
+        // an empty dialog must never remain above the input.
+        self.promote_next_tui_approval();
+    }
+
+    fn tui_approval_identity_is_live(&self, identity: &PermissionRequestIdentity) -> bool {
+        let Some(tab_id) = identity
+            .source
+            .as_deref()
+            .and_then(|source| source.parse::<usize>().ok())
+        else {
+            return false;
+        };
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return false;
+        };
+        if tab.turn_abort.is_none() || tab.draining_turn_id.is_some() || tab.reassemble_pending {
+            return false;
+        }
+        match (identity.turn_id, identity.local_op_id) {
+            (Some(turn_id), None) if tab.active_turn_id == turn_id => {
+                !self.extension_turn_has_route(tab_id, turn_id)
+            }
+            (None, Some(local_op_id)) => {
+                tab.active_turn_id == 0 && tab.active_local_op_id == Some(local_op_id)
+            }
+            _ => false,
         }
     }
 
     /// Record a tool name into `<cwd>/.zode/state.json` `permissions.allow`
     /// (deduped) so an "allow always" choice survives restarts.
-    fn persist_allow_always(&self, tool: &str) {
-        let cwd = self.active_tab().engine.cwd.clone();
+    fn persist_allow_always_at(&self, cwd: &std::path::Path, tool: &str) {
         let tool = tool.to_string();
         // Best-effort: a failed persist must not interrupt the turn.
-        let _ = zode_core::config::ConfigManager::update_project_state(&cwd, |s| {
+        let _ = zode_core::config::ConfigManager::update_project_state(cwd, |s| {
             let perms = s
                 .entry("permissions")
                 .or_insert_with(|| serde_json::json!({}));
@@ -968,7 +1337,7 @@ impl TuiApp {
     /// status are committed only when the background result arrives.
     fn start_reassemble_active(
         &mut self,
-        template: EngineTemplate,
+        global_candidate: EngineTemplate,
         effect: ReassembleEffect,
         agent_tx: &mpsc::UnboundedSender<AppEvent>,
     ) -> bool {
@@ -978,10 +1347,13 @@ impl TuiApp {
             )));
             return false;
         }
-        // Plan mode is per-tab: re-apply THIS tab's mode to whatever template a
-        // caller passed (a model/provider/yolo swap must not drop or leak it).
-        let template = template.with_plan_mode(self.active_tab().plan_mode);
-        let (store, carry, cwd, id, seq) = {
+        // Keep the candidate stored in `self.template` clean. The engine is
+        // assembled from an effective task-local overlay; only the clean
+        // candidate is committed when the background result succeeds.
+        let candidate_changes_model = global_candidate.model() != self.template.model();
+        let candidate_changes_access =
+            global_candidate.tool_access() != self.template.tool_access();
+        let (store, carry, cwd, id, seq, active_model, active_access, plan_mode) = {
             let tab = self.active_tab();
             let store = match tab.engine.store.lock() {
                 Ok(s) => s.clone(),
@@ -996,8 +1368,28 @@ impl TuiApp {
                 tab.engine.cwd.clone(),
                 tab.id,
                 tab.reassemble_seq + 1,
+                tab.engine.model.clone(),
+                tab.extension_access,
+                tab.plan_mode,
             )
         };
+        let target_model = match &effect {
+            ReassembleEffect::Model { id } => id.clone(),
+            _ if candidate_changes_model => global_candidate
+                .model()
+                .map(str::to_string)
+                .unwrap_or(active_model),
+            _ => active_model,
+        };
+        let target_access = match &effect {
+            ReassembleEffect::Yolo { access, .. } => *access,
+            _ if candidate_changes_access => global_candidate.tool_access(),
+            _ => active_access,
+        };
+        let engine_template = global_candidate
+            .with_model(target_model)
+            .with_tool_access(target_access)
+            .with_plan_mode(plan_mode);
         {
             let tab = self.active_tab_mut();
             tab.reassemble_seq = seq;
@@ -1008,12 +1400,12 @@ impl TuiApp {
 
         let tx = agent_tx.clone();
         tokio::spawn(async move {
-            let result = match template
+            let result = match engine_template
                 .assemble_tab_with_carry(Some(cwd), Some(id.to_string()), carry)
                 .await
             {
                 Ok(engine) => Ok(ReassembledEngine {
-                    template,
+                    template: global_candidate,
                     engine: engine.with_store(store),
                 }),
                 Err(e) => Err(e.to_string()),
@@ -1035,27 +1427,79 @@ impl TuiApp {
         effect: ReassembleEffect,
         result: Result<ReassembledEngine, String>,
     ) {
+        let extension_context = match &effect {
+            ReassembleEffect::ExtensionNewTab {
+                connection_id,
+                failure_code,
+            }
+            | ReassembleEffect::ExtensionResumeTab {
+                connection_id,
+                failure_code,
+            }
+            | ReassembleEffect::ExtensionReconfigure {
+                connection_id,
+                failure_code,
+                ..
+            } => Some((*connection_id, *failure_code)),
+            _ => None,
+        };
+        let extension_failure = extension_context.and_then(|(_, failure_code)| {
+            result.as_ref().err().map(|message| {
+                (
+                    failure_code.unwrap_or("engine_assemble_failed"),
+                    message.clone(),
+                )
+            })
+        });
+        let extension_connection = extension_context.map(|(connection_id, _)| connection_id);
         let Some(tab_idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+            if extension_connection.is_some() {
+                let pending_task_ids: HashSet<String> = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.reassemble_pending)
+                    .map(|tab| tab.session_id.clone())
+                    .collect();
+                let removed_task_ids = self.extension_tasks.retain_pending_tasks(&pending_task_ids);
+                let fallback = self.tabs.get(self.active).map(|tab| tab.session_id.clone());
+                for removed_task_id in removed_task_ids {
+                    self.extension_tasks
+                        .replace_task_selection(&removed_task_id, fallback.as_deref());
+                }
+                self.extension_tasks.queue_completion(
+                    extension_failure
+                        .as_ref()
+                        .map(|(code, message)| (*code, message.as_str())),
+                );
+            }
             return;
         };
         if !self.tabs[tab_idx].reassemble_pending || self.tabs[tab_idx].reassemble_seq != seq {
             return;
         }
-
+        let extension_task_id = extension_connection
+            .is_some()
+            .then(|| self.tabs[tab_idx].session_id.clone());
+        let focused_tab_id = self.tabs.get(self.active).map(|tab| tab.id);
         self.tabs[tab_idx].reassemble_pending = false;
         // A new/resumed tab assembles under an UNCHANGED template clone —
         // installing it back would clobber a template switch that happened
         // while the assembly ran.
         let tab_creation = matches!(
-            effect,
-            ReassembleEffect::NewTab | ReassembleEffect::ResumeTab
+            &effect,
+            ReassembleEffect::NewTab
+                | ReassembleEffect::ResumeTab
+                | ReassembleEffect::ExtensionNewTab { .. }
+                | ReassembleEffect::ExtensionResumeTab { .. }
         );
+        let extension_reconfigure =
+            matches!(&effect, ReassembleEffect::ExtensionReconfigure { .. });
         match result {
             Ok(done) => {
                 let model = done.engine.model.clone();
                 self.tabs[tab_idx].engine = Arc::new(done.engine);
                 self.tabs[tab_idx].mode = Mode::Ready;
-                if !tab_creation {
+                if !tab_creation && !extension_reconfigure {
                     self.template = done.template;
                     self.status.model = model;
                 }
@@ -1065,23 +1509,38 @@ impl TuiApp {
                 self.apply_reassemble_effect(tab_idx, effect);
             }
             Err(e) if tab_creation => {
-                // The placeholder tab never got a real engine — remove it
-                // (keeping it would leave a tab aliasing another tab's engine
-                // and store). If it was the last tab (the parent was closed
-                // mid-assembly), quit like closing the last tab does.
-                self.tabs.remove(tab_idx);
-                if self.tabs.is_empty() {
+                if self.tabs.len() == 1 {
+                    // The parent may have been closed while this placeholder
+                    // assembled. Keep the sole remaining tab renderable for
+                    // the final draw/exit hint path, but exit immediately: the
+                    // failed placeholder still owns a clone of the parent's
+                    // engine/store and must never become interactive.
+                    self.tabs[tab_idx].mode = Mode::Error;
+                    self.active = 0;
                     self.should_quit = true;
-                    return;
+                    self.toast = Some(Toast::error(format!("{}: {e}", crate::tr("switch failed"))));
+                } else {
+                    // With another real tab available, discard the failed
+                    // placeholder instead of retaining its cloned engine/store.
+                    self.tabs.remove(tab_idx);
+                    self.active = focused_tab_id
+                        .and_then(|focused_id| {
+                            self.tabs.iter().position(|tab| tab.id == focused_id)
+                        })
+                        .unwrap_or_else(|| tab_idx.min(self.tabs.len() - 1));
+                    self.toast = Some(Toast::error(e));
                 }
-                if self.active >= self.tabs.len() {
-                    self.active = self.tabs.len() - 1;
-                }
-                self.toast = Some(Toast::error(e));
+            }
+            Err(e) if extension_reconfigure => {
+                // The old engine and task-local fields were never replaced;
+                // return the task to its prior ready state and surface the
+                // failure only through the extension completion channel.
+                self.tabs[tab_idx].mode = Mode::Ready;
+                self.toast = Some(Toast::error(format!("{}: {e}", crate::tr("switch failed"))));
             }
             Err(e) => {
-                if let ReassembleEffect::Plan { on } = effect {
-                    self.tabs[tab_idx].plan_mode = !on;
+                if let ReassembleEffect::Plan { on } = &effect {
+                    self.tabs[tab_idx].plan_mode = !*on;
                 }
                 self.tabs[tab_idx]
                     .chat
@@ -1089,6 +1548,21 @@ impl TuiApp {
                 self.tabs[tab_idx].mode = Mode::Error;
                 self.toast = Some(Toast::error(format!("{}: {e}", crate::tr("switch failed"))));
             }
+        }
+        if extension_connection.is_some() {
+            if let Some(task_id) = extension_task_id.as_deref() {
+                self.extension_tasks.finish_background_task(task_id);
+                if !self.tabs.iter().any(|tab| tab.session_id == task_id) {
+                    let fallback = self.tabs.get(self.active).map(|tab| tab.session_id.clone());
+                    self.extension_tasks
+                        .replace_task_selection(task_id, fallback.as_deref());
+                }
+            }
+            self.extension_tasks.queue_completion(
+                extension_failure
+                    .as_ref()
+                    .map(|(code, message)| (*code, message.as_str())),
+            );
         }
     }
 
@@ -1119,10 +1593,10 @@ impl TuiApp {
             ReassembleEffect::Model { id } => self.apply_model_effect(tab_idx, &id),
             // Fresh tab: nothing to announce — the tab flipping from
             // Switching to Ready IS the signal.
-            ReassembleEffect::NewTab => {}
+            ReassembleEffect::NewTab | ReassembleEffect::ExtensionNewTab { .. } => {}
             // Resumed tab: the engine arrived with the saved store attached —
             // replay it into the transcript and seed the context gauge.
-            ReassembleEffect::ResumeTab => {
+            ReassembleEffect::ResumeTab | ReassembleEffect::ExtensionResumeTab { .. } => {
                 let rebuilt = {
                     let tab = &self.tabs[tab_idx];
                     tab.engine.store.lock().ok().map(|store| {
@@ -1144,6 +1618,9 @@ impl TuiApp {
                     tab.persisted_msgs
                         .store(len, std::sync::atomic::Ordering::Relaxed);
                 }
+            }
+            ReassembleEffect::ExtensionReconfigure { access, .. } => {
+                self.tabs[tab_idx].extension_access = access;
             }
 
             ReassembleEffect::Notify(notify) => self.apply_reassemble_notify(tab_idx, notify),
@@ -1171,7 +1648,8 @@ impl TuiApp {
                 self.tabs[tab_idx].chat.push_system(&msg);
             }
             ReassembleEffect::Sandbox => self.apply_sandbox_reassemble_effect(tab_idx),
-            ReassembleEffect::Yolo { notify } => {
+            ReassembleEffect::Yolo { access, notify } => {
+                self.tabs[tab_idx].extension_access = access;
                 self.apply_reassemble_notify(tab_idx, notify);
             }
         }
@@ -1610,6 +2088,7 @@ impl TuiApp {
         self.next_tab_id += 1;
         let placeholder = self.active_tab().engine.clone();
         let mut tab = SessionTab::new(id, placeholder, meta.id.clone());
+        tab.extension_access = zode_core::ToolAccessMode::Prompt;
         tab.title = meta.title.clone();
         tab.titled = true;
         tab.reassemble_pending = true;
@@ -1619,19 +2098,23 @@ impl TuiApp {
         self.active = self.tabs.len() - 1;
         self.dismiss_input_popups();
 
-        let template = self.template.clone();
+        let clean_template = self.template.clone();
+        let engine_template = clean_template
+            .with_model(meta.model.clone())
+            .with_tool_access(zode_core::ToolAccessMode::Prompt)
+            .with_plan_mode(false);
         let tx = agent_tx.clone();
         tokio::spawn(async move {
             let result = async {
                 let store = Session::load(&path)
                     .await
                     .map_err(|e| format!("{}: {e}", crate::tr("load failed")))?;
-                let engine = template
+                let engine = engine_template
                     .assemble_tab(cwd_override, Some(id.to_string()))
                     .await
                     .map_err(|e| format!("{}: {e}", crate::tr("assemble failed")))?;
                 Ok(ReassembledEngine {
-                    template,
+                    template: clean_template,
                     engine: engine.with_store(store),
                 })
             }
@@ -1961,7 +2444,19 @@ impl TuiApp {
                 break;
             }
 
+            // Keep Tokio's default fair selection. Extension worker results
+            // validate the bridge's current active connection synchronously,
+            // so correctness no longer depends on consuming Disconnected first.
             tokio::select! {
+                inbound = extension_tasks::recv_extension_task(&mut self.extension_task_rx) => {
+                    if let Some(inbound) = inbound {
+                        self.dispatch_extension_inbound(inbound, &agent_tx);
+                    } else {
+                        // A closed receiver is immediately ready forever. Drop
+                        // it so subsequent iterations park on `pending()`.
+                        self.extension_task_rx = None;
+                    }
+                }
                 maybe_ev = term_events.next() => {
                     if let Some(Ok(ev)) = maybe_ev {
                         let mut burst = vec![ev];
@@ -2002,7 +2497,7 @@ impl TuiApp {
                     }
                 }
                 Some(app_ev) = agent_rx.recv() => {
-                    self.handle_agent_event(app_ev);
+                    self.handle_runtime_event(app_ev, &agent_tx);
                     // Coalesce a burst of streaming events (text deltas, tool
                     // updates) into ONE redraw. Providers stream tokens in
                     // bursts; handling each in its own loop pass forces a full
@@ -2013,12 +2508,13 @@ impl TuiApp {
                     while drained < AGENT_COALESCE_CAP {
                         match agent_rx.try_recv() {
                             Ok(ev) => {
-                                self.handle_agent_event(ev);
+                                self.handle_runtime_event(ev, &agent_tx);
                                 drained += 1;
                             }
                             Err(_) => break,
                         }
                     }
+                    self.dispatch_extension_completions(&agent_tx);
                     // A turn may have just finished — if it left the context at
                     // the auto-compact threshold, compact before anything new is
                     // sent, then flush any queued input.
@@ -2026,26 +2522,7 @@ impl TuiApp {
                     self.dispatch_queued_input(&agent_tx).await;
                 }
                 Some(req) = self.approval_rx.next() => {
-                    // An approval is the highest-priority modal: dismiss any
-                    // settings/help/picker/panel overlay so it can't hide the
-                    // prompt that is now capturing input.
-                    self.settings = None;
-                    self.connect = None;
-                    self.session_picker = None;
-                    self.tasks_panel = None;
-                    self.subagents_panel = None;
-                    self.files_panel = None;
-                    self.browser_panel = None;
-                    self.show_help = false;
-                    // Only focus the source tab when this request becomes the
-                    // active dialog; a queued request must not steal focus from
-                    // the dialog currently shown.
-                    if self.active_dialog.is_none() {
-                        let d = self.open_approval(req);
-                        self.active_dialog = Some(d);
-                    } else {
-                        self.pending_requests.push_back(req);
-                    }
+                    self.route_approval_request(req);
                 }
                 Some(req) = self.question_rx.next() => {
                     // A question is a modal like an approval: clear overlays so
@@ -2066,6 +2543,7 @@ impl TuiApp {
                 }
                 _ = ticker.tick() => {
                     self.status.tick();
+                    self.cleanup_extension_attachments_at(std::time::Instant::now());
                     let had_toast = self.toast.is_some();
                     if let Some(t) = &mut self.toast {
                         if t.tick() {
@@ -2119,16 +2597,21 @@ impl TuiApp {
             // Context-window occupancy: last prompt size vs the active model's window.
             self.status.context_tokens = tab.context_tokens;
             self.status.context_window = tab.engine.model_max_tokens;
+            self.status.model = tab.engine.model.clone();
             // Plan mode is per-tab, so the badge always reflects the active tab.
             self.status.plan_mode = tab.plan_mode;
+            self.status.yolo = matches!(tab.extension_access, zode_core::ToolAccessMode::Auto);
             self.status.selection_mode = self.selection_mode;
         }
         // Active provider group (for the `model(provider)` label), from the live
         // template — current across startup, model switch, and connect.
-        self.status.provider = self.template.active_provider_name().unwrap_or_default();
-        // Keep the approval + sandbox badges in sync with the live template
-        // (single source of truth across startup / toggles / tab switches).
-        self.status.yolo = self.template.yolo();
+        self.status.provider = self
+            .template
+            .with_model(self.tabs[self.active].engine.model.clone())
+            .active_provider_name()
+            .unwrap_or_default();
+        // Sandbox remains global; approval mode is task-local and was synced
+        // from the active tab above.
         let sandbox = self.template.sandbox();
         self.status.sandbox = sandbox.is_some();
         self.status.sandbox_read_only = sandbox
@@ -3762,12 +4245,10 @@ impl TuiApp {
         match session.start_pairing().await {
             Ok(handle) => {
                 let url = browser_extension_pairing_url(handle.port, &handle.code);
-                let open_note = match open_url_in_chrome(&url) {
-                    Ok(()) => "Opened the zode extension page in Chrome.".to_string(),
-                    Err(e) => format!("Could not open Chrome automatically: {e}."),
-                };
+                let open_note =
+                    browser_extension_open_note(&url, session.open_extension_url(&url).await);
                 self.active_tab_mut().chat.push_system(&format!(
-                    "Pairing code: {} (valid 2 min). WS port {}. {open_note} If needed, open: {url}",
+                    "Pairing code: {} (valid 2 min). WS port {}. {open_note}",
                     handle.code, handle.port
                 ));
             }
@@ -4131,6 +4612,11 @@ impl TuiApp {
                 self.start_reassemble_active(
                     t,
                     ReassembleEffect::Yolo {
+                        access: if yolo {
+                            zode_core::ToolAccessMode::Auto
+                        } else {
+                            zode_core::ToolAccessMode::Prompt
+                        },
                         notify: ReassembleNotify::Toast(format!("{} → {m}", crate::tr("mode"))),
                     },
                     agent_tx,
@@ -4607,24 +5093,28 @@ impl TuiApp {
         }
 
         let tab_idx = self.active;
-        let template = self.template.with_plan_mode(self.tabs[tab_idx].plan_mode);
+        let global_candidate = self.template.with_model(id.to_string());
+        let engine_template = global_candidate
+            .with_tool_access(self.tabs[tab_idx].extension_access)
+            .with_plan_mode(self.tabs[tab_idx].plan_mode);
         let hot_result = {
             let tab = &mut self.tabs[tab_idx];
             match Arc::get_mut(&mut tab.engine) {
-                Some(engine) => template.hot_swap_model(engine, id.to_string()).map(Some),
+                Some(engine) => engine_template
+                    .hot_swap_model(engine, id.to_string())
+                    .map(Some),
                 None => Ok(None),
             }
         };
 
         match hot_result {
-            Ok(Some(template)) => {
-                self.template = template;
+            Ok(Some(_effective_template)) => {
+                self.template = global_candidate;
                 self.apply_model_effect(tab_idx, id);
             }
             Ok(None) => {
-                let t = self.template.with_model(id.to_string());
                 self.start_reassemble_active(
-                    t,
+                    global_candidate,
                     ReassembleEffect::Model { id: id.to_string() },
                     agent_tx,
                 );
@@ -4661,22 +5151,25 @@ impl TuiApp {
             return;
         }
 
-        let template = self.template.with_plan_mode(self.tabs[tab_idx].plan_mode);
-        let hot_template = {
+        let global_candidate = self.template.with_goal(new_goal.clone());
+        let engine_template = global_candidate
+            .with_model(self.tabs[tab_idx].engine.model.clone())
+            .with_tool_access(self.tabs[tab_idx].extension_access)
+            .with_plan_mode(self.tabs[tab_idx].plan_mode);
+        let hot_swapped = {
             let tab = &mut self.tabs[tab_idx];
             Arc::get_mut(&mut tab.engine)
-                .map(|engine| template.hot_swap_goal(engine, new_goal.clone()))
+                .map(|engine| engine_template.hot_swap_goal(engine, new_goal.clone()))
         };
 
-        if let Some(template) = hot_template {
-            self.template = template;
+        if hot_swapped.is_some() {
+            self.template = global_candidate;
             self.apply_goal_effect(tab_idx, new_goal);
             return;
         }
 
-        let t = self.template.with_goal(new_goal.clone());
         if !self.start_reassemble_active(
-            t,
+            global_candidate,
             ReassembleEffect::Goal {
                 goal: new_goal.clone(),
             },
@@ -4720,14 +5213,19 @@ impl TuiApp {
         let cwd = self.active_tab().engine.cwd.clone();
         let tab_id = self.active_tab().id;
         self.active_tab_mut().chat.push_system(&format!("$ {cmd}"));
-        let abort = AbortController::new();
         let owned_slot = !self.active_tab().is_busy();
-        if owned_slot {
+        let (op_id, abort) = if owned_slot {
             // Reuse the turn-busy machinery: spinner shows, prompts queue, and
             // Esc (interrupt_active_turn) aborts — the select below sees it
             // and the child dies with the dropped future (kill_on_drop).
-            self.active_tab_mut().turn_abort = Some(abort.clone());
-        }
+            let Some((op_id, abort)) = self.begin_local_operation(self.active) else {
+                return;
+            };
+            (Some(op_id), abort)
+        } else {
+            // Concurrent shells never own or release the tab's shared slot.
+            (None, AbortController::new())
+        };
         let cmd = cmd.to_string();
         let tx = agent_tx.clone();
         tokio::spawn(async move {
@@ -4739,7 +5237,7 @@ impl TuiApp {
                 tab_id,
                 cmd,
                 output,
-                owned_slot,
+                op_id,
             });
         });
     }
@@ -4913,6 +5411,13 @@ impl TuiApp {
             }
         };
 
+        let Some(turn_id) = self.active_tab().turn_seq.checked_add(1) else {
+            self.toast = Some(Toast::error(crate::tr(
+                "turn limit reached — start a new task",
+            )));
+            return;
+        };
+
         // Stamp the session title from the first user prompt of this tab.
         if !self.active_tab().titled {
             let title_source = if submitted_text.trim().is_empty() {
@@ -4947,8 +5452,7 @@ impl TuiApp {
         // Fresh turn: reset the per-turn tool-use flag (goal no-progress).
         tab.turn_used_tools = false;
 
-        tab.turn_seq += 1;
-        let turn_id = tab.turn_seq;
+        tab.turn_seq = turn_id;
         tab.active_turn_id = turn_id;
         let tab_id = tab.id;
         let abort = AbortController::new();
@@ -4959,127 +5463,57 @@ impl TuiApp {
         let submitted_text_for_vision = submitted_text.clone();
         let vision_prompt = images_cfg.effective_prompt().to_string();
         let tx = agent_tx.clone();
+        // Bind only after this turn is canonical in the tab, but before the
+        // provider task can enqueue a tool approval request.
+        self.template
+            .bind_approval_turn(&tab_id.to_string(), turn_id);
         tokio::spawn(async move {
-            let stream_result = if let Some((vision_template, provider_name)) = vision_template {
-                let vision_engine = match vision_template
-                    .assemble_tab(Some(engine.cwd.clone()), Some(format!("{tab_id}:vision")))
-                    .await
-                {
-                    Ok(e) if e.supports_images() => Arc::new(e),
-                    Ok(_) => {
-                        let _ = tx.send(AppEvent::TurnDone {
-                            tab_id,
-                            turn_id,
-                            result: Err(crate::tr(
-                                "vision provider '{provider_name}' does not declare image support",
-                            )
-                            .replace("{provider_name}", &provider_name)),
-                        });
-                        return;
+            let stream_result: Result<Box<dyn agent::stream::EventStream>, String> = async {
+                if let Some((vision_template, provider_name)) = vision_template {
+                    let assembled = vision_template
+                        .assemble_tab(Some(engine.cwd.clone()), Some(format!("{tab_id}:vision")))
+                        .await
+                        .map_err(|error| {
+                            format!("{}: {error}", crate::tr("vision provider failed"))
+                        })?;
+                    if !assembled.supports_images() {
+                        return Err(crate::tr(
+                            "vision provider '{provider_name}' does not declare image support",
+                        )
+                        .replace("{provider_name}", &provider_name));
                     }
-                    Err(e) => {
-                        let _ = tx.send(AppEvent::TurnDone {
-                            tab_id,
-                            turn_id,
-                            result: Err(format!("{}: {e}", crate::tr("vision provider failed"))),
-                        });
-                        return;
-                    }
-                };
-                match run_vision_description(
-                    vision_engine,
-                    vision_prompt,
-                    submitted_text_for_vision.clone(),
-                    images_for_vision,
-                    abort.clone(),
-                )
-                .await
-                {
-                    Ok(description) => {
-                        let prompt =
-                            merge_prompt_with_vision(&submitted_text_for_vision, &description);
-                        engine.turn(&prompt, abort).await
-                    }
-                    Err(e) => {
-                        let _ = tx.send(AppEvent::TurnDone {
-                            tab_id,
-                            turn_id,
-                            result: Err(e),
-                        });
-                        return;
-                    }
-                }
-            } else {
-                engine.turn_blocks(content, abort).await
-            };
-
-            match stream_result {
-                Ok(mut stream) => {
-                    // Surface the post-compaction restoration note (if the
-                    // engine injected one at the start of this turn) through
-                    // the same channel as provider events, so the generic
-                    // Notice renderer shows it in the transcript.
-                    if let Some(note) = engine.take_restore_note() {
-                        let _ = tx.send(AppEvent::Agent {
-                            tab_id,
-                            turn_id,
-                            cost_label: None,
-                            event: Event::Notice {
-                                code: "zode.compact.restore".into(),
-                                message: note,
-                            },
-                        });
-                    }
-                    while let Some(item) = stream.next().await {
-                        match item {
-                            Ok(event) => {
-                                // Feed the cost tracker (counts only Usage events).
-                                engine.cost.observe(&event).await;
-                                let cost_label = if matches!(
-                                    event,
-                                    Event::Usage { .. } | Event::ToolResult { .. }
-                                ) {
-                                    Some(engine.cost.sidebar_label().await)
-                                } else {
-                                    None
-                                };
-                                if tx
-                                    .send(AppEvent::Agent {
-                                        tab_id,
-                                        turn_id,
-                                        cost_label,
-                                        event,
-                                    })
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                            }
-                            Err(e) => {
-                                let _ = tx.send(AppEvent::TurnDone {
-                                    tab_id,
-                                    turn_id,
-                                    result: Err(e.to_string()),
-                                });
-                                return;
-                            }
-                        }
-                    }
-                    let _ = tx.send(AppEvent::TurnDone {
-                        tab_id,
-                        turn_id,
-                        result: Ok(()),
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(AppEvent::TurnDone {
-                        tab_id,
-                        turn_id,
-                        result: Err(e.to_string()),
-                    });
+                    let description = run_vision_description(
+                        Arc::new(assembled),
+                        vision_prompt,
+                        submitted_text_for_vision.clone(),
+                        images_for_vision,
+                        abort.clone(),
+                    )
+                    .await?;
+                    let prompt = merge_prompt_with_vision(&submitted_text_for_vision, &description);
+                    engine
+                        .turn(&prompt, abort)
+                        .await
+                        .map_err(|error| error.to_string())
+                } else {
+                    engine
+                        .turn_blocks(content, abort)
+                        .await
+                        .map_err(|error| error.to_string())
                 }
             }
+            .await;
+            forward_agent_turn_stream(engine, stream_result, tab_id, turn_id, tx).await;
         });
+    }
+
+    fn handle_runtime_event(&mut self, ev: AppEvent, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        match ev {
+            AppEvent::ExtensionTask(event) => {
+                self.handle_extension_task_event(event, agent_tx);
+            }
+            other => self.handle_agent_event(other),
+        }
     }
 
     fn handle_agent_event(&mut self, ev: AppEvent) {
@@ -5114,15 +5548,23 @@ impl TuiApp {
         // outcome. Routed by tab id only (it isn't a turn).
         if let AppEvent::CompactDone {
             tab_id,
+            op_id,
             result,
             auto,
         } = ev
         {
-            let Some(tab) = self.tab_by_id(tab_id) else {
+            self.template
+                .clear_approval_local_operation_if(&tab_id.to_string(), op_id);
+            self.deny_tui_approvals(TuiApprovalCleanupTarget::LocalOperation { tab_id, op_id });
+            let Some(tab_idx) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
                 return;
             };
+            if self.tabs[tab_idx].active_local_op_id != Some(op_id) {
+                return;
+            }
+            let tab = &mut self.tabs[tab_idx];
+            tab.active_local_op_id = None;
             tab.turn_abort = None;
-            tab.active_turn_id = 0;
             let ok = result.is_ok();
             if ok {
                 // Refresh the context gauge immediately from the rewritten
@@ -5190,21 +5632,38 @@ impl TuiApp {
             }
             return;
         }
-        if let AppEvent::BgProgress { tab_id, line } = ev {
+        if let AppEvent::BgProgress {
+            tab_id,
+            op_id,
+            line,
+        } = ev
+        {
             let Some(tab) = self.tab_by_id(tab_id) else {
                 return;
             };
-            if tab.is_busy() {
+            if tab.active_local_op_id == Some(op_id) {
                 tab.chat.push_system(&line);
             }
             return;
         }
-        if let AppEvent::BgDone { tab_id, result } = ev {
-            let Some(tab) = self.tab_by_id(tab_id) else {
+        if let AppEvent::BgDone {
+            tab_id,
+            op_id,
+            result,
+        } = ev
+        {
+            self.template
+                .clear_approval_local_operation_if(&tab_id.to_string(), op_id);
+            self.deny_tui_approvals(TuiApprovalCleanupTarget::LocalOperation { tab_id, op_id });
+            let Some(tab_idx) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
                 return;
             };
+            if self.tabs[tab_idx].active_local_op_id != Some(op_id) {
+                return;
+            }
+            let tab = &mut self.tabs[tab_idx];
+            tab.active_local_op_id = None;
             tab.turn_abort = None;
-            tab.active_turn_id = 0;
             tab.active_tool_names.clear();
             match result {
                 Ok(line) => {
@@ -5231,19 +5690,29 @@ impl TuiApp {
             tab_id,
             cmd,
             output,
-            owned_slot,
+            op_id,
         } = ev
         {
-            let Some(tab) = self.tab_by_id(tab_id) else {
+            if let Some(op_id) = op_id {
+                self.template
+                    .clear_approval_local_operation_if(&tab_id.to_string(), op_id);
+                self.deny_tui_approvals(TuiApprovalCleanupTarget::LocalOperation { tab_id, op_id });
+            }
+            let Some(tab_idx) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
                 return;
             };
-            // Release the busy slot only if this run took it — and never
-            // clobber a LIVE agent turn's abort handle (possible if the user
-            // Esc'd this command and started a turn before the kill completed;
-            // `active_turn_id != 0` only while a turn is in flight).
-            if owned_slot && tab.active_turn_id == 0 {
+            // An owned shell must still be the exact slot owner. Stale and
+            // duplicate completions are dropped as a whole, including output.
+            // Concurrent shells carry no id and never mutate slot ownership.
+            if let Some(op_id) = op_id {
+                if self.tabs[tab_idx].active_local_op_id != Some(op_id) {
+                    return;
+                }
+                let tab = &mut self.tabs[tab_idx];
+                tab.active_local_op_id = None;
                 tab.turn_abort = None;
             }
+            let tab = &mut self.tabs[tab_idx];
             // `None` = interrupted: the child was killed and the interrupt
             // handler already posted "(interrupted)" — nothing more to show,
             // and a partial run must not become agent context.
@@ -5262,6 +5731,19 @@ impl TuiApp {
                 .push(format_shell_context(&cmd, &output));
             return;
         }
+        if let AppEvent::TurnDone {
+            tab_id, turn_id, ..
+        } = &ev
+        {
+            // Modal cleanup belongs to the immutable old generation even when
+            // this terminal is stale for the tab's current busy slot.
+            self.template
+                .clear_approval_turn_if(&tab_id.to_string(), *turn_id);
+            self.deny_tui_approvals(TuiApprovalCleanupTarget::Turn {
+                tab_id: *tab_id,
+                turn_id: *turn_id,
+            });
+        }
         // Route to the originating tab; drop events from a closed tab.
         let (tab_id, turn_id) = match &ev {
             AppEvent::Agent {
@@ -5277,22 +5759,54 @@ impl TuiApp {
             | AppEvent::GitStatDone { .. }
             | AppEvent::LocalShellDone { .. }
             | AppEvent::ConnectDialogReady { .. }
-            | AppEvent::ReassembleDone { .. } => {
+            | AppEvent::ReassembleDone { .. }
+            | AppEvent::ExtensionTask(_) => {
                 unreachable!("handled above")
             }
         };
-        let Some(tab) = self.tab_by_id(tab_id) else {
+        let Some(tab_idx) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
         // Drop events from an aborted/superseded turn within that tab.
-        if turn_id != tab.active_turn_id {
-            // The aborted turn's terminal TurnDone marks the end of its
-            // teardown — clear the draining latch so the tab is idle again.
-            if matches!(ev, AppEvent::TurnDone { .. }) {
-                tab.draining = false;
+        if turn_id != self.tabs[tab_idx].active_turn_id {
+            if let AppEvent::TurnDone { ref result, .. } = ev {
+                if self.tabs[tab_idx].draining_turn_id == Some(turn_id) {
+                    // The exact interrupted turn's terminal is canonical for
+                    // the draining lifecycle even though active_turn_id was
+                    // cleared at abort time. It owns the one interrupted wire
+                    // terminal and the final persistence, but deliberately
+                    // skips post-turn memory extraction.
+                    self.forward_extension_turn_event(tab_id, turn_id, &ev);
+                    let tab = &mut self.tabs[tab_idx];
+                    tab.draining_turn_id = None;
+                    tab.active_tool_names.clear();
+                    let allow_append = !tab.store_dirty;
+                    tab.store_dirty = false;
+                    let (session_id, engine, title, persisted) = (
+                        tab.session_id.clone(),
+                        tab.engine.clone(),
+                        tab.title.clone(),
+                        tab.persisted_msgs.clone(),
+                    );
+                    tokio::spawn(crate::tab::persist_session(
+                        session_id,
+                        engine,
+                        title,
+                        persisted,
+                        allow_append,
+                    ));
+                } else {
+                    // Remember every real provider terminal for idempotent old
+                    // interrupt requests, but never fan stale output to UI.
+                    self.record_stale_extension_turn_done(tab_id, turn_id, result);
+                }
             }
             return;
         }
+        // Only canonical, still-live turn events reach the extension fanout.
+        // This choke point shares the same stale/closed-tab fence as the TUI.
+        self.forward_extension_turn_event(tab_id, turn_id, &ev);
+        let tab = &mut self.tabs[tab_idx];
         match ev {
             AppEvent::Agent {
                 event, cost_label, ..
@@ -5499,7 +6013,8 @@ impl TuiApp {
             | AppEvent::GitStatDone { .. }
             | AppEvent::LocalShellDone { .. }
             | AppEvent::ConnectDialogReady { .. }
-            | AppEvent::ReassembleDone { .. } => {
+            | AppEvent::ReassembleDone { .. }
+            | AppEvent::ExtensionTask(_) => {
                 unreachable!("handled above")
             }
         }
@@ -5684,8 +6199,19 @@ impl TuiApp {
                 }
             }
             "yolo" => {
-                let on = !self.template.yolo();
+                // Toggle the active task's effective access, not the clean
+                // global default: resumed/extension tasks can intentionally
+                // diverge from that default and must switch on the first use.
+                let on = !matches!(
+                    self.active_tab().extension_access,
+                    zode_core::ToolAccessMode::Auto
+                );
                 let t = self.template.with_yolo(on);
+                let access = if on {
+                    zode_core::ToolAccessMode::Auto
+                } else {
+                    zode_core::ToolAccessMode::Prompt
+                };
                 let msg = if on {
                     crate::tr("yolo: ON — tools auto-approve (deny rules still apply)")
                 } else {
@@ -5694,6 +6220,7 @@ impl TuiApp {
                 self.start_reassemble_active(
                     t,
                     ReassembleEffect::Yolo {
+                        access,
                         notify: ReassembleNotify::System(msg.to_string()),
                     },
                     agent_tx,
@@ -5966,8 +6493,9 @@ impl TuiApp {
         }
         let tab_id = self.active_tab().id;
         let engine = self.active_tab().engine.clone();
-        let abort = AbortController::new();
-        self.active_tab_mut().turn_abort = Some(abort.clone());
+        let Some((op_id, abort)) = self.begin_local_operation(self.active) else {
+            return;
+        };
         self.active_tab_mut().mode = Mode::Thinking;
         self.active_tab_mut()
             .chat
@@ -5978,6 +6506,7 @@ impl TuiApp {
             let log: zode_core::workflows_js::LogSink = Arc::new(move |line| {
                 let _ = log_tx.send(AppEvent::BgProgress {
                     tab_id,
+                    op_id,
                     line: format!("  {line}"),
                 });
             });
@@ -5995,7 +6524,11 @@ impl TuiApp {
                     line
                 })
                 .map_err(|e| format!("workflow '{name}': {e}"));
-            let _ = tx.send(AppEvent::BgDone { tab_id, result });
+            let _ = tx.send(AppEvent::BgDone {
+                tab_id,
+                op_id,
+                result,
+            });
         });
     }
 
@@ -6023,8 +6556,9 @@ impl TuiApp {
         ));
         let tag = cfg.release_tag().to_string();
         // Reuse the turn-busy machinery: spinner shows, Esc clears it.
-        let abort = AbortController::new();
-        self.active_tab_mut().turn_abort = Some(abort.clone());
+        let Some((op_id, abort)) = self.begin_local_operation(self.active) else {
+            return;
+        };
         self.active_tab_mut()
             .chat
             .push_system(&format!("{} {tool}…", crate::tr("calling op")));
@@ -6038,7 +6572,11 @@ impl TuiApp {
                 },
                 Err(e) => Err(format!("/op: {e}")),
             };
-            let _ = tx.send(AppEvent::BgDone { tab_id, result });
+            let _ = tx.send(AppEvent::BgDone {
+                tab_id,
+                op_id,
+                result,
+            });
         });
     }
 
@@ -6055,8 +6593,9 @@ impl TuiApp {
         }
         let tab_id = self.active_tab().id;
         let session = self.active_tab().engine.browser.clone();
-        let abort = AbortController::new();
-        self.active_tab_mut().turn_abort = Some(abort.clone());
+        let Some((op_id, abort)) = self.begin_local_operation(self.active) else {
+            return;
+        };
         let label = match &op {
             BrowserOp::Launch => "launching browser",
             BrowserOp::Close => "closing browser",
@@ -6069,7 +6608,11 @@ impl TuiApp {
         tokio::spawn(async move {
             let _ = &abort; // keep the controller alive for the duration
             let result = run_browser_op(session, op).await;
-            let _ = tx.send(AppEvent::BgDone { tab_id, result });
+            let _ = tx.send(AppEvent::BgDone {
+                tab_id,
+                op_id,
+                result,
+            });
         });
     }
 
@@ -6104,8 +6647,9 @@ impl TuiApp {
             Some(tab_id.to_string()),
         ));
         let tag = cfg.release_tag().to_string();
-        let abort = AbortController::new();
-        self.active_tab_mut().turn_abort = Some(abort.clone());
+        let Some((op_id, abort)) = self.begin_local_operation(self.active) else {
+            return;
+        };
         self.active_tab_mut()
             .chat
             .push_system(&format!("{}: {prompt}", crate::tr("generating design")));
@@ -6121,6 +6665,7 @@ impl TuiApp {
                     let progress = move |p| {
                         let _ = ptx.send(AppEvent::BgProgress {
                             tab_id,
+                            op_id,
                             line: design_progress_line(&p),
                         });
                     };
@@ -6142,7 +6687,11 @@ impl TuiApp {
                 }
                 Err(e) => Err(format!("/op: {e}")),
             };
-            let _ = tx.send(AppEvent::BgDone { tab_id, result });
+            let _ = tx.send(AppEvent::BgDone {
+                tab_id,
+                op_id,
+                result,
+            });
         });
     }
 
@@ -6196,6 +6745,9 @@ impl TuiApp {
         agent_tx: &mpsc::UnboundedSender<AppEvent>,
         auto: bool,
     ) {
+        let Some((op_id, abort)) = self.begin_local_operation(tab_idx) else {
+            return;
+        };
         let tab = &mut self.tabs[tab_idx];
         let tab_id = tab.id;
         let engine = tab.engine.clone();
@@ -6204,8 +6756,6 @@ impl TuiApp {
         // near/over the window must not be sent whole (the summarize request
         // itself would 400 with context-overflow, deadlocking compaction).
         let context_tokens = tab.context_tokens;
-        let abort = AbortController::new();
-        tab.turn_abort = Some(abort.clone());
         tab.mode = Mode::Compacting;
         tab.chat
             .push_system(crate::tr("compacting the conversation…"));
@@ -6226,6 +6776,7 @@ impl TuiApp {
                 .map_err(|e| e.to_string());
             let _ = tx.send(AppEvent::CompactDone {
                 tab_id,
+                op_id,
                 result,
                 auto,
             });
@@ -7755,6 +8306,43 @@ fn strip_recalled_memory(text: &str) -> &str {
     }
 }
 
+/// Recognize only the server-generated attachment envelope and return a safe
+/// display summary. The body remains persisted for the model/resume path, but
+/// must never be copied into task snapshots or rendered as user-authored chat.
+fn attached_file_summary(text: &str) -> Option<String> {
+    let opening_end = text.find(">\n")?;
+    let opening = &text[..=opening_end];
+    if !opening.starts_with("<attached_file ") || !text.ends_with("</attached_file>") {
+        return None;
+    }
+    let attribute = |name: &str| {
+        let marker = format!("{name}=\"");
+        let start = opening.find(&marker)? + marker.len();
+        let end = opening[start..].find('"')? + start;
+        Some(&opening[start..end])
+    };
+    let name = attribute("name")?;
+    let media_type = attribute("media_type")?;
+    let boundary = attribute("boundary")?;
+    if !boundary.starts_with("ZODE-ATTACHMENT-zode_attachment_") {
+        return None;
+    }
+    let begin = format!("\n--- BEGIN {boundary} ---\n");
+    let end = format!("\n--- END {boundary} ---\n</attached_file>");
+    if !text[opening_end + 1..].starts_with(&begin) || !text.ends_with(&end) {
+        return None;
+    }
+    Some(format!("[Attached file: {name} ({media_type})]"))
+}
+
+/// Remove engine-injected recall context before classifying a stored text
+/// block. This ordering matters for attachment-only turns: noema prepends its
+/// recall pack to the first attachment envelope itself.
+fn stored_user_text_for_display(text: &str) -> String {
+    let text = strip_recalled_memory(text);
+    attached_file_summary(text).unwrap_or_else(|| text.to_string())
+}
+
 fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
     let mut chat = ChatView::new();
     for msg in store.iter() {
@@ -7765,7 +8353,7 @@ fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
                 for (idx, block) in content.iter().enumerate() {
                     match block {
                         ContentBlock::Text { text } if !text.trim().is_empty() => {
-                            text_parts.push(text.as_str());
+                            text_parts.push(stored_user_text_for_display(text));
                         }
                         ContentBlock::Image { source } => {
                             let media_type = match source {
@@ -7939,6 +8527,16 @@ fn browser_extension_connect_url(port: u16) -> String {
     )
 }
 
+fn browser_extension_open_note(
+    url: &str,
+    result: Result<(), zode_core::browser::BrowserError>,
+) -> String {
+    match result {
+        Ok(()) => "Opened the zode extension page in Chrome.".into(),
+        Err(error) => format!("Could not open Chrome automatically: {error}. Open manually: {url}"),
+    }
+}
+
 fn start_browser_bridge_listener(session: Arc<zode_core::browser::BrowserSession>) {
     if cfg!(test) {
         return;
@@ -7964,48 +8562,13 @@ async fn ensure_browser_bridge_and_maybe_reconnect(
     match session.ensure_bridge_listening().await {
         Ok(port) if session.bridge_token_available() => {
             let url = browser_extension_connect_url(port);
-            if let Err(e) = open_url_in_chrome(&url) {
-                tracing::debug!(error = %e, "browser bridge reconnect page open failed");
+            if let Err(e) = session.open_extension_url(&url).await {
+                tracing::debug!(error = %e, url = %url, "browser bridge reconnect page open failed");
             }
         }
         Ok(_) => {}
         Err(e) => tracing::debug!(error = %e, "browser bridge listener start failed"),
     }
-}
-
-fn open_url_in_chrome(url: &str) -> Result<(), String> {
-    let mut candidates: Vec<std::process::Command> = Vec::new();
-    if cfg!(target_os = "macos") {
-        let mut chrome = std::process::Command::new("open");
-        chrome.args(["-a", "Google Chrome", url]);
-        candidates.push(chrome);
-
-        let mut fallback = std::process::Command::new("open");
-        fallback.arg(url);
-        candidates.push(fallback);
-    } else if cfg!(target_os = "windows") {
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", "start", ""]).arg(url);
-        candidates.push(cmd);
-    } else {
-        for binary in ["google-chrome", "chromium", "chromium-browser", "xdg-open"] {
-            let mut cmd = std::process::Command::new(binary);
-            cmd.arg(url);
-            candidates.push(cmd);
-        }
-    }
-
-    let mut last_err = None;
-    for mut cmd in candidates {
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        match cmd.spawn() {
-            Ok(_) => return Ok(()),
-            Err(e) => last_err = Some(e.to_string()),
-        }
-    }
-    Err(last_err.unwrap_or_else(|| "no browser opener configured".into()))
 }
 
 /// How many image chips render before collapsing the rest into a `+N` marker.
@@ -8418,6 +8981,28 @@ mod tests {
     use crate::ui::chat::Role;
     use zode_core::config::{NoemaSettings, ProviderConfig, ProviderKind, ZodeConfig};
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn sandbox_status_line_names_tmp_when_writable() {
         use zode_core::sandbox::{SandboxConfig, SandboxMode};
@@ -8476,6 +9061,32 @@ mod tests {
                 zode_core::browser::bridge::server::EXTENSION_ID
             )
         );
+    }
+
+    #[test]
+    fn browser_extension_open_note_reports_success() {
+        assert_eq!(
+            browser_extension_open_note("chrome-extension://zode/popup.html", Ok(())),
+            "Opened the zode extension page in Chrome."
+        );
+    }
+
+    #[test]
+    fn browser_extension_open_note_keeps_locator_hint_and_manual_url() {
+        let url = "chrome-extension://zode/popup.html?port=17657&code=123456&connect=1";
+        let error = zode_core::browser::BrowserError::NotFound(
+            "no Google Chrome found; tried [local-app, program-files, path-a/chrome.exe]; set browser.executable to the full Chrome executable path".into(),
+        );
+        let note = browser_extension_open_note(url, Err(error));
+        for expected in [
+            "Could not open Chrome automatically",
+            "tried [local-app, program-files, path-a/chrome.exe]",
+            "browser.executable",
+            "Open manually",
+            url,
+        ] {
+            assert!(note.contains(expected), "missing {expected}: {note}");
+        }
     }
 
     #[test]
@@ -8579,7 +9190,7 @@ mod tests {
             .expect("shell result within timeout")
             .expect("channel open");
         match &ev {
-            AppEvent::LocalShellDone { owned_slot, .. } => assert!(!owned_slot),
+            AppEvent::LocalShellDone { op_id, .. } => assert!(op_id.is_none()),
             other => panic!("unexpected event: {}", event_name(other)),
         }
         app.handle_agent_event(ev);
@@ -8600,6 +9211,7 @@ mod tests {
             AppEvent::LocalShellDone { .. } => "LocalShellDone",
             AppEvent::ConnectDialogReady { .. } => "ConnectDialogReady",
             AppEvent::ReassembleDone { .. } => "ReassembleDone",
+            AppEvent::ExtensionTask(_) => "ExtensionTask",
         }
     }
 
@@ -8627,8 +9239,8 @@ mod tests {
     #[tokio::test]
     async fn local_shell_done_never_clobbers_a_live_turn() {
         let (mut app, _tx) = make_test_app().await;
-        // A live agent turn owns the busy slot (active_turn_id != 0) — a stale
-        // shell completion must not release it.
+        // A live agent turn owns the busy slot — a stale owned-shell completion
+        // must be dropped as a whole and cannot release it or append output.
         app.active_tab_mut().turn_abort = Some(AbortController::new());
         app.active_tab_mut().active_turn_id = 7;
         let tab_id = app.active_tab().id;
@@ -8636,14 +9248,13 @@ mod tests {
             tab_id,
             cmd: "echo x".into(),
             output: Some("x".into()),
-            owned_slot: true,
+            op_id: Some(1),
         });
         assert!(
             app.active_tab().turn_abort.is_some(),
             "live turn kept its abort handle"
         );
-        // The output itself still lands (it did run).
-        assert_eq!(app.active_tab().pending_shell_context.len(), 1);
+        assert!(app.active_tab().pending_shell_context.is_empty());
     }
 
     #[cfg(unix)]
@@ -8714,16 +9325,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn regular_resume_uses_saved_model_and_prompt_without_changing_global_defaults() {
+        let config = tempfile::tempdir().unwrap();
+        let _env_lock = crate::tab::TEST_ENV_LOCK.lock().await;
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", config.path());
+        let (mut app, _unused_tx, cwd) = make_test_app_with_dir().await;
+        let session_id = "regular-resume-saved-model";
+        let path = SessionIndex::session_path(session_id).unwrap();
+        Session::save(&path, &agent::message::MessageStore::new())
+            .await
+            .unwrap();
+        let meta = SessionMeta {
+            id: session_id.into(),
+            title: "Saved model session".into(),
+            cwd: cwd.path().display().to_string(),
+            model: "saved-model".into(),
+            updated_at: 1,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        app.resume_session(meta, &tx);
+        let placeholder = app.tabs.last().unwrap();
+        assert_eq!(
+            placeholder.extension_access,
+            zode_core::ToolAccessMode::Prompt
+        );
+        assert!(placeholder.reassemble_pending);
+
+        let event = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("resume assembly finishes")
+            .expect("event channel stays open");
+        app.handle_agent_event(event);
+        let resumed = app
+            .tabs
+            .iter()
+            .find(|tab| tab.session_id == session_id)
+            .unwrap();
+        assert_eq!(resumed.engine.model, "saved-model");
+        assert_eq!(resumed.extension_access, zode_core::ToolAccessMode::Prompt);
+        assert_eq!(app.template.model(), Some("test-model"));
+        assert_eq!(
+            app.template.tool_access(),
+            zode_core::ToolAccessMode::Prompt
+        );
+        assert!(!app.template.plan_mode());
+    }
+
+    #[tokio::test]
     async fn local_shell_interrupted_posts_nothing() {
         let (mut app, _tx) = make_test_app().await;
         let tab_id = app.active_tab().id;
+        app.active_tab_mut().local_op_seq = 1;
+        app.active_tab_mut().active_local_op_id = Some(1);
         app.active_tab_mut().turn_abort = Some(AbortController::new());
+        assert!(app.interrupt_active_turn());
         let before = app.active_tab().chat.messages().len();
         app.handle_agent_event(AppEvent::LocalShellDone {
             tab_id,
             cmd: "sleep 100".into(),
             output: None,
-            owned_slot: true,
+            op_id: Some(1),
         });
         assert!(!app.active_tab().is_busy());
         assert_eq!(app.active_tab().chat.messages().len(), before);
@@ -8735,6 +9397,12 @@ mod tests {
         // The tempdir guard drops here — fine for tests that never touch the
         // cwd again after assembly.
         (app, tx)
+    }
+
+    fn arm_local_op_for_test(app: &mut TuiApp, tab_idx: usize) -> u64 {
+        app.begin_local_operation(tab_idx)
+            .expect("test tab accepts local operation")
+            .0
     }
 
     /// Like [`make_test_app`] but keeps the cwd tempdir alive — required by
@@ -8769,12 +9437,14 @@ mod tests {
         )
         .with_question_queue(Some(question_queue));
         let engine = template.assemble().await.unwrap();
+        let initial_access = template.tool_access();
         let app = TuiApp::new(
             engine,
             template,
             UiConfig {
                 theme_id: None,
                 yolo: false,
+                initial_access,
                 sandbox: false,
                 provider_names: Vec::new(),
                 needs_setup: false,
@@ -8786,6 +9456,61 @@ mod tests {
         );
         let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
         (app, agent_tx, temp)
+    }
+
+    #[tokio::test]
+    async fn initial_tab_records_actual_engine_access_when_resume_load_failed() {
+        let cwd = tempfile::tempdir().unwrap();
+        let cfg = ZodeConfig {
+            provider: ProviderConfig {
+                r#type: Some(ProviderKind::Ollama),
+                base_url: Some("http://localhost:11434".into()),
+                model: Some("saved-model".into()),
+                ..Default::default()
+            },
+            noema: NoemaSettings {
+                enabled: Some(false),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (approval_queue, approval_rx) = zode_core::approval::approval_queue();
+        let (question_queue, question_rx) = zode_core::question::question_queue();
+        let op_question_queue = question_queue.clone();
+        let clean_template = EngineTemplate::new(
+            cfg,
+            cwd.path().to_path_buf(),
+            Some(approval_queue),
+            true,
+            None,
+            "2026-07-13".into(),
+        )
+        .with_question_queue(Some(question_queue));
+        let resume_template = clean_template.with_tool_access(zode_core::ToolAccessMode::Prompt);
+        let engine = resume_template.assemble().await.unwrap();
+
+        let app = TuiApp::new(
+            engine,
+            clean_template,
+            UiConfig {
+                theme_id: None,
+                yolo: true,
+                initial_access: resume_template.tool_access(),
+                sandbox: false,
+                provider_names: Vec::new(),
+                needs_setup: false,
+            },
+            approval_rx,
+            question_rx,
+            op_question_queue,
+            None, // transcript load failed, so attach_session returned no id
+        );
+
+        assert_eq!(
+            app.tabs[0].extension_access,
+            zode_core::ToolAccessMode::Prompt
+        );
+        assert_eq!(app.template.tool_access(), zode_core::ToolAccessMode::Auto);
     }
 
     async fn send_key(
@@ -9706,9 +10431,11 @@ mod tests {
         // Pretend the gauge holds a large pre-compact count while the (freshly
         // compacted) store is small.
         app.tabs[0].context_tokens = 50_000;
+        let op_id = arm_local_op_for_test(&mut app, 0);
 
         app.handle_agent_event(AppEvent::CompactDone {
             tab_id,
+            op_id,
             result: Ok("compacted the transcript".to_string()),
             auto: false,
         });
@@ -9744,8 +10471,10 @@ mod tests {
         ));
 
         for _ in 0..AUTO_COMPACT_MAX_FAILURES {
+            let op_id = arm_local_op_for_test(&mut app, 0);
             app.handle_agent_event(AppEvent::CompactDone {
                 tab_id,
+                op_id,
                 result: Err("HTTP 400: input token limit".into()),
                 auto: true,
             });
@@ -9761,8 +10490,10 @@ mod tests {
         assert!(!matches!(app.tabs[0].mode, Mode::Compacting));
 
         // A successful (manual) compaction re-arms the trigger.
+        let op_id = arm_local_op_for_test(&mut app, 0);
         app.handle_agent_event(AppEvent::CompactDone {
             tab_id,
+            op_id,
             result: Ok("compacted".into()),
             auto: false,
         });
@@ -9770,8 +10501,10 @@ mod tests {
 
         // Manual-failure counting is out of scope for the breaker: a manual
         // /compact failure must not advance it.
+        let op_id = arm_local_op_for_test(&mut app, 0);
         app.handle_agent_event(AppEvent::CompactDone {
             tab_id,
+            op_id,
             result: Err("boom".into()),
             auto: false,
         });
@@ -9807,8 +10540,10 @@ mod tests {
         }
 
         for round in 1..=AUTO_COMPACT_MAX_FAILURES {
+            let op_id = arm_local_op_for_test(&mut app, 0);
             app.handle_agent_event(AppEvent::CompactDone {
                 tab_id,
+                op_id,
                 result: Ok("compacted 1 message · ~10 → ~10 tokens".into()),
                 auto: true,
             });
@@ -9834,8 +10569,10 @@ mod tests {
             let mut store = app.tabs[0].engine.store.lock().unwrap();
             *store = agent::message::MessageStore::new();
         }
+        let op_id = arm_local_op_for_test(&mut app, 0);
         app.handle_agent_event(AppEvent::CompactDone {
             tab_id,
+            op_id,
             result: Ok("compacted".into()),
             auto: true,
         });
@@ -9908,6 +10645,7 @@ mod tests {
     #[tokio::test]
     async fn model_switch_hot_swaps_without_reassemble_pending() {
         let (mut app, agent_tx) = make_test_app().await;
+        app.active_tab_mut().extension_access = zode_core::ToolAccessMode::ReadOnly;
 
         app.handle_slash("model", "other-model", &agent_tx).await;
 
@@ -9921,6 +10659,109 @@ mod tests {
             "visible model should update immediately"
         );
         assert_eq!(app.active_tab().engine.model, "other-model");
+        assert_eq!(
+            app.active_tab().extension_access,
+            zode_core::ToolAccessMode::ReadOnly,
+            "ordinary /model preserves the active task's access"
+        );
+        assert_eq!(app.template.model(), Some("other-model"));
+        assert_eq!(
+            app.template.tool_access(),
+            zode_core::ToolAccessMode::Prompt,
+            "task-local access must not leak into the clean global default"
+        );
+        assert!(!app.template.plan_mode());
+    }
+
+    #[tokio::test]
+    async fn sandbox_reload_and_plan_reassembly_preserve_task_local_overrides() {
+        let (mut app, _unused_tx, _dir) = make_test_app_with_dir().await;
+        let effective = app
+            .template
+            .with_model("other-model".into())
+            .with_tool_access(zode_core::ToolAccessMode::Auto)
+            .with_plan_mode(true);
+        effective
+            .hot_swap_model(
+                Arc::get_mut(&mut app.tabs[0].engine).expect("test owns the engine"),
+                "other-model".into(),
+            )
+            .unwrap();
+        app.tabs[0].extension_access = zode_core::ToolAccessMode::Auto;
+        app.tabs[0].plan_mode = true;
+        let carried_cost = app.tabs[0].engine.cost.clone();
+
+        for effect in [
+            ReassembleEffect::Sandbox,
+            ReassembleEffect::ReloadSkills,
+            ReassembleEffect::Plan { on: true },
+        ] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            assert!(app.start_reassemble_active(app.template.clone(), effect, &tx));
+            let event = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+                .await
+                .expect("reassembly finishes")
+                .expect("event channel stays open");
+            app.handle_agent_event(event);
+
+            assert_eq!(app.tabs[0].engine.model, "other-model");
+            assert_eq!(
+                app.tabs[0].extension_access,
+                zode_core::ToolAccessMode::Auto
+            );
+            assert!(app.tabs[0].plan_mode);
+            assert!(Arc::ptr_eq(&app.tabs[0].engine.cost, &carried_cost));
+            assert_eq!(app.template.model(), Some("test-model"));
+            assert_eq!(
+                app.template.tool_access(),
+                zode_core::ToolAccessMode::Prompt
+            );
+            assert!(!app.template.plan_mode());
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_yolo_toggles_active_when_global_and_task_access_diverge() {
+        for (global, active, expected) in [
+            (
+                zode_core::ToolAccessMode::Auto,
+                zode_core::ToolAccessMode::Prompt,
+                zode_core::ToolAccessMode::Auto,
+            ),
+            (
+                zode_core::ToolAccessMode::Prompt,
+                zode_core::ToolAccessMode::Auto,
+                zode_core::ToolAccessMode::Prompt,
+            ),
+        ] {
+            let (mut app, _unused_tx, _dir) = make_test_app_with_dir().await;
+            app.template = app.template.with_tool_access(global);
+            app.tabs[0].extension_access = active;
+            let second_engine = app
+                .template
+                .assemble_tab(None, Some("2".into()))
+                .await
+                .unwrap();
+            let mut second = SessionTab::new(2, Arc::new(second_engine), "second-task".into());
+            second.extension_access = global;
+            app.tabs.push(second);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+
+            app.handle_slash("yolo", "", &tx).await;
+            let event = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+                .await
+                .expect("yolo reassembly finishes")
+                .expect("event channel stays open");
+            app.handle_agent_event(event);
+
+            assert_eq!(app.tabs[0].extension_access, expected);
+            assert_eq!(app.template.tool_access(), expected);
+            assert_eq!(
+                app.tabs[1].extension_access, global,
+                "existing background tabs keep their local access"
+            );
+            assert!(!app.template.plan_mode());
+        }
     }
 
     #[tokio::test]
@@ -10213,6 +11054,51 @@ mod tests {
         assert!(
             !app.tabs[0].is_busy(),
             "draining clears when the aborted turn's TurnDone lands"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupting_non_agent_abort_handle_never_enters_draining_state() {
+        let (mut app, _tx) = make_test_app().await;
+        app.tabs[0].active_turn_id = 0;
+        app.tabs[0].local_op_seq = 9;
+        app.tabs[0].active_local_op_id = Some(9);
+        app.tabs[0].turn_abort = Some(AbortController::new());
+
+        assert!(app.interrupt_active_turn());
+        assert_eq!(app.tabs[0].draining_turn_id, None);
+        assert_eq!(app.tabs[0].active_local_op_id, None);
+        assert_eq!(app.tabs[0].local_op_seq, 9);
+        assert!(!app.tabs[0].is_busy());
+    }
+
+    #[tokio::test]
+    async fn local_operation_generation_never_wraps() {
+        let (mut app, _tx) = make_test_app().await;
+        app.tabs[0].local_op_seq = u64::MAX;
+
+        assert!(app.begin_local_operation(0).is_none());
+        assert_eq!(app.tabs[0].local_op_seq, u64::MAX);
+        assert_eq!(app.tabs[0].active_local_op_id, None);
+        assert!(app.tabs[0].turn_abort.is_none());
+    }
+
+    #[tokio::test]
+    async fn tui_turn_generation_never_wraps_or_starts_turn_zero() {
+        let (mut app, agent_tx) = make_test_app().await;
+        app.tabs[0].titled = true;
+        app.tabs[0].turn_seq = u64::MAX;
+        let messages_before = app.tabs[0].chat.messages().len();
+
+        app.submit("must not become turn zero", &agent_tx).await;
+
+        assert_eq!(app.tabs[0].turn_seq, u64::MAX);
+        assert_eq!(app.tabs[0].active_turn_id, 0);
+        assert!(app.tabs[0].turn_abort.is_none());
+        assert_eq!(app.tabs[0].chat.messages().len(), messages_before);
+        assert!(
+            app.toast.is_some(),
+            "sequence exhaustion is visible to the user"
         );
     }
 
@@ -11644,6 +12530,31 @@ mod tests {
         assert_eq!(
             process_line_for_event(&tool_use_result, None).as_deref(),
             Some("Result tool_use · deepseek-v4-pro")
+        );
+    }
+
+    #[tokio::test]
+    async fn simultaneously_ready_extension_agent_and_tick_sources_are_unbiased() {
+        let source = include_str!("app.rs");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source precedes tests");
+        assert!(
+            !production.contains(&["biased", ";"].concat()),
+            "the production event loop must use Tokio's fair select"
+        );
+        let mut selected = [0usize; 3];
+        for _ in 0..300 {
+            tokio::select! {
+                _ = std::future::ready(()) => selected[0] += 1,
+                _ = std::future::ready(()) => selected[1] += 1,
+                _ = std::future::ready(()) => selected[2] += 1,
+            }
+        }
+        assert!(
+            selected.into_iter().all(|count| count > 0),
+            "all simultaneously-ready sources must be serviced: {selected:?}"
         );
     }
 }

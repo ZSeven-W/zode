@@ -25,6 +25,7 @@ use futures::StreamExt;
 use crate::config::BrowserConfig;
 
 use super::backend::*;
+use super::executable::locate_managed_executable;
 use super::session::BackendFactory;
 use super::snapshot_js::SNAPSHOT_JS;
 
@@ -33,76 +34,6 @@ const NAV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Cap for the console/network ring buffers and the request-correlation
 /// pending queue; oldest entries are evicted once exceeded.
 const LOG_BUFFER_CAP: usize = 500;
-
-/// Candidate executable paths per platform, tried in order.
-fn candidate_paths() -> Vec<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        ]
-        .iter()
-        .map(PathBuf::from)
-        .collect()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        [
-            "google-chrome",
-            "google-chrome-stable",
-            "chromium",
-            "chromium-browser",
-            "microsoft-edge",
-        ]
-        .iter()
-        .filter_map(|n| which_in_path(n))
-        .collect()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
-        [
-            format!(r"{pf}\Google\Chrome\Application\chrome.exe"),
-            format!(r"{pf}\Microsoft\Edge\Application\msedge.exe"),
-        ]
-        .iter()
-        .map(PathBuf::from)
-        .collect()
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn which_in_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|d| d.join(name))
-            .find(|p| p.is_file())
-    })
-}
-
-/// Explicit `browser.executable` wins when it points at a real file;
-/// otherwise probe the platform's well-known install locations.
-pub(crate) fn locate_executable(cfg: &BrowserConfig) -> Result<PathBuf, BrowserError> {
-    if let Some(exe) = &cfg.executable {
-        let p = PathBuf::from(exe);
-        return if p.is_file() {
-            Ok(p)
-        } else {
-            Err(BrowserError::NotFound(format!(
-                "configured browser.executable does not exist: {exe}"
-            )))
-        };
-    }
-    let tried = candidate_paths();
-    tried.iter().find(|p| p.is_file()).cloned().ok_or_else(|| {
-        BrowserError::NotFound(format!(
-            "no Chrome/Chromium/Edge found; tried {:?}; set browser.executable in config",
-            tried
-        ))
-    })
-}
 
 /// Expand a leading `~/` against the home directory; anything else is
 /// returned unchanged (mirrors `hooks_config::expand_tilde`, which is
@@ -196,7 +127,7 @@ impl BackendFactory for ManagedFactory {
 
 impl ManagedBackend {
     pub async fn launch(cfg: &BrowserConfig) -> Result<Arc<Self>, BrowserError> {
-        let exe = locate_executable(cfg)?;
+        let exe = locate_managed_executable(cfg)?;
         let profile = resolve_profile_dir(cfg);
         create_profile_dir(&profile)?;
         let downloads_dir = crate::config::ConfigManager::config_dir()
@@ -764,28 +695,6 @@ impl BrowserBackend for ManagedBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn explicit_executable_wins() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake = dir.path().join("mychrome");
-        std::fs::write(&fake, "").unwrap();
-        let cfg = BrowserConfig {
-            executable: Some(fake.to_string_lossy().into_owned()),
-            ..Default::default()
-        };
-        assert_eq!(locate_executable(&cfg).unwrap(), fake);
-    }
-
-    #[test]
-    fn missing_explicit_executable_errors_with_path() {
-        let cfg = BrowserConfig {
-            executable: Some("/definitely/not/here".into()),
-            ..Default::default()
-        };
-        let err = locate_executable(&cfg).unwrap_err();
-        assert!(err.to_string().contains("/definitely/not/here"));
-    }
 
     #[test]
     fn profile_dir_defaults_under_zode_home() {

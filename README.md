@@ -306,6 +306,25 @@ port and pairing code pre-filled; after the first pairing, the extension stores
 a token and reconnects silently when zode is running. Tabs opened by zode are
 placed in a Chrome tab group named `zode`.
 
+### Chrome task side panel
+
+Zode must be running for extension tasks. Run `/browser pair` once, then
+clicking the toolbar icon opens the side panel. The pairing page remains a
+small code/token reconnect flow; task state lives in the panel. Tasks are
+shared with the TUI sessions without changing the terminal's focused tab.
+
+The panel can send text, select a model, choose access modes `readOnly`,
+`prompt`, and `auto`, stream the response, and Stop a running turn. A turn can
+attach at most 8 files and 20 MiB total: PNG, JPEG, GIF, and WebP images up to
+5 MiB each, plus UTF-8 text and code files up to 1 MiB each. PDF, Office,
+archive, executable, and non-UTF-8 inputs are rejected.
+
+After an extension update, click Reload on `chrome://extensions`. Older
+extension versions remain compatible with browser automation but do not have
+the task side panel. On Windows, zode locates and launches Chrome directly for
+extension URLs instead of invoking the default-browser shell, avoiding
+Microsoft Store redirection when Chrome is already installed.
+
 Useful commands:
 
 ```bash

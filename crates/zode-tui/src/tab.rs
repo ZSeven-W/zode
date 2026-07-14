@@ -12,7 +12,7 @@ use agent::session::Session;
 use once_cell::sync::Lazy;
 use zode_core::images::ImageAttachment;
 use zode_core::session_meta::{title_from_prompt, SessionIndex, SessionMeta};
-use zode_core::{TodoItem, ZodeEngine};
+use zode_core::{TodoItem, ToolAccessMode, ZodeEngine};
 
 /// Serializes ALL session persistence process-wide. `Session::save` reuses the
 /// same temp path per session id, and `SessionIndex` is a load-modify-save, so
@@ -20,6 +20,9 @@ use zode_core::{TodoItem, ZodeEngine};
 /// could corrupt the temp file or lose an index update. Saves are infrequent
 /// and tiny, so one global lock is cheaper than the bugs it prevents.
 static SAVE_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: Lazy<tokio::sync::Mutex<()>> =
+    Lazy::new(|| tokio::sync::Mutex::new(()));
 
 use crate::ui::chat::ChatView;
 use crate::ui::status::Mode;
@@ -47,11 +50,18 @@ pub struct SessionTab {
     pub store_dirty: bool,
     /// Abort handle for the in-flight turn, if any.
     pub turn_abort: Option<AbortController>,
-    /// True between an interrupt and the aborted turn's task actually
-    /// finishing its teardown (its terminal `TurnDone` arriving). Keeps the
-    /// tab `is_busy()` so a fast resubmit can't spawn a second turn that
-    /// races the still-draining one on the shared message store.
-    pub draining: bool,
+    /// Monotonic generation for abortable non-agent operations that reserve
+    /// the tab busy slot. Completion events carry this id so a delayed
+    /// predecessor cannot release or relabel a newer operation/agent turn.
+    pub local_op_seq: u64,
+    /// Exact non-agent operation that currently owns `turn_abort`. Agent turns
+    /// leave this `None` and are fenced independently by `active_turn_id`.
+    pub active_local_op_id: Option<u64>,
+    /// Exact agent turn whose abort is still tearing down. The id matters:
+    /// only that turn's terminal `TurnDone` may release the busy latch, and
+    /// non-agent abort users (local shell / compact / background operations)
+    /// never enter this state because they do not emit `TurnDone`.
+    pub draining_turn_id: Option<u64>,
     /// True while a model/provider/config rebuild is running off the UI loop.
     /// It blocks new turns just like an in-flight agent turn, but there is no
     /// abort handle because engine assembly is not cancellation-aware.
@@ -100,6 +110,12 @@ pub struct SessionTab {
     /// the status badge reads it for the active tab, and reassembly re-applies
     /// it so a model/provider/yolo swap doesn't drop or leak plan mode.
     pub plan_mode: bool,
+    /// Task-local tool approval policy. This is deliberately independent from
+    /// `plan_mode`: plan mode changes the prompt/tool surface, while access
+    /// controls whether the remaining tools are read-only, prompted, or
+    /// auto-approved. Saved sessions resume as `Prompt` unless a live task
+    /// explicitly changes this field.
+    pub extension_access: ToolAccessMode,
     /// Cached snapshot of this tab's live `TodoWrite` list, refreshed each
     /// tick from `engine.todo_state` so the sync sidebar render can read it.
     pub todos: Vec<TodoItem>,
@@ -150,7 +166,9 @@ impl SessionTab {
             persisted_msgs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             store_dirty: false,
             turn_abort: None,
-            draining: false,
+            local_op_seq: 0,
+            active_local_op_id: None,
+            draining_turn_id: None,
             reassemble_pending: false,
             reassemble_seq: 0,
             turn_seq: 0,
@@ -170,6 +188,7 @@ impl SessionTab {
             history_pos: None,
             history_draft: String::new(),
             plan_mode: false,
+            extension_access: ToolAccessMode::Prompt,
             todos: Vec::new(),
             git_files: None,
             git_poll_inflight: false,
@@ -188,7 +207,7 @@ impl SessionTab {
     /// rebuild is running, or an interrupted turn is still draining — the
     /// last keeps a fast resubmit from racing the aborted task's teardown.
     pub fn is_busy(&self) -> bool {
-        self.turn_abort.is_some() || self.reassemble_pending || self.draining
+        self.turn_abort.is_some() || self.reassemble_pending || self.draining_turn_id.is_some()
     }
 
     /// Stamp the session index with a title derived from the first prompt.
@@ -276,36 +295,103 @@ pub async fn persist_session(
         }
     }
     persisted.store(total, Ordering::Relaxed);
-    // Keep the index's recency current so `--continue` resumes this tab.
-    let mut idx = SessionIndex::load().unwrap_or_default();
-    if !idx.touch_updated(&session_id, now_secs()) {
-        idx.upsert(SessionMeta {
-            id: session_id,
-            title,
-            cwd: engine.cwd.display().to_string(),
-            model: engine.model.clone(),
-            updated_at: now_secs(),
-        });
-    }
-    let _ = idx.save();
-}
-
-/// Locked load-modify-save: upsert one entry under SAVE_LOCK so it can't race
-/// a concurrent `persist_session` / delete and lose updates.
-pub async fn index_upsert(meta: SessionMeta) {
-    let _guard = SAVE_LOCK.lock().await;
-    let mut idx = SessionIndex::load().unwrap_or_default();
-    idx.upsert(meta);
-    let _ = idx.save();
-}
-
-/// Locked removal of a session entry from the index (see [`index_upsert`]).
-pub async fn index_remove(id: &str) {
-    let _guard = SAVE_LOCK.lock().await;
-    if let Ok(mut idx) = SessionIndex::load() {
-        if idx.remove(id) {
-            let _ = idx.save();
+    // Keep the complete index record current. Updating only recency leaves a
+    // stale model after `/model` or extension model/set, so every successful
+    // transcript save refreshes all live session metadata atomically.
+    let mut idx = match SessionIndex::load() {
+        Ok(idx) => idx,
+        Err(e) => {
+            tracing::warn!("session index load failed after transcript save: {e}");
+            return;
         }
+    };
+    idx.upsert(SessionMeta {
+        id: session_id,
+        title,
+        cwd: engine.cwd.display().to_string(),
+        model: engine.model.clone(),
+        updated_at: now_secs(),
+    });
+    if let Err(e) = idx.save() {
+        tracing::warn!("session index save failed: {e}");
+    }
+}
+
+/// Run synchronous index I/O on the blocking pool while holding the same lock
+/// used by transcript persistence. Acquire the async mutex before entering the
+/// blocking pool: a saturated save queue must suspend Tokio tasks, not occupy
+/// every blocking worker with `blocking_lock()` waiters.
+async fn with_session_index_lock<T>(
+    operation: &'static str,
+    f: impl FnOnce() -> Result<T, zode_core::CoreError> + Send + 'static,
+) -> Result<T, zode_core::CoreError>
+where
+    T: Send + 'static,
+{
+    let _guard = SAVE_LOCK.lock().await;
+    tokio::task::spawn_blocking(f).await.map_err(|error| {
+        zode_core::CoreError::Other(format!("{operation} worker failed: {error}"))
+    })?
+}
+
+/// Checked, serialized index load. Corrupt or unreadable indexes are surfaced
+/// to the caller instead of being mistaken for an empty index.
+pub async fn session_index_load_checked() -> Result<SessionIndex, zode_core::CoreError> {
+    with_session_index_lock("session index load", SessionIndex::load).await
+}
+
+/// Cancellable checked load for queued extension workers. The predicate runs
+/// only after the async save lock is acquired and immediately before disk I/O.
+pub async fn session_index_load_checked_if(
+    should_run: impl FnOnce() -> bool + Send + 'static,
+) -> Result<Option<SessionIndex>, zode_core::CoreError> {
+    let _guard = SAVE_LOCK.lock().await;
+    if !should_run() {
+        return Ok(None);
+    }
+    tokio::task::spawn_blocking(SessionIndex::load)
+        .await
+        .map_err(|error| {
+            zode_core::CoreError::Other(format!("session index load worker failed: {error}"))
+        })?
+        .map(Some)
+}
+
+/// Checked load-modify-save upsert under [`SAVE_LOCK`].
+pub async fn index_upsert_checked(meta: SessionMeta) -> Result<(), zode_core::CoreError> {
+    with_session_index_lock("session index upsert", move || {
+        let mut idx = SessionIndex::load()?;
+        idx.upsert(meta);
+        idx.save()
+    })
+    .await
+}
+
+/// Checked load-modify-save removal under [`SAVE_LOCK`].
+pub async fn index_remove_checked(id: &str) -> Result<bool, zode_core::CoreError> {
+    let id = id.to_string();
+    with_session_index_lock("session index remove", move || {
+        let mut idx = SessionIndex::load()?;
+        let removed = idx.remove(&id);
+        if removed {
+            idx.save()?;
+        }
+        Ok(removed)
+    })
+    .await
+}
+
+/// Best-effort compatibility wrapper for existing background callers.
+pub async fn index_upsert(meta: SessionMeta) {
+    if let Err(e) = index_upsert_checked(meta).await {
+        tracing::warn!("session index upsert failed: {e}");
+    }
+}
+
+/// Best-effort compatibility wrapper for existing background callers.
+pub async fn index_remove(id: &str) {
+    if let Err(e) = index_remove_checked(id).await {
+        tracing::warn!("session index remove failed: {e}");
     }
 }
 
@@ -320,6 +406,28 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn busy_flag_tracks_abort_handle() {
         // Construction needs a real ZodeEngine (network-free assemble), which
@@ -333,5 +441,81 @@ mod tests {
         assert!(busy.is_some());
         let idle: Option<AbortController> = None;
         assert!(idle.is_none());
+    }
+
+    #[test]
+    fn checked_index_io_never_blocks_a_blocking_pool_thread_on_async_save_lock() {
+        let source = include_str!("tab.rs");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source precedes tests");
+        assert!(
+            !production.contains(&["SAVE_LOCK.", "blocking_lock()"].concat()),
+            "acquire SAVE_LOCK asynchronously before entering spawn_blocking"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_session_refreshes_existing_title_cwd_and_model() {
+        use zode_core::config::{NoemaSettings, ProviderConfig, ProviderKind, ZodeConfig};
+        use zode_core::EngineTemplate;
+
+        let config = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let _env_lock = TEST_ENV_LOCK.lock().await;
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", config.path());
+        let cfg = ZodeConfig {
+            provider: ProviderConfig {
+                r#type: Some(ProviderKind::Ollama),
+                base_url: Some("http://localhost:11434".into()),
+                model: Some("current-model".into()),
+                ..Default::default()
+            },
+            noema: NoemaSettings {
+                enabled: Some(false),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let engine = Arc::new(
+            EngineTemplate::new(
+                cfg,
+                cwd.path().to_path_buf(),
+                None,
+                false,
+                None,
+                "2026-07-13".into(),
+            )
+            .assemble()
+            .await
+            .unwrap(),
+        );
+        let session_id = "refresh-meta";
+        let mut index = SessionIndex::default();
+        index.upsert(SessionMeta {
+            id: session_id.into(),
+            title: "Old title".into(),
+            cwd: "/old/cwd".into(),
+            model: "old-model".into(),
+            updated_at: 1,
+        });
+        index.save().unwrap();
+
+        persist_session(
+            session_id.into(),
+            engine,
+            "Current title".into(),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            false,
+        )
+        .await;
+
+        let reloaded = SessionIndex::load().unwrap();
+        let meta = reloaded.find_prefix(session_id).unwrap();
+        assert_eq!(meta.title, "Current title");
+        assert_eq!(meta.cwd, cwd.path().display().to_string());
+        assert_eq!(meta.model, "current-model");
+        assert!(meta.updated_at > 1);
     }
 }
