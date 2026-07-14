@@ -59,6 +59,8 @@ pub struct LspClient {
     root: PathBuf,
     /// Keeps the child alive; killed on drop.
     _child: Child,
+    #[cfg(test)]
+    write_failure_notify: Option<Arc<Notify>>,
 }
 
 impl LspClient {
@@ -112,6 +114,8 @@ impl LspClient {
             open: Mutex::new(HashSet::new()),
             root,
             _child: child,
+            #[cfg(test)]
+            write_failure_notify: None,
         };
         client.initialize().await?;
         Ok(client)
@@ -158,16 +162,39 @@ impl LspClient {
         self.pending.lock().await.insert(id, tx);
 
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        if let Err(e) = write_message(&self.stdin, &msg).await {
-            self.pending.lock().await.remove(&id);
-            return Err(format!("lsp write {method}: {e}"));
+        let write_error = write_message(&self.stdin, &msg).await.err();
+        #[cfg(test)]
+        if write_error.is_some() {
+            if let Some(notify) = &self.write_failure_notify {
+                notify.notify_one();
+            }
         }
 
-        let resp = match tokio::time::timeout(Duration::from_secs(timeout_secs), rx).await {
+        // A dying server can close stdin before the stdout reader observes
+        // EOF and publishes its stderr-backed exit diagnostic. Keep this
+        // receiver alive for that drain window and prefer the useful server
+        // error; if the reader never reports back, fall through to the
+        // original write error below.
+        let response_timeout = if write_error.is_some() {
+            STDERR_DRAIN + Duration::from_secs(1)
+        } else {
+            Duration::from_secs(timeout_secs)
+        };
+
+        let resp = match tokio::time::timeout(response_timeout, rx).await {
             Ok(Ok(v)) => v,
-            Ok(Err(_)) => return Err(format!("lsp {method}: server closed the connection")),
+            Ok(Err(_)) => {
+                self.pending.lock().await.remove(&id);
+                if let Some(e) = write_error {
+                    return Err(format!("lsp write {method}: {e}"));
+                }
+                return Err(format!("lsp {method}: server closed the connection"));
+            }
             Err(_) => {
                 self.pending.lock().await.remove(&id);
+                if let Some(e) = write_error {
+                    return Err(format!("lsp write {method}: {e}"));
+                }
                 return Err(format!("lsp {method}: timed out"));
             }
         };
@@ -474,6 +501,70 @@ mod tests {
             err.contains("Unknown binary"),
             "the server's own stderr is the only useful diagnostic: {err}"
         );
+    }
+
+    /// If the server dies while a large request is still being written, the
+    /// write can observe EPIPE before the stdout reader reports EOF. The
+    /// pending request must still be allowed to receive the richer server
+    /// death diagnostic instead of returning a bare broken-pipe error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_failure_prefers_pending_server_exit_diagnostic() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 0.1; exit 1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn short-lived server");
+        let stdin = child.stdin.take().expect("child stdin");
+        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let write_failed = Arc::new(Notify::new());
+        let client = LspClient {
+            lang: "rust".into(),
+            stdin: Arc::new(Mutex::new(stdin)),
+            next_id: AtomicI64::new(1),
+            pending: pending.clone(),
+            diagnostics: Arc::new(Mutex::new(HashMap::new())),
+            diag_notify: Arc::new(Notify::new()),
+            dead: Arc::new(AtomicBool::new(false)),
+            open: Mutex::new(HashSet::new()),
+            root: std::env::temp_dir(),
+            _child: child,
+            write_failure_notify: Some(write_failed.clone()),
+        };
+
+        let simulated_reader = async {
+            write_failed.notified().await;
+            let tx = pending
+                .lock()
+                .await
+                .remove(&1)
+                .expect("write failure must retain the pending request for the reader");
+            let _ = tx.send(json!({
+                "error": {
+                    "message": "language server exited unexpectedly: Unknown binary"
+                }
+            }));
+        };
+        // Larger than a platform pipe buffer, so the write remains pending
+        // until the child exits and closes its stdin.
+        let request = client.request_with_timeout(
+            "initialize",
+            json!({ "padding": "x".repeat(4 * 1024 * 1024) }),
+            1,
+        );
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (result, ()) = tokio::join!(request, simulated_reader);
+            result
+        })
+        .await
+        .expect("write failure and simulated reader must not hang");
+        let err = result.expect_err("the short-lived server cannot accept the request");
+
+        assert!(err.contains("exited"), "{err}");
+        assert!(err.contains("Unknown binary"), "{err}");
     }
 
     /// A server that has not published yet must be reported as such, not as an
