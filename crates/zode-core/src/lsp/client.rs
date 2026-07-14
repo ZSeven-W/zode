@@ -30,8 +30,11 @@ const INIT_TIMEOUT_SECS: u64 = 45;
 /// How many trailing stderr lines to keep as the death diagnostic.
 const STDERR_TAIL_LINES: usize = 5;
 /// How long to let the stderr reader finish after stdout hits EOF, so the
-/// server's last words make it into the error we report.
-const STDERR_DRAIN: Duration = Duration::from_millis(500);
+/// server's last words make it into the error we report. Generous on purpose:
+/// this grace only runs on the server-death error path, and a tight bound
+/// races the spawned stderr reader under CI load, occasionally dropping the
+/// server's own diagnostic (the only useful one) from the reported error.
+const STDERR_DRAIN: Duration = Duration::from_secs(2);
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>;
 type Diagnostics = Arc<Mutex<HashMap<String, Vec<Value>>>>;
