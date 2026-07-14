@@ -239,6 +239,8 @@ pub struct SandboxSettings {
     /// (`~/.ssh`, `~/.aws`, the zode config, …) from READS. `None`/false → reads
     /// unrestricted (the safe default for a coding agent that reads the repo).
     pub restrict_reads: Option<bool>,
+    /// Windows sandbox tier: `auto`, `basic`, or `elevated` (Tier 2 AppContainer).
+    pub windows_tier: Option<String>,
 }
 
 /// Plugin enable/disable state. Plugins are on by default, so only the
@@ -1039,6 +1041,9 @@ impl ZodeConfig {
         }
         if other.sandbox.restrict_reads.is_some() {
             self.sandbox.restrict_reads = other.sandbox.restrict_reads;
+        }
+        if other.sandbox.windows_tier.is_some() {
+            self.sandbox.windows_tier = other.sandbox.windows_tier;
         }
         if other.max_output_tokens.is_some() {
             self.max_output_tokens = other.max_output_tokens;
@@ -2594,5 +2599,16 @@ mod tests {
         base.merge_from(over);
         assert!(base.browser.headless()); // kept
         assert_eq!(base.browser.executable.as_deref(), Some("/opt/chrome")); // merged
+    }
+
+    #[test]
+    fn windows_sandbox_tier_parses_camelcase_and_merges_by_presence() {
+        let mut base: ZodeConfig =
+            serde_json::from_str(r#"{"sandbox":{"windowsTier":"auto"}}"#).unwrap();
+        assert_eq!(base.sandbox.windows_tier.as_deref(), Some("auto"));
+        let over: ZodeConfig =
+            serde_json::from_str(r#"{"sandbox":{"windowsTier":"elevated"}}"#).unwrap();
+        base.merge_from(over);
+        assert_eq!(base.sandbox.windows_tier.as_deref(), Some("elevated"));
     }
 }

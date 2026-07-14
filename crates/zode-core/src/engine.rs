@@ -267,7 +267,13 @@ fn sandbox_prompt_note(sandbox: &Option<crate::sandbox::SandboxConfig>) -> Strin
                     sb.write_scope_summary()
                 ),
             };
-            let net = if sb.allow_network() {
+            let net = if sb.is_windows_tier_one() {
+                if sb.is_windows_tier_two() {
+                    "Network is DENIED by AppContainer capability omission (Tier 2), including loopback."
+                } else {
+                    "network unenforced (Windows Tier 1)"
+                }
+            } else if sb.allow_network() {
                 "Network is allowed."
             } else {
                 "Outbound network is DENIED."

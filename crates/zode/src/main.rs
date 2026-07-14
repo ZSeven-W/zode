@@ -17,6 +17,12 @@ use zode_core::{EngineTemplate, ZodeEngine};
 
 #[tokio::main]
 async fn main() {
+    #[cfg(windows)]
+    if let Some(exit) = zode_core::sandbox::windows::intercept_private_entrypoint(
+        &std::env::args_os().collect::<Vec<_>>(),
+    ) {
+        std::process::exit(exit as i32);
+    }
     let args = Args::parse();
     let stdout_is_tty = std::io::stdout().is_terminal();
     init_tracing(&args, stdout_is_tty);
@@ -67,6 +73,23 @@ async fn run(args: Args) -> i32 {
         match command {
             args::Command::Doctor => return doctor::run(&cwd).await,
             args::Command::Server(server_args) => return server::run(server_args, &cwd).await,
+            args::Command::Sandbox { action } => match action {
+                args::SandboxCommand::Cleanup => {
+                    #[cfg(windows)]
+                    match zode_core::sandbox::windows::cleanup_acl_journal() {
+                        Ok(()) => return 0,
+                        Err(error) => {
+                            eprintln!("zode: sandbox cleanup failed: {error}");
+                            return 1;
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        eprintln!("zode: sandbox cleanup is only needed on Windows");
+                        return 0;
+                    }
+                }
+            },
         }
     }
     // First run: drop a starter config the user can edit. Best-effort — a
@@ -155,7 +178,10 @@ async fn run(args: Args) -> i32 {
         ) {
             // Strict-read is applied post-resolve so it rides along on the
             // resolved config without widening `resolve`'s signature.
-            Ok(sandbox) => sandbox.map(|c| c.with_restrict_reads(restrict_reads)),
+            Ok(sandbox) => sandbox.map(|c| {
+                c.with_restrict_reads(restrict_reads)
+                    .with_windows_tier(cfg.sandbox.windows_tier.as_deref())
+            }),
             Err(e) => {
                 eprintln!("zode: {e}");
                 return 1;
@@ -167,6 +193,9 @@ async fn run(args: Args) -> i32 {
     // kernel without unprivileged user namespaces). FAIL-CLOSED like resolve:
     // stop and tell the user rather than run with a false sense of isolation.
     if let Some(sb) = &sandbox {
+        if let Some(notice) = sb.windows_tier_notice() {
+            eprintln!("zode: {notice}");
+        }
         if let Err(e) = sb.verify().await {
             eprintln!("zode: {e}");
             return 1;

@@ -5122,6 +5122,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "uuid",
+ "windows",
 ]
 
 [[package]]

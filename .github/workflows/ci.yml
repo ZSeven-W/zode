@@ -66,3 +66,28 @@ jobs:
         run: cargo build -p zode
       - name: sdk suites
         run: ZODE_BIN="$PWD/target/debug/zode" bash scripts/test-sdks.sh --strict
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --workspace
+      # `build --workspace` above proves the whole product compiles on Windows.
+      # The runtime test run is scoped to the sandbox module: zode's broader
+      # suite has pre-existing Unix path/behavior assumptions (images, mcp,
+      # noema, engine, fs_escalate) whose Windows-greenness is separate,
+      # tracked debt — not part of the Windows Tier 1 sandbox feature.
+      - name: test
+        run: "cargo test -p zode-core sandbox::"
+      # windows-latest runs with an Administrator account; the ignored suite
+      # creates a per-user AppContainer and tears it down via a Drop guard even
+      # when an assertion fails.
+      - name: Windows Tier 1 and Tier 2 sandbox integration tests
+        env:
+          ZODE_SANDBOX_IT: "1"
+        run: cargo test -p zode-core --features sandbox-test-runner --test windows-sandbox-it -- --ignored

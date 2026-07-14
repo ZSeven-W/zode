@@ -1,6 +1,6 @@
 //! Generated locale data for [`crate::i18n`]. SOURCE_STRINGS (English keys) and the 14 LOCALES rows are aligned by index. Do not edit by hand.
 
-pub const N: usize = 126;
+pub const N: usize = 132;
 
 pub static SOURCE_STRINGS: [&str; N] = [
     "Show commands and keybindings",
@@ -129,6 +129,12 @@ pub static SOURCE_STRINGS: [&str; N] = [
     "Vision",
     "Thinking",
     "Orchestration",
+    "Windows Tier 1 sandbox (experimental)",
+    "best-effort write confinement",
+    "network unenforced",
+    ".git/.zode rename/delete through parent is not kernel-enforced",
+    "Windows Tier 2 sandbox (experimental)",
+    "network denied (AppContainer; loopback included)",
 ];
 
 pub static LOCALES: [[&str; N]; 14] = [
@@ -259,6 +265,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "图像理解",
         "思考输出",
         "编排",
+        "Windows 第 1 层沙盒（实验性）",
+        "尽力而为的写入限制",
+        "网络未强制限制",
+        "内核不强制阻止通过父目录重命名/删除 .git/.zode",
+        "Windows 第 2 层沙箱（实验性）",
+        "网络已拒绝（AppContainer；包括回环）",
     ],
     [
         "顯示指令與快捷鍵",
@@ -387,6 +399,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "圖像理解",
         "思考輸出",
         "編排",
+        "Windows 第 1 層沙盒（實驗性）",
+        "盡力而為的寫入限制",
+        "網路未強制限制",
+        "核心不強制阻止透過父目錄重新命名/刪除 .git/.zode",
+        "Windows 第 2 層沙箱（實驗性）",
+        "網路已拒絕（AppContainer；包括回環）",
     ],
     [
         "コマンドとキーバインドを表示",
@@ -515,6 +533,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "画像認識",
         "思考出力",
         "オーケストレーション",
+        "Windows Tier 1 サンドボックス（試験的）",
+        "ベストエフォートの書き込み制限",
+        "ネットワークは未強制",
+        "親経由の .git/.zode の名前変更・削除はカーネルで強制されません",
+        "Windows Tier 2 サンドボックス（実験的）",
+        "ネットワーク拒否（AppContainer；ループバックを含む）",
     ],
     [
         "명령어 및 단축키 표시",
@@ -643,6 +667,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "이미지 이해",
         "사고 출력",
         "오케스트레이션",
+        "Windows Tier 1 샌드박스(실험적)",
+        "최선 노력 쓰기 제한",
+        "네트워크 미강제",
+        "부모를 통한 .git/.zode 이름 변경/삭제는 커널에서 강제되지 않음",
+        "Windows Tier 2 샌드박스(실험적)",
+        "네트워크 거부됨(AppContainer; 루프백 포함)",
     ],
     [
         "Mostrar comandos y atajos de teclado",
@@ -771,6 +801,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Visión",
         "Razonamiento",
         "Orquestación",
+        "Sandbox Windows nivel 1 (experimental)",
+        "confinamiento de escritura de mejor esfuerzo",
+        "red no aplicada",
+        "el kernel no impide renombrar/eliminar .git/.zode mediante el padre",
+        "Sandbox de Windows Nivel 2 (experimental)",
+        "red denegada (AppContainer; bucle incluido)",
     ],
     [
         "Afficher les commandes et raccourcis",
@@ -899,6 +935,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Vision",
         "Raisonnement",
         "Orchestration",
+        "Bac à sable Windows niveau 1 (expérimental)",
+        "confinement des écritures au mieux",
+        "réseau non imposé",
+        "le noyau n'empêche pas le renommage/suppression de .git/.zode via le parent",
+        "Bac à sable Windows Niveau 2 (expérimental)",
+        "réseau refusé (AppContainer ; boucle incluse)",
     ],
     [
         "Befehle und Tastenkürzel anzeigen",
@@ -1027,6 +1069,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Bildanalyse",
         "Denkausgabe",
         "Orchestrierung",
+        "Windows-Tier-1-Sandbox (experimentell)",
+        "Best-Effort-Schreibbeschränkung",
+        "Netzwerk nicht erzwungen",
+        ".git/.zode-Umbenennen/Löschen über das Elternverzeichnis wird nicht vom Kernel erzwungen",
+        "Windows-Tier-2-Sandbox (experimentell)",
+        "Netzwerk verweigert (AppContainer; Loopback eingeschlossen)",
     ],
     [
         "Mostrar comandos e atalhos de teclado",
@@ -1155,6 +1203,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Visão",
         "Raciocínio",
         "Orquestração",
+        "Sandbox Windows nível 1 (experimental)",
+        "confinamento de escrita de melhor esforço",
+        "rede não imposta",
+        "renomear/excluir .git/.zode pelo pai não é imposto pelo kernel",
+        "Sandbox Windows Nível 2 (experimental)",
+        "rede negada (AppContainer; loopback incluído)",
     ],
     [
         "Показать команды и сочетания клавиш",
@@ -1283,6 +1337,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Зрение",
         "Размышления",
         "Оркестрация",
+        "Песочница Windows уровня 1 (экспериментальная)",
+        "ограничение записи по мере возможности",
+        "сеть не контролируется",
+        "ядро не запрещает переименование/удаление .git/.zode через родителя",
+        "Песочница Windows уровня 2 (экспериментальная)",
+        "сеть запрещена (AppContainer; включая loopback)",
     ],
     [
         "कमांड और कीबाइंडिंग दिखाएँ",
@@ -1411,6 +1471,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "विज़न",
         "सोच",
         "ऑर्केस्ट्रेशन",
+        "Windows टियर 1 सैंडबॉक्स (प्रायोगिक)",
+        "सर्वोत्तम-प्रयास लेखन सीमा",
+        "नेटवर्क लागू नहीं",
+        "मूल फ़ोल्डर से .git/.zode का नाम बदलना/हटाना कर्नेल द्वारा लागू नहीं है",
+        "Windows टियर 2 सैंडबॉक्स (प्रयोगात्मक)",
+        "नेटवर्क अस्वीकृत (AppContainer; लूपबैक सहित)",
     ],
     [
         "Tampilkan perintah dan pintasan keyboard",
@@ -1539,6 +1605,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Visi",
         "Pemikiran",
         "Orkestrasi",
+        "Sandbox Windows Tingkat 1 (eksperimental)",
+        "pembatasan tulis upaya terbaik",
+        "jaringan tidak diberlakukan",
+        "ubah nama/hapus .git/.zode melalui induk tidak diberlakukan kernel",
+        "Sandbox Windows Tingkat 2 (eksperimental)",
+        "jaringan ditolak (AppContainer; termasuk loopback)",
     ],
     [
         "แสดงคำสั่งและคีย์ลัด",
@@ -1667,6 +1739,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "การเข้าใจภาพ",
         "การแสดงความคิด",
         "การจัดวาง",
+        "แซนด์บ็อกซ์ Windows ระดับ 1 (ทดลอง)",
+        "การจำกัดการเขียนแบบพยายามเต็มที่",
+        "ไม่บังคับใช้เครือข่าย",
+        "เคอร์เนลไม่บังคับการเปลี่ยนชื่อ/ลบ .git/.zode ผ่านโฟลเดอร์แม่",
+        "แซนด์บ็อกซ์ Windows ระดับ 2 (ทดลอง)",
+        "ปฏิเสธเครือข่าย (AppContainer; รวม loopback)",
     ],
     [
         "Komutları ve kısayolları göster",
@@ -1795,6 +1873,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Görüntü anlama",
         "Düşünme",
         "Orkestrasyon",
+        "Windows Katman 1 sandbox (deneysel)",
+        "en iyi çabayla yazma sınırlaması",
+        "ağ uygulanmıyor",
+        "üst dizin üzerinden .git/.zode yeniden adlandırma/silme çekirdekçe engellenmez",
+        "Windows Katman 2 sandbox (deneysel)",
+        "ağ reddedildi (AppContainer; geri döngü dahil)",
     ],
     [
         "Hiển thị lệnh và phím tắt",
@@ -1923,6 +2007,12 @@ pub static LOCALES: [[&str; N]; 14] = [
         "Thị giác",
         "Suy nghĩ",
         "Điều phối",
+        "Sandbox Windows Tầng 1 (thử nghiệm)",
+        "giới hạn ghi theo nỗ lực tốt nhất",
+        "mạng không được thực thi",
+        "kernel không ngăn đổi tên/xóa .git/.zode thông qua thư mục cha",
+        "Sandbox Windows Tầng 2 (thử nghiệm)",
+        "mạng bị từ chối (AppContainer; gồm loopback)",
     ],
 ];
 

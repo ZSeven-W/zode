@@ -86,6 +86,17 @@ pub enum Command {
     Doctor,
     /// Run zode as a JSON-RPC app server.
     Server(ServerArgs),
+    /// Manage persisted sandbox state.
+    Sandbox {
+        #[command(subcommand)]
+        action: SandboxCommand,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum SandboxCommand {
+    /// Remove stale Windows sandbox capability ACEs and AppContainer profile.
+    Cleanup,
 }
 
 #[cfg(test)]
@@ -153,5 +164,16 @@ mod tests {
             Some(Command::Server(s)) => assert_eq!(s.listen, "ws://127.0.0.1:0"),
             other => panic!("expected server command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_sandbox_cleanup() {
+        let args = Args::parse_from(["zode", "sandbox", "cleanup"]);
+        assert!(matches!(
+            args.command,
+            Some(Command::Sandbox {
+                action: SandboxCommand::Cleanup
+            })
+        ));
     }
 }

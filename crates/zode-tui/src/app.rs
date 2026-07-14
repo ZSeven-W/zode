@@ -8415,6 +8415,20 @@ fn sandbox_status_line(sandbox: Option<&zode_core::sandbox::SandboxConfig>) -> S
     use zode_core::sandbox::SandboxMode;
     match sandbox {
         None => "sandbox: OFF — shell commands AND file writes run unconfined".to_string(),
+        Some(c) if c.is_windows_tier_two() => format!(
+            "sandbox: ON — {}; {}; {}; {}",
+            crate::tr("Windows Tier 2 sandbox (experimental)"),
+            crate::tr("best-effort write confinement"),
+            crate::tr("network denied (AppContainer; loopback included)"),
+            crate::tr(".git/.zode rename/delete through parent is not kernel-enforced")
+        ),
+        Some(c) if c.is_windows_tier_one() => format!(
+            "sandbox: ON — {}; {}; {}; {}",
+            crate::tr("Windows Tier 1 sandbox (experimental)"),
+            crate::tr("best-effort write confinement"),
+            crate::tr("network unenforced"),
+            crate::tr(".git/.zode rename/delete through parent is not kernel-enforced")
+        ),
         Some(c) => {
             let mode = match c.mode() {
                 SandboxMode::ReadOnly => "read-only (no file writes — shell or tools)".to_string(),
