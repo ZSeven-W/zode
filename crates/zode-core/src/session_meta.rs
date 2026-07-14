@@ -2,7 +2,8 @@
 //! this index tracks id/title/cwd/model/updated_at for listing and
 //! resuming. Stored at `<config_dir>/sessions/index.json`.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,7 +50,8 @@ impl SessionIndex {
     pub fn save(&self) -> Result<(), CoreError> {
         let dir = Self::sessions_dir()?;
         std::fs::create_dir_all(&dir)?;
-        std::fs::write(Self::index_path()?, serde_json::to_string_pretty(self)?)?;
+        let json = serde_json::to_vec_pretty(self)?;
+        write_atomic(&Self::index_path()?, &json)?;
         Ok(())
     }
 
@@ -119,6 +121,55 @@ impl SessionIndex {
         v.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
         v
     }
+}
+
+/// Publish a complete file by staging it beside the destination and then
+/// atomically replacing the destination. A unique, exclusively-created temp
+/// prevents concurrent writers from sharing staging state; every failure after
+/// creation removes that writer's temp file.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    const MAX_TEMP_ATTEMPTS: usize = 16;
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "index.json".to_string());
+    let mut last_collision = None;
+
+    for _ in 0..MAX_TEMP_ATTEMPTS {
+        let temp_path = dir.join(format!(
+            ".{file_name}.{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut temp = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_collision = Some(error);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+
+        let result = temp.write_all(bytes).and_then(|()| temp.sync_all());
+        drop(temp);
+        let result = result.and_then(|()| std::fs::rename(&temp_path, path));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        return result;
+    }
+
+    Err(last_collision.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate a unique session index temp file",
+        )
+    }))
 }
 
 /// Title from the first user message: first line, trimmed to 48 chars.
@@ -273,5 +324,103 @@ mod tests {
                 .title,
             "new"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn concurrent_saves_never_publish_malformed_json() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+
+        fn large_index(marker: char) -> SessionIndex {
+            let mut index = SessionIndex::default();
+            index.upsert(SessionMeta {
+                id: marker.to_string(),
+                title: marker.to_string().repeat(2 * 1024 * 1024),
+                cwd: "/tmp".to_string(),
+                model: "m".to_string(),
+                updated_at: marker as u64,
+            });
+            index
+        }
+
+        let first = Arc::new(large_index('a'));
+        let second = Arc::new(large_index('b'));
+        first.save().unwrap();
+
+        let start = Arc::new(Barrier::new(3));
+        let writers_done = Arc::new(AtomicBool::new(false));
+        let spawn_writer = |index: Arc<SessionIndex>| {
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                for _ in 0..32 {
+                    index.save().unwrap();
+                }
+            })
+        };
+        let writer_one = spawn_writer(first);
+        let writer_two = spawn_writer(second);
+
+        start.wait();
+        let mut reads = 0;
+        while !writers_done.load(Ordering::Acquire) || reads < 32 {
+            let raw = std::fs::read_to_string(SessionIndex::index_path().unwrap()).unwrap();
+            serde_json::from_str::<SessionIndex>(&raw)
+                .unwrap_or_else(|error| panic!("reader observed malformed index: {error}"));
+            reads += 1;
+            if writer_one.is_finished() && writer_two.is_finished() {
+                writers_done.store(true, Ordering::Release);
+            }
+            std::thread::yield_now();
+        }
+        writer_one.join().unwrap();
+        writer_two.join().unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn save_roundtrips_without_temp_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        let mut index = SessionIndex::default();
+        index.upsert(SessionMeta {
+            id: "roundtrip".to_string(),
+            title: "saved atomically".to_string(),
+            cwd: "/tmp".to_string(),
+            model: "m".to_string(),
+            updated_at: 42,
+        });
+
+        index.save().unwrap();
+
+        let loaded = SessionIndex::load().unwrap();
+        assert_eq!(loaded.sessions.len(), 1);
+        assert_eq!(loaded.sessions[0].id, "roundtrip");
+        let entries: Vec<_> = std::fs::read_dir(SessionIndex::sessions_dir().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, [std::ffi::OsString::from("index.json")]);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn failed_save_removes_its_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        let sessions_dir = SessionIndex::sessions_dir().unwrap();
+        std::fs::create_dir_all(sessions_dir.join("index.json")).unwrap();
+
+        assert!(SessionIndex::default().save().is_err());
+
+        let entries: Vec<_> = std::fs::read_dir(&sessions_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, [std::ffi::OsString::from("index.json")]);
     }
 }
