@@ -198,6 +198,8 @@ const ZH_ONLY: &[(&str, &str, &str)] = &[
     ("no file to view for this image", "此图片没有可查看的文件", "此圖片沒有可檢視的檔案"),
     ("no goal set — use /goal <text> to set one", "未设置目标 — 使用 /goal <text> 设置", "未設定目標 — 使用 /goal <text> 設定"),
     ("no named providers configured", "未配置具名服务商", "未設定具名服務商"),
+    ("no image-capable providers configured", "未配置支持图像的服务商", "未設定支援圖像的服務商"),
+    ("no image-capable providers configured — add a vision model under `providers` or set supportsImages=true, then pick it here", "未配置支持图像的服务商 — 请在 `providers` 下添加视觉模型或设置 supportsImages=true，然后在此选择", "未設定支援圖像的服務商 — 請在 `providers` 下新增視覺模型或設定 supportsImages=true，然後在此選擇"),
     ("no provider '{name}' in config", "配置中没有服务商 '{name}'", "設定中沒有服務商 '{name}'"),
     ("no saved sessions yet", "暂无已保存会话", "尚無已儲存會話"),
     ("not found", "未找到", "未找到"),

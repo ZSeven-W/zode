@@ -47,7 +47,9 @@ use crate::noema::ZodeNoema;
 use crate::plugin::PluginManager;
 use crate::provider::build_provider;
 use crate::skills::{skills_dirs, skills_index, SkillTool};
-use crate::task_factory::{ModelRuntimeState, ParentToolsCell, ZodeTaskFactory};
+use crate::task_factory::{
+    resolve_subagent_max_iterations, ModelRuntimeState, ParentToolsCell, ZodeTaskFactory,
+};
 
 const EDIT_HISTORY_CAPACITY: usize = 50;
 
@@ -152,6 +154,36 @@ fn resolve_max_output(
     } else {
         resolved.min(context_window - 1)
     }
+}
+
+/// Fill provider capabilities that the user did not explicitly configure from
+/// models.dev metadata for the active model. Explicit `supportsImages` always
+/// wins; catalog inference is only the safe default for otherwise-unannotated
+/// OpenAI-compatible providers, whose runtime default is intentionally false.
+fn resolve_provider_capabilities(
+    provider: &crate::config::ProviderConfig,
+    provider_id: Option<&str>,
+    catalog: &crate::Catalog,
+) -> crate::config::ProviderConfig {
+    let mut resolved = provider.clone();
+    if resolved.supports_images.is_none() {
+        resolved.supports_images = resolved
+            .model
+            .as_deref()
+            .and_then(|model| catalog.supports_images_for_model_scoped(provider_id, model));
+    }
+    resolved
+}
+
+fn effective_provider_supports_images(
+    provider: &crate::config::ProviderConfig,
+    provider_id: Option<&str>,
+    catalog: &crate::Catalog,
+) -> bool {
+    let resolved = resolve_provider_capabilities(provider, provider_id, catalog);
+    build_provider(&resolved)
+        .map(|provider| provider.capabilities().supports_images)
+        .unwrap_or(false)
 }
 
 fn pre_turn_compact_needed(input_tokens: u32, context_window: u32, max_output_tokens: u32) -> bool {
@@ -668,6 +700,7 @@ impl ZodeEngine {
     ) -> Result<Self, CoreError> {
         Self::assemble_with_carry_and_access(
             cfg,
+            cfg.active_provider_key(),
             cwd,
             gate,
             sandbox,
@@ -685,6 +718,7 @@ impl ZodeEngine {
     #[allow(clippy::too_many_arguments)]
     async fn assemble_with_carry_and_access(
         cfg: &ZodeConfig,
+        selected_provider_key: Option<&str>,
         cwd: PathBuf,
         gate: Arc<dyn ApprovalGate>,
         sandbox: Option<crate::sandbox::SandboxConfig>,
@@ -701,7 +735,10 @@ impl ZodeEngine {
         // chromium lazily, on the first `lease()`.
         let browser_session = browser
             .unwrap_or_else(|| BrowserSession::new(cfg.browser.clone(), Arc::new(ManagedFactory)));
-        let provider = build_provider(&cfg.provider)?;
+        let active_provider_key = selected_provider_key.or_else(|| cfg.active_provider_key());
+        let provider_cfg =
+            resolve_provider_capabilities(&cfg.provider, active_provider_key, cached_catalog());
+        let provider = build_provider(&provider_cfg)?;
         let model = cfg
             .provider
             .model
@@ -1021,6 +1058,7 @@ impl ZodeEngine {
             task_tools.clone(),
             agent_defs,
             subagents.clone(),
+            resolve_subagent_max_iterations(cfg.subagent_max_iterations),
         ));
         let agent_type_list = task_factory.agent_types();
         base.register(Arc::new(TaskTool::new(task_factory)));
@@ -1154,19 +1192,19 @@ impl ZodeEngine {
             max_output_tokens: resolve_max_output(
                 &cfg.provider,
                 cfg.max_output_tokens,
-                cfg.active_provider_key(),
+                active_provider_key,
                 cached_catalog(),
                 resolve_context_window(
                     &cfg.provider,
                     cfg.context_window,
-                    cfg.active_provider_key(),
+                    active_provider_key,
                     cached_catalog(),
                 ),
             ),
             model_max_tokens: resolve_context_window(
                 &cfg.provider,
                 cfg.context_window,
-                cfg.active_provider_key(),
+                active_provider_key,
                 cached_catalog(),
             ),
             max_iterations: resolve_max_iterations(cfg.max_iterations),
@@ -1826,6 +1864,10 @@ pub enum ToolAccessMode {
 #[derive(Clone)]
 pub struct EngineTemplate {
     cfg: ZodeConfig,
+    /// Exact named-provider selection. The resolved active `ProviderConfig`
+    /// alone cannot recover this when two groups expose the same model through
+    /// otherwise identical endpoint settings.
+    selected_provider_key: Option<String>,
     cwd: PathBuf,
     /// Interactive approval channel (TUI). `None` → always bypass.
     queue: Option<ApprovalQueue>,
@@ -1847,6 +1889,12 @@ pub struct EngineTemplate {
     pub browser: Arc<BrowserSession>,
 }
 
+fn provider_key_owns_model(cfg: &ZodeConfig, key: &str, model: &str) -> bool {
+    cfg.providers.get(key).is_some_and(|entry| {
+        entry.models.contains_key(model) || entry.model.as_deref() == Some(model) || key == model
+    })
+}
+
 impl EngineTemplate {
     pub fn new(
         cfg: ZodeConfig,
@@ -1857,8 +1905,10 @@ impl EngineTemplate {
         date: String,
     ) -> Self {
         let browser = BrowserSession::new(cfg.browser.clone(), Arc::new(ManagedFactory));
+        let selected_provider_key = cfg.active_provider_key().map(str::to_string);
         Self {
             cfg,
+            selected_provider_key,
             cwd,
             queue,
             question_queue: None,
@@ -1883,6 +1933,25 @@ impl EngineTemplate {
     pub fn with_config(&self, cfg: ZodeConfig) -> Self {
         let mut template = self.clone();
         template.browser = BrowserSession::new(cfg.browser.clone(), Arc::new(ManagedFactory));
+        // `with_config` has no explicit provider-key argument. Preserve the
+        // current exact selection while it still owns the replacement config's
+        // active model; otherwise derive the best available fallback.
+        template.selected_provider_key = cfg
+            .provider
+            .model
+            .as_deref()
+            .and_then(|model| {
+                self.selected_provider_key
+                    .as_deref()
+                    .filter(|key| {
+                        provider_key_owns_model(&cfg, key, model)
+                            && cfg
+                                .resolve_named_provider_model(key, model)
+                                .is_some_and(|resolved| resolved == cfg.provider)
+                    })
+                    .map(str::to_string)
+            })
+            .or_else(|| cfg.active_provider_key().map(str::to_string));
         template.cfg = cfg;
         template
     }
@@ -1942,6 +2011,7 @@ impl EngineTemplate {
         let sandbox = self.sandbox.as_ref().map(|sb| sb.clone().with_cwd(&cwd));
         ZodeEngine::assemble_with_carry_and_access(
             &self.cfg,
+            self.provider_scope(),
             cwd,
             gate,
             sandbox,
@@ -2001,12 +2071,41 @@ impl EngineTemplate {
         self.cfg.provider.model.as_deref()
     }
 
+    fn provider_scope(&self) -> Option<&str> {
+        self.selected_provider_key
+            .as_deref()
+            .filter(|key| {
+                self.cfg
+                    .provider
+                    .model
+                    .as_deref()
+                    .is_some_and(|model| provider_key_owns_model(&self.cfg, key, model))
+            })
+            .or_else(|| self.cfg.active_provider_key())
+    }
+
     pub fn images(&self) -> &crate::config::ImagesConfig {
         &self.cfg.images
     }
 
     pub fn provider_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.cfg.providers.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Named providers that can actually accept image input. For multi-model
+    /// provider groups, any image-capable model makes the provider eligible;
+    /// the vision path will select that model instead of blindly taking the
+    /// group's first (often text-only) model.
+    pub fn vision_provider_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .cfg
+            .providers
+            .keys()
+            .filter(|name| self.resolve_vision_provider(name).is_some())
+            .cloned()
+            .collect();
         names.sort();
         names
     }
@@ -2083,17 +2182,35 @@ impl EngineTemplate {
     /// unknown model is simply set on the current active provider.
     pub fn with_model(&self, model: String) -> Self {
         let mut t = self.clone();
-        match t.cfg.resolve_model_provider(&model) {
-            Some(resolved) => t.cfg.provider = resolved,
-            None => {
-                // Unknown model on the current provider's credentials: drop the
-                // previous model's per-model overrides so the new model resolves
-                // its own context window / output cap / prices instead of
-                // inheriting stale values (the status-bar % ctx denominator in
-                // particular must follow the new model's real max context).
-                t.cfg.provider.clear_model_overrides();
-                t.cfg.provider.model = Some(model);
-            }
+        // When several provider groups expose the same wire model id, keep an
+        // explicitly selected provider instead of letting the generic lookup
+        // rebound the model to the first group. This is especially important
+        // for provider-scoped catalog capabilities (one endpoint may support
+        // image input while another does not).
+        let preferred_key = t
+            .selected_provider_key
+            .clone()
+            .or_else(|| t.cfg.active_provider_key().map(str::to_string))
+            .filter(|key| provider_key_owns_model(&t.cfg, key, &model));
+        if let Some((key, resolved)) = preferred_key.and_then(|key| {
+            t.cfg
+                .resolve_named_provider_model(&key, &model)
+                .map(|provider| (key, provider))
+        }) {
+            t.cfg.provider = resolved;
+            t.selected_provider_key = Some(key);
+        } else if let Some(resolved) = t.cfg.resolve_model_provider(&model) {
+            t.cfg.provider = resolved;
+            t.selected_provider_key = t.cfg.active_provider_key().map(str::to_string);
+        } else {
+            // Unknown model on the current provider's credentials: drop the
+            // previous model's per-model overrides so the new model resolves
+            // its own context window / output cap / prices instead of
+            // inheriting stale values (the status-bar % ctx denominator in
+            // particular must follow the new model's real max context).
+            t.cfg.provider.clear_model_overrides();
+            t.cfg.provider.model = Some(model);
+            t.selected_provider_key = t.cfg.active_provider_key().map(str::to_string);
         }
         t
     }
@@ -2139,7 +2256,56 @@ impl EngineTemplate {
         let provider = self.cfg.resolve_named_provider(name)?;
         let mut t = self.clone();
         t.cfg.provider = provider;
+        t.selected_provider_key = Some(name.to_string());
         Some(t)
+    }
+
+    /// Select a named provider for image description. When the provider groups
+    /// several models, prefer the first model whose explicit/config-catalog
+    /// capability accepts images. If none qualifies, retain the normal default
+    /// so the existing submission-time check can return the precise
+    /// "does not declare image support" error for stale/manual configs.
+    pub fn with_vision_provider(&self, name: &str) -> Option<Self> {
+        let mut t = self.with_provider(name)?;
+        if let Some(provider) = self.resolve_vision_provider(name) {
+            t.cfg.provider = provider;
+        } else if t.model().is_none() {
+            return None;
+        }
+        Some(t)
+    }
+
+    fn resolve_vision_provider(&self, name: &str) -> Option<crate::config::ProviderConfig> {
+        self.resolve_vision_provider_with_catalog(name, cached_catalog())
+    }
+
+    fn resolve_vision_provider_with_catalog(
+        &self,
+        name: &str,
+        catalog: &crate::Catalog,
+    ) -> Option<crate::config::ProviderConfig> {
+        let entry = self.cfg.providers.get(name)?;
+        let mut models = Vec::new();
+        if let Some(model) = entry.model.clone() {
+            models.push(model);
+        }
+        for model in entry.models.keys() {
+            if !models.contains(model) {
+                models.push(model.clone());
+            }
+        }
+
+        if models.is_empty() {
+            // Image description still needs a concrete model id. A provider
+            // transport may advertise image support by default (Anthropic in
+            // particular), but assembling it without a model can only fail.
+            return None;
+        }
+
+        models.into_iter().find_map(|model| {
+            let provider = self.cfg.resolve_named_provider_model(name, &model)?;
+            effective_provider_supports_images(&provider, Some(name), catalog).then_some(provider)
+        })
     }
 
     /// The `providers`-map key that owns the active model — its `models` map
@@ -2147,7 +2313,7 @@ impl EngineTemplate {
     /// active model isn't part of any configured group. Used to display
     /// "model(provider)" in the status bar.
     pub fn active_provider_name(&self) -> Option<String> {
-        self.cfg.active_provider_key().map(str::to_string)
+        self.provider_scope().map(str::to_string)
     }
 
     /// Clone with the `providers` map replaced — keeps `active_provider_name`
@@ -2158,6 +2324,36 @@ impl EngineTemplate {
     ) -> Self {
         let mut t = self.clone();
         t.cfg.providers = providers;
+        t.selected_provider_key = t
+            .cfg
+            .provider
+            .model
+            .as_deref()
+            .and_then(|model| {
+                self.selected_provider_key
+                    .as_deref()
+                    .filter(|key| {
+                        provider_key_owns_model(&t.cfg, key, model)
+                            && t.cfg
+                                .resolve_named_provider_model(key, model)
+                                .is_some_and(|resolved| resolved == t.cfg.provider)
+                    })
+                    .map(str::to_string)
+            })
+            .or_else(|| t.cfg.active_provider_key().map(str::to_string));
+        t
+    }
+
+    /// Variant used by `/connect`, which knows the exact group key before the
+    /// freshly saved providers map is installed on the template.
+    pub fn with_provider_config_for_key(
+        &self,
+        provider: crate::config::ProviderConfig,
+        provider_key: String,
+    ) -> Self {
+        let mut t = self.clone();
+        t.cfg.provider = provider;
+        t.selected_provider_key = Some(provider_key);
         t
     }
 
@@ -2166,6 +2362,23 @@ impl EngineTemplate {
     pub fn with_provider_config(&self, provider: crate::config::ProviderConfig) -> Self {
         let mut t = self.clone();
         t.cfg.provider = provider;
+        t.selected_provider_key = t
+            .cfg
+            .provider
+            .model
+            .as_deref()
+            .and_then(|model| {
+                self.selected_provider_key
+                    .as_deref()
+                    .filter(|key| {
+                        provider_key_owns_model(&t.cfg, key, model)
+                            && t.cfg
+                                .resolve_named_provider_model(key, model)
+                                .is_some_and(|resolved| resolved == t.cfg.provider)
+                    })
+                    .map(str::to_string)
+            })
+            .or_else(|| t.cfg.active_provider_key().map(str::to_string));
         t
     }
 
@@ -2215,7 +2428,13 @@ impl EngineTemplate {
         model: String,
     ) -> Result<Self, CoreError> {
         let template = self.with_model(model);
-        let provider = build_provider(&template.cfg.provider)?;
+        let active_provider_key = template.provider_scope();
+        let provider_cfg = resolve_provider_capabilities(
+            &template.cfg.provider,
+            active_provider_key,
+            cached_catalog(),
+        );
+        let provider = build_provider(&provider_cfg)?;
         let model = template
             .cfg
             .provider
@@ -2225,13 +2444,13 @@ impl EngineTemplate {
         let context_window = resolve_context_window(
             &template.cfg.provider,
             template.cfg.context_window,
-            template.cfg.active_provider_key(),
+            active_provider_key,
             cached_catalog(),
         );
         let max_output_tokens = resolve_max_output(
             &template.cfg.provider,
             template.cfg.max_output_tokens,
-            template.cfg.active_provider_key(),
+            active_provider_key,
             cached_catalog(),
             context_window,
         );
@@ -2892,6 +3111,227 @@ mod tests {
             "2026-06-14".into(),
         );
         assert_eq!(template.active_provider_name().as_deref(), Some("deepseek"));
+    }
+
+    #[test]
+    fn vision_provider_selects_image_model_in_multi_model_group() {
+        let mut cfg = test_cfg();
+        let mut qwen_models = indexmap::IndexMap::new();
+        // Deliberately put the text-only model first: ordinary provider
+        // selection keeps this default, while vision selection must skip it.
+        qwen_models.insert(
+            "qwen3-coder-plus".to_string(),
+            crate::config::ModelOverride::default(),
+        );
+        qwen_models.insert(
+            "qwen3-vl-plus".to_string(),
+            crate::config::ModelOverride::default(),
+        );
+        cfg.providers.insert(
+            "qwen".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Openai),
+                api_key: Some("sk-qwen".into()),
+                base_url: Some("https://dashscope.example/v1".into()),
+                models: qwen_models,
+                ..Default::default()
+            },
+        );
+        cfg.providers.insert(
+            "text-only".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Openai),
+                api_key: Some("sk-text".into()),
+                model: Some("qwen3-coder-plus".into()),
+                ..Default::default()
+            },
+        );
+        cfg.providers.insert(
+            "missing-model".into(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk-no-model".into()),
+                supports_images: Some(true),
+                ..Default::default()
+            },
+        );
+        let template = EngineTemplate::new(
+            cfg,
+            std::path::PathBuf::from("/tmp/zode"),
+            None,
+            false,
+            None,
+            "2026-07-15".into(),
+        );
+
+        assert_eq!(
+            template.with_provider("qwen").unwrap().model(),
+            Some("qwen3-coder-plus")
+        );
+        assert_eq!(
+            template.with_vision_provider("qwen").unwrap().model(),
+            Some("qwen3-vl-plus")
+        );
+        assert_eq!(template.vision_provider_names(), vec!["qwen".to_string()]);
+        assert!(template.with_vision_provider("missing-model").is_none());
+        assert!(template.resolve_vision_provider("missing-model").is_none());
+    }
+
+    fn duplicate_model_image_scope_fixture() -> (ZodeConfig, crate::Catalog) {
+        let mut cfg = test_cfg();
+        for name in ["alpha", "beta"] {
+            let mut models = indexmap::IndexMap::new();
+            models.insert(
+                "shared".to_string(),
+                crate::config::ModelOverride::default(),
+            );
+            cfg.providers.insert(
+                name.to_string(),
+                ProviderConfig {
+                    r#type: Some(ProviderKind::Openai),
+                    // Deliberately identical endpoint identity: only the
+                    // explicit provider key can distinguish these groups.
+                    api_key: Some("sk-shared".to_string()),
+                    base_url: Some("https://shared.example/v1".to_string()),
+                    models,
+                    ..Default::default()
+                },
+            );
+        }
+        cfg.provider = cfg.resolve_named_provider("alpha").unwrap();
+
+        let catalog = crate::Catalog::from_json(
+            r#"{
+              "alpha": { "id":"alpha", "name":"Alpha", "models": {
+                "shared": { "id":"shared", "name":"Shared",
+                  "modalities":{"input":["text"],"output":["text"]} }
+              } },
+              "beta": { "id":"beta", "name":"Beta", "models": {
+                "shared": { "id":"shared", "name":"Shared",
+                  "modalities":{"input":["text","image"],"output":["text"]} }
+              } }
+            }"#,
+        )
+        .expect("parse duplicate-model capability fixture");
+        (cfg, catalog)
+    }
+
+    #[test]
+    fn explicit_provider_scope_survives_assemble_hot_swap_and_vision_selection() {
+        let (cfg, catalog) = duplicate_model_image_scope_fixture();
+
+        // Ordinary assembly resolves capabilities from the active provider key.
+        // Selecting beta must not be rebound to the first owner (alpha) merely
+        // because both endpoints use the same wire model id.
+        let template = EngineTemplate::new(
+            cfg,
+            std::path::PathBuf::from("/tmp/zode"),
+            None,
+            false,
+            None,
+            "2026-07-15".into(),
+        )
+        .with_provider("beta")
+        .unwrap();
+        assert_eq!(
+            template.cfg.active_provider_key(),
+            Some("alpha"),
+            "the resolved configs are intentionally indistinguishable"
+        );
+        assert_eq!(template.provider_scope(), Some("beta"));
+        let resolved = resolve_provider_capabilities(
+            &template.cfg.provider,
+            template.provider_scope(),
+            &catalog,
+        );
+        assert!(
+            build_provider(&resolved)
+                .unwrap()
+                .capabilities()
+                .supports_images
+        );
+
+        // The vision picker scopes each duplicate model to the provider being
+        // inspected, and therefore exposes beta but not text-only alpha.
+        assert!(template
+            .resolve_vision_provider_with_catalog("alpha", &catalog)
+            .is_none());
+        assert_eq!(
+            template
+                .resolve_vision_provider_with_catalog("beta", &catalog)
+                .and_then(|provider| provider.base_url),
+            Some("https://shared.example/v1".to_string())
+        );
+
+        // hot_swap_model starts with `with_model`; repeating/switching to a
+        // model owned by the selected provider must preserve beta's scope.
+        let hot_swap_template = template
+            .with_provider("beta")
+            .unwrap()
+            .with_model("shared".into());
+        assert_eq!(
+            hot_swap_template.active_provider_name().as_deref(),
+            Some("beta")
+        );
+        let hot_resolved = resolve_provider_capabilities(
+            hot_swap_template.active_provider(),
+            hot_swap_template.provider_scope(),
+            &catalog,
+        );
+        assert!(
+            build_provider(&hot_resolved)
+                .unwrap()
+                .capabilities()
+                .supports_images
+        );
+
+        // Generic template/config replacement helpers must not discard an
+        // exact selection while beta still owns the active model.
+        assert_eq!(
+            template
+                .with_config(template.cfg.clone())
+                .active_provider_name()
+                .as_deref(),
+            Some("beta")
+        );
+        assert_eq!(
+            template
+                .with_provider_config(template.cfg.provider.clone())
+                .active_provider_name()
+                .as_deref(),
+            Some("beta")
+        );
+        assert_eq!(
+            template
+                .with_providers_map(template.cfg.providers.clone())
+                .active_provider_name()
+                .as_deref(),
+            Some("beta")
+        );
+
+        // `/connect` knows the new group key before it installs the updated
+        // providers map. Carry that key explicitly so an otherwise identical
+        // newly connected group is not rebound to alpha.
+        let connected = ProviderConfig {
+            r#type: Some(ProviderKind::Openai),
+            api_key: Some("sk-shared".to_string()),
+            base_url: Some("https://shared.example/v1".to_string()),
+            model: Some("shared".to_string()),
+            ..Default::default()
+        };
+        let mut saved = template.cfg.clone();
+        saved.connect_provider(
+            "gamma",
+            connected.clone(),
+            crate::config::ModelOverride::default(),
+        );
+        let connected_template = template
+            .with_provider_config_for_key(connected, "gamma".to_string())
+            .with_providers_map(saved.providers);
+        assert_eq!(
+            connected_template.active_provider_name().as_deref(),
+            Some("gamma")
+        );
     }
 
     #[test]
@@ -3816,6 +4256,52 @@ mod tests {
         assert_eq!(
             resolve_max_output(&bare, None, None, &cat, DEFAULT_MODEL_MAX_TOKENS),
             DEFAULT_MAX_OUTPUT_TOKENS
+        );
+    }
+
+    #[test]
+    fn provider_image_capability_is_inferred_without_overriding_user_choice() {
+        use crate::config::ProviderConfig;
+        let cat = crate::Catalog::from_json(
+            r#"{
+              "alibaba": { "id":"alibaba", "name":"Alibaba", "models": {
+                "qwen-vl": { "id":"qwen-vl", "name":"Qwen VL",
+                  "modalities":{"input":["text","image"],"output":["text"]} },
+                "qwen-text": { "id":"qwen-text", "name":"Qwen Text",
+                  "modalities":{"input":["text"],"output":["text"]} }
+              } }
+            }"#,
+        )
+        .expect("parse fixture catalog");
+
+        let vision = ProviderConfig {
+            model: Some("qwen-vl".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_provider_capabilities(&vision, Some("custom-qwen"), &cat).supports_images,
+            Some(true),
+            "custom provider names should fall back to matching model metadata"
+        );
+
+        let text = ProviderConfig {
+            model: Some("qwen-text".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_provider_capabilities(&text, Some("alibaba"), &cat).supports_images,
+            Some(false)
+        );
+
+        let explicit_off = ProviderConfig {
+            model: Some("qwen-vl".into()),
+            supports_images: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_provider_capabilities(&explicit_off, Some("alibaba"), &cat).supports_images,
+            Some(false),
+            "an explicit supportsImages override must win over the catalog"
         );
     }
 

@@ -260,6 +260,9 @@ pub struct ConnectDialog {
     catalog: Option<Catalog>,
     /// Prices stashed from a catalog model match; applied at submit.
     pending_prices: Option<CatalogPrices>,
+    /// Image-input capability stashed from the matched catalog model. Kept
+    /// separate from the editable form fields, like cache prices.
+    pending_supports_images: Option<bool>,
     /// Catalog model ids offered for the selected provider (Left/Right cycle in
     /// the Model field). Populated on form entry; empty when no catalog match.
     available_models: Vec<String>,
@@ -293,6 +296,7 @@ impl ConnectDialog {
             output_price: String::new(),
             catalog: None,
             pending_prices: None,
+            pending_supports_images: None,
             available_models: Vec::new(),
             config_providers: IndexMap::new(),
         }
@@ -333,6 +337,7 @@ impl ConnectDialog {
             output_price: String::new(),
             catalog: Some(cat.clone()),
             pending_prices: None,
+            pending_supports_images: None,
             available_models: Vec::new(),
             config_providers: config_providers.clone(),
         }
@@ -584,6 +589,13 @@ impl ConnectDialog {
             .unwrap_or_default()
     }
 
+    fn configured_model_image_override(&self, provider_idx: usize) -> Option<bool> {
+        self.config_providers
+            .get(&self.providers[provider_idx].name)
+            .and_then(|entry| entry.models.get(&self.model))
+            .and_then(|model| model.supports_images)
+    }
+
     /// Cycle the Model field through the provider's catalog models (Left/Right).
     /// Resets and re-fills `context`/`max_output`/prices for the newly selected
     /// model. No-op when the provider has no catalog models.
@@ -613,6 +625,7 @@ impl ConnectDialog {
         self.input_price.clear();
         self.output_price.clear();
         self.pending_prices = None;
+        self.pending_supports_images = None;
         self.apply_model_prefill();
     }
 
@@ -626,6 +639,7 @@ impl ConnectDialog {
         // Resolve the catalog provider id, then look up the model. Do the lookup
         // first so the borrow on `self.catalog` ends before we mutate `self`.
         let catalog_id = self.catalog_id_for(provider_idx);
+        let configured_supports_images = self.configured_model_image_override(provider_idx);
         let matched = self
             .catalog
             .as_ref()
@@ -662,10 +676,17 @@ impl ConnectDialog {
                     cache_read_price: m.cache_read_price,
                     cache_write_price: m.cache_write_price,
                 });
+                // Persist a positive catalog capability so a just-refreshed
+                // model works in this process. Keep catalog denials inferred:
+                // writing `false` as an explicit model override would mask a
+                // future catalog upgrade that adds image input support.
+                self.pending_supports_images =
+                    configured_supports_images.or(m.supports_images.filter(|supported| *supported));
             }
             None => {
                 // Model doesn't match any known catalog model — clear stashed prices.
                 self.pending_prices = None;
+                self.pending_supports_images = configured_supports_images;
             }
         }
     }
@@ -797,6 +818,14 @@ impl ConnectDialog {
                     prov.cache_read_price = prices.cache_read_price;
                     prov.cache_write_price = prices.cache_write_price;
                 }
+                // Model-specific user config wins over the provider-level
+                // default, which in turn wins over catalog inference. Persist
+                // the result into the new per-model override so a just-refreshed
+                // catalog model also works immediately.
+                prov.supports_images = self
+                    .configured_model_image_override(provider_idx)
+                    .or(prov.supports_images)
+                    .or(self.pending_supports_images);
                 // Provider name defaults to model id (the config map key),
                 // editable in the model field.
                 let name = if self.model.trim().is_empty() {
@@ -1638,6 +1667,92 @@ mod tests {
         // Context/max_output should also be set.
         assert_eq!(action.provider.context_window, Some(131072));
         assert_eq!(action.provider.max_output_tokens, Some(16384));
+    }
+
+    #[test]
+    fn confirm_persists_catalog_image_capability_into_model_override() {
+        let cat = zode_core::Catalog::from_json(
+            r#"{ "visionco": {
+              "id":"visionco", "name":"VisionCo", "api":"https://vision.example/v1",
+              "models": { "qwen-vl": {
+                "id":"qwen-vl", "name":"Qwen VL", "attachment":false,
+                "modalities":{"input":["text","image"],"output":["text"]}
+              } }
+            } }"#,
+        )
+        .expect("fixture parses");
+        let mut dialog = ConnectDialog::with_catalog(&cat);
+        dialog.select_to_api_key_for_test("VisionCo");
+        for c in "sk-test".chars() {
+            dialog.input_char(c);
+        }
+
+        let action = dialog.confirm().expect("submit vision provider");
+        assert_eq!(action.provider.supports_images, Some(true));
+        assert_eq!(action.model_override.supports_images, Some(true));
+    }
+
+    #[test]
+    fn confirm_does_not_freeze_catalog_image_denial_as_an_override() {
+        let cat = zode_core::Catalog::from_json(
+            r#"{ "textco": {
+              "id":"textco", "name":"TextCo", "api":"https://text.example/v1",
+              "models": { "qwen-text": {
+                "id":"qwen-text", "name":"Qwen Text",
+                "modalities":{"input":["text"],"output":["text"]}
+              } }
+            } }"#,
+        )
+        .expect("fixture parses");
+        let mut dialog = ConnectDialog::with_catalog(&cat);
+        dialog.select_to_api_key_for_test("TextCo");
+        for c in "sk-test".chars() {
+            dialog.input_char(c);
+        }
+
+        let action = dialog.confirm().expect("submit text provider");
+        assert_eq!(action.provider.supports_images, None);
+        assert_eq!(action.model_override.supports_images, None);
+    }
+
+    #[test]
+    fn configured_model_image_override_wins_over_catalog() {
+        let cat = zode_core::Catalog::from_json(
+            r#"{ "visionco": {
+              "id":"visionco", "name":"VisionCo", "api":"https://vision.example/v1",
+              "models": { "qwen-vl": {
+                "id":"qwen-vl", "name":"Qwen VL",
+                "modalities":{"input":["text","image"],"output":["text"]}
+              } }
+            } }"#,
+        )
+        .expect("fixture parses");
+        let mut models = IndexMap::new();
+        models.insert(
+            "qwen-vl".to_string(),
+            ModelOverride {
+                supports_images: Some(false),
+                ..Default::default()
+            },
+        );
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "visionco".to_string(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Openai),
+                api_key: Some("sk-saved".into()),
+                base_url: Some("https://vision.example/v1".into()),
+                supports_images: Some(true),
+                models,
+                ..Default::default()
+            },
+        );
+        let mut dialog = ConnectDialog::with_catalog_and_providers(&cat, &providers);
+        dialog.select_to_api_key_for_test("visionco");
+
+        let action = dialog.confirm().expect("submit configured provider");
+        assert_eq!(action.provider.supports_images, Some(false));
+        assert_eq!(action.model_override.supports_images, Some(false));
     }
 
     /// Build a catalog JSON string with `n` distinct providers so the picker

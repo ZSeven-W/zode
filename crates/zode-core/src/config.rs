@@ -576,6 +576,11 @@ pub struct ZodeConfig {
     /// for headless `-p` runs, which can't be interrupted with Ctrl+C.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_iterations: Option<u32>,
+    /// Optional per-child runaway backstop for Task-spawned sub-agents. Absent
+    /// or `0` leaves child loops unbounded so they run until the model naturally
+    /// finishes; a positive value opts into a finite model/tool round-trip cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_max_iterations: Option<u32>,
     /// How many times to retry a transient API failure (rate limit / 5xx /
     /// network) with exponential backoff before the turn fails. Absent = 10;
     /// `0` disables retries.
@@ -765,23 +770,64 @@ impl ZodeConfig {
     /// `model` equals the id (the legacy flat-per-model shape). Returns `None`
     /// when no provider owns the model. The result never carries a `models` map.
     ///
-    /// When the same model id appears under more than one provider, the first
-    /// match (in `providers` insertion order, `models`-map entries first) wins.
-    /// This is deterministic but credential-ambiguous; a config that needs two
-    /// providers to expose the same model id should give them distinct ids.
+    /// When the same model id appears under more than one provider, prefer the
+    /// owner whose resolved config matches the active provider. This preserves
+    /// an explicit named-provider selection instead of silently rebinding the
+    /// model to the first group. If the active config cannot disambiguate the
+    /// owners, insertion order remains the deterministic fallback.
     /// The `providers`-map key owning the active model — its `models` map
     /// contains it, its `model` equals it, or it is keyed by it. `None` when the
     /// active model belongs to no configured group. For catalog-backed providers
     /// this key equals the models.dev provider id, so it scopes catalog lookups.
     pub fn active_provider_key(&self) -> Option<&str> {
         let model = self.provider.model.as_deref()?;
+        let owns_model = |key: &str, entry: &ProviderConfig| {
+            entry.models.contains_key(model)
+                || entry.model.as_deref() == Some(model)
+                || key == model
+        };
+
+        // A provider selected through `resolve_named_provider[_model]` carries
+        // the fully resolved shared + model-specific fields. Match that exact
+        // shape first; this also distinguishes two endpoints exposing the same
+        // wire model id but declaring different per-model overrides.
+        let mut active = self.provider.clone();
+        active.models.clear();
+        for (key, entry) in &self.providers {
+            if !owns_model(key, entry) {
+                continue;
+            }
+            if self
+                .resolve_named_provider_model(key, model)
+                .is_some_and(|resolved| resolved == active)
+            {
+                return Some(key.as_str());
+            }
+        }
+
+        // A top-level active provider may add model-specific fields or an env
+        // fallback after it was resolved. The endpoint identity still pins the
+        // intended owner even when the complete structs no longer compare equal.
+        for (key, entry) in &self.providers {
+            if !owns_model(key, entry) {
+                continue;
+            }
+            if self
+                .resolve_named_provider_model(key, model)
+                .is_some_and(|resolved| {
+                    resolved.kind() == active.kind()
+                        && resolved.api_key == active.api_key
+                        && resolved.base_url == active.base_url
+                        && resolved.dialect == active.dialect
+                })
+            {
+                return Some(key.as_str());
+            }
+        }
+
         self.providers
             .iter()
-            .find(|(key, entry)| {
-                entry.models.contains_key(model)
-                    || entry.model.as_deref() == Some(model)
-                    || key.as_str() == model
-            })
+            .find(|(key, entry)| owns_model(key, entry))
             .map(|(key, _)| key.as_str())
     }
 
@@ -1050,6 +1096,9 @@ impl ZodeConfig {
         }
         if other.max_iterations.is_some() {
             self.max_iterations = other.max_iterations;
+        }
+        if other.subagent_max_iterations.is_some() {
+            self.subagent_max_iterations = other.subagent_max_iterations;
         }
         if other.max_api_retries.is_some() {
             self.max_api_retries = other.max_api_retries;
@@ -1866,6 +1915,21 @@ mod tests {
             global.images.vision_prompt.as_deref(),
             Some("Project prompt")
         );
+    }
+
+    #[test]
+    fn subagent_iteration_budget_parses_serializes_and_merges() {
+        let cfg: ZodeConfig = serde_json::from_str(r#"{"subagentMaxIterations":64}"#).unwrap();
+        assert_eq!(cfg.subagent_max_iterations, Some(64));
+        assert!(serde_json::to_string(&cfg)
+            .unwrap()
+            .contains("\"subagentMaxIterations\":64"));
+
+        let mut global: ZodeConfig =
+            serde_json::from_str(r#"{"subagentMaxIterations":32}"#).unwrap();
+        let project: ZodeConfig = serde_json::from_str(r#"{"subagentMaxIterations":0}"#).unwrap();
+        global.merge_from(project);
+        assert_eq!(global.subagent_max_iterations, Some(0));
     }
 
     #[test]

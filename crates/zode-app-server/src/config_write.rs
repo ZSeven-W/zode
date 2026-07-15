@@ -28,6 +28,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "sandbox",
     "maxOutputTokens",
     "maxIterations",
+    "subagentMaxIterations",
     "maxApiRetries",
     "autoUpdate",
     "contextWindow",

@@ -193,6 +193,7 @@ Optional top-level config keys (all have sensible defaults):
   "language": "zh-CN",           // UI language (15 locales); also via /language
   "effort": "medium",            // default reasoning effort; also via /effort
   "autonomousOrchestration": true, // sub-agent + workflow orchestration (default on)
+  "subagentMaxIterations": 0,      // optional child guard; omitted/0 = unbounded
   "sandbox": {
     "enabled": true,             // OS sandbox for shell commands (default on)
     "mode": "workspace-write",   // "workspace-write" | "read-only"

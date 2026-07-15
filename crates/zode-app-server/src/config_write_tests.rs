@@ -36,6 +36,7 @@ fn whitelist_matches_every_serialized_zode_config_key() {
         "sandbox",
         "maxOutputTokens",
         "maxIterations",
+        "subagentMaxIterations",
         "maxApiRetries",
         "autoUpdate",
         "contextWindow",
@@ -78,6 +79,16 @@ fn invalid_patch_value_reports_serde_error() {
 fn shallow_patch_replaces_a_top_level_value() {
     let config = merge_patch(&ZodeConfig::default(), json!({"theme": "dark"})).unwrap();
     assert_eq!(config.theme.as_deref(), Some("dark"));
+}
+
+#[test]
+fn subagent_iteration_budget_patch_accepts_bounded_and_unbounded_values() {
+    let bounded =
+        merge_patch(&ZodeConfig::default(), json!({"subagentMaxIterations": 64})).unwrap();
+    assert_eq!(bounded.subagent_max_iterations, Some(64));
+
+    let unbounded = merge_patch(&bounded, json!({"subagentMaxIterations": 0})).unwrap();
+    assert_eq!(unbounded.subagent_max_iterations, Some(0));
 }
 
 #[test]

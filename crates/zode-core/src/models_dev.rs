@@ -50,6 +50,10 @@ pub struct CatalogProvider {
 pub struct CatalogModel {
     pub id: String,
     pub name: String,
+    /// Whether the model accepts image input. `None` means the catalog did not
+    /// publish enough modality metadata to decide, so callers should retain
+    /// their provider default (or an explicit user override).
+    pub supports_images: Option<bool>,
     /// Context window size in tokens. None if the catalog doesn't publish it.
     pub context: Option<u32>,
     /// Max output tokens. None if the catalog doesn't publish it.
@@ -91,12 +95,24 @@ struct RawModel {
     id: String,
     #[serde(default)]
     name: String,
+    /// Older models.dev records expose only this coarse attachment bit, while
+    /// newer records also publish explicit input modalities below.
+    #[serde(default)]
+    attachment: Option<bool>,
+    #[serde(default)]
+    modalities: Option<RawModalities>,
     /// { context: u32, output: u32 } — both integers in the live API.
     #[serde(default)]
     limit: Option<RawLimit>,
     /// { input, output, cache_read?, cache_write? } — f64 $/MTok.
     #[serde(default)]
     cost: Option<RawCost>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawModalities {
+    #[serde(default)]
+    input: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -160,11 +176,30 @@ impl Catalog {
     ///
     /// Never panics; never touches the network.
     pub fn load_blocking() -> Self {
-        Self::from_disk_cache()
-            .or_else(|| Self::from_json(BUNDLED).ok())
-            .unwrap_or_else(|| Self {
-                providers: Vec::new(),
-            })
+        if let Some(mut cached) = Self::from_disk_cache() {
+            // Caches written by Zode versions before image-capability parsing
+            // deliberately kept only limits/prices. Detect that legacy shape
+            // without parsing the large bundled snapshot on every normal
+            // launch; new/raw caches have at least one known capability.
+            let has_capability_metadata = cached
+                .providers
+                .iter()
+                .flat_map(|provider| provider.models.iter())
+                .any(|model| model.supports_images.is_some());
+            if !has_capability_metadata {
+                // Enrich a still-fresh legacy cache so an upgrade fixes vision
+                // routing immediately instead of waiting up to CACHE_TTL for
+                // the next network refresh.
+                if let Ok(bundled) = Self::from_json(BUNDLED) {
+                    cached.fill_missing_image_capabilities(&bundled);
+                }
+            }
+            return cached;
+        }
+
+        Self::from_json(BUNDLED).unwrap_or_else(|_| Self {
+            providers: Vec::new(),
+        })
     }
 
     /// Best-effort live refresh: fetches `https://models.dev/api.json`,
@@ -250,6 +285,57 @@ impl Catalog {
             .or_else(|| self.max_output_for_model(model_id))
     }
 
+    /// Published image-input support for `model_id`, searching all providers.
+    /// Unknown metadata remains `None` so an explicit provider default is not
+    /// accidentally turned into a denial.
+    pub fn supports_images_for_model(&self, model_id: &str) -> Option<bool> {
+        let mut matches = self
+            .providers
+            .iter()
+            .flat_map(|p| p.models.iter())
+            .filter(|m| m.id == model_id);
+        let first = matches.next()?.supports_images?;
+        // A model id can be reused by aggregators whose endpoint support
+        // differs. Global fallback is safe only when every catalog match both
+        // publishes a capability and agrees; otherwise require an explicit
+        // supportsImages override.
+        matches
+            .all(|model| model.supports_images == Some(first))
+            .then_some(first)
+    }
+
+    /// Provider-scoped form of [`Self::supports_images_for_model`]. A custom
+    /// configured provider name may not equal a models.dev id, so a missing
+    /// scoped match falls back to the globally matching model id.
+    pub fn supports_images_for_model_scoped(
+        &self,
+        provider_id: Option<&str>,
+        model_id: &str,
+    ) -> Option<bool> {
+        if let Some(model) = provider_id.and_then(|pid| self.find_model(pid, model_id)) {
+            // A known endpoint with unknown metadata must stay unknown. A
+            // same-named model on another endpoint is not evidence that this
+            // endpoint accepts images.
+            return model.supports_images;
+        }
+        self.supports_images_for_model(model_id)
+    }
+
+    fn fill_missing_image_capabilities(&mut self, fallback: &Self) {
+        for provider in &mut self.providers {
+            for model in &mut provider.models {
+                if model.supports_images.is_none() {
+                    model.supports_images = match fallback.find_model(&provider.id, &model.id) {
+                        // Preserve an exact endpoint's unknown capability;
+                        // do not borrow a claim from a different endpoint.
+                        Some(exact) => exact.supports_images,
+                        None => fallback.supports_images_for_model(&model.id),
+                    };
+                }
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Disk cache helpers
     // -----------------------------------------------------------------------
@@ -318,6 +404,17 @@ impl Catalog {
 // ---------------------------------------------------------------------------
 
 fn raw_model_to_catalog(m: RawModel) -> CatalogModel {
+    // Explicit modalities are more precise than the legacy attachment bit:
+    // an attachment-capable text model can accept files without accepting
+    // image content. Fall back to `attachment` only when modalities are absent.
+    let supports_images = m.modalities.map_or(m.attachment, |modalities| {
+        Some(
+            modalities
+                .input
+                .iter()
+                .any(|kind| kind.eq_ignore_ascii_case("image")),
+        )
+    });
     let (context, max_output) = m
         .limit
         .map(|l| (l.context, l.output))
@@ -329,6 +426,7 @@ fn raw_model_to_catalog(m: RawModel) -> CatalogModel {
     CatalogModel {
         id: m.id,
         name: m.name,
+        supports_images,
         context,
         max_output,
         input_price,
@@ -371,6 +469,12 @@ fn serialize_catalog_to_json(catalog: &Catalog) -> Result<String, serde_json::Er
             let mut model_obj = Map::new();
             model_obj.insert("id".into(), Value::String(m.id.clone()));
             model_obj.insert("name".into(), Value::String(m.name.clone()));
+            if let Some(supports_images) = m.supports_images {
+                // The cache only needs the normalized capability. Store it in
+                // a models.dev-compatible field so the regular parser can read
+                // it back without a second cache schema.
+                model_obj.insert("attachment".into(), Value::Bool(supports_images));
+            }
             if m.context.is_some() || m.max_output.is_some() {
                 let mut limit = Map::new();
                 if let Some(c) = m.context {
@@ -461,6 +565,178 @@ mod tests {
     }
 
     #[test]
+    fn parses_image_support_from_modalities_and_legacy_attachment() {
+        let json = r#"{
+          "p": { "id":"p", "name":"P", "models": {
+            "vision": {
+              "id":"vision", "name":"Vision", "attachment":false,
+              "modalities":{"input":["text","image"],"output":["text"]}
+            },
+            "files-only": {
+              "id":"files-only", "name":"Files", "attachment":true,
+              "modalities":{"input":["text"],"output":["text"]}
+            },
+            "legacy-vision": {
+              "id":"legacy-vision", "name":"Legacy", "attachment":true
+            },
+            "unknown": { "id":"unknown", "name":"Unknown" }
+          } }
+        }"#;
+        let cat = Catalog::from_json(json).expect("parse image metadata");
+
+        assert_eq!(
+            cat.find_model("p", "vision").unwrap().supports_images,
+            Some(true)
+        );
+        assert_eq!(
+            cat.find_model("p", "files-only").unwrap().supports_images,
+            Some(false),
+            "explicit modalities must win over the coarse attachment bit"
+        );
+        assert_eq!(
+            cat.find_model("p", "legacy-vision")
+                .unwrap()
+                .supports_images,
+            Some(true)
+        );
+        assert_eq!(
+            cat.find_model("p", "unknown").unwrap().supports_images,
+            None
+        );
+    }
+
+    #[test]
+    fn image_support_lookup_scopes_then_falls_back_by_model() {
+        let cat = Catalog::from_json(
+            r#"{
+              "alpha": { "id":"alpha", "name":"Alpha", "models": {
+                "shared": { "id":"shared", "name":"Shared", "attachment":false }
+              } },
+              "beta": { "id":"beta", "name":"Beta", "models": {
+                "shared": { "id":"shared", "name":"Shared", "attachment":true },
+                "vision": { "id":"vision", "name":"Vision", "attachment":true }
+              } }
+            }"#,
+        )
+        .expect("parse fixture");
+
+        assert_eq!(
+            cat.supports_images_for_model_scoped(Some("alpha"), "shared"),
+            Some(false)
+        );
+        assert_eq!(
+            cat.supports_images_for_model_scoped(Some("beta"), "shared"),
+            Some(true)
+        );
+        assert_eq!(
+            cat.supports_images_for_model_scoped(Some("custom-name"), "vision"),
+            Some(true),
+            "custom provider names should still benefit from model metadata"
+        );
+        assert_eq!(
+            cat.supports_images_for_model_scoped(Some("custom-name"), "shared"),
+            None,
+            "a conflicting global model id must not create a false positive"
+        );
+    }
+
+    #[test]
+    fn scoped_unknown_image_support_does_not_borrow_from_another_endpoint() {
+        let cat = Catalog::from_json(
+            r#"{
+              "alpha": { "id":"alpha", "name":"Alpha", "models": {
+                "shared": { "id":"shared", "name":"Shared" }
+              } },
+              "beta": { "id":"beta", "name":"Beta", "models": {
+                "shared": { "id":"shared", "name":"Shared", "attachment":true }
+              } }
+            }"#,
+        )
+        .expect("parse fixture");
+
+        assert_eq!(
+            cat.supports_images_for_model_scoped(Some("alpha"), "shared"),
+            None,
+            "an exact endpoint match with unknown metadata must remain unknown"
+        );
+        assert_eq!(
+            cat.supports_images_for_model_scoped(Some("custom-name"), "shared"),
+            None,
+            "a provider alias must not borrow capability when any same-id endpoint is unknown"
+        );
+    }
+
+    #[test]
+    fn cache_roundtrip_preserves_normalized_image_capability() {
+        let cat = Catalog::from_json(
+            r#"{ "p": { "id":"p", "name":"P", "models": {
+              "v": { "id":"v", "name":"V",
+                "modalities":{"input":["text","image"],"output":["text"]} }
+            } } }"#,
+        )
+        .expect("parse fixture");
+        let cached = serialize_catalog_to_json(&cat).expect("serialize cache");
+        let reparsed = Catalog::from_json(&cached).expect("parse cache");
+        assert_eq!(
+            reparsed.find_model("p", "v").unwrap().supports_images,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn legacy_cache_can_be_enriched_from_bundled_metadata() {
+        let mut legacy = Catalog::from_json(
+            r#"{ "p": { "id":"p", "name":"P", "models": {
+              "v": { "id":"v", "name":"V" }
+            } } }"#,
+        )
+        .expect("parse legacy cache");
+        let fallback = Catalog::from_json(
+            r#"{ "p": { "id":"p", "name":"P", "models": {
+              "v": { "id":"v", "name":"V", "attachment":true }
+            } } }"#,
+        )
+        .expect("parse fallback");
+
+        legacy.fill_missing_image_capabilities(&fallback);
+        assert_eq!(
+            legacy.find_model("p", "v").unwrap().supports_images,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn legacy_cache_enrichment_preserves_exact_endpoint_unknown() {
+        let mut legacy = Catalog::from_json(
+            r#"{ "alpha": { "id":"alpha", "name":"Alpha", "models": {
+              "shared": { "id":"shared", "name":"Shared" }
+            } } }"#,
+        )
+        .expect("parse legacy cache");
+        let fallback = Catalog::from_json(
+            r#"{
+              "alpha": { "id":"alpha", "name":"Alpha", "models": {
+                "shared": { "id":"shared", "name":"Shared" }
+              } },
+              "beta": { "id":"beta", "name":"Beta", "models": {
+                "shared": { "id":"shared", "name":"Shared", "attachment":true }
+              } }
+            }"#,
+        )
+        .expect("parse fallback");
+
+        legacy.fill_missing_image_capabilities(&fallback);
+        assert_eq!(
+            legacy
+                .find_model("alpha", "shared")
+                .unwrap()
+                .supports_images,
+            None,
+            "cache enrichment must not borrow image support from another endpoint"
+        );
+    }
+
+    #[test]
     fn context_for_model_scoped_prefers_active_provider() {
         // The same model id under two providers with DIFFERENT context windows
         // (e.g. a direct provider vs an aggregator), plus a unique model on one.
@@ -510,6 +786,11 @@ mod tests {
         // The committed snapshot must always parse.
         let cat = Catalog::from_json(BUNDLED).expect("bundled snapshot parses");
         assert!(!cat.providers().is_empty());
+        assert_eq!(
+            cat.supports_images_for_model("qwen3-vl-plus"),
+            Some(true),
+            "Qwen VL must be recognized from modalities even where attachment=false"
+        );
     }
 
     #[test]
@@ -560,6 +841,11 @@ mod tests {
         assert!(
             !cat.providers().is_empty(),
             "load_blocking should return the bundled catalog (non-empty providers)"
+        );
+        assert_eq!(
+            cat.supports_images_for_model("qwen3-vl-plus"),
+            Some(true),
+            "a fresh legacy disk cache must be enriched before it can mask bundled vision metadata"
         );
     }
 }

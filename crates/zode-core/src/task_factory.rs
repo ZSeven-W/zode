@@ -21,7 +21,15 @@ use agent::tool::ToolRegistry;
 use agent_tools_code::{TaskAgentConfig, TaskAgentFactory};
 use async_trait::async_trait;
 
-const SUBAGENT_MAX_ITERATIONS: usize = 8;
+/// Leave Task-spawned child loops unbounded unless the user explicitly opts
+/// into a positive safety cap. `None` and `0` both preserve QueryLoop's natural
+/// stop condition: the model completes a turn without requesting another tool.
+pub fn resolve_subagent_max_iterations(configured: Option<u32>) -> Option<usize> {
+    match configured {
+        Some(value) if value > 0 => Some(usize::try_from(value).unwrap_or(usize::MAX)),
+        Some(_) | None => None,
+    }
+}
 
 /// Shared late-bound handle to the parent's final gated tool registry.
 pub type ParentToolsCell = Arc<OnceLock<Arc<ToolRegistry>>>;
@@ -82,6 +90,8 @@ pub struct ZodeTaskFactory {
     defs: Vec<crate::agents::AgentDef>,
     /// Per-engine sub-agent registry; the Task observer writes here.
     subagents: crate::subagents::SubAgentRegistry,
+    /// Per-child model/tool round-trip cap. `None` means unbounded.
+    max_iterations: Option<usize>,
 }
 
 impl ZodeTaskFactory {
@@ -95,6 +105,7 @@ impl ZodeTaskFactory {
         parent_tools: ParentToolsCell,
         defs: Vec<crate::agents::AgentDef>,
         subagents: crate::subagents::SubAgentRegistry,
+        max_iterations: Option<usize>,
     ) -> Self {
         Self {
             runtime,
@@ -105,6 +116,7 @@ impl ZodeTaskFactory {
             parent_tools,
             defs,
             subagents,
+            max_iterations,
         }
     }
 
@@ -191,10 +203,10 @@ impl TaskAgentFactory for ZodeTaskFactory {
             model,
             tools: self.child_tools(),
             system: Some(system),
-            // Child agents are for bounded delegation. Keep the main loop
-            // autonomous, but cap sub-agents so a bad decomposition cannot
-            // consume the whole harness budget.
-            max_iterations: Some(SUBAGENT_MAX_ITERATIONS),
+            // `None` deliberately leaves the child's QueryLoop unbounded so
+            // iterative engineering can reach its natural completion. A user
+            // may still opt into a positive safety cap through config.
+            max_iterations: self.max_iterations,
             // Same gate/sandbox/hooks/cwd/file_cache as the parent so the
             // child cannot bypass approvals, sandboxing, or hook blockers.
             permissions: Some(self.permissions.clone()),
@@ -211,7 +223,12 @@ mod tests {
     use super::*;
     use crate::config::{ProviderConfig, ProviderKind};
     use crate::provider::build_provider;
+    use agent::abort::AbortController;
+    use agent::permission::PermissionMode;
+    use agent::stream::{Event as AgentEvent, ResultData};
+    use agent::testing::{FakeTool, MockProvider};
     use agent::tool::{SafetyClass, Tool, ToolUseContext};
+    use agent_tools_code::TaskTool;
     use async_trait::async_trait;
     use serde_json::{json, Value};
     use std::num::NonZeroUsize;
@@ -250,7 +267,7 @@ mod tests {
         }
     }
 
-    fn factory_with(cell: ParentToolsCell) -> ZodeTaskFactory {
+    fn factory_with_limit(cell: ParentToolsCell, max_iterations: Option<usize>) -> ZodeTaskFactory {
         let file_cache = Arc::new(FileStateCache::new(
             NonZeroUsize::new(8).unwrap(),
             1024 * 1024,
@@ -264,7 +281,12 @@ mod tests {
             cell,
             Vec::new(),
             crate::subagents::SubAgentRegistry::new(),
+            max_iterations,
         )
+    }
+
+    fn factory_with(cell: ParentToolsCell) -> ZodeTaskFactory {
+        factory_with_limit(cell, resolve_subagent_max_iterations(None))
     }
 
     #[tokio::test]
@@ -278,7 +300,10 @@ mod tests {
         assert!(cfg.cwd.is_some());
         assert!(cfg.file_cache.is_some());
         assert!(cfg.hooks.is_some());
-        assert_eq!(cfg.max_iterations, Some(SUBAGENT_MAX_ITERATIONS));
+        assert_eq!(
+            cfg.max_iterations, None,
+            "the default child loop must remain unbounded"
+        );
     }
 
     #[tokio::test]
@@ -296,6 +321,102 @@ mod tests {
     async fn unknown_agent_type_errors() {
         let f = factory_with(Arc::new(OnceLock::new()));
         assert!(f.build("nonexistent-shape").await.is_err());
+    }
+
+    #[test]
+    fn subagent_iteration_budget_defaults_unbounded_and_can_be_overridden() {
+        assert_eq!(resolve_subagent_max_iterations(None), None);
+        assert_eq!(resolve_subagent_max_iterations(Some(64)), Some(64));
+        assert_eq!(resolve_subagent_max_iterations(Some(0)), None);
+    }
+
+    #[tokio::test]
+    async fn explicit_subagent_iteration_budget_reaches_the_child_config() {
+        let factory = factory_with_limit(Arc::new(OnceLock::new()), Some(64));
+        let cfg = factory.build("general").await.unwrap();
+        assert_eq!(cfg.max_iterations, Some(64));
+    }
+
+    #[tokio::test]
+    async fn unbounded_default_completes_more_than_legacy_32_tool_rounds() {
+        const TOOL_ROUNDS: usize = 33;
+
+        let mut turns: Vec<Vec<AgentEvent>> = (0..TOOL_ROUNDS)
+            .map(|round| {
+                vec![
+                    AgentEvent::ToolUse {
+                        id: format!("engineering-step-{round}"),
+                        name: "EngineeringStep".into(),
+                        input: json!({"round": round}),
+                    },
+                    AgentEvent::Result {
+                        data: ResultData {
+                            stop_reason: Some("tool_use".into()),
+                            ..Default::default()
+                        },
+                    },
+                ]
+            })
+            .collect();
+        turns.push(vec![
+            AgentEvent::TextDelta {
+                delta: "loop complete".into(),
+            },
+            AgentEvent::Result {
+                data: ResultData {
+                    stop_reason: Some("end_turn".into()),
+                    ..Default::default()
+                },
+            },
+        ]);
+
+        let provider = Arc::new(MockProvider::with_turns(turns));
+        let engineering_step = Arc::new(FakeTool::new("EngineeringStep", json!({"ok": true})));
+        let mut parent = ToolRegistry::new();
+        parent.register(engineering_step.clone());
+        let parent_tools: ParentToolsCell = Arc::new(OnceLock::new());
+        parent_tools.set(Arc::new(parent)).unwrap();
+
+        let cwd = std::env::temp_dir();
+        let file_cache = Arc::new(FileStateCache::new(
+            NonZeroUsize::new(8).unwrap(),
+            1024 * 1024,
+        ));
+        let permissions = Arc::new(PermissionManager::new().with_mode(PermissionMode::Bypass));
+        let hooks = Arc::new(HookRunner::new());
+        let factory = ZodeTaskFactory::new(
+            ModelRuntimeState::new(provider.clone(), "loop-model".into()),
+            permissions.clone(),
+            cwd.clone(),
+            file_cache.clone(),
+            hooks.clone(),
+            parent_tools,
+            Vec::new(),
+            crate::subagents::SubAgentRegistry::new(),
+            resolve_subagent_max_iterations(None),
+        );
+        let task = TaskTool::new(Arc::new(factory));
+        let ctx = ToolUseContext {
+            cwd,
+            abort: AbortController::new(),
+            file_cache,
+            permissions,
+            hooks,
+            task_depth: 0,
+        };
+
+        let output = task
+            .call(
+                &ctx,
+                json!({"prompt": "iterate until complete", "agent_type": "general"}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output["output"], "loop complete");
+        assert_eq!(output["stop_reason"], "end_turn");
+        assert_eq!(engineering_step.call_count(), TOOL_ROUNDS);
+        assert_eq!(provider.remaining_turns(), 0);
     }
 
     #[tokio::test]

@@ -1644,13 +1644,13 @@ impl TuiApp {
                 .vision_provider
                 .as_deref()
                 .and_then(|provider_name| {
-                    self.template.with_provider(provider_name).map(|template| {
-                        PreparedExtensionVision {
+                    self.template
+                        .with_vision_provider(provider_name)
+                        .map(|template| PreparedExtensionVision {
                             template,
                             provider_name: provider_name.to_string(),
                             prompt: images_config.effective_prompt().to_string(),
-                        }
-                    })
+                        })
                 })
         } else {
             None

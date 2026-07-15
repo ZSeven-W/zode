@@ -4057,11 +4057,11 @@ impl TuiApp {
     /// Open the image-understanding provider picker (`/vision`). With no named
     /// providers configured there's nothing to pick, so fall back to a hint.
     fn open_vision_picker(&mut self) {
-        let providers = self.template.provider_names();
+        let providers = self.template.vision_provider_names();
         if providers.is_empty() {
             self.active_tab_mut().chat.push_system(crate::tr(
-                "no named providers configured — add one under `providers` in your config, \
-                 then pick it here to handle image understanding",
+                "no image-capable providers configured — add a vision model under `providers` \
+                 or set supportsImages=true, then pick it here",
             ));
             return;
         }
@@ -4738,6 +4738,7 @@ impl TuiApp {
         // Group the connected model under its provider in the `providers` map
         // (shared credentials, one entry per provider) and set it active.
         let provider = action.provider.clone();
+        let provider_key = action.provider_key.clone();
         cfg.connect_provider(
             &action.provider_key,
             provider.clone(),
@@ -4756,7 +4757,7 @@ impl TuiApp {
         // bar's `model(provider)` label resolves the freshly connected group.
         let t = self
             .template
-            .with_provider_config(provider)
+            .with_provider_config_for_key(provider, provider_key)
             .with_providers_map(cfg.providers.clone());
         self.start_reassemble_active(t, ReassembleEffect::Connect { provider_name }, agent_tx);
     }
@@ -5400,7 +5401,7 @@ impl TuiApp {
                     )));
                     return;
                 };
-                let Some(template) = self.template.with_provider(provider_name) else {
+                let Some(template) = self.template.with_vision_provider(provider_name) else {
                     self.toast = Some(Toast::error(
                         crate::tr("vision provider '{provider_name}' is not configured")
                             .replace("{provider_name}", provider_name),
@@ -6863,9 +6864,9 @@ impl TuiApp {
             },
             "provider" => {
                 if value.is_empty() {
-                    let providers = self.template.provider_names();
+                    let providers = self.template.vision_provider_names();
                     let msg = if providers.is_empty() {
-                        crate::tr("no named providers configured").to_string()
+                        crate::tr("no image-capable providers configured").to_string()
                     } else {
                         format!(
                             "{}: {}",
@@ -6884,6 +6885,20 @@ impl TuiApp {
                 {
                     self.toast = Some(Toast::error(
                         crate::tr("no provider '{name}' in config").replace("{name}", value),
+                    ));
+                    return;
+                }
+                if !self
+                    .template
+                    .vision_provider_names()
+                    .iter()
+                    .any(|name| name == value)
+                {
+                    self.toast = Some(Toast::error(
+                        crate::tr(
+                            "vision provider '{provider_name}' does not declare image support",
+                        )
+                        .replace("{provider_name}", value),
                     ));
                     return;
                 }
@@ -6956,6 +6971,18 @@ impl TuiApp {
             if !self.template.provider_names().iter().any(|n| n == provider) {
                 self.toast = Some(Toast::error(
                     crate::tr("no provider '{name}' in config").replace("{name}", provider),
+                ));
+                return;
+            }
+            if !self
+                .template
+                .vision_provider_names()
+                .iter()
+                .any(|name| name == provider)
+            {
+                self.toast = Some(Toast::error(
+                    crate::tr("vision provider '{provider_name}' does not declare image support")
+                        .replace("{provider_name}", provider),
                 ));
                 return;
             }
