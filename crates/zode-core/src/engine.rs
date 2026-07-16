@@ -367,6 +367,9 @@ pub struct CarryState {
     pub todo_state: Option<TodoState>,
     pub compact_state: Option<Arc<Mutex<AutoCompactState>>>,
     pub subagents: Option<crate::subagents::SubAgentRegistry>,
+    /// External-agent trust grants (fingerprints). Session-scoped by design:
+    /// carried across engine rebuilds, never persisted to disk.
+    pub external_grants: Option<Arc<crate::external_agents::GrantStore>>,
     pub file_cache: Option<Arc<FileStateCache>>,
     pub bg_shells_meta: Option<BackgroundShellTracker>,
     pub recent_files: Option<crate::compact_memory::RecentFiles>,
@@ -387,6 +390,7 @@ impl ZodeEngine {
             todo_state: Some(self.todo_state.clone()),
             compact_state: Some(self.compact_state.clone()),
             subagents: Some(self.subagents.clone()),
+            external_grants: Some(self.external_grants.clone()),
             file_cache: Some(self.file_cache.clone()),
             bg_shells_meta: Some(self.bg_shells_meta.clone()),
             recent_files: Some(self.recent_files.clone()),
@@ -612,6 +616,8 @@ pub struct ZodeEngine {
     pub todo_state: TodoState,
     /// Live registry of Task-spawned sub-agents, read by the TUI overlay.
     pub subagents: crate::subagents::SubAgentRegistry,
+    /// External-agent trust grants (see [`CarryState::external_grants`]).
+    pub external_grants: Arc<crate::external_agents::GrantStore>,
     /// File-edit undo/redo history, fed by an EditHistoryHook on `hooks`.
     pub history: Arc<tokio::sync::Mutex<EditHistory>>,
     /// Host-side metadata for background shells (Phase 07 task panel).
@@ -1248,8 +1254,59 @@ impl ZodeEngine {
             subagents.clone(),
             resolve_subagent_max_iterations(cfg.subagent_max_iterations),
         ));
-        let agent_type_list = task_factory.agent_types();
-        base.register(Arc::new(TaskTool::new(task_factory)));
+        let mut agent_type_list = task_factory.agent_types();
+        // External agent CLIs (claude / codex / opencode / custom) as Task
+        // agent_types. Discovery is stat-only and skipped entirely in plan /
+        // read-only mode (Task itself is absent there — red-line behavior).
+        // Grants are session-scoped fingerprints carried across rebuilds.
+        let external_grants = carry
+            .external_grants
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::external_agents::GrantStore::default()));
+        let external_registry = if plan_mode || read_only_tools || !cfg.external_agents.enabled() {
+            Arc::new(crate::external_agents::ExternalAgentRegistry::default())
+        } else {
+            let conflicts: Vec<String> = agent_type_list.iter().map(|(n, _)| n.clone()).collect();
+            Arc::new(crate::external_agents::discover(
+                &cfg.external_agents,
+                &conflicts,
+            ))
+        };
+        let raw_task: Arc<dyn Tool> = Arc::new(TaskTool::new(task_factory));
+        if external_registry.is_empty() {
+            // No external agents: register the upstream tool exactly as
+            // before — it flows through wrap_mutating_tools unchanged.
+            base.register(raw_task);
+        } else {
+            // Self-gated router (spec ADR-4). The INTERNAL route reproduces
+            // today's gate semantics bit-for-bit by pre-wrapping the inner
+            // TaskTool with the same PermissionGatedTool that
+            // wrap_mutating_tools would have applied (ask > allow > gate);
+            // the EXTERNAL route runs its own trust approval. "Task" then
+            // joins the self-gated skip set so the outer pass never adds a
+            // second, context-blind gate on top.
+            let force_ask = cfg.permissions.ask.iter().any(|a| a == "Task");
+            let auto_allowed = !force_ask && cfg.permissions.allow.iter().any(|a| a == "Task");
+            let inner: Arc<dyn Tool> = if auto_allowed {
+                raw_task
+            } else {
+                Arc::new(PermissionGatedTool::new(raw_task, gate.clone()))
+            };
+            agent_type_list.extend(external_registry.agent_types());
+            base.register(Arc::new(crate::task_tool::ZodeTaskTool::new(
+                inner,
+                external_registry.clone(),
+                external_grants.clone(),
+                gate.clone(),
+                subagents.observer(),
+                file_cache.clone(),
+                crate::task_tool::ExternalRuntimeCfg {
+                    timeout: cfg.external_agents.timeout(),
+                    max_concurrent: cfg.external_agents.max_concurrent(),
+                },
+            )));
+        }
+        let task_is_self_gated = !external_registry.is_empty();
 
         // Autonomous orchestration: let the agent define new sub-agent types
         // and workflows. Default ON (unset → enabled); toggle off via Settings.
@@ -1339,7 +1396,9 @@ impl ZodeEngine {
         let scoped_ask = crate::permission_rules::scoped_ask_tools(&permission_rules);
         let pass_unmatched = compute_pass_unmatched(&base, &scoped_ask, &cfg.permissions.allow);
         rule_gate.set_pass_unmatched(pass_unmatched);
-        let mut gated = wrap_mutating_tools(base, &gate, &mutating_allow, &force_ask);
+        let self_gated: &[&str] = if task_is_self_gated { &["Task"] } else { &[] };
+        let mut gated =
+            wrap_mutating_tools(base, &gate, &mutating_allow, &force_ask, self_gated);
 
         // 3. ToolSearch over the full set (candidates = snapshot of the
         //    gated registry, taken before ToolSearch itself is added).
@@ -1467,6 +1526,7 @@ impl ZodeEngine {
             bash_sessions,
             todo_state,
             subagents,
+            external_grants,
             history,
             bg_shells_meta,
             skills,
@@ -2975,9 +3035,18 @@ fn wrap_mutating_tools(
     gate: &Arc<dyn ApprovalGate>,
     allow: &[String],
     ask: &[String],
+    self_gated: &[&str],
 ) -> ToolRegistry {
     let mut out = ToolRegistry::new();
     for tool in src.list() {
+        // Self-gated tools implement their own route-aware approval (spec
+        // ADR-4) and are never wrapped here — not even by `ask`, which they
+        // absorb internally. Checked BEFORE force_ask on purpose: the
+        // mutating-allow list alone cannot skip an `ask` hit.
+        if self_gated.iter().any(|n| *n == tool.name()) {
+            out.register(tool);
+            continue;
+        }
         // browser_upload performs canonical-path preflight before its own
         // per-call approval and must never be wrapped by a gate outside that
         // validation boundary.
@@ -3102,7 +3171,7 @@ mod tests {
         let mut src = ToolRegistry::new();
         src.register(Arc::new(RoTool("Peek")));
         src.register(Arc::new(RoTool("Glance")));
-        let out = wrap_mutating_tools(src, &gate, &[], &["Peek".to_string()]);
+        let out = wrap_mutating_tools(src, &gate, &[], &["Peek".to_string()], &[]);
         let ctx = agent::tool::ToolUseContext::new(std::env::temp_dir());
 
         let peek = out.get("Peek").unwrap();
@@ -3123,7 +3192,13 @@ mod tests {
         let gate: Arc<dyn ApprovalGate> = Arc::new(DenyGate);
         let mut src = ToolRegistry::new();
         src.register(Arc::new(RoTool("Edit")));
-        let out = wrap_mutating_tools(src, &gate, &["Edit".to_string()], &["Edit".to_string()]);
+        let out = wrap_mutating_tools(
+            src,
+            &gate,
+            &["Edit".to_string()],
+            &["Edit".to_string()],
+            &[],
+        );
         let ctx = agent::tool::ToolUseContext::new(std::env::temp_dir());
         assert!(
             out.get("Edit")
@@ -3342,6 +3417,7 @@ mod tests {
             bash_sessions: BashSessionRegistry::new(),
             todo_state: TodoState::new(),
             subagents: crate::subagents::SubAgentRegistry::new(),
+            external_grants: Arc::new(crate::external_agents::GrantStore::default()),
             history: Arc::new(tokio::sync::Mutex::new(EditHistory::new(1))),
             bg_shells_meta: BackgroundShellTracker::new(),
             skills: Arc::new(SkillRegistry::new()),
@@ -4335,6 +4411,125 @@ mod tests {
         assert!(!names.contains(&"Task".to_string()), "{names:?}");
         // The plan-mode preamble is in the system prompt.
         assert!(eng.system.as_deref().unwrap_or("").contains("PLAN MODE"));
+    }
+
+    /// Red line: with no external agents configured/installed, the internal
+    /// Task path keeps today's exact shape — a PermissionGatedTool around the
+    /// upstream TaskTool, so a deny gate blocks it.
+    #[tokio::test]
+    async fn internal_task_behavior_unchanged_when_no_external_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_cfg();
+        cfg.external_agents.enabled = Some(false);
+        let eng = ZodeEngine::assemble(
+            &cfg,
+            dir.path().to_path_buf(),
+            Arc::new(DenyGate),
+            None,
+            "2026-06-13",
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = eng.tools.get("Task").expect("Task registered");
+        let ctx = agent::tool::ToolUseContext::new(dir.path());
+        let err = task
+            .call(
+                &ctx,
+                serde_json::json!({"agent_type":"general","prompt":"hi"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("denied"), "{err}");
+    }
+
+    /// Red line: `permissions.ask=["Task"]` on an external agent_type yields
+    /// exactly ONE approval (the trust view), never a generic second prompt;
+    /// and the internal route through the same router is still gate-blocked.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn ask_on_task_prompts_once_not_twice() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug)]
+        struct CountingGate(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl ApprovalGate for CountingGate {
+            fn interactive(&self) -> bool {
+                true
+            }
+            async fn approve(&self, _t: &str, _i: &serde_json::Value) -> Approval {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Approval::Deny // internal route: deny so no provider call runs
+            }
+            async fn approve_scoped(
+                &self,
+                _t: &str,
+                _i: &serde_json::Value,
+                _s: crate::approval::ApprovalScope,
+            ) -> Approval {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Approval::AllowOnce
+            }
+        }
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/extagent/fake-claude.sh");
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_cfg();
+        cfg.permissions.ask.push("Task".to_string());
+        cfg.external_agents.agents.insert(
+            "fake-ext".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "command": fixture.display().to_string(),
+                "args": [],
+                "promptTransport": "stdin",
+                "output": "jsonl-claude",
+            }))
+            .unwrap(),
+        );
+        let count = Arc::new(AtomicUsize::new(0));
+        let eng = ZodeEngine::assemble(
+            &cfg,
+            dir.path().to_path_buf(),
+            Arc::new(CountingGate(count.clone())),
+            None,
+            "2026-06-13",
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = eng.tools.get("Task").expect("Task registered");
+        let ctx = agent::tool::ToolUseContext::new(dir.path());
+
+        // External route: exactly one (scoped trust) prompt.
+        let out = task
+            .call(
+                &ctx,
+                serde_json::json!({"agent_type":"fake-ext","prompt":"go"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 1, "one approval, never two");
+        assert_eq!(out["__external_agent__"]["profile"], "fake-ext");
+
+        // Internal route through the same router: ask-forced gate intact.
+        let before = count.load(Ordering::SeqCst);
+        let err = task
+            .call(
+                &ctx,
+                serde_json::json!({"agent_type":"general","prompt":"hi"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("denied"), "{err}");
+        assert_eq!(count.load(Ordering::SeqCst), before + 1);
     }
 
     #[test]
