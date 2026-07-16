@@ -496,3 +496,44 @@ ZODE_BROWSER_IT=1 cargo test -p zode-core --test browser_it -- --ignored
 
 It launches a headless managed Chrome, navigates a `data:` URL, evaluates
 JS, screenshots, snapshots, clicks by ref, and checks console-log capture.
+
+## External agents
+
+Zode can register installed external agent CLIs (claude code / codex /
+opencode / custom) as `Task` tool `agent_type`s. Design doc:
+`docs/superpowers/specs/2026-07-16-agent-team-design.md` (Phase A).
+
+- **Discovery is stat-only**: binaries found on a sanitized PATH (or
+  `externalAgents.agents.<name>.command`) are canonicalized but never
+  executed before approval. Uninstalled CLIs simply don't appear.
+- **Trust model (not a sandbox)**: an external agent runs IN-PLACE and is
+  not gated per-operation by zode. The first call shows a dedicated trust
+  approval (full argv, cwd, env allowlist names, the CLI's own sandbox
+  level, content hash; "version unverified"). Approving "session" stores a
+  fingerprint grant in CarryState (never persisted); the binary is
+  re-hashed before every spawn and `--version` is verified after first
+  approval. `--yolo` fails closed unless the profile sets `trusted: true`.
+- **Self-gated Task router**: `ZodeTaskTool` (crates/zode-core/src/task_tool.rs)
+  wraps the upstream TaskTool. Internal agent_types keep today's gating
+  bit-for-bit; `permissions.ask=["Task"]` yields exactly one prompt per
+  call. Plan/read-only mode has no Task at all (unchanged).
+- **Runner hygiene** (crates/zode-core/src/external_agents/): env starts
+  from `env_clear()` + allowlist (loader vars always refused; provider API
+  keys not passed by default — use `envAllow`), prompt goes via stdin where
+  supported, stdout/stderr drain concurrently, kill uses the process group,
+  aftermath reports best-effort `changed_files` and clears the whole
+  FileStateCache (needs `FileStateCache::clear()` from vendor/agent).
+- **Cost**: external usage is attributed to `external:<profile>:<model>`,
+  never the parent model (`__external_agent__` result discriminant).
+- **Config** (`externalAgents`, camelCase): `enabled`, `timeoutSecs`
+  (default 1800), `maxConcurrent` (process-wide, default 2), `agents` map
+  (per-profile `command`/`extraArgs`/`envAllow`/`trusted`; custom profiles
+  add `args` + `promptTransport` + `output` etc. — argv transport requires
+  a `{prompt}` placeholder). Same-key entries replace wholesale across
+  config layers.
+
+Opt-in real-CLI integration test:
+
+```bash
+ZODE_EXTAGENT_IT=1 cargo test -p zode-core --test extagent_it -- --ignored
+```
