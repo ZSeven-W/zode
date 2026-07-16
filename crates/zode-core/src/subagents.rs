@@ -47,6 +47,14 @@ pub struct SubAgent {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub transcript: Vec<SubAgentLine>,
+    /// Usage aggregation state: Usage frames are cumulative WITHIN one
+    /// provider turn and reset between turns, so totals = settled turns +
+    /// the current turn's peak (mirrors TaskTool's algorithm in
+    /// agent-tools-code task.rs).
+    pub committed_input: u32,
+    pub committed_output: u32,
+    pub turn_input: u32,
+    pub turn_output: u32,
 }
 
 #[derive(Debug)]
@@ -110,6 +118,10 @@ impl SubAgentRegistry {
                 input_tokens: 0,
                 output_tokens: 0,
                 transcript: Vec::new(),
+                committed_input: 0,
+                committed_output: 0,
+                turn_input: 0,
+                turn_output: 0,
             });
             let cap = s.cap;
             while s.agents.len() > cap {
@@ -177,9 +189,19 @@ fn apply_event(a: &mut SubAgent, event: &Event) {
             output_tokens,
             ..
         } => {
-            // Cumulative frames — take the max, not the sum.
-            a.input_tokens = a.input_tokens.max(*input_tokens);
-            a.output_tokens = a.output_tokens.max(*output_tokens);
+            // Cumulative within a provider turn; a counter regression marks
+            // a new turn — settle the finished turn's peak, then track the
+            // new one. A plain max would under-count multi-turn children.
+            if *input_tokens < a.turn_input || *output_tokens < a.turn_output {
+                a.committed_input = a.committed_input.saturating_add(a.turn_input);
+                a.committed_output = a.committed_output.saturating_add(a.turn_output);
+                a.turn_input = 0;
+                a.turn_output = 0;
+            }
+            a.turn_input = a.turn_input.max(*input_tokens);
+            a.turn_output = a.turn_output.max(*output_tokens);
+            a.input_tokens = a.committed_input.saturating_add(a.turn_input);
+            a.output_tokens = a.committed_output.saturating_add(a.turn_output);
         }
         Event::Error { message, .. } => a.transcript.push(SubAgentLine::Error(message.clone())),
         Event::Notice { message, .. } => a.transcript.push(SubAgentLine::Notice(message.clone())),
@@ -232,6 +254,27 @@ impl TaskObserver for ZodeTaskObserver {
 mod tests {
     use super::*;
     use agent::stream::Event;
+
+    #[test]
+    fn usage_settles_per_turn_peaks_across_multi_turn_children() {
+        let reg = SubAgentRegistry::new();
+        let obs = reg.observer();
+        let id = obs.on_start("general", None, 1);
+        let usage = |i: u32, o: u32| Event::Usage {
+            input_tokens: i,
+            output_tokens: o,
+            cache_read: 0,
+            cache_create: 0,
+        };
+        // Turn 1: cumulative frames 100→300; turn 2 resets to 50→120.
+        obs.on_event(id, &usage(100, 10));
+        obs.on_event(id, &usage(300, 40));
+        obs.on_event(id, &usage(50, 5)); // regression = new turn
+        obs.on_event(id, &usage(120, 30));
+        let a = &reg.snapshot()[0];
+        assert_eq!(a.input_tokens, 420, "300 (turn1 peak) + 120 (turn2 peak)");
+        assert_eq!(a.output_tokens, 70, "40 + 30 — a plain max would say 40");
+    }
 
     #[test]
     fn lifecycle_start_event_finish_builds_subagent() {

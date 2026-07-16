@@ -220,6 +220,10 @@ mod tests {
             finished_at: None,
             input_tokens: 12,
             output_tokens: 7,
+            committed_input: 0,
+            committed_output: 0,
+            turn_input: 0,
+            turn_output: 0,
             transcript: vec![
                 SubAgentLine::Text("hello".into()),
                 SubAgentLine::ToolUse {

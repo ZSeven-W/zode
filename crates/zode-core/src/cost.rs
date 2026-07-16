@@ -113,6 +113,24 @@ impl CostState {
         let model = self.model();
         tracker.observe_event(&model, event);
         if let Event::ToolResult { output, .. } = event {
+            // External agent results carry their own model attribution and
+            // must NOT be billed to the parent model. Validate bounds/types
+            // defensively — this field crosses a process boundary.
+            if let Some(ext) = output.get("__external_agent__") {
+                let profile = ext.get("profile").and_then(|v| v.as_str()).unwrap_or("?");
+                let model_name = ext.get("model").and_then(|v| v.as_str()).unwrap_or("cli");
+                let sane = |k: &str| {
+                    ext.get(k)
+                        .and_then(|v| v.as_u64())
+                        .filter(|n| *n < 100_000_000)
+                        .unwrap_or(0)
+                };
+                let (ci, co) = (sane("usage_input_tokens"), sane("usage_output_tokens"));
+                if ci > 0 || co > 0 {
+                    tracker.observe(&format!("external:{profile}:{model_name}"), ci, co, 0, 0);
+                }
+                return;
+            }
             // `agent_type` is unique to the Task tool's result shape — gate on
             // it so an MCP tool that happens to use those field names can't be
             // mistaken for a sub-agent.
@@ -351,6 +369,39 @@ mod tests {
         cost.observe(&other).await;
         let report = cost.report().await;
         assert!(!report.contains("999"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn external_usage_not_attributed_to_parent_model() {
+        let cost = CostState::new("parent-model".into());
+        cost.observe(&Event::ToolResult {
+            id: "1".into(),
+            ok: true,
+            output: serde_json::json!({
+                "output": "done",
+                "agent_type": "codex",
+                "__external_agent__": {"profile": "codex", "model": "gpt-x",
+                    "usage_input_tokens": 137, "usage_output_tokens": 53}
+            }),
+        })
+        .await;
+        let report = cost.report().await;
+        // Totals include the external tokens (their own model bucket)…
+        assert!(report.contains("137"), "{report}");
+        // …and the bogus-bounds guard drops absurd values instead of billing.
+        let cost2 = CostState::new("parent-model".into());
+        cost2
+            .observe(&Event::ToolResult {
+                id: "2".into(),
+                ok: true,
+                output: serde_json::json!({
+                    "__external_agent__": {"profile": "x", "model": "y",
+                        "usage_input_tokens": u64::MAX, "usage_output_tokens": 1}
+                }),
+            })
+            .await;
+        let report2 = cost2.report().await;
+        assert!(report2.contains("↑0"), "{report2}");
     }
 
     #[tokio::test]
