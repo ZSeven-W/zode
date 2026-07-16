@@ -45,7 +45,7 @@
 - **Browser control** — built-in `browser_*` tools can drive a managed Chromium instance or your real Chrome profile through the zode Chrome bridge extension: navigate, click/type, inspect DOM, capture screenshots, read console/network logs, and group zode-opened tabs
 - **Non-blocking permissions** — every mutating tool is gated (allow once / always / deny), but the prompt docks inline and never blocks you: keep typing to queue a follow-up while a tool waits, with hard-deny rules
 - **OS sandbox, on by default** — shell commands run under sandbox-exec (macOS) / bwrap (Linux) in `read-only` or `workspace-write` mode, with **outbound network denied by default**. Toggle live with `/sandbox`; the model can request an escape for a single command (`dangerouslyDisableSandbox`) which **you authorize** at the prompt
-- **Full-screen TUI** — streaming markdown with syntax highlighting, diff previews, slash-command autocomplete, prompt history (Up/Down), 4 built-in themes, settings & help overlays, resilient right sidebar sections, **15-language UI** (`/language`)
+- **Full-screen TUI** — streaming markdown with syntax highlighting, diff previews, slash-command autocomplete, prompt history (Up/Down), 11 built-in themes, settings & help overlays, resilient right sidebar sections, **15-language UI** (`/language`)
 - **Multi-session tabs** — run several conversations side by side (`Ctrl+T`), each an isolated agent; resume past sessions with full history replay
 - **Sub-agents & workflows** — delegate scoped work to child agents via the Task tool (they inherit the same gate, sandbox, and hooks), manage them with `/agents` / `/workflows`, and toggle autonomous orchestration
 - **Cross-agent ecosystem** — discovers skills, slash commands, and MCP servers from Claude / Codex / opencode / antigravity / pi / kilo / cursor (plus their plugin trees), with zode's own taking precedence; foreign integrations are off by default and non-portable ones are filtered out
@@ -352,7 +352,7 @@ loading, update, CRX packaging, and smoke-test steps.
 | `/config` | Show model + working directory |
 | `/compact` | Context auto-compaction status |
 | `/cost` | Token usage & cost so far (incl. sub-agents) |
-| `/theme [id]` | Switch theme (`catppuccin-mocha`, `cyberpunk`, `minimal`, `hacker`) |
+| `/theme [id]` | Switch theme (`catppuccin-mocha`, `aurora-forge`, `ember-atelier`, `sakura-paper`, `arctic-day`, `lavender-mist`, `citrus-grove`, `verdant-signal`, `cyberpunk`, `minimal`, `hacker`) |
 | `/sessions`, `/resume` | Session picker — resume into a new tab with history |
 | `/connect` | Connect and switch the active provider |
 | `/sidebar [on\|off\|toggle\|auto\|mcp\|files\|todo]` | Show/hide the right sidebar; fold the MCP / modified-files / todo sections (also click their ▼ headers) |

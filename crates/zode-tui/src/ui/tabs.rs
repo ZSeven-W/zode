@@ -205,6 +205,8 @@ pub fn render_sidebar(
     theme: &Theme,
 ) -> SidebarHits {
     let row_width = area.width.saturating_sub(1) as usize;
+    let content_y = area.y.saturating_add(1);
+    let content_height = area.height.saturating_sub(1);
     // Sections flowing BELOW the tab list (empty → no-op) plus the pinned
     // version row: reserve room so the tab list yields.
     let sub_h = crate::ui::subagents_sidebar::section_height(info.subagents.len());
@@ -216,7 +218,7 @@ pub fn render_sidebar(
     let mut hits = SidebarHits::default();
     let header_row = |lines: &Vec<Line<'_>>| {
         // The section's header renders after its leading blank separator.
-        let row = area.y + lines.len() as u16 + 1;
+        let row = content_y + lines.len() as u16 + 1;
         (row < area.y + area.height).then_some(row)
     };
 
@@ -259,10 +261,10 @@ pub fn render_sidebar(
     lines.push(header_line(row_width, theme));
     // Cap the tab list so everything below it fits.
     let tabs_budget =
-        (area.height as usize).saturating_sub(sub_h + files_h + todo_h + version_foot);
+        (content_height as usize).saturating_sub(sub_h + files_h + todo_h + version_foot);
     // Tab rows render contiguously starting at the current line count —
     // remember the window so a click can map back to a tab index.
-    let tabs_top = area.y + lines.len() as u16;
+    let tabs_top = content_y + lines.len() as u16;
     let (first, shown) = append_tab_rows(&mut lines, row_width, tabs_budget, tabs, active, theme);
     hits.tabs_rows_start = (shown > 0).then_some(tabs_top);
     hits.tabs_first_index = first;
@@ -288,7 +290,7 @@ pub fn render_sidebar(
             info.git_files.len(),
             info.files_collapsed,
         ) {
-            let row = area.y + (start + idx) as u16;
+            let row = content_y + (start + idx) as u16;
             hits.files_more_row = (row < area.y + area.height).then_some(row);
         }
     }
@@ -315,7 +317,7 @@ fn render_version_row(f: &mut Frame, area: Rect, occupied: u16, version: &str, t
         return;
     }
     let y = area.y + area.height - 1;
-    if y <= area.y + occupied {
+    if y <= area.y.saturating_add(1) + occupied {
         return;
     }
     let row_width = area.width.saturating_sub(1) as usize;
@@ -344,7 +346,7 @@ fn render_tab_list(
     append_tab_rows(
         &mut lines,
         row_width,
-        area.height as usize,
+        area.height.saturating_sub(1) as usize,
         tabs,
         active,
         theme,
@@ -428,7 +430,16 @@ fn render_sidebar_block(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>, th
         Paragraph::new(lines)
             .block(
                 Block::default()
-                    .borders(Borders::LEFT)
+                    .borders(Borders::LEFT | Borders::TOP)
+                    // Draw the divider with a solid left-eighth block instead of
+                    // the box-drawing `│`: many terminal fonts render U+2502 a
+                    // hair short so it looks dashed between rows, whereas block
+                    // elements tile seamlessly into one continuous line — and it
+                    // matches the block glyphs used elsewhere in the chrome.
+                    .border_set(ratatui::symbols::border::Set {
+                        vertical_left: "▏",
+                        ..ratatui::symbols::border::PLAIN
+                    })
                     .border_style(Style::default().fg(theme.separator)),
             )
             .style(Style::default().bg(theme.bg_secondary)),
@@ -619,6 +630,13 @@ mod tests {
         assert!(joined.contains("Minimal"));
         assert!(joined.contains("target/debug"));
         assert!(joined.contains("sandbox"));
+    }
+
+    #[test]
+    fn sidebar_draws_a_closed_top_edge_and_solid_left_rail() {
+        let (rows, _) = draw_rows(info_with_sections(&[], &[], false, false));
+        assert_eq!(rows[0], format!("┌{}", "─".repeat(33)));
+        assert!(rows[1].starts_with('▏'));
     }
 
     #[test]

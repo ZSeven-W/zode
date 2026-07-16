@@ -17,7 +17,19 @@ fn streaming() -> Vec<String> {
 }
 
 pub fn all() -> Vec<Theme> {
-    vec![catppuccin_mocha(), cyberpunk(), minimal(), hacker()]
+    vec![
+        catppuccin_mocha(),
+        aurora_forge(),
+        ember_atelier(),
+        sakura_paper(),
+        arctic_day(),
+        lavender_mist(),
+        citrus_grove(),
+        verdant_signal(),
+        cyberpunk(),
+        minimal(),
+        hacker(),
+    ]
 }
 
 pub fn catppuccin_mocha() -> Theme {
@@ -37,6 +49,188 @@ pub fn catppuccin_mocha() -> Theme {
         assistant: Color::Indexed(111),
         system: Color::Indexed(221),
         separator: Color::Indexed(141),
+        icon_logo: "⟢".into(),
+        icon_user: "❯".into(),
+        icon_assistant: "◈".into(),
+        icon_system: "⚡".into(),
+        spinner_thinking: braille(),
+        spinner_streaming: streaming(),
+    }
+}
+
+pub fn aurora_forge() -> Theme {
+    Theme {
+        id: "aurora-forge".into(),
+        name: "Aurora Forge".into(),
+        description: "Deep navy with mint and violet accents".into(),
+        bg_primary: Color::Indexed(233),
+        bg_secondary: Color::Indexed(234),
+        bg_input: Color::Indexed(235),
+        fg_text: Color::Indexed(254),
+        fg_subtle: Color::Indexed(66),
+        fg_white: Color::Indexed(255),
+        accent: Color::Indexed(80),
+        accent_secondary: Color::Indexed(141),
+        user: Color::Indexed(121),
+        assistant: Color::Indexed(80),
+        system: Color::Indexed(221),
+        separator: Color::Indexed(80),
+        icon_logo: "⟢".into(),
+        icon_user: "❯".into(),
+        icon_assistant: "◈".into(),
+        icon_system: "⚡".into(),
+        spinner_thinking: braille(),
+        spinner_streaming: streaming(),
+    }
+}
+
+pub fn ember_atelier() -> Theme {
+    Theme {
+        id: "ember-atelier".into(),
+        name: "Ember Atelier".into(),
+        description: "Warm charcoal with amber and coral accents".into(),
+        bg_primary: Color::Indexed(233),
+        bg_secondary: Color::Indexed(234),
+        bg_input: Color::Indexed(235),
+        fg_text: Color::Indexed(254),
+        fg_subtle: Color::Indexed(138),
+        fg_white: Color::Indexed(255),
+        accent: Color::Indexed(215),
+        accent_secondary: Color::Indexed(204),
+        user: Color::Indexed(222),
+        assistant: Color::Indexed(209),
+        system: Color::Indexed(221),
+        separator: Color::Indexed(215),
+        icon_logo: "⟢".into(),
+        icon_user: "❯".into(),
+        icon_assistant: "◆".into(),
+        icon_system: "⚡".into(),
+        spinner_thinking: braille(),
+        spinner_streaming: streaming(),
+    }
+}
+
+pub fn sakura_paper() -> Theme {
+    Theme {
+        id: "sakura-paper".into(),
+        name: "Sakura Paper".into(),
+        description: "Warm paper with ink, sakura, and indigo accents".into(),
+        bg_primary: Color::Indexed(255),
+        bg_secondary: Color::Indexed(231),
+        bg_input: Color::Indexed(254),
+        fg_text: Color::Indexed(236),
+        fg_subtle: Color::Indexed(243),
+        fg_white: Color::Indexed(236),
+        accent: Color::Indexed(125),
+        accent_secondary: Color::Indexed(61),
+        user: Color::Indexed(23),
+        assistant: Color::Indexed(61),
+        system: Color::Indexed(94),
+        separator: Color::Indexed(125),
+        icon_logo: "⟢".into(),
+        icon_user: "❯".into(),
+        icon_assistant: "●".into(),
+        icon_system: "⚡".into(),
+        spinner_thinking: braille(),
+        spinner_streaming: streaming(),
+    }
+}
+
+pub fn arctic_day() -> Theme {
+    Theme {
+        id: "arctic-day".into(),
+        name: "Arctic Day".into(),
+        description: "Cool white with ocean blue and teal accents".into(),
+        bg_primary: Color::Indexed(255),
+        bg_secondary: Color::Indexed(231),
+        bg_input: Color::Indexed(254),
+        fg_text: Color::Indexed(236),
+        fg_subtle: Color::Indexed(242),
+        fg_white: Color::Indexed(236),
+        accent: Color::Indexed(25),
+        accent_secondary: Color::Indexed(30),
+        user: Color::Indexed(23),
+        assistant: Color::Indexed(25),
+        system: Color::Indexed(94),
+        separator: Color::Indexed(25),
+        icon_logo: "⟢".into(),
+        icon_user: "❯".into(),
+        icon_assistant: "◈".into(),
+        icon_system: "⚡".into(),
+        spinner_thinking: braille(),
+        spinner_streaming: streaming(),
+    }
+}
+
+pub fn lavender_mist() -> Theme {
+    Theme {
+        id: "lavender-mist".into(),
+        name: "Lavender Mist".into(),
+        description: "Soft lavender with plum and indigo accents".into(),
+        bg_primary: Color::Indexed(189),
+        bg_secondary: Color::Indexed(231),
+        bg_input: Color::Indexed(225),
+        fg_text: Color::Indexed(236),
+        fg_subtle: Color::Indexed(60),
+        fg_white: Color::Indexed(236),
+        accent: Color::Indexed(61),
+        accent_secondary: Color::Indexed(25),
+        user: Color::Indexed(23),
+        assistant: Color::Indexed(61),
+        system: Color::Indexed(94),
+        separator: Color::Indexed(61),
+        icon_logo: "⟢".into(),
+        icon_user: "❯".into(),
+        icon_assistant: "●".into(),
+        icon_system: "⚡".into(),
+        spinner_thinking: braille(),
+        spinner_streaming: streaming(),
+    }
+}
+
+pub fn citrus_grove() -> Theme {
+    Theme {
+        id: "citrus-grove".into(),
+        name: "Citrus Grove".into(),
+        description: "Sunny cream with orange, olive, and teal accents".into(),
+        bg_primary: Color::Indexed(230),
+        bg_secondary: Color::Indexed(231),
+        bg_input: Color::Indexed(229),
+        fg_text: Color::Indexed(236),
+        fg_subtle: Color::Indexed(240),
+        fg_white: Color::Indexed(236),
+        accent: Color::Indexed(130),
+        accent_secondary: Color::Indexed(58),
+        user: Color::Indexed(23),
+        assistant: Color::Indexed(130),
+        system: Color::Indexed(94),
+        separator: Color::Indexed(130),
+        icon_logo: "⟢".into(),
+        icon_user: "❯".into(),
+        icon_assistant: "◆".into(),
+        icon_system: "⚡".into(),
+        spinner_thinking: braille(),
+        spinner_streaming: streaming(),
+    }
+}
+
+pub fn verdant_signal() -> Theme {
+    Theme {
+        id: "verdant-signal".into(),
+        name: "Verdant Signal".into(),
+        description: "Forest black with leaf, mint, and gold accents".into(),
+        bg_primary: Color::Indexed(232),
+        bg_secondary: Color::Indexed(233),
+        bg_input: Color::Indexed(234),
+        fg_text: Color::Indexed(254),
+        fg_subtle: Color::Indexed(66),
+        fg_white: Color::Indexed(255),
+        accent: Color::Indexed(114),
+        accent_secondary: Color::Indexed(80),
+        user: Color::Indexed(158),
+        assistant: Color::Indexed(79),
+        system: Color::Indexed(179),
+        separator: Color::Indexed(114),
         icon_logo: "⟢".into(),
         icon_user: "❯".into(),
         icon_assistant: "◈".into(),

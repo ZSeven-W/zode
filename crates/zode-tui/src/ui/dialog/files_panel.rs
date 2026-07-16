@@ -52,16 +52,16 @@ impl FilesPanel {
         let popup = centered(area, 70, 70);
         f.render_widget(Clear, popup);
 
+        let surface = Style::default().bg(theme.bg_secondary).fg(theme.fg_text);
         let title = format!(" {} ({}) ", crate::tr("modified files"), files.len());
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.separator))
             .title(Span::styled(
                 title,
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ));
+                surface.fg(theme.accent).add_modifier(Modifier::BOLD),
+            ))
+            .style(surface);
         let inner = block.inner(popup);
         f.render_widget(block, popup);
         if inner.height == 0 || inner.width < 8 {
@@ -107,7 +107,7 @@ impl FilesPanel {
             footer,
             Style::default().fg(theme.fg_subtle),
         )));
-        f.render_widget(Paragraph::new(lines), inner);
+        f.render_widget(Paragraph::new(lines).style(surface), inner);
     }
 }
 
@@ -171,5 +171,34 @@ mod tests {
         assert!(content.contains("crates/f0.rs"));
         assert!(content.contains("crates/f11.rs")); // ALL rows visible (12 fit)
         assert!(content.contains("+11"));
+    }
+
+    #[test]
+    fn light_theme_fills_the_entire_popup_surface() {
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("arctic-day"));
+        let files = vec![stat(
+            "crates/zode-tui/src/ui/dialog/files_panel.rs",
+            Some(3),
+            Some(1),
+        )];
+        let area = Rect::new(0, 0, 80, 24);
+        let popup = centered(area, 70, 70);
+        let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut panel = FilesPanel::new();
+        terminal
+            .draw(|f| panel.render(f, f.area(), &files, &theme))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        for y in popup.y..popup.y + popup.height {
+            for x in popup.x..popup.x + popup.width {
+                assert_eq!(
+                    buffer[(x, y)].bg,
+                    theme.bg_secondary,
+                    "popup cell ({x}, {y}) did not inherit the active theme"
+                );
+            }
+        }
     }
 }
