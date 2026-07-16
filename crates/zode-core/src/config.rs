@@ -386,6 +386,63 @@ impl DesktopConfig {
     }
 }
 
+/// External agent CLIs (claude / codex / opencode / custom) exposed as Task
+/// `agent_type`s. All fields optional; effective values come from the getters.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExternalAgentsConfig {
+    pub enabled: Option<bool>,
+    pub timeout_secs: Option<u64>,
+    /// Process-wide cap on concurrently running external CLI processes.
+    pub max_concurrent: Option<u32>,
+    /// Per-profile entries. Merge semantics: keys merge across config layers,
+    /// but a same-key entry is replaced WHOLESALE (no field-level deep merge).
+    pub agents: IndexMap<String, ExternalAgentEntry>,
+}
+
+impl ExternalAgentsConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.timeout_secs.unwrap_or(1800))
+    }
+    pub fn max_concurrent(&self) -> u32 {
+        self.max_concurrent.unwrap_or(2)
+    }
+}
+
+/// One external agent profile. For the three built-ins only
+/// `enabled`/`command`/`extra_args`/`env_allow`/`trusted` are honored; the
+/// remaining capability fields describe custom profiles.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExternalAgentEntry {
+    pub enabled: Option<bool>,
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub extra_args: Option<Vec<String>>,
+    /// "stdin" | "argv" | "file" (argv requires a "{prompt}" placeholder in
+    /// `args`; file requires "{prompt_file}").
+    pub prompt_transport: Option<String>,
+    /// "text" | "jsonl-claude" | "jsonl-codex" (default "text").
+    pub output: Option<String>,
+    pub resume_flag: Option<String>,
+    pub version_requirement: Option<String>,
+    /// JSON pointer into the final result event, e.g. "/session_id".
+    pub session_id_source: Option<String>,
+    /// "none" | "readOnly" | "workspaceWrite" | "unrestricted" | "unknown".
+    pub effective_sandbox: Option<String>,
+    /// Env var names this CLI needs for its own auth (loader vars rejected).
+    pub auth_env: Option<Vec<String>>,
+    pub env_allow: Option<Vec<String>>,
+    /// Explicit user opt-in: allow non-interactive (--yolo) trust approval.
+    pub trusted: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NoemaSettings {
@@ -669,6 +726,9 @@ pub struct ZodeConfig {
     /// Built-in desktop control configuration (the `desktop_*` tools).
     #[serde(skip_serializing_if = "is_default")]
     pub desktop: DesktopConfig,
+    /// External agent CLIs exposed as Task `agent_type`s.
+    #[serde(skip_serializing_if = "ExternalAgentsConfig::is_default")]
+    pub external_agents: ExternalAgentsConfig,
     /// Native Noema long-term memory integration.
     #[serde(skip_serializing_if = "is_default")]
     pub noema: NoemaSettings,
@@ -1235,6 +1295,16 @@ impl ZodeConfig {
         let d = other.desktop;
         self.desktop.enabled = d.enabled.or(self.desktop.enabled);
         self.desktop.snapshot_max_nodes = d.snapshot_max_nodes.or(self.desktop.snapshot_max_nodes);
+
+        // externalAgents: scalars overlay by presence; the agents map merges
+        // by key with same-key entries replaced wholesale (no field-level
+        // deep merge — avoids extraArgs accumulation ambiguity).
+        let ea = other.external_agents;
+        self.external_agents.enabled = ea.enabled.or(self.external_agents.enabled);
+        self.external_agents.timeout_secs = ea.timeout_secs.or(self.external_agents.timeout_secs);
+        self.external_agents.max_concurrent =
+            ea.max_concurrent.or(self.external_agents.max_concurrent);
+        self.external_agents.agents.extend(ea.agents);
 
         let n = other.noema;
         self.noema.enabled = n.enabled.or(self.noema.enabled);
@@ -2834,5 +2904,47 @@ mod tests {
             serde_json::from_str(r#"{"sandbox":{"windowsTier":"elevated"}}"#).unwrap();
         base.merge_from(over);
         assert_eq!(base.sandbox.windows_tier.as_deref(), Some("elevated"));
+    }
+
+    #[test]
+    fn external_agents_config_defaults_and_merge() {
+        let json = r#"{"externalAgents":{"timeoutSecs":600,
+            "agents":{"codex":{"extraArgs":["--model","gpt-x"]},
+                      "my-cli":{"command":"my-agent","args":["run","{prompt}"],"output":"text"}}}}"#;
+        let cfg: ZodeConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.external_agents.enabled());
+        assert_eq!(cfg.external_agents.timeout().as_secs(), 600);
+        assert_eq!(cfg.external_agents.max_concurrent(), 2);
+        assert_eq!(
+            cfg.external_agents.agents["my-cli"].args.as_deref(),
+            Some(&["run".to_string(), "{prompt}".to_string()][..])
+        );
+
+        // merge: project layer replaces same-key entries wholesale; absent
+        // scalars keep the global value.
+        let mut global: ZodeConfig = serde_json::from_str(
+            r#"{"externalAgents":{"maxConcurrent":4,
+                "agents":{"codex":{"trusted":true,"extraArgs":["--old"]}}}}"#,
+        )
+        .unwrap();
+        let project: ZodeConfig = serde_json::from_str(
+            r#"{"externalAgents":{"agents":{"codex":{"extraArgs":["--new"]}}}}"#,
+        )
+        .unwrap();
+        global.merge_from(project);
+        let codex = &global.external_agents.agents["codex"];
+        assert_eq!(
+            codex.extra_args.as_deref(),
+            Some(&["--new".to_string()][..])
+        );
+        assert_eq!(
+            codex.trusted, None,
+            "entry replaced wholesale, not field-merged"
+        );
+        assert_eq!(
+            global.external_agents.max_concurrent(),
+            4,
+            "absent scalar keeps global"
+        );
     }
 }
