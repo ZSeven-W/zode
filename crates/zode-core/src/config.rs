@@ -351,6 +351,24 @@ impl BrowserConfig {
     }
 }
 
+/// Built-in desktop control (`desktop_*` tools, `/desktop` command).
+/// All fields optional; effective values come from the getters.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DesktopConfig {
+    pub enabled: Option<bool>,
+    pub snapshot_max_nodes: Option<usize>,
+}
+
+impl DesktopConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+    pub fn snapshot_max_nodes(&self) -> usize {
+        self.snapshot_max_nodes.unwrap_or(500)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NoemaSettings {
@@ -631,6 +649,9 @@ pub struct ZodeConfig {
     /// Built-in browser control configuration (the `browser_*` tools).
     #[serde(skip_serializing_if = "is_default")]
     pub browser: BrowserConfig,
+    /// Built-in desktop control configuration (the `desktop_*` tools).
+    #[serde(skip_serializing_if = "is_default")]
+    pub desktop: DesktopConfig,
     /// Native Noema long-term memory integration.
     #[serde(skip_serializing_if = "is_default")]
     pub noema: NoemaSettings,
@@ -1186,6 +1207,11 @@ impl ZodeConfig {
         self.browser.profile_dir = b.profile_dir.or(self.browser.profile_dir.take());
         self.browser.default_target = b.default_target.or(self.browser.default_target.take());
         self.browser.viewport = b.viewport.or(self.browser.viewport.take());
+
+        // Desktop: each field present in the project layer overrides global.
+        let d = other.desktop;
+        self.desktop.enabled = d.enabled.or(self.desktop.enabled);
+        self.desktop.snapshot_max_nodes = d.snapshot_max_nodes.or(self.desktop.snapshot_max_nodes);
 
         let n = other.noema;
         self.noema.enabled = n.enabled.or(self.noema.enabled);
@@ -2731,6 +2757,22 @@ mod tests {
         base.merge_from(over);
         assert!(base.browser.headless()); // kept
         assert_eq!(base.browser.executable.as_deref(), Some("/opt/chrome")); // merged
+    }
+
+    #[test]
+    fn desktop_config_defaults_and_merge() {
+        let d = crate::config::DesktopConfig::default();
+        assert!(d.enabled()); // absent -> default true
+        assert_eq!(d.snapshot_max_nodes(), 500);
+
+        // project layer field present overrides global; absent keeps global
+        let mut base: ZodeConfig =
+            serde_json::from_str(r#"{"desktop":{"enabled":true,"snapshotMaxNodes":500}}"#).unwrap();
+        let over: ZodeConfig =
+            serde_json::from_str(r#"{"desktop":{"enabled":false}}"#).unwrap();
+        base.merge_from(over);
+        assert!(!base.desktop.enabled()); // overridden
+        assert_eq!(base.desktop.snapshot_max_nodes(), 500); // kept
     }
 
     #[test]
