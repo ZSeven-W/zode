@@ -137,6 +137,20 @@ impl PermissionDialog {
         let Some(req) = &self.request else {
             return Vec::new();
         };
+        // External-agent trust requests carry a structured view — render it
+        // in full (never the 120-char generic summary): the user is deciding
+        // to delegate trust, so the whole surface must be visible.
+        if req.input.get("_kind").and_then(|k| k.as_str()) == Some("external-agent") {
+            let mut lines: Vec<Line<'static>> = vec![Line::from(req.summary()), Line::from("")];
+            for row in zode_core::approval::render_external_agent_view(&req.input).lines() {
+                lines.push(Line::styled(
+                    row.to_string(),
+                    Style::default().fg(theme.fg_subtle),
+                ));
+            }
+            lines.push(Line::from(""));
+            return lines;
+        }
         let mut lines = vec![Line::from(req.summary()), Line::from("")];
         if let Some(diff) = diff_from_tool_input(&req.input, &self.cwd, theme) {
             let truncated = diff.len() > MAX_PERMISSION_DIFF_LINES;
@@ -158,9 +172,20 @@ impl PermissionDialog {
     fn footer_lines(&self, theme: &Theme) -> (Vec<Line<'static>>, Vec<(u16, u16, Approval)>) {
         // Each action is a chip; the arrow-key/Enter highlight marks the active
         // one. The leading digit keeps the 1/2/3 direct-pick affordance.
+        // Trust-scope requests re-label "always": the grant lives only for
+        // this session (never persisted to permissions.allow).
+        let session_scoped = self
+            .request
+            .as_ref()
+            .is_some_and(|r| !r.scope.persist_allow_always());
+        let always_label = if session_scoped {
+            crate::tr("trust this session")
+        } else {
+            crate::tr("allow always")
+        };
         let labels = [
             format!("1 {}", crate::tr("allow once")),
-            format!("2 {}", crate::tr("allow always")),
+            format!("2 {always_label}"),
             format!("3 {}", crate::tr("deny")),
         ];
         let normal = Style::default()

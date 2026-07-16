@@ -1302,9 +1302,13 @@ impl TuiApp {
         let cwd = dialog.cwd().to_path_buf();
         if let Some(request) = dialog.take_request() {
             let tool = request.tool.clone();
+            // Scope gate: an external-agent trust grant (CarryFingerprintGrant
+            // etc.) is session-only — persisting it as a project tool allow
+            // would silently un-gate every future Task call.
+            let persistable = request.scope.persist_allow_always();
             let actual = if exact_live { approval } else { Approval::Deny };
             let respond_ok = request.respond(actual).is_ok();
-            if exact_live && respond_ok && approval == Approval::AllowAlways {
+            if exact_live && respond_ok && approval == Approval::AllowAlways && persistable {
                 self.persist_allow_always_at(&cwd, &tool);
             }
         }

@@ -143,8 +143,9 @@ impl StdinGate {
 }
 
 /// Multi-line rendering of an external-agent trust request for plain-text
-/// gates. Field names mirror the structured `_kind: "external-agent"` view.
-pub(crate) fn render_external_agent_view(input: &serde_json::Value) -> String {
+/// gates and the TUI card body. Field names mirror the structured
+/// `_kind: "external-agent"` view.
+pub fn render_external_agent_view(input: &serde_json::Value) -> String {
     let pick = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
     let env = input
         .get("_env")
