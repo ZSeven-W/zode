@@ -16,11 +16,51 @@ pub enum Approval {
     Deny,
 }
 
+/// What an approval AUTHORIZES — and therefore where an "always"-style
+/// answer may be persisted (spec v2.3 ADR-4). The TUI writes AllowAlways
+/// into project `permissions.allow` ONLY for `ProjectToolAllow`; the other
+/// scopes are caller-managed (CarryState) and never touch disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApprovalScope {
+    /// Classic tool gating (existing behavior; persistence allowed).
+    #[default]
+    ProjectToolAllow,
+    /// One call only; no "always" semantics at all.
+    SingleInvocation,
+    /// External-agent trust grant, bound to a fingerprint in CarryState.
+    /// AllowAlways here means "trust this agent for this session".
+    CarryFingerprintGrant,
+    /// External teammate hire: "authorize this teammate until the session
+    /// ends". AllowAlways-only or Deny; never persisted.
+    TeamMemberSession,
+}
+
+impl ApprovalScope {
+    /// May an AllowAlways answer be persisted into project permissions?
+    pub fn persist_allow_always(self) -> bool {
+        matches!(self, ApprovalScope::ProjectToolAllow)
+    }
+}
+
 /// Host-supplied approver. Headless uses [`StdinGate`]; the TUI supplies
 /// a queue-backed gate (Phase 05); `--yolo` uses [`BypassGate`].
 #[async_trait]
 pub trait ApprovalGate: Send + Sync + std::fmt::Debug {
     async fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval;
+
+    /// Scope-aware variant. Default delegates to [`Self::approve`] so
+    /// existing gates keep working; gates that render scopes differently
+    /// (TUI, stdin) override this. Callers passing a non-default scope MUST
+    /// use this method, never `approve` directly.
+    async fn approve_scoped(
+        &self,
+        tool: &str,
+        input: &serde_json::Value,
+        scope: ApprovalScope,
+    ) -> Approval {
+        let _ = scope;
+        self.approve(tool, input).await
+    }
 
     /// Whether this gate can actually put a question to a HUMAN. Auto-answering
     /// gates (yolo / bypass) must say `false` — consent-style questions, like
@@ -102,10 +142,86 @@ impl StdinGate {
     }
 }
 
+/// Multi-line rendering of an external-agent trust request for plain-text
+/// gates. Field names mirror the structured `_kind: "external-agent"` view.
+pub(crate) fn render_external_agent_view(input: &serde_json::Value) -> String {
+    let pick = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let env = input
+        .get("_env")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let mut out = String::new();
+    out.push_str(&format!("  agent:    {}\n", pick("_agent")));
+    out.push_str(&format!("  command:  {}\n", pick("_command")));
+    out.push_str(&format!("  cwd:      {}\n", pick("_cwd")));
+    out.push_str(&format!(
+        "  env:      {}\n",
+        if env.is_empty() {
+            "(base set only)"
+        } else {
+            &env
+        }
+    ));
+    out.push_str(&format!("  sandbox:  {}\n", pick("_sandbox")));
+    out.push_str(&format!("  version:  {}\n", pick("_version")));
+    if !pick("_restored").is_empty() {
+        out.push_str(&format!("  restored: {}\n", pick("_restored")));
+    }
+    out.push_str(
+        "  NOTE: approving delegates trust — this process acts autonomously in\n  the cwd and is NOT gated per-operation by zode.",
+    );
+    out
+}
+
 #[async_trait]
 impl ApprovalGate for StdinGate {
     fn interactive(&self) -> bool {
         true
+    }
+
+    async fn approve_scoped(
+        &self,
+        tool: &str,
+        input: &serde_json::Value,
+        scope: ApprovalScope,
+    ) -> Approval {
+        let is_external = input.get("_kind").and_then(|k| k.as_str()) == Some("external-agent");
+        if !is_external {
+            return self.approve(tool, input).await;
+        }
+        let _serialize = self.prompt_lock.lock().await;
+        let tool = tool.to_string();
+        let body = render_external_agent_view(input);
+        tokio::task::spawn_blocking(move || {
+            let mut out = std::io::stderr();
+            let _ = writeln!(out, "\n⚠ External agent trust request ({tool}):");
+            let _ = writeln!(out, "{body}");
+            let options = match scope {
+                ApprovalScope::TeamMemberSession => {
+                    "  Authorize this teammate for the session? [s]ession / [N]o: "
+                }
+                _ => "  Allow? [o]nce / [s]ession / [N]o: ",
+            };
+            let _ = write!(out, "{options}");
+            let _ = out.flush();
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() {
+                return Approval::Deny;
+            }
+            match line.trim().to_lowercase().as_str() {
+                "o" | "once" if scope != ApprovalScope::TeamMemberSession => Approval::AllowOnce,
+                "s" | "session" => Approval::AllowAlways,
+                _ => Approval::Deny,
+            }
+        })
+        .await
+        .unwrap_or(Approval::Deny)
     }
 
     async fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval {
@@ -145,6 +261,13 @@ pub(crate) fn parse_answer(s: &str) -> Option<Approval> {
 /// One-line summary of a tool call for the approval prompt.
 pub(crate) fn summarize_input(tool: &str, input: &serde_json::Value) -> String {
     let pick = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    if pick("_kind") == "external-agent" {
+        return format!(
+            "run external agent '{}': {}",
+            pick("_agent"),
+            pick("_command")
+        );
+    }
     match tool {
         "Bash" | "BashRun" => format!("$ {}", pick("command")),
         "FileWrite" | "FileEdit" | "Remove" | "Move" | "Mkdir" => {
@@ -254,6 +377,9 @@ pub struct ApprovalRequest {
     /// This is mutually exclusive with [`Self::turn_id`], so equal numeric
     /// generations from the two domains can never be confused.
     pub local_op_id: Option<u64>,
+    /// What this approval authorizes — gates render options per scope, and
+    /// the TUI persists AllowAlways only for [`ApprovalScope::ProjectToolAllow`].
+    pub scope: ApprovalScope,
     sender: oneshot::Sender<Approval>,
 }
 
@@ -392,6 +518,18 @@ impl ApprovalQueue {
         input: &serde_json::Value,
         source: Option<String>,
     ) -> Approval {
+        self.request_scoped(tool, input, ApprovalScope::ProjectToolAllow, source)
+            .await
+    }
+
+    /// Scope-carrying variant of [`Self::request`].
+    pub async fn request_scoped(
+        &self,
+        tool: &str,
+        input: &serde_json::Value,
+        scope: ApprovalScope,
+        source: Option<String>,
+    ) -> Approval {
         let (tx, rx) = oneshot::channel();
         let (turn_id, local_op_id) = self.owner_for_source(source.as_deref());
         let req = ApprovalRequest {
@@ -400,6 +538,7 @@ impl ApprovalQueue {
             source,
             turn_id,
             local_op_id,
+            scope,
             sender: tx,
         };
         if self.sender.send(req).is_err() {
@@ -436,6 +575,17 @@ impl ApprovalGate for QueueGate {
 
     async fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval {
         self.queue.request(tool, input, self.label.clone()).await
+    }
+
+    async fn approve_scoped(
+        &self,
+        tool: &str,
+        input: &serde_json::Value,
+        scope: ApprovalScope,
+    ) -> Approval {
+        self.queue
+            .request_scoped(tool, input, scope, self.label.clone())
+            .await
     }
 }
 
@@ -744,6 +894,64 @@ mod tests {
         assert_eq!(request.local_op_id, None);
         request.respond(Approval::Deny).unwrap();
         assert_eq!(pending.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn scoped_request_carries_scope_to_receiver() {
+        let (queue, mut rx) = approval_queue();
+        let q = queue.clone();
+        let pending = tokio::spawn(async move {
+            q.request_scoped(
+                "Task",
+                &json!({}),
+                ApprovalScope::CarryFingerprintGrant,
+                None,
+            )
+            .await
+        });
+        let req = rx.next().await.unwrap();
+        assert_eq!(req.scope, ApprovalScope::CarryFingerprintGrant);
+        req.respond(Approval::AllowOnce).unwrap();
+        assert_eq!(pending.await.unwrap(), Approval::AllowOnce);
+    }
+
+    #[tokio::test]
+    async fn plain_request_defaults_to_project_tool_allow_scope() {
+        let (queue, mut rx) = approval_queue();
+        let q = queue.clone();
+        tokio::spawn(async move { q.request("Bash", &json!({}), None).await });
+        let req = rx.next().await.unwrap();
+        assert_eq!(req.scope, ApprovalScope::ProjectToolAllow);
+        assert!(req.scope.persist_allow_always());
+        assert!(!ApprovalScope::CarryFingerprintGrant.persist_allow_always());
+        req.respond(Approval::Deny).unwrap();
+    }
+
+    #[test]
+    fn external_agent_summary_is_not_generic_truncation() {
+        let input = json!({"_kind":"external-agent","_agent":"codex",
+            "_command":"/usr/local/bin/codex exec --json --full-auto","_cwd":"/work"});
+        let s = summarize_input("Task", &input);
+        assert!(s.contains("codex") && s.contains("--full-auto"));
+        assert!(!s.ends_with('…'));
+    }
+
+    #[test]
+    fn external_agent_view_renders_all_fields() {
+        let input = json!({"_kind":"external-agent","_agent":"codex",
+            "_command":"/usr/local/bin/codex exec","_cwd":"/work",
+            "_env":["CODEX_TOKEN"],"_sandbox":"workspace-write","_version":"未验证"});
+        let v = render_external_agent_view(&input);
+        for needle in [
+            "codex",
+            "/work",
+            "CODEX_TOKEN",
+            "workspace-write",
+            "未验证",
+            "delegates trust",
+        ] {
+            assert!(v.contains(needle), "missing {needle} in:\n{v}");
+        }
     }
 
     #[test]
