@@ -6,6 +6,7 @@
 
 pub mod actor;
 pub mod backend;
+pub mod gate;
 #[cfg(test)]
 pub mod mock;
 pub mod screenshot;
