@@ -4,6 +4,7 @@
 //! for actor threading, generation-bound identity, and permission-laddered
 //! reads (see docs/superpowers/specs/2026-07-11-desktop-control-design.md).
 
+pub mod actor;
 pub mod backend;
 #[cfg(test)]
 pub mod mock;
