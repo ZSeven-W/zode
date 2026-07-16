@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"sess-0001","model":"claude-x"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"正在为王小明重构模块"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"src/a.rs"}}]}}
+{"type":"result","subtype":"success","result":"完成：已更新 src/a.rs","session_id":"sess-0001","usage":{"input_tokens":120,"output_tokens":45},"total_cost_usd":0.01,"model":"claude-x"}

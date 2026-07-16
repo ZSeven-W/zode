@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"th-0001"}
+{"type":"item.completed","item":{"type":"command_execution","command":"cargo test"}}
+{"type":"item.completed","item":{"type":"agent_message","text":"测试全部通过"}}
+{"type":"turn.completed","usage":{"input_tokens":80,"output_tokens":30}}
