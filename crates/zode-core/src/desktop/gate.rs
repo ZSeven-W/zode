@@ -91,7 +91,10 @@ mod tests {
 
     #[tokio::test]
     async fn gate_injects_backend_and_registers_flag() {
-        let s = DesktopSession::new(DesktopConfig::default(), crate::desktop::mock::mock_factory());
+        let s = DesktopSession::new(
+            DesktopConfig::default(),
+            crate::desktop::mock::mock_factory(),
+        );
         let t = desktop_gated(Arc::new(Echo), Arc::new(YesGate), s.clone());
         let ctx = agent::tool::ToolUseContext::new(std::env::temp_dir());
         let out = t.call(&ctx, json!({"action":"click"})).await.unwrap();

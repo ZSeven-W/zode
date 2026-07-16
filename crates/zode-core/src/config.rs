@@ -2768,8 +2768,7 @@ mod tests {
         // project layer field present overrides global; absent keeps global
         let mut base: ZodeConfig =
             serde_json::from_str(r#"{"desktop":{"enabled":true,"snapshotMaxNodes":500}}"#).unwrap();
-        let over: ZodeConfig =
-            serde_json::from_str(r#"{"desktop":{"enabled":false}}"#).unwrap();
+        let over: ZodeConfig = serde_json::from_str(r#"{"desktop":{"enabled":false}}"#).unwrap();
         base.merge_from(over);
         assert!(!base.desktop.enabled()); // overridden
         assert_eq!(base.desktop.snapshot_max_nodes(), 500); // kept

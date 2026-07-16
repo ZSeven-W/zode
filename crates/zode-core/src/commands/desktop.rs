@@ -9,7 +9,9 @@ pub enum DesktopCommand {
 pub fn map_subcommand(args: &str) -> Result<DesktopCommand, String> {
     match args.trim() {
         "" | "status" => Ok(DesktopCommand::Status),
-        other => Err(format!("unknown subcommand {other:?}; usage: /desktop [status]")),
+        other => Err(format!(
+            "unknown subcommand {other:?}; usage: /desktop [status]"
+        )),
     }
 }
 

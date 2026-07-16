@@ -355,7 +355,11 @@ impl Tool for DesktopScreenshotTool {
             .resolve_window(app, arg_str(&input, "window")?)
             .map_err(to_agent_err)?;
         let lease = self.deps.session.lease().await.map_err(to_agent_err)?;
-        let shot = lease.backend().screenshot(&win).await.map_err(to_agent_err)?;
+        let shot = lease
+            .backend()
+            .screenshot(&win)
+            .await
+            .map_err(to_agent_err)?;
         drop(lease); // release the input lock before disk I/O
         save_screenshot_artifact(&self.deps.shots_dir, &shot.bytes)
     }
@@ -370,8 +374,10 @@ mod tests {
 
     fn deps() -> (DesktopToolDeps, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let session =
-            DesktopSession::new(DesktopConfig::default(), crate::desktop::mock::mock_factory());
+        let session = DesktopSession::new(
+            DesktopConfig::default(),
+            crate::desktop::mock::mock_factory(),
+        );
         session.scopes().grant_subsystem();
         session.scopes().allow_app("com.apple.TextEdit");
         (
@@ -402,7 +408,15 @@ mod tests {
             SafetyClass::Mutating
         );
         for a in [
-            "launch", "focus", "click", "toggle", "expand", "scroll", "set_value", "type", "key",
+            "launch",
+            "focus",
+            "click",
+            "toggle",
+            "expand",
+            "scroll",
+            "set_value",
+            "type",
+            "key",
         ] {
             assert!(action_family(a).is_some(), "unmapped action {a}");
         }
@@ -425,8 +439,10 @@ mod tests {
         assert!(snap["outline"].as_str().unwrap().contains("[e1]"));
 
         // subsystem consent required: a fresh session without consent errors
-        let s2 =
-            DesktopSession::new(DesktopConfig::default(), crate::desktop::mock::mock_factory());
+        let s2 = DesktopSession::new(
+            DesktopConfig::default(),
+            crate::desktop::mock::mock_factory(),
+        );
         let d2 = DesktopToolDeps {
             session: s2,
             shots_dir: d.shots_dir.clone(),

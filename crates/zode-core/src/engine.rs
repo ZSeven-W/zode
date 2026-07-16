@@ -1011,12 +1011,14 @@ impl ZodeEngine {
                 deps.clone(),
             )));
             for tool in [
-                Arc::new(crate::desktop::tools::DesktopActTool::new(deps.clone()))
-                    as Arc<dyn Tool>,
+                Arc::new(crate::desktop::tools::DesktopActTool::new(deps.clone())) as Arc<dyn Tool>,
                 Arc::new(crate::desktop::tools::DesktopScreenshotTool::new(deps)),
             ] {
-                let gated =
-                    crate::desktop::gate::desktop_gated(tool, gate.clone(), desktop_session.clone());
+                let gated = crate::desktop::gate::desktop_gated(
+                    tool,
+                    gate.clone(),
+                    desktop_session.clone(),
+                );
                 desktop_mutating_names.push(gated.name().to_string());
                 base.register(gated);
             }

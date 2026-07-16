@@ -9,9 +9,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use crate::config::DesktopConfig;
 
 use super::actor::ActorHandle;
-use super::backend::{
-    AppId, DesktopBackend, DesktopBackendFactory, DesktopError, WindowId,
-};
+use super::backend::{AppId, DesktopBackend, DesktopBackendFactory, DesktopError, WindowId};
 
 /// Default per-session actor replacement cap before the breaker trips.
 const DEFAULT_MAX_REPLACEMENTS: u64 = 3;
@@ -66,7 +64,10 @@ impl PermissionScopes {
             .contains(&(exe.to_string(), family))
     }
     pub fn grant(&self, exe: &str, family: ActionFamily) {
-        self.grants.lock().unwrap().insert((exe.to_string(), family));
+        self.grants
+            .lock()
+            .unwrap()
+            .insert((exe.to_string(), family));
     }
 }
 
@@ -175,7 +176,14 @@ impl DesktopSession {
                 self.actor.generation(),
                 self.actor.is_tripped()
             ),
-            format!("always_allow={}", if grants.is_empty() { "none".into() } else { grants.join(",") }),
+            format!(
+                "always_allow={}",
+                if grants.is_empty() {
+                    "none".into()
+                } else {
+                    grants.join(",")
+                }
+            ),
         ]
     }
 }

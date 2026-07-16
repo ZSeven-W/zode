@@ -160,15 +160,24 @@ pub enum DesktopError {
     Protocol(String),
     Timeout(String),
     Dead(String),
-    StaleRef { reason: String },
-    StaleTarget { reason: String },
-    PartialInput { characters_sent: usize, reason: String },
+    StaleRef {
+        reason: String,
+    },
+    StaleTarget {
+        reason: String,
+    },
+    PartialInput {
+        characters_sent: usize,
+        reason: String,
+    },
     PartialKeyInput {
         combos_sent: usize,
         cleanup_ok: bool,
         reason: String,
     },
-    Ambiguous { candidates: Vec<String> },
+    Ambiguous {
+        candidates: Vec<String>,
+    },
 }
 
 impl fmt::Display for DesktopError {
@@ -202,7 +211,11 @@ impl fmt::Display for DesktopError {
                 "partial key input ({combos_sent} combos sent, cleanup_ok={cleanup_ok}): {reason}"
             ),
             DesktopError::Ambiguous { candidates } => {
-                write!(f, "ambiguous desktop target; candidates: {}", candidates.join(", "))
+                write!(
+                    f,
+                    "ambiguous desktop target; candidates: {}",
+                    candidates.join(", ")
+                )
             }
         }
     }
