@@ -985,6 +985,43 @@ impl ZodeEngine {
             }
         }
 
+        // Built-in desktop control (desktop_*). Disable via `tools:desktop`.
+        // desktop_read is permission-laddered but registered un-gated (its own
+        // consent/allowlist checks run inside the tool). The mutating tools
+        // (act/screenshot) are pre-wrapped in `desktop_gated` HERE, and their
+        // names are collected into `desktop_mutating_names` so the derived
+        // allow set below never double-gates them.
+        let mut desktop_mutating_names: Vec<String> = Vec::new();
+        if cfg.desktop.enabled() {
+            // Per-engine session (M1: not shared across tabs — the /desktop
+            // panel is M4). Uses the platform factory (Unsupported until the
+            // macOS AX backend lands in M1 Task 12).
+            let desktop_session = crate::desktop::session::DesktopSession::new(
+                cfg.desktop.clone(),
+                crate::desktop::platform_factory(),
+            );
+            let shots_dir = crate::config::ConfigManager::config_dir()
+                .unwrap_or_else(|_| PathBuf::from(".zode"))
+                .join("screenshots");
+            let deps = crate::desktop::tools::DesktopToolDeps {
+                session: desktop_session.clone(),
+                shots_dir,
+            };
+            base.register(Arc::new(crate::desktop::tools::DesktopReadTool::new(
+                deps.clone(),
+            )));
+            for tool in [
+                Arc::new(crate::desktop::tools::DesktopActTool::new(deps.clone()))
+                    as Arc<dyn Tool>,
+                Arc::new(crate::desktop::tools::DesktopScreenshotTool::new(deps)),
+            ] {
+                let gated =
+                    crate::desktop::gate::desktop_gated(tool, gate.clone(), desktop_session.clone());
+                desktop_mutating_names.push(gated.name().to_string());
+                base.register(gated);
+            }
+        }
+
         // Skills: load the three-level SKILL.md tree. Disabled skills are
         // dropped from the registry + index, but the full list is kept for the
         // /plugin picker.
@@ -1185,6 +1222,12 @@ impl ZodeEngine {
             ] {
                 mutating_allow.push(name.to_string());
             }
+        }
+        // desktop_* mutating tools are pre-wrapped via desktop_gated() above.
+        // Derive the allow set from the ACTUAL registered wrapper names so it
+        // can never drift from what was registered (spec §注册不变量).
+        for name in &desktop_mutating_names {
+            mutating_allow.push(name.clone());
         }
         let mut gated = wrap_mutating_tools(base, &gate, &mutating_allow, &cfg.permissions.ask);
 
@@ -4482,6 +4525,38 @@ mod tests {
             "browser_tabs",
             "browser_upload",
         ] {
+            let tool = eng.tools.get(t).unwrap_or_else(|| panic!("missing {t}"));
+            assert_eq!(tool.safety_class(), SafetyClass::Mutating);
+        }
+    }
+
+    #[tokio::test]
+    async fn desktop_tools_registered_with_derived_allow_set() {
+        // DesktopConfig.enabled() defaults true (test_cfg() leaves it unset).
+        let dir = tempfile::tempdir().unwrap();
+        let eng = ZodeEngine::assemble(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-06-13",
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
+        for t in ["desktop_read", "desktop_act", "desktop_screenshot"] {
+            assert!(names.iter().any(|n| n == t), "missing {t}: {names:?}");
+        }
+        // desktop_read stays ReadOnly and un-gated (its own consent/allowlist
+        // checks run inside); the mutating pair is pre-wrapped via desktop_gated
+        // and NOT double-gated by wrap_mutating_tools.
+        let read = eng.tools.get("desktop_read").expect("desktop_read");
+        assert_eq!(read.safety_class(), SafetyClass::ReadOnly);
+        for t in ["desktop_act", "desktop_screenshot"] {
             let tool = eng.tools.get(t).unwrap_or_else(|| panic!("missing {t}"));
             assert_eq!(tool.safety_class(), SafetyClass::Mutating);
         }

@@ -218,6 +218,21 @@ pub trait DesktopBackendFactory: Send + Sync + std::fmt::Debug {
     async fn create(&self) -> Result<std::sync::Arc<dyn DesktopBackend>, DesktopError>;
 }
 
+/// Fallback factory for platforms/builds without a real backend yet. Creation
+/// fails with a clear message rather than panicking, so enabling the subsystem
+/// on an unsupported platform degrades gracefully.
+#[derive(Debug, Default)]
+pub struct UnsupportedDesktopFactory;
+
+#[async_trait]
+impl DesktopBackendFactory for UnsupportedDesktopFactory {
+    async fn create(&self) -> Result<std::sync::Arc<dyn DesktopBackend>, DesktopError> {
+        Err(DesktopError::Dead(
+            "desktop control is not available on this platform in this build".into(),
+        ))
+    }
+}
+
 /// Actor-client backend: `Send + Sync + Debug` so `Arc<dyn DesktopBackend>`
 /// can be shared; the implementation forwards commands to a platform thread.
 #[async_trait]

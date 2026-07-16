@@ -14,6 +14,13 @@ pub mod session;
 pub mod tools;
 
 pub use backend::{
-    AppId, AppInfo, AppLaunchId, DesktopBackend, DesktopError, ElementActionKind, ElementRef,
-    Screenshot, SnapshotResult, WindowId, WindowInfo,
+    AppId, AppInfo, AppLaunchId, DesktopBackend, DesktopBackendFactory, DesktopError,
+    ElementActionKind, ElementRef, Screenshot, SnapshotResult, WindowId, WindowInfo,
 };
+
+/// The platform backend factory for this build. Every platform currently
+/// returns the graceful `Unsupported` fallback; Task 12 flips macOS to the
+/// real AX factory (`ax::AxFactory`).
+pub fn platform_factory() -> std::sync::Arc<dyn DesktopBackendFactory> {
+    std::sync::Arc::new(backend::UnsupportedDesktopFactory)
+}
