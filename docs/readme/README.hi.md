@@ -47,7 +47,7 @@
 - **Browser control**: `browser_*` tools managed Chromium या Chrome bridge extension के जरिए आपके real Chrome profile को control कर सकते हैं।
 - **Non-blocking permissions**: mutating tools allow once / always / deny approval से गुजरते हैं, और approval prompt input को block नहीं करता।
 - **OS sandbox default on**: shell commands macOS `sandbox-exec` या Linux `bwrap` में चलते हैं; outbound network default रूप से denied है।
-- **Full-screen TUI**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, themes, settings/help overlays और 15-language UI (`/language`).
+- **Full-screen TUI**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, 11 built-in themes, settings/help overlays और 15-language UI (`/language`).
 - **Multi-session tabs**: `Ctrl+T` से कई isolated conversations साथ-साथ चलाएँ और पुरानी sessions resume करें।
 - **Sub-agents और workflows**: Task tool से scoped work delegate करें और `/agents`, `/workflows` से manage करें।
 - **Skills, MCP और hooks**: `SKILL.md` packs load करें, MCP servers connect करें और tool events पर external scripts चलाएँ।
@@ -201,6 +201,7 @@ Zode `tools:browser` group देता है: screenshots/DOM/logs read कर
 | `/help` | Commands और keybindings |
 | `/connect` | Provider connect/switch |
 | `/model [id]` | Active model show/set |
+| `/theme [id]` | TUI theme बदलें (`catppuccin-mocha`, `aurora-forge`, `ember-atelier`, `sakura-paper`, `arctic-day`, `lavender-mist`, `citrus-grove`, `verdant-signal`, `cyberpunk`, `minimal`, `hacker`) |
 | `/sessions`, `/resume` | Sessions resume |
 | `/browser ...` | Browser control |
 | `/tasks` | Background tasks |

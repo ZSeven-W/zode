@@ -47,7 +47,7 @@
 - **瀏覽器控制**：內建 `browser_*` 工具可驅動受管 Chromium，或透過 Chrome bridge 擴充功能控制你正在使用的 Chrome。
 - **非阻塞權限**：有副作用的工具都會經過 allow once / always / deny 審批，提示內嵌顯示，不會阻止你繼續輸入。
 - **預設啟用 OS 沙箱**：shell 命令在 macOS `sandbox-exec` 或 Linux `bwrap` 中執行，預設禁止對外網路。
-- **全螢幕 TUI**：串流 Markdown、語法高亮、diff 預覽、斜線命令補全、歷史提示、主題、設定與說明浮層，以及 15 種 UI 語言（`/language`）。
+- **全螢幕 TUI**：串流 Markdown、語法高亮、diff 預覽、斜線命令補全、歷史提示、11 套內建主題、設定與說明浮層，以及 15 種 UI 語言（`/language`）。
 - **多會話分頁**：用 `Ctrl+T` 並排執行多個隔離對話，也可恢復歷史會話。
 - **子代理與工作流**：透過 Task 工具委派範圍明確的工作，並用 `/agents`、`/workflows` 管理。
 - **Skills、MCP 與 hooks**：按需載入 `SKILL.md`，連接 MCP server，並在工具事件上執行外部腳本。
@@ -203,6 +203,7 @@ Zode 提供 `tools:browser` 工具組，支援讀取截圖/DOM/log、導航、�
 | `/help` | 命令與快捷鍵說明 |
 | `/connect` | 連接並切換目前 provider |
 | `/model [id]` | 查看或設定目前模型 |
+| `/theme [id]` | 切換主題（`catppuccin-mocha`、`aurora-forge`、`ember-atelier`、`sakura-paper`、`arctic-day`、`lavender-mist`、`citrus-grove`、`verdant-signal`、`cyberpunk`、`minimal`、`hacker`） |
 | `/sessions`, `/resume` | 恢復歷史會話 |
 | `/browser ...` | 瀏覽器控制 |
 | `/tasks` | 背景工作 |

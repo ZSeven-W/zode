@@ -47,7 +47,7 @@
 - **ควบคุม browser**: เครื่องมือ `browser_*` ควบคุม managed Chromium หรือ Chrome profile จริงผ่าน Chrome bridge extension
 - **Permission ไม่ block งาน**: เครื่องมือที่มี side effect ต้องผ่าน allow once / always / deny และ approval prompt อยู่ inline
 - **เปิด OS sandbox เป็นค่าเริ่มต้น**: shell commands รันใน macOS `sandbox-exec` หรือ Linux `bwrap` โดย outbound network ถูก deny เป็นค่าเริ่มต้น
-- **TUI เต็มจอ**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, themes, settings/help overlays และ UI 15 ภาษา (`/language`)
+- **TUI เต็มจอ**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, ธีมในตัว 11 แบบ, settings/help overlays และ UI 15 ภาษา (`/language`)
 - **Multi-session tabs**: รันหลาย conversation แบบ isolated ด้วย `Ctrl+T` และ resume sessions เก่าได้
 - **Sub-agents และ workflows**: delegate งานที่มี scope ชัดเจนด้วย Task tool แล้วจัดการผ่าน `/agents` และ `/workflows`
 - **Skills, MCP และ hooks**: โหลด `SKILL.md`, เชื่อมต่อ MCP servers และรัน external scripts ตอนเกิด tool events
@@ -201,6 +201,7 @@ Zode มี `tools:browser` group สำหรับอ่าน screenshots/DOM
 | `/help` | Commands และ keybindings |
 | `/connect` | Connect/switch provider |
 | `/model [id]` | Show/set active model |
+| `/theme [id]` | สลับธีม (`catppuccin-mocha`, `aurora-forge`, `ember-atelier`, `sakura-paper`, `arctic-day`, `lavender-mist`, `citrus-grove`, `verdant-signal`, `cyberpunk`, `minimal`, `hacker`) |
 | `/sessions`, `/resume` | Resume sessions |
 | `/browser ...` | Browser control |
 | `/tasks` | Background tasks |

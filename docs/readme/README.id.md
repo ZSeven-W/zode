@@ -47,7 +47,7 @@
 - **Kontrol browser**: tool `browser_*` dapat mengendalikan managed Chromium atau profil Chrome asli melalui ekstensi Chrome bridge.
 - **Permission non-blocking**: tool yang mengubah state melewati allow once / always / deny, dengan prompt approval inline.
 - **OS sandbox aktif default**: perintah shell berjalan di `sandbox-exec` macOS atau `bwrap` Linux, dan outbound network ditolak secara default.
-- **TUI layar penuh**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, themes, settings/help overlays, dan UI 15 bahasa (`/language`).
+- **TUI layar penuh**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, 11 tema bawaan, settings/help overlays, dan UI 15 bahasa (`/language`).
 - **Tab multi-session**: jalankan beberapa percakapan terisolasi dengan `Ctrl+T` dan resume session lama.
 - **Sub-agents dan workflows**: delegasikan pekerjaan terarah dengan Task tool, lalu kelola lewat `/agents` dan `/workflows`.
 - **Skills, MCP, dan hooks**: muat paket `SKILL.md`, hubungkan MCP server, dan jalankan script eksternal pada event tool.
@@ -201,6 +201,7 @@ Zode memiliki grup `tools:browser` untuk membaca screenshot/DOM/log, navigasi, k
 | `/help` | Bantuan command dan keybinding |
 | `/connect` | Connect dan ganti provider |
 | `/model [id]` | Lihat atau set model aktif |
+| `/theme [id]` | Ganti tema (`catppuccin-mocha`, `aurora-forge`, `ember-atelier`, `sakura-paper`, `arctic-day`, `lavender-mist`, `citrus-grove`, `verdant-signal`, `cyberpunk`, `minimal`, `hacker`) |
 | `/sessions`, `/resume` | Resume session |
 | `/browser ...` | Kontrol browser |
 | `/tasks` | Background tasks |

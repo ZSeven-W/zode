@@ -47,7 +47,7 @@
 - **Browser control**: công cụ `browser_*` điều khiển managed Chromium hoặc Chrome profile thật thông qua Chrome bridge extension.
 - **Permission không block**: mọi mutating tool đi qua allow once / always / deny, với approval prompt inline.
 - **OS sandbox bật mặc định**: shell commands chạy trong macOS `sandbox-exec` hoặc Linux `bwrap`, outbound network bị từ chối theo mặc định.
-- **TUI toàn màn hình**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, themes, settings/help overlays và UI 15 ngôn ngữ (`/language`).
+- **TUI toàn màn hình**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, 11 chủ đề tích hợp, settings/help overlays và UI 15 ngôn ngữ (`/language`).
 - **Multi-session tabs**: chạy nhiều conversation tách biệt bằng `Ctrl+T` và resume session cũ.
 - **Sub-agents và workflows**: delegate công việc có scope rõ bằng Task tool, quản lý qua `/agents` và `/workflows`.
 - **Skills, MCP và hooks**: load package `SKILL.md`, kết nối MCP servers và chạy external scripts trên tool events.
@@ -201,6 +201,7 @@ Zode có group `tools:browser` để đọc screenshots/DOM/logs, navigate/click
 | `/help` | Commands và keybindings |
 | `/connect` | Connect/switch provider |
 | `/model [id]` | Show/set active model |
+| `/theme [id]` | Đổi chủ đề (`catppuccin-mocha`, `aurora-forge`, `ember-atelier`, `sakura-paper`, `arctic-day`, `lavender-mist`, `citrus-grove`, `verdant-signal`, `cyberpunk`, `minimal`, `hacker`) |
 | `/sessions`, `/resume` | Resume sessions |
 | `/browser ...` | Browser control |
 | `/tasks` | Background tasks |

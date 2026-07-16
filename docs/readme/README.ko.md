@@ -47,7 +47,7 @@
 - **브라우저 제어**: 내장 `browser_*` 도구로 managed Chromium 을 제어하거나 Chrome bridge extension 으로 현재 Chrome profile 을 제어합니다.
 - **비차단 권한**: 변경 작업은 allow once / always / deny 승인을 거치며, 승인 prompt 는 입력을 막지 않습니다.
 - **OS sandbox 기본 활성화**: shell 명령은 macOS `sandbox-exec` 또는 Linux `bwrap` 안에서 실행되며 outbound network 는 기본 차단됩니다.
-- **전체 화면 TUI**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, themes, settings/help overlays, 15개 UI 언어(`/language`).
+- **전체 화면 TUI**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, 11개 내장 테마, settings/help overlays, 15개 UI 언어(`/language`).
 - **멀티 세션 tabs**: `Ctrl+T` 로 여러 isolated conversation 을 나란히 실행하고 과거 session 을 resume 할 수 있습니다.
 - **Sub-agents 및 workflows**: Task tool 로 scope 가 명확한 작업을 위임하고 `/agents`, `/workflows` 로 관리합니다.
 - **Skills, MCP, hooks**: `SKILL.md` 를 필요할 때 로드하고 MCP server 를 연결하며 tool event 에 외부 script 를 실행합니다.
@@ -201,6 +201,7 @@ Zode 는 `tools:browser` group 을 제공하며 screenshot/DOM/log 읽기, navig
 | `/help` | command 와 keybinding |
 | `/connect` | provider 연결 및 전환 |
 | `/model [id]` | active model 표시/설정 |
+| `/theme [id]` | 테마 전환 (`catppuccin-mocha`, `aurora-forge`, `ember-atelier`, `sakura-paper`, `arctic-day`, `lavender-mist`, `citrus-grove`, `verdant-signal`, `cyberpunk`, `minimal`, `hacker`) |
 | `/sessions`, `/resume` | session 복원 |
 | `/browser ...` | browser control |
 | `/tasks` | background tasks |

@@ -47,7 +47,7 @@
 - **Controle de navegador**: ferramentas `browser_*` controlam um Chromium gerenciado ou seu perfil real do Chrome via extensão Chrome bridge.
 - **Permissões sem bloqueio**: ferramentas com efeitos colaterais passam por allow once / always / deny, com prompt inline.
 - **Sandbox do OS por padrão**: comandos shell rodam sob `sandbox-exec` no macOS ou `bwrap` no Linux, com rede de saída negada por padrão.
-- **TUI em tela cheia**: Markdown em streaming, syntax highlighting, diff preview, slash-command autocomplete, histórico, temas, overlays de settings/help e UI em 15 idiomas (`/language`).
+- **TUI em tela cheia**: Markdown em streaming, syntax highlighting, diff preview, slash-command autocomplete, histórico, 11 temas integrados, overlays de settings/help e UI em 15 idiomas (`/language`).
 - **Abas multi-sessão**: rode conversas isoladas em paralelo com `Ctrl+T` e retome sessões anteriores.
 - **Sub-agents e workflows**: delegue tarefas bem delimitadas com a ferramenta Task e gerencie com `/agents` e `/workflows`.
 - **Skills, MCP e hooks**: carregue pacotes `SKILL.md`, conecte servidores MCP e execute scripts externos em eventos de ferramentas.
@@ -201,6 +201,7 @@ Zode inclui o grupo `tools:browser` para ler screenshots/DOM/logs, navegar, clic
 | `/help` | Ajuda de comandos e atalhos |
 | `/connect` | Conectar e alternar provider |
 | `/model [id]` | Mostrar ou definir modelo ativo |
+| `/theme [id]` | Alterar tema (`catppuccin-mocha`, `aurora-forge`, `ember-atelier`, `sakura-paper`, `arctic-day`, `lavender-mist`, `citrus-grove`, `verdant-signal`, `cyberpunk`, `minimal`, `hacker`) |
 | `/sessions`, `/resume` | Retomar sessões |
 | `/browser ...` | Controle do navegador |
 | `/tasks` | Tarefas em segundo plano |

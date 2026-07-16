@@ -47,7 +47,7 @@
 - **Browser control**: `browser_*` araçları managed Chromium'u veya Chrome bridge extension ile gerçek Chrome profilinizi yönetir.
 - **Non-blocking permissions**: Mutating tools allow once / always / deny onayından geçer; approval prompt yazmaya devam etmenizi engellemez.
 - **OS sandbox varsayılan açık**: Shell komutları macOS `sandbox-exec` veya Linux `bwrap` içinde çalışır; outbound network varsayılan olarak kapalıdır.
-- **Full-screen TUI**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, themes, settings/help overlays ve 15-language UI (`/language`).
+- **Full-screen TUI**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, 11 yerleşik tema, settings/help overlays ve 15-language UI (`/language`).
 - **Multi-session tabs**: `Ctrl+T` ile izole conversation'ları paralel çalıştırın ve geçmiş sessions'ı resume edin.
 - **Sub-agents ve workflows**: Task tool ile scope'u net işleri delege edin, `/agents` ve `/workflows` ile yönetin.
 - **Skills, MCP ve hooks**: `SKILL.md` paketlerini yükleyin, MCP servers bağlayın ve tool event'lerinde external scripts çalıştırın.
@@ -201,6 +201,7 @@ Zode `tools:browser` group sunar: screenshots/DOM/logs okuma, navigate/click/typ
 | `/help` | Commands ve keybindings |
 | `/connect` | Provider connect/switch |
 | `/model [id]` | Active model show/set |
+| `/theme [id]` | Temayı değiştir (`catppuccin-mocha`, `aurora-forge`, `ember-atelier`, `sakura-paper`, `arctic-day`, `lavender-mist`, `citrus-grove`, `verdant-signal`, `cyberpunk`, `minimal`, `hacker`) |
 | `/sessions`, `/resume` | Sessions resume |
 | `/browser ...` | Browser control |
 | `/tasks` | Background tasks |

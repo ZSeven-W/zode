@@ -47,7 +47,7 @@
 - **Управление браузером**: инструменты `browser_*` управляют managed Chromium или реальным профилем Chrome через расширение Chrome bridge.
 - **Неблокирующие разрешения**: все mutating tools проходят allow once / always / deny, а prompt одобрения не мешает продолжать ввод.
 - **OS sandbox по умолчанию**: shell-команды запускаются через `sandbox-exec` на macOS или `bwrap` на Linux; исходящая сеть по умолчанию запрещена.
-- **Полноэкранная TUI**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, history, themes, settings/help overlays и UI на 15 языках (`/language`).
+- **Полноэкранная TUI**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, history, 11 встроенных тем, settings/help overlays и UI на 15 языках (`/language`).
 - **Multi-session tabs**: запускайте несколько изолированных диалогов через `Ctrl+T` и возобновляйте прошлые sessions.
 - **Sub-agents и workflows**: делегируйте ограниченные задачи через Task tool и управляйте ими через `/agents` и `/workflows`.
 - **Skills, MCP и hooks**: загружайте пакеты `SKILL.md`, подключайте MCP servers и запускайте внешние scripts на событиях tools.
@@ -201,6 +201,7 @@ Zode включает группу `tools:browser` для чтения screensho
 | `/help` | Commands и keybindings |
 | `/connect` | Подключить и переключить provider |
 | `/model [id]` | Показать или задать active model |
+| `/theme [id]` | Сменить тему (`catppuccin-mocha`, `aurora-forge`, `ember-atelier`, `sakura-paper`, `arctic-day`, `lavender-mist`, `citrus-grove`, `verdant-signal`, `cyberpunk`, `minimal`, `hacker`) |
 | `/sessions`, `/resume` | Возобновить sessions |
 | `/browser ...` | Browser control |
 | `/tasks` | Background tasks |

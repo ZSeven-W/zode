@@ -47,7 +47,7 @@
 - **ブラウザー制御**：組み込みの `browser_*` ツールで managed Chromium、または Chrome bridge 拡張経由で既存 Chrome を操作。
 - **ノンブロッキング権限**：変更を伴うツールは allow once / always / deny で確認され、プロンプトは入力を妨げません。
 - **OS サンドボックスが標準有効**：shell コマンドは macOS `sandbox-exec` または Linux `bwrap` で実行され、デフォルトで outbound network を拒否。
-- **フルスクリーン TUI**：streaming Markdown、syntax highlight、diff preview、slash command autocomplete、履歴、テーマ、設定/ヘルプ overlay、15 言語 UI（`/language`）。
+- **フルスクリーン TUI**：streaming Markdown、syntax highlight、diff preview、slash command autocomplete、履歴、11 個の組み込みテーマ、設定/ヘルプ overlay、15 言語 UI（`/language`）。
 - **マルチセッション tabs**：`Ctrl+T` で複数の独立した会話を並行実行し、過去の session も復元可能。
 - **サブエージェントと workflow**：Task tool で限定された作業を委任し、`/agents` と `/workflows` で管理。
 - **Skills / MCP / hooks**：必要に応じて `SKILL.md` を読み込み、MCP server を接続し、tool event に外部 script を実行。
@@ -201,6 +201,7 @@ Zode は `tools:browser` group を提供し、screenshot/DOM/log の読み取り
 | `/help` | command と keybinding |
 | `/connect` | provider を接続して切り替え |
 | `/model [id]` | active model の表示/設定 |
+| `/theme [id]` | テーマを切り替え（`catppuccin-mocha`、`aurora-forge`、`ember-atelier`、`sakura-paper`、`arctic-day`、`lavender-mist`、`citrus-grove`、`verdant-signal`、`cyberpunk`、`minimal`、`hacker`） |
 | `/sessions`, `/resume` | session 復元 |
 | `/browser ...` | browser control |
 | `/tasks` | background tasks |
