@@ -47,6 +47,47 @@
     return params.taskId || (params.task && params.task.id) || null;
   }
 
+  function itemOrder(item) {
+    const order = Number(item && item.order);
+    return Number.isSafeInteger(order) && order >= 0 ? order : null;
+  }
+
+  function nextTimelineOrder(state) {
+    let highest = -1;
+    for (const items of [state.messages, state.tools, state.approvals]) {
+      for (const item of items) {
+        const order = itemOrder(item);
+        if (order != null) {
+          highest = Math.max(highest, order);
+        }
+      }
+    }
+    return highest + 1;
+  }
+
+  function normalizeTimeline(messages, tools, approvals) {
+    const collections = [messages, tools, approvals];
+    let next = 0;
+    for (const items of collections) {
+      for (const item of items) {
+        const order = itemOrder(item);
+        if (order != null) {
+          next = Math.max(next, order + 1);
+        }
+      }
+    }
+    return collections.map((items) =>
+      items.map((item) => {
+        const copy = cloneValue(item);
+        if (itemOrder(copy) == null) {
+          copy.order = next;
+          next += 1;
+        }
+        return copy;
+      }),
+    );
+  }
+
   function upsertById(items, id, patch, create = true) {
     const index = items.findIndex((item) => item.id === id);
     if (index < 0) {
@@ -188,6 +229,15 @@
       }
       return task;
     });
+    const [messages, tools, approvals] = normalizeTimeline(
+      Array.isArray(value.messages) ? value.messages : [],
+      Array.isArray(value.tools)
+        ? value.tools
+        : Array.isArray(value.toolRuns)
+          ? value.toolRuns
+          : [],
+      Array.isArray(value.approvals) ? value.approvals : [],
+    );
     return {
       ...state,
       loaded: true,
@@ -195,15 +245,9 @@
       tasks,
       currentTaskId: value.currentTaskId == null ? null : value.currentTaskId,
       models: cloneValue(Array.isArray(value.models) ? value.models : []),
-      messages: cloneValue(Array.isArray(value.messages) ? value.messages : []),
-      tools: cloneValue(
-        Array.isArray(value.tools)
-          ? value.tools
-          : Array.isArray(value.toolRuns)
-            ? value.toolRuns
-            : [],
-      ),
-      approvals: cloneValue(Array.isArray(value.approvals) ? value.approvals : []),
+      messages,
+      tools,
+      approvals,
       terminal: null,
       error: null,
       terminalsByTask: {},
@@ -421,6 +465,35 @@
       };
     }
 
+    if (event.type === "message/added") {
+      const taskId = taskIdOf(params);
+      const turnId = params.turnId || null;
+      const role = params.role || "user";
+      const text = String(params.text == null ? params.content || "" : params.text);
+      const messageId =
+        params.messageId || `${taskId || "task"}:${turnId || "turn"}:${role}`;
+      const exists = current.messages.some(
+        (message) => message.id === messageId && (!taskId || message.taskId === taskId),
+      );
+      if (!taskId || !text || exists) {
+        return { ...current, messages: current.messages.map(cloneValue) };
+      }
+      return {
+        ...current,
+        messages: [
+          ...current.messages.map(cloneValue),
+          {
+            id: messageId,
+            taskId,
+            turnId,
+            role,
+            text,
+            order: nextTimelineOrder(current),
+          },
+        ],
+      };
+    }
+
     if (event.type === "message/delta") {
       const scope = resolveTurnEvent(current, params);
       if (!scope.accepted) {
@@ -444,6 +517,7 @@
             turnId: params.turnId || null,
             role: params.role || "assistant",
             text: delta,
+            order: nextTimelineOrder(scoped),
           },
         ];
       } else {
@@ -475,6 +549,9 @@
         name: params.tool || params.name || "tool",
         summary: params.summary || params.tool || params.name || "Tool",
         status: "running",
+        order:
+          itemOrder(scoped.tools.find((candidate) => candidate.id === toolId)) ??
+          nextTimelineOrder(scoped),
       };
       return {
         ...scoped,
@@ -492,6 +569,7 @@
       if (!toolId) {
         return { ...current };
       }
+      const existing = scoped.tools.find((candidate) => candidate.id === toolId);
       return {
         ...scoped,
         tools: upsertById(scoped.tools, toolId, {
@@ -500,6 +578,7 @@
           status: params.failed ? "failed" : "completed",
           failed: Boolean(params.failed),
           output: params.output == null ? null : cloneValue(params.output),
+          order: itemOrder(existing) ?? nextTimelineOrder(scoped),
         }),
       };
     }
@@ -521,6 +600,9 @@
           id: approvalId,
           taskId: scope.taskId,
           status: "pending",
+          order:
+            itemOrder(scoped.approvals.find((candidate) => candidate.id === approvalId)) ??
+            nextTimelineOrder(scoped),
         }),
       };
     }
@@ -717,8 +799,41 @@
     return parts.length ? parts : [{ kind: "text", text: source }];
   }
 
-  function isBlockStart(line) {
-    return /^```/.test(line) || /^#{1,6}\s+/.test(line) || /^\s*[-*+]\s+/.test(line);
+  function tableCells(line) {
+    let source = String(line == null ? "" : line).trim();
+    if (source.startsWith("|")) {
+      source = source.slice(1);
+    }
+    if (source.endsWith("|")) {
+      source = source.slice(0, -1);
+    }
+    return source.split("|").map((cell) => cell.trim());
+  }
+
+  function isTableDelimiter(line) {
+    if (!String(line || "").includes("|")) {
+      return false;
+    }
+    const cells = tableCells(line);
+    return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+  }
+
+  function isTableStart(line, nextLine) {
+    return String(line || "").includes("|") && isTableDelimiter(nextLine);
+  }
+
+  function tableCell(cell) {
+    const text = String(cell || "").trim();
+    return { text, inlines: inlineParts(text) };
+  }
+
+  function isBlockStart(line, nextLine) {
+    return (
+      /^```/.test(line) ||
+      /^#{1,6}\s+/.test(line) ||
+      /^\s*[-*+]\s+/.test(line) ||
+      isTableStart(line, nextLine)
+    );
   }
 
   function markdownBlocks(markdown) {
@@ -763,6 +878,20 @@
         continue;
       }
 
+      if (isTableStart(line, lines[index + 1])) {
+        const headers = tableCells(line).map(tableCell);
+        const rows = [];
+        index += 2;
+        while (index < lines.length && lines[index].trim() && lines[index].includes("|")) {
+          const cells = tableCells(lines[index]);
+          const row = headers.map((_, cellIndex) => tableCell(cells[cellIndex] || ""));
+          rows.push(row);
+          index += 1;
+        }
+        blocks.push({ kind: "table", headers, rows });
+        continue;
+      }
+
       if (/^\s*[-*+]\s+/.test(line)) {
         const items = [];
         while (index < lines.length) {
@@ -783,7 +912,7 @@
       while (
         index < lines.length &&
         lines[index].trim() &&
-        !isBlockStart(lines[index])
+        !isBlockStart(lines[index], lines[index + 1])
       ) {
         paragraph.push(lines[index].trim());
         index += 1;

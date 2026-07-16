@@ -63,7 +63,13 @@ if [ -z "$chrome" ]; then
   exit 1
 fi
 
-cp "$dir/manifest.json" "$dir/background.js" "$dir/popup.html" "$dir/popup.js" "$dir/offscreen.html" "$dir/offscreen.js" "$dir/sidepanel.html" "$dir/sidepanel.css" "$dir/sidepanel-state.js" "$dir/sidepanel.js" "$pack_dir/"
+if [ ! -f "$dir/dist/sidepanel-react.js" ] || [ ! -f "$dir/dist/sidepanel-react.css" ]; then
+  echo "React side panel build is missing; run npm --prefix extensions/chrome install && npm --prefix extensions/chrome run build" >&2
+  exit 1
+fi
+
+cp "$dir/manifest.json" "$dir/background.js" "$dir/popup.html" "$dir/popup.js" "$dir/offscreen.html" "$dir/offscreen.js" "$dir/sidepanel.html" "$dir/sidepanel-state.js" "$dir/sidepanel.js" "$pack_dir/"
+cp -R "$dir/dist" "$pack_dir/"
 if [ -d "$dir/icons" ]; then
   cp -R "$dir/icons" "$pack_dir/"
 fi
@@ -82,3 +88,5 @@ if [ ! -f "$crx" ]; then
   exit 1
 fi
 echo "packed: $crx"
+echo "note: regular Chrome may reject off-store CRX files with CRX_REQUIRED_PROOF_MISSING"
+echo "local install: open chrome://extensions, enable Developer mode, click Load unpacked, and select $dir"

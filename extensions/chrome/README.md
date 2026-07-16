@@ -7,18 +7,28 @@ Default bridge port: `17657`
 
 ## Load unpacked
 
-1. Open `chrome://extensions`.
-2. Enable Developer mode.
-3. Click Load unpacked and choose this `extensions/chrome` directory.
-4. In zode, run `/browser pair`; zode opens the extension page with the WS port and pairing code pre-filled and auto-connects it.
-5. Run `/browser target bridge` before using browser tools against this Chrome profile.
+1. Build the React side panel with `npm --prefix extensions/chrome install` and `npm --prefix extensions/chrome run build`.
+2. Open `chrome://extensions`.
+3. Enable Developer mode.
+4. Click Load unpacked and choose this `extensions/chrome` directory.
+5. In zode, run `/browser pair`; zode opens the extension page with the WS port and pairing code pre-filled and auto-connects it.
+6. Run `/browser target bridge` before using browser tools against this Chrome profile.
 
 ## Task side panel
 
-Zode must be running before the extension can connect. Run `/browser pair` once
-to open the lightweight pairing page with its local port and one-time code. The
-page closes after pairing; on later launches, its stored token is used only to
-reconnect. Clicking the toolbar icon opens the side panel where tasks run.
+Run the updated zode CLI once and execute `/browser pair` to register the local
+Native Messaging host and open the lightweight pairing page. After this one-time
+setup, opening the side panel auto-starts zode automatically when no CLI process
+is running, then reconnects with the stored token. Clicking the toolbar icon
+opens the side panel where tasks run.
+
+The stable `sidepanel.html` entry is implemented with React, TypeScript,
+Tailwind CSS, and local shadcn/ui components. Source files live in
+`extensions/chrome/src/`; Vite writes the CSP-safe extension assets to
+`extensions/chrome/dist/`. The existing task controller and protocol state
+machine remain framework-independent and continue to be covered by the Node
+test suite. Version 0.5.0 adds Native Messaging auto-start; the daemon uses the
+last workspace registered by a normal zode launch.
 
 Side-panel tasks are shared with the TUI sessions: creating or selecting a task
 does not switch the terminal's focused tab, and the same history remains
@@ -27,6 +37,15 @@ selection, access modes `readOnly`, `prompt`, and `auto`, streaming output, and
 Stop for the active turn. `prompt` displays approval choices; `readOnly` does
 not expose mutating tools, while `auto` allows eligible interactions without a
 prompt but does not bypass hard deny or sandbox rules.
+
+When a turn is submitted from the side panel, bridge browser tools target the
+page currently shown beside it. This lets `browser_read` inspect that page
+without opening another tab. The page stays in its existing tab group; only an
+explicit `browser_tabs` action creates or selects a different tab.
+Side-panel prompts also treat that page as their primary context: ambiguous
+phrases such as “this” or “current page” trigger a page read before an answer,
+while the local workspace is used only when the prompt explicitly asks about
+the project, code, or files.
 
 Each turn accepts at most 8 files and 20 MiB total. Supported images are PNG,
 JPEG, GIF, and WebP, up to 5 MiB each. UTF-8 text and code files are supported
@@ -39,7 +58,11 @@ before testing the side panel. Older extension versions remain compatible with
 existing browser automation, but they do not contain the task side panel;
 reload or update to version 0.3.0 or newer for task dispatch.
 
-After the first pairing, the extension stores a token. It stays idle while zode is not running; when zode is running with bridge target selected, zode opens the extension page to reconnect with the stored token. Tabs opened through zode's bridge are grouped into a Chrome tab group named `zode`.
+After the first pairing, the extension stores a token. If zode is not running,
+the extension starts an extension-only background daemon through Chrome Native
+Messaging and reconnects to its local WebSocket. Closing Chrome or unloading the
+extension closes the native port and stops that daemon. Tabs opened through
+zode's bridge are grouped into a Chrome tab group named `zode`.
 
 The extension also reports downloads created after the current bridge WebSocket
 connection was established. It never searches or returns earlier Chrome profile
@@ -67,20 +90,21 @@ the full extension URL so you can open it manually.
 
 ## Tab behavior
 
-The bridge drives one sticky zode-owned tab instead of whatever tab you are
-viewing:
+The bridge chooses its initial tab based on where the task starts:
 
-- When zode needs a tab it always creates a fresh background `about:blank`
-  tab inside the blue `zode` tab group. It never takes over a tab you opened
-  and never steals focus — click into the zode group to watch it work.
-- All actions keep targeting that tab even when you switch tabs.
+- A turn submitted from the side panel targets the active page beside the
+  panel, so it can analyze that page without creating a tab.
+- Standalone TUI or CLI bridge automation creates a background `about:blank`
+  tab inside the blue `zode` tab group instead of taking over a human tab.
+- After acquisition, all actions keep targeting the chosen tab even when you
+  switch tabs.
 - If you navigate the zode tab yourself via the address bar, a bookmark, or
   an omnibox search — or click "Cancel" on Chrome's debugging bar — zode
   abandons it and creates a fresh tab for its next action. Clicking links
   inside the zode tab is indistinguishable from zode's own clicks and does
   not hand off.
-- Screenshots briefly activate the zode tab (hidden tabs do not render) and
-  then restore the tab you were on.
+- Screenshots of a background zode tab briefly activate it (hidden tabs do not
+  render) and then restore the tab you were on.
 
 ## Theme-adaptive icon
 
@@ -94,13 +118,21 @@ from `assets/logo-light.png` at the repo root with `sips -Z <size>`.
 ## Update
 
 After changing files in this directory, open `chrome://extensions` and click
-the Reload button on the zode browser bridge card. Version 0.3.0 adds the native
+the Reload button on the zode card (the extension is named "zode"; it was
+previously listed as "zode browser bridge"). Version 0.3.0 adds the native
 task side panel and its permission, so an older extension must be reloaded or
 updated before clicking the toolbar icon can open it. The manifest embeds a
 public key so unpacked and packed installs keep the same extension ID, which
 zode uses for the WebSocket Origin check.
 
-## Pack CRX
+## Pack CRX (enterprise and automated testing only)
+
+Do not drag the generated CRX into a regular Chrome installation. Current
+Chrome releases can reject off-store packages with
+`CRX_REQUIRED_PROOF_MISSING` because they do not carry Chrome Web Store proof.
+For local use, follow **Load unpacked** above and select this
+`extensions/chrome` directory. The manifest public key keeps the unpacked
+extension ID stable.
 
 Run:
 
@@ -110,7 +142,9 @@ extensions/chrome/pack.sh
 
 The script creates or reuses `extensions/chrome/zode-bridge.pem`, or reuses an existing legacy `extensions/zode-bridge.pem`, prints the manifest public key and extension ID, and writes `extensions/chrome/zode-bridge.crx`. Keep the `.pem` private; it is ignored by git. Reusing the same `.pem` preserves the extension ID across future CRX builds.
 
-Modern Chrome restricts off-store CRX installs. Developer builds usually need Load unpacked, while managed environments can allow CRX installs with enterprise policy such as `ExtensionInstallAllowlist` for the fixed extension ID above.
+The CRX remains useful for ChromeDriver and for managed environments that allow
+off-store installation through enterprise policy. Public distribution should
+use the Chrome Web Store.
 
 ## Smoke test
 

@@ -8,7 +8,8 @@ const extensionDir = __dirname;
 const stateSource = fs.readFileSync(path.join(extensionDir, "sidepanel-state.js"), "utf8");
 const panelSource = fs.readFileSync(path.join(extensionDir, "sidepanel.js"), "utf8");
 const html = fs.readFileSync(path.join(extensionDir, "sidepanel.html"), "utf8");
-const css = fs.readFileSync(path.join(extensionDir, "sidepanel.css"), "utf8");
+const css = fs.readFileSync(path.join(extensionDir, "src", "styles.css"), "utf8");
+const reactSource = fs.readFileSync(path.join(extensionDir, "src", "App.tsx"), "utf8");
 
 function plain(value) {
   return JSON.parse(JSON.stringify(value));
@@ -99,7 +100,7 @@ function testSnapshotAuthoritativelyReplacesServerState(State) {
   assert.equal(next.currentTaskId, "s1");
   assert.deepEqual(plain(next.models), ["m1", "m2"]);
   assert.deepEqual(plain(next.messages), [
-    { id: "u1", taskId: "s1", role: "user", text: "inspect" },
+    { id: "u1", taskId: "s1", role: "user", text: "inspect", order: 0 },
   ]);
   assert.deepEqual(plain(next.workspace), { name: "zode", path: "/workspace" });
   assert.deepEqual(plain(next.tools), []);
@@ -130,6 +131,24 @@ function testReducerCoversCoreTaskLifecycleWithoutMutation(State) {
   assert.equal(State.primaryAction(state, "s1"), "stop");
   assert.equal(state.tasks[0].status, "running");
 
+  const userMessage = {
+    type: "message/added",
+    params: {
+      taskId: "s1",
+      turnId: "turn-1",
+      messageId: "s1:turn-1:user",
+      role: "user",
+      text: "hello from the panel",
+    },
+  };
+  state = applyPure(State, state, userMessage);
+  state = applyPure(State, state, userMessage);
+  assert.equal(
+    state.messages.filter((message) => message.id === "s1:turn-1:user").length,
+    1,
+    "locally acknowledged user messages must be idempotent",
+  );
+
   state = applyPure(State, state, {
     type: "message/delta",
     params: {
@@ -150,7 +169,7 @@ function testReducerCoversCoreTaskLifecycleWithoutMutation(State) {
       delta: "lo",
     },
   });
-  assert.equal(state.messages[0].text, "hello");
+  assert.equal(state.messages.find((message) => message.id === "a1").text, "hello");
 
   const beforeStale = state;
   state = applyPure(State, state, {
@@ -188,6 +207,11 @@ function testReducerCoversCoreTaskLifecycleWithoutMutation(State) {
     },
   });
   assert.equal(state.approvals[0].status, "pending");
+  assert.deepEqual(
+    [state.messages[0].order, state.messages[1].order, state.tools[0].order, state.approvals[0].order],
+    [0, 1, 2, 3],
+    "messages, tools, and approvals share one chronological sequence",
+  );
   state = applyPure(State, state, {
     type: "approval/resolved",
     params: {
@@ -701,32 +725,82 @@ function testMarkdownBlocksAndSafeLinks(State) {
   assert.equal(State.safeUrl("data:text/html,bad"), null);
   assert.equal(State.safeUrl("https://example.com"), "https://example.com");
   assert.equal(State.safeUrl("mailto:hello@example.com"), "mailto:hello@example.com");
+
+  const table = State.markdownBlocks([
+    "Tool permissions:",
+    "",
+    "| Tool | Safety | Mode |",
+    "| --- | --- | --- |",
+    "| `browser_read` | ReadOnly | No approval |",
+    "| `browser_act` | Mutating | Prompt |",
+  ].join("\n"));
+  assert.deepEqual(plain(table.map((block) => block.kind)), ["paragraph", "table"]);
+  assert.deepEqual(plain(table[1].headers.map((cell) => cell.text)), [
+    "Tool",
+    "Safety",
+    "Mode",
+  ]);
+  assert.equal(table[1].rows.length, 2);
+  assert.equal(table[1].rows[0][0].inlines[0].kind, "code");
+  assert.equal(table[1].rows[1][2].text, "Prompt");
+}
+
+async function testCommonMarkAndGfmRenderer() {
+  const React = require("react");
+  const { renderToStaticMarkup } = require("react-dom/server");
+  const [{ default: ReactMarkdown }, { default: remarkGfm }] = await Promise.all([
+    import("react-markdown"),
+    import("remark-gfm"),
+  ]);
+  const markdown = [
+    "---",
+    "",
+    "**总样本量: 74,314 人**（初二、高三除外）",
+    "",
+    "**样本构成**：*分层抽样*与~~旧数据~~",
+    "",
+    "> 引用内容",
+    "",
+    "1. 第一项",
+    "2. 第二项",
+    "",
+    "- [x] 已完成",
+    "- [ ] 待处理",
+    "",
+    "| 分类 | 人数 |",
+    "| --- | ---: |",
+    "| **男生** | 37,147 |",
+    "",
+    "[危险链接](javascript:alert(1))",
+    "",
+    "<script>alert('blocked')</script>",
+  ].join("\n");
+  const rendered = renderToStaticMarkup(
+    React.createElement(ReactMarkdown, { remarkPlugins: [remarkGfm], skipHtml: true }, markdown),
+  );
+
+  assert.match(rendered, /<hr\/>/);
+  assert.match(rendered, /<strong>总样本量: 74,314 人<\/strong>/);
+  assert.match(rendered, /<strong>男生<\/strong>/);
+  assert.match(rendered, /<em>分层抽样<\/em>/);
+  assert.match(rendered, /<del>旧数据<\/del>/);
+  assert.match(rendered, /<blockquote>/);
+  assert.match(rendered, /<ol>/);
+  assert.match(rendered, /type="checkbox"/);
+  assert.match(rendered, /<table>/);
+  assert.doesNotMatch(rendered, /javascript:/);
+  assert.doesNotMatch(rendered, /<script/);
 }
 
 function testHtmlAndSourceContracts() {
   for (const label of ["New task", "Attach files", "Send task", "Retry connection"]) {
-    assert.match(html, new RegExp(`aria-label=["']${label}["']`));
+    assert.match(reactSource, new RegExp(`aria-label=["'{][^\n]*${label}`));
   }
-  for (const id of [
-    "task-menu",
-    "workspace-label",
-    "connection-banner-message",
-    "retry-button",
-    "message-stream",
-    "tool-region",
-    "approval-region",
-    "error-region",
-    "composer-region",
-    "composer",
-    "attachment-input",
-    "attachment-list",
-    "attachment-status",
-    "access-select",
-    "model-select",
-    "send-button",
-  ]) {
-    assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
-  }
+  assert.match(html, /id=["']zode-react-root["']/);
+  assert.match(html, /href=["']dist\/sidepanel-react\.css["']/);
+  assert.match(html, /src=["']dist\/sidepanel-react\.js["']/);
+  assert.match(reactSource, /id=["']panel-title-react["']/);
+  assert.match(reactSource, /aria-labelledby=["']panel-title-react["']/);
   assert.doesNotMatch(html, /\son[a-z]+\s*=/i);
   assert.doesNotMatch(html, /<script\b(?![^>]*\bsrc=)[^>]*>/i);
   assert.doesNotMatch(html, /(?:src|href)\s*=\s*["'](?:https?:)?\/\//i);
@@ -740,17 +814,12 @@ function testHtmlAndSourceContracts() {
   assert.match(panelSource, /attachment\/finish/);
   assert.match(panelSource, /attachment\/cancel/);
   assert.match(
-    html,
-    /<input\b[^>]*\bid=["']attachment-input["'][^>]*\btype=["']file["'][^>]*\bmultiple\b[^>]*\bhidden\b[^>]*>/s,
+    reactSource,
+    /<input[\s\S]{0,200}type=["']file["'][\s\S]{0,100}multiple[\s\S]{0,100}hidden/,
   );
-  assert.match(
-    html,
-    /accept=["']image\/png,image\/jpeg,image\/gif,image\/webp,text\/\*,\.rs,\.js,\.ts,\.tsx,\.jsx,\.json,\.md,\.toml,\.yaml,\.yml,\.css,\.html,\.sh,\.py,\.go,\.java,\.kt["']/,
-  );
-  assert.match(html, /<button\b[^>]*\bid=["']more-button["'][^>]*\bhidden\b[^>]*>/s);
-  assert.match(html, /<button\b[^>]*\bid=["']more-button["'][^>]*\bdisabled\b[^>]*>/s);
+  assert.match(reactSource, /ACCEPTED_ATTACHMENTS/);
   assert.match(css, /@media\s*\(prefers-color-scheme:\s*dark\)/);
-  assert.match(css, /@media\s*\(max-width:\s*3\d\dpx\)/);
+  assert.match(css, /@media\s*\(max-width:\s*380px\)/);
   assert.doesNotMatch(css, /body\s*\{[^}]*min-width:\s*(?:3\d\d|[4-9]\d\d)px/s);
 }
 
@@ -1404,11 +1473,22 @@ async function testTurnStartSingleFlightAndDraftOwnership(App) {
   await third;
 
   const turnStarts = runtime.calls.filter((call) => call.method === "turn/start");
+  const sentMessages = controller
+    .getState()
+    .messages.filter((message) => message.role === "user" && message.taskId === "s1");
   assert.equal(exposesSubmitting, true);
   assert.equal(pendingWhileSending, true);
   assert.equal(requestCountWhileFirstPending, 1);
   assert.equal(controller.isSubmitting("s1"), false);
   assert.equal(turnStarts.length, 2, "two submit clicks must share the first request");
+  assert.deepEqual(
+    plain(sentMessages.map((message) => [message.turnId, message.text])),
+    [
+      ["turn-1", "original draft"],
+      ["turn-2", "draft before send"],
+    ],
+    "each acknowledged turn must render its submitted user text once",
+  );
   assert.equal(controller.getState().drafts.s2, "second task draft");
   assert.equal(controller.getState().drafts.s1, "edited while sending");
 }
@@ -1516,11 +1596,20 @@ async function testTurnStartResponseDoesNotLoseItsFirstDelta(App, State) {
     plain(controller.getState().messages),
     [
       {
+        id: "s1:turn-immediate:user",
+        taskId: "s1",
+        turnId: "turn-immediate",
+        role: "user",
+        text: "stream immediately",
+        order: 0,
+      },
+      {
         id: "assistant-immediate",
         taskId: "s1",
         turnId: "turn-immediate",
         role: "assistant",
         text: "first token",
+        order: 1,
       },
     ],
   );
@@ -1832,6 +1921,7 @@ async function testApprovalResponseIsFencedByAuthoritativeSnapshot(App, State) {
       turnId: "snapshot-new-turn",
       status: "pending",
       summary: "Authoritative approval",
+      order: 0,
     },
   ];
   controller.dispatch({ type: "snapshot", snapshot: authoritative });
@@ -3514,7 +3604,7 @@ async function testConnectedSocketRefreshesAuthoritativeStateAndPreservesLocalWo
     },
   ];
   fresh.models = ["m2", "m3"];
-  fresh.messages = [{ id: "fresh-message", role: "assistant", text: "fresh" }];
+  fresh.messages = [{ id: "fresh-message", role: "assistant", text: "fresh", order: 0 }];
   let snapshotReads = 0;
   const runtime = makeRuntime((message) => {
     if (message.type === "zode-status") {
@@ -3963,6 +4053,7 @@ async function testSubmittedAttachmentsCannotBeCancelledInFlight(App) {
   testConcurrentTaskFeedbackIsIsolatedAndSnapshotClearsIt(State);
   testPrimaryActionTreatsStoppingAsStop(State);
   testMarkdownBlocksAndSafeLinks(State);
+  await testCommonMarkAndGfmRenderer();
   testHtmlAndSourceContracts();
   testMarkdownDomRendererUsesTextNodesOnly(State, App);
   await testControllerStartupReconnectsHydratesAndRegistersOnce(App);

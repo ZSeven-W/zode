@@ -31,6 +31,34 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md $prerelease
 
+  browser-extension:
+    needs: create-release
+    name: browser-extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: extensions/chrome/package-lock.json
+      - name: Install extension dependencies
+        working-directory: extensions/chrome
+        run: npm ci
+      - name: Build and test extension
+        working-directory: extensions/chrome
+        run: npm test
+      - name: Package extension
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ./scripts/package-browser-extension.sh "dist/zode-browser-bridge-$version.zip"
+      - name: Publish extension to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/zode-browser-bridge-*.zip
+          fail_on_unmatched_files: true
+
   build:
     needs: create-release
     name: ${{ matrix.pkg-suffix }}

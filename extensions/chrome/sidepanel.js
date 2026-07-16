@@ -6,7 +6,8 @@
   const STORAGE_CURRENT_TASK = "zodePanelCurrentTask";
   const STORAGE_COLLAPSED_TOOLS = "zodePanelCollapsedTools";
   const STORAGE_KEYS = [STORAGE_DRAFTS, STORAGE_CURRENT_TASK, STORAGE_COLLAPSED_TOOLS];
-  const DISCONNECTED_GUIDANCE = "启动 zode 并运行 /browser pair 以连接任务客户端。";
+  const DISCONNECTED_GUIDANCE =
+    "无法自动连接 Zode。首次使用新版扩展时，请先运行一次新版 zode 并执行 /browser pair。";
   const UNSUPPORTED_TASK_CLIENT_MESSAGE =
     "Current zode version does not support the task client";
   const ATTACHMENT_CHUNK_BYTES = 256 * 1024;
@@ -92,7 +93,7 @@
   }
 
   function actionableError(prefix, error) {
-    return `${prefix}: ${messageOf(error)}。请启动 zode 并运行 /browser pair，然后重试。`;
+    return `${prefix}: ${messageOf(error)}。请先运行一次新版 zode 并执行 /browser pair，然后重试。`;
   }
 
   function turnStartError(error) {
@@ -1684,6 +1685,18 @@
           }
           const result = await requestTurnStart(flight, params);
           if (result && result.turnId) {
+            if (input) {
+              dispatch({
+                type: "message/added",
+                params: {
+                  taskId,
+                  turnId: result.turnId,
+                  messageId: `${taskId}:${result.turnId}:user`,
+                  role: "user",
+                  text: input,
+                },
+              });
+            }
             dispatch({
               type: "turn/started",
               params: { taskId, turnId: result.turnId },
@@ -2450,6 +2463,12 @@
       typeof document === "undefined" ||
       typeof chrome === "undefined" ||
       !chrome.runtime
+    ) {
+      return null;
+    }
+    if (
+      typeof document.getElementById === "function" &&
+      document.getElementById("zode-react-root")
     ) {
       return null;
     }

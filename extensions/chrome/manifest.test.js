@@ -65,7 +65,6 @@ function testPackScriptCopiesOffscreenFiles() {
 function testPackScriptCopiesEverySidePanelAsset() {
   for (const asset of [
     "sidepanel.html",
-    "sidepanel.css",
     "sidepanel-state.js",
     "sidepanel.js",
   ]) {
@@ -75,6 +74,7 @@ function testPackScriptCopiesEverySidePanelAsset() {
       `pack.sh must copy ${asset}`,
     );
   }
+  assert.match(packScript, /cp\s+-R\s+"\$dir\/dist"\s+"\$pack_dir\/"/);
 }
 
 function testManifestDeclaresRequiredPermissions() {
@@ -87,11 +87,19 @@ function testManifestDeclaresRequiredPermissions() {
     "offscreen",
     "downloads",
     "sidePanel",
+    "nativeMessaging",
   ]);
 }
 
+function testNativeMessagingAutostartContract() {
+  const background = fs.readFileSync(path.join(extensionDir, "background.js"), "utf8");
+  assert.match(background, /ai\.zode\.browser_bridge/);
+  assert.match(background, /chrome\.runtime\.connectNative\(NATIVE_HOST_NAME\)/);
+  assert.match(background, /reconnectOrStart\(message\.port\)/);
+}
+
 function testManifestUsesNativeActionOpenedSidePanel() {
-  assert.equal(manifest.version, "0.3.0");
+  assert.equal(manifest.version, "0.5.0");
   assert.equal(manifest.minimum_chrome_version, "116");
   assert.deepEqual(manifest.side_panel, { default_path: "sidepanel.html" });
   assert.equal(Object.hasOwn(manifest.action, "default_popup"), false);
@@ -105,7 +113,7 @@ function testTaskSidePanelDocumentationCoversOperationAndCompatibility() {
   for (const readme of [extensionReadme, rootReadme]) {
     assert.match(readme, /\/browser pair/i);
     assert.match(readme, /toolbar (?:icon|button)[\s\S]{0,100}side panel/i);
-    assert.match(readme, /zode (?:must be|is) running/i);
+    assert.match(readme, /start(?:s|ed)? zode automatically|auto-start/i);
     assert.match(readme, /shared[\s-]+(?:with|TUI)[\s\S]{0,80}(?:TUI )?sessions?/i);
     assert.match(readme, /`readOnly`[\s\S]{0,120}`prompt`[\s\S]{0,120}`auto`/i);
     assert.match(readme, /stop/i);
@@ -128,7 +136,8 @@ function testTaskSidePanelDocumentationCoversOperationAndCompatibility() {
 function testSidePanelShellIsAccessibleAndCspSafe() {
   const assetPaths = [
     "sidepanel.html",
-    "sidepanel.css",
+    "dist/sidepanel-react.css",
+    "dist/sidepanel-react.js",
     "sidepanel-state.js",
     "sidepanel.js",
   ];
@@ -137,6 +146,12 @@ function testSidePanelShellIsAccessibleAndCspSafe() {
   }
 
   const html = fs.readFileSync(path.join(extensionDir, "sidepanel.html"), "utf8");
+  const appSource = fs.readFileSync(path.join(extensionDir, "src", "App.tsx"), "utf8");
+  const reactStyles = fs.readFileSync(path.join(extensionDir, "src", "styles.css"), "utf8");
+  const reactBundle = fs.readFileSync(
+    path.join(extensionDir, "dist", "sidepanel-react.js"),
+    "utf8",
+  );
   const stateSource = fs.readFileSync(path.join(extensionDir, "sidepanel-state.js"), "utf8");
   const panelSource = fs.readFileSync(path.join(extensionDir, "sidepanel.js"), "utf8");
   const scriptTags = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
@@ -147,16 +162,50 @@ function testSidePanelShellIsAccessibleAndCspSafe() {
     return source[1];
   });
 
-  assert.match(html, /<link\b[^>]*rel=["']stylesheet["'][^>]*href=["']sidepanel\.css["']/i);
-  assert.deepEqual(scriptSources, ["sidepanel-state.js", "sidepanel.js"]);
+  assert.match(
+    html,
+    /<link\b[^>]*rel=["']stylesheet["'][^>]*href=["']dist\/sidepanel-react\.css["']/i,
+  );
+  assert.deepEqual(scriptSources, [
+    "sidepanel-state.js",
+    "sidepanel.js",
+    "dist/sidepanel-react.js",
+  ]);
   assert.doesNotMatch(html, /<style\b/i);
   assert.doesNotMatch(html, /\sstyle\s*=/i);
   assert.doesNotMatch(html, /\son[a-z]+\s*=/i);
   assert.doesNotMatch(html, /(?:src|href)=["'](?:https?:)?\/\//i);
-  assert.match(html, /<h1\b[^>]*id=["'][^"']+["']/i);
-  assert.match(html, /<main\b[^>]*aria-labelledby=["'][^"']+["']/i);
-  assert.match(html, /\brole=["']status["']/i);
-  assert.match(html, /\baria-live=["']polite["']/i);
+  assert.match(html, /<div\b[^>]*id=["']zode-react-root["']/i);
+  assert.match(appSource, /<h1\b[^>]*id=["'][^"']+["']/i);
+  assert.match(appSource, /<main\b[^>]*aria-labelledby=["'][^"']+["']/i);
+  assert.match(appSource, /\brole=["']status["']/i);
+  assert.match(appSource, /\baria-live=["']polite["']/i);
+  assert.doesNotMatch(appSource, /dangerouslySetInnerHTML/);
+  for (const token of [
+    "background",
+    "card",
+    "card-foreground",
+    "popover",
+    "popover-foreground",
+    "primary",
+    "primary-foreground",
+    "secondary",
+    "secondary-foreground",
+    "muted",
+    "muted-foreground",
+    "accent",
+    "accent-foreground",
+    "destructive",
+    "border",
+    "input",
+    "ring",
+    "chart-1",
+    "sidebar",
+    "sidebar-foreground",
+  ]) {
+    assert.match(reactStyles, new RegExp(`--${token}:`), `missing shadcn token --${token}`);
+  }
+  assert.doesNotMatch(reactBundle, /\bprocess\.env\b/);
   assert.match(stateSource, /globalThis\.ZodePanelState\s*=/);
   assert.match(panelSource, /type:\s*["']zode-status["']/);
   for (const source of [stateSource, panelSource]) {
@@ -214,10 +263,23 @@ async function testSidePanelStatusRequestFailuresRenderDisconnectedState() {
   }
 }
 
+function testManifestNameIsZodeAndDeclaresSidePanelCommand() {
+  assert.equal(manifest.name, "zode");
+  const command = manifest.commands && manifest.commands["open-side-panel"];
+  assert.ok(command, "manifest must declare the open-side-panel command");
+  assert.ok(command.description, "command needs a description for chrome://extensions/shortcuts");
+  assert.ok(
+    command.suggested_key && command.suggested_key.default,
+    "command needs a default suggested key",
+  );
+}
+
 (async () => {
   testExtensionIconsAreDeclaredAndSized();
   testLightIconVariantsExistAndSized();
+  testManifestNameIsZodeAndDeclaresSidePanelCommand();
   testManifestDeclaresRequiredPermissions();
+  testNativeMessagingAutostartContract();
   testManifestUsesNativeActionOpenedSidePanel();
   testTaskSidePanelDocumentationCoversOperationAndCompatibility();
   testPackScriptCopiesDeclaredIconDirectory();

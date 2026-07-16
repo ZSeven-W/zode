@@ -20,6 +20,7 @@ function makeChrome(storage = {}) {
     iconPaths: [],
     runtimeSent: [],
     sidePanelBehaviors: [],
+    sidePanelOpens: [],
   };
   const listeners = {
     tabRemoved: [],
@@ -27,6 +28,7 @@ function makeChrome(storage = {}) {
     webNavCommitted: [],
     downloadCreated: [],
     downloadChanged: [],
+    command: [],
   };
   const tabsById = new Map();
   let nextTabId = 100;
@@ -72,6 +74,10 @@ function makeChrome(storage = {}) {
     fireDownloadChanged(delta) {
       listeners.downloadChanged.forEach((listener) => listener(delta));
     },
+    fireCommand(command, tab) {
+      listeners.command.forEach((listener) => listener(command, tab));
+    },
+    lastFocusedWindowId: 1,
     storage: {
       local: {
         get: async (keys) => {
@@ -180,6 +186,16 @@ function makeChrome(storage = {}) {
         }
         return Promise.resolve();
       },
+      open: (options) => {
+        calls.sidePanelOpens.push(JSON.parse(JSON.stringify(options)));
+        return Promise.resolve();
+      },
+    },
+    commands: {
+      onCommand: { addListener: (listener) => listeners.command.push(listener) },
+    },
+    windows: {
+      getLastFocused: () => Promise.resolve({ id: api.lastFocusedWindowId }),
     },
     webNavigation: {
       onCommitted: { addListener: (listener) => listeners.webNavCommitted.push(listener) },
@@ -1004,6 +1020,27 @@ async function evaluateSidePanelStartup(chrome) {
   return { websocketAttempts, consoleErrors };
 }
 
+async function testOpenSidePanelCommandOpensPanelForFocusedWindow() {
+  const chrome = makeChrome();
+  await evaluateSidePanelStartup(chrome);
+
+  // Command fired on a tab: open the panel in that tab's window.
+  chrome.fireCommand("open-side-panel", { id: 5, windowId: 7 });
+  await flushImmediates();
+  assert.deepEqual(chrome.calls.sidePanelOpens, [{ windowId: 7 }]);
+
+  // No tab context: fall back to the last focused window.
+  chrome.lastFocusedWindowId = 3;
+  chrome.fireCommand("open-side-panel", undefined);
+  await flushImmediates();
+  assert.deepEqual(chrome.calls.sidePanelOpens, [{ windowId: 7 }, { windowId: 3 }]);
+
+  // Unknown commands are ignored.
+  chrome.fireCommand("something-else", { id: 5, windowId: 7 });
+  await flushImmediates();
+  assert.equal(chrome.calls.sidePanelOpens.length, 2);
+}
+
 async function testStartupEnablesActionOpenedSidePanelExactlyOnce() {
   const chrome = makeChrome();
   const startup = await evaluateSidePanelStartup(chrome);
@@ -1167,6 +1204,93 @@ async function testReconnectMessageUsesStoredTokenAndPort() {
   assert.equal(response.status.port, 17657);
 }
 
+async function testReconnectAutoStartsNativeHostWhenZodeIsOffline() {
+  const chrome = makeChrome({ zodePort: 17657, zodeToken: "token" });
+  const sockets = [];
+  const nativeCalls = [];
+  const nativeMessages = [];
+  const nativeMessageListeners = [];
+  const nativeDisconnectListeners = [];
+  chrome.runtime.connectNative = (name) => {
+    nativeCalls.push(name);
+    return {
+      onMessage: { addListener: (listener) => nativeMessageListeners.push(listener) },
+      onDisconnect: { addListener: (listener) => nativeDisconnectListeners.push(listener) },
+      postMessage(message) {
+        nativeMessages.push(plain(message));
+        setImmediate(() => nativeMessageListeners[0]({ ok: true, port: 17658 }));
+      },
+      disconnect() {
+        nativeDisconnectListeners.forEach((listener) => listener());
+      },
+    };
+  };
+
+  class OfflineThenOnlineWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+
+    constructor(url) {
+      this.url = url;
+      this.readyState = OfflineThenOnlineWebSocket.CONNECTING;
+      sockets.push(this);
+      const attempt = sockets.length;
+      setImmediate(() => {
+        if (attempt === 1) {
+          this.readyState = 3;
+          this.onerror?.();
+          return;
+        }
+        this.readyState = OfflineThenOnlineWebSocket.OPEN;
+        this.onopen?.();
+      });
+    }
+
+    send(text) {
+      const message = JSON.parse(text);
+      if (message.type === "auth") {
+        setImmediate(() => {
+          this.onmessage?.({ data: JSON.stringify({ type: "ok", taskProtocol: 1 }) });
+        });
+      }
+    }
+
+    close() {
+      this.readyState = 3;
+    }
+  }
+
+  const sandbox = {
+    console,
+    setImmediate,
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+    WebSocket: OfflineThenOnlineWebSocket,
+    chrome,
+  };
+  vm.runInNewContext(backgroundSource, sandbox, { filename: backgroundPath });
+  const handler = chrome.runtimeMessages[0];
+  let response = null;
+  assert.equal(
+    handler({ type: "zode-reconnect" }, {}, (value) => {
+      response = value;
+    }),
+    true,
+  );
+  await flushImmediates(12);
+
+  assert.equal(sockets.length, 2);
+  assert.equal(sockets[0].url, "ws://127.0.0.1:17657");
+  assert.equal(sockets[1].url, "ws://127.0.0.1:17658");
+  assert.deepEqual(nativeCalls, ["ai.zode.browser_bridge"]);
+  assert.deepEqual(nativeMessages, [{ type: "start", protocolVersion: 1 }]);
+  assert.equal(response.ok, true);
+  assert.equal(response.status.connected, true);
+  assert.equal(response.status.port, 17658);
+}
+
 async function testCdpActionCreatesAndReusesControlledTab() {
   const h = makeRpcHarness();
   h.chrome.addTab({ id: 5, url: "https://human.example/", active: true });
@@ -1203,6 +1327,37 @@ async function testCdpActionCreatesAndReusesControlledTab() {
     evals.map((c) => c.tabId),
     [zodeTabId, zodeTabId],
   );
+}
+
+async function testSidePanelTurnTargetsTheActivePage() {
+  const h = makeRpcHarness();
+  h.chrome.addTab({ id: 5, url: "https://human.example/", active: true });
+  await h.connect();
+
+  const turn = h.taskRequest("turn/start", { taskId: "s1", input: "analyze this page" });
+  await flushImmediates();
+
+  const result = await h.rpc({
+    id: 12,
+    kind: "cdp",
+    method: "Runtime.evaluate",
+    params: { expression: "document.title" },
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(h.chrome.calls.created.length, 0, "side-panel turn opened a new tab");
+  assert.equal(h.chrome.calls.attached.at(-1), 5);
+  assert.equal(h.chrome.tabsById.get(5).active, true);
+
+  const request = h.frames.find(
+    (frame) => frame.channel === "tasks" && frame.method === "turn/start",
+  );
+  await h.deliver({
+    channel: "tasks",
+    kind: "response",
+    id: request.id,
+    result: { turnId: "turn-1" },
+  });
+  assert.deepEqual(plain(await turn), { ok: true, result: { turnId: "turn-1" } });
 }
 
 async function testTabRpcsManageControlledTab() {
@@ -1451,10 +1606,12 @@ async function testDownloadCancellationAndLimitValidation() {
   await testThemeMessageSwitchesIcon();
   await testBackgroundStartupDoesNotTouchWebSocket();
   await testStartupEnablesActionOpenedSidePanelExactlyOnce();
+  await testOpenSidePanelCommandOpensPanelForFocusedWindow();
   await testSidePanelStartupIsBestEffortWhenApiIsUnavailableOrFails();
   await testStatusMessageReturnsConnectionState();
   await testStatusLoadsStoredPortAndReconnectCapability();
   await testReconnectMessageUsesStoredTokenAndPort();
+  await testReconnectAutoStartsNativeHostWhenZodeIsOffline();
   await testAuthenticatedAndReplacementSocketsBroadcastTaskLifecycle();
   await testUnsupportedTaskProtocolKeepsLegacyRpcAvailable();
   await testTaskRequestResponseUsesDedicatedWireId();
@@ -1474,6 +1631,7 @@ async function testDownloadCancellationAndLimitValidation() {
   await testTaskSendFailureClearsPendingAndTimer();
   await testTaskTimeoutClearsPendingAndIgnoresLateResponse();
   await testCdpActionCreatesAndReusesControlledTab();
+  await testSidePanelTurnTargetsTheActivePage();
   await testTabRpcsManageControlledTab();
   await testHumanNavigationHandsOffControlledTab();
   await testDebuggerDetachReasonControlsHandoff();

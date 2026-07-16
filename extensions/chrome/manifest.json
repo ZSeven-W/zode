@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "minimum_chrome_version": "116",
-  "name": "zode browser bridge",
-  "version": "0.3.0",
+  "name": "zode",
+  "version": "0.5.0",
   "description": "Pairs your Chrome with the local zode CLI so its agent can drive this browser.",
-  "permissions": ["debugger", "tabs", "storage", "tabGroups", "webNavigation", "offscreen", "downloads", "sidePanel"],
+  "permissions": ["debugger", "tabs", "storage", "tabGroups", "webNavigation", "offscreen", "downloads", "sidePanel", "nativeMessaging"],
   "icons": {
     "16": "icons/zode-16.png",
     "32": "icons/zode-32.png",
@@ -16,6 +16,15 @@
   },
   "side_panel": {
     "default_path": "sidepanel.html"
+  },
+  "commands": {
+    "open-side-panel": {
+      "suggested_key": {
+        "default": "Alt+Z",
+        "mac": "Alt+Z"
+      },
+      "description": "Open the zode side panel"
+    }
   },
   "action": {
     "default_icon": {

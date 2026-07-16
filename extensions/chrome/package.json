@@ -1,0 +1,35 @@
+{
+  "name": "@zode/chrome-extension",
+  "private": true,
+  "version": "0.5.0",
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "dev": "vite build --watch",
+    "test": "npm run build && npm run test:legacy",
+    "test:legacy": "node background.test.js && node offscreen.test.js && node popup.test.js && node sidepanel.test.js && node manifest.test.js"
+  },
+  "dependencies": {
+    "@radix-ui/react-scroll-area": "^1.2.14",
+    "@radix-ui/react-select": "^2.3.3",
+    "@radix-ui/react-slot": "^1.2.3",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.536.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.2",
+    "@types/chrome": "^0.1.1",
+    "@types/node": "^24.0.15",
+    "@types/react": "^19.1.9",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^6.0.3",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.4"
+  }
+}

@@ -9,6 +9,8 @@ const AUTH_ATTEMPT_TIMEOUT_MS = 15_000;
 const TASK_REQUEST_TIMEOUT_MS = 30_000;
 const TASK_PROTOCOL_VERSION = 1;
 const TASK_PENDING_CAP = 500;
+const NATIVE_HOST_NAME = "ai.zode.browser_bridge";
+const NATIVE_START_TIMEOUT_MS = 30_000;
 const BUF_CAP = 500;
 const PENDING_REQUEST_CAP = 500;
 const DOWNLOAD_LIMIT_CAP = 100;
@@ -44,6 +46,9 @@ let nextTaskConnectionId = 1;
 const pendingTaskRequests = new Map();
 let tokenMutationQueue = Promise.resolve();
 let authAttempt = null;
+let nativePort = null;
+let nativeStatus = null;
+let nativeStartPromise = null;
 
 async function getStored(keys) {
   return await chrome.storage.local.get(keys);
@@ -301,6 +306,40 @@ function applyThemeIcon(dark) {
   );
 }
 
+// chrome://extensions/shortcuts command: open the zode side panel in the
+// window the shortcut was pressed in. Command handlers carry the user
+// gesture that sidePanel.open() requires; call it directly off the
+// listener's tab argument and only fall back to an async window lookup.
+function enableSidePanelCommand() {
+  if (
+    !chrome.commands ||
+    !chrome.sidePanel ||
+    typeof chrome.sidePanel.open !== "function"
+  ) {
+    return;
+  }
+  chrome.commands.onCommand.addListener((command, tab) => {
+    if (command !== "open-side-panel") {
+      return;
+    }
+    const openPanel = (windowId) => {
+      if (windowId == null) {
+        return;
+      }
+      Promise.resolve(chrome.sidePanel.open({ windowId })).catch((error) =>
+        console.debug("zode side panel open failed", error),
+      );
+    };
+    if (tab && tab.windowId != null) {
+      openPanel(tab.windowId);
+      return;
+    }
+    Promise.resolve(chrome.windows.getLastFocused())
+      .then((window) => openPanel(window && window.id))
+      .catch((error) => console.debug("zode side panel open failed", error));
+  });
+}
+
 function enableActionOpenedSidePanel() {
   if (!chrome.sidePanel || typeof chrome.sidePanel.setPanelBehavior !== "function") {
     return;
@@ -348,6 +387,101 @@ async function ensureThemeWatcher() {
 
 function reconnectStored(port) {
   return connect(port || null, "");
+}
+
+function nativeRuntimeError(fallback) {
+  const message = chrome.runtime.lastError && chrome.runtime.lastError.message;
+  return new Error(
+    message ||
+      fallback ||
+      "zode native host is unavailable; run the updated zode CLI once to install it",
+  );
+}
+
+function startNativeZode() {
+  if (nativePort && nativeStatus) {
+    return Promise.resolve(nativeStatus);
+  }
+  if (nativeStartPromise) {
+    return nativeStartPromise;
+  }
+  nativeStartPromise = new Promise((resolve, reject) => {
+    let port;
+    let settled = false;
+    let timeout;
+    const finish = (error, status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) {
+        if (nativePort === port) nativePort = null;
+        nativeStatus = null;
+        try {
+          port?.disconnect();
+        } catch (_) {
+          // Chrome may already have closed a failed native host.
+        }
+        reject(error);
+      } else {
+        nativeStatus = status;
+        resolve(status);
+      }
+    };
+    try {
+      port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+      nativePort = port;
+      port.onMessage.addListener((message) => {
+        if (!message || message.ok !== true || !Number.isInteger(message.port)) {
+          finish(new Error((message && message.error) || "zode native host failed to start"));
+          return;
+        }
+        finish(null, { port: message.port });
+      });
+      port.onDisconnect.addListener(() => {
+        const error = nativeRuntimeError("zode native host disconnected before startup");
+        if (nativePort === port) nativePort = null;
+        nativeStatus = null;
+        if (!settled) finish(error);
+      });
+      timeout = setTimeout(() => {
+        finish(new Error("zode native host startup timed out"));
+        try {
+          port.disconnect();
+        } catch (_) {
+          // Chrome may already have closed a failed native host.
+        }
+      }, NATIVE_START_TIMEOUT_MS);
+      port.postMessage({ type: "start", protocolVersion: 1 });
+    } catch (error) {
+      finish(nativeRuntimeError(String(error && error.message ? error.message : error)));
+    }
+  });
+  const pending = nativeStartPromise;
+  pending.then(
+    () => {
+      if (nativeStartPromise === pending) nativeStartPromise = null;
+    },
+    () => {
+      if (nativeStartPromise === pending) nativeStartPromise = null;
+    },
+  );
+  return nativeStartPromise;
+}
+
+async function reconnectOrStart(port) {
+  try {
+    return await reconnectStored(port);
+  } catch (connectionError) {
+    let native;
+    try {
+      native = await startNativeZode();
+    } catch (nativeError) {
+      throw new Error(
+        `${connectionError.message}. ${nativeError.message || nativeError}`,
+      );
+    }
+    return await reconnectStored(native.port || port);
+  }
 }
 
 function closeSocket() {
@@ -445,6 +579,20 @@ function requestTask(method, params = {}) {
       reject(error);
     }
   });
+}
+
+// A turn submitted from the side panel is about the page beside the panel.
+// Make that page the bridge target before the agent can invoke browser_read;
+// unlike zode-created tabs, it remains in the user's existing tab group.
+async function targetActivePageForSidePanelTurn() {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab || tab.id == null) {
+    return;
+  }
+  if (controlledTabId !== tab.id) {
+    await detachAttached();
+    controlledTabId = tab.id;
+  }
 }
 
 function handleTaskFrame(msg) {
@@ -620,8 +768,9 @@ async function attachTo(tabId) {
   await cdp("Page.enable", {});
 }
 
-// zode never takes over a human tab: when it has no controlled tab it
-// always creates a fresh background one inside the zode tab group.
+// Standalone bridge automation never takes over a human tab: when it has no
+// controlled tab it creates a fresh background one inside the zode tab group.
+// Side-panel turns set controlledTabId to the adjacent active page first.
 async function ensureControlledTab() {
   const existing = await controlledTab();
   if (existing) {
@@ -932,13 +1081,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === "zode-reconnect") {
-    reconnectStored(message.port)
+    reconnectOrStart(message.port)
       .then((status) => sendResponse({ ok: true, status }))
       .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
     return true;
   }
   if (message.type === "zode-task-request") {
-    requestTask(message.method, message.params)
+    const request =
+      message.method === "turn/start"
+        ? targetActivePageForSidePanelTurn().then(() => requestTask(message.method, message.params))
+        : requestTask(message.method, message.params);
+    request
       .then((result) => sendResponse({ ok: true, result }))
       .catch((error) => {
         const response = { ok: false, error: String(error.message || error) };
@@ -957,4 +1110,5 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 enableActionOpenedSidePanel();
+enableSidePanelCommand();
 ensureThemeWatcher();
