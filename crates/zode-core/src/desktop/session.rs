@@ -124,6 +124,13 @@ impl DesktopSession {
         })
     }
 
+    /// Build a generation-bound AppId for an executable identity. M1: pid and
+    /// start-time are placeholders filled by the platform backend later; the
+    /// actor generation is stamped so ids fail after an actor replacement.
+    pub fn resolve_app(&self, exe: &str) -> AppId {
+        AppId::new(0, 0, exe.to_string(), self.actor.generation())
+    }
+
     /// Resolve a model-supplied window token into a generation-bound WindowId.
     /// M1: the mock/AX backend addresses windows by an opaque token; the id is
     /// stamped with the current actor generation so it fails as StaleRef after

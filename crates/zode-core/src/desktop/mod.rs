@@ -11,6 +11,7 @@ pub mod gate;
 pub mod mock;
 pub mod screenshot;
 pub mod session;
+pub mod tools;
 
 pub use backend::{
     AppId, AppInfo, AppLaunchId, DesktopBackend, DesktopError, ElementActionKind, ElementRef,
