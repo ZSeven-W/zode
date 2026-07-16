@@ -119,25 +119,10 @@ impl Tool for BrowserReadTool {
             "screenshot" => {
                 let shot = lease.backend().screenshot().await.map_err(to_agent_err)?;
                 drop(lease); // release the browser before disk I/O
-                std::fs::create_dir_all(&self.deps.shots_dir)
-                    .map_err(|e| AgentError::other(format!("shots dir: {e}")))?;
-                let name = format!(
-                    "shot-{}.jpg",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis()
-                );
-                let path = self.deps.shots_dir.join(name);
-                std::fs::write(&path, &shot.bytes)
-                    .map_err(|e| AgentError::other(format!("save screenshot: {e}")))?;
-                let block = agent::attachments::image_from_bytes(&shot.bytes)
-                    .map_err(|e| AgentError::other(format!("screenshot encode: {e}")))?;
-                Ok(json!({
-                    "__agent_content_blocks__": [serde_json::to_value(&block)
-                        .map_err(|e| AgentError::other(e.to_string()))?],
-                    "text": format!("screenshot saved: {}", path.display()),
-                }))
+                crate::desktop::screenshot::save_screenshot_artifact(
+                    &self.deps.shots_dir,
+                    &shot.bytes,
+                )
             }
             "snapshot" => Ok(json!({
                 "outline": lease.backend().snapshot().await.map_err(to_agent_err)?

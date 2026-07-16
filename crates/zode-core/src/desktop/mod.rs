@@ -8,6 +8,7 @@ pub mod actor;
 pub mod backend;
 #[cfg(test)]
 pub mod mock;
+pub mod screenshot;
 pub mod session;
 
 pub use backend::{
