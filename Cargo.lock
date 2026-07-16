@@ -6062,6 +6062,7 @@ dependencies = [
  "futures-util",
  "indexmap 2.14.0",
  "indexmap",
+ "libc",
  "noema-core",
  "opentelemetry",
  "opentelemetry-otlp",

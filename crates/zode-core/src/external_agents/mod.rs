@@ -8,6 +8,7 @@ pub mod fingerprint;
 pub mod limiter;
 pub mod parser;
 pub mod profiles;
+pub mod runner;
 
 use std::path::{Path, PathBuf};
 
