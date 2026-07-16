@@ -5034,7 +5034,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zode"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 dependencies = [
  "agent",
  "anyhow",
@@ -5056,7 +5056,7 @@ dependencies = [
 
 [[package]]
 name = "zode-app-server"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 dependencies = [
  "agent",
  "async-trait",
@@ -5078,7 +5078,7 @@ dependencies = [
 
 [[package]]
 name = "zode-app-server-protocol"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 dependencies = [
  "anyhow",
  "pretty_assertions",
@@ -5090,7 +5090,7 @@ dependencies = [
 
 [[package]]
 name = "zode-app-server-transport"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 dependencies = [
  "serde_json",
  "zode-app-server-protocol",
@@ -5098,7 +5098,7 @@ dependencies = [
 
 [[package]]
 name = "zode-core"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 dependencies = [
  "agent",
  "agent-tools-code",
@@ -5129,7 +5129,7 @@ dependencies = [
 
 [[package]]
 name = "zode-sdk-rust"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -5140,7 +5140,7 @@ dependencies = [
 
 [[package]]
 name = "zode-tui"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 dependencies = [
  "agent",
  "base64 0.22.1",

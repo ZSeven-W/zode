@@ -1,4 +1,4 @@
-//! Experimental Windows Tier 1 runner.
+//! Windows Tier 1 runner.
 //!
 //! Tier 1 is best-effort write confinement, not a complete Windows security
 //! boundary. Network is unenforced. Writable roots retain delete-child access

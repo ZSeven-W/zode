@@ -4,6 +4,20 @@ TypeScript SDK for `zode server` stdio JSON-RPC.
 
 ## Install
 
+From GitHub Packages (authenticate npm with a token that has
+`read:packages`, then configure the `@zseven-w` scope for
+`https://npm.pkg.github.com`):
+
+```ini
+# ~/.npmrc
+@zseven-w:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```
+
+```sh
+npm install @zseven-w/zode-sdk@0.1.0-beta.6
+```
+
 From this repository:
 
 ```sh
@@ -14,7 +28,7 @@ pnpm --dir sdk/typescript build
 Package name:
 
 ```json
-"@zseven/zode-sdk"
+"@zseven-w/zode-sdk"
 ```
 
 ## Usage
@@ -22,7 +36,7 @@ Package name:
 `zode` must be on `PATH`, or pass `{ binary: "/absolute/path/to/zode" }`.
 
 ```ts
-import { ProtocolMethod, ZodeClient } from "@zseven/zode-sdk";
+import { ProtocolMethod, ZodeClient } from "@zseven-w/zode-sdk";
 
 const client = new ZodeClient();
 
@@ -51,7 +65,7 @@ Register handlers before starting a turn. Pass `approvalPolicy: "auto"` (or
 `readOnly` denies it.
 
 ```ts
-import { ProtocolMethod, ZodeClient } from "@zseven/zode-sdk";
+import { ProtocolMethod, ZodeClient } from "@zseven-w/zode-sdk";
 
 const client = new ZodeClient();
 
@@ -95,7 +109,7 @@ const client = await ZodeClient.connectWebSocket({
 
 ## Version
 
-`@zseven/zode-sdk` `0.1.0-beta.5`.
+`@zseven-w/zode-sdk` `0.1.0-beta.6`.
 
 ## Test
 

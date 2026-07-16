@@ -31,6 +31,157 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md $prerelease
 
+  sdk-rust-release:
+    needs: create-release
+    name: sdk-rust-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test and package Rust SDK
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          actual="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          test "$actual" = "$version"
+          cargo test -p zode-sdk-rust --locked
+          ./scripts/package-rust-sdk.sh "$version" \
+            "sdk-dist/zode-sdk-rust-$version.tar.gz"
+          verify_dir="$(mktemp -d)"
+          tar -xzf "sdk-dist/zode-sdk-rust-$version.tar.gz" -C "$verify_dir"
+          cargo test --workspace \
+            --manifest-path "$verify_dir/zode-sdk-rust-$version/Cargo.toml"
+      - name: Publish Rust SDK bundle to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sdk-dist/*.tar.gz
+          fail_on_unmatched_files: true
+
+  sdk-typescript-package:
+    needs: create-release
+    name: sdk-typescript-package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://npm.pkg.github.com
+          scope: "@zseven-w"
+          cache: pnpm
+          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+      - name: Build and test TypeScript SDK
+        working-directory: sdk/typescript
+        run: |
+          test "$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME#v}"
+          pnpm install --frozen-lockfile
+          pnpm test
+      - name: Publish TypeScript SDK to GitHub Packages
+        working-directory: sdk/typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if npm view "@zseven-w/zode-sdk@$version" version \
+            --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "@zseven-w/zode-sdk@$version already published — reusing"
+          else
+            npm publish --tag beta
+          fi
+
+  sdk-python-release:
+    needs: create-release
+    name: sdk-python-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test and package Python SDK
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          expected="${version/-beta./b}"
+          actual="$(python -c 'import tomllib; print(tomllib.load(open("sdk/python/pyproject.toml", "rb"))["project"]["version"])')"
+          test "$actual" = "$expected"
+          PYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests
+          python -m pip install --disable-pip-version-check build==1.2.2.post1
+          python -m build sdk/python
+      - name: Publish Python SDK archives to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sdk/python/dist/*.whl
+            sdk/python/dist/*.tar.gz
+          fail_on_unmatched_files: true
+
+  sdk-go-module:
+    needs: create-release
+    name: sdk-go-module
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: sdk/go/go.mod
+          cache-dependency-path: sdk/go/go.mod
+      - name: Test Go SDK
+        working-directory: sdk/go
+        run: go test ./...
+      - name: Publish Go module tag
+        run: |
+          tag="sdk/go/$GITHUB_REF_NAME"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" \
+            >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+            remote_sha="$(git rev-list -n 1 "$tag")"
+            test "$remote_sha" = "$GITHUB_SHA"
+            echo "$tag already points to $GITHUB_SHA — reusing"
+          else
+            git tag "$tag" "$GITHUB_SHA"
+            git push origin "refs/tags/$tag"
+          fi
+
+  sdk-kotlin-package:
+    needs: create-release
+    name: sdk-kotlin-package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+      - name: Test and publish Kotlin SDK to GitHub Packages
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -Fq "version = \"$version\"" sdk/kotlin/build.gradle.kts
+          gradle -p sdk/kotlin test
+          pom="https://maven.pkg.github.com/zseven-w/zode/com/zseven/zode/zode-sdk/$version/zode-sdk-$version.pom"
+          if curl -fsS -u "$GITHUB_ACTOR:$GITHUB_TOKEN" "$pom" >/dev/null 2>&1; then
+            echo "com.zseven.zode:zode-sdk:$version already published — reusing"
+          else
+            gradle -p sdk/kotlin publish
+          fi
+
   browser-extension:
     needs: create-release
     name: browser-extension

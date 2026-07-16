@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Rust SDK for the zode app-server JSON-RPC protocol."
 publish = false
 
 [lib]
@@ -11,7 +14,7 @@ name = "zode_sdk"
 path = "src/lib.rs"
 
 [dependencies]
-zode-app-server-protocol = { path = "../../crates/zode-app-server-protocol" }
+zode-app-server-protocol = { path = "../../crates/zode-app-server-protocol", version = "=0.1.0-beta.6" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

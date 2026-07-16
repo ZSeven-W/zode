@@ -147,7 +147,7 @@ pub fn tier_one_summary(read_only: bool) -> String {
         "best-effort write confinement to configured roots"
     };
     format!(
-        "Windows Tier 1 sandbox (experimental): {writes}; network unenforced. \
+        "Windows Tier 1 sandbox: {writes}; network unenforced. \
          File tools reject .git and .zode paths, but the kernel policy cannot protect them \
          from rename/delete through their parent because parent delete-child rights are retained \
          for build-tool and atomic-rename compatibility."
@@ -161,7 +161,7 @@ pub fn tier_two_summary(read_only: bool) -> String {
         "best-effort write confinement to configured roots"
     };
     format!(
-        "Windows Tier 2 sandbox (experimental): {writes}; network denied (AppContainer — no \
+        "Windows Tier 2 sandbox: {writes}; network denied (AppContainer — no \
          network capability, loopback included). \
          File tools reject .git and .zode paths, but the kernel write policy cannot protect them \
          from rename/delete through their parent because parent delete-child rights are retained \
@@ -253,10 +253,9 @@ mod tests {
     }
 
     #[test]
-    fn tier_one_summary_states_all_experimental_limitations() {
+    fn tier_one_summary_states_all_limitations() {
         let summary = tier_one_summary(false);
         for required in [
-            "experimental",
             "best-effort",
             "network unenforced",
             ".git",

@@ -4,13 +4,22 @@ Rust SDK for `zode server` stdio JSON-RPC.
 
 ## Install
 
-Inside this repository it is a workspace crate:
+From the tagged Git repository:
+
+```toml
+zode-sdk-rust = { git = "https://github.com/ZSeven-W/zode.git", tag = "v0.1.0-beta.6" }
+```
+
+Inside this repository it is also a workspace crate:
 
 ```toml
 zode-sdk-rust = { path = "sdk/rust" }
 ```
 
 The library name is `zode_sdk`.
+
+Each GitHub Release also includes a standalone Rust SDK source bundle containing
+both `zode-sdk-rust` and its `zode-app-server-protocol` dependency.
 
 ## Usage
 
@@ -98,7 +107,7 @@ handler denies.
 
 ## Version
 
-This crate is versioned with the zode workspace (currently `0.1.0-beta.5`).
+This crate is versioned with the zode workspace (currently `0.1.0-beta.6`).
 
 ## Test
 

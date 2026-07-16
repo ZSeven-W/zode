@@ -4,7 +4,33 @@ Kotlin/JVM SDK for `zode server` stdio JSON-RPC.
 
 ## Install
 
-This directory is a standalone Gradle project.
+The SDK is published to GitHub Packages as
+`com.zseven.zode:zode-sdk:0.1.0-beta.6`. Configure the repository and
+credentials with a token that has `read:packages`:
+
+```properties
+# ~/.gradle/gradle.properties
+gpr.user=YOUR_GITHUB_USERNAME
+gpr.key=YOUR_GITHUB_TOKEN
+```
+
+```kotlin
+repositories {
+    maven {
+        url = uri("https://maven.pkg.github.com/zseven-w/zode")
+        credentials {
+            username = providers.gradleProperty("gpr.user").orNull
+            password = providers.gradleProperty("gpr.key").orNull
+        }
+    }
+}
+
+dependencies {
+    implementation("com.zseven.zode:zode-sdk:0.1.0-beta.6")
+}
+```
+
+This directory is also a standalone Gradle project.
 
 ```sh
 cd sdk/kotlin
@@ -93,7 +119,7 @@ unregistered or throwing handler denies.
 
 ## Version
 
-`0.1.0-beta.5`.
+`0.1.0-beta.6`.
 
 ## Test
 

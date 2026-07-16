@@ -10,6 +10,12 @@ Module path:
 github.com/ZSeven-W/zode/sdk/go
 ```
 
+Install the tagged module version:
+
+```sh
+go get github.com/ZSeven-W/zode/sdk/go@v0.1.0-beta.6
+```
+
 For local development, work inside `sdk/go`.
 
 ## Usage
@@ -103,8 +109,8 @@ denies.
 
 ## Version
 
-Versioned by the repository git tag (module `github.com/ZSeven-W/zode/sdk/go`,
-`v0.1.0-beta.5`).
+Versioned by the module-aware git tag `sdk/go/v0.1.0-beta.6` for module
+`github.com/ZSeven-W/zode/sdk/go`.
 
 ## Test
 
