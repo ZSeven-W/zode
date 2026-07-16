@@ -15,6 +15,7 @@ pub mod compact_memory;
 pub mod config;
 pub mod cost;
 pub mod currency;
+pub mod desktop;
 pub mod diff;
 pub mod engine;
 pub mod error;
