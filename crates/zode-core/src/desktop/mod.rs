@@ -8,6 +8,7 @@ pub mod actor;
 pub mod backend;
 #[cfg(test)]
 pub mod mock;
+pub mod session;
 
 pub use backend::{
     AppId, AppInfo, AppLaunchId, DesktopBackend, DesktopError, ElementActionKind, ElementRef,
