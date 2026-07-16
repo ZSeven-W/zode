@@ -224,11 +224,12 @@ fn render_table(table: TableState, theme: &Theme) -> Vec<Line<'static>> {
         .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
     let body = Style::default().fg(theme.fg_text);
+    // A full box-drawing grid: a rule tops the table and follows *every* row, so
+    // every cell is boxed. The corner/junction glyphs (`┌┬┐ ├┼┤ └┴┘`) are made
+    // to interlock with `│`/`─`, so verticals and horizontals meet seamlessly.
     let mut out = Vec::new();
-    out.push(Line::from(Span::styled(
-        table_rule(&widths, "┌", "┬", "┐"),
-        border,
-    )));
+    out.push(table_rule(&widths, "┌", "┬", "┐", border));
+    let last = table.rows.len().saturating_sub(1);
     for (row_idx, row) in table.rows.iter().enumerate() {
         let cell_style = if row_idx < table.header_rows {
             head
@@ -236,18 +237,31 @@ fn render_table(table: TableState, theme: &Theme) -> Vec<Line<'static>> {
             body
         };
         out.push(render_table_row(row, &widths, cell_style, border));
-        if row_idx + 1 == table.header_rows {
-            out.push(Line::from(Span::styled(
-                table_rule(&widths, "├", "┼", "┤"),
-                border,
-            )));
-        }
+        let rule = if row_idx == last {
+            table_rule(&widths, "└", "┴", "┘", border)
+        } else {
+            table_rule(&widths, "├", "┼", "┤", border)
+        };
+        out.push(rule);
     }
-    out.push(Line::from(Span::styled(
-        table_rule(&widths, "└", "┴", "┘"),
-        border,
-    )));
     out
+}
+
+/// A horizontal rule whose column layout matches [`render_table_row`]: `left`
+/// corner, `─` spanning each cell (its content width plus the two padding
+/// spaces), a `mid` junction between columns, then the `right` corner. Feeding
+/// the proper box-drawing glyphs (`┌┬┐` / `├┼┤` / `└┴┘`) makes every junction
+/// interlock with the `│` verticals above and below for a seamless grid.
+fn table_rule(widths: &[usize], left: &str, mid: &str, right: &str, style: Style) -> Line<'static> {
+    let mut s = String::from(left);
+    for (idx, width) in widths.iter().enumerate() {
+        if idx > 0 {
+            s.push_str(mid);
+        }
+        s.push_str(&"─".repeat(width.saturating_add(2)));
+    }
+    s.push_str(right);
+    Line::from(Span::styled(s, style))
 }
 
 fn render_table_row(
@@ -256,21 +270,16 @@ fn render_table_row(
     cell_style: Style,
     border_style: Style,
 ) -> Line<'static> {
-    let mut spans = vec![Span::styled("│ ", border_style)];
+    let mut spans = vec![Span::styled("│", border_style)];
     for (idx, width) in widths.iter().copied().enumerate() {
         let cell = row.get(idx).map(String::as_str).unwrap_or("");
-        spans.push(Span::styled(pad_display(cell, width), cell_style));
-        spans.push(Span::styled(" │ ", border_style));
+        spans.push(Span::styled(
+            format!(" {} ", pad_display(cell, width)),
+            cell_style,
+        ));
+        spans.push(Span::styled("│", border_style));
     }
     Line::from(spans)
-}
-
-fn table_rule(widths: &[usize], left: &str, join: &str, right: &str) -> String {
-    let segments: Vec<String> = widths
-        .iter()
-        .map(|width| "─".repeat(width.saturating_add(2)))
-        .collect();
-    format!("{left}{}{right}", segments.join(join))
 }
 
 fn pad_display(s: &str, width: usize) -> String {
@@ -476,28 +485,64 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
+        // Full box-drawing grid: a `┌…┐` tops the table and a `└…┘` closes it,
+        // with `├┼┤` rules between rows; content rows use the `│` separator.
         let top = rows
             .iter()
-            .position(|row| row.starts_with("┌"))
+            .position(|row| row.starts_with('┌'))
             .expect("table should render a top border");
         let bottom = rows
             .iter()
-            .position(|row| row.starts_with("└"))
+            .position(|row| row.starts_with('└'))
             .expect("table should render a bottom border");
-
         assert!(
-            rows[top].ends_with("┐"),
+            rows[top].ends_with('┐'),
             "top border should close: {rows:#?}"
         );
         assert!(
-            rows[bottom].ends_with("┘"),
+            rows[bottom].ends_with('┘'),
             "bottom border should close: {rows:#?}"
+        );
+        // Junction rule between rows and a `│`-separated content row.
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with('├') && row.contains('┼')),
+            "interior rules interlock with the verticals: {rows:#?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with('│') && row.contains('│')),
+            "content rows use the `│` column separator: {rows:#?}"
         );
         assert_eq!(
             rows.get(top.saturating_sub(1)).map(String::as_str),
             Some("")
         );
         assert_eq!(rows.get(bottom + 1).map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn table_rules_bound_every_row() {
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let lines = render_markdown("| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n", &theme);
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        // A rule row is made only of box-drawing frame glyphs (no cell text).
+        let is_rule =
+            |row: &&String| row.contains('─') && row.chars().all(|c| "┌┬┐├┼┤└┴┘─".contains(c));
+        // header + 2 body rows → 3 rows, each boxed → 4 rules (top + one per row).
+        assert_eq!(
+            rows.iter().filter(is_rule).count(),
+            4,
+            "every row gets its own bottom rule: {rows:#?}"
+        );
     }
 
     #[test]

@@ -195,6 +195,14 @@ Zode 提供 `tools:browser` 工具组：
 - **managed**：Zode 启动并控制专用 Chromium profile。
 - **bridge**：通过 [`extensions/chrome/`](../../extensions/chrome/) 中的 MV3 扩展控制你正在使用的 Chrome profile。
 
+首次升级后运行一次新版 Zode 并执行 `/browser pair`。这会注册仅允许固定扩展 ID
+调用的 Chrome Native Messaging host。之后即使没有打开 Zode CLI，侧栏也会自动
+启动一个无终端的本地 Zode daemon，并使用已保存的 token 恢复任务和历史记录。
+从侧栏提交任务时，浏览器工具会绑定侧栏旁边的当前页面，因此“分析当前页面”会
+直接读取现有标签页，不再新建标签页；独立的 TUI/CLI 自动化仍使用 `zode` 标签组。
+侧栏中的“这个”“当前内容”等含糊表达也默认指向当前页面，Agent 会先读取页面；
+只有用户明确询问项目、代码或本地文件时，才会优先检查本地工作区。
+
 常用命令：
 
 ```bash
@@ -204,7 +212,7 @@ Zode 提供 `tools:browser` 工具组：
 /browser close
 /browser pair
 /browser target managed
-/browser target bridge
+/browser target bridge        # 切换到扩展桥接，并保存为下次启动的默认目标
 /browser screenshot [path]
 ```
 

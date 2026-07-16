@@ -31,7 +31,7 @@ use crate::approval::{ApprovalGate, ApprovalQueue, BypassGate, QueueGate};
 use crate::bg_shells::{BackgroundShellTracker, BgShellHook};
 use crate::browser::{
     BrowserActTool, BrowserEvalTool, BrowserReadTool, BrowserSession, BrowserTabsTool,
-    BrowserToolDeps, BrowserUploadTool, ManagedFactory,
+    BrowserTarget, BrowserToolDeps, BrowserUploadTool, ManagedFactory,
 };
 use crate::config::ZodeConfig;
 use crate::cost::CostState;
@@ -41,7 +41,7 @@ use crate::history::{EditHistory, EditHistoryHook};
 use crate::hooks_config::load_hook_handlers;
 use crate::instructions::{
     build_system_prompt, discover_instructions, gather_env, gather_env_with_branch,
-    openspec_detected,
+    openspec_detected, PromptFlags,
 };
 use crate::noema::ZodeNoema;
 use crate::plugin::PluginManager;
@@ -184,6 +184,30 @@ fn effective_provider_supports_images(
     build_provider(&resolved)
         .map(|provider| provider.capabilities().supports_images)
         .unwrap_or(false)
+}
+
+/// Map the `/effort` setting onto real provider reasoning knobs. Prose in the
+/// system prompt stays as fallback for providers with no knob.
+pub(crate) fn map_effort(
+    effort: Option<&str>,
+    supports_thinking: bool,
+    reasoning_opt_in: bool,
+) -> (Option<agent::provider::ThinkingConfig>, Option<String>) {
+    let norm = effort.map(str::trim).map(str::to_ascii_lowercase);
+    // Precedence: a native thinking budget (Anthropic) wins for "high" — the
+    // effort string rides along too, so the vendor adaptive-thinking path
+    // can emit output_config.effort for models that require adaptive
+    // thinking. Otherwise the opt-in OpenAI-style effort string is
+    // forwarded verbatim (including an explicit "medium"); "medium" is the
+    // provider default and maps to no knob at all when not opted in.
+    match norm.as_deref() {
+        Some("high") if supports_thinking => (
+            Some(agent::provider::ThinkingConfig::new(8192)),
+            Some("high".to_string()),
+        ),
+        Some(e @ ("low" | "medium" | "high")) if reasoning_opt_in => (None, Some(e.to_string())),
+        _ => (None, None),
+    }
 }
 
 fn pre_turn_compact_needed(input_tokens: u32, context_window: u32, max_output_tokens: u32) -> bool {
@@ -347,6 +371,7 @@ pub struct CarryState {
     pub recent_files: Option<crate::compact_memory::RecentFiles>,
     pub verification: Option<crate::verification::VerificationState>,
     pub tool_trace: Option<crate::tool_trace::ToolTrace>,
+    pub reminders: Option<crate::reminders::ReminderTracker>,
 }
 
 impl ZodeEngine {
@@ -365,6 +390,7 @@ impl ZodeEngine {
             recent_files: Some(self.recent_files.clone()),
             verification: Some(self.verification.clone()),
             tool_trace: Some(self.tool_trace.clone()),
+            reminders: Some(self.reminders.clone()),
         }
     }
 }
@@ -386,6 +412,8 @@ fn render_runtime_system_prompt(
     sandbox: &Option<crate::sandbox::SandboxConfig>,
     plan_mode: bool,
     has_question_tool: bool,
+    has_todo_tool: bool,
+    has_run_check_tool: bool,
     model: &str,
     skills: &SkillRegistry,
     agent_type_list: &[(String, String)],
@@ -406,15 +434,20 @@ fn render_runtime_system_prompt(
     // is answerable). Stable across a session, so it doesn't hurt caching.
     env.model = model.to_string();
     let instructions = discover_instructions(cwd);
-    let mut system = build_system_prompt(
-        &instructions,
-        &skills_idx,
-        &env,
-        cfg.skill_discipline(),
-        cfg.openspec_awareness() && openspec_detected(cwd),
+    let flags = PromptFlags {
+        skill_discipline: cfg.skill_discipline(),
+        openspec: cfg.openspec_awareness() && openspec_detected(cwd),
         // Nudge toward the AskUserQuestion tool only when it's actually present.
-        has_question_tool,
-    );
+        ask_user_question: has_question_tool,
+        todo: has_todo_tool,
+        // Reflect actual tool availability, exactly like `has_todo_tool`.
+        // `run_check` is Mutating and is filtered both by plan mode and by
+        // read-only mode (`filter_read_only`) — deriving this from the final
+        // gated registry keeps the prompt in sync in both cases instead of
+        // hardcoding only the plan-mode gate.
+        verify_tool: has_run_check_tool,
+    };
+    let mut system = build_system_prompt(&instructions, &skills_idx, &env, &flags);
     // Declare the live sandbox / write policy so the agent knows whether it may
     // write outside cwd or reach the network.
     system.push_str(&sandbox_prompt_note(sandbox));
@@ -425,17 +458,29 @@ fn render_runtime_system_prompt(
     // A persistent goal (`/goal`) keeps the agent focused on one objective AND
     // drives an autonomous multi-turn loop.
     if let Some(goal) = cfg.goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+        // `run_check` is Mutating and can be filtered out of the gated
+        // registry (plan mode / read-only mode) — only tell the model to
+        // rely on it when it's actually available, same signal as
+        // `flags.verify_tool` above.
+        let verify_clause = if has_run_check_tool {
+            "Before claiming completion, \
+             run the `run_check` tool with the exact verification command or \
+             invariant that proves the work is done. When — and only when — the \
+             goal is FULLY achieved and `run_check` has fresh passing evidence, \
+             call the `goal_complete` tool with a short summary to end the loop."
+        } else {
+            "Before claiming completion, verify the goal is achieved by the \
+             means available to you. When — and only when — the goal is FULLY \
+             achieved, call the `goal_complete` tool with a short summary to \
+             end the loop."
+        };
         system.push_str(&format!(
             "\n\n# Current goal\nKeep this objective in focus for every turn; \
              if a request is ambiguous, resolve it toward the goal:\n{goal}\n\n\
              You are working AUTONOMOUSLY toward this goal across multiple turns. \
              Each turn, take the next concrete step (research, edit, run, verify) — \
              do not just describe what you would do; actually do it. The loop \
-             continues automatically after every turn. Before claiming completion, \
-             run the `run_check` tool with the exact verification command or \
-             invariant that proves the work is done. When — and only when — the \
-             goal is FULLY achieved and `run_check` has fresh passing evidence, \
-             call the `goal_complete` tool with a short summary to end the loop. \
+             continues automatically after every turn. {verify_clause} \
              Do not call `goal_complete` prematurely, and do not stop early \
              otherwise; if work remains, keep going on the next turn."
         ));
@@ -526,6 +571,13 @@ pub struct ZodeEngine {
     pub max_api_retries: u32,
     /// Sampling temperature (None = provider default).
     pub temperature: Option<f32>,
+    /// Anthropic-style extended-thinking budget, derived from `/effort` when
+    /// the active provider declares `supports_thinking`. See [`map_effort`].
+    pub thinking: Option<agent::provider::ThinkingConfig>,
+    /// OpenAI-style `reasoning_effort` string ("low" | "high"), derived from
+    /// `/effort` when the provider config opts in via `reasoning: true`. See
+    /// [`map_effort`].
+    pub reasoning_effort: Option<String>,
     /// Whether to request provider prompt caching (default on).
     pub prompt_cache: bool,
     /// Native Noema long-term memory adapter. Disabled adapters are cheap no-ops.
@@ -588,6 +640,10 @@ pub struct ZodeEngine {
     /// the `/browser` TUI panel). All tabs from the same `EngineTemplate`
     /// share one `Arc` — one browser process per zode run.
     pub browser: Arc<BrowserSession>,
+    /// Per-engine browser target pin baked into this engine's `browser_*`
+    /// tools at assembly (extension task engines pin `Bridge`). `None` means
+    /// the tools follow the session-wide `/browser target` selection.
+    pub browser_target_override: Option<BrowserTarget>,
     /// Shared completion signal for the autonomous goal loop. The registered
     /// `goal_complete` tool flips this; the TUI polls it after each turn to
     /// decide whether to stop looping. Created fresh in `assemble` so a rebuilt
@@ -598,6 +654,9 @@ pub struct ZodeEngine {
     pub verification: crate::verification::VerificationState,
     /// Durable JSONL trace file for full tool inputs/outputs, referenced by export.
     pub tool_trace: crate::tool_trace::ToolTrace,
+    /// Per-turn system reminders: external file drift, todo staleness, and
+    /// (via `check_branch_drift`) git branch drift.
+    pub reminders: crate::reminders::ReminderTracker,
     /// Optional cap on autonomous goal-loop turns (`autoLoopMaxTurns`). `None`
     /// means unbounded — the loop runs until `goal_complete` or user interrupt.
     auto_loop_max_turns: Option<u32>,
@@ -710,6 +769,7 @@ impl ZodeEngine {
             plan_mode,
             false,
             browser,
+            None,
             carry,
         )
         .await
@@ -728,6 +788,7 @@ impl ZodeEngine {
         plan_mode: bool,
         read_only_tools: bool,
         browser: Option<Arc<BrowserSession>>,
+        browser_target_override: Option<BrowserTarget>,
         carry: CarryState,
     ) -> Result<Self, CoreError> {
         // Reuse the caller's session (all tabs share ONE browser process) or
@@ -772,6 +833,7 @@ impl ZodeEngine {
             .tool_trace
             .clone()
             .unwrap_or_else(|| crate::tool_trace::ToolTrace::new(&cwd));
+        let reminders = carry.reminders.clone().unwrap_or_default();
         register_default_with_todo(&mut base, policy.clone(), todo_state.clone());
         // A sandbox-blocked file write must ask the user to escalate rather than
         // dead-end: otherwise the model retries the same write and finally works
@@ -805,9 +867,14 @@ impl ZodeEngine {
         // the tool flips it, the host polls it after each turn to stop looping.
         // Always registered (cheap, read-only) so a goal can be set mid-session.
         let goal_completed = Arc::new(AtomicBool::new(false));
+        // `run_check` is Mutating (see below), so plan-mode / read-only
+        // sessions never register it — requiring fresh evidence from it would
+        // make `goal_complete` permanently unreachable there. Only demand
+        // evidence when the session can actually produce it.
         base.register(Arc::new(crate::goal::GoalCompleteTool::new(
             goal_completed.clone(),
             verification.clone(),
+            !(plan_mode || read_only_tools),
         )));
         base.register(Arc::new(crate::verification::RunCheckTool::new(
             verification.clone(),
@@ -897,21 +964,23 @@ impl ZodeEngine {
             let deps = BrowserToolDeps {
                 session: browser_session.clone(),
                 shots_dir,
+                target_override: browser_target_override.clone(),
             };
             base.register(Arc::new(BrowserReadTool::new(deps.clone())));
-            base.register(Arc::new(BrowserUploadTool::new(
-                browser_session.clone(),
-                gate.clone(),
-            )));
+            base.register(Arc::new(
+                BrowserUploadTool::new(browser_session.clone(), gate.clone())
+                    .with_target_override(browser_target_override.clone()),
+            ));
             for tool in [
                 Arc::new(BrowserActTool::new(deps.clone())) as Arc<dyn Tool>,
                 Arc::new(BrowserEvalTool::new(deps.clone())),
                 Arc::new(BrowserTabsTool::new(deps)),
             ] {
-                base.register(crate::browser::gate::browser_gated(
+                base.register(crate::browser::gate::browser_gated_as(
                     tool,
                     gate.clone(),
                     browser_session.clone(),
+                    browser_target_override.clone(),
                 ));
             }
         }
@@ -1021,6 +1090,7 @@ impl ZodeEngine {
             verification.clone(),
         )));
         hook_runner.register(Arc::new(tool_trace.hook()));
+        hook_runner.register(Arc::new(reminders.hook()));
         // External hooks.json scripts (global ⊕ project).
         for h in load_hook_handlers(&cwd) {
             hook_runner.register(h);
@@ -1138,6 +1208,12 @@ impl ZodeEngine {
                 .ok()
                 .flatten()
         };
+        // Seed the drift-tracker baseline with the branch that's about to be
+        // baked into the system prompt, so `check_branch_drift` only fires on
+        // a REAL change observed after this prompt was rendered.
+        reminders.note_git_branch(git_branch.clone());
+        let has_todo_tool = tools.get("TodoWrite").is_some();
+        let has_run_check_tool = tools.get("run_check").is_some();
         let system = Some(render_runtime_system_prompt(
             cfg,
             &cwd,
@@ -1145,6 +1221,8 @@ impl ZodeEngine {
             &sandbox,
             plan_mode,
             has_question_tool,
+            has_todo_tool,
+            has_run_check_tool,
             &model,
             &skills,
             &agent_type_list,
@@ -1162,6 +1240,14 @@ impl ZodeEngine {
         // Mid-turn steering channel: host → running loop.
         let (steer_tx, steer_rx) = futures::channel::mpsc::unbounded::<Vec<ContentBlock>>();
         let steer_rx = Arc::new(std::sync::Mutex::new(steer_rx));
+
+        // Map /effort onto real provider reasoning knobs (system-prompt prose
+        // stays as the fallback for providers with no such knob).
+        let (thinking, reasoning_effort) = map_effort(
+            cfg.effort.as_deref(),
+            provider.capabilities().supports_thinking,
+            cfg.provider.reasoning.unwrap_or(false),
+        );
 
         let noema = ZodeNoema::from_settings(&cfg.noema);
         let session_store = (cfg.compact.memory_sink() && noema.is_enabled()).then(|| {
@@ -1210,6 +1296,8 @@ impl ZodeEngine {
             max_iterations: resolve_max_iterations(cfg.max_iterations),
             max_api_retries: resolve_max_api_retries(cfg.max_api_retries),
             temperature: cfg.temperature,
+            thinking,
+            reasoning_effort,
             prompt_cache: cfg.prompt_cache.unwrap_or(true),
             noema,
             extract_config: crate::noema_extract::ExtractConfig::from_settings(&cfg.noema),
@@ -1242,8 +1330,10 @@ impl ZodeEngine {
             goal_completed,
             verification,
             tool_trace,
+            reminders,
             auto_loop_max_turns: cfg.auto_loop_max_turns,
             browser: browser_session,
+            browser_target_override,
         })
     }
 
@@ -1566,8 +1656,28 @@ impl ZodeEngine {
         let query = text_query(&content);
         self.restore_after_compact(&query);
         self.auto_remember_noema(&query);
+        let mut notices = self.reminders.pre_turn(&self.todo_state).await;
+        if let Some(n) = self.check_branch_drift().await {
+            notices.push(n);
+        }
+        let content = if notices.is_empty() {
+            content
+        } else {
+            crate::reminders::prepend_reminder(content, &notices)
+        };
         let content = self.inject_noema_memory(content, &query);
         self.turn_blocks_raw(content, abort).await
+    }
+
+    /// Detect a git-branch change since the prompt was rendered. Runs `git
+    /// rev-parse` off-thread; the tracker baseline is seeded at assembly time.
+    async fn check_branch_drift(&self) -> Option<String> {
+        let cwd = self.cwd.clone();
+        let current =
+            tokio::task::spawn_blocking(move || crate::instructions::detect_git_branch(&cwd))
+                .await
+                .ok()?;
+        self.reminders.note_git_branch(current)
     }
 
     /// Run one turn without dynamic memory injection. This is for internal
@@ -1596,6 +1706,12 @@ impl ZodeEngine {
             .steer(self.steer_rx.clone());
         if let Some(t) = self.temperature {
             builder = builder.temperature(t);
+        }
+        if let Some(tc) = self.thinking {
+            builder = builder.thinking(tc);
+        }
+        if let Some(e) = self.reasoning_effort.clone() {
+            builder = builder.reasoning_effort(e);
         }
         if let Some(store) = &self.session_store {
             builder = builder
@@ -1887,6 +2003,11 @@ pub struct EngineTemplate {
     /// Process-wide browser session, shared by every tab assembled from this
     /// template — one browser process per zode run, not one per tab.
     pub browser: Arc<BrowserSession>,
+    /// Pin the `browser_*` tools of engines assembled from this template to
+    /// an explicit target. Extension-task templates pin `Bridge` so
+    /// side-panel turns drive the page beside the panel, regardless of the
+    /// session-wide `/browser target` selection.
+    browser_target_override: Option<BrowserTarget>,
 }
 
 fn provider_key_owns_model(cfg: &ZodeConfig, key: &str, model: &str) -> bool {
@@ -1918,7 +2039,15 @@ impl EngineTemplate {
             sandbox,
             date,
             browser,
+            browser_target_override: None,
         }
+    }
+
+    /// Pin engines assembled from this template to an explicit browser
+    /// target (see the field doc). Returns the template for chaining.
+    pub fn with_browser_target_override(mut self, target: Option<BrowserTarget>) -> Self {
+        self.browser_target_override = target;
+        self
     }
 
     /// Wire the interactive question channel (TUI). Carried across reassembly
@@ -2021,6 +2150,7 @@ impl EngineTemplate {
             self.plan_mode,
             self.read_only_tools,
             Some(self.browser.clone()),
+            self.browser_target_override.clone(),
             carry,
         )
         .await
@@ -2455,6 +2585,18 @@ impl EngineTemplate {
             context_window,
         );
         let system = template.runtime_system_for_engine(engine, &model);
+        // Re-derive the /effort knobs for the NEW provider — same inputs and
+        // same precedence as `assemble` (see `map_effort`). Without this the
+        // engine keeps whatever thinking/reasoning_effort the OLD provider
+        // resolved to, which is wrong (and unsafe) once the provider kind
+        // changes: e.g. swapping from an Anthropic-capable provider to an
+        // OpenAI-compat one must drop a stale thinking budget that the new
+        // provider would never accept.
+        let (thinking, reasoning_effort) = map_effort(
+            template.cfg.effort.as_deref(),
+            provider.capabilities().supports_thinking,
+            template.cfg.provider.reasoning.unwrap_or(false),
+        );
 
         engine.provider = provider;
         engine.model = model.clone();
@@ -2467,6 +2609,8 @@ impl EngineTemplate {
         // total survives the swap (was: replaced with a fresh $0 tracker).
         engine.cost.set_model(model);
         engine.system = Some(system);
+        engine.thinking = thinking;
+        engine.reasoning_effort = reasoning_effort;
         Ok(template)
     }
 
@@ -2485,6 +2629,14 @@ impl EngineTemplate {
             .as_ref()
             .map(|sb| sb.clone().with_cwd(&engine.cwd));
         let workflow_defs = crate::workflows::load_workflow_defs(&engine.cwd);
+        // Sync hot-swap path (user-triggered, off the startup critical path) —
+        // detect the branch inline, then re-seed the drift tracker so its
+        // baseline matches what's about to be baked into this fresh prompt.
+        // `engine.reminders` is carried across the hot-swap (not rebuilt), so
+        // without re-seeding, a branch change already reflected in this new
+        // prompt would still fire a stale/false drift notice on the next turn.
+        let git_branch = crate::instructions::detect_git_branch(&engine.cwd);
+        engine.reminders.note_git_branch(git_branch.clone());
         render_runtime_system_prompt(
             &self.cfg,
             &engine.cwd,
@@ -2492,14 +2644,14 @@ impl EngineTemplate {
             &sandbox,
             self.plan_mode,
             self.question_queue.is_some(),
+            engine.tools.get("TodoWrite").is_some(),
+            engine.tools.get("run_check").is_some(),
             model,
             &engine.skills,
             &engine.agent_types,
             &workflow_defs,
             &engine.lsp.as_ref().map(|m| m.langs()).unwrap_or_default(),
-            // Sync hot-swap path (user-triggered, off the startup critical
-            // path) — detect the branch inline.
-            None,
+            Some(git_branch),
         )
     }
 
@@ -2777,6 +2929,38 @@ mod tests {
     }
 
     #[test]
+    fn effort_maps_to_thinking_and_reasoning_effort() {
+        use crate::engine::map_effort;
+        // Anthropic-style provider: high effort enables a thinking budget,
+        // and the effort string now rides along too so the vendor adaptive
+        // path can emit output_config.effort.
+        let (thinking, effort) = map_effort(Some("high"), true, false);
+        assert_eq!(thinking.map(|t| t.max_tokens), Some(8192));
+        assert_eq!(effort.as_deref(), Some("high"));
+        // OpenAI-compat with reasoning opt-in: effort string is forwarded.
+        let (thinking, effort) = map_effort(Some("low"), false, true);
+        assert!(thinking.is_none());
+        assert_eq!(effort.as_deref(), Some("low"));
+        // OpenAI-compat opt-in now also forwards an explicit "medium".
+        assert_eq!(
+            map_effort(Some("medium"), false, true).1.as_deref(),
+            Some("medium")
+        );
+        // medium without opt-in still maps to nothing (pure prose fallback).
+        let (t, e) = map_effort(Some("medium"), true, false);
+        assert!(t.is_none() && e.is_none());
+        let (t, e) = map_effort(None, true, true);
+        assert!(t.is_none() && e.is_none());
+        let (t, e) = map_effort(Some("high"), false, false);
+        assert!(t.is_none() && e.is_none());
+        // High + opt-in on an OpenAI-compat provider forwards "high".
+        assert_eq!(
+            map_effort(Some("high"), false, true).1.as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
     fn workspace_policy_follows_sandbox_mode() {
         use crate::sandbox::{SandboxConfig, SandboxMode};
         let tmp = tempfile::tempdir().unwrap();
@@ -2864,6 +3048,7 @@ mod tests {
             permissions: Arc::new(PermissionManager::new().with_mode(PermissionMode::Bypass)),
             hooks: Arc::new(HookRunner::new()),
             store: Arc::new(Mutex::new(MessageStore::new())),
+            browser_target_override: None,
             file_cache: Arc::new(FileStateCache::new(
                 NonZeroUsize::new(1).expect("nonzero"),
                 1024,
@@ -2885,9 +3070,12 @@ mod tests {
             tool_trace: crate::tool_trace::ToolTrace::with_path(
                 std::env::temp_dir().join("zode-test-tool-trace.jsonl"),
             ),
+            reminders: crate::reminders::ReminderTracker::default(),
             auto_loop_max_turns: None,
             max_api_retries: 10,
             temperature: None,
+            thinking: None,
+            reasoning_effort: None,
             prompt_cache: false,
             noema: ZodeNoema::disabled(),
             extract_config: crate::noema_extract::ExtractConfig::default(),
@@ -3335,6 +3523,80 @@ mod tests {
     }
 
     #[test]
+    fn hot_swap_model_recomputes_thinking_for_new_provider() {
+        // Two named providers with different `supports_thinking` capability
+        // (Anthropic vs. an OpenAI-compat endpoint), each owning a distinct
+        // model id — same shape as `duplicate_model_image_scope_fixture`
+        // above, but exercising the REAL `hot_swap_model` path (which builds
+        // a live provider and must recompute engine.thinking/reasoning_effort
+        // from it) instead of just `with_model` on the template.
+        let mut cfg = test_cfg();
+        cfg.effort = Some("high".into());
+        cfg.providers.insert(
+            "anthropic-p".to_string(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Anthropic),
+                api_key: Some("sk-anthropic".into()),
+                model: Some("claude-thinking".into()),
+                ..Default::default()
+            },
+        );
+        cfg.providers.insert(
+            "openai-p".to_string(),
+            ProviderConfig {
+                r#type: Some(ProviderKind::Openai),
+                api_key: Some("sk-openai".into()),
+                model: Some("gpt-compat".into()),
+                ..Default::default()
+            },
+        );
+        cfg.provider = cfg.resolve_named_provider("anthropic-p").unwrap();
+
+        let template = EngineTemplate::new(
+            cfg,
+            std::path::PathBuf::from("/tmp/zode"),
+            None,
+            false,
+            None,
+            "2026-07-16".into(),
+        )
+        .with_provider("anthropic-p")
+        .unwrap();
+
+        let seed_provider = build_provider(&template.cfg.provider).unwrap();
+        let mut engine = minimal_engine(seed_provider);
+        assert!(
+            engine.thinking.is_none(),
+            "minimal_engine starts with no knobs computed"
+        );
+
+        // Hot-swap onto the anthropic model: /effort=high + supports_thinking
+        // must populate a thinking budget for THIS provider.
+        let template = template
+            .hot_swap_model(&mut engine, "claude-thinking".into())
+            .unwrap();
+        assert_eq!(
+            template.active_provider_name().as_deref(),
+            Some("anthropic-p")
+        );
+        assert!(
+            engine.thinking.is_some(),
+            "anthropic provider with /effort=high must get a thinking budget"
+        );
+
+        // Hot-swap to the openai-compat model (supports_thinking=false): the
+        // stale anthropic thinking budget must be dropped, not carried over.
+        let template = template
+            .hot_swap_model(&mut engine, "gpt-compat".into())
+            .unwrap();
+        assert_eq!(template.active_provider_name().as_deref(), Some("openai-p"));
+        assert!(
+            engine.thinking.is_none(),
+            "switching to a non-thinking provider must clear the stale thinking budget"
+        );
+    }
+
+    #[test]
     fn with_provider_on_multi_model_picks_first_model() {
         let template = EngineTemplate::new(
             deepseek_multi_model_cfg(),
@@ -3480,6 +3742,20 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("rust integration preference?"), "{text}");
+    }
+
+    #[test]
+    fn prepend_reminder_lands_in_first_text_block() {
+        let content = vec![agent::message::ContentBlock::Text { text: "hi".into() }];
+        let out = crate::reminders::prepend_reminder(content, &["note".into()]);
+        match &out[0] {
+            agent::message::ContentBlock::Text { text } => {
+                assert!(text.starts_with("<system-reminder>"));
+                assert!(text.contains("- note"));
+                assert!(text.ends_with("hi"));
+            }
+            _ => panic!("expected text block"),
+        }
     }
 
     #[cfg(feature = "noema")]
@@ -3848,6 +4124,16 @@ mod tests {
             !eng.system.as_deref().unwrap_or("").contains("# Plan mode"),
             "read-only access must not inject the plan-mode prompt"
         );
+        // read_only_tools filters `run_check` (Mutating) same as plan_mode;
+        // the prompt must not advertise a tool the model doesn't have.
+        assert!(
+            eng.tools.get("run_check").is_none(),
+            "run_check must be filtered under read-only tool access"
+        );
+        assert!(
+            !eng.system.as_deref().unwrap_or("").contains("run_check"),
+            "run_check must not be advertised when read-only access filtered it out"
+        );
     }
 
     #[tokio::test]
@@ -4031,6 +4317,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn goal_prompt_omits_run_check_when_tool_unavailable() {
+        // read-only access filters `run_check` (Mutating) the same way plan
+        // mode does — the goal block must not tell the model to reach for a
+        // tool it doesn't have, but must still push it toward `goal_complete`.
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_cfg();
+        cfg.goal = Some("ship v1 of the parser".into());
+        let template = EngineTemplate::new(
+            cfg,
+            dir.path().to_path_buf(),
+            None,
+            false,
+            None,
+            "2026-06-13".into(),
+        )
+        .with_tool_access(ToolAccessMode::ReadOnly);
+        let eng = template.assemble().await.unwrap();
+        assert!(
+            eng.tools.get("run_check").is_none(),
+            "run_check must be filtered under read-only tool access"
+        );
+        let sys = eng.system.as_deref().unwrap_or("");
+        assert!(sys.contains("Current goal"), "{sys}");
+        assert!(!sys.contains("run_check"), "{sys}");
+        assert!(sys.contains("goal_complete"), "{sys}");
+        assert!(sys.contains("AUTONOMOUSLY"), "{sys}");
+    }
+
+    #[tokio::test]
     async fn orchestration_is_on_by_default() {
         // Unset autonomous_orchestration → ON: define_agent registered + the
         // orchestration directive injected into the system prompt.
@@ -4100,8 +4415,8 @@ mod tests {
         )
         .await
         .unwrap();
-        // EditHistory + BgShell + compact-tracker + verification + tool-trace.
-        assert_eq!(eng.hooks.len(), 5);
+        // EditHistory + BgShell + compact-tracker + verification + tool-trace + reminders.
+        assert_eq!(eng.hooks.len(), 6);
         assert!(eng.undo().await.is_err()); // empty history
     }
 
@@ -4170,6 +4485,33 @@ mod tests {
             let tool = eng.tools.get(t).unwrap_or_else(|| panic!("missing {t}"));
             assert_eq!(tool.safety_class(), SafetyClass::Mutating);
         }
+    }
+
+    #[tokio::test]
+    async fn browser_target_override_pins_engine_tools_to_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let template = EngineTemplate::new(
+            test_cfg(),
+            dir.path().to_path_buf(),
+            None,
+            false,
+            None,
+            "2026-07-16".into(),
+        )
+        .with_browser_target_override(Some(crate::browser::BrowserTarget::Bridge));
+        let eng = template.assemble().await.unwrap();
+        let read = eng.tools.get("browser_read").expect("browser_read");
+        // The session default is managed; the pinned bridge target is
+        // unpaired, so the tool must fail with the pairing hint instead of
+        // launching a managed Chrome.
+        let err = read
+            .call(
+                &agent::tool::ToolUseContext::new(dir.path()),
+                serde_json::json!({"action": "tabs"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pair"), "{err}");
     }
 
     #[tokio::test]
@@ -4490,5 +4832,16 @@ mod tests {
             .recall_for_turn("dark mode theme", Some(engine.cwd.as_path()))
             .unwrap();
         assert!(recalled.is_some(), "expected the sunk memory to recall");
+    }
+
+    #[tokio::test]
+    async fn branch_drift_uses_tracker_baseline() {
+        let tracker = crate::reminders::ReminderTracker::default();
+        // Baseline = what the prompt was rendered with.
+        assert!(tracker.note_git_branch(Some("main".into())).is_none());
+        // Simulate a checkout observed at the next turn.
+        let note = tracker.note_git_branch(Some("feature/y".into())).unwrap();
+        assert!(note.contains("feature/y"));
+        assert!(note.contains("main"));
     }
 }

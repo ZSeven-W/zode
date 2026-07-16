@@ -142,6 +142,18 @@ impl ZodeTaskFactory {
         ("reviewer", "Reviews code and reports issues; read-only"),
     ];
 
+    /// Appended to every child system prompt (built-in and user-defined types).
+    /// The child's final text is a tool result for the parent, not a human-facing
+    /// message — without this, children pad results with greetings and questions.
+    pub(crate) const SUBAGENT_CONTRACT: &str = "\n\n## Sub-agent contract\n\
+You are running as a sub-agent inside an orchestrator. Your final assistant \
+text is returned VERBATIM to the calling agent as the tool result — it is not \
+shown to a human. Return exactly the findings, data, or diff the task asked \
+for: no greetings, no questions, no offers of further help. The prompt you \
+received is your ONLY context — you cannot see the parent conversation and \
+nobody can answer questions mid-run. If the task cannot be completed with the \
+given context, state precisely what is missing as your result.";
+
     fn builtin_system_for(agent_type: &str) -> Option<String> {
         let prompt = match agent_type {
             "general" => {
@@ -198,6 +210,7 @@ impl TaskAgentFactory for ZodeTaskFactory {
                 (system, runtime.model.clone())
             }
         };
+        let system = format!("{system}{}", Self::SUBAGENT_CONTRACT);
         Ok(TaskAgentConfig {
             provider: runtime.provider,
             model,
@@ -433,5 +446,16 @@ mod tests {
         let cfg = f.build("researcher").await.unwrap();
         assert!(cfg.tools.get("Task").is_none());
         assert!(cfg.tools.get("FileRead").is_some());
+    }
+
+    #[tokio::test]
+    async fn child_system_prompt_carries_subagent_contract() {
+        let factory = factory_with(Arc::new(OnceLock::new()));
+        let cfg = factory.build("general").await.unwrap();
+        let system = cfg.system.unwrap();
+        assert!(system.contains("returned VERBATIM to the calling agent"));
+        assert!(system.contains("cannot see the parent conversation"));
+        // The base persona is still present, contract is appended not replacing.
+        assert!(system.contains("focused sub-agent"));
     }
 }

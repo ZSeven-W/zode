@@ -53,6 +53,15 @@ Dependency direction: `zode` → `zode-tui` → `zode-core` → `vendor/agent`.
   store, cost tracker, turn state) built from an `EngineTemplate`, sharing one
   approval channel. Sub-agents (Task tool) inherit the parent's final gated +
   sandboxed tool registry plus its permissions/hooks/cwd/file_cache.
+- **Per-turn system reminders** (`zode-core/src/reminders.rs`): an
+  `AfterToolUse` hook tracks fs-tool mtimes / TodoWrite calls; `turn_blocks`
+  prepends a `<system-reminder>` block for external file changes, stale todo
+  lists, and git-branch drift. Every notice fires once (baselines advance).
+- **Effort maps to real knobs**: `map_effort` (engine.rs) forwards `low|medium|high`
+  when reasoning is opted in; on Anthropic, `/effort high` maps to a thinking
+  budget on legacy models and to adaptive thinking (`thinking:{type:"adaptive"}`
+  + `output_config.effort`) on Opus 4.6+/Sonnet 4.6+/Sonnet 5/Opus 4.7/4.8/Fable 5;
+  OpenAI reasoning requests use `max_completion_tokens`.
 
 ### Data flow
 
@@ -318,7 +327,7 @@ Enter/Tab to confirm, Esc to dismiss).
 | `/browser launch` | Launch the managed browser now |
 | `/browser close` | Close the managed browser |
 | `/browser pair` | Start a localhost bridge listener and print a 6-digit pairing code plus WS port for the Chrome extension |
-| `/browser target <managed\|bridge>` | Switch target; `bridge` routes tools through the paired Chrome extension |
+| `/browser target <managed\|bridge>` | Switch target and persist it to global `browser.defaultTarget`; `bridge` routes tools through the paired Chrome extension |
 | `/browser screenshot [path]` | Take a screenshot, optionally to an explicit path |
 
 ### `--browser` / `--no-browser` CLI flags
@@ -414,14 +423,55 @@ popup and enter the displayed WS port and 6-digit code. A successful pairing
 stores a long-term token in Chrome storage and in `~/.zode/browser-bridge.json`
 (0600), so reconnects can authenticate with the token.
 
-The bridge drives one sticky zode-owned tab: acquisition always creates a
-fresh background `about:blank` tab in the "zode" tab group (never taking over
-or focusing a human tab); explicit human navigation of that tab (address-bar
-/ bookmark / omnibox `webNavigation` transitions) or a `canceled_by_user`
-debugger detach hands it back, and the next action acquires a new tab. zode's
-own `Page.navigate` calls are rewritten to `transitionType: "link"` so they
-never trigger the handoff listener. Screenshots briefly activate the tab and
-restore the previously active one.
+Extension version 0.5.0 also requests `nativeMessaging`. Every normal TUI
+launch registers the running zode executable as host
+`ai.zode.browser_bridge` for the fixed extension origin and stores the current
+workspace in `~/.zode/browser-native-host.json`. When the side panel cannot
+reach the saved WebSocket port, it starts that native host, which enters
+`TuiApp::run_extension_daemon`: the existing extension task, agent, approval,
+history, and WebSocket code runs without terminal setup or rendering. The
+native pipe is only a lifecycle/bootstrap channel; browser and task payloads
+continue to use the authenticated localhost WebSocket. Closing the native port
+shuts down the daemon.
+
+The bridge drives one sticky tab. A side-panel `turn/start` first targets the
+active page beside the panel, allowing `browser_read` to analyze that page
+without creating or grouping a new tab. Standalone TUI/CLI bridge acquisition
+still creates a background `about:blank` tab in the "zode" tab group rather
+than taking over a human tab. Explicit human navigation of a controlled tab
+(address-bar / bookmark / omnibox `webNavigation` transitions) or a
+`canceled_by_user` debugger detach hands it back, and the next standalone
+action acquires a new tab. zode's own `Page.navigate` calls are rewritten to
+`transitionType: "link"` so they never trigger the handoff listener.
+Screenshots briefly activate a background tab and restore the previously
+active one.
+
+Extension task engines pin their `browser_*` tools to the bridge target:
+`extension_tasks.rs` assembles them via
+`EngineTemplate::with_browser_target_override(Some(BrowserTarget::Bridge))`,
+which flows through `BrowserToolDeps::target_override` /
+`BrowserSession::lease_as` and the `BrowserGateView` `_target` field. A
+side-panel turn therefore always drives the page beside the panel — never a
+managed Chrome — regardless of the session-wide `/browser target`
+selection, which still governs TUI-created tabs. The pin lives only on the
+assembling template; extension reassembles never write it back to the
+global template.
+
+The extension stream forwards assistant text AND extended-thinking deltas
+(`message/delta`, thinking uses `role: "thinking"`); tool payloads
+(input/output) are deliberately never forwarded — only tool identity and
+failed/completed status. Every ToolUse bumps a per-turn segment counter and
+text/thinking messageIds carry it (`…:assistant-<n>` / `…:thinking-<n>`),
+so the panel timeline interleaves thinking/text runs with the tool calls
+between them in true order. The React panel renders consecutive tool calls
+as one compact activity group (one row per call).
+
+Extension turns append a hidden `browser_side_panel_context` text block in
+`zode-tui/src/app/extension_tasks.rs`. It tells the agent that the active page
+is the primary context, that ambiguous/deictic page questions should call
+`browser_read` before answering, and that it must not inspect the local
+workspace unless the user explicitly asks about project code or files. The
+block is sent to the engine but omitted from the panel's displayed user text.
 
 The toolbar icon is theme-adaptive: an offscreen document (`offscreen.html`,
 `MATCH_MEDIA` reason, `offscreen` permission) posts `zode-theme` messages on

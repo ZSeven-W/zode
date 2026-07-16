@@ -1,4 +1,5 @@
 mod args;
+mod browser_native_host;
 mod doctor;
 mod headless;
 mod server;
@@ -23,7 +24,23 @@ async fn main() {
     ) {
         std::process::exit(exit as i32);
     }
-    let args = Args::parse();
+    let raw_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let native_invocation = raw_args
+        .get(1)
+        .is_some_and(|arg| zode_core::browser::bridge::native_host::is_invocation_arg(arg));
+    let mut args = if native_invocation {
+        if let Err(error) = browser_native_host::read_start_request() {
+            let _ = browser_native_host::write_error(&error.to_string());
+            std::process::exit(1);
+        }
+        Args::parse_from(["zode", "--browser-native-host"])
+    } else {
+        Args::parse()
+    };
+    if native_invocation {
+        args.cwd = zode_core::browser::bridge::native_host::preferred_cwd()
+            .map(|path| path.display().to_string());
+    }
     let stdout_is_tty = std::io::stdout().is_terminal();
     init_tracing(&args, stdout_is_tty);
     let exit = run(args).await;
@@ -60,7 +77,11 @@ fn tracing_writes_to_terminal(args: &Args, stdout_is_tty: bool) -> bool {
 }
 
 fn launches_full_tui(args: &Args, stdout_is_tty: bool) -> bool {
-    args.command.is_none() && args.print.is_none() && !args.no_tui && stdout_is_tty
+    args.command.is_none()
+        && args.print.is_none()
+        && !args.no_tui
+        && !args.browser_native_host
+        && stdout_is_tty
 }
 
 async fn run(args: Args) -> i32 {
@@ -233,7 +254,7 @@ async fn run(args: Args) -> i32 {
     spawn_auto_update(&cfg);
 
     // Plain REPL when asked, or when stdout isn't a tty (piped/CI).
-    if args.no_tui || !std::io::stdout().is_terminal() {
+    if !args.browser_native_host && (args.no_tui || !std::io::stdout().is_terminal()) {
         // Resume in the session's original directory when it still exists.
         let resume_meta = resolve_resume_target(&args);
         let eff_cwd = resume_dir(&resume_meta).unwrap_or(cwd);
@@ -288,7 +309,7 @@ async fn run(args: Args) -> i32 {
         provider_names: cfg.providers.keys().cloned().collect(),
         needs_setup,
     };
-    match zode_tui::TuiApp::new(
+    let app = zode_tui::TuiApp::new(
         engine,
         template,
         ui,
@@ -296,13 +317,31 @@ async fn run(args: Args) -> i32 {
         question_rx,
         op_question_queue,
         resumed_id,
-    )
-    .run()
-    .await
-    {
+    );
+    let result = if args.browser_native_host {
+        match app.ensure_extension_bridge_listening().await {
+            Ok(port) => {
+                if let Err(error) = browser_native_host::write_ready(port) {
+                    return {
+                        eprintln!("zode native host: {error}");
+                        1
+                    };
+                }
+                app.run_extension_daemon(browser_native_host::spawn_disconnect_watcher())
+                    .await
+            }
+            Err(error) => {
+                let _ = browser_native_host::write_error(&error.to_string());
+                return 1;
+            }
+        }
+    } else {
+        app.run().await
+    };
+    match result {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("zode tui: {e}");
+            eprintln!("zode: {e}");
             1
         }
     }
@@ -361,14 +400,25 @@ fn today_date() -> String {
 /// Resolve which session `--resume`/`--continue` targets, if any. Done BEFORE
 /// engine assembly so the engine can be built in the session's own cwd.
 fn resolve_resume_target(args: &Args) -> Option<SessionMeta> {
-    if let Some(r) = &args.resume {
-        SessionIndex::load()
-            .ok()
-            .and_then(|i| i.find_prefix(r).cloned())
-    } else if args.continue_ {
-        SessionIndex::load().ok().and_then(|i| i.latest().cloned())
+    let requested = args.resume.as_deref();
+    if requested.is_none() && !args.continue_ {
+        return None;
+    }
+    let index = match SessionIndex::load() {
+        Ok(index) => index,
+        Err(error) => {
+            eprintln!("zode: could not load or repair session index: {error}");
+            return None;
+        }
+    };
+    if let Some(prefix) = requested {
+        let target = index.find_prefix(prefix).cloned();
+        if target.is_none() {
+            eprintln!("zode: session not found: {prefix}");
+        }
+        target
     } else {
-        None
+        index.latest().cloned()
     }
 }
 

@@ -16,11 +16,27 @@ use super::session::BrowserSession;
 #[derive(Debug)]
 pub struct BrowserGateView {
     session: Arc<BrowserSession>,
+    /// Mirrors the tools' `BrowserToolDeps::target_override`: the target the
+    /// gated tool will actually drive, so approval prompts never claim
+    /// "managed" for a turn pinned to the bridge (or vice versa).
+    target_override: Option<BrowserTarget>,
 }
 
 impl BrowserGateView {
-    pub(crate) fn new(session: Arc<BrowserSession>) -> Self {
-        Self { session }
+    pub(crate) fn with_target_override(
+        session: Arc<BrowserSession>,
+        target_override: Option<BrowserTarget>,
+    ) -> Self {
+        Self {
+            session,
+            target_override,
+        }
+    }
+
+    fn effective_target(&self) -> BrowserTarget {
+        self.target_override
+            .clone()
+            .unwrap_or_else(|| self.session.target())
     }
 }
 
@@ -31,7 +47,7 @@ impl GateView for BrowserGateView {
         if let Some(obj) = shown.as_object_mut() {
             obj.insert(
                 "_target".into(),
-                serde_json::json!(match self.session.target() {
+                serde_json::json!(match self.effective_target() {
                     BrowserTarget::Managed => "managed",
                     BrowserTarget::Bridge => "bridge",
                 }),
@@ -53,8 +69,23 @@ pub fn browser_gated(
     gate: Arc<dyn ApprovalGate>,
     session: Arc<BrowserSession>,
 ) -> Arc<PermissionGatedTool> {
+    browser_gated_as(inner, gate, session, None)
+}
+
+/// [`browser_gated`] with an explicit target override so the approval
+/// prompt's `_target` matches the backend the tool will actually drive
+/// (extension-task engines pin this to `Bridge`).
+pub fn browser_gated_as(
+    inner: Arc<dyn Tool>,
+    gate: Arc<dyn ApprovalGate>,
+    session: Arc<BrowserSession>,
+    target_override: Option<BrowserTarget>,
+) -> Arc<PermissionGatedTool> {
     let name = inner.name().to_string();
-    let view = Arc::new(BrowserGateView::new(session.clone()));
+    let view = Arc::new(BrowserGateView::with_target_override(
+        session.clone(),
+        target_override,
+    ));
     let gated = Arc::new(PermissionGatedTool::with_view(inner, gate, view));
     session.register_perm_flag(&name, gated.always_flag());
     gated
@@ -131,6 +162,25 @@ mod tests {
         let seen = gate.seen.lock().unwrap();
         assert_eq!(seen[0]["_target"], "managed");
         assert_eq!(seen[0]["_page_url"], "https://example.test/");
+    }
+
+    #[tokio::test]
+    async fn gate_reports_effective_target_when_overridden() {
+        let gate = std::sync::Arc::new(CapturingGate {
+            seen: Default::default(),
+            answer: Approval::Deny, // deny so the inner tool never leases
+        });
+        let s = session(); // session-wide target stays managed
+        let t = browser_gated_as(
+            std::sync::Arc::new(EchoInput),
+            gate.clone(),
+            s,
+            Some(crate::browser::BrowserTarget::Bridge),
+        );
+        let ctx = agent::tool::ToolUseContext::new(std::env::temp_dir());
+        let _ = t.call(&ctx, json!({})).await;
+        let seen = gate.seen.lock().unwrap();
+        assert_eq!(seen[0]["_target"], "bridge");
     }
 
     #[tokio::test]

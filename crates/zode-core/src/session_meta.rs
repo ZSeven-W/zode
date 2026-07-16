@@ -2,15 +2,21 @@
 //! this index tracks id/title/cwd/model/updated_at for listing and
 //! resuming. Stored at `<config_dir>/sessions/index.json`.
 
-use std::io::Write;
+use std::collections::HashSet;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
+use agent::message::{ContentBlock, Message};
+use agent::session::{SessionHeader, SCHEMA_VERSION};
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
-use crate::config::ConfigManager;
+use crate::config::{ConfigManager, DEFAULT_STARTER_MODEL};
 use crate::error::CoreError;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
     pub title: String,
@@ -20,9 +26,15 @@ pub struct SessionMeta {
     pub updated_at: u64,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionIndex {
     pub sessions: Vec<SessionMeta>,
+}
+
+struct LoadedIndex {
+    index: SessionIndex,
+    repair_needed: bool,
+    corrupt_primary: Option<Vec<u8>>,
 }
 
 impl SessionIndex {
@@ -34,25 +46,72 @@ impl SessionIndex {
         Ok(Self::sessions_dir()?.join("index.json"))
     }
 
+    fn backup_path() -> Result<PathBuf, CoreError> {
+        Ok(Self::sessions_dir()?.join("index.json.bak"))
+    }
+
+    fn lock_path() -> Result<PathBuf, CoreError> {
+        Ok(Self::sessions_dir()?.join(".index.lock"))
+    }
+
     pub fn session_path(id: &str) -> Result<PathBuf, CoreError> {
         Ok(Self::sessions_dir()?.join(format!("{id}.jsonl")))
     }
 
+    /// Load the metadata cache under a cross-process lock. A malformed legacy
+    /// index is archived and repaired from its valid prefix/backup. Metadata
+    /// without a transcript is pruned and transcript files missing from the
+    /// cache are re-indexed. The JSONL files are the durable conversation data;
+    /// `index.json` is only a rebuildable listing cache.
     pub fn load() -> Result<Self, CoreError> {
-        let path = Self::index_path()?;
-        match std::fs::read_to_string(&path) {
-            Ok(s) => Ok(serde_json::from_str(&s)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(CoreError::Io(e)),
+        let dir = Self::sessions_dir()?;
+        if !dir.exists() {
+            return Ok(Self::default());
         }
+        std::fs::create_dir_all(&dir)?;
+        let _lock = lock_index()?;
+        let mut loaded = load_and_reconcile_unlocked(&dir)?;
+        persist_repair_unlocked(&mut loaded)?;
+        Ok(loaded.index)
     }
 
+    /// Publish a complete snapshot under the cross-process lock. Production
+    /// read-modify-write paths should use [`Self::update`] so a snapshot loaded
+    /// by another process cannot overwrite newer entries.
     pub fn save(&self) -> Result<(), CoreError> {
         let dir = Self::sessions_dir()?;
         std::fs::create_dir_all(&dir)?;
-        let json = serde_json::to_vec_pretty(self)?;
-        write_atomic(&Self::index_path()?, &json)?;
-        Ok(())
+        let _lock = lock_index()?;
+        save_unlocked(self)
+    }
+
+    /// Run an index read-modify-write transaction while holding the same OS
+    /// lock used by every Zode process. This prevents last-writer-wins loss when
+    /// multiple terminals finish turns at the same time.
+    pub fn update<T>(
+        mutate: impl FnOnce(&mut SessionIndex) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        let dir = Self::sessions_dir()?;
+        std::fs::create_dir_all(&dir)?;
+        let _lock = lock_index()?;
+        let mut loaded = load_and_reconcile_unlocked(&dir)?;
+        let before = loaded.index.clone();
+        let result = match mutate(&mut loaded.index) {
+            Ok(result) => result,
+            Err(error) => {
+                if loaded.repair_needed {
+                    persist_repair_unlocked(&mut loaded)?;
+                }
+                return Err(error);
+            }
+        };
+        if loaded.index != before {
+            loaded.repair_needed = true;
+        }
+        if loaded.repair_needed {
+            persist_repair_unlocked(&mut loaded)?;
+        }
+        Ok(result)
     }
 
     pub fn upsert(&mut self, meta: SessionMeta) {
@@ -89,20 +148,21 @@ impl SessionIndex {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(CoreError::Io(e)),
         }
-        let mut idx = Self::load()?;
-        if idx.remove(id) {
-            idx.save()?;
-        }
+        Self::update(|idx| {
+            idx.remove(id);
+            Ok(())
+        })?;
         Ok(())
     }
 
     pub fn set_title(id: &str, title: String) -> Result<(), CoreError> {
-        let mut idx = Self::load()?;
-        let Some(meta) = idx.sessions.iter_mut().find(|m| m.id == id) else {
-            return Err(CoreError::Other(format!("session not found: {id}")));
-        };
-        meta.title = title;
-        idx.save()
+        Self::update(|idx| {
+            let Some(meta) = idx.sessions.iter_mut().find(|m| m.id == id) else {
+                return Err(CoreError::Other(format!("session not found: {id}")));
+            };
+            meta.title = title;
+            Ok(())
+        })
     }
 
     /// Most recently updated session.
@@ -121,6 +181,260 @@ impl SessionIndex {
         v.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
         v
     }
+}
+
+fn lock_index() -> Result<File, CoreError> {
+    let path = SessionIndex::lock_path()?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    FileExt::lock_exclusive(&file)?;
+    Ok(file)
+}
+
+fn load_and_reconcile_unlocked(dir: &Path) -> Result<LoadedIndex, CoreError> {
+    let mut loaded = load_unlocked()?;
+    if reconcile_transcripts(&mut loaded.index, dir)? {
+        loaded.repair_needed = true;
+    }
+    Ok(loaded)
+}
+
+fn load_unlocked() -> Result<LoadedIndex, CoreError> {
+    let primary_path = SessionIndex::index_path()?;
+    let backup_path = SessionIndex::backup_path()?;
+    match std::fs::read(&primary_path) {
+        Ok(raw) => match serde_json::from_slice::<SessionIndex>(&raw) {
+            Ok(index) => Ok(LoadedIndex {
+                index,
+                repair_needed: false,
+                corrupt_primary: None,
+            }),
+            Err(error) => {
+                tracing::warn!("session index is malformed and will be repaired: {error}");
+                let index = salvage_leading_index(&raw)
+                    .or_else(|| load_valid_backup(&backup_path))
+                    .unwrap_or_default();
+                Ok(LoadedIndex {
+                    index,
+                    repair_needed: true,
+                    corrupt_primary: Some(raw),
+                })
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(index) = load_valid_backup(&backup_path) {
+                Ok(LoadedIndex {
+                    index,
+                    repair_needed: true,
+                    corrupt_primary: None,
+                })
+            } else {
+                Ok(LoadedIndex {
+                    index: SessionIndex::default(),
+                    repair_needed: false,
+                    corrupt_primary: None,
+                })
+            }
+        }
+        Err(error) => {
+            if let Some(index) = load_valid_backup(&backup_path) {
+                tracing::warn!("session index could not be read; restoring backup: {error}");
+                Ok(LoadedIndex {
+                    index,
+                    repair_needed: true,
+                    corrupt_primary: None,
+                })
+            } else {
+                Err(CoreError::Io(error))
+            }
+        }
+    }
+}
+
+fn salvage_leading_index(raw: &[u8]) -> Option<SessionIndex> {
+    let mut stream = serde_json::Deserializer::from_slice(raw).into_iter::<SessionIndex>();
+    stream.next()?.ok()
+}
+
+fn load_valid_backup(path: &Path) -> Option<SessionIndex> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+}
+
+fn persist_repair_unlocked(loaded: &mut LoadedIndex) -> Result<(), CoreError> {
+    if !loaded.repair_needed {
+        return Ok(());
+    }
+    if let Some(raw) = loaded.corrupt_primary.take() {
+        if let Err(error) = archive_corrupt_index(&raw) {
+            tracing::warn!("could not archive corrupt session index: {error}");
+        }
+    }
+    save_unlocked(&loaded.index)?;
+    loaded.repair_needed = false;
+    Ok(())
+}
+
+fn save_unlocked(index: &SessionIndex) -> Result<(), CoreError> {
+    let json = serde_json::to_vec_pretty(index)?;
+    write_atomic(&SessionIndex::index_path()?, &json)?;
+    if let Err(error) = write_atomic(&SessionIndex::backup_path()?, &json) {
+        tracing::warn!("could not refresh session index backup: {error}");
+    }
+    Ok(())
+}
+
+fn archive_corrupt_index(raw: &[u8]) -> std::io::Result<PathBuf> {
+    let dir = SessionIndex::sessions_dir().map_err(core_error_to_io)?;
+    for _ in 0..16 {
+        let path = dir.join(format!(
+            "index.corrupt-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        file.write_all(raw)?;
+        file.sync_all()?;
+        return Ok(path);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate corrupt session index archive",
+    ))
+}
+
+fn core_error_to_io(error: CoreError) -> std::io::Error {
+    std::io::Error::other(error.to_string())
+}
+
+fn reconcile_transcripts(index: &mut SessionIndex, dir: &Path) -> Result<bool, CoreError> {
+    let indexed_before = index.sessions.len();
+    index.sessions.retain(|meta| {
+        let path = dir.join(format!("{}.jsonl", meta.id));
+        match std::fs::metadata(&path) {
+            Ok(metadata) => metadata.is_file(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "could not verify indexed session transcript; keeping metadata"
+                );
+                true
+            }
+        }
+    });
+    let pruned = indexed_before - index.sessions.len();
+    if pruned > 0 {
+        tracing::warn!(
+            count = pruned,
+            "pruning session metadata without transcript files"
+        );
+    }
+
+    let mut known: HashSet<String> = index.sessions.iter().map(|meta| meta.id.clone()).collect();
+    let mut recovered = Vec::new();
+    let mut defaults = None;
+
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(id) = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if known.contains(&id) {
+            continue;
+        }
+        let Some((title, message_updated_at)) = transcript_summary(&path) else {
+            tracing::warn!(path = %path.display(), "ignoring invalid orphan session transcript");
+            continue;
+        };
+        let updated_at = path
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(message_updated_at);
+        let (cwd, model) = defaults.get_or_insert_with(recovery_defaults);
+        known.insert(id.clone());
+        recovered.push(SessionMeta {
+            id,
+            title,
+            cwd: cwd.clone(),
+            model: model.clone(),
+            updated_at,
+        });
+    }
+
+    let recovered_any = !recovered.is_empty();
+    if recovered_any {
+        tracing::warn!(
+            count = recovered.len(),
+            "re-indexing session transcripts missing from the metadata cache"
+        );
+        index.sessions.extend(recovered);
+    }
+    Ok(pruned > 0 || recovered_any)
+}
+
+fn recovery_defaults() -> (String, String) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let model = ConfigManager::load(&cwd)
+        .ok()
+        .and_then(|config| config.provider.model)
+        .unwrap_or_else(|| DEFAULT_STARTER_MODEL.to_string());
+    (cwd.display().to_string(), model)
+}
+
+fn transcript_summary(path: &Path) -> Option<(String, u64)> {
+    let file = File::open(path).ok()?;
+    let mut lines = BufReader::new(file).lines();
+    let header: SessionHeader = serde_json::from_str(&lines.next()?.ok()?).ok()?;
+    if header.schema_version != SCHEMA_VERSION {
+        return None;
+    }
+
+    let mut title = None;
+    let mut updated_at = 0;
+    for line in lines {
+        let message: Message = serde_json::from_str(&line.ok()?).ok()?;
+        updated_at = updated_at.max(message.header().timestamp_ms / 1000);
+        if title.is_none() {
+            if let Message::User { content, .. } = &message {
+                let prompt = content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !prompt.trim().is_empty() {
+                    title = Some(title_from_prompt(&prompt));
+                }
+            }
+        }
+    }
+    Some((
+        title.unwrap_or_else(|| "(recovered session)".to_string()),
+        updated_at,
+    ))
 }
 
 /// Publish a complete file by staging it beside the destination and then
@@ -212,11 +526,26 @@ mod tests {
         }
     }
 
+    fn write_empty_transcript(id: &str) {
+        let path = SessionIndex::session_path(id).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&SessionHeader::current()).unwrap()
+            ),
+        )
+        .unwrap();
+    }
+
     #[test]
     #[serial_test::serial]
     fn upsert_then_latest_and_find() {
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        write_empty_transcript("aaaa1111");
+        write_empty_transcript("bbbb2222");
 
         let mut idx = SessionIndex::load().unwrap();
         idx.upsert(SessionMeta {
@@ -306,6 +635,7 @@ mod tests {
     fn set_title_updates_existing_session() {
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        write_empty_transcript("rename-me");
         let mut idx = SessionIndex::default();
         idx.upsert(SessionMeta {
             id: "rename-me".to_string(),
@@ -324,6 +654,241 @@ mod tests {
                 .title,
             "new"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_repairs_trailing_writer_garbage_and_archives_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        write_empty_transcript("kept-session");
+        let mut index = SessionIndex::default();
+        index.upsert(SessionMeta {
+            id: "kept-session".to_string(),
+            title: "kept".to_string(),
+            cwd: "/tmp".to_string(),
+            model: "m".to_string(),
+            updated_at: 7,
+        });
+        let mut corrupt = serde_json::to_vec_pretty(&index).unwrap();
+        corrupt.extend_from_slice(b"  }\n  ]\n}");
+        let sessions_dir = SessionIndex::sessions_dir().unwrap();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(SessionIndex::index_path().unwrap(), &corrupt).unwrap();
+
+        let loaded = SessionIndex::load().unwrap();
+
+        assert_eq!(loaded, index);
+        let repaired = std::fs::read(SessionIndex::index_path().unwrap()).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<SessionIndex>(&repaired).unwrap(),
+            index
+        );
+        assert_eq!(
+            serde_json::from_slice::<SessionIndex>(
+                &std::fs::read(SessionIndex::backup_path().unwrap()).unwrap()
+            )
+            .unwrap(),
+            index
+        );
+        let archives: Vec<_> = std::fs::read_dir(sessions_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("index.corrupt-")
+            })
+            .collect();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(std::fs::read(archives[0].path()).unwrap(), corrupt);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_restores_a_valid_backup_when_primary_has_no_salvageable_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        write_empty_transcript("from-backup");
+        let mut backup = SessionIndex::default();
+        backup.upsert(SessionMeta {
+            id: "from-backup".to_string(),
+            title: "backup".to_string(),
+            cwd: "/tmp".to_string(),
+            model: "m".to_string(),
+            updated_at: 11,
+        });
+        let sessions_dir = SessionIndex::sessions_dir().unwrap();
+        std::fs::create_dir_all(sessions_dir).unwrap();
+        std::fs::write(SessionIndex::index_path().unwrap(), b"{broken").unwrap();
+        std::fs::write(
+            SessionIndex::backup_path().unwrap(),
+            serde_json::to_vec_pretty(&backup).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = SessionIndex::load().unwrap();
+
+        assert_eq!(loaded, backup);
+        assert_eq!(
+            serde_json::from_slice::<SessionIndex>(
+                &std::fs::read(SessionIndex::index_path().unwrap()).unwrap()
+            )
+            .unwrap(),
+            backup
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_reindexes_an_orphan_jsonl_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        let id = "orphan-session";
+        let path = SessionIndex::session_path(id).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let user = Message::User {
+            header: agent::message::Header::new(),
+            content: vec![ContentBlock::Text {
+                text: "recover this conversation\nwith all of its messages".to_string(),
+            }],
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&SessionHeader::current()).unwrap(),
+                serde_json::to_string(&user).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let loaded = SessionIndex::load().unwrap();
+
+        let meta = loaded.find_prefix(id).unwrap();
+        assert_eq!(meta.id, id);
+        assert_eq!(meta.title, "recover this conversation");
+        assert!(!meta.model.is_empty());
+        assert!(SessionIndex::index_path().unwrap().exists());
+        assert!(SessionIndex::backup_path().unwrap().exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_prunes_metadata_without_transcript_and_persists_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        write_empty_transcript("live-session");
+
+        let mut index = SessionIndex::default();
+        for (id, title) in [("live-session", "live"), ("ghost-session", "ghost")] {
+            index.upsert(SessionMeta {
+                id: id.to_string(),
+                title: title.to_string(),
+                cwd: "/tmp".to_string(),
+                model: "m".to_string(),
+                updated_at: 1,
+            });
+        }
+        index.save().unwrap();
+
+        let loaded = SessionIndex::load().unwrap();
+
+        assert!(loaded.find_prefix("live-session").is_some());
+        assert!(loaded.find_prefix("ghost-session").is_none());
+        for path in [
+            SessionIndex::index_path().unwrap(),
+            SessionIndex::backup_path().unwrap(),
+        ] {
+            let repaired: SessionIndex =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert!(repaired.find_prefix("live-session").is_some());
+            assert!(repaired.find_prefix("ghost-session").is_none());
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn concurrent_update_transactions_preserve_every_session() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        SessionIndex::default().save().unwrap();
+        let worker_count = 12;
+        let start = Arc::new(Barrier::new(worker_count + 1));
+        let mut workers = Vec::new();
+        for worker in 0..worker_count {
+            let start = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                SessionIndex::update(|index| {
+                    write_empty_transcript(&format!("session-{worker}"));
+                    index.upsert(SessionMeta {
+                        id: format!("session-{worker}"),
+                        title: format!("worker {worker}"),
+                        cwd: "/tmp".to_string(),
+                        model: "m".to_string(),
+                        updated_at: worker as u64,
+                    });
+                    Ok(())
+                })
+                .unwrap();
+            }));
+        }
+        start.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let loaded = SessionIndex::load().unwrap();
+        assert_eq!(loaded.sessions.len(), worker_count);
+        for worker in 0..worker_count {
+            assert!(loaded.find_prefix(&format!("session-{worker}")).is_some());
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn index_lock_is_exclusive_across_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        std::fs::create_dir_all(SessionIndex::sessions_dir().unwrap()).unwrap();
+        let lock = lock_index().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "session_meta::tests::child_index_lock_probe",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(
+                "ZODE_CHILD_INDEX_LOCK_PATH",
+                SessionIndex::lock_path().unwrap(),
+            )
+            .output()
+            .unwrap();
+        drop(lock);
+        assert!(
+            output.status.success(),
+            "child index lock probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn child_index_lock_probe() {
+        let Some(path) = std::env::var_os("ZODE_CHILD_INDEX_LOCK_PATH") else {
+            return;
+        };
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let error = FileExt::try_lock_exclusive(&file).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
     }
 
     #[test]
@@ -386,6 +951,7 @@ mod tests {
     fn save_roundtrips_without_temp_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        write_empty_transcript("roundtrip");
         let mut index = SessionIndex::default();
         index.upsert(SessionMeta {
             id: "roundtrip".to_string(),
@@ -404,7 +970,11 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(entries, [std::ffi::OsString::from("index.json")]);
+        assert!(entries.contains(&std::ffi::OsString::from(".index.lock")));
+        assert!(entries.contains(&std::ffi::OsString::from("index.json")));
+        assert!(entries.contains(&std::ffi::OsString::from("index.json.bak")));
+        assert!(entries.contains(&std::ffi::OsString::from("roundtrip.jsonl")));
+        assert_eq!(entries.len(), 4);
     }
 
     #[test]
@@ -421,6 +991,11 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(entries, [std::ffi::OsString::from("index.json")]);
+        assert!(entries.contains(&std::ffi::OsString::from(".index.lock")));
+        assert!(entries.contains(&std::ffi::OsString::from("index.json")));
+        assert_eq!(entries.len(), 2);
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.to_string_lossy().ends_with(".tmp")));
     }
 }

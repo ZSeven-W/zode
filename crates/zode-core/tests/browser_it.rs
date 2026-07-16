@@ -158,6 +158,7 @@ async fn upload_and_download_end_to_end() {
     let read = BrowserReadTool::new(BrowserToolDeps {
         session: session.clone(),
         shots_dir: upload_dir.path().join("shots"),
+        target_override: None,
     });
     let ctx = ToolUseContext::new(std::env::temp_dir());
     let mut completed = None;

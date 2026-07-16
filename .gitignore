@@ -30,7 +30,10 @@ extensions/*.pem
 extensions/*.crx
 sdk/typescript/node_modules
 sdk/typescript/dist
+extensions/chrome/node_modules
+extensions/chrome/dist
 sdk/python/**/__pycache__
 .superpowers
 .zode
+sdk/kotlin/.gradle
 .worktrees/

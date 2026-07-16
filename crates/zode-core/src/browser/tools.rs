@@ -12,14 +12,33 @@ use agent::tool::{SafetyClass, Tool, ToolUseContext};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use super::backend::{BrowserError, ClickTarget};
-use super::session::BrowserSession;
+use super::backend::{BrowserError, BrowserTarget, ClickTarget};
+use super::session::{BackendLease, BrowserSession};
 
 /// Shared deps for all four `browser_*` tools.
 #[derive(Debug, Clone)]
 pub struct BrowserToolDeps {
     pub session: Arc<BrowserSession>,
     pub shots_dir: PathBuf,
+    /// When set, every lease taken by these tools targets this backend
+    /// instead of the session-wide `/browser target` selection. Extension
+    /// task engines pin this to `Bridge` so side-panel turns always act on
+    /// the page beside the panel, never a managed Chrome.
+    pub target_override: Option<BrowserTarget>,
+}
+
+impl BrowserToolDeps {
+    /// The target these tools actually drive: the override when pinned,
+    /// otherwise the session-wide selection.
+    pub fn effective_target(&self) -> BrowserTarget {
+        self.target_override
+            .clone()
+            .unwrap_or_else(|| self.session.target())
+    }
+
+    pub async fn lease(&self) -> Result<BackendLease<'_>, BrowserError> {
+        self.session.lease_as(self.effective_target()).await
+    }
 }
 
 fn to_agent_err(e: BrowserError) -> AgentError {
@@ -95,7 +114,7 @@ impl Tool for BrowserReadTool {
     }
 
     async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        let lease = self.deps.session.lease().await.map_err(to_agent_err)?;
+        let lease = self.deps.lease().await.map_err(to_agent_err)?;
         match input.get("action").and_then(|a| a.as_str()).unwrap_or("") {
             "screenshot" => {
                 let shot = lease.backend().screenshot().await.map_err(to_agent_err)?;
@@ -204,7 +223,7 @@ impl Tool for BrowserActTool {
     }
 
     async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        let lease = self.deps.session.lease().await.map_err(to_agent_err)?;
+        let lease = self.deps.lease().await.map_err(to_agent_err)?;
         match input.get("action").and_then(|a| a.as_str()).unwrap_or("") {
             "navigate" => {
                 let url = input
@@ -297,7 +316,7 @@ impl Tool for BrowserEvalTool {
             .get("expression")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AgentError::other("eval: 'expression' required"))?;
-        let lease = self.deps.session.lease().await.map_err(to_agent_err)?;
+        let lease = self.deps.lease().await.map_err(to_agent_err)?;
         let value = lease
             .backend()
             .evaluate(expression)
@@ -350,7 +369,7 @@ impl Tool for BrowserTabsTool {
     }
 
     async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        let lease = self.deps.session.lease().await.map_err(to_agent_err)?;
+        let lease = self.deps.lease().await.map_err(to_agent_err)?;
         match input.get("action").and_then(|a| a.as_str()).unwrap_or("") {
             "new" => {
                 let url = input.get("url").and_then(|v| v.as_str());
@@ -394,6 +413,7 @@ mod tests {
             BrowserToolDeps {
                 session,
                 shots_dir: dir.path().to_path_buf(),
+                target_override: None,
             },
             dir,
         )
@@ -401,6 +421,20 @@ mod tests {
 
     fn ctx() -> ToolUseContext {
         ToolUseContext::new(std::env::temp_dir())
+    }
+
+    #[tokio::test]
+    async fn target_override_bridge_beats_managed_session_default() {
+        let (mut d, _g) = deps();
+        d.target_override = Some(crate::browser::BrowserTarget::Bridge);
+        // Session default is managed (mock factory would succeed); the
+        // override must force the unpaired bridge path and fail with the
+        // pairing hint instead of touching the managed factory.
+        let err = BrowserReadTool::new(d)
+            .call(&ctx(), json!({"action": "tabs"}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pair"));
     }
 
     #[test]

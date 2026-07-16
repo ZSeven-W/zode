@@ -236,6 +236,31 @@ CHECKS = [
         ],
         "pty": True,
     },
+    {
+        "id": "prompt_steers_parallel_todo_reporting",
+        "cmd": ["cargo", "test", "-p", "zode-core", "--",
+                "instructions::tests::system_prompt_includes_working_style_and_reporting",
+                "instructions::tests::system_prompt_gates_todo_discipline_on_flag"],
+    },
+    {
+        "id": "subagent_contract_in_child_prompt",
+        "cmd": ["cargo", "test", "-p", "zode-core",
+                "task_factory::tests::child_system_prompt_carries_subagent_contract"],
+    },
+    {
+        "id": "pre_turn_reminders_fire_once",
+        "cmd": ["cargo", "test", "-p", "zode-core", "reminders::tests"],
+    },
+    {
+        "id": "effort_maps_to_provider_knobs",
+        "cmd": ["cargo", "test", "-p", "zode-core",
+                "engine::tests::effort_maps_to_thinking_and_reasoning_effort"],
+    },
+    {
+        "id": "intermediate_agents_md_discovered",
+        "cmd": ["cargo", "test", "-p", "zode-core",
+                "instructions::tests::discovers_intermediate_dir_instructions_in_order"],
+    },
 ]
 
 

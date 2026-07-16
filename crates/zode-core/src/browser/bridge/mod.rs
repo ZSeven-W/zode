@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod native_host;
 pub mod server;
 mod task_channel;
 pub mod task_protocol;

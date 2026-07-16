@@ -5106,6 +5106,8 @@ dependencies = [
  "base64 0.22.1",
  "chromiumoxide",
  "dirs",
+ "filetime",
+ "fs4 0.9.1",
  "futures",
  "futures-util",
  "indexmap",

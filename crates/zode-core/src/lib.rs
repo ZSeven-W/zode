@@ -39,6 +39,7 @@ pub mod plugin;
 pub mod portability;
 pub mod provider;
 pub mod question;
+pub mod reminders;
 pub mod sandbox;
 pub mod session_meta;
 pub mod skills;

@@ -23,13 +23,24 @@ pub struct GoalCompleteTool {
     /// same `Arc` is handed to the engine so the host can poll it after a turn.
     completed: Arc<AtomicBool>,
     verification: VerificationState,
+    /// Whether a fresh passing `run_check` is required before this tool will
+    /// succeed. `run_check` is `Mutating`, so plan-mode / read-only sessions
+    /// never register it — requiring its evidence there would make
+    /// `goal_complete` permanently unreachable. Callers in that shape of
+    /// session pass `false` so the tool can still legitimately end the loop.
+    evidence_required: bool,
 }
 
 impl GoalCompleteTool {
-    pub fn new(completed: Arc<AtomicBool>, verification: VerificationState) -> Self {
+    pub fn new(
+        completed: Arc<AtomicBool>,
+        verification: VerificationState,
+        evidence_required: bool,
+    ) -> Self {
         Self {
             completed,
             verification,
+            evidence_required,
         }
     }
 }
@@ -41,10 +52,18 @@ impl Tool for GoalCompleteTool {
     }
 
     fn description(&self) -> &str {
-        "Call this ONLY when the current goal is fully achieved; it ends the \
-         autonomous goal loop. Provide a short summary of what was accomplished. \
-         Do not call it prematurely — if more work remains, keep going instead. \
-         A fresh passing run_check is required before this tool will succeed."
+        if self.evidence_required {
+            "Call this ONLY when the current goal is fully achieved; it ends the \
+             autonomous goal loop. Provide a short summary of what was accomplished. \
+             Do not call it prematurely — if more work remains, keep going instead. \
+             A fresh passing run_check is required before this tool will succeed."
+        } else {
+            "Call this ONLY when the current goal is fully achieved; it ends the \
+             autonomous goal loop. Provide a short summary of what was accomplished. \
+             Do not call it prematurely — if more work remains, keep going instead. \
+             A fresh passing run_check is required before this tool will succeed when \
+             verification tooling is available in this session."
+        }
     }
 
     fn input_schema(&self) -> Value {
@@ -73,6 +92,20 @@ impl Tool for GoalCompleteTool {
             .unwrap_or("")
             .trim()
             .to_string();
+        if !self.evidence_required {
+            self.completed.store(true, Ordering::SeqCst);
+            return Ok(json!({
+                "ok": true,
+                "summary": summary,
+                "verification": {
+                    "tool": Value::Null,
+                    "command": Value::Null,
+                },
+                "note": "goal marked complete; the autonomous goal loop will stop \
+                         (verification tooling unavailable in this session; \
+                         completed without run_check evidence)"
+            }));
+        }
         let evidence = self
             .verification
             .completion_evidence()
@@ -97,7 +130,7 @@ mod tests {
     #[test]
     fn tool_metadata_is_stable() {
         let flag = Arc::new(AtomicBool::new(false));
-        let tool = GoalCompleteTool::new(flag, VerificationState::default());
+        let tool = GoalCompleteTool::new(flag, VerificationState::default(), true);
         assert_eq!(tool.name(), "goal_complete");
         assert_eq!(tool.safety_class(), SafetyClass::ReadOnly);
         let schema = tool.input_schema();
@@ -108,7 +141,7 @@ mod tests {
     async fn call_sets_the_shared_flag_only_after_a_fresh_passed_verification() {
         let verification = crate::verification::VerificationState::default();
         let flag = Arc::new(AtomicBool::new(false));
-        let tool = GoalCompleteTool::new(flag.clone(), verification.clone());
+        let tool = GoalCompleteTool::new(flag.clone(), verification.clone(), true);
         assert!(!flag.load(Ordering::SeqCst));
         let ctx = ToolUseContext::new(".");
         let premature = tool
@@ -126,5 +159,23 @@ mod tests {
         assert!(flag.load(Ordering::SeqCst), "flag must be set after call");
         assert_eq!(out["ok"], true);
         assert_eq!(out["summary"], "did the thing");
+    }
+
+    #[tokio::test]
+    async fn call_completes_without_evidence_when_not_required() {
+        let verification = crate::verification::VerificationState::default();
+        let flag = Arc::new(AtomicBool::new(false));
+        let tool = GoalCompleteTool::new(flag.clone(), verification, false);
+        assert!(!flag.load(Ordering::SeqCst));
+        let ctx = ToolUseContext::new(".");
+        let out = tool
+            .call(&ctx, json!({ "summary": "did the thing" }))
+            .await
+            .expect("goal_complete should succeed without run_check evidence");
+        assert!(flag.load(Ordering::SeqCst), "flag must be set after call");
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["summary"], "did the thing");
+        assert!(out["verification"]["tool"].is_null());
+        assert!(out["verification"]["command"].is_null());
     }
 }

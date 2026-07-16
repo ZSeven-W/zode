@@ -70,6 +70,10 @@ pub struct Args {
     /// config, …) from reads. Off by default — a coding agent reads the repo.
     #[arg(long)]
     pub sandbox_strict_read: bool,
+
+    /// Internal: run the extension-only event pump for Chrome Native Messaging.
+    #[arg(long, hide = true)]
+    pub browser_native_host: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -146,6 +150,12 @@ mod tests {
         assert!(a.browser && !a.no_browser);
         let a = Args::parse_from(["zode", "--no-browser"]);
         assert!(!a.browser && a.no_browser);
+    }
+
+    #[test]
+    fn native_host_flag_is_hidden_but_parseable() {
+        let a = Args::parse_from(["zode", "--browser-native-host"]);
+        assert!(a.browser_native_host);
     }
 
     #[test]

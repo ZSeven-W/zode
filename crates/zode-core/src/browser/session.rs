@@ -59,7 +59,16 @@ impl BrowserSession {
     }
 
     pub async fn lease(&self) -> Result<BackendLease<'_>, BrowserError> {
-        let want_bridge = matches!(self.target(), BrowserTarget::Bridge);
+        self.lease_as(self.target()).await
+    }
+
+    /// Like [`lease`](Self::lease), but selecting the backend for an explicit
+    /// target instead of the session-wide one. Extension-task engines use this
+    /// (via their assembled target override) so side-panel turns always drive
+    /// the user's real Chrome through the bridge, regardless of the global
+    /// `/browser target` selection.
+    pub async fn lease_as(&self, target: BrowserTarget) -> Result<BackendLease<'_>, BrowserError> {
+        let want_bridge = matches!(target, BrowserTarget::Bridge);
         let mut guard = self.slot.lock().await;
         let needs_new = match guard.as_ref() {
             Some(b) => !b.is_alive().await || b.is_bridge() != want_bridge,
@@ -242,6 +251,32 @@ mod tests {
         };
         let s = BrowserSession::new(cfg, MockFactory::new());
         assert!(matches!(s.target(), BrowserTarget::Bridge));
+    }
+
+    #[tokio::test]
+    async fn lease_as_managed_overrides_bridge_default() {
+        let cfg = BrowserConfig {
+            default_target: Some("bridge".into()),
+            ..BrowserConfig::default()
+        };
+        let f = MockFactory::new();
+        let s = BrowserSession::new(cfg, f.clone());
+        // The unpaired bridge default would fail, but an explicit managed
+        // override must ignore the session target and boot the factory.
+        let lease = s.lease_as(BrowserTarget::Managed).await.unwrap();
+        assert!(!lease.backend().is_bridge());
+        assert_eq!(f.made.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn lease_as_bridge_without_pairing_is_dead_with_hint() {
+        let s = BrowserSession::new(BrowserConfig::default(), MockFactory::new());
+        let err = match s.lease_as(BrowserTarget::Bridge).await {
+            Ok(_) => panic!("bridge override should require pairing first"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, BrowserError::Dead(_)));
+        assert!(err.to_string().contains("pair"));
     }
 
     #[tokio::test]

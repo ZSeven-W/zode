@@ -17,11 +17,15 @@ use super::session::BrowserSession;
 pub struct BrowserUploadTool {
     session: Arc<BrowserSession>,
     gate: Arc<dyn ApprovalGate>,
+    /// See `BrowserToolDeps::target_override`: pins every lease (preflight
+    /// URL hint + execution) to this target instead of the session-wide one.
+    target_override: Option<BrowserTarget>,
 }
 
 #[derive(Debug)]
 struct UploadExecution {
     session: Arc<BrowserSession>,
+    target_override: Option<BrowserTarget>,
 }
 
 #[async_trait]
@@ -65,9 +69,13 @@ impl Tool for UploadExecution {
                     .ok_or_else(|| AgentError::other("preflighted upload path is not a string"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let effective = self
+            .target_override
+            .clone()
+            .unwrap_or_else(|| self.session.target());
         let lease = self
             .session
-            .lease()
+            .lease_as(effective)
             .await
             .map_err(|error| AgentError::other(error.to_string()))?;
         lease
@@ -81,7 +89,24 @@ impl Tool for UploadExecution {
 
 impl BrowserUploadTool {
     pub fn new(session: Arc<BrowserSession>, gate: Arc<dyn ApprovalGate>) -> Self {
-        Self { session, gate }
+        Self {
+            session,
+            gate,
+            target_override: None,
+        }
+    }
+
+    /// Pin every lease this tool takes to `target` (see
+    /// `BrowserToolDeps::target_override`).
+    pub fn with_target_override(mut self, target: Option<BrowserTarget>) -> Self {
+        self.target_override = target;
+        self
+    }
+
+    fn effective_target(&self) -> BrowserTarget {
+        self.target_override
+            .clone()
+            .unwrap_or_else(|| self.session.target())
     }
 
     fn preflight(input: &Value) -> Result<(ClickTarget, Vec<PathBuf>, Value), AgentError> {
@@ -184,15 +209,16 @@ impl Tool for BrowserUploadTool {
 
     async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let (target, paths, mut shown) = Self::preflight(&input)?;
+        let effective = self.effective_target();
         let lease = self
             .session
-            .lease()
+            .lease_as(effective.clone())
             .await
             .map_err(|error| AgentError::other(error.to_string()))?;
         if let Some(obj) = shown.as_object_mut() {
             obj.insert(
                 "_target".into(),
-                json!(match self.session.target() {
+                json!(match effective {
                     BrowserTarget::Managed => "managed",
                     BrowserTarget::Bridge => "bridge",
                 }),
@@ -214,11 +240,15 @@ impl Tool for BrowserUploadTool {
         drop(lease);
         let inner = Arc::new(UploadExecution {
             session: self.session.clone(),
+            target_override: self.target_override.clone(),
         });
         let gated = PermissionGatedTool::with_view(
             inner,
             self.gate.clone(),
-            Arc::new(super::gate::BrowserGateView::new(self.session.clone())),
+            Arc::new(super::gate::BrowserGateView::with_target_override(
+                self.session.clone(),
+                self.target_override.clone(),
+            )),
         );
         gated.call(ctx, shown).await
     }
@@ -244,6 +274,31 @@ mod tests {
             self.seen.lock().unwrap().push(input.clone());
             Approval::AllowAlways
         }
+    }
+
+    #[tokio::test]
+    async fn target_override_bridge_fails_with_pairing_hint_before_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("u.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let gate = Arc::new(Gate {
+            seen: Mutex::new(Vec::new()),
+        });
+        let session = crate::browser::BrowserSession::new(
+            crate::config::BrowserConfig::default(),
+            crate::browser::backend::mock::mock_factory(),
+        );
+        let tool = BrowserUploadTool::new(session, gate.clone())
+            .with_target_override(Some(crate::browser::BrowserTarget::Bridge));
+        let err = tool
+            .call(
+                &ToolUseContext::new(std::env::temp_dir()),
+                json!({"selector": "input", "paths": [file.to_string_lossy()]}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pair"));
+        assert!(gate.seen.lock().unwrap().is_empty());
     }
 
     fn tool(gate: Arc<Gate>) -> BrowserUploadTool {

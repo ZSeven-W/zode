@@ -15,6 +15,7 @@ pub const MAX_INSTRUCTION_BYTES: usize = 64 * 1024;
 pub enum Level {
     Global,
     ProjectRoot,
+    Intermediate,
     Cwd,
 }
 
@@ -100,34 +101,45 @@ pub fn discover_instructions(cwd: &Path) -> Vec<InstructionFile> {
         }
     }
 
-    // 2. Project root.
+    // 2. Project root down to cwd: every directory on the path contributes,
+    //    root first (later files win the model's attention). If cwd is not
+    //    under the root (no .git anywhere), the chain is just [cwd].
     let root = project_root(cwd);
-    if let Some(p) = pick_in_dir(&root) {
-        if !seen.contains(&p) {
+    let mut chain: Vec<&Path> = Vec::new();
+    let mut cur = Some(cwd);
+    while let Some(c) = cur {
+        chain.push(c);
+        if c == root {
+            break;
+        }
+        cur = c.parent();
+    }
+    if *chain.last().unwrap() != root {
+        // cwd is outside the detected root (project_root fell back): keep cwd only.
+        chain = vec![cwd];
+    }
+    chain.reverse();
+    let last = chain.len().saturating_sub(1);
+    for (i, dir) in chain.iter().enumerate() {
+        if let Some(p) = pick_in_dir(dir) {
+            if seen.contains(&p) {
+                continue;
+            }
             if let Some((content, truncated)) = read_capped(&p) {
                 seen.push(p.clone());
+                let level = if i == 0 {
+                    Level::ProjectRoot
+                } else if i == last {
+                    Level::Cwd
+                } else {
+                    Level::Intermediate
+                };
                 out.push(InstructionFile {
                     path: p,
                     content,
-                    level: Level::ProjectRoot,
+                    level,
                     truncated,
                 });
-            }
-        }
-    }
-
-    // 3. cwd (if different from the project root).
-    if cwd != root {
-        if let Some(p) = pick_in_dir(cwd) {
-            if !seen.contains(&p) {
-                if let Some((content, truncated)) = read_capped(&p) {
-                    out.push(InstructionFile {
-                        path: p,
-                        content,
-                        level: Level::Cwd,
-                        truncated,
-                    });
-                }
             }
         }
     }
@@ -144,6 +156,23 @@ pub struct EnvInfo {
     /// The active model id (e.g. "deepseek-v4-pro"), so the agent can answer
     /// "what model are you?". Set by the engine after `gather_env`.
     pub model: String,
+}
+
+/// Feature flags for optional system-prompt sections. A struct (not bools)
+/// so call sites stay readable as sections accumulate.
+#[derive(Debug, Clone, Default)]
+pub struct PromptFlags {
+    pub skill_discipline: bool,
+    pub openspec: bool,
+    pub ask_user_question: bool,
+    /// TodoWrite is registered — include the task-tracking discipline section.
+    pub todo: bool,
+    /// The `run_check` tool is registered — include the verification
+    /// sentence that advertises it. Plan mode strips `run_check` from the
+    /// tool registry (it's `SafetyClass::Mutating`, filtered out by
+    /// `filter_read_only`), so the prompt must not tell the model to call a
+    /// tool it doesn't have.
+    pub verify_tool: bool,
 }
 
 /// Appended when the project uses OpenSpec + the toggle is on. Generic — names
@@ -181,6 +210,52 @@ transcript. The user gets an arrow-key picker that always also offers a \
 free-text 'Other'. You get back `{ answers: [{ question, header, answer }] }`, \
 where each `answer` is the chosen option text or the user's custom text. Use \
 plain prose only for open-ended questions that have no discrete options.\n";
+
+/// Parallel tool calls + anti-promise completion discipline. Unconditional —
+/// does not name `run_check` (which plan mode removes from the tool
+/// registry; see `VERIFY_TOOL` below for the gated sentence that does).
+const WORKING_STYLE: &str = "\n### Working style\n\
+When a response needs several INDEPENDENT tool calls (reading multiple files, \
+separate searches), issue them together in one response — they run in parallel \
+and you get every result at once. Only sequence calls whose input depends on an \
+earlier result. Never end your turn on an unexecuted plan or promise: if your \
+last paragraph says you WILL do something next, do it now with tool calls \
+instead of stopping.\n";
+
+/// Verification sentence naming the `run_check` tool. Split out of
+/// `WORKING_STYLE` because plan mode strips `run_check` from the tool
+/// registry (`SafetyClass::Mutating`, dropped by `filter_read_only`) —
+/// advertising a tool the model doesn't have invites a failed call. Gated
+/// on `PromptFlags::verify_tool`.
+const VERIFY_TOOL: &str = "Before claiming work is complete or fixed, verify \
+it — run the relevant test/build/command (the `run_check` tool runs a \
+command and evaluates explicit assertions, recording the evidence) and \
+report the actual result. If verification fails, say so plainly; never \
+claim success without fresh evidence.\n";
+
+/// Final-message and reporting norms.
+const REPORTING: &str = "\n### Reporting\n\
+Your final message of a turn is what the user reads — put the complete answer, \
+findings, and conclusions there; text between tool calls should be brief status \
+only. Lead with the outcome, then supporting detail. Reference code as \
+`path:line` so locations are clickable. Report results faithfully: failing \
+tests, skipped steps, and partial work are stated as such, never papered over.\n";
+
+/// Included only when the TodoWrite tool is registered.
+const TODO_DISCIPLINE: &str = "\n### Task tracking\n\
+For any task with 3+ distinct steps, maintain a plan with the TodoWrite tool: \
+create the list before starting, keep exactly one item in_progress while you \
+work on it, and mark items completed as you finish — re-emit the FULL list on \
+every call (it replaces the previous one). Keep items short and user-facing. \
+Skip the todo list for single-step or purely conversational requests.\n";
+
+/// Compaction awareness: the model otherwise treats a `[Context summary]`
+/// message as odd user input, or wraps up early fearing context loss.
+const LONG_SESSIONS: &str = "\n### Long sessions\n\
+When the conversation grows long it is automatically compacted: older turns \
+are replaced by a `[Context summary]` message and recently touched files are \
+re-attached. Treat a context summary as trusted prior conversation and keep \
+working — do not wrap up early because the session is long.\n";
 
 /// Steer the model toward bounded reads. Bash output caps are the hard guard;
 /// this guidance reduces how often the cap needs to trigger.
@@ -238,23 +313,30 @@ pub fn build_system_prompt(
     instructions: &[InstructionFile],
     skills_index: &str,
     env: &EnvInfo,
-    skill_discipline: bool,
-    openspec: bool,
-    ask_user_question: bool,
+    flags: &PromptFlags,
 ) -> String {
     let mut s = String::new();
     s.push_str(IDENTITY);
     s.push_str("\n\n## Environment\n");
     s.push_str(&format!("- cwd: {}\n", env.cwd));
     s.push_str(&format!("- platform: {}\n", env.platform));
-    s.push_str(&format!("- date: {}\n", env.date));
+    s.push_str(&format!("- date (session start): {}\n", env.date));
     if !env.model.is_empty() {
         s.push_str(&format!("- model: {}\n", env.model));
     }
     if let Some(b) = &env.git_branch {
-        s.push_str(&format!("- git branch: {b}\n"));
+        s.push_str(&format!("- git branch (at session start): {b}\n"));
     }
     s.push_str(TOKEN_HYGIENE);
+    s.push_str(WORKING_STYLE);
+    if flags.verify_tool {
+        s.push_str(VERIFY_TOOL);
+    }
+    s.push_str(REPORTING);
+    if flags.todo {
+        s.push_str(TODO_DISCIPLINE);
+    }
+    s.push_str(LONG_SESSIONS);
 
     if !instructions.is_empty() {
         s.push_str("\n## Project Instructions\n");
@@ -268,14 +350,14 @@ pub fn build_system_prompt(
         s.push_str("Invoke a skill by name with the Skill tool to load its full instructions:\n");
         s.push_str(skills_index);
         s.push('\n');
-        if skill_discipline {
+        if flags.skill_discipline {
             s.push_str(SKILL_DISCIPLINE);
         }
     }
-    if ask_user_question {
+    if flags.ask_user_question {
         s.push_str(ASK_USER_QUESTION);
     }
-    if openspec {
+    if flags.openspec {
         s.push_str(OPENSPEC_AWARENESS);
     }
     s
@@ -395,9 +477,10 @@ mod tests {
             &files,
             "- code-review: review code",
             &env,
-            true,
-            false,
-            false,
+            &PromptFlags {
+                skill_discipline: true,
+                ..Default::default()
+            },
         );
         assert!(prompt.contains("Zode"));
         assert!(prompt.contains("/p"));
@@ -426,7 +509,15 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let prompt = build_system_prompt(&[], "", &env, true, false, false);
+        let prompt = build_system_prompt(
+            &[],
+            "",
+            &env,
+            &PromptFlags {
+                skill_discipline: true,
+                ..Default::default()
+            },
+        );
         assert!(!prompt.contains("Available Skills"));
         // An empty model is omitted from the Environment block.
         assert!(!prompt.contains("- model:"));
@@ -442,7 +533,7 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let prompt = build_system_prompt(&[], "", &env, false, false, false);
+        let prompt = build_system_prompt(&[], "", &env, &PromptFlags::default());
         assert!(prompt.contains("FileRead"));
         assert!(
             prompt.to_lowercase().contains("do not cat")
@@ -459,7 +550,15 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "- foo: a skill", &env, true, false, false);
+        let p = build_system_prompt(
+            &[],
+            "- foo: a skill",
+            &env,
+            &PromptFlags {
+                skill_discipline: true,
+                ..Default::default()
+            },
+        );
         assert!(p.contains("Using skills"));
         assert!(p.contains("invoke it with the Skill tool"));
         // install-agnostic: no hardcoded skill names
@@ -476,7 +575,16 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "", &env, true, false, false); // no skills index → no block
+        // no skills index → no block
+        let p = build_system_prompt(
+            &[],
+            "",
+            &env,
+            &PromptFlags {
+                skill_discipline: true,
+                ..Default::default()
+            },
+        );
         assert!(!p.contains("Using skills"));
     }
 
@@ -489,7 +597,7 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "- foo: a skill", &env, false, false, false);
+        let p = build_system_prompt(&[], "- foo: a skill", &env, &PromptFlags::default());
         assert!(!p.contains("Using skills"));
     }
 
@@ -528,7 +636,15 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "", &env, false, true, false);
+        let p = build_system_prompt(
+            &[],
+            "",
+            &env,
+            &PromptFlags {
+                openspec: true,
+                ..Default::default()
+            },
+        );
         assert!(p.contains("OpenSpec workflow"));
         assert!(p.contains("openspec validate"));
         assert!(p.contains("openspec archive"));
@@ -545,7 +661,7 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "", &env, false, false, false);
+        let p = build_system_prompt(&[], "", &env, &PromptFlags::default());
         assert!(!p.contains("OpenSpec workflow"));
     }
 
@@ -558,7 +674,15 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "", &env, false, false, true);
+        let p = build_system_prompt(
+            &[],
+            "",
+            &env,
+            &PromptFlags {
+                ask_user_question: true,
+                ..Default::default()
+            },
+        );
         assert!(p.contains("Asking the user"));
         assert!(p.contains("AskUserQuestion"));
         assert!(p.contains("arrow-key picker"));
@@ -573,8 +697,113 @@ mod tests {
             git_branch: None,
             model: String::new(),
         };
-        let p = build_system_prompt(&[], "", &env, false, false, false);
+        let p = build_system_prompt(&[], "", &env, &PromptFlags::default());
         assert!(!p.contains("AskUserQuestion"));
         assert!(!p.contains("Asking the user"));
+    }
+
+    #[test]
+    fn system_prompt_includes_working_style_and_reporting() {
+        let env = EnvInfo {
+            cwd: "/p".into(),
+            platform: "linux".into(),
+            date: "2026-07-16".into(),
+            git_branch: None,
+            model: String::new(),
+        };
+        let p = build_system_prompt(
+            &[],
+            "",
+            &env,
+            &PromptFlags {
+                verify_tool: true,
+                ..Default::default()
+            },
+        );
+        // Parallel tool-call steering.
+        assert!(p.contains("issue them together in one response"));
+        // Anti-promise completion discipline (unconditional).
+        assert!(p.contains("Never end your turn on an unexecuted plan"));
+        // run_check advertising — gated on verify_tool, on here.
+        assert!(p.contains("run_check"));
+        // Communication norms.
+        assert!(p.contains("final message of a turn is what the user reads"));
+        assert!(p.contains("`path:line`"));
+        // Compaction awareness.
+        assert!(p.contains("[Context summary]"));
+
+        // Plan mode (verify_tool: false) must not advertise a tool it
+        // removed from the registry.
+        let without_verify = build_system_prompt(&[], "", &env, &PromptFlags::default());
+        assert!(!without_verify.contains("run_check"));
+        // The unconditional working-style text is still present.
+        assert!(without_verify.contains("issue them together in one response"));
+        assert!(without_verify.contains("Never end your turn on an unexecuted plan"));
+    }
+
+    #[test]
+    fn system_prompt_gates_todo_discipline_on_flag() {
+        let env = EnvInfo {
+            cwd: "/p".into(),
+            platform: "linux".into(),
+            date: "2026-07-16".into(),
+            git_branch: None,
+            model: String::new(),
+        };
+        let with = build_system_prompt(
+            &[],
+            "",
+            &env,
+            &PromptFlags {
+                todo: true,
+                ..Default::default()
+            },
+        );
+        let without = build_system_prompt(&[], "", &env, &PromptFlags::default());
+        assert!(with.contains("TodoWrite"));
+        assert!(with.contains("one item in_progress"));
+        assert!(!without.contains("TodoWrite"));
+    }
+
+    #[test]
+    fn env_block_labels_branch_and_date_as_session_start() {
+        let env = EnvInfo {
+            cwd: "/p".into(),
+            platform: "macos".into(),
+            date: "2026-07-16".into(),
+            git_branch: Some("main".into()),
+            model: String::new(),
+        };
+        let p = build_system_prompt(&[], "", &env, &PromptFlags::default());
+        assert!(p.contains("- date (session start): 2026-07-16"));
+        assert!(p.contains("- git branch (at session start): main"));
+    }
+
+    #[test]
+    fn discovers_intermediate_dir_instructions_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "root rules").unwrap();
+        let mid = dir.path().join("crates");
+        let leaf = mid.join("foo");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(mid.join("AGENTS.md"), "mid rules").unwrap();
+        std::fs::write(leaf.join("CLAUDE.md"), "leaf rules").unwrap();
+        let files = discover_instructions(&leaf);
+        let bodies: Vec<&str> = files.iter().map(|f| f.content.as_str()).collect();
+        let root_i = bodies
+            .iter()
+            .position(|c| c.contains("root rules"))
+            .unwrap();
+        let mid_i = bodies.iter().position(|c| c.contains("mid rules")).unwrap();
+        let leaf_i = bodies
+            .iter()
+            .position(|c| c.contains("leaf rules"))
+            .unwrap();
+        assert!(
+            root_i < mid_i && mid_i < leaf_i,
+            "root → intermediate → cwd order"
+        );
+        assert_eq!(files[mid_i].level, Level::Intermediate);
     }
 }

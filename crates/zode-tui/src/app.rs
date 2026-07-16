@@ -581,6 +581,11 @@ impl TuiApp {
         question_queue: zode_core::question::QuestionQueue,
         resumed_id: Option<String>,
     ) -> Self {
+        if !cfg!(test) {
+            if let Err(error) = zode_core::browser::bridge::native_host::install(&engine.cwd) {
+                tracing::debug!(%error, "browser native host registration failed");
+            }
+        }
         let mut theme_store = ThemeStore::with_builtins();
         if let Ok(dir) = ConfigManager::config_dir() {
             theme_store.merge_user(crate::theme::loader::load_dir(&dir.join("themes")));
@@ -1987,9 +1992,16 @@ impl TuiApp {
 
     /// Open the session picker (/sessions, /resume) from the saved index.
     fn open_session_picker(&mut self) {
-        let metas: Vec<SessionMeta> = SessionIndex::load()
-            .map(|i| i.newest_first().into_iter().cloned().collect())
-            .unwrap_or_default();
+        let metas: Vec<SessionMeta> = match SessionIndex::load() {
+            Ok(index) => index.newest_first().into_iter().cloned().collect(),
+            Err(error) => {
+                self.toast = Some(Toast::error(format!(
+                    "{}: {error}",
+                    crate::tr("load failed")
+                )));
+                return;
+            }
+        };
         if metas.is_empty() {
             self.toast = Some(Toast::info(crate::tr("no saved sessions yet")));
             return;
@@ -2365,6 +2377,67 @@ impl TuiApp {
         restore_terminal(&mut terminal)?;
         self.print_resume_hint();
         result
+    }
+
+    /// Run only the extension task/agent event pump, without taking over a
+    /// terminal. Chrome starts this mode through Native Messaging when the
+    /// side panel is opened while no regular zode process is available.
+    pub async fn run_extension_daemon(
+        mut self,
+        mut shutdown: tokio::sync::oneshot::Receiver<()>,
+    ) -> std::io::Result<()> {
+        self.refresh_dynamic_commands();
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                inbound = extension_tasks::recv_extension_task(&mut self.extension_task_rx) => {
+                    if let Some(inbound) = inbound {
+                        self.dispatch_extension_inbound(inbound, &agent_tx);
+                    } else {
+                        self.extension_task_rx = None;
+                    }
+                }
+                Some(app_ev) = agent_rx.recv() => {
+                    self.handle_runtime_event(app_ev, &agent_tx);
+                    let mut drained = 0;
+                    while drained < AGENT_COALESCE_CAP {
+                        match agent_rx.try_recv() {
+                            Ok(event) => {
+                                self.handle_runtime_event(event, &agent_tx);
+                                drained += 1;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    self.dispatch_extension_completions(&agent_tx);
+                    self.maybe_auto_compact(&agent_tx);
+                    self.dispatch_queued_input(&agent_tx).await;
+                }
+                Some(request) = self.approval_rx.next() => {
+                    self.route_approval_request(request);
+                }
+                Some(request) = self.question_rx.next() => {
+                    // The task side panel does not expose the TUI's question
+                    // picker yet. Dismiss instead of leaving the tool hung in
+                    // a daemon with no terminal to answer it.
+                    let _ = request.respond(None);
+                }
+                _ = ticker.tick() => {
+                    self.cleanup_extension_attachments_at(std::time::Instant::now());
+                }
+                _ = &mut shutdown => break,
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn ensure_extension_bridge_listening(
+        &self,
+    ) -> Result<u16, zode_core::browser::BrowserError> {
+        self.extension_browser.ensure_bridge_listening().await
     }
 
     /// On exit, print how to continue this session (like opencode/codex). Only
@@ -4869,7 +4942,14 @@ impl TuiApp {
                     }
                 };
                 let want_bridge = matches!(next, zode_core::browser::BrowserTarget::Bridge);
-                match engine.browser.set_target(next) {
+                let target_name = if want_bridge { "bridge" } else { "managed" };
+                let persisted = ConfigManager::persist_browser_default_target(target_name);
+                match persisted.and_then(|()| {
+                    engine
+                        .browser
+                        .set_target(next)
+                        .map_err(|error| zode_core::CoreError::Other(error.to_string()))
+                }) {
                     // set_target mutates the shared session synchronously (no
                     // reassembly involved), so a fresh snapshot already
                     // reflects it.
@@ -4879,7 +4959,10 @@ impl TuiApp {
                         }
                         status = self.browser_panel_status();
                     }
-                    Err(e) => self.active_tab_mut().chat.push_system(&e.to_string()),
+                    Err(e) => self
+                        .active_tab_mut()
+                        .chat
+                        .push_system(&format!("{}: {e}", crate::tr("save config failed"))),
                 }
             }
             BrowserPanelAction::ManagePermissions => {
@@ -5768,6 +5851,12 @@ impl TuiApp {
         let Some(tab_idx) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
+        // Capture this before forwarding TurnDone: the forwarder consumes the
+        // immutable route. Tests inject a TempDir-backed repository here, so
+        // extension turns must not fall through to the user's global store.
+        let extension_sessions = self
+            .extension_tasks
+            .session_repository_for_turn(tab_id, turn_id);
         // Drop events from an aborted/superseded turn within that tab.
         if turn_id != self.tabs[tab_idx].active_turn_id {
             if let AppEvent::TurnDone { ref result, .. } = ev {
@@ -5789,13 +5878,21 @@ impl TuiApp {
                         tab.title.clone(),
                         tab.persisted_msgs.clone(),
                     );
-                    tokio::spawn(crate::tab::persist_session(
-                        session_id,
-                        engine,
-                        title,
-                        persisted,
-                        allow_append,
-                    ));
+                    if let Some(sessions) = extension_sessions {
+                        tokio::spawn(async move {
+                            sessions
+                                .persist(session_id, engine, title, persisted, allow_append)
+                                .await;
+                        });
+                    } else {
+                        tokio::spawn(crate::tab::persist_session(
+                            session_id,
+                            engine,
+                            title,
+                            persisted,
+                            allow_append,
+                        ));
+                    }
                 } else {
                     // Remember every real provider terminal for idempotent old
                     // interrupt requests, but never fan stale output to UI.
@@ -5999,13 +6096,21 @@ impl TuiApp {
                 // Mine the just-completed turn for durable memories (no-op
                 // unless autoExtract is on; runs detached, never blocks).
                 engine.spawn_post_turn_extraction();
-                tokio::spawn(crate::tab::persist_session(
-                    session_id,
-                    engine,
-                    title,
-                    persisted,
-                    allow_append,
-                ));
+                if let Some(sessions) = extension_sessions {
+                    tokio::spawn(async move {
+                        sessions
+                            .persist(session_id, engine, title, persisted, allow_append)
+                            .await;
+                    });
+                } else {
+                    tokio::spawn(crate::tab::persist_session(
+                        session_id,
+                        engine,
+                        title,
+                        persisted,
+                        allow_append,
+                    ));
+                }
             }
             AppEvent::Toast { .. }
             | AppEvent::CompactDone { .. }
@@ -6155,11 +6260,18 @@ impl TuiApp {
                         };
                         let want_bridge = matches!(t, zode_core::browser::BrowserTarget::Bridge);
                         let session = self.active_tab().engine.browser.clone();
-                        let msg = match session.set_target(t) {
-                            Ok(()) => format!("browser target: {target}"),
-                            Err(e) => e.to_string(),
+                        let mut applied = false;
+                        let msg = match ConfigManager::persist_browser_default_target(&target) {
+                            Ok(()) => match session.set_target(t) {
+                                Ok(()) => {
+                                    applied = true;
+                                    format!("browser target: {target} (saved as default)")
+                                }
+                                Err(e) => e.to_string(),
+                            },
+                            Err(e) => format!("{}: {e}", crate::tr("save config failed")),
                         };
-                        if want_bridge {
+                        if want_bridge && applied {
                             ensure_browser_bridge_and_maybe_reconnect(session).await;
                         }
                         self.active_tab_mut().chat.push_system(&msg);
@@ -8362,11 +8474,14 @@ fn attached_file_summary(text: &str) -> Option<String> {
     Some(format!("[Attached file: {name} ({media_type})]"))
 }
 
-/// Remove engine-injected recall context before classifying a stored text
-/// block. This ordering matters for attachment-only turns: noema prepends its
-/// recall pack to the first attachment envelope itself.
+/// Remove engine-injected context before rendering a stored user text block.
+/// The browser side-panel hint is model-only, and noema recall must be stripped
+/// before classifying attachment-only turns because it prefixes the envelope.
 fn stored_user_text_for_display(text: &str) -> String {
     let text = strip_recalled_memory(text);
+    if text.trim() == extension_tasks::SIDE_PANEL_BROWSER_CONTEXT.trim() {
+        return String::new();
+    }
     attached_file_summary(text).unwrap_or_else(|| text.to_string())
 }
 
@@ -8380,7 +8495,10 @@ fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
                 for (idx, block) in content.iter().enumerate() {
                     match block {
                         ContentBlock::Text { text } if !text.trim().is_empty() => {
-                            text_parts.push(stored_user_text_for_display(text));
+                            let shown = stored_user_text_for_display(text);
+                            if !shown.trim().is_empty() {
+                                text_parts.push(shown);
+                            }
                         }
                         ContentBlock::Image { source } => {
                             let media_type = match source {
@@ -9431,6 +9549,20 @@ mod tests {
         assert!(!app.active_tab().is_busy());
         assert_eq!(app.active_tab().chat.messages().len(), before);
         assert!(app.active_tab().pending_shell_context.is_empty());
+    }
+
+    #[tokio::test]
+    async fn extension_daemon_exits_on_native_port_disconnect_without_a_terminal() {
+        let (app, _tx) = make_test_app().await;
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            app.run_extension_daemon(shutdown_rx),
+        )
+        .await
+        .expect("daemon observes native disconnect")
+        .expect("daemon exits cleanly");
     }
 
     async fn make_test_app() -> (TuiApp, mpsc::UnboundedSender<AppEvent>) {
@@ -12395,6 +12527,15 @@ mod tests {
         // Malformed (head but no hints header) → returned unchanged, never eats text.
         let malformed = "## Relevant Memories\n- orphan\n\nbody";
         assert_eq!(strip_recalled_memory(malformed), malformed);
+    }
+
+    #[test]
+    fn stored_user_display_hides_only_the_injected_side_panel_context() {
+        assert!(
+            stored_user_text_for_display(extension_tasks::SIDE_PANEL_BROWSER_CONTEXT).is_empty()
+        );
+        let ordinary = "用户明确提到了 <browser_side_panel_context> 标签";
+        assert_eq!(stored_user_text_for_display(ordinary), ordinary);
     }
 
     /// Diagnostic (not run in CI): load a REAL session file and render it the

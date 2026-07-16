@@ -2109,9 +2109,10 @@ mod tests {
             })
             .collect();
         assert!(rows.iter().any(|row| row.contains("│ Type")));
-        assert!(rows
-            .iter()
-            .any(|row| row.contains("├") && row.contains("─")));
+        assert!(rows.iter().any(|row| {
+            let r = row.trim();
+            r.contains('─') && r.chars().all(|c| "┌┬┐├┼┤└┴┘─".contains(c))
+        }));
         assert!(rows
             .iter()
             .any(|row| row.contains("Fact") && row.contains("API 地址")));

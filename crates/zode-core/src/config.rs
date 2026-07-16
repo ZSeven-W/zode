@@ -57,6 +57,11 @@ pub struct ProviderConfig {
     /// When unset, provider defaults decide.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_images: Option<bool>,
+    /// Opt-in: forward `/effort` as an OpenAI-style `reasoning_effort` request
+    /// parameter. Off by default because non-reasoning OpenAI-compatible
+    /// endpoints reject the parameter outright.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
     /// Per-provider token prices in USD per million tokens ($/MTok — the form
     /// providers publish). Optional so cost is computed for models the built-in
     /// catalog doesn't know (e.g. DeepSeek), instead of showing "cost n/a". The
@@ -1024,6 +1029,7 @@ impl ZodeConfig {
         active.context_window = active.context_window.or(p.context_window);
         active.max_output_tokens = active.max_output_tokens.or(p.max_output_tokens);
         active.supports_images = active.supports_images.or(p.supports_images);
+        active.reasoning = active.reasoning.or(p.reasoning);
         active.input_price = active.input_price.or(p.input_price);
         active.output_price = active.output_price.or(p.output_price);
         active.cache_read_price = active.cache_read_price.or(p.cache_read_price);
@@ -1053,6 +1059,9 @@ impl ZodeConfig {
         }
         if op.supports_images.is_some() {
             self.provider.supports_images = op.supports_images;
+        }
+        if op.reasoning.is_some() {
+            self.provider.reasoning = op.reasoning;
         }
         self.providers.extend(other.providers);
         if other.images.mode.is_some() {
@@ -1237,6 +1246,20 @@ impl ConfigManager {
     pub fn load_global() -> Result<ZodeConfig, CoreError> {
         let path = Self::global_path()?;
         Self::load_file(&path)
+    }
+
+    /// Persist the browser target selected from the interactive `/browser`
+    /// controls. This is a read-modify-write so unrelated global settings are
+    /// preserved, and the normal atomic config writer publishes the update.
+    pub fn persist_browser_default_target(target: &str) -> Result<(), CoreError> {
+        if !matches!(target, "managed" | "bridge") {
+            return Err(CoreError::Other(format!(
+                "invalid browser target {target:?} (expected managed | bridge)"
+            )));
+        }
+        let mut cfg = Self::load_global()?;
+        cfg.browser.default_target = Some(target.to_string());
+        Self::save_global(&cfg)
     }
 
     /// On first run, drop a starter `config.json` into the global config dir so
@@ -1880,6 +1903,51 @@ mod tests {
         let out = serde_json::to_string(&cfg).unwrap();
         assert!(out.contains("\"supportsImages\":true"));
         assert!(out.contains("\"visionProvider\":\"openai-vision\""));
+    }
+
+    #[test]
+    fn provider_reasoning_opt_in_roundtrips() {
+        let cfg: ZodeConfig = serde_json::from_str(
+            r#"{
+                "provider": {
+                    "type": "openai",
+                    "apiKey": "sk-test",
+                    "baseUrl": "https://api.deepseek.com/v1",
+                    "model": "deepseek-reasoner",
+                    "reasoning": true
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.provider.reasoning, Some(true));
+
+        let out = serde_json::to_string(&cfg).unwrap();
+        assert!(out.contains("\"reasoning\":true"));
+
+        // Absent by default and omitted from the serialized form (no null noise).
+        let default_cfg = ZodeConfig::default();
+        assert_eq!(default_cfg.provider.reasoning, None);
+        let default_out = serde_json::to_string(&default_cfg).unwrap();
+        assert!(!default_out.contains("\"reasoning\""));
+    }
+
+    #[test]
+    fn merge_adopts_project_reasoning_opt_in() {
+        let mut global = ZodeConfig {
+            provider: ProviderConfig {
+                r#type: Some(ProviderKind::Openai),
+                api_key: Some("sk".into()),
+                model: Some("deepseek-reasoner".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project: ZodeConfig =
+            serde_json::from_str(r#"{"provider":{"reasoning":true}}"#).unwrap();
+        global.merge_from(project);
+        assert_eq!(global.provider.reasoning, Some(true));
+        // Unrelated fields inherited from global untouched.
+        assert_eq!(global.provider.api_key.as_deref(), Some("sk"));
     }
 
     #[test]
@@ -2663,6 +2731,34 @@ mod tests {
         base.merge_from(over);
         assert!(base.browser.headless()); // kept
         assert_eq!(base.browser.executable.as_deref(), Some("/opt/chrome")); // merged
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn browser_default_target_persists_without_clobbering_global_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ZODE_CONFIG_DIR", dir.path());
+        ConfigManager::save_global(&ZodeConfig {
+            theme: Some("mono".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        ConfigManager::persist_browser_default_target("bridge").unwrap();
+        let saved = ConfigManager::load_global().unwrap();
+        assert_eq!(saved.browser.default_target(), "bridge");
+        assert_eq!(saved.theme.as_deref(), Some("mono"));
+
+        let error = ConfigManager::persist_browser_default_target("other").unwrap_err();
+        assert!(error.to_string().contains("managed | bridge"));
+        assert_eq!(
+            ConfigManager::load_global()
+                .unwrap()
+                .browser
+                .default_target(),
+            "bridge"
+        );
+        std::env::remove_var("ZODE_CONFIG_DIR");
     }
 
     #[test]

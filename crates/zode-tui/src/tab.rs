@@ -210,21 +210,12 @@ impl SessionTab {
         self.turn_abort.is_some() || self.reassemble_pending || self.draining_turn_id.is_some()
     }
 
-    /// Stamp the session index with a title derived from the first prompt.
-    /// The tab fields update synchronously; the index write (disk I/O under
-    /// the global SAVE_LOCK) is spawned so the first submit never stalls the
-    /// event loop behind another tab's in-flight save.
+    /// Stamp the tab with a title derived from the first prompt. The durable
+    /// index entry is published only after the transcript save succeeds; an
+    /// interrupted first turn must not leave metadata for a missing JSONL.
     pub fn stamp_title(&mut self, prompt: &str) {
-        let title = title_from_prompt(prompt);
-        self.title = title.clone();
+        self.title = title_from_prompt(prompt);
         self.titled = true;
-        tokio::spawn(index_upsert(SessionMeta {
-            id: self.session_id.clone(),
-            title,
-            cwd: self.engine.cwd.display().to_string(),
-            model: self.engine.model.clone(),
-            updated_at: now_secs(),
-        }));
     }
 
     /// Snapshot the store then persist (full rewrite). Delegates to
@@ -298,22 +289,18 @@ pub async fn persist_session(
     // Keep the complete index record current. Updating only recency leaves a
     // stale model after `/model` or extension model/set, so every successful
     // transcript save refreshes all live session metadata atomically.
-    let mut idx = match SessionIndex::load() {
-        Ok(idx) => idx,
-        Err(e) => {
-            tracing::warn!("session index load failed after transcript save: {e}");
-            return;
-        }
-    };
-    idx.upsert(SessionMeta {
+    let meta = SessionMeta {
         id: session_id,
         title,
         cwd: engine.cwd.display().to_string(),
         model: engine.model.clone(),
         updated_at: now_secs(),
-    });
-    if let Err(e) = idx.save() {
-        tracing::warn!("session index save failed: {e}");
+    };
+    if let Err(e) = SessionIndex::update(|idx| {
+        idx.upsert(meta);
+        Ok(())
+    }) {
+        tracing::warn!("session index update failed after transcript save: {e}");
     }
 }
 
@@ -360,9 +347,10 @@ pub async fn session_index_load_checked_if(
 /// Checked load-modify-save upsert under [`SAVE_LOCK`].
 pub async fn index_upsert_checked(meta: SessionMeta) -> Result<(), zode_core::CoreError> {
     with_session_index_lock("session index upsert", move || {
-        let mut idx = SessionIndex::load()?;
-        idx.upsert(meta);
-        idx.save()
+        SessionIndex::update(|idx| {
+            idx.upsert(meta);
+            Ok(())
+        })
     })
     .await
 }
@@ -371,12 +359,7 @@ pub async fn index_upsert_checked(meta: SessionMeta) -> Result<(), zode_core::Co
 pub async fn index_remove_checked(id: &str) -> Result<bool, zode_core::CoreError> {
     let id = id.to_string();
     with_session_index_lock("session index remove", move || {
-        let mut idx = SessionIndex::load()?;
-        let removed = idx.remove(&id);
-        if removed {
-            idx.save()?;
-        }
-        Ok(removed)
+        SessionIndex::update(|idx| Ok(idx.remove(&id)))
     })
     .await
 }

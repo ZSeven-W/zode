@@ -304,15 +304,23 @@ There are two browser targets:
 For the bridge target, load the extension once from `extensions/chrome`, then
 run `/browser pair`. Zode opens the extension page with the local WebSocket
 port and pairing code pre-filled; after the first pairing, the extension stores
-a token and reconnects silently when zode is running. Tabs opened by zode are
-placed in a Chrome tab group named `zode`.
+a token. It reconnects to a running CLI or auto-starts an extension-only zode
+daemon when needed. Tabs opened by zode are placed in a Chrome tab group named
+`zode`.
 
 ### Chrome task side panel
 
-Zode must be running for extension tasks. Run `/browser pair` once, then
-clicking the toolbar icon opens the side panel. The pairing page remains a
-small code/token reconnect flow; task state lives in the panel. Tasks are
-shared with the TUI sessions without changing the terminal's focused tab.
+Run the updated zode CLI and `/browser pair` once. Clicking the toolbar icon
+opens the side panel; afterwards it auto-starts zode automatically when no CLI
+process is running. The pairing page remains a small code/token flow, and tasks
+stay shared with TUI sessions without changing terminal focus.
+
+Side-panel turns bind bridge browser tools to the page currently shown beside
+the panel, so requests such as “analyze this page” use `browser_read` on the
+existing tab instead of opening a new one. Standalone TUI and CLI browser
+automation keeps using zode-owned tabs in the `zode` tab group. The active page
+is also the default context for ambiguous side-panel prompts; local project
+files are inspected only when the user explicitly asks about them.
 
 The panel can send text, select a model, choose access modes `readOnly`,
 `prompt`, and `auto`, stream the response, and Stop a running turn. A turn can
@@ -335,7 +343,7 @@ Useful commands:
 /browser close                   # close the managed browser
 /browser pair                    # pair or reconnect the Chrome bridge extension
 /browser target managed          # use zode's managed Chromium
-/browser target bridge           # use your real Chrome profile via the extension
+/browser target bridge           # use the extension and save it as the next-launch default
 /browser screenshot [path]       # capture a browser screenshot
 ```
 

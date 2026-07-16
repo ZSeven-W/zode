@@ -40,6 +40,9 @@ const EXTENSION_WORKER_LIMIT: usize = 4;
 const EXTENSION_RECENT_REQUEST_LIMIT: usize = 128;
 const EXTENSION_RECENT_TURN_LIMIT: usize = 128;
 const EXTENSION_PENDING_APPROVAL_LIMIT: usize = 64;
+pub(super) const SIDE_PANEL_BROWSER_CONTEXT: &str = r#"<browser_side_panel_context>
+This turn was submitted from the browser side panel. The active browser page beside the panel is the primary context for the request. If the request could reasonably refer to that page—including phrases such as "this", "this page", "current page", "summarize", "what is this about", "这个", "这个页面", "当前页面", "讲的是什么", or "帮我看看"—inspect the page with browser_read before answering. Do not read or search the local workspace to guess what the page contains. Use local files only when the user explicitly asks about the project, code, workspace, or a local file.
+</browser_side_panel_context>"#;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
@@ -132,7 +135,7 @@ impl ExtensionTaskError {
 }
 
 #[derive(Debug, Clone)]
-struct ExtensionSessionRepository {
+pub(super) struct ExtensionSessionRepository {
     /// Production uses `SessionIndex`'s configured location. Tests inject an
     /// explicit root so they never mutate the process-wide ZODE_CONFIG_DIR.
     root: Option<PathBuf>,
@@ -247,6 +250,74 @@ impl ExtensionSessionRepository {
         }
         SessionIndex::session_path(id)
             .map_err(|error| ExtensionTaskError::internal(error.to_string()))
+    }
+
+    /// Persist an extension-owned turn through the same repository used by
+    /// extension snapshots. Production delegates to the global session store;
+    /// tests with an explicit root stay entirely inside their TempDir.
+    pub(super) async fn persist(
+        &self,
+        session_id: String,
+        engine: Arc<ZodeEngine>,
+        title: String,
+        persisted: Arc<std::sync::atomic::AtomicUsize>,
+        allow_append: bool,
+    ) {
+        if self.root.is_none() {
+            crate::tab::persist_session(session_id, engine, title, persisted, allow_append).await;
+            return;
+        }
+
+        let path = match self.session_path(&session_id) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!("extension session path failed: {error}");
+                return;
+            }
+        };
+        let _guard = self.explicit_root_lock.lock().await;
+        if let Some(parent) = path.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                tracing::warn!("extension session directory creation failed: {error}");
+                return;
+            }
+        }
+        let snapshot = match engine.store.lock() {
+            Ok(store) => store.clone(),
+            Err(_) => return,
+        };
+        let total = snapshot.len();
+        let mut appended = false;
+        if allow_append {
+            let expected = persisted.load(Ordering::Relaxed).min(total);
+            let tail: Vec<Message> = snapshot.iter().skip(expected).cloned().collect();
+            match Session::append(&path, &tail, expected).await {
+                Ok(true) => appended = true,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!("extension session append failed, rewriting: {error}")
+                }
+            }
+        }
+        if !appended {
+            if let Err(error) = Session::save(&path, &snapshot).await {
+                tracing::warn!("extension session save failed: {error}");
+                return;
+            }
+        }
+        persisted.store(total, Ordering::Relaxed);
+        drop(_guard);
+
+        let meta = SessionMeta {
+            id: session_id,
+            title,
+            cwd: engine.cwd.display().to_string(),
+            model: engine.model.clone(),
+            updated_at: unix_timestamp_secs(),
+        };
+        if let Err(error) = self.upsert(meta).await {
+            tracing::warn!("extension session index update failed after transcript save: {error}");
+        }
     }
 
     async fn upsert(&self, meta: SessionMeta) -> Result<(), ExtensionTaskError> {
@@ -423,6 +494,11 @@ struct ExtensionTurnRoute {
     task_id: String,
     connection_id: Option<u64>,
     state: ExtensionTurnRouteState,
+    /// Streaming segment counter, bumped on every ToolUse. Assistant text and
+    /// thinking deltas carry the current segment in their `messageId`
+    /// (`…:assistant-<n>` / `…:thinking-<n>`) so the panel timeline keeps
+    /// text/thinking runs in order relative to the tool calls between them.
+    segment: u64,
 }
 
 #[derive(Debug)]
@@ -548,6 +624,24 @@ enum PreparedExtensionDirectRequest {
 }
 
 impl ExtensionTaskState {
+    pub(super) fn session_repository_for_turn(
+        &self,
+        tab_id: usize,
+        turn_id: u64,
+    ) -> Option<ExtensionSessionRepository> {
+        if self.turn_routes.contains_key(&(tab_id, turn_id)) {
+            return Some(self.sessions.clone());
+        }
+        // The injected repository is the persistence boundary for the whole
+        // test app, including focused TUI-turn lifecycle tests that deliberately
+        // have no extension route.
+        #[cfg(test)]
+        if self.sessions.root.is_some() {
+            return Some(self.sessions.clone());
+        }
+        None
+    }
+
     fn disconnected(&mut self, connection_id: u64) {
         if let Some(cancel) = self.cancellation_by_connection.remove(&connection_id) {
             cancel.store(true, Ordering::Release);
@@ -899,6 +993,7 @@ struct WorkspaceSummary {
 struct HistoryMessage {
     id: String,
     task_id: String,
+    order: usize,
     role: &'static str,
     text: String,
 }
@@ -908,6 +1003,7 @@ struct HistoryMessage {
 struct HistoryTool {
     id: String,
     task_id: String,
+    order: usize,
     name: String,
     summary: String,
     status: &'static str,
@@ -1558,6 +1654,7 @@ impl TuiApp {
                     task_id: task_id.clone(),
                     connection_id: Some(connection_id),
                     state: ExtensionTurnRouteState::InterruptRequested,
+                    segment: 0,
                 },
             );
             return Ok(PreparedExtensionDirectRequest::Interrupt {
@@ -1588,6 +1685,7 @@ impl TuiApp {
                 task_id: task_id.clone(),
                 connection_id: Some(connection_id),
                 state: ExtensionTurnRouteState::InterruptRequested,
+                segment: 0,
             },
         );
         Ok(PreparedExtensionDirectRequest::Interrupt {
@@ -1732,6 +1830,11 @@ impl TuiApp {
                 }
             }
         }
+        // This context is sent to the model but intentionally omitted from
+        // display_text, so the panel keeps showing only the user's words.
+        content.push(ContentBlock::Text {
+            text: SIDE_PANEL_BROWSER_CONTEXT.to_string(),
+        });
         let vision = (!images.is_empty()).then_some(vision).flatten();
 
         let mut display_text = input.clone();
@@ -1774,6 +1877,7 @@ impl TuiApp {
                 task_id: task_id.clone(),
                 connection_id: Some(connection_id),
                 state: ExtensionTurnRouteState::Running,
+                segment: 0,
             },
         );
         Ok(PreparedExtensionTurn {
@@ -2018,6 +2122,7 @@ impl TuiApp {
             return;
         };
         let turn_id_string = turn_id.to_string();
+        let segment = route.segment;
         let frame = match event {
             AppEvent::Agent {
                 event: agent::stream::Event::TextDelta { delta },
@@ -2027,7 +2132,20 @@ impl TuiApp {
                 json!({
                     "taskId": route.task_id,
                     "turnId": turn_id_string,
-                    "messageId": format!("{}:{turn_id}:assistant", route.task_id),
+                    "messageId": format!("{}:{turn_id}:assistant-{segment}", route.task_id),
+                    "delta": delta,
+                }),
+            )),
+            AppEvent::Agent {
+                event: agent::stream::Event::Thinking { delta },
+                ..
+            } => Some(TaskServerFrame::event(
+                "message/delta",
+                json!({
+                    "taskId": route.task_id,
+                    "turnId": turn_id_string,
+                    "messageId": format!("{}:{turn_id}:thinking-{segment}", route.task_id),
+                    "role": "thinking",
                     "delta": delta,
                 }),
             )),
@@ -2035,6 +2153,11 @@ impl TuiApp {
                 event: agent::stream::Event::ToolUse { id, name, .. },
                 ..
             } => {
+                // A tool call closes the current text/thinking segment: later
+                // deltas start fresh timeline items ordered after this tool.
+                if let Some(live) = self.extension_tasks.turn_routes.get_mut(&(tab_id, turn_id)) {
+                    live.segment += 1;
+                }
                 let public_identity = public_tool_identity(name);
                 Some(TaskServerFrame::event(
                     "tool/started",
@@ -2420,10 +2543,14 @@ impl TuiApp {
         }
 
         let clean_template = self.template.clone();
+        // Extension task engines pin browser tools to the bridge (see the
+        // task/create path); the pin lives on the assembling template only —
+        // extension reassembles never write the template back globally.
         let engine_template = clean_template
             .with_model(model.clone())
             .with_tool_access(access)
-            .with_plan_mode(plan_mode);
+            .with_plan_mode(plan_mode)
+            .with_browser_target_override(Some(zode_core::browser::BrowserTarget::Bridge));
         let sessions = self.extension_tasks.sessions.clone();
         let tx = agent_tx.clone();
         tokio::spawn(async move {
@@ -2775,7 +2902,13 @@ impl TuiApp {
         tab.mode = Mode::Switching;
         self.tabs.push(tab);
 
-        let template = self.template.clone();
+        // Extension task engines pin browser tools to the bridge: a side-panel
+        // turn must drive the page beside the panel, never a managed Chrome,
+        // regardless of the session-wide `/browser target` selection.
+        let template = self
+            .template
+            .clone()
+            .with_browser_target_override(Some(zode_core::browser::BrowserTarget::Bridge));
         let sessions = self.extension_tasks.sessions.clone();
         let tx = agent_tx.clone();
         let session_for_task = session_id.clone();
@@ -2865,10 +2998,13 @@ impl TuiApp {
         self.tabs.push(tab);
 
         let clean_template = self.template.clone();
+        // Same bridge pin as task/create: resumed extension tasks drive the
+        // page beside the panel, not a managed Chrome.
         let engine_template = clean_template
             .with_model(meta.model.clone())
             .with_tool_access(ToolAccessMode::Prompt)
-            .with_plan_mode(false);
+            .with_plan_mode(false)
+            .with_browser_target_override(Some(zode_core::browser::BrowserTarget::Bridge));
         let tx = agent_tx.clone();
         tokio::spawn(async move {
             let cwd_override = match tokio::fs::metadata(&saved_cwd).await {
@@ -3560,9 +3696,11 @@ fn history_from_store(task_id: &str, store: &MessageStore) -> SnapshotHistory {
                     if let ContentBlock::ToolUse { id, name, .. } = block {
                         let public_identity = public_tool_identity(name);
                         tool_indexes.insert(id.clone(), history.tools.len());
+                        let order = history.messages.len() + history.tools.len();
                         history.tools.push(HistoryTool {
                             id: id.clone(),
                             task_id: task_id.to_string(),
+                            order,
                             name: public_identity.clone(),
                             summary: public_identity,
                             status: "running",
@@ -3587,16 +3725,19 @@ fn push_history_text(
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text } if !text.trim().is_empty() => {
-                Some(super::stored_user_text_for_display(text))
+                let shown = super::stored_user_text_for_display(text);
+                (!shown.trim().is_empty()).then_some(shown)
             }
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("\n");
     if !text.is_empty() {
+        let order = history.messages.len() + history.tools.len();
         history.messages.push(HistoryMessage {
             id,
             task_id: task_id.to_string(),
+            order,
             role,
             text,
         });
@@ -3905,6 +4046,7 @@ mod tests {
                 task_id,
                 connection_id: Some(712),
                 state: super::ExtensionTurnRouteState::Running,
+                segment: 0,
             },
         );
         let (request, pending) = detached_approval_request(Some(tab_id.to_string()), Some(1)).await;
@@ -4919,6 +5061,7 @@ mod tests {
                 task_id,
                 connection_id: Some(connection_id),
                 state: super::ExtensionTurnRouteState::Running,
+                segment: 0,
             },
         );
         app.extension_tasks.fail_send_after_for_test(0);
@@ -5033,6 +5176,7 @@ mod tests {
                 task_id: task_id.clone(),
                 connection_id: Some(connection_id),
                 state: super::ExtensionTurnRouteState::Running,
+                segment: 0,
             },
         );
         let (new_request, new_waiter) =
@@ -5151,6 +5295,7 @@ mod tests {
                 task_id: task_id.clone(),
                 connection_id: Some(connection_id),
                 state: super::ExtensionTurnRouteState::Running,
+                segment: 0,
             },
         );
         let (request, pending) = request_from_app_queue(&mut app, queue, tab_id.to_string()).await;
@@ -5161,6 +5306,7 @@ mod tests {
                 task_id: task_id.clone(),
                 connection_id: None,
                 state: super::ExtensionTurnRouteState::Running,
+                segment: 0,
             },
         );
         assert!(app
@@ -5240,6 +5386,7 @@ mod tests {
                     task_id: task_id.clone(),
                     connection_id: None,
                     state: super::ExtensionTurnRouteState::Running,
+                    segment: 0,
                 },
             );
             let snapshot = serde_json::json!({
@@ -6277,6 +6424,20 @@ mod tests {
             .unwrap()
             .iter()
             .any(|message| message["text"] == "inspect auth"));
+        let message_orders = pushed["params"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["order"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        let tool_orders = pushed["params"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["order"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(message_orders, vec![0, 1]);
+        assert_eq!(tool_orders, vec![2]);
     }
 
     #[tokio::test]
@@ -6703,9 +6864,17 @@ mod tests {
                 if text.contains("<attached_file name=\"main.rs\"")
                     && text.contains(secret_body)
         ));
+        assert!(matches!(
+            &prepared.content[2],
+            ContentBlock::Text { text }
+                if text.contains("<browser_side_panel_context>")
+                    && text.contains("browser_read")
+                    && text.contains("Do not read or search the local workspace")
+        ));
         let shown = app.tabs[0].chat.messages().last().unwrap().text.clone();
         assert!(shown.contains("main.rs"));
         assert!(!shown.contains(secret_body));
+        assert!(!shown.contains("browser_side_panel_context"));
         assert!(matches!(
             app.extension_attachments.consume_finished(
                 connection_id,
@@ -6847,6 +7016,9 @@ mod tests {
                         text: "inspect this file".into(),
                     },
                     ContentBlock::Text { text: attached },
+                    ContentBlock::Text {
+                        text: super::SIDE_PANEL_BROWSER_CONTEXT.into(),
+                    },
                 ],
             })
             .unwrap();
@@ -6857,6 +7029,7 @@ mod tests {
         assert!(snapshot_wire.contains("secrets.txt"));
         assert!(!snapshot_wire.contains(secret));
         assert!(!snapshot_wire.contains("BEGIN ZODE-ATTACHMENT"));
+        assert!(!snapshot_wire.contains("browser_side_panel_context"));
 
         let chat = super::super::rebuild_chat_from_store(&store);
         let rendered = chat
@@ -6869,6 +7042,7 @@ mod tests {
         assert!(rendered.contains("secrets.txt"));
         assert!(!rendered.contains(secret));
         assert!(!rendered.contains("BEGIN ZODE-ATTACHMENT"));
+        assert!(!rendered.contains("browser_side_panel_context"));
     }
 
     #[test]
@@ -7137,6 +7311,7 @@ mod tests {
                 task_id,
                 connection_id: Some(connection_id),
                 state: super::ExtensionTurnRouteState::Running,
+                segment: 0,
             },
         );
         let raw = format!("bad\n\u{2029}secret-sentinel-{}", "你".repeat(200));
@@ -7292,6 +7467,7 @@ mod tests {
                 task_id: task_id.clone(),
                 connection_id: Some(connection_id),
                 state: super::ExtensionTurnRouteState::Running,
+                segment: 0,
             },
         );
 
@@ -7379,6 +7555,81 @@ mod tests {
         assert_eq!(tool_result["params"]["taskId"], task_id);
         assert_eq!(tool_result["params"]["turnId"], "9");
         assert!(!app.extension_tasks.turn_routes.contains_key(&(tab_id, 9)));
+    }
+
+    #[tokio::test]
+    async fn extension_stream_forwards_thinking_and_segments_by_tool_boundaries() {
+        let (mut app, _tx, _rx, _cwd) = make_test_app().await;
+        let connection_id = 505;
+        let tab_id = app.tabs[0].id;
+        let task_id = app.tabs[0].session_id.clone();
+        app.extension_tasks.connected(connection_id);
+        app.tabs[0].turn_seq = 3;
+        app.tabs[0].active_turn_id = 3;
+        app.tabs[0].turn_abort = Some(agent::abort::AbortController::new());
+        app.extension_tasks.turn_routes.insert(
+            (tab_id, 3),
+            super::ExtensionTurnRoute {
+                task_id: task_id.clone(),
+                connection_id: Some(connection_id),
+                state: super::ExtensionTurnRouteState::Running,
+                segment: 0,
+            },
+        );
+
+        let agent_event = |event: agent::stream::Event| AppEvent::Agent {
+            tab_id,
+            turn_id: 3,
+            cost_label: None,
+            event,
+        };
+        app.handle_agent_event(agent_event(agent::stream::Event::Thinking {
+            delta: "plan".into(),
+        }));
+        app.handle_agent_event(agent_event(agent::stream::Event::TextDelta {
+            delta: "before".into(),
+        }));
+        app.handle_agent_event(agent_event(agent::stream::Event::ToolUse {
+            id: "t1".into(),
+            name: "browser_read".into(),
+            input: serde_json::json!({"action":"snapshot"}),
+        }));
+        app.handle_agent_event(agent_event(agent::stream::Event::ToolResult {
+            id: "t1".into(),
+            ok: true,
+            output: serde_json::json!({"outline":"..."}),
+        }));
+        app.handle_agent_event(agent_event(agent::stream::Event::Thinking {
+            delta: "review".into(),
+        }));
+        app.handle_agent_event(agent_event(agent::stream::Event::TextDelta {
+            delta: "after".into(),
+        }));
+
+        let deltas: Vec<serde_json::Value> = app
+            .extension_tasks
+            .sent_frames_for_test()
+            .into_iter()
+            .map(|(_, frame)| serde_json::to_value(frame).unwrap())
+            .filter(|frame| frame["event"] == "message/delta")
+            .collect();
+        let ids: Vec<&str> = deltas
+            .iter()
+            .map(|frame| frame["params"]["messageId"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                format!("{task_id}:3:thinking-0"),
+                format!("{task_id}:3:assistant-0"),
+                format!("{task_id}:3:thinking-1"),
+                format!("{task_id}:3:assistant-1"),
+            ],
+            "thinking/text segments must break at tool boundaries, in order"
+        );
+        assert_eq!(deltas[0]["params"]["role"], "thinking");
+        assert_eq!(deltas[2]["params"]["role"], "thinking");
+        assert!(deltas[1]["params"]["role"].as_str() != Some("thinking"));
     }
 
     #[tokio::test]
@@ -7553,6 +7804,7 @@ mod tests {
                 task_id: "closing-task".into(),
                 connection_id: Some(506),
                 state: super::ExtensionTurnRouteState::Running,
+                segment: 0,
             },
         );
         app.extension_tasks.remember_turn_terminal(
@@ -7651,6 +7903,7 @@ mod tests {
                 task_id: task_id.clone(),
                 connection_id: None,
                 state: super::ExtensionTurnRouteState::InterruptRequested,
+                segment: 0,
             },
         );
         app.extension_tasks.connected(601);
@@ -7722,6 +7975,7 @@ mod tests {
                 task_id: task_id.clone(),
                 connection_id: None,
                 state: super::ExtensionTurnRouteState::Running,
+                segment: 0,
             },
         );
         app.extension_tasks.connected(602);
@@ -7804,6 +8058,7 @@ mod tests {
                 task_id,
                 connection_id: Some(604),
                 state: super::ExtensionTurnRouteState::Running,
+                segment: 0,
             },
         );
 
@@ -8295,6 +8550,38 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn extension_created_engine_pins_browser_target_to_bridge() {
+        let config = tempfile::tempdir().unwrap();
+        let (mut app, tx, mut rx, _cwd) = make_test_app().await;
+        app.extension_tasks
+            .set_session_root_for_test(config.path().join("sessions"));
+        app.handle_extension_request(
+            77,
+            TaskClientFrame::request("create", "task/create", serde_json::json!({})),
+            &tx,
+        )
+        .await
+        .unwrap();
+        let engine = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match rx.recv().await.expect("app event stream ended") {
+                    AppEvent::ReassembleDone { result, .. } => {
+                        break result.expect("extension engine assembly failed").engine;
+                    }
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("no ReassembleDone within timeout");
+        assert_eq!(
+            engine.browser_target_override,
+            Some(zode_core::browser::BrowserTarget::Bridge),
+            "extension task engines must pin browser tools to the bridge"
+        );
     }
 
     #[tokio::test]

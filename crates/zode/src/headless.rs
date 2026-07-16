@@ -514,29 +514,37 @@ async fn save_session(engine: &ZodeEngine, id: &str) {
     // session, not an older one. The entry exists (stamp_title on the first
     // turn for new sessions; created at resume for old ones); create a
     // minimal entry if somehow missing.
-    let mut idx = SessionIndex::load().unwrap_or_default();
-    if !idx.touch_updated(id, now_secs()) {
-        idx.upsert(SessionMeta {
-            id: id.to_string(),
-            title: "(session)".to_string(),
-            cwd: engine.cwd.display().to_string(),
-            model: engine.model.clone(),
-            updated_at: now_secs(),
-        });
+    let fallback = SessionMeta {
+        id: id.to_string(),
+        title: "(session)".to_string(),
+        cwd: engine.cwd.display().to_string(),
+        model: engine.model.clone(),
+        updated_at: now_secs(),
+    };
+    if let Err(error) = SessionIndex::update(|idx| {
+        if !idx.touch_updated(id, fallback.updated_at) {
+            idx.upsert(fallback);
+        }
+        Ok(())
+    }) {
+        tracing::warn!("session index update failed after transcript save: {error}");
     }
-    let _ = idx.save();
 }
 
 fn stamp_title(engine: &ZodeEngine, id: &str, prompt: &str) {
-    let mut idx = SessionIndex::load().unwrap_or_default();
-    idx.upsert(SessionMeta {
+    let meta = SessionMeta {
         id: id.to_string(),
         title: title_from_prompt(prompt),
         cwd: engine.cwd.display().to_string(),
         model: engine.model.clone(),
         updated_at: now_secs(),
-    });
-    let _ = idx.save();
+    };
+    if let Err(error) = SessionIndex::update(|idx| {
+        idx.upsert(meta);
+        Ok(())
+    }) {
+        tracing::warn!("session index title update failed: {error}");
+    }
 }
 
 fn now_secs() -> u64 {
