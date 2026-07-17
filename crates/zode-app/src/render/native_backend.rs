@@ -325,6 +325,29 @@ impl NativeBackend {
         Some(path.with_transform(&matrix))
     }
 
+    pub fn svg_path_with_viewbox(
+        &self,
+        d: &str,
+        rect: Rect,
+        viewbox: f32,
+    ) -> Option<skia_safe::Path> {
+        if viewbox <= 0.0 || rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return None;
+        }
+        let path = skia_safe::utils::parse_path::from_svg(d)?;
+        let scale = (rect.size.x / viewbox).min(rect.size.y / viewbox);
+        let scaled_viewbox = viewbox * scale;
+        let mut matrix = skia_safe::Matrix::new_identity();
+        matrix.set_scale_translate(
+            (scale, scale),
+            (
+                rect.origin.x + (rect.size.x - scaled_viewbox) / 2.0,
+                rect.origin.y + (rect.size.y - scaled_viewbox) / 2.0,
+            ),
+        );
+        Some(path.with_transform(&matrix))
+    }
+
     pub fn fill_inner_shadow_svg_path(
         &self,
         canvas: &skia_safe::Canvas,
@@ -455,7 +478,7 @@ mod tests {
     use std::sync::Arc;
 
     use jian_core::render::ImageSource;
-    use jian_widgets::{Color, Point2D, TextLayout};
+    use jian_widgets::{Color, Point2D, Rect, TextLayout};
 
     use super::NativeBackend;
 
@@ -463,6 +486,28 @@ mod tests {
         include_bytes!("../../tests/fonts/NotoSansSC-Regular.subset.ttf");
     const SNAPSHOT_SEMIBOLD: &[u8] =
         include_bytes!("../../tests/fonts/NotoSansSC-SemiBold.subset.ttf");
+
+    #[test]
+    fn svg_path_with_viewbox_preserves_icon_aspect_ratio_and_padding() {
+        const FOLDER_ICON: &str = "M3 5H10L12 7H21V19H3Z";
+
+        let backend = NativeBackend::new(1.0);
+        let target = Rect::xywh(10.0, 20.0, 16.0, 16.0);
+        let path = backend
+            .svg_path_with_viewbox(FOLDER_ICON, target, 24.0)
+            .expect("folder icon should parse");
+        let bounds = path.compute_tight_bounds();
+
+        assert!((bounds.width() / bounds.height() - 18.0 / 14.0).abs() < 0.001);
+        assert!(bounds.width() < target.size.x);
+        assert!(bounds.height() < target.size.y);
+        assert!(bounds.left >= target.origin.x);
+        assert!(bounds.top >= target.origin.y);
+        assert!(bounds.right <= target.origin.x + target.size.x);
+        assert!(bounds.bottom <= target.origin.y + target.size.y);
+        assert!((bounds.center_x() - (target.origin.x + target.size.x / 2.0)).abs() < 0.001);
+        assert!((bounds.center_y() - (target.origin.y + target.size.y / 2.0)).abs() < 0.001);
+    }
 
     #[test]
     fn repeated_image_id_reuses_the_same_encoded_bytes() {

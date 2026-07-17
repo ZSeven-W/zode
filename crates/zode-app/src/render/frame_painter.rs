@@ -4,6 +4,8 @@ use skia_safe::PaintStyle;
 use super::native_backend::{skia_paint, to_sk_rect};
 use super::NativeBackend;
 
+const STROKE_ICON_VIEWBOX: f32 = 24.0;
+
 /// Frame-scoped Jian painter. The canvas borrow cannot escape the host frame.
 pub struct FramePainter<'a> {
     backend: &'a mut NativeBackend,
@@ -90,7 +92,10 @@ impl Painter for FramePainter<'_> {
     }
 
     fn stroke_svg_path_in_rect(&mut self, d: &str, rect: Rect, color: Color, width: f32) {
-        if let Some(path) = self.backend.svg_path(d, rect) {
+        if let Some(path) = self
+            .backend
+            .svg_path_with_viewbox(d, rect, STROKE_ICON_VIEWBOX)
+        {
             self.canvas
                 .draw_path(&path, &skia_paint(color, PaintStyle::Stroke, width));
         }
