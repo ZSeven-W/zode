@@ -168,7 +168,7 @@ fn composer_bottom_controls_share_the_send_button_centerline() {
     let state = ComposerState {
         sandbox_label: "工作区写入".into(),
         model: Some("gpt-5".into()),
-        effort: Some("高".into()),
+        effort: Some("high".into()),
         ..ComposerState::default()
     };
     let mut painter = CapturePainter::new(1.0);
@@ -186,7 +186,7 @@ fn composer_bottom_controls_share_the_send_button_centerline() {
         let svg = painter.svg(icon.path());
         assert_close(svg.top_left.y + svg.size / 2.0, center_y, 1.0);
     }
-    for label in ["工作区写入", "gpt-5", "高"] {
+    for label in ["工作区写入", "gpt-5 高"] {
         let text = painter.text(label);
         assert_close(text.origin.y + text.size / 2.0, center_y, 1.0);
     }
