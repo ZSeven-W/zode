@@ -45,7 +45,10 @@ pub(crate) use fs::read_denied_dirs;
 use fs::{
     binary_on_path, canonical, empty_ro_mask_dir, sandbox_unavailable, scheme_escape, shell_join,
 };
-pub use fs::{resolve, resolve_with_settings, SandboxedFsSink};
+pub use fs::{
+    overlay_profile, resolve, resolve_with_overrides, resolve_with_settings, select_profile,
+    SandboxOverrides, SandboxedFsSink,
+};
 #[cfg(all(test, unix))]
 use tool::looks_like_sandbox_denial;
 pub use tool::{

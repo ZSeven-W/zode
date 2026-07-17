@@ -58,6 +58,10 @@ impl SessionIndex {
         Ok(Self::sessions_dir()?.join(format!("{id}.jsonl")))
     }
 
+    pub fn session_sidecar_dir(id: &str) -> Result<PathBuf, CoreError> {
+        Ok(Self::sessions_dir()?.join(id))
+    }
+
     /// Load the metadata cache under a cross-process lock. A malformed legacy
     /// index is archived and repaired from its valid prefix/backup. Metadata
     /// without a transcript is pruned and transcript files missing from the
@@ -142,11 +146,19 @@ impl SessionIndex {
     }
 
     pub async fn delete_session_file_and_index(id: &str) -> Result<(), CoreError> {
+        validate_session_id(id)?;
         let path = Self::session_path(id)?;
         match tokio::fs::remove_file(&path).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => {}
             Err(e) => return Err(CoreError::Io(e)),
+        }
+        let sidecar = Self::session_sidecar_dir(id)?;
+        match tokio::fs::remove_dir_all(sidecar).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(CoreError::Io(error)),
         }
         Self::update(|idx| {
             idx.remove(id);
@@ -170,9 +182,13 @@ impl SessionIndex {
         self.sessions.iter().max_by_key(|m| m.updated_at)
     }
 
-    /// First session whose id starts with `prefix`.
+    /// Session matching `prefix`: an exact id always wins (user-chosen ids
+    /// may prefix each other), else the first prefix match.
     pub fn find_prefix(&self, prefix: &str) -> Option<&SessionMeta> {
-        self.sessions.iter().find(|m| m.id.starts_with(prefix))
+        self.sessions
+            .iter()
+            .find(|m| m.id == prefix)
+            .or_else(|| self.sessions.iter().find(|m| m.id.starts_with(prefix)))
     }
 
     /// Sessions newest-first (for the picker UI in Phase 07).
@@ -318,18 +334,17 @@ fn core_error_to_io(error: CoreError) -> std::io::Error {
 fn reconcile_transcripts(index: &mut SessionIndex, dir: &Path) -> Result<bool, CoreError> {
     let indexed_before = index.sessions.len();
     index.sessions.retain(|meta| {
-        let path = dir.join(format!("{}.jsonl", meta.id));
-        match std::fs::metadata(&path) {
-            Ok(metadata) => metadata.is_file(),
+        let transcript = dir.join(format!("{}.jsonl", meta.id));
+        if transcript.is_file() {
+            return true;
+        }
+        match std::fs::metadata(&transcript) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    %error,
-                    "could not verify indexed session transcript; keeping metadata"
-                );
+                tracing::warn!(path = %transcript.display(), %error, "could not verify indexed session transcript; keeping metadata");
                 true
             }
+            Ok(_) => false,
         }
     });
     let pruned = indexed_before - index.sessions.len();
@@ -347,6 +362,27 @@ fn reconcile_transcripts(index: &mut SessionIndex, dir: &Path) -> Result<bool, C
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        if path.is_dir() {
+            let meta_path = path.join("meta.json");
+            let Ok(raw) = std::fs::read(&meta_path) else {
+                continue;
+            };
+            let Ok(meta) = serde_json::from_slice::<crate::sessions::DurableSessionMeta>(&raw)
+            else {
+                tracing::warn!(path = %meta_path.display(), "ignoring invalid durable session metadata");
+                continue;
+            };
+            let matches_dir =
+                path.file_name().and_then(|name| name.to_str()) == Some(meta.id.as_str());
+            let transcript = dir.join(format!("{}.jsonl", meta.id));
+            if !matches_dir || !transcript.is_file() {
+                continue;
+            }
+            if known.insert(meta.id.clone()) {
+                recovered.push(meta.index_meta());
+            }
+            continue;
+        }
         if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
             continue;
         }
@@ -487,6 +523,21 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Title from the first user message: first line, trimmed to 48 chars.
+/// Shared authority for on-disk session ids. Everything that derives a
+/// filesystem path from a user-supplied id must pass this first; an empty or
+/// path-like id would otherwise escape (or become) the sessions directory.
+pub fn validate_session_id(id: &str) -> Result<(), CoreError> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(CoreError::Other(format!("invalid session id: {id:?}")));
+    }
+    Ok(())
+}
+
 pub fn title_from_prompt(prompt: &str) -> String {
     let first = prompt.lines().next().unwrap_or("").trim();
     if first.chars().count() > 48 {
@@ -571,6 +622,22 @@ mod tests {
     }
 
     #[test]
+    fn find_prefix_prefers_an_exact_id_over_a_longer_prefix_match() {
+        let mut idx = SessionIndex::default();
+        for id in ["abc2", "abc"] {
+            idx.upsert(SessionMeta {
+                id: id.into(),
+                title: id.into(),
+                cwd: "/p".into(),
+                model: "m".into(),
+                updated_at: 1,
+            });
+        }
+        assert_eq!(idx.find_prefix("abc").unwrap().id, "abc");
+        assert_eq!(idx.find_prefix("abc2").unwrap().id, "abc2");
+    }
+
+    #[test]
     fn touch_updates_recency_preserving_fields() {
         let mut idx = SessionIndex::default();
         idx.upsert(SessionMeta {
@@ -628,6 +695,30 @@ mod tests {
             .unwrap();
         assert!(!path.exists());
         assert!(SessionIndex::load().unwrap().find_prefix(id).is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn delete_rejects_invalid_ids_without_touching_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", dir.path());
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(sessions.join("survivor")).unwrap();
+        std::fs::write(sessions.join("survivor.jsonl"), "{}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("outside")).unwrap();
+
+        for id in ["", "../outside", "a/b", "."] {
+            assert!(
+                SessionIndex::delete_session_file_and_index(id)
+                    .await
+                    .is_err(),
+                "id {id:?} must be rejected"
+            );
+        }
+
+        assert!(sessions.join("survivor").is_dir());
+        assert!(sessions.join("survivor.jsonl").is_file());
+        assert!(dir.path().join("outside").is_dir());
     }
 
     #[test]

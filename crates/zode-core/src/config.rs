@@ -218,6 +218,8 @@ pub struct PermissionsConfig {
     pub deny: Vec<String>,
     /// Tool names that require interactive approval.
     pub ask: Vec<String>,
+    /// Input-scoped rules using JSON-pointer matchers.
+    pub rules: Vec<crate::permission_rules::PermissionRuleSpec>,
 }
 
 /// OS-sandbox settings for shell commands. The sandbox is **on by default**
@@ -245,6 +247,21 @@ pub struct SandboxSettings {
     /// unrestricted (the safe default for a coding agent that reads the repo).
     pub restrict_reads: Option<bool>,
     /// Windows sandbox tier: `auto`, `basic`, or `elevated` (Tier 2 AppContainer).
+    pub windows_tier: Option<String>,
+    /// Reusable named policies selected with `--sandbox-profile`.
+    pub profiles: HashMap<String, SandboxProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct SandboxProfile {
+    pub enabled: Option<bool>,
+    pub mode: Option<String>,
+    pub network: Option<bool>,
+    pub writable_roots: Vec<String>,
+    pub exclude_slash_tmp: Option<bool>,
+    pub exclude_tmpdir_env_var: Option<bool>,
+    pub restrict_reads: Option<bool>,
     pub windows_tier: Option<String>,
 }
 
@@ -1103,6 +1120,11 @@ impl ZodeConfig {
         extend_dedup(&mut self.permissions.allow, other.permissions.allow);
         extend_dedup(&mut self.permissions.deny, other.permissions.deny);
         extend_dedup(&mut self.permissions.ask, other.permissions.ask);
+        for rule in other.permissions.rules {
+            if !self.permissions.rules.contains(&rule) {
+                self.permissions.rules.push(rule);
+            }
+        }
         if other.sandbox.enabled.is_some() {
             self.sandbox.enabled = other.sandbox.enabled;
         }
@@ -1121,6 +1143,7 @@ impl ZodeConfig {
         if other.sandbox.windows_tier.is_some() {
             self.sandbox.windows_tier = other.sandbox.windows_tier;
         }
+        self.sandbox.profiles.extend(other.sandbox.profiles);
         if other.max_output_tokens.is_some() {
             self.max_output_tokens = other.max_output_tokens;
         }

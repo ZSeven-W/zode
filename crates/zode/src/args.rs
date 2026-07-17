@@ -1,6 +1,23 @@
 //! CLI argument definitions. Mirrors master plan §4.4.
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    #[default]
+    Plain,
+    Json,
+    StreamJson,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum PermissionModeArg {
+    #[default]
+    Default,
+    DontAsk,
+    AcceptEdits,
+    Bypass,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "zode", version, about = "AI-native coding CLI")]
@@ -12,6 +29,50 @@ pub struct Args {
     /// Headless single-turn mode: run this prompt, stream to stdout, exit.
     #[arg(short = 'p', long = "print")]
     pub print: Option<String>,
+
+    /// Read the headless prompt from a UTF-8 file, or `-` for stdin.
+    #[arg(long, conflicts_with_all = ["print", "prompt_json"])]
+    pub prompt_file: Option<String>,
+
+    /// Read a headless prompt from JSON (`{"prompt":"..."}` or a string).
+    #[arg(long, conflicts_with_all = ["print", "prompt_file"])]
+    pub prompt_json: Option<String>,
+
+    /// Headless output contract. Structured formats reserve stdout for JSON.
+    #[arg(long, value_enum, default_value_t)]
+    pub output_format: OutputFormat,
+
+    /// Maximum agentic model/tool turns for a headless run.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub max_turns: Option<u32>,
+
+    /// Comma-separated tool names/globs to expose (empty means all).
+    #[arg(long, value_delimiter = ',')]
+    pub tools: Vec<String>,
+
+    /// Comma-separated tool names/globs to remove after the allowlist.
+    #[arg(long, value_delimiter = ',')]
+    pub disallowed_tools: Vec<String>,
+
+    /// Strict session id to create or resume (no prefix matching).
+    #[arg(long, conflicts_with_all = ["continue_", "resume", "fork_session"])]
+    pub session_id: Option<String>,
+
+    /// Fork an existing session by exact id before running.
+    #[arg(long, conflicts_with_all = ["continue_", "resume", "session_id"])]
+    pub fork_session: Option<String>,
+
+    /// Create an isolated Git worktree for the forked session.
+    #[arg(long, requires = "fork_session")]
+    pub fork_worktree: bool,
+
+    /// Headless permission policy. `--yolo` remains an alias for bypass.
+    #[arg(long, value_enum, default_value_t)]
+    pub permission_mode: PermissionModeArg,
+
+    /// Additional JSON permission rules file for this invocation.
+    #[arg(long)]
+    pub rules: Option<String>,
 
     /// Plain readline REPL instead of the full TUI.
     #[arg(long = "no-tui")]
@@ -71,6 +132,11 @@ pub struct Args {
     #[arg(long)]
     pub sandbox_strict_read: bool,
 
+    /// Named sandbox policy (`read-only`, `workspace`, `workspace-network`,
+    /// `unconfined`, or a config-defined sandbox.profiles entry).
+    #[arg(long, conflicts_with_all = ["no_sandbox", "sandbox_read_only"])]
+    pub sandbox_profile: Option<String>,
+
     /// Internal: run the extension-only event pump for Chrome Native Messaging.
     #[arg(long, hide = true)]
     pub browser_native_host: bool,
@@ -90,10 +156,28 @@ pub enum Command {
     Doctor,
     /// Run zode as a JSON-RPC app server.
     Server(ServerArgs),
+    /// Run Zode as an Agent Client Protocol (ACP) agent over stdio.
+    Acp,
+    /// Show local sessions, checkpoints, worktrees, and last run state.
+    Dashboard {
+        /// Emit a stable JSON snapshot instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install, inspect, update, and remove plugin packages.
+    Plugin {
+        #[command(subcommand)]
+        action: PluginCommand,
+    },
     /// Manage persisted sandbox state.
     Sandbox {
         #[command(subcommand)]
         action: SandboxCommand,
+    },
+    /// Inspect, fork, rewind, and apply durable sessions.
+    Session {
+        #[command(subcommand)]
+        action: SessionCommand,
     },
 }
 
@@ -101,6 +185,114 @@ pub enum Command {
 pub enum SandboxCommand {
     /// Remove stale Windows sandbox capability ACEs and AppContainer profile.
     Cleanup,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum PluginCommand {
+    /// List managed installed plugins, optionally including marketplace entries.
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        available: bool,
+    },
+    /// Validate a plugin manifest and component paths.
+    Validate {
+        #[arg(default_value = ".")]
+        path: String,
+    },
+    /// Install a local/Git plugin source or a configured marketplace entry.
+    Install {
+        source: String,
+        /// Explicitly trust executable hooks, MCP servers, commands, and skills.
+        #[arg(long)]
+        trust: bool,
+    },
+    /// Update one plugin, or every managed plugin when name is omitted.
+    Update { name: Option<String> },
+    /// Uninstall a managed plugin package.
+    #[command(alias = "remove", alias = "rm")]
+    Uninstall {
+        name: String,
+        #[arg(long)]
+        keep_data: bool,
+    },
+    /// Enable an installed plugin package.
+    Enable { name: String },
+    /// Disable an installed plugin package without deleting it.
+    Disable { name: String },
+    /// Show provenance, hash, components, and install state.
+    Details { name: String },
+    /// Manage local/Git-backed static marketplace sources.
+    Marketplace {
+        #[command(subcommand)]
+        action: MarketplaceCommand,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum MarketplaceCommand {
+    /// List configured sources and their available plugins.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add and cache a local/Git marketplace source.
+    Add {
+        source: String,
+        #[arg(long)]
+        trust: bool,
+    },
+    /// Refresh one source or all sources.
+    Update { name: Option<String> },
+    /// Remove a configured source cache (installed plugins remain installed).
+    Remove { name: String },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum SessionCommand {
+    /// List sessions newest first.
+    List {
+        /// Emit a JSON array.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show durable V1 session metadata, journal head, and checkpoints.
+    Show { id: String },
+    /// Fork a session by exact id.
+    Fork {
+        id: String,
+        /// Explicit target id (generated when omitted).
+        #[arg(long)]
+        target_id: Option<String>,
+        /// Fork from the transcript state before this checkpoint's turn.
+        #[arg(long)]
+        checkpoint: Option<String>,
+        /// Create a dedicated Git worktree for the fork.
+        #[arg(long)]
+        worktree: bool,
+    },
+    /// Preview or apply a checkpoint rewind.
+    Rewind {
+        id: String,
+        checkpoint: String,
+        /// Apply after conflict detection; omitted means preview only.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Apply an isolated session worktree's changes to another checkout.
+    ApplyBack {
+        id: String,
+        /// Target checkout (defaults to the current directory).
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Delete a session. Worktree removal requires an explicit flag.
+    Delete {
+        id: String,
+        #[arg(long)]
+        remove_worktree: bool,
+    },
 }
 
 #[cfg(test)]
@@ -115,10 +307,66 @@ mod tests {
     }
 
     #[test]
+    fn parses_structured_headless_contract() {
+        let args = Args::parse_from([
+            "zode",
+            "-p",
+            "ship it",
+            "--output-format",
+            "stream-json",
+            "--max-turns",
+            "12",
+            "--tools",
+            "File*,Bash",
+            "--disallowed-tools",
+            "FileEdit",
+            "--permission-mode",
+            "dont-ask",
+        ]);
+        assert_eq!(args.output_format, OutputFormat::StreamJson);
+        assert_eq!(args.max_turns, Some(12));
+        assert_eq!(args.tools, ["File*", "Bash"]);
+        assert_eq!(args.disallowed_tools, ["FileEdit"]);
+        assert_eq!(args.permission_mode, PermissionModeArg::DontAsk);
+    }
+
+    #[test]
+    fn parses_strict_session_and_fork_modes() {
+        let strict = Args::parse_from(["zode", "-p", "x", "--session-id", "session-1"]);
+        assert_eq!(strict.session_id.as_deref(), Some("session-1"));
+
+        let fork = Args::parse_from([
+            "zode",
+            "-p",
+            "x",
+            "--fork-session",
+            "source",
+            "--fork-worktree",
+        ]);
+        assert_eq!(fork.fork_session.as_deref(), Some("source"));
+        assert!(fork.fork_worktree);
+    }
+
+    #[test]
+    fn prompt_sources_conflict() {
+        assert!(Args::try_parse_from(["zode", "-p", "x", "--prompt-file", "prompt.txt"]).is_err());
+    }
+
+    #[test]
     fn parses_yolo_and_sandbox() {
         let a = Args::parse_from(["zode", "--yolo", "--sandbox"]);
         assert!(a.yolo);
         assert!(a.sandbox);
+    }
+
+    #[test]
+    fn parses_named_sandbox_profile() {
+        let args = Args::parse_from(["zode", "--sandbox-profile", "read-only"]);
+        assert_eq!(args.sandbox_profile.as_deref(), Some("read-only"));
+        assert!(
+            Args::try_parse_from(["zode", "--sandbox-profile", "workspace", "--no-sandbox"])
+                .is_err()
+        );
     }
 
     #[test]
@@ -185,5 +433,51 @@ mod tests {
                 action: SandboxCommand::Cleanup
             })
         ));
+    }
+
+    #[test]
+    fn parses_session_rewind_and_fork() {
+        let rewind = Args::parse_from(["zode", "session", "rewind", "s1", "cp1", "--apply"]);
+        assert!(matches!(
+            rewind.command,
+            Some(Command::Session {
+                action: SessionCommand::Rewind { apply: true, .. }
+            })
+        ));
+        let fork = Args::parse_from([
+            "zode",
+            "session",
+            "fork",
+            "s1",
+            "--checkpoint",
+            "cp1",
+            "--worktree",
+        ]);
+        assert!(matches!(
+            fork.command,
+            Some(Command::Session {
+                action: SessionCommand::Fork { worktree: true, .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn readme_operational_commands_parse() {
+        for argv in [
+            vec!["zode", "acp"],
+            vec!["zode", "dashboard", "--json"],
+            vec!["zode", "session", "list", "--json"],
+            vec!["zode", "session", "show", "session-1"],
+            vec![
+                "zode",
+                "plugin",
+                "install",
+                "plugin@MARKETPLACE_NAME",
+                "--trust",
+            ],
+            vec!["zode", "plugin", "marketplace", "list", "--json"],
+        ] {
+            Args::try_parse_from(argv).expect("README command should parse");
+        }
     }
 }

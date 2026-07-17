@@ -39,7 +39,9 @@ use zode_core::commands::parse_slash;
 use zode_core::config::{ConfigManager, ImageMode, ImagesConfig};
 use zode_core::images::{split_pasted_image_paths, ImageAttachment};
 use zode_core::question::{QuestionReceiver, QuestionRequest};
+use zode_core::run_event::{RunEvent, RunEventContext, RunStatus, TurnOutcome, TurnRecorder};
 use zode_core::session_meta::{SessionIndex, SessionMeta};
+use zode_core::sessions::SessionStore;
 use zode_core::{EngineTemplate, ZodeEngine};
 
 use crate::event::{AppEvent, ReassembleEffect, ReassembleNotify, ReassembledEngine};
@@ -514,13 +516,23 @@ pub struct TuiApp {
 async fn forward_agent_turn_stream(
     engine: Arc<ZodeEngine>,
     stream_result: Result<Box<dyn agent::stream::EventStream>, String>,
+    mut recorder: Option<TurnRecorder>,
+    abort: Option<AbortController>,
     tab_id: usize,
     turn_id: u64,
     tx: mpsc::UnboundedSender<AppEvent>,
 ) {
+    let turn_ran = stream_result.is_ok();
+    let mut stop_reason: Option<String> = None;
     let result = match stream_result {
         Ok(mut stream) => {
             if let Some(note) = engine.take_restore_note() {
+                if let Some(recorder) = recorder.as_mut() {
+                    recorder.record(RunEvent::Notice {
+                        code: "zode.compact.restore".into(),
+                        message: note.clone(),
+                    });
+                }
                 let _ = tx.send(AppEvent::Agent {
                     tab_id,
                     turn_id,
@@ -536,6 +548,12 @@ async fn forward_agent_turn_stream(
                 match item {
                     Ok(event) => {
                         engine.cost.observe(&event).await;
+                        if let Some(recorder) = recorder.as_mut() {
+                            recorder.record_agent(&event);
+                        }
+                        if let Event::Result { data } = &event {
+                            stop_reason = data.stop_reason.clone();
+                        }
                         let cost_label =
                             if matches!(event, Event::Usage { .. } | Event::ToolResult { .. }) {
                                 Some(engine.cost.sidebar_label().await)
@@ -555,6 +573,12 @@ async fn forward_agent_turn_stream(
                         }
                     }
                     Err(error) => {
+                        if let Some(recorder) = recorder.as_mut() {
+                            recorder.record(RunEvent::Error {
+                                code: "stream_error".into(),
+                                message: error.to_string(),
+                            });
+                        }
                         result = Err(error.to_string());
                         break;
                     }
@@ -564,6 +588,19 @@ async fn forward_agent_turn_stream(
         }
         Err(error) => Err(error),
     };
+    if let Some(recorder) = recorder.as_mut() {
+        // A user cancel journals Interrupted (like `zode -p`), not a generic
+        // failure. stop_reason stays the model's short token — never the raw
+        // error text, which telemetry.rs exports verbatim.
+        let interrupted = abort.as_ref().is_some_and(|abort| abort.is_aborted());
+        let failed = result.is_err();
+        let outcome = TurnOutcome {
+            status: RunStatus::derive(interrupted, failed, stop_reason.as_deref()),
+            stop_reason,
+            partial: failed,
+        };
+        recorder.complete(Some(&engine.checkpoints), turn_ran, &outcome);
+    }
     let _ = tx.send(AppEvent::TurnDone {
         tab_id,
         turn_id,
@@ -5576,8 +5613,29 @@ impl TuiApp {
         let tab_id = tab.id;
         let abort = AbortController::new();
         tab.turn_abort = Some(abort.clone());
+        // A clone for the recorder so it can distinguish a user cancel from a
+        // failure (the turn's own `abort` is moved into `engine.turn`).
+        let abort_for_recorder = abort.clone();
 
         let engine = tab.engine.clone();
+        let session_id = tab.session_id.clone();
+        let mut recorder = TurnRecorder::new(
+            SessionStore::open_default().ok(),
+            RunEventContext::new(
+                session_id.clone(),
+                Some(format!("tui-{turn_id}")),
+                Some(Uuid::new_v4().simple().to_string()),
+            ),
+        );
+        recorder.start();
+        {
+            let count = engine.store.lock().map(|store| store.len()).unwrap_or(0);
+            if let Err(error) =
+                recorder.begin_checkpoint(&engine.checkpoints, engine.cwd.clone(), count)
+            {
+                tracing::warn!("checkpoint start failed: {error}");
+            }
+        }
         let images_for_vision = images.clone();
         let submitted_text_for_vision = submitted_text.clone();
         let vision_prompt = images_cfg.effective_prompt().to_string();
@@ -5622,7 +5680,16 @@ impl TuiApp {
                 }
             }
             .await;
-            forward_agent_turn_stream(engine, stream_result, tab_id, turn_id, tx).await;
+            forward_agent_turn_stream(
+                engine,
+                stream_result,
+                Some(recorder),
+                Some(abort_for_recorder),
+                tab_id,
+                turn_id,
+                tx,
+            )
+            .await;
         });
     }
 

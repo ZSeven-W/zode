@@ -50,6 +50,9 @@ pub fn commands_dirs(cwd: &Path) -> Vec<PathBuf> {
         collect_named_dirs(&global.join("plugins"), "commands", &mut dirs);
         dirs.push(global.join("commands"));
     }
+    dirs.extend(crate::plugin_package::installed_package_dirs(
+        crate::plugin_package::PackageDirectoryKind::Commands,
+    ));
     collect_named_dirs(&cwd.join(".zode").join("plugins"), "commands", &mut dirs);
     dirs.push(cwd.join(".zode").join("commands"));
     dirs

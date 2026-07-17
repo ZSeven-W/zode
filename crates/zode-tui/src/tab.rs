@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent::abort::AbortController;
-use agent::session::Session;
 use once_cell::sync::Lazy;
 use zode_core::images::ImageAttachment;
 use zode_core::session_meta::{title_from_prompt, SessionIndex, SessionMeta};
+use zode_core::sessions::{DurableSessionMeta, SessionStore};
 use zode_core::{TodoItem, ToolAccessMode, ZodeEngine};
 
 /// Serializes ALL session persistence process-wide. `Session::save` reuses the
@@ -257,51 +257,37 @@ pub async fn persist_session(
     // Serialize all saves: prevents same-session transcript temp-file races and
     // SessionIndex lost updates across concurrent tab saves.
     let _guard = SAVE_LOCK.lock().await;
-    let Ok(path) = SessionIndex::session_path(&session_id) else {
+    let Ok(store) = SessionStore::open_default() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     let snapshot = match engine.store.lock() {
         Ok(store) => store.clone(),
         Err(_) => return,
     };
     let total = snapshot.len();
-    // Try the incremental append first when permitted.
-    let mut appended = false;
-    if allow_append {
+    let mut meta = store.load_meta(&session_id).unwrap_or_else(|_| {
+        DurableSessionMeta::new(SessionMeta {
+            id: session_id.clone(),
+            title: title.clone(),
+            cwd: engine.cwd.display().to_string(),
+            model: engine.model.clone(),
+            updated_at: now_secs(),
+        })
+    });
+    meta.title = title;
+    meta.cwd = engine.cwd.display().to_string();
+    meta.model = engine.model.clone();
+    let result = if allow_append {
         let expected = persisted.load(Ordering::Relaxed).min(total);
-        let tail: Vec<agent::message::Message> = snapshot.iter().skip(expected).cloned().collect();
-        match Session::append(&path, &tail, expected).await {
-            Ok(true) => appended = true,
-            Ok(false) => {} // count mismatch / missing → full save below
-            Err(e) => tracing::warn!("session append failed, rewriting: {e}"),
-        }
-    }
-    if !appended {
-        if let Err(e) = Session::save(&path, &snapshot).await {
-            tracing::warn!("session save failed: {e}");
-            return;
-        }
+        store.save_incremental(&meta, &snapshot, expected).await
+    } else {
+        store.save(&meta, &snapshot).await
+    };
+    if let Err(error) = result {
+        tracing::warn!("durable session save failed: {error}");
+        return;
     }
     persisted.store(total, Ordering::Relaxed);
-    // Keep the complete index record current. Updating only recency leaves a
-    // stale model after `/model` or extension model/set, so every successful
-    // transcript save refreshes all live session metadata atomically.
-    let meta = SessionMeta {
-        id: session_id,
-        title,
-        cwd: engine.cwd.display().to_string(),
-        model: engine.model.clone(),
-        updated_at: now_secs(),
-    };
-    if let Err(e) = SessionIndex::update(|idx| {
-        idx.upsert(meta);
-        Ok(())
-    }) {
-        tracing::warn!("session index update failed after transcript save: {e}");
-    }
 }
 
 /// Run synchronous index I/O on the blocking pool while holding the same lock

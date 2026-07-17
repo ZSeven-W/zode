@@ -41,6 +41,53 @@ impl ApprovalGate for BypassGate {
     }
 }
 
+/// Non-interactive fail-closed gate used by `--permission-mode dont-ask`.
+#[derive(Debug)]
+pub struct DenyGate;
+
+#[async_trait]
+impl ApprovalGate for DenyGate {
+    async fn approve(&self, _tool: &str, _input: &serde_json::Value) -> Approval {
+        Approval::Deny
+    }
+}
+
+/// Auto-approve workspace editing tools while still prompting for shell,
+/// browser, MCP, Git, and other mutating capabilities. Deletions and
+/// overwriting moves are NOT edits: they destroy state the checkpoint
+/// system cannot restore (a removed directory is only recorded as a
+/// non-reversible effect), so they keep prompting.
+#[derive(Debug, Default)]
+pub struct AcceptEditsGate {
+    prompt: StdinGate,
+}
+
+fn accept_edits_auto_allows(tool: &str, input: &serde_json::Value) -> bool {
+    match tool {
+        "FileWrite" | "FileEdit" | "Mkdir" | "NotebookEdit" => true,
+        "Move" => !input
+            .get("overwrite")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+#[async_trait]
+impl ApprovalGate for AcceptEditsGate {
+    fn interactive(&self) -> bool {
+        true
+    }
+
+    async fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval {
+        if accept_edits_auto_allows(tool, input) {
+            Approval::AllowOnce
+        } else {
+            self.prompt.approve(tool, input).await
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct StdinGate {
     /// Serializes prompts: QueryLoop can dispatch tools concurrently, and
@@ -412,6 +459,45 @@ mod tests {
             g.approve("Bash", &json!({"command": "ls"})).await,
             Approval::AllowOnce
         );
+    }
+
+    #[tokio::test]
+    async fn deny_gate_always_denies() {
+        assert_eq!(
+            DenyGate.approve("FileWrite", &serde_json::json!({})).await,
+            Approval::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_edits_auto_allows_only_file_mutations() {
+        let gate = AcceptEditsGate::default();
+        assert_eq!(
+            gate.approve("FileEdit", &serde_json::json!({})).await,
+            Approval::AllowOnce
+        );
+        // Do not call the shell branch here: it intentionally reads stdin.
+        assert!(!accept_edits_auto_allows("Bash", &serde_json::json!({})));
+    }
+
+    #[test]
+    fn accept_edits_never_auto_allows_deletion_or_overwriting_moves() {
+        // "Accept edits" covers edits; a recursive delete or an overwriting
+        // move destroys state the checkpoint system cannot restore.
+        assert!(!accept_edits_auto_allows(
+            "Remove",
+            &json!({"path": "src", "recursive": true})
+        ));
+        assert!(!accept_edits_auto_allows(
+            "Move",
+            &json!({"from": "a", "to": "b", "overwrite": true})
+        ));
+        assert!(accept_edits_auto_allows(
+            "Move",
+            &json!({"from": "a", "to": "b"})
+        ));
+        assert!(accept_edits_auto_allows("FileWrite", &json!({"path": "a"})));
+        assert!(accept_edits_auto_allows("NotebookEdit", &json!({})));
     }
 
     #[test]

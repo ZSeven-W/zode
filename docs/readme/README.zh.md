@@ -48,6 +48,8 @@
 - **非阻塞权限**：会修改状态的工具都经过 allow once / always / deny 审批，审批提示内联显示，不阻塞你继续输入。
 - **默认开启 OS 沙箱**：shell 命令在 macOS `sandbox-exec` 或 Linux `bwrap` 中运行，默认禁止出站网络。
 - **全屏 TUI**：流式 Markdown、语法高亮、diff 预览、斜杠命令补全、历史输入、11 套内置主题、设置与帮助浮层，以及 15 种 UI 语言（`/language`）。
+- **V1 兼容的持久会话**：保留原有 `<id>.jsonl` 会话协议，同时以旁路数据增加 journal、checkpoint、rewind、fork 和隔离 Git worktree。
+- **自动化接口**：稳定的 JSON/JSONL headless 输出、精确会话定位、工具过滤、确定性退出码、stdio ACP 和本地 dashboard。
 - **多会话标签页**：用 `Ctrl+T` 并排运行多个隔离会话，并可恢复历史会话。
 - **子代理与工作流**：通过 Task 工具委派范围明确的工作，并用 `/agents`、`/workflows` 管理。
 - **技能、MCP 与 hooks**：按需加载 `SKILL.md`，连接 MCP 服务器，并在工具事件上运行外部脚本。
@@ -87,7 +89,7 @@ irm https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.ps1 | i
 
 ### 从源码构建
 
-需要近期稳定版 Rust 工具链：
+需要 Rust 1.88 或更新版本：
 
 ```bash
 git clone --recurse-submodules https://github.com/ZSeven-W/zode.git
@@ -132,7 +134,188 @@ zode --browser                # 强制启用浏览器工具
 zode --model <id>             # 覆盖模型
 zode --provider <name>        # 选择配置中的提供商
 zode server                   # 通过 stdio 运行 JSON-RPC app-server
+zode acp                      # 通过 stdio 运行 ACP agent
+zode dashboard                # 查看本地会话、checkpoint 和 worktree
 ```
+
+## 新功能使用指南
+
+### 结构化 headless
+
+`-p`、`--prompt-file` 和 `--prompt-json` 共用同一套 headless 引擎。`json`
+只输出最终结果对象；`stream-json` 按行输出版本化的
+`zode.run-event.v1` 事件。结构化模式会把 stdout 专用于机器可读数据，并用
+稳定退出码：`0` 成功、`10` provider 错误、`11` 权限拒绝、`12` 轮次上限、`13` 中断（Ctrl-C）、`14` 部分结果、`15` 会话定位错误。
+
+```bash
+zode -p "修复失败测试" --output-format json --max-turns 12
+zode -p "审查仓库" --output-format stream-json \
+  --tools 'File*,ContentSearch,Git' --disallowed-tools FileWrite
+zode --prompt-file prompt.txt --permission-mode accept-edits
+zode --prompt-json '{"prompt":"总结当前工作区"}'
+
+# 精确 ID 不做前缀匹配；fork 不会修改源会话。
+zode -p "继续工作" --session-id my-session
+zode -p "尝试另一种方案" --fork-session my-session --fork-worktree
+```
+
+工具 deny 规则优先于 allow，并会传递给 Task 子代理。`--permission-mode`
+支持 `default`、`dont-ask`、`accept-edits`、`bypass`；`--yolo` 仍是 bypass
+的快捷方式，但硬拒绝规则始终生效。
+
+### 直接扩展 Session V1
+
+会话 transcript 仍然只有一份：`~/.zode/sessions/<id>.jsonl`。旧版 Zode
+可以继续读写它；新版也直接读写同一个文件。新增数据只放在
+`~/.zode/sessions/<id>/` 旁路目录中，包括 `meta.json`、journal、checkpoint
+和 snapshot，因此无需新增会话版本，也没有 transcript 双写问题。
+
+```bash
+zode session list
+zode session list --json
+zode session show <id>                         # 查看 metadata 和 checkpoint ID
+zode session fork <id> --target-id experiment
+zode session fork <id> --checkpoint <cp> --worktree
+zode session rewind <id> <cp>                  # 只预览冲突与改动
+zode session rewind <id> <cp> --apply
+zode session apply-back <id> --target /path/to/checkout
+zode session delete <id> --remove-worktree
+```
+
+系统会在有修改副作用的 turn 前创建 checkpoint。Rewind 会恢复已跟踪文件和
+会话消息前缀，遇到新改动时报告冲突而不是覆盖；历史 journal 不会被删除，
+而是建立新的逻辑分支。worktree fork 的结果需要通过 `apply-back` 显式合回。
+
+### 权限规则和沙箱 profile
+
+权限规则可以写进 `config.json` 的 `permissions.rules`，也可以用
+`--rules ./permissions.json` 临时加载。字段匹配使用 RFC 6901 JSON pointer；
+优先级固定为 deny > ask > allow。
+独立 rules 文件只能是规则数组或 `{ "rules": [...] }`，不要再套一层
+`permissions`。
+
+```jsonc
+{
+  "permissions": {
+    "deny": ["Remove"],
+    "rules": [
+      {
+        "behavior": "allow",
+        "tool": "Bash",
+        "matcher": {
+          "kind": "field",
+          "pointer": "/command",
+          "pattern": { "kind": "glob", "value": "git status*" }
+        }
+      },
+      {
+        "behavior": "deny",
+        "tool": "Bash",
+        "matcher": {
+          "kind": "field",
+          "pointer": "/command",
+          "pattern": { "kind": "glob", "value": "*--force*" }
+        }
+      }
+    ]
+  },
+  "sandbox": {
+    "profiles": {
+      "ci": {
+        "enabled": true,
+        "mode": "workspace-write",
+        "network": false,
+        "writableRoots": ["/tmp/build-cache"]
+      }
+    }
+  }
+}
+```
+
+```bash
+zode -p "只做检查" --sandbox-profile read-only
+zode -p "运行检查" --sandbox-profile workspace
+zode -p "下载依赖" --sandbox-profile workspace-network
+zode -p "运行 CI" --sandbox-profile ci --rules ./permissions.json
+```
+
+内置 profile 为 `read-only`、`workspace`、`workspace-network` 和
+`unconfined`；也可以像上例一样定义自己的 profile。
+
+### 插件和静态 marketplace
+
+受管理插件可包含 skills、commands、agents、hooks、MCP 和 LSP。Zode 支持
+`plugin.json`、`.zode-plugin/plugin.json`、`.grok-plugin/plugin.json` 和
+`.claude-plugin/plugin.json`。安装内容会复制为带来源与 SHA-256 tree hash 的
+不可变快照；包含可执行能力的插件只有在显式传入 `--trust` 后才会启用。
+
+```bash
+zode plugin validate ./my-plugin
+zode plugin install ./my-plugin --trust
+zode plugin install owner/repo@main#plugins/my-plugin --trust
+zode plugin list --json
+zode plugin details my-plugin
+zode plugin disable my-plugin
+zode plugin enable my-plugin
+zode plugin update my-plugin
+zode plugin uninstall my-plugin
+
+# marketplace 是本地目录或 Git 静态索引，不依赖 Zode 云服务。
+zode plugin marketplace add owner/plugin-index --trust
+zode plugin marketplace list --json
+zode plugin install my-plugin@MARKETPLACE_NAME --trust  # 同名时指定来源
+zode plugin marketplace update
+```
+
+### ACP、dashboard、OTLP 与 PTY 测试
+
+`zode acp` 通过 stdio 实现 ACP initialize/new/load/fork/prompt/cancel，向客户端
+流式发送消息、思考和工具事件，通过客户端请求权限，并支持客户端提供的 stdio、
+HTTP、SSE MCP server。它与 TUI/headless 共用同一套 V1 兼容会话存储。
+
+```bash
+zode acp
+zode dashboard
+zode dashboard --json
+```
+
+OTLP 默认关闭，必须显式设置 `ZODE_OTEL=1`。导出的只有不含内容的生命周期、
+工具名、状态和 token usage 属性；不会导出 prompt、模型文本、工具输入/输出、
+文件路径或错误消息。
+
+```bash
+ZODE_OTEL=1 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
+zode -p "运行测试" --output-format json
+```
+
+仓库还提供真实 PTY + VT100 虚拟屏幕测试工具，可记录 raw diagnostics 和屏幕快照：
+
+```bash
+cargo test -p zode-pty-harness
+cargo run -p zode-pty-harness --bin zode-pty-scenario -- scenario.json
+```
+
+`scenario.json` 会按顺序驱动真实终端的等待、按键、resize 和 snapshot；按键写法
+支持 `<Enter>`、`<Esc>`、`<Tab>`、方向键、`<Backspace>`、`<C-c>`、`<C-d>`
+和 `<C-l>`：
+
+```json
+{
+  "command": ["target/debug/zode", "--no-sandbox"],
+  "rows": 40,
+  "cols": 120,
+  "steps": [
+    { "action": "wait_for_text", "text": "zode", "timeout_ms": 5000 },
+    { "action": "send_keys", "keys": "hello<Enter>" },
+    { "action": "resize", "rows": 50, "cols": 140 },
+    { "action": "snapshot", "path": "target/pty/after-input.json" }
+  ]
+}
+```
+
+本地开源版本明确不包含 xAI 专用账号/计费，也不建设由 Zode 运营的云 marketplace
+服务。
 
 ## 配置要点
 
@@ -168,6 +351,10 @@ zode server
 zode server --listen stdio://
 zode server --listen off
 ```
+
+这里的“不支持”只限定 app-server 协议本身：它暂不提供托管 marketplace 管理、
+远程控制、Realtime、后台终端、thread archive/fork、goals 和 app connector。
+上文的本地 Session V1 命令与静态插件 marketplace 是独立 CLI 能力，不受此限制。
 
 SDK 位于 [`sdk/`](../../sdk/)：
 

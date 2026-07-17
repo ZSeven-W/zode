@@ -61,6 +61,9 @@ pub fn agents_dirs(cwd: &Path) -> Vec<PathBuf> {
     if let Ok(global) = ConfigManager::config_dir() {
         dirs.push(global.join("agents"));
     }
+    dirs.extend(crate::plugin_package::installed_package_dirs(
+        crate::plugin_package::PackageDirectoryKind::Agents,
+    ));
     dirs.push(cwd.join(".zode").join("agents"));
     dirs
 }

@@ -64,6 +64,9 @@ pub fn skills_dirs(cwd: &Path) -> Vec<PathBuf> {
         collect_plugin_skill_dirs(&global.join("plugins"), &mut dirs);
         dirs.push(global.join("skills"));
     }
+    dirs.extend(crate::plugin_package::installed_package_dirs(
+        crate::plugin_package::PackageDirectoryKind::Skills,
+    ));
     collect_plugin_skill_dirs(&cwd.join(".zode").join("plugins"), &mut dirs);
     dirs.push(cwd.join(".zode").join("skills"));
     dirs

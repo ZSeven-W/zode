@@ -1,388 +1,205 @@
-//! Headless modes: `-p/--print` (single turn) and `--no-tui` (readline
-//! REPL). Both consume the agent Event stream without any TUI.
+//! Headless `-p/--print` mode: single turn streamed to stdout (plain,
+//! `json`, or `stream-json`), plus the display helpers shared with the REPL
+//! (`crate::repl`).
 
 use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent::abort::AbortController;
-use agent::message::MessageStore;
-use agent::session::Session;
 use agent::stream::Event;
 use futures::StreamExt;
-use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
 use uuid::Uuid;
-use zode_core::commands::{parse_slash, CommandAction, CommandRegistry};
-use zode_core::config::ConfigManager;
-use zode_core::session_meta::{title_from_prompt, SessionIndex, SessionMeta};
+use zode_core::run_event::{RunEvent, RunEventContext, TurnOutcome, TurnRecorder};
+use zode_core::sessions::{DurableSessionMeta, SessionStore};
 use zode_core::ZodeEngine;
 
+use crate::args::OutputFormat;
+use crate::headless_output::{CostSummary, HeadlessAccumulator, HeadlessIds};
+
 /// Run a single prompt, stream to stdout, return a process exit code.
-/// `resumed_id` is `Some` when `-p` ran with `--continue`/`--resume`; the
-/// appended turn is then persisted so the conversation survives.
-pub async fn run_print(engine: &ZodeEngine, prompt: &str, resumed_id: Option<String>) -> i32 {
+/// Every print run owns a durable, V1-compatible session id, including fresh one-shots.
+pub async fn run_print(
+    engine: &ZodeEngine,
+    prompt: &str,
+    session_meta: DurableSessionMeta,
+    output_format: OutputFormat,
+) -> i32 {
     // A `-p` run over a large `--continue`/`--resume` context could exceed
     // the provider's input limit on the very first turn — compact it down
     // first (byte estimate; no prior Usage in a fresh process).
     engine.auto_compact_if_needed(None).await;
+    let session_id = session_meta.id.clone();
+    let turn_id = Uuid::new_v4().simple().to_string();
+    let request_id = Uuid::new_v4().simple().to_string();
+    let mut stdout = std::io::stdout();
+    let mut recorder = TurnRecorder::new(
+        SessionStore::open_default().ok(),
+        RunEventContext::new(
+            session_id.clone(),
+            Some(turn_id.clone()),
+            Some(request_id.clone()),
+        ),
+    );
+    for envelope in recorder.start() {
+        stream_json_line(&mut stdout, output_format, &envelope);
+    }
+    {
+        let message_count = engine.store.lock().map(|store| store.len()).unwrap_or(0);
+        if let Err(error) =
+            recorder.begin_checkpoint(&engine.checkpoints, engine.cwd.clone(), message_count)
+        {
+            tracing::warn!("checkpoint start failed: {error}");
+        }
+    }
+
     let abort = AbortController::new();
-    let mut stream = match engine.turn(prompt, abort).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("zode: {e}");
-            return 1;
+    // Make Ctrl-C a first-class interrupt: abort the turn so the run reports
+    // RunStatus::Interrupted / EXIT_INTERRUPTED instead of dying mid-write.
+    {
+        let abort = abort.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                abort.abort_with_reason("interrupted by Ctrl-C");
+            }
+        });
+    }
+    let mut accumulator = HeadlessAccumulator::default();
+    let mut partial = false;
+    let mut stream = match engine.turn(prompt, abort.clone()).await {
+        Ok(stream) => Some(stream),
+        Err(error) => {
+            let message = error.to_string();
+            accumulator.push_error("turn_start_error", message.clone());
+            if output_format == OutputFormat::Plain {
+                eprintln!("zode: {message}");
+            }
+            let envelope = recorder.record(RunEvent::Error {
+                code: "turn_start_error".into(),
+                message,
+            });
+            stream_json_line(&mut stdout, output_format, &envelope);
+            None
         }
     };
+    let turn_ran = stream.is_some();
 
-    let mut exit = 0;
-    let mut stdout = std::io::stdout();
     let mut tool_names = std::collections::HashMap::<String, String>::new();
-    while let Some(item) = stream.next().await {
+    while let Some(item) = match stream.as_mut() {
+        Some(stream) => stream.next().await,
+        None => None,
+    } {
         let event = match item {
             Ok(ev) => ev,
             Err(e) => {
-                eprintln!("\nzode stream error: {e}");
-                exit = 1;
+                let message = e.to_string();
+                accumulator.push_stream_error(message.clone());
+                partial = true;
+                if output_format == OutputFormat::Plain {
+                    eprintln!("\nzode stream error: {message}");
+                }
+                let envelope = recorder.record(RunEvent::Error {
+                    code: "stream_error".into(),
+                    message,
+                });
+                stream_json_line(&mut stdout, output_format, &envelope);
                 break;
             }
         };
         // Feed every event to the cost tracker (it counts only Usage events).
         engine.cost.observe(&event).await;
-        match event {
-            Event::TextDelta { delta } => {
+        accumulator.on_event(&engine.model, &event);
+        let envelope = recorder.record_agent(&event);
+        stream_json_line(&mut stdout, output_format, &envelope);
+        match &event {
+            Event::TextDelta { delta } if output_format == OutputFormat::Plain => {
                 let _ = write!(stdout, "{delta}");
                 let _ = stdout.flush();
             }
             Event::ToolUse { id, name, .. } => {
-                tool_names.insert(id, name.clone());
-                eprintln!("· {name}");
+                tool_names.insert(id.clone(), name.clone());
+                if output_format == OutputFormat::Plain {
+                    eprintln!("· {name}");
+                }
             }
-            Event::ToolResult { id, ok, output } => {
+            Event::ToolResult { id, ok, output } if output_format == OutputFormat::Plain => {
                 if let Some(line) = tool_result_line(
-                    tool_names.get(&id).map(String::as_str),
-                    ok,
-                    &output,
+                    tool_names.get(id).map(String::as_str),
+                    *ok,
+                    output,
                     Some(engine.cwd.as_path()),
                 ) {
                     eprintln!("· {line}");
                 }
             }
-            Event::Error { code, message } => {
+            Event::Error { code, message } if output_format == OutputFormat::Plain => {
                 eprintln!("\nzode error [{code}]: {message}");
-                exit = 1;
             }
             _ => {}
         }
     }
-    let _ = writeln!(stdout);
+    if output_format == OutputFormat::Plain {
+        let _ = writeln!(stdout);
+    }
     // Mine the completed turn for durable memories (no-op unless autoExtract
     // is on). Awaited so the process doesn't exit before the write lands.
     engine.extract_post_turn_inline().await;
-    // Persist the appended turn when resuming, so `-p --continue` builds a
-    // durable conversation instead of discarding each turn.
-    if let Some(id) = &resumed_id {
-        save_session(engine, id).await;
+    // Every structured run is resumable, including a fresh one-shot.
+    if let Err(error) = save_durable_session(engine, &session_meta).await {
+        tracing::warn!("session save failed: {error}");
     }
-    // Token/cache usage to stderr (keeps stdout = the model's answer).
-    eprintln!("{}", engine.cost.report().await);
-    exit
-}
-
-/// Plain readline REPL. `resumed_id` is Some when --continue/--resume
-/// loaded a prior session into the engine's store.
-pub async fn run_repl(engine: ZodeEngine, resumed_id: Option<String>) -> i32 {
-    let registry = CommandRegistry::with_builtins();
-    let (session_id, mut titled) = match resumed_id {
-        Some(id) => (id, true),
-        None => (Uuid::new_v4().simple().to_string(), false),
-    };
-
-    let mut rl = match DefaultEditor::new() {
-        Ok(rl) => rl,
-        Err(e) => {
-            eprintln!("zode: readline init: {e}");
-            return 1;
-        }
-    };
-    let history = history_path();
-    if let Some(h) = &history {
-        let _ = rl.load_history(h);
-    }
-
-    println!(
-        "zode {} — {}  (/help, /exit)",
-        env!("CARGO_PKG_VERSION"),
-        engine.model
+    let cost =
+        CostSummary::from_snapshot(&engine.cost.snapshot().await, engine.cost.currency_code());
+    let result = accumulator.finish(
+        HeadlessIds {
+            session_id,
+            turn_id,
+            request_id,
+            model: engine.model.clone(),
+        },
+        cost,
+        partial,
+        abort.is_aborted(),
     );
-
-    loop {
-        match rl.readline("› ") {
-            Ok(line) => {
-                let line = line.trim().to_string();
-                if line.is_empty() {
-                    continue;
-                }
-                let _ = rl.add_history_entry(line.as_str());
-
-                if let Some((name, cmd_args)) = parse_slash(&line) {
-                    match dispatch_command(&registry, &engine, name, cmd_args).await {
-                        CmdFlow::Exit => break,
-                        CmdFlow::Continue => continue,
-                        CmdFlow::Save => {
-                            save_session(&engine, &session_id).await;
-                            continue;
-                        }
-                    }
-                }
-
-                if !titled {
-                    stamp_title(&engine, &session_id, &line);
-                    titled = true;
-                }
-                // Pre-turn safety compaction using the accurate provider-
-                // reported occupancy from the last turn — the runtime's own
-                // byte-estimate auto-compaction under-counts CJK, so a long
-                // REPL session could otherwise hard-400 at the input limit.
-                let last = engine.last_prompt_tokens().await;
-                if engine.auto_compact_if_needed(last).await {
-                    save_session(&engine, &session_id).await;
-                }
-                run_turn(&engine, &line).await;
-                engine.extract_post_turn_inline().await;
-                save_session(&engine, &session_id).await;
-            }
-            Err(ReadlineError::Interrupted) => {
-                println!("(Ctrl+C — press Ctrl+D or type /exit to quit)");
-            }
-            Err(ReadlineError::Eof) => break,
-            Err(e) => {
-                eprintln!("zode: {e}");
-                break;
-            }
-        }
+    if output_format == OutputFormat::Json {
+        emit_json_line(&mut stdout, &result);
     }
-
-    if let Some(h) = &history {
-        let _ = rl.save_history(h);
-    }
-    0
-}
-
-enum CmdFlow {
-    Exit,
-    Continue,
-    /// The command mutated the message store (e.g. /compact); persist the
-    /// session before continuing so the change survives a resume.
-    Save,
-}
-
-async fn dispatch_command(
-    registry: &CommandRegistry,
-    engine: &ZodeEngine,
-    name: &str,
-    args: &str,
-) -> CmdFlow {
-    let Some(cmd) = registry.get(name) else {
-        println!("unknown command: /{name}  (try /help)");
-        return CmdFlow::Continue;
+    let outcome = TurnOutcome {
+        status: result.status,
+        stop_reason: result.stop_reason.clone(),
+        partial: result.partial,
     };
-    match cmd.name {
-        "exit" => return CmdFlow::Exit,
-        "help" => {
-            for c in registry.all() {
-                println!("  /{:<10} {}", c.name, c.description);
-            }
-        }
-        "clear" => {
-            // std::sync::Mutex; no await while held.
-            if let Ok(mut store) = engine.store.lock() {
-                *store = MessageStore::new();
-            }
-            println!("(context cleared)");
-        }
-        "model" => {
-            if args.is_empty() {
-                println!("model: {}", engine.model);
-            } else {
-                println!("(model switch needs reassembly — restart with --model {args})");
-            }
-        }
-        "config" => println!("model={} cwd={}", engine.model, engine.cwd.display()),
-        "compact" => match engine.compact(AbortController::new()).await {
-            Ok(o) => {
-                println!(
-                    "(compacted {} message{} · ~{} → ~{} tokens)",
-                    o.replaced,
-                    if o.replaced == 1 { "" } else { "s" },
-                    o.pre_tokens,
-                    o.post_tokens,
-                );
-                return CmdFlow::Save;
-            }
-            Err(e) => println!("(compact failed: {e})"),
-        },
-        "cost" => println!("{}", engine.cost.report().await),
-        "undo" => match engine.undo().await {
-            Ok(p) => println!("(undid edit to {})", p.display()),
-            Err(e) => println!("({e})"),
-        },
-        "redo" => match engine.redo().await {
-            Ok(p) => println!("(redid edit to {})", p.display()),
-            Err(e) => println!("({e})"),
-        },
-        "skills" => {
-            let list = engine.skills.list();
-            if list.is_empty() {
-                println!("(no skills loaded)");
-            } else {
-                for s in list {
-                    println!("  {} — {}", s.name, s.description);
-                }
-            }
-        }
-        "plugin" => {
-            let plugins = engine.plugin_list();
-            if args.is_empty() {
-                for p in &plugins {
-                    let mark = if p.enabled { "[on] " } else { "[off]" };
-                    println!("  {mark} {:<22} {}", p.id, p.description);
-                }
-                println!("(toggle with /plugin <id>; applies on restart)");
-            } else if !plugins.iter().any(|p| p.id == args) {
-                println!("unknown plugin: {args}");
-            } else {
-                match toggle_plugin(args) {
-                    Ok(on) => println!(
-                        "{args} {} (restart to apply)",
-                        if on { "enabled" } else { "disabled" }
-                    ),
-                    Err(e) => println!("({e})"),
-                }
-            }
-        }
-        "mcp" => match &engine.mcp {
-            None => println!("(no MCP servers configured)"),
-            Some(lc) => {
-                for s in lc.registry.snapshot() {
-                    let status = if s.state.is_connected() {
-                        "connected"
-                    } else {
-                        "not connected"
-                    };
-                    println!(
-                        "  {} — {} ({} tools)",
-                        s.name,
-                        status,
-                        s.state.tool_names().len()
-                    );
-                }
-            }
-        },
-        "memory" => {
-            println!("{}", engine.noema.handle_command(args, Some(&engine.cwd)));
-        }
-        "diff" => println!("{}", zode_core::diff::working_tree_diff(&engine.cwd).await),
-        "agents" => {
-            for (n, desc) in &engine.agent_types {
-                println!("  {n:<12} {desc}");
-            }
-        }
-        "workflows" => {
-            if engine.workflows.is_empty() {
-                println!("(no workflows; add ~/.zode/workflows/<name>.md or use define_workflow)");
-            } else {
-                for (n, desc) in &engine.workflows {
-                    println!("  {n:<16} {desc}");
-                }
-            }
-        }
-        "hooks" => {
-            let entries = zode_core::hooks_config::load_hook_entries(&engine.cwd);
-            if entries.is_empty() {
-                println!("(no hooks configured)");
-            } else {
-                for e in entries {
-                    match &e.tool {
-                        Some(t) => println!("  {} [{}] → {}", e.event, t, e.script),
-                        None => println!("  {} → {}", e.event, e.script),
-                    }
-                }
-            }
-        }
-        "export" => match zode_core::export::try_resolve_export_path(&engine.cwd, args) {
-            Some(path) => match std::fs::write(&path, engine.export_markdown()) {
-                Ok(()) => println!("(exported to {})", path.display()),
-                Err(e) => println!("(export failed: {e})"),
-            },
-            None => println!(
-                "(export path escapes the workspace — use an absolute path to export elsewhere)"
-            ),
-        },
-        "currency" => {
-            let code = args.trim();
-            if code.is_empty() {
-                println!("currency: {}", engine.cost.currency_code());
-            } else {
-                println!("currency → {}", engine.cost.set_currency(code));
-            }
-        }
-        _ => match cmd.action {
-            CommandAction::Ui => println!("/{name} is available in the TUI only"),
-            _ => println!("/{name}: not handled in the REPL yet"),
-        },
+    for envelope in recorder.complete(Some(&engine.checkpoints), turn_ran, &outcome) {
+        stream_json_line(&mut stdout, output_format, &envelope);
     }
-    CmdFlow::Continue
+    if output_format == OutputFormat::Plain {
+        // Token/cache usage to stderr (keeps stdout = the model's answer).
+        eprintln!("{}", engine.cost.report().await);
+    }
+    result.exit_code()
 }
 
-async fn run_turn(engine: &ZodeEngine, prompt: &str) {
-    let abort = AbortController::new();
-    let mut stream = match engine.turn(prompt, abort).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("zode: {e}");
-            return;
-        }
-    };
-    let mut out = std::io::stdout();
-    let mut tool_names = std::collections::HashMap::<String, String>::new();
-    while let Some(item) = stream.next().await {
-        let event = match item {
-            Ok(ev) => ev,
-            Err(e) => {
-                eprintln!("\nstream error: {e}");
-                break;
-            }
-        };
-        // Feed every event to the cost tracker (it counts only Usage events).
-        engine.cost.observe(&event).await;
-        match event {
-            Event::TextDelta { delta } => {
-                let _ = write!(out, "{delta}");
-                let _ = out.flush();
-            }
-            Event::ToolUse { id, name, .. } => {
-                tool_names.insert(id, name.clone());
-                eprintln!("\n· {name}");
-            }
-            Event::ToolResult { id, ok, output } => {
-                if let Some(line) = tool_result_line(
-                    tool_names.get(&id).map(String::as_str),
-                    ok,
-                    &output,
-                    Some(engine.cwd.as_path()),
-                ) {
-                    eprintln!("\n· {line}");
-                }
-            }
-            Event::Error { code, message } => eprintln!("\n[{code}] {message}"),
-            _ => {}
-        }
+fn stream_json_line(
+    writer: &mut impl Write,
+    output_format: OutputFormat,
+    envelope: &zode_core::run_event::RunEventEnvelope,
+) {
+    if output_format == OutputFormat::StreamJson {
+        emit_json_line(writer, envelope);
     }
-    let _ = writeln!(out);
 }
 
-fn tool_result_line(
+fn emit_json_line(writer: &mut impl Write, value: &impl serde::Serialize) {
+    match serde_json::to_writer(&mut *writer, value) {
+        Ok(()) => {
+            let _ = writer.write_all(b"\n");
+            let _ = writer.flush();
+        }
+        Err(error) => eprintln!("zode: failed to encode structured output: {error}"),
+    }
+}
+
+pub(crate) fn tool_result_line(
     name: Option<&str>,
     ok: bool,
     output: &serde_json::Value,
@@ -493,86 +310,23 @@ fn compact_text(text: &str, max_chars: usize) -> String {
     one_line
 }
 
-/// Snapshot the store (MessageStore: Clone) then persist. The std mutex
-/// guard is dropped before the await, so it never crosses an await point.
-async fn save_session(engine: &ZodeEngine, id: &str) {
-    let Ok(path) = SessionIndex::session_path(id) else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let snapshot = match engine.store.lock() {
-        Ok(store) => store.clone(),
-        Err(_) => return,
-    };
-    if let Err(e) = Session::save(&path, &snapshot).await {
-        tracing::warn!("session save failed: {e}");
-        return;
-    }
-    // Keep the index's recency current so `--continue` resumes this
-    // session, not an older one. The entry exists (stamp_title on the first
-    // turn for new sessions; created at resume for old ones); create a
-    // minimal entry if somehow missing.
-    let fallback = SessionMeta {
-        id: id.to_string(),
-        title: "(session)".to_string(),
-        cwd: engine.cwd.display().to_string(),
-        model: engine.model.clone(),
-        updated_at: now_secs(),
-    };
-    if let Err(error) = SessionIndex::update(|idx| {
-        if !idx.touch_updated(id, fallback.updated_at) {
-            idx.upsert(fallback);
-        }
-        Ok(())
-    }) {
-        tracing::warn!("session index update failed after transcript save: {error}");
-    }
+async fn save_durable_session(
+    engine: &ZodeEngine,
+    meta: &DurableSessionMeta,
+) -> Result<(), zode_core::CoreError> {
+    let snapshot = engine
+        .store
+        .lock()
+        .map_err(|_| zode_core::CoreError::Other("message store lock poisoned".into()))?
+        .clone();
+    SessionStore::open_default()?.save(meta, &snapshot).await
 }
 
-fn stamp_title(engine: &ZodeEngine, id: &str, prompt: &str) {
-    let meta = SessionMeta {
-        id: id.to_string(),
-        title: title_from_prompt(prompt),
-        cwd: engine.cwd.display().to_string(),
-        model: engine.model.clone(),
-        updated_at: now_secs(),
-    };
-    if let Err(error) = SessionIndex::update(|idx| {
-        idx.upsert(meta);
-        Ok(())
-    }) {
-        tracing::warn!("session index title update failed: {error}");
-    }
-}
-
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Flip a plugin id in the global config's `plugins.disabled` list and persist
-/// it. Returns the new enabled state. Applies on the next launch (the running
-/// engine's tool set is already assembled).
-fn toggle_plugin(id: &str) -> Result<bool, zode_core::CoreError> {
-    let mut cfg = ConfigManager::load_global()?;
-    let was_disabled = cfg.plugins.disabled.iter().any(|d| d == id);
-    if was_disabled {
-        cfg.plugins.disabled.retain(|d| d != id);
-    } else {
-        cfg.plugins.disabled.push(id.to_string());
-    }
-    ConfigManager::save_global(&cfg)?;
-    Ok(was_disabled)
-}
-
-fn history_path() -> Option<std::path::PathBuf> {
-    ConfigManager::config_dir()
-        .ok()
-        .map(|d| d.join("input_history"))
 }
 
 #[cfg(test)]

@@ -64,6 +64,21 @@ pub fn effective_servers(
     user: &HashMap<String, LspServerConfig>,
 ) -> HashMap<String, LspServerConfig> {
     let mut servers = detect_default_servers();
+    for component in crate::plugin_package::installed_package_configs(
+        crate::plugin_package::PackageConfigKind::Lsp,
+    ) {
+        let Some(value) = component.load_json() else {
+            continue;
+        };
+        let value = value.get("servers").cloned().unwrap_or(value);
+        match serde_json::from_value::<HashMap<String, LspServerConfig>>(value) {
+            Ok(plugin_servers) => servers.extend(plugin_servers),
+            Err(error) => tracing::warn!(
+                plugin = %component.plugin,
+                "skip plugin LSP config: {error}"
+            ),
+        }
+    }
     for (lang, sc) in user {
         servers.insert(lang.clone(), sc.clone());
     }

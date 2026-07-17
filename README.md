@@ -46,6 +46,8 @@
 - **Non-blocking permissions** — every mutating tool is gated (allow once / always / deny), but the prompt docks inline and never blocks you: keep typing to queue a follow-up while a tool waits, with hard-deny rules
 - **OS sandbox, on by default** — shell commands run under sandbox-exec (macOS) / bwrap (Linux) in `read-only` or `workspace-write` mode, with **outbound network denied by default**. Toggle live with `/sandbox`; the model can request an escape for a single command (`dangerouslyDisableSandbox`) which **you authorize** at the prompt
 - **Full-screen TUI** — streaming markdown with syntax highlighting, diff previews, slash-command autocomplete, prompt history (Up/Down), 11 built-in themes, settings & help overlays, resilient right sidebar sections, **15-language UI** (`/language`)
+- **Durable, V1-compatible sessions** — keep the existing `<id>.jsonl` transcript contract while adding journals, checkpoints, rewind, fork, and isolated Git worktrees as sidecar data
+- **Automation surfaces** — stable JSON/JSONL headless output, exact session targeting, tool filters, deterministic exit codes, ACP over stdio, and a local operations dashboard
 - **Multi-session tabs** — run several conversations side by side (`Ctrl+T`), each an isolated agent; resume past sessions with full history replay
 - **Sub-agents & workflows** — delegate scoped work to child agents via the Task tool (they inherit the same gate, sandbox, and hooks), manage them with `/agents` / `/workflows`, and toggle autonomous orchestration
 - **Cross-agent ecosystem** — discovers skills, slash commands, and MCP servers from Claude / Codex / opencode / antigravity / pi / kilo / cursor (plus their plugin trees), with zode's own taking precedence; foreign integrations are off by default and non-portable ones are filtered out
@@ -103,7 +105,7 @@ com.apple.quarantine ./zode` if Gatekeeper complains).
 
 ### From source
 
-Requires a recent stable Rust toolchain:
+Requires Rust 1.88 or newer:
 
 ```bash
 git clone --recurse-submodules https://github.com/ZSeven-W/zode.git
@@ -177,11 +179,202 @@ zode --no-browser          # disable built-in browser tools for this run
 zode --model <id>          # override the model
 zode --provider <name>     # pick a named provider from config.providers
 zode server                # JSON-RPC app-server mode over stdio
+zode acp                   # Agent Client Protocol agent over stdio
+zode dashboard             # local sessions/checkpoints/worktrees overview
 ```
 
 You can also point at any provider without editing the config by exporting the
 matching key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …); for Ollama the
 `baseUrl` is taken from the environment when unset.
+
+## Automation, Durable Sessions, and Operations
+
+### Structured headless runs
+
+`-p`, `--prompt-file`, and `--prompt-json` all use the same headless engine.
+`json` emits one final result object; `stream-json` emits one
+`zode.run-event.v1` JSON object per line. Structured modes reserve stdout for
+machine-readable output and use stable exit codes: `0` success, `10` provider
+error, `11` permission denied, `12` turn/limit reached, `13` interrupted
+(Ctrl-C), `14` partial result, `15` session targeting error.
+
+```bash
+zode -p "fix the failing tests" --output-format json --max-turns 12
+zode -p "review this repo" --output-format stream-json \
+  --tools 'File*,ContentSearch,Git' --disallowed-tools FileWrite
+zode --prompt-file prompt.txt --permission-mode accept-edits
+zode --prompt-json '{"prompt":"summarize the workspace"}'
+
+# Exact IDs do not prefix-match. A fork never mutates its source session.
+zode -p "continue the work" --session-id my-session
+zode -p "try another approach" --fork-session my-session --fork-worktree
+```
+
+Tool deny patterns win over allow patterns and are inherited by Task
+sub-agents. `--permission-mode` accepts `default`, `dont-ask`, `accept-edits`,
+and `bypass`; `--yolo` remains a shortcut for bypass, while hard deny rules
+still apply.
+
+### V1-compatible sessions, checkpoints, and worktrees
+
+The transcript remains the original V1 file at
+`~/.zode/sessions/<id>.jsonl`. It is the **only** transcript copy, so older Zode
+clients can keep reading and writing it. New metadata is additive and lives in
+`~/.zode/sessions/<id>/` (`meta.json`, journal, checkpoints, and snapshots).
+No new session format or transcript migration is required.
+
+```bash
+zode session list
+zode session list --json
+zode session show <id>                         # metadata + checkpoint IDs
+zode session fork <id> --target-id experiment
+zode session fork <id> --checkpoint <cp> --worktree
+zode session rewind <id> <cp>                  # conflict-aware preview
+zode session rewind <id> <cp> --apply
+zode session apply-back <id> --target /path/to/checkout
+zode session delete <id> --remove-worktree
+```
+
+A checkpoint is captured before a mutating turn. Rewind restores tracked file
+content and the transcript prefix, reports conflicts instead of overwriting
+newer changes, and records a new logical journal branch rather than deleting
+history. Worktree forks can be applied back explicitly when the experiment is
+ready.
+
+### Permission rules and sandbox profiles
+
+Rules can live under `permissions.rules` in `config.json`, or in a standalone
+JSON file passed with `--rules`. A field matcher uses an RFC 6901 JSON pointer;
+deny takes precedence over ask, which takes precedence over allow.
+The standalone file must be either a rule array or `{ "rules": [...] }`; it is
+not wrapped in a top-level `permissions` object.
+
+```jsonc
+{
+  "permissions": {
+    "deny": ["Remove"],
+    "rules": [
+      {
+        "behavior": "allow",
+        "tool": "Bash",
+        "matcher": {
+          "kind": "field",
+          "pointer": "/command",
+          "pattern": { "kind": "glob", "value": "git status*" }
+        }
+      },
+      {
+        "behavior": "deny",
+        "tool": "Bash",
+        "matcher": {
+          "kind": "field",
+          "pointer": "/command",
+          "pattern": { "kind": "glob", "value": "*--force*" }
+        }
+      }
+    ]
+  },
+  "sandbox": {
+    "profiles": {
+      "ci": {
+        "enabled": true,
+        "mode": "workspace-write",
+        "network": false,
+        "writableRoots": ["/tmp/build-cache"]
+      }
+    }
+  }
+}
+```
+
+```bash
+zode -p "inspect only" --sandbox-profile read-only
+zode -p "run checks" --sandbox-profile workspace
+zode -p "download dependencies" --sandbox-profile workspace-network
+zode -p "run CI" --sandbox-profile ci --rules ./permissions.json
+```
+
+Built-in profiles are `read-only`, `workspace`, `workspace-network`, and
+`unconfined`. Config-defined profiles use the same sandbox fields shown above.
+
+### Plugins and static marketplaces
+
+A managed plugin can contribute skills, commands, agents, hooks, MCP servers,
+and LSP servers. Zode accepts `plugin.json`, `.zode-plugin/plugin.json`,
+`.grok-plugin/plugin.json`, and `.claude-plugin/plugin.json`; installs are
+immutable snapshots with provenance and a SHA-256 tree hash. Executable plugin
+content is never activated without the explicit `--trust` flag.
+
+```bash
+zode plugin validate ./my-plugin
+zode plugin install ./my-plugin --trust
+zode plugin install owner/repo@main#plugins/my-plugin --trust
+zode plugin list --json
+zode plugin details my-plugin
+zode plugin disable my-plugin
+zode plugin enable my-plugin
+zode plugin update my-plugin
+zode plugin uninstall my-plugin
+
+# A marketplace is a local/Git static index, not a Zode-hosted service.
+zode plugin marketplace add owner/plugin-index --trust
+zode plugin marketplace list --json
+zode plugin install my-plugin@MARKETPLACE_NAME --trust  # disambiguate if needed
+zode plugin marketplace update
+```
+
+### ACP, dashboard, telemetry, and TUI regression tests
+
+`zode acp` implements ACP initialize/new/load/fork/prompt/cancel over stdio,
+streams message/thought/tool updates, requests permissions through the client,
+and accepts client-supplied stdio, HTTP, and SSE MCP servers. Session data uses
+the same V1-compatible store as the TUI and headless CLI.
+
+```bash
+zode acp
+zode dashboard
+zode dashboard --json
+```
+
+OTLP export is off by default and requires an explicit opt-in. It exports only
+content-free lifecycle/tool-name/status/usage attributes: prompts, generated
+text, tool inputs/outputs, file paths, and error messages are never sent.
+
+```bash
+ZODE_OTEL=1 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
+zode -p "run the test suite" --output-format json
+```
+
+For real-terminal TUI regression scenarios, the workspace includes a PTY +
+VT100 harness that records raw diagnostics and virtual-screen snapshots:
+
+```bash
+cargo test -p zode-pty-harness
+cargo run -p zode-pty-harness --bin zode-pty-scenario -- scenario.json
+```
+
+`scenario.json` drives the real terminal with ordered waits, key input,
+resizes, and snapshots (key notation supports `<Enter>`, `<Esc>`, `<Tab>`,
+`<Up>`, `<Down>`, `<Left>`, `<Right>`, `<Backspace>`, `<C-c>`, `<C-d>`, and
+`<C-l>`):
+
+```json
+{
+  "command": ["target/debug/zode", "--no-sandbox"],
+  "rows": 40,
+  "cols": 120,
+  "steps": [
+    { "action": "wait_for_text", "text": "zode", "timeout_ms": 5000 },
+    { "action": "send_keys", "keys": "hello<Enter>" },
+    { "action": "resize", "rows": 50, "cols": 140 },
+    { "action": "snapshot", "path": "target/pty/after-input.json" }
+  ]
+}
+```
+
+This local/open implementation deliberately does not include xAI-specific
+accounts, billing, or a Zode-operated cloud marketplace service.
 
 Optional top-level config keys (all have sensible defaults):
 
@@ -210,7 +403,8 @@ Optional top-level config keys (all have sensible defaults):
 ```
 
 > The sandbox confines shell commands (macOS: sandbox-exec; Linux: `bwrap`,
-> which must be installed — otherwise it degrades to off with a warning).
+> which must be installed). Startup fails closed if the configured sandbox
+> cannot be verified; use the explicit `--no-sandbox` flag to run without it.
 > Network is denied by default. If a command genuinely needs to escape, the
 > model sets `dangerouslyDisableSandbox: true` and **you** authorize it at the
 > approval prompt — or toggle the whole sandbox live with `/sandbox`.
@@ -254,9 +448,11 @@ authenticate with `Authorization: Bearer <token>`. See
 [`sdk/README.md`](sdk/README.md) for the full protocol, notification field
 names, and per-language examples.
 
-Still out of scope: account/auth, marketplace, remote-control, Realtime,
-standalone process spawn, background terminals, thread archive/fork, goals, and
-app connectors.
+For this app-server protocol specifically, hosted marketplace management,
+remote-control, Realtime, standalone process spawn, background terminals,
+thread archive/fork, goals, and app connectors remain out of scope. The local
+session and static-plugin marketplace commands documented above are separate
+CLI surfaces.
 
 SDKs live under [`sdk/`](sdk/):
 

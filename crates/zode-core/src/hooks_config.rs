@@ -108,7 +108,48 @@ pub fn load_hook_entries(cwd: &std::path::Path) -> Vec<HookEntry> {
             }
         }
     }
+    for component in crate::plugin_package::installed_package_configs(
+        crate::plugin_package::PackageConfigKind::Hooks,
+    ) {
+        let Some(value) = component.load_json() else {
+            continue;
+        };
+        match serde_json::from_value::<HooksConfig>(value) {
+            Ok(mut cfg) => {
+                let data = ConfigManager::config_dir()
+                    .unwrap_or_else(|_| PathBuf::from(".zode"))
+                    .join("plugin-data")
+                    .join(&component.plugin);
+                for entry in &mut cfg.hooks {
+                    entry.script = substitute_plugin_path(&entry.script, &component.root, &data);
+                }
+                entries.extend(cfg.hooks);
+            }
+            Err(error) => tracing::warn!(
+                plugin = %component.plugin,
+                "skip plugin hooks: {error}"
+            ),
+        }
+    }
     entries
+}
+
+fn substitute_plugin_path(script: &str, root: &std::path::Path, data: &std::path::Path) -> String {
+    let root_text = root.display().to_string();
+    let data_text = data.display().to_string();
+    let expanded = script
+        .replace("${ZODE_PLUGIN_ROOT}", &root_text)
+        .replace("${CLAUDE_PLUGIN_ROOT}", &root_text)
+        .replace("${GROK_PLUGIN_ROOT}", &root_text)
+        .replace("${ZODE_PLUGIN_DATA}", &data_text)
+        .replace("${CLAUDE_PLUGIN_DATA}", &data_text)
+        .replace("${GROK_PLUGIN_DATA}", &data_text);
+    let path = std::path::Path::new(&expanded);
+    if path.is_absolute() || expanded.starts_with("~/") {
+        expanded
+    } else {
+        root.join(path).display().to_string()
+    }
 }
 
 /// Load hooks.json (global ⊕ project) into handlers ready to register.

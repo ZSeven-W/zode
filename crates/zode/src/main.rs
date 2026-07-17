@@ -1,19 +1,26 @@
+mod acp;
 mod args;
 mod browser_native_host;
+mod dashboard;
 mod doctor;
 mod headless;
+mod headless_output;
+mod plugin_cli;
+mod repl;
 mod server;
+mod session_cli;
+mod session_setup;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent::session::Session;
-use args::Args;
+use args::{Args, OutputFormat, PermissionModeArg};
 use clap::Parser;
-use zode_core::approval::{ApprovalGate, BypassGate, StdinGate};
+use session_setup::{attach_session, prepare_headless_session, resolve_resume_target, resume_dir};
+use zode_core::approval::{AcceptEditsGate, ApprovalGate, BypassGate, DenyGate, StdinGate};
 use zode_core::config::ConfigManager;
-use zode_core::session_meta::{SessionIndex, SessionMeta};
+use zode_core::session_meta::SessionMeta;
 use zode_core::{EngineTemplate, ZodeEngine};
 
 #[tokio::main]
@@ -44,6 +51,7 @@ async fn main() {
     let stdout_is_tty = std::io::stdout().is_terminal();
     init_tracing(&args, stdout_is_tty);
     let exit = run(args).await;
+    zode_core::telemetry::shutdown();
     std::process::exit(exit);
 }
 
@@ -79,6 +87,8 @@ fn tracing_writes_to_terminal(args: &Args, stdout_is_tty: bool) -> bool {
 fn launches_full_tui(args: &Args, stdout_is_tty: bool) -> bool {
     args.command.is_none()
         && args.print.is_none()
+        && args.prompt_file.is_none()
+        && args.prompt_json.is_none()
         && !args.no_tui
         && !args.browser_native_host
         && stdout_is_tty
@@ -94,6 +104,10 @@ async fn run(args: Args) -> i32 {
         match command {
             args::Command::Doctor => return doctor::run(&cwd).await,
             args::Command::Server(server_args) => return server::run(server_args, &cwd).await,
+            args::Command::Acp => return acp::run(&cwd).await,
+            args::Command::Dashboard { json } => return dashboard::run(*json).await,
+            args::Command::Plugin { action } => return plugin_cli::run(action, &cwd),
+            args::Command::Session { action } => return session_cli::run(action, &cwd).await,
             args::Command::Sandbox { action } => match action {
                 args::SandboxCommand::Cleanup => {
                     #[cfg(windows)]
@@ -113,6 +127,35 @@ async fn run(args: Args) -> i32 {
             },
         }
     }
+    let headless_prompt = match load_headless_prompt(&args) {
+        Ok(prompt) => prompt,
+        Err(error) => {
+            emit_startup_error(args.output_format, "invalid_prompt", &error);
+            return 2;
+        }
+    };
+    if headless_prompt.is_none() && args.output_format != OutputFormat::Plain {
+        eprintln!("zode: --output-format requires -p, --prompt-file, or --prompt-json");
+        return 2;
+    }
+    // Exact session targeting / forking is only wired on the headless prompt
+    // path. Reject rather than silently start a fresh random-id session (the
+    // REPL/TUI resume only via --resume/--continue), matching the
+    // --permission-mode guard below.
+    if headless_prompt.is_none() && (args.session_id.is_some() || args.fork_session.is_some()) {
+        eprintln!(
+            "zode: --session-id and --fork-session require -p, --prompt-file, or --prompt-json"
+        );
+        return 2;
+    }
+    if args.yolo && args.permission_mode != PermissionModeArg::Default {
+        emit_startup_error(
+            args.output_format,
+            "invalid_permission_mode",
+            "--yolo cannot be combined with --permission-mode",
+        );
+        return 2;
+    }
     // First run: drop a starter config the user can edit. Best-effort — a
     // failure here (e.g. read-only home) must never stop zode from launching.
     if let Err(e) = ConfigManager::ensure_default_global() {
@@ -121,10 +164,26 @@ async fn run(args: Args) -> i32 {
     let mut cfg = match ConfigManager::load(&cwd) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("zode: config error: {e}");
+            emit_startup_error(args.output_format, "config_error", &e.to_string());
             return 1;
         }
     };
+    if let Some(max_turns) = args.max_turns {
+        cfg.max_iterations = Some(max_turns);
+    }
+    if let Some(path) = &args.rules {
+        match zode_core::permission_rules::load_rule_specs(std::path::Path::new(path)) {
+            Ok(rules) => cfg.permissions.rules.extend(rules),
+            Err(error) => {
+                emit_startup_error(
+                    args.output_format,
+                    "invalid_permission_rules",
+                    &error.to_string(),
+                );
+                return 2;
+            }
+        }
+    }
     // --provider selects a named provider group; --model picks the model within
     // it (or overrides the active model when no --provider is given). Resolving
     // the (provider, model) pair TOGETHER applies the correct per-model override
@@ -133,14 +192,22 @@ async fn run(args: Args) -> i32 {
         (Some(name), Some(m)) => match cfg.resolve_named_provider_model(name, m) {
             Some(p) => cfg.provider = p,
             None => {
-                eprintln!("zode: no provider named '{name}' in config.providers");
+                emit_startup_error(
+                    args.output_format,
+                    "provider_not_found",
+                    &format!("no provider named '{name}' in config.providers"),
+                );
                 return 1;
             }
         },
         (Some(name), None) => match cfg.resolve_named_provider(name) {
             Some(p) => cfg.provider = p,
             None => {
-                eprintln!("zode: no provider named '{name}' in config.providers");
+                emit_startup_error(
+                    args.output_format,
+                    "provider_not_found",
+                    &format!("no provider named '{name}' in config.providers"),
+                );
                 return 1;
             }
         },
@@ -159,52 +226,38 @@ async fn run(args: Args) -> i32 {
     // sandbox is wanted but can't be established (missing backend / unsupported
     // OS) it errors instead of silently running unconfined — we stop here and
     // tell the user to install a backend or pass `--no-sandbox`.
+    // A named `--sandbox-profile` is a config preset, not a one-shot flag:
+    // fold it into cfg.sandbox so every later consumer — the EngineTemplate
+    // and the TUI `/sandbox` toggle, which both re-resolve from cfg.sandbox —
+    // honors the profile's mode/network/roots/windowsTier. The transient CLI
+    // overrides below stay session-only (the toggle owns mode/network).
+    if let Some(name) = args.sandbox_profile.as_deref() {
+        match zode_core::sandbox::select_profile(&cfg.sandbox, name) {
+            Ok(profile) => {
+                cfg.sandbox = zode_core::sandbox::overlay_profile(&cfg.sandbox, &profile)
+            }
+            Err(error) => {
+                emit_startup_error(
+                    args.output_format,
+                    "sandbox_profile_not_found",
+                    &error.to_string(),
+                );
+                return 2;
+            }
+        }
+    }
     let sandbox = {
-        use zode_core::sandbox::SandboxMode;
-        let enabled = if args.no_sandbox {
-            false
-        } else if args.sandbox {
-            true
-        } else {
-            cfg.sandbox.enabled.unwrap_or(true)
+        let overrides = zode_core::sandbox::SandboxOverrides {
+            disable: args.no_sandbox,
+            force_enable: args.sandbox,
+            read_only: args.sandbox_read_only,
+            allow_network: args.sandbox_allow_network,
+            strict_read: args.sandbox_strict_read,
         };
-        let mode = if args.sandbox_read_only {
-            SandboxMode::ReadOnly
-        } else {
-            cfg.sandbox
-                .mode
-                .as_deref()
-                .map(SandboxMode::parse)
-                .unwrap_or_default()
-        };
-        let allow_network = args.sandbox_allow_network || cfg.sandbox.network.unwrap_or(false);
-        let roots: Vec<std::path::PathBuf> = cfg
-            .sandbox
-            .writable_roots
-            .iter()
-            .map(std::path::PathBuf::from)
-            .collect();
-        let exclude_slash_tmp = cfg.sandbox.exclude_slash_tmp.unwrap_or(false);
-        let exclude_tmpdir_env_var = cfg.sandbox.exclude_tmpdir_env_var.unwrap_or(false);
-        let restrict_reads =
-            args.sandbox_strict_read || cfg.sandbox.restrict_reads.unwrap_or(false);
-        match zode_core::sandbox::resolve(
-            &cwd,
-            enabled,
-            mode,
-            allow_network,
-            &roots,
-            exclude_slash_tmp,
-            exclude_tmpdir_env_var,
-        ) {
-            // Strict-read is applied post-resolve so it rides along on the
-            // resolved config without widening `resolve`'s signature.
-            Ok(sandbox) => sandbox.map(|c| {
-                c.with_restrict_reads(restrict_reads)
-                    .with_windows_tier(cfg.sandbox.windows_tier.as_deref())
-            }),
+        match zode_core::sandbox::resolve_with_overrides(&cfg.sandbox, &cwd, &overrides, &[]) {
+            Ok(sandbox) => sandbox,
             Err(e) => {
-                eprintln!("zode: {e}");
+                emit_startup_error(args.output_format, "sandbox_error", &e.to_string());
                 return 1;
             }
         }
@@ -215,10 +268,16 @@ async fn run(args: Args) -> i32 {
     // stop and tell the user rather than run with a false sense of isolation.
     if let Some(sb) = &sandbox {
         if let Some(notice) = sb.windows_tier_notice() {
-            eprintln!("zode: {notice}");
+            if args.output_format == OutputFormat::Plain {
+                eprintln!("zode: {notice}");
+            }
         }
         if let Err(e) = sb.verify().await {
-            eprintln!("zode: {e}");
+            emit_startup_error(
+                args.output_format,
+                "sandbox_verification_failed",
+                &e.to_string(),
+            );
             return 1;
         }
     }
@@ -235,18 +294,56 @@ async fn run(args: Args) -> i32 {
     // --print: headless single turn (stdin gate, or bypass on --yolo). A
     // short-lived one-shot has nothing to gain from a background update, so it's
     // only started for the interactive surfaces below.
-    if let Some(prompt) = args.print.clone() {
-        // Resume in the session's original directory when `-p` is combined
-        // with `--continue`/`--resume`, so the one-shot appends to (and
-        // persists) that conversation instead of starting cold.
-        let resume_meta = resolve_resume_target(&args);
-        let eff_cwd = resume_dir(&resume_meta).unwrap_or(cwd);
-        let Some(engine) = build(&cfg, eff_cwd, headless_gate(args.yolo), sandbox, &today).await
-        else {
-            return 1;
+    if let Some(prompt) = headless_prompt {
+        let model = cfg
+            .provider
+            .model
+            .clone()
+            .unwrap_or_else(|| zode_core::config::DEFAULT_STARTER_MODEL.into());
+        let prepared = match prepare_headless_session(&args, &prompt, &cwd, &model).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                emit_startup_error(args.output_format, "session_error", &error.to_string());
+                return crate::headless_output::EXIT_SESSION;
+            }
         };
-        let (engine, resumed_id) = attach_session(engine, resume_meta).await;
-        return headless::run_print(&engine, &prompt, resumed_id).await;
+        let eff_cwd = {
+            let recorded = PathBuf::from(&prepared.meta.cwd);
+            if recorded.is_dir() {
+                recorded
+            } else {
+                cwd
+            }
+        };
+        let tool_filter = match headless_tool_filter(&args) {
+            Ok(filter) => filter,
+            Err(error) => {
+                emit_startup_error(
+                    args.output_format,
+                    "invalid_tool_filter",
+                    &error.to_string(),
+                );
+                return 2;
+            }
+        };
+        let engine = match build(
+            &cfg,
+            eff_cwd,
+            headless_gate(&args),
+            sandbox,
+            &today,
+            tool_filter.as_ref(),
+        )
+        .await
+        {
+            Ok(engine) => engine,
+            Err(error) => {
+                emit_startup_error(args.output_format, "engine_build_error", &error.to_string());
+                return 10;
+            }
+        };
+        let engine = engine.with_store(prepared.messages);
+        return headless::run_print(&engine, &prompt, prepared.meta, args.output_format).await;
     }
 
     // Silently check GitHub Releases in the background and swap in a newer build
@@ -258,13 +355,48 @@ async fn run(args: Args) -> i32 {
         // Resume in the session's original directory when it still exists.
         let resume_meta = resolve_resume_target(&args);
         let eff_cwd = resume_dir(&resume_meta).unwrap_or(cwd);
-        let Some(engine) = build(&cfg, eff_cwd, headless_gate(args.yolo), sandbox, &today).await
-        else {
-            return 1;
+        let tool_filter = match headless_tool_filter(&args) {
+            Ok(filter) => filter,
+            Err(error) => {
+                eprintln!("zode: {error}");
+                return 2;
+            }
+        };
+        let engine = match build(
+            &cfg,
+            eff_cwd,
+            headless_gate(&args),
+            sandbox,
+            &today,
+            tool_filter.as_ref(),
+        )
+        .await
+        {
+            Ok(engine) => engine,
+            Err(error) => {
+                eprintln!("zode: {error}");
+                return 1;
+            }
         };
         let (engine, resumed_id) = attach_session(engine, resume_meta).await;
-        return headless::run_repl(engine, resumed_id).await;
+        return repl::run_repl(engine, resumed_id).await;
     }
+
+    // The TUI's approval flow is the interactive queue gate; a headless
+    // permission policy has no mapping onto it. Reject instead of silently
+    // running with more capability than the flag promised (--yolo remains
+    // the TUI's bypass).
+    if args.permission_mode != PermissionModeArg::Default {
+        eprintln!("zode: --permission-mode requires -p, --prompt-file, --prompt-json, or --no-tui");
+        return 2;
+    }
+    let tui_tool_filter = match headless_tool_filter(&args) {
+        Ok(filter) => filter,
+        Err(error) => {
+            eprintln!("zode: {error}");
+            return 2;
+        }
+    };
 
     // Full TUI: approvals are gated through a queue the UI drains. Each tab
     // gets a QueueGate labeled with its id (so prompts carry their source tab)
@@ -285,7 +417,8 @@ async fn run(args: Args) -> i32 {
     // The TUI keeps a template so Ctrl+T / resume / hot-switch can (re)assemble
     // engines.
     let template = EngineTemplate::new(cfg.clone(), cwd, Some(queue), args.yolo, sandbox, today)
-        .with_question_queue(Some(question_queue));
+        .with_question_queue(Some(question_queue))
+        .with_tool_filter(tui_tool_filter);
     // Tab 0 is assembled here; the app assigns it id 0, so label it "0".
     // Resume in the session's original directory when it still exists.
     let resume_meta = resolve_resume_target(&args);
@@ -364,12 +497,24 @@ fn spawn_auto_update(cfg: &zode_core::config::ZodeConfig) {
 }
 
 /// Gate for the headless surfaces: bypass on --yolo, else a stdin prompt.
-fn headless_gate(yolo: bool) -> Arc<dyn ApprovalGate> {
-    if yolo {
-        Arc::new(BypassGate)
-    } else {
-        Arc::new(StdinGate::new())
+fn headless_gate(args: &Args) -> Arc<dyn ApprovalGate> {
+    if args.yolo || args.permission_mode == PermissionModeArg::Bypass {
+        return Arc::new(BypassGate);
     }
+    match args.permission_mode {
+        PermissionModeArg::Default => Arc::new(StdinGate::new()),
+        PermissionModeArg::DontAsk => Arc::new(DenyGate),
+        PermissionModeArg::AcceptEdits => Arc::new(AcceptEditsGate::default()),
+        PermissionModeArg::Bypass => Arc::new(BypassGate),
+    }
+}
+
+fn headless_tool_filter(
+    args: &Args,
+) -> Result<Option<zode_core::tool_filter::ToolFilter>, zode_core::CoreError> {
+    let filter =
+        zode_core::tool_filter::ToolFilter::new(args.tools.clone(), args.disallowed_tools.clone())?;
+    Ok((!filter.is_empty()).then_some(filter))
 }
 
 /// Assemble the engine, reporting and returning None on error.
@@ -379,56 +524,100 @@ async fn build(
     gate: Arc<dyn ApprovalGate>,
     sandbox: Option<zode_core::sandbox::SandboxConfig>,
     date: &str,
-) -> Option<ZodeEngine> {
+    tool_filter: Option<&zode_core::tool_filter::ToolFilter>,
+) -> Result<ZodeEngine, zode_core::CoreError> {
     // Headless surfaces have no UI to answer questions (None), no consent
     // channel for the op-bridge (None), don't enter plan mode (false), and
     // build a fresh, single-use browser session (None; no tab to share it with).
-    match ZodeEngine::assemble(cfg, cwd, gate, sandbox, date, None, None, false, None).await {
-        Ok(e) => Some(e),
-        Err(e) => {
-            eprintln!("zode: {e}");
-            None
+    ZodeEngine::assemble_with_tool_filter_and_mcp(
+        cfg,
+        cwd,
+        gate,
+        sandbox,
+        date,
+        None,
+        None,
+        false,
+        None,
+        tool_filter,
+        None,
+    )
+    .await
+}
+
+fn load_headless_prompt(args: &Args) -> Result<Option<String>, String> {
+    if let Some(prompt) = &args.print {
+        return Ok(Some(prompt.clone()));
+    }
+    if let Some(path) = &args.prompt_file {
+        let prompt = if path == "-" {
+            use std::io::Read;
+            let mut prompt = String::new();
+            std::io::stdin()
+                .read_to_string(&mut prompt)
+                .map_err(|error| format!("read prompt from stdin: {error}"))?;
+            prompt
+        } else {
+            std::fs::read_to_string(path)
+                .map_err(|error| format!("read prompt file '{path}': {error}"))?
+        };
+        return nonempty_prompt(prompt);
+    }
+    if let Some(raw) = &args.prompt_json {
+        let value: serde_json::Value =
+            serde_json::from_str(raw).map_err(|error| format!("parse --prompt-json: {error}"))?;
+        let prompt = match value {
+            serde_json::Value::String(prompt) => prompt,
+            serde_json::Value::Object(object) => object
+                .get("prompt")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| "--prompt-json object requires string field 'prompt'".to_string())?,
+            _ => return Err("--prompt-json must be a string or object".into()),
+        };
+        return nonempty_prompt(prompt);
+    }
+    Ok(None)
+}
+
+fn nonempty_prompt(prompt: String) -> Result<Option<String>, String> {
+    if prompt.trim().is_empty() {
+        Err("headless prompt is empty".into())
+    } else {
+        Ok(Some(prompt))
+    }
+}
+
+fn emit_startup_error(format: OutputFormat, code: &str, message: &str) {
+    if format == OutputFormat::Json {
+        let result = crate::headless_output::HeadlessResult::startup_failure(code, message);
+        println!("{}", serde_json::to_string(&result).unwrap_or_default());
+    } else if format == OutputFormat::StreamJson {
+        let mut context = zode_core::run_event::RunEventContext::new("", None, None);
+        for event in [
+            zode_core::run_event::RunEvent::Error {
+                code: code.to_string(),
+                message: message.to_string(),
+            },
+            zode_core::run_event::RunEvent::RunCompleted {
+                status: zode_core::run_event::RunStatus::Failed,
+                stop_reason: Some("startup_error".into()),
+                partial: false,
+            },
+        ] {
+            println!(
+                "{}",
+                serde_json::to_string(&context.envelope(event)).unwrap_or_default()
+            );
         }
+    } else {
+        eprintln!("zode: {message}");
     }
 }
 
 /// Today's date as YYYY-MM-DD (UTC) for the system prompt's env block.
 fn today_date() -> String {
     time::OffsetDateTime::now_utc().date().to_string()
-}
-
-/// Resolve which session `--resume`/`--continue` targets, if any. Done BEFORE
-/// engine assembly so the engine can be built in the session's own cwd.
-fn resolve_resume_target(args: &Args) -> Option<SessionMeta> {
-    let requested = args.resume.as_deref();
-    if requested.is_none() && !args.continue_ {
-        return None;
-    }
-    let index = match SessionIndex::load() {
-        Ok(index) => index,
-        Err(error) => {
-            eprintln!("zode: could not load or repair session index: {error}");
-            return None;
-        }
-    };
-    if let Some(prefix) = requested {
-        let target = index.find_prefix(prefix).cloned();
-        if target.is_none() {
-            eprintln!("zode: session not found: {prefix}");
-        }
-        target
-    } else {
-        index.latest().cloned()
-    }
-}
-
-/// The session's recorded cwd, but only if that directory still exists (else
-/// the caller falls back to the launch cwd).
-fn resume_dir(meta: &Option<SessionMeta>) -> Option<PathBuf> {
-    meta.as_ref().and_then(|m| {
-        let p = PathBuf::from(&m.cwd);
-        p.is_dir().then_some(p)
-    })
 }
 
 /// Derive the engine used for the initial TUI tab without mutating the clean
@@ -442,31 +631,6 @@ fn tui_engine_template(template: &EngineTemplate, meta: Option<&SessionMeta>) ->
             .with_tool_access(zode_core::ToolAccessMode::Prompt)
             .with_plan_mode(false),
         None => template.clone(),
-    }
-}
-
-/// Load the resolved session's store into `engine`. Returns the (possibly
-/// updated) engine and the resumed session id.
-async fn attach_session(
-    engine: ZodeEngine,
-    meta: Option<SessionMeta>,
-) -> (ZodeEngine, Option<String>) {
-    let Some(meta) = meta else {
-        return (engine, None);
-    };
-    match SessionIndex::session_path(&meta.id) {
-        Ok(path) => match Session::load(&path).await {
-            Ok(store) => {
-                let short: String = meta.id.chars().take(8).collect();
-                eprintln!("zode: resumed session {short} ({})", meta.title);
-                (engine.with_store(store), Some(meta.id))
-            }
-            Err(e) => {
-                eprintln!("zode: could not load session {}: {e}", meta.id);
-                (engine, None)
-            }
-        },
-        Err(_) => (engine, None),
     }
 }
 

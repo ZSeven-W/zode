@@ -7,6 +7,7 @@ members = [
   "crates/zode-app-server-protocol",
   "crates/zode-app-server-transport",
   "crates/zode-app-server",
+  "crates/zode-pty-harness",
   "sdk/rust",
 ]
 # vendor/agent is its own (agent-rs) workspace; keep it out of ours so its
@@ -16,7 +17,7 @@ exclude = ["vendor/agent", "vendor/noema"]
 [workspace.package]
 version = "0.1.0-beta.6"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/ZSeven-W/zode"
 authors = ["ZSeven-W <fini.yang@gmail.com>"]
@@ -49,6 +50,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 fs4 = "0.9"
+sha2 = "0.10"
+agent-client-protocol = { version = "1.2.0", features = ["unstable_session_fork"] }
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
 
 thiserror = "1"
 anyhow = "1"
@@ -64,6 +70,8 @@ tempfile = "3"
 serial_test = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 chromiumoxide = { version = "0.9", default-features = true }
+portable-pty = "0.9"
+vt100 = "0.15"
 
 [profile.release]
 lto = "thin"

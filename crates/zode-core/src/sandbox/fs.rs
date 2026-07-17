@@ -253,6 +253,132 @@ pub fn resolve_with_settings(
         .with_windows_tier(settings.windows_tier.as_deref()))
 }
 
+/// CLI-level sandbox overrides. Every entrypoint (TUI/headless `main`, ACP,
+/// app server) resolves its sandbox through [`resolve_with_overrides`] so a
+/// config knob (profiles, `windowsTier`, `restrictReads`, …) means the same
+/// thing on every surface; surfaces without flags pass `Default::default()`.
+#[derive(Debug, Clone, Default)]
+pub struct SandboxOverrides {
+    /// `--no-sandbox`: wins over everything.
+    pub disable: bool,
+    /// `--sandbox`: force-enable regardless of config.
+    pub force_enable: bool,
+    /// `--sandbox-read-only`.
+    pub read_only: bool,
+    /// `--sandbox-allow-network`.
+    pub allow_network: bool,
+    /// `--sandbox-strict-read`.
+    pub strict_read: bool,
+}
+
+/// Look up a named sandbox profile: the built-in set first, then the user's
+/// `sandbox.profiles` map.
+pub fn select_profile(
+    settings: &crate::config::SandboxSettings,
+    name: &str,
+) -> Result<crate::config::SandboxProfile, CoreError> {
+    use crate::config::SandboxProfile;
+    let builtin = match name {
+        "read-only" => Some(SandboxProfile {
+            enabled: Some(true),
+            mode: Some("read-only".into()),
+            network: Some(false),
+            ..Default::default()
+        }),
+        "workspace" => Some(SandboxProfile {
+            enabled: Some(true),
+            mode: Some("workspace-write".into()),
+            network: Some(false),
+            ..Default::default()
+        }),
+        "workspace-network" => Some(SandboxProfile {
+            enabled: Some(true),
+            mode: Some("workspace-write".into()),
+            network: Some(true),
+            ..Default::default()
+        }),
+        "unconfined" => Some(SandboxProfile {
+            enabled: Some(false),
+            ..Default::default()
+        }),
+        _ => None,
+    };
+    builtin
+        .or_else(|| settings.profiles.get(name).cloned())
+        .ok_or_else(|| CoreError::Other(format!("unknown sandbox profile: {name}")))
+}
+
+/// Overlay a profile onto base settings: every field the profile sets wins,
+/// absent fields keep the base value. One place instead of a hand-written
+/// per-field chain at each entrypoint.
+pub fn overlay_profile(
+    base: &crate::config::SandboxSettings,
+    profile: &crate::config::SandboxProfile,
+) -> crate::config::SandboxSettings {
+    let mut settings = base.clone();
+    settings.enabled = profile.enabled.or(base.enabled);
+    settings.mode = profile.mode.clone().or_else(|| base.mode.clone());
+    settings.network = profile.network.or(base.network);
+    if !profile.writable_roots.is_empty() {
+        settings.writable_roots = profile.writable_roots.clone();
+    }
+    settings.exclude_slash_tmp = profile.exclude_slash_tmp.or(base.exclude_slash_tmp);
+    settings.exclude_tmpdir_env_var = profile
+        .exclude_tmpdir_env_var
+        .or(base.exclude_tmpdir_env_var);
+    settings.restrict_reads = profile.restrict_reads.or(base.restrict_reads);
+    settings.windows_tier = profile
+        .windows_tier
+        .clone()
+        .or_else(|| base.windows_tier.clone());
+    settings
+}
+
+/// Resolve the effective sandbox from (already profile-overlaid) settings,
+/// CLI overrides, and any surface-specific extra writable roots. Applies
+/// `restrictReads` and `windowsTier`, so no surface can silently drop them.
+pub fn resolve_with_overrides(
+    settings: &crate::config::SandboxSettings,
+    cwd: &Path,
+    overrides: &SandboxOverrides,
+    extra_writable_roots: &[PathBuf],
+) -> Result<Option<super::SandboxConfig>, CoreError> {
+    let enabled = if overrides.disable {
+        false
+    } else if overrides.force_enable {
+        true
+    } else {
+        settings.enabled.unwrap_or(true)
+    };
+    let mode = if overrides.read_only {
+        super::SandboxMode::ReadOnly
+    } else {
+        settings
+            .mode
+            .as_deref()
+            .map(super::SandboxMode::parse)
+            .unwrap_or_default()
+    };
+    let allow_network = overrides.allow_network || settings.network.unwrap_or(false);
+    let mut roots: Vec<PathBuf> = settings.writable_roots.iter().map(PathBuf::from).collect();
+    roots.extend_from_slice(extra_writable_roots);
+    let restrict_reads = overrides.strict_read || settings.restrict_reads.unwrap_or(false);
+    Ok(resolve(
+        cwd,
+        enabled,
+        mode,
+        allow_network,
+        &roots,
+        settings.exclude_slash_tmp.unwrap_or(false),
+        settings.exclude_tmpdir_env_var.unwrap_or(false),
+    )?
+    .map(|config| {
+        config
+            .with_restrict_reads(restrict_reads)
+            .with_windows_tier(settings.windows_tier.as_deref())
+    }))
+}
+
 /// Whether the OS sandbox backend is actually present — a PURE function so the
 /// fail-closed decision is testable without the host's real backend. Linux
 /// needs `bwrap` (bubblewrap); macOS has Seatbelt built in.

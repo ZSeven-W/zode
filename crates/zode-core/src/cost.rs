@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use agent::cost::{CostTracker, ModelPriceCatalog};
+use agent::cost::{CostSnapshot, CostTracker, ModelPriceCatalog};
 use agent::stream::Event;
 use tokio::sync::Mutex;
 
@@ -181,6 +181,13 @@ impl CostState {
         } else {
             self.currency().format(snap.total_usd())
         }
+    }
+
+    /// Structured snapshot for non-human consumers such as headless JSON,
+    /// session journals, ACP, and telemetry. Human renderers should continue
+    /// to use [`Self::report`] / [`Self::sidebar_label`].
+    pub async fn snapshot(&self) -> CostSnapshot {
+        self.tracker.lock().await.snapshot()
     }
 }
 

@@ -19,7 +19,9 @@ use zode_core::browser::bridge::{
     TaskClientBody, TaskInbound, TaskInboundKind, TaskReceiver, TaskServerFrame,
 };
 use zode_core::images::ImageAttachment;
+use zode_core::run_event::{RunEventContext, TurnRecorder};
 use zode_core::session_meta::{SessionIndex, SessionMeta};
+use zode_core::sessions::SessionStore;
 use zode_core::{EngineTemplate, ToolAccessMode, ZodeEngine};
 
 use crate::event::{
@@ -563,14 +565,34 @@ fn spawn_prepared_extension_turn(
     let PreparedExtensionTurn {
         tab_id,
         turn_id,
+        task_id,
         input,
         mut content,
         images,
         vision,
         engine,
         abort,
-        ..
     } = prepared;
+    let abort_for_recorder = abort.clone();
+    // Side-panel turns run the same gated, mutating tools as every other
+    // surface, so they must checkpoint (for rewind) and journal too.
+    let mut recorder = TurnRecorder::new(
+        SessionStore::open_default().ok(),
+        RunEventContext::new(
+            task_id.clone(),
+            Some(format!("ext-{turn_id}")),
+            Some(Uuid::new_v4().simple().to_string()),
+        ),
+    );
+    recorder.start();
+    {
+        let count = engine.store.lock().map(|store| store.len()).unwrap_or(0);
+        if let Err(error) =
+            recorder.begin_checkpoint(&engine.checkpoints, engine.cwd.clone(), count)
+        {
+            tracing::warn!("extension checkpoint start failed: {error}");
+        }
+    }
     tokio::spawn(async move {
         let stream_result: Result<Box<dyn agent::stream::EventStream>, String> = async {
             if let Some(vision) = vision {
@@ -606,7 +628,16 @@ fn spawn_prepared_extension_turn(
                 .map_err(|error| error.to_string())
         }
         .await;
-        super::forward_agent_turn_stream(engine, stream_result, tab_id, turn_id, tx).await;
+        super::forward_agent_turn_stream(
+            engine,
+            stream_result,
+            Some(recorder),
+            Some(abort_for_recorder),
+            tab_id,
+            turn_id,
+            tx,
+        )
+        .await;
     });
 }
 

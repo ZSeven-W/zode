@@ -2,6 +2,7 @@
 //! one turn at a time. `QueryLoop::run` consumes `self`, so each turn
 //! rebuilds a loop from these Arcs (cheap — all fields are Arc).
 
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +13,7 @@ use agent::compact::AutoCompactState;
 use agent::file_cache::FileStateCache;
 use agent::hook::HookRunner;
 use agent::message::{ContentBlock, MessageStore};
-use agent::permission::{PermissionManager, PermissionMode, RuleSource};
+use agent::permission::{PermissionManager, PermissionMode};
 use agent::provider::Provider;
 use agent::query::QueryLoop;
 use agent::skills::SkillRegistry;
@@ -372,6 +373,7 @@ pub struct CarryState {
     pub verification: Option<crate::verification::VerificationState>,
     pub tool_trace: Option<crate::tool_trace::ToolTrace>,
     pub reminders: Option<crate::reminders::ReminderTracker>,
+    pub checkpoints: Option<crate::sessions::checkpoint::CheckpointTracker>,
 }
 
 impl ZodeEngine {
@@ -391,6 +393,7 @@ impl ZodeEngine {
             verification: Some(self.verification.clone()),
             tool_trace: Some(self.tool_trace.clone()),
             reminders: Some(self.reminders.clone()),
+            checkpoints: Some(self.checkpoints.clone()),
         }
     }
 }
@@ -543,6 +546,9 @@ pub struct ZodeEngine {
     pub tools: Arc<ToolRegistry>,
     pub permissions: Arc<PermissionManager>,
     pub hooks: Arc<HookRunner>,
+    /// Durable per-turn file checkpoint coordinator. Surfaces activate it with
+    /// their session/turn ids; the shared hook captures mutating tool inputs.
+    pub checkpoints: crate::sessions::checkpoint::CheckpointTracker,
     pub store: Arc<Mutex<MessageStore>>,
     pub file_cache: Arc<FileStateCache>,
     pub compact_state: Arc<Mutex<AutoCompactState>>,
@@ -738,6 +744,46 @@ impl ZodeEngine {
         .await
     }
 
+    /// Assemble an engine with a task-local tool allow/deny filter. This is
+    /// applied before approval wrapping and before the Task factory receives
+    /// its final registry, so sub-agents cannot recover tools denied to their
+    /// parent.
+    /// Assemble for a protocol host that supplies ephemeral MCP transports.
+    /// These are merged in memory over local discovery and are never persisted.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn assemble_with_tool_filter_and_mcp(
+        cfg: &ZodeConfig,
+        cwd: PathBuf,
+        gate: Arc<dyn ApprovalGate>,
+        sandbox: Option<crate::sandbox::SandboxConfig>,
+        date: &str,
+        question_tool: Option<Arc<dyn Tool>>,
+        op_consent: Option<Arc<dyn crate::openpencil::Consent>>,
+        plan_mode: bool,
+        browser: Option<Arc<BrowserSession>>,
+        tool_filter: Option<&crate::tool_filter::ToolFilter>,
+        mcp_config: Option<agent::mcp::McpConfig>,
+    ) -> Result<Self, CoreError> {
+        Self::assemble_with_carry_and_access(
+            cfg,
+            cfg.active_provider_key(),
+            cwd,
+            gate,
+            sandbox,
+            date,
+            question_tool,
+            op_consent,
+            plan_mode,
+            false,
+            browser,
+            None,
+            CarryState::default(),
+            tool_filter,
+            mcp_config,
+        )
+        .await
+    }
+
     /// Like [`assemble`] but reusing the caller-supplied long-lived session
     /// state (`carry`) instead of building fresh instances. Used by
     /// reassembly (model/provider/plugin/sandbox hot-swap) so the accumulated
@@ -774,6 +820,8 @@ impl ZodeEngine {
             browser,
             None,
             carry,
+            None,
+            None,
         )
         .await
     }
@@ -793,7 +841,15 @@ impl ZodeEngine {
         browser: Option<Arc<BrowserSession>>,
         browser_target_override: Option<BrowserTarget>,
         carry: CarryState,
+        tool_filter: Option<&crate::tool_filter::ToolFilter>,
+        explicit_mcp: Option<agent::mcp::McpConfig>,
     ) -> Result<Self, CoreError> {
+        let permission_rules = crate::permission_rules::config_rules(&cfg.permissions)?;
+        let rule_gate = Arc::new(crate::permission_rules::RuleApprovalGate::new(
+            gate,
+            permission_rules.clone(),
+        ));
+        let gate: Arc<dyn ApprovalGate> = rule_gate.clone();
         // Reuse the caller's session (all tabs share ONE browser process) or
         // build a fresh one — cheap: the managed backend only launches
         // chromium lazily, on the first `lease()`.
@@ -931,13 +987,21 @@ impl ZodeEngine {
         // skills-tree walk and LSP detection (disk) below — startup latency
         // becomes max(disk, connect) instead of their sum. The lifecycle is
         // awaited just before tools are wrapped, where its tools register.
+        let explicit_mcp_names = explicit_mcp
+            .as_ref()
+            .map(|config| config.servers.keys().cloned().collect::<HashSet<_>>())
+            .unwrap_or_default();
+        let merged_mcp =
+            crate::mcp::merge_config(crate::mcp::discover_mcp_config(&cwd), explicit_mcp);
         let mut all_mcp_servers: Vec<String> = Vec::new();
         let mcp_connect: Option<tokio::task::JoinHandle<Arc<agent::mcp::Lifecycle>>> =
-            match crate::mcp::discover_mcp_config(&cwd) {
+            match merged_mcp {
                 Some(mut config) => {
                     all_mcp_servers = config.servers.keys().cloned().collect();
                     all_mcp_servers.sort();
-                    config.servers.retain(|name, _| plugins.mcp_enabled(name));
+                    config.servers.retain(|name, _| {
+                        explicit_mcp_names.contains(name) || plugins.mcp_enabled(name)
+                    });
                     // Plan mode filters MCP tools out anyway → skip the connect
                     // (process spawn / network).
                     if plan_mode || config.servers.is_empty() {
@@ -1122,6 +1186,7 @@ impl ZodeEngine {
             )))
         });
         let bg_shells_meta = carry.bg_shells_meta.clone().unwrap_or_default();
+        let checkpoints = carry.checkpoints.clone().unwrap_or_default();
         let mut hook_runner = HookRunner::new();
         // EditHistoryHook resolves paths via the same policy the fs tools use.
         hook_runner.register(Arc::new(EditHistoryHook::new(
@@ -1129,6 +1194,7 @@ impl ZodeEngine {
             policy.clone(),
         )));
         hook_runner.register(Arc::new(BgShellHook::new(bg_shells_meta.clone())));
+        hook_runner.register(Arc::new(checkpoints.clone()));
         let recent_files = carry.recent_files.clone().unwrap_or_default();
         let restore_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
         hook_runner.register(Arc::new(crate::compact_memory::compact_tracker_hook(
@@ -1151,8 +1217,11 @@ impl ZodeEngine {
         // `ask` is handled entirely by the gate (master §4.6①). Built here so
         // the Task sub-agent factory can share it.
         let mut pm = PermissionManager::new().with_mode(PermissionMode::Bypass);
-        for tool in &cfg.permissions.deny {
-            pm = pm.deny(RuleSource::User, tool.clone());
+        for rule in permission_rules
+            .iter()
+            .filter(|rule| rule.behavior == agent::permission::PermissionBehavior::Deny)
+        {
+            pm = pm.add_rule(rule.clone());
         }
         let permissions = Arc::new(pm);
 
@@ -1203,6 +1272,16 @@ impl ZodeEngine {
         // tools are always-on and pass through).
         let base = filter_enabled_tools(base, &plugins);
 
+        // Task-local Headless/ACP filtering. This runs after dynamic MCP/LSP
+        // discovery so exact patterns are validated against the real registry,
+        // and before the Task tool's late-bound parent registry is populated.
+        // ToolSearch is registered later, so it validates as a virtual name
+        // and its registration below honors the filter.
+        let base = match tool_filter {
+            Some(filter) => filter.apply_with_virtual(base, &["ToolSearch"])?,
+            None => base,
+        };
+
         // Plan mode: keep only read-only tools so the agent can research but
         // not change anything until the user approves the plan and exits.
         let base = if plan_mode || read_only_tools {
@@ -1241,12 +1320,34 @@ impl ZodeEngine {
         for name in &desktop_mutating_names {
             mutating_allow.push(name.clone());
         }
-        let mut gated = wrap_mutating_tools(base, &gate, &mutating_allow, &cfg.permissions.ask);
+        let mut force_ask = cfg.permissions.ask.clone();
+        for rule in permission_rules
+            .iter()
+            .filter(|rule| rule.behavior == agent::permission::PermissionBehavior::Ask)
+        {
+            if !force_ask.contains(&rule.tool_name) {
+                force_ask.push(rule.tool_name.clone());
+            }
+        }
+        // A tool force-gated ONLY by scoped ask rules keeps its base
+        // disposition for non-matching inputs: if it would run ungated
+        // (read-only or user-allow-listed), unmatched calls auto-allow instead
+        // of falling through to the interactive prompt / dont-ask DenyGate.
+        // Use the USER allow list, not `mutating_allow` — the latter is padded
+        // with the browser tools purely to avoid double-gating, but those tools
+        // are still force-gated via `browser_gated`, so they must keep prompting.
+        let scoped_ask = crate::permission_rules::scoped_ask_tools(&permission_rules);
+        let pass_unmatched = compute_pass_unmatched(&base, &scoped_ask, &cfg.permissions.allow);
+        rule_gate.set_pass_unmatched(pass_unmatched);
+        let mut gated = wrap_mutating_tools(base, &gate, &mutating_allow, &force_ask);
 
         // 3. ToolSearch over the full set (candidates = snapshot of the
         //    gated registry, taken before ToolSearch itself is added).
-        let candidates = Arc::new(gated.clone());
-        gated.register(Arc::new(ToolSearchTool::new(candidates)));
+        //    A tool filter that excludes ToolSearch skips it entirely.
+        if tool_filter.is_none_or(|filter| filter.allows("ToolSearch")) {
+            let candidates = Arc::new(gated.clone());
+            gated.register(Arc::new(ToolSearchTool::new(candidates)));
+        }
 
         let tools = Arc::new(gated);
         // Late-bind the child sub-agent's tool set to the final gated+sandboxed
@@ -1317,6 +1418,7 @@ impl ZodeEngine {
             tools,
             permissions,
             hooks,
+            checkpoints,
             store: Arc::new(Mutex::new(MessageStore::new())),
             file_cache,
             // Carry compaction latches (no-progress / failure breaker) so a
@@ -2054,6 +2156,9 @@ pub struct EngineTemplate {
     /// Restrict the registry to read-only tools without enabling plan mode or
     /// changing the system prompt.
     read_only_tools: bool,
+    /// Optional task-local allow/deny filter used by headless/ACP clients.
+    /// Kept on the template so rebuilds cannot silently restore denied tools.
+    tool_filter: Option<crate::tool_filter::ToolFilter>,
     sandbox: Option<crate::sandbox::SandboxConfig>,
     date: String,
     /// Process-wide browser session, shared by every tab assembled from this
@@ -2092,6 +2197,7 @@ impl EngineTemplate {
             yolo,
             plan_mode: false,
             read_only_tools: false,
+            tool_filter: None,
             sandbox,
             date,
             browser,
@@ -2208,6 +2314,8 @@ impl EngineTemplate {
             Some(self.browser.clone()),
             self.browser_target_override.clone(),
             carry,
+            self.tool_filter.as_ref(),
+            None,
         )
         .await
     }
@@ -2350,6 +2458,14 @@ impl EngineTemplate {
         t.read_only_tools = matches!(access, ToolAccessMode::ReadOnly);
         t.yolo = matches!(access, ToolAccessMode::Auto);
         t
+    }
+
+    /// Clone with a task-local tool selection. The filter survives provider,
+    /// model, sandbox, and plugin reassembly.
+    pub fn with_tool_filter(&self, filter: Option<crate::tool_filter::ToolFilter>) -> Self {
+        let mut template = self.clone();
+        template.tool_filter = filter;
+        template
     }
 
     /// Clone with plan mode toggled (for `/plan`). Read-only tools only + a
@@ -2772,6 +2888,14 @@ impl EngineTemplate {
         section("allow", &p.allow);
         section("ask", &p.ask);
         section("deny", &p.deny);
+        for rule in &p.rules {
+            out.push(format!(
+                "{:?}: {} {}",
+                rule.behavior,
+                rule.tool,
+                serde_json::to_string(&rule.matcher).unwrap_or_default()
+            ));
+        }
         out
     }
 
@@ -2815,6 +2939,28 @@ fn filter_read_only(src: ToolRegistry) -> ToolRegistry {
         }
     }
     out
+}
+
+/// Tools whose unmatched calls should auto-allow: those with a scoped `ask`
+/// rule that would otherwise run ungated — read-only, or in the user's real
+/// `permissions.allow`. `user_allow` must be `cfg.permissions.allow`, NOT the
+/// browser-padded `mutating_allow`: browser tools are force-gated and must
+/// keep prompting even when a scoped ask rule is added.
+fn compute_pass_unmatched(
+    tools: &ToolRegistry,
+    scoped_ask: &std::collections::BTreeSet<String>,
+    user_allow: &[String],
+) -> std::collections::BTreeSet<String> {
+    tools
+        .list()
+        .into_iter()
+        .filter(|tool| {
+            scoped_ask.contains(tool.name())
+                && (matches!(tool.safety_class(), SafetyClass::ReadOnly)
+                    || user_allow.iter().any(|allow| allow == tool.name()))
+        })
+        .map(|tool| tool.name().to_string())
+        .collect()
 }
 
 /// Re-register every tool, wrapping mutating/destructive ones in a
@@ -2893,6 +3039,57 @@ mod tests {
         ) -> Result<serde_json::Value, agent::error::AgentError> {
             Ok(serde_json::json!({"ran": true}))
         }
+    }
+
+    #[derive(Debug)]
+    struct RwTool(&'static str);
+    #[async_trait::async_trait]
+    impl Tool for RwTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "mutating test tool"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn safety_class(&self) -> SafetyClass {
+            SafetyClass::Mutating
+        }
+        async fn call(
+            &self,
+            _ctx: &agent::tool::ToolUseContext,
+            _input: serde_json::Value,
+        ) -> Result<serde_json::Value, agent::error::AgentError> {
+            Ok(serde_json::json!({"ran": true}))
+        }
+    }
+
+    #[test]
+    fn pass_unmatched_excludes_force_gated_mutating_tools() {
+        // A mutating tool (e.g. browser_eval) that is force-gated but appears
+        // in the double-gate marker list must NOT be treated as "runs
+        // ungated": a scoped ask rule on it must keep prompting non-matching
+        // calls, never auto-allow them.
+        let mut src = ToolRegistry::new();
+        src.register(Arc::new(RwTool("browser_eval")));
+        src.register(Arc::new(RoTool("FileRead")));
+        let scoped_ask =
+            std::collections::BTreeSet::from(["browser_eval".to_string(), "FileRead".to_string()]);
+        // user_allow is the real permissions.allow — browser_eval is NOT in it
+        // (it only lives in the browser double-gate marker list).
+        let pass = compute_pass_unmatched(&src, &scoped_ask, &[]);
+        assert!(
+            !pass.contains("browser_eval"),
+            "force-gated mutating tool must not auto-allow unmatched calls"
+        );
+        // A read-only tool with a scoped ask rule still auto-allows unmatched.
+        assert!(pass.contains("FileRead"));
+        // A genuinely allow-listed mutating tool does auto-allow (it would run
+        // unprompted anyway).
+        let pass_allowed = compute_pass_unmatched(&src, &scoped_ask, &["browser_eval".to_string()]);
+        assert!(pass_allowed.contains("browser_eval"));
     }
 
     #[tokio::test]
@@ -3103,6 +3300,7 @@ mod tests {
             tools: Arc::new(ToolRegistry::new()),
             permissions: Arc::new(PermissionManager::new().with_mode(PermissionMode::Bypass)),
             hooks: Arc::new(HookRunner::new()),
+            checkpoints: crate::sessions::checkpoint::CheckpointTracker::default(),
             store: Arc::new(Mutex::new(MessageStore::new())),
             browser_target_override: None,
             file_cache: Arc::new(FileStateCache::new(
@@ -4475,8 +4673,9 @@ mod tests {
         )
         .await
         .unwrap();
-        // EditHistory + BgShell + compact-tracker + verification + tool-trace + reminders.
-        assert_eq!(eng.hooks.len(), 6);
+        // EditHistory + checkpoint + BgShell + compact-tracker + verification
+        // + tool-trace + reminders.
+        assert_eq!(eng.hooks.len(), 7);
         assert!(eng.undo().await.is_err()); // empty history
     }
 

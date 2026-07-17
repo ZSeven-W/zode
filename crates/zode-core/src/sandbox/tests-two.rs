@@ -480,3 +480,68 @@
             assert_eq!(cfg.cwd, real);
         }
     }
+
+#[test]
+fn shared_resolver_applies_profile_overlay_overrides_and_extras() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = crate::config::SandboxSettings {
+        enabled: Some(true),
+        network: Some(false),
+        windows_tier: Some("tier2".into()),
+        ..Default::default()
+    };
+    settings.profiles.insert(
+        "custom".into(),
+        crate::config::SandboxProfile {
+            network: Some(true),
+            ..Default::default()
+        },
+    );
+
+    // Builtin + custom profiles resolve; unknown names error.
+    assert!(select_profile(&settings, "read-only").is_ok());
+    assert!(select_profile(&settings, "unconfined").is_ok());
+    assert!(select_profile(&settings, "custom").is_ok());
+    assert!(select_profile(&settings, "nope").is_err());
+
+    // Profile fields win over the base settings on overlay.
+    let overlaid = overlay_profile(
+        &settings,
+        &crate::config::SandboxProfile {
+            mode: Some("read-only".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(overlaid.mode.as_deref(), Some("read-only"));
+    assert_eq!(overlaid.network, Some(false)); // base preserved
+
+    // disable beats everything.
+    let disabled = resolve_with_overrides(
+        &settings,
+        dir.path(),
+        &SandboxOverrides {
+            disable: true,
+            ..Default::default()
+        },
+        &[],
+    )
+    .unwrap();
+    assert!(disabled.is_none());
+
+    // read_only + strict_read overrides and extra roots land in the config.
+    let extra = tempfile::tempdir().unwrap();
+    let config = resolve_with_overrides(
+        &settings,
+        dir.path(),
+        &SandboxOverrides {
+            read_only: true,
+            strict_read: true,
+            ..Default::default()
+        },
+        &[extra.path().to_path_buf()],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(config.mode(), SandboxMode::ReadOnly);
+    assert!(config.restrict_reads());
+}

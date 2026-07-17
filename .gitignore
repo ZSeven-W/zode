@@ -12,6 +12,7 @@
 
 # Docs (local working artifacts — plans/specs live on disk, not pushed)
 docs/*
+!docs/grok-build-parity-plan.md
 !docs/readme/
 !docs/readme/**
 

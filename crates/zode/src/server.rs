@@ -1,11 +1,10 @@
 use std::io;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::args::ServerArgs;
 use zode_app_server::runtime::ServerRuntimeOptions;
 use zode_core::config::ConfigManager;
-use zode_core::sandbox::SandboxMode;
 
 pub async fn run(args: &ServerArgs, cwd: &Path) -> i32 {
     if args.listen == "off" {
@@ -93,30 +92,15 @@ async fn bootstrap(cwd: &Path) -> io::Result<ServerRuntimeOptions> {
     cfg.resolve_provider_from_map();
     cfg.apply_env_fallbacks();
 
-    let enabled = cfg.sandbox.enabled.unwrap_or(true);
-    let mode = cfg
-        .sandbox
-        .mode
-        .as_deref()
-        .map(SandboxMode::parse)
-        .unwrap_or_default();
-    let roots: Vec<PathBuf> = cfg
-        .sandbox
-        .writable_roots
-        .iter()
-        .map(PathBuf::from)
-        .collect();
-    let sandbox = zode_core::sandbox::resolve(
+    // Shared resolver: the same config (windowsTier, restrictReads, …) must
+    // yield the same sandbox here as in the CLI/TUI entrypoint.
+    let sandbox = zode_core::sandbox::resolve_with_overrides(
+        &cfg.sandbox,
         cwd,
-        enabled,
-        mode,
-        cfg.sandbox.network.unwrap_or(false),
-        &roots,
-        cfg.sandbox.exclude_slash_tmp.unwrap_or(false),
-        cfg.sandbox.exclude_tmpdir_env_var.unwrap_or(false),
+        &zode_core::sandbox::SandboxOverrides::default(),
+        &[],
     )
-    .map_err(io::Error::other)?
-    .map(|sandbox| sandbox.with_restrict_reads(cfg.sandbox.restrict_reads.unwrap_or(false)));
+    .map_err(io::Error::other)?;
     if let Some(sandbox) = &sandbox {
         sandbox.verify().await.map_err(io::Error::other)?;
     }
