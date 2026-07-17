@@ -336,6 +336,7 @@ jobs:
               cp dist-app/zode-desktop-*.AppImage dist-app/zode-desktop-*.tar.gz release-assets/
               ;;
           esac
+          cp dist-app/zode-desktop-*.sha256 release-assets/
       - name: Publish desktop assets to release
         uses: softprops/action-gh-release@v2
         with:

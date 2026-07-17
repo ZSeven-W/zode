@@ -64,6 +64,7 @@ test_macos_dry_run_contract() {
   assert_contains "$output" "signing=ad-hoc"
   assert_contains "$output" "artifact=$TMP/macos/Zode.app"
   assert_contains "$output" "artifact=$TMP/macos/zode-desktop-1.2.3-beta.4-aarch64-apple-darwin.tar.gz"
+  assert_contains "$output" "checksum=$TMP/macos/zode-desktop-1.2.3-beta.4-aarch64-apple-darwin.tar.gz.sha256"
 }
 
 test_windows_dry_run_contract() {
@@ -76,6 +77,8 @@ test_windows_dry_run_contract() {
   assert_contains "$output" "signing=unsigned"
   assert_contains "$output" "artifact=$TMP/windows/zode-desktop-9.8.7-rc.2-x86_64-pc-windows-msvc.zip"
   assert_contains "$output" "artifact=$TMP/windows/zode-desktop-9.8.7-rc.2-x86_64-pc-windows-msvc.msi"
+  assert_contains "$output" "checksum=$TMP/windows/zode-desktop-9.8.7-rc.2-x86_64-pc-windows-msvc.zip.sha256"
+  assert_contains "$output" "checksum=$TMP/windows/zode-desktop-9.8.7-rc.2-x86_64-pc-windows-msvc.msi.sha256"
 }
 
 test_windows_version_limits() {
@@ -92,6 +95,8 @@ test_linux_dry_run_contract() {
   assert_contains "$output" "linuxdeploy_sha256=620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff"
   assert_contains "$output" "artifact=$TMP/linux/zode-desktop-2.0.1-aarch64-unknown-linux-gnu.AppImage"
   assert_contains "$output" "artifact=$TMP/linux/zode-desktop-2.0.1-aarch64-unknown-linux-gnu.tar.gz"
+  assert_contains "$output" "checksum=$TMP/linux/zode-desktop-2.0.1-aarch64-unknown-linux-gnu.AppImage.sha256"
+  assert_contains "$output" "checksum=$TMP/linux/zode-desktop-2.0.1-aarch64-unknown-linux-gnu.tar.gz.sha256"
 }
 
 test_missing_platform_tool_is_explicit() {
@@ -116,6 +121,10 @@ test_packaging_assets_are_complete() {
     || fail "WiX template does not expose the stable UpgradeCode"
   grep -Fq 'Icon=dev.zseven.zode' "$ROOT/packaging/linux/dev.zseven.zode.desktop" \
     || fail "desktop entry does not reference the packaged icon"
+  grep -Fq 'Get-FileHash' "$ROOT/packaging/windows/UNSIGNED.txt" \
+    || fail "Windows unsigned notice does not provide an executable checksum command"
+  grep -Fq '.sha256' "$ROOT/packaging/windows/UNSIGNED.txt" \
+    || fail "Windows unsigned notice does not name the published checksum sidecars"
 }
 
 test_windows_executable_is_gui_subsystem() {
@@ -148,6 +157,13 @@ test_macos_native_bundle_path() {
   [[ -s "$out/Zode.app/Contents/Resources/zode-app.dependencies.txt" ]] \
     || fail "dependency audit is missing"
   [[ -s "$archive" ]] || fail "macOS archive is missing"
+  [[ -s "$archive.sha256" ]] || fail "macOS archive checksum is missing"
+  (
+    cd "$out"
+    shasum -a 256 -c "$(basename "$archive").sha256"
+  ) || fail "macOS archive checksum does not verify"
+  grep -Eq '^[0-9a-f]{64}  zode-desktop-3\.4\.5-beta\.6-aarch64-apple-darwin\.tar\.gz$' \
+    "$archive.sha256" || fail "macOS checksum does not use the portable sidecar format"
   grep -Fq '<string>3.4.5</string>' "$out/Zode.app/Contents/Info.plist" \
     || fail "normalized bundle version is missing"
   grep -Fq '<string>3.4.5-beta.6</string>' "$out/Zode.app/Contents/Info.plist" \

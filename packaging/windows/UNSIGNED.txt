@@ -1,6 +1,17 @@
 Zode Windows release artifacts are unsigned.
 
 This portable archive and its companion MSI do not carry an Authenticode
-signature. Verify release checksums from the official ZSeven-W/zode release
-before running them. Identity-backed signing can be added later as a separate,
-auditable release stage.
+signature. Download each artifact together with its adjacent `.sha256` file
+from the official ZSeven-W/zode release. Then verify every downloaded Windows
+artifact from PowerShell before running it:
+
+  Get-ChildItem -Path "zode-desktop-*.msi", "zode-desktop-*.zip" -File | ForEach-Object {
+    $ChecksumFile = "$($_.FullName).sha256"
+    $Expected = ((Get-Content -LiteralPath $ChecksumFile -Raw) -split '\s+')[0].ToLower()
+    $Actual = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower()
+    if ($Actual -ne $Expected) { throw "SHA-256 mismatch: $($_.Name)" }
+    Write-Host "SHA-256 verified: $($_.Name)"
+  }
+
+Identity-backed signing can be added later as a separate, auditable release
+stage. A matching checksum proves file integrity, not publisher identity.

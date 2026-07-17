@@ -55,6 +55,40 @@ refuse_existing() {
   [[ ! -e "$path" ]] || die "refusing to overwrite existing artifact: $path"
 }
 
+calculate_sha256() {
+  local file="$1"
+  local digest windows_file
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(sha256sum "$file" | awk '{ print $1 }')"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(shasum -a 256 "$file" | awk '{ print $1 }')"
+  elif command -v powershell.exe >/dev/null 2>&1; then
+    windows_file="$file"
+    if command -v cygpath >/dev/null 2>&1; then
+      windows_file="$(cygpath -w "$file")"
+    fi
+    digest="$(FILE_TO_HASH="$windows_file" powershell.exe -NoProfile -NonInteractive -Command \
+      '(Get-FileHash -LiteralPath $env:FILE_TO_HASH -Algorithm SHA256).Hash')"
+  else
+    die "required SHA-256 command not found: sha256sum, shasum, or powershell.exe"
+  fi
+  digest="$(printf '%s' "$digest" | tr -d '\r\n' | tr '[:upper:]' '[:lower:]')"
+  if ! printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$'; then
+    die "invalid SHA-256 result for artifact: $file"
+  fi
+  printf '%s\n' "$digest"
+}
+
+write_sha256() {
+  local artifact="$1"
+  local sidecar="$artifact.sha256"
+  local digest
+  [[ -s "$artifact" ]] || die "cannot checksum missing artifact: $artifact"
+  refuse_existing "$sidecar"
+  digest="$(calculate_sha256 "$artifact")"
+  printf '%s  %s\n' "$digest" "$(basename "$artifact")" >"$sidecar"
+}
+
 TARGET=""
 OUT=""
 VERSION_INPUT=""
@@ -152,6 +186,7 @@ print_plan() {
       echo "signing=ad-hoc"
       echo "artifact=$OUT/Zode.app"
       echo "artifact=$OUT/$PREFIX.tar.gz"
+      echo "checksum=$OUT/$PREFIX.tar.gz.sha256"
       ;;
     windows)
       echo "msi_version=$MSI_VERSION"
@@ -159,6 +194,8 @@ print_plan() {
       echo "signing=unsigned"
       echo "artifact=$OUT/$PREFIX.zip"
       echo "artifact=$OUT/$PREFIX.msi"
+      echo "checksum=$OUT/$PREFIX.zip.sha256"
+      echo "checksum=$OUT/$PREFIX.msi.sha256"
       ;;
     linux)
       local sha256
@@ -171,6 +208,8 @@ print_plan() {
       echo "linuxdeploy_sha256=$sha256"
       echo "artifact=$OUT/$PREFIX.AppImage"
       echo "artifact=$OUT/$PREFIX.tar.gz"
+      echo "checksum=$OUT/$PREFIX.AppImage.sha256"
+      echo "checksum=$OUT/$PREFIX.tar.gz.sha256"
       ;;
   esac
 }
@@ -315,6 +354,7 @@ package_macos() {
     || die "ad-hoc codesign verification failed for $app"
   COPYFILE_DISABLE=1 tar -C "$OUT" -czf "$archive" Zode.app
   [[ -s "$archive" ]] || die "macOS archive was not created: $archive"
+  write_sha256 "$archive"
 }
 
 package_windows() {
@@ -371,6 +411,8 @@ package_windows() {
     || die "WiX v4 failed to create MSI"
   [[ -s "$zip_path" ]] || die "Windows portable zip was not created: $zip_path"
   [[ -s "$msi_path" ]] || die "Windows MSI was not created: $msi_path"
+  write_sha256 "$zip_path"
+  write_sha256 "$msi_path"
   echo "Windows artifacts are unsigned: $zip_path, $msi_path"
 }
 
@@ -467,6 +509,8 @@ package_linux() {
   [[ -s "$appimage" ]] || die "linuxdeploy did not create expected AppImage: $appimage"
   tar -C "$OUT" -czf "$archive" "$PREFIX-portable"
   [[ -s "$archive" ]] || die "Linux portable archive was not created: $archive"
+  write_sha256 "$appimage"
+  write_sha256 "$archive"
 }
 
 mkdir -p "$OUT"

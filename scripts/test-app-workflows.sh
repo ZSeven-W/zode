@@ -16,6 +16,15 @@ require_text() {
   grep -Fq -- "$text" "$file" || fail "$file is missing: $text"
 }
 
+require_count_at_least() {
+  local file="$1"
+  local text="$2"
+  local minimum="$3"
+  local count
+  count="$(grep -Fc -- "$text" "$file" || true)"
+  ((count >= minimum)) || fail "$file needs at least $minimum occurrences of: $text"
+}
+
 require_text "$CI" "workflow_dispatch:"
 require_text "$CI" "update_snapshots:"
 require_text "$CI" "cargo test --locked -p zode-app --test snapshots"
@@ -24,12 +33,17 @@ require_text "$CI" "inputs.update_snapshots && '1' || '0'"
 require_text "$CI" "crates/zode-app/tests/snapshots/"
 require_text "$CI" "aarch64-apple-ios"
 require_text "$CI" "aarch64-linux-android"
+require_text "$CI" "./scripts/test-app-workflows.sh"
+require_text "$CI" "./scripts/test-build-app-release.sh"
+require_text "$CI" "verify native macOS packaging contract"
+require_count_at_least "$CI" "./scripts/test-build-app-release.sh" 2
 for runner in ubuntu-24.04 macos-15 windows-latest; do
   require_text "$CI" "$runner"
 done
 
 require_text "$RELEASE" "build-app-release.sh"
 require_text "$RELEASE" "zode-desktop-"
+require_text "$RELEASE" "zode-desktop-*.sha256"
 for target in aarch64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu; do
   require_text "$RELEASE" "$target"
 done

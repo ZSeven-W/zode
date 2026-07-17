@@ -21,6 +21,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: verify desktop workflow and packaging contracts
+        run: |
+          ./scripts/test-app-workflows.sh
+          ./scripts/test-build-app-release.sh
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
@@ -59,6 +63,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: verify arm64 runner
         run: test "$(uname -m)" = arm64
+      - name: verify native macOS packaging contract
+        run: ./scripts/test-build-app-release.sh
       - name: test desktop app
         run: cargo test --locked -p zode-app --all-targets
       - name: build desktop app

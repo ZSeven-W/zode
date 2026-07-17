@@ -6,6 +6,14 @@
 - Windows: a portable `.zip` and WiX v4 `.msi`; both are explicitly unsigned.
 - Linux: a `linuxdeploy` AppImage plus a portable `.tar.gz`.
 
+Every final archive, installer, and AppImage has an adjacent
+`<artifact>.sha256` file. Each sidecar contains lowercase SHA-256 followed by
+two spaces and the artifact basename, so it can be checked with
+`sha256sum -c` on Linux or `shasum -a 256 -c` on macOS. The release workflow
+publishes artifacts and sidecars together. Windows packages remain unsigned;
+their bundled `UNSIGNED.txt` includes a PowerShell verification command and
+explains that checksums establish integrity rather than publisher identity.
+
 Release artifact names use the `zode-desktop-<version>-<target>` prefix. The
 application bundle stays `Zode.app`, and the executable stays `zode-app` (or
 `zode-app.exe` on Windows).
