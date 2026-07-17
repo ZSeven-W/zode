@@ -28,7 +28,13 @@ pub enum ReassembleEffect {
         refresh_dialog: bool,
     },
     Connect {
+        /// The `providers`-map group key (e.g. "qwen") — the name the status
+        /// bar and `/vision` refer to, NOT the connect dialog's display name
+        /// (which may be a model id when the user typed one).
         provider_name: String,
+        /// The connected model id, when the connection pinned one — shown
+        /// separately so the flash never labels a model as a provider.
+        model: Option<String>,
     },
     Effort {
         notify: ReassembleNotify,

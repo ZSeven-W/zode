@@ -1587,14 +1587,23 @@ impl TuiApp {
                     self.agents_dialog = Some(AgentsDialog::new(self.agent_rows()));
                 }
             }
-            ReassembleEffect::Connect { provider_name } => {
-                self.toast = Some(Toast::info(format!(
-                    "{} -> {provider_name}",
-                    crate::tr("provider")
-                )));
-                self.tabs[tab_idx]
-                    .chat
-                    .push_system(&format!("{} -> {provider_name}", crate::tr("provider")));
+            ReassembleEffect::Connect {
+                provider_name,
+                model,
+            } => {
+                // Provider and model are labeled separately: the dialog's
+                // display name may BE a model id, and flashing that under a
+                // "provider" label reads as the wrong state.
+                let message = match &model {
+                    Some(model) => format!(
+                        "{} -> {provider_name} · {} -> {model}",
+                        crate::tr("provider"),
+                        crate::tr("model")
+                    ),
+                    None => format!("{} -> {provider_name}", crate::tr("provider")),
+                };
+                self.toast = Some(Toast::info(message.clone()));
+                self.tabs[tab_idx].chat.push_system(&message);
             }
             ReassembleEffect::Effort { notify } => {
                 self.apply_reassemble_notify(tab_idx, notify);
@@ -4840,14 +4849,25 @@ impl TuiApp {
             return;
         }
 
-        let provider_name = action.name;
+        // Flash the group key the rest of the UI calls this provider (status
+        // bar, /vision) — action.name may be a model id when one was typed —
+        // and the pinned model separately.
+        let provider_name = action.provider_key.clone();
+        let model = action.provider.model.clone();
         // Carry the just-saved providers map onto the template so the status
         // bar's `model(provider)` label resolves the freshly connected group.
         let t = self
             .template
             .with_provider_config_for_key(provider, provider_key)
             .with_providers_map(cfg.providers.clone());
-        self.start_reassemble_active(t, ReassembleEffect::Connect { provider_name }, agent_tx);
+        self.start_reassemble_active(
+            t,
+            ReassembleEffect::Connect {
+                provider_name,
+                model,
+            },
+            agent_tx,
+        );
     }
 
     /// Drive the plugin picker. Space/Enter flips the selected plugin in place;
