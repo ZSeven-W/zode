@@ -61,6 +61,7 @@ const ARTIFACTS_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
     GeometryExpectation::new(LayoutRect::Transcript, 652.0, 70.0, 736.0, 772.0),
     GeometryExpectation::new(LayoutRect::Composer, 652.0, 870.0, 736.0, 196.0),
+    GeometryExpectation::new(LayoutRect::ContextPanel, 1484.0, 62.0, 300.0, 1002.0),
 ];
 
 const ENVIRONMENT_GEOMETRY: &[GeometryExpectation] = &[
@@ -188,6 +189,11 @@ fn assert_scene_landmarks(scene: &ReferenceScene) {
             assert!(scene.block_count() >= 12);
             assert!(scene.visual_kinds().len() >= 5);
             assert!(!scene.state.composer.attachments.is_empty());
+            assert_eq!(
+                scene.state.presentation.secondary_pane,
+                Some(SecondaryPane::Environment)
+            );
+            assert_eq!(snapshot.layout.context_panel.width(), 300.0);
             assert!(scene.state.composer.attachments.iter().all(|attachment| {
                 !attachment.media_type.starts_with("data:")
                     && !attachment.display_name.contains("base64")
