@@ -4,7 +4,9 @@ use zode_app_model::{
     demo_state, AppCommand, LoadState, SessionPresentationState, SettingsCategory, ShellPage,
     ShellRoute,
 };
-use zode_app_ui::{accessibility_tree, Insets, SettingsPanel, WorkspaceLayout, WorkspaceSnapshot};
+use zode_app_ui::{
+    accessibility_tree, Insets, RectExt, SettingsPanel, WorkspaceLayout, WorkspaceSnapshot,
+};
 use zode_node_protocol::{
     NodeId as AgentNodeId, RuntimeOptions, SandboxMode, SessionLocator, TurnId,
 };
@@ -30,6 +32,56 @@ fn settings_general_exposes_the_reference_information_architecture() {
     assert!(layout.general.general_rows.iter().all(|row| {
         (center_y(row.label_rect) - center_y(row.value_rect)).abs() <= f32::EPSILON
     }));
+}
+
+#[test]
+fn settings_general_matches_the_reference_vertical_rhythm() {
+    let mut state = demo_state();
+    state.shell.page = ShellPage::Settings;
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::General);
+    let shell = WorkspaceLayout::compute_presentation(
+        1_800.0,
+        1_080.0,
+        Insets::ZERO,
+        state.presentation.route,
+        None,
+    );
+
+    let layout = SettingsPanel::layout(shell.sidebar, shell.primary_surface, &state);
+
+    assert_eq!(layout.content, Rect::xywh(636.0, 70.0, 768.0, 1_010.0));
+    assert_eq!(
+        layout.general.permission_card,
+        Rect::xywh(636.0, 174.0, 768.0, 216.0)
+    );
+    assert_eq!(
+        layout.general.general_section_label,
+        Rect::xywh(636.0, 436.0, 768.0, 24.0)
+    );
+    assert_eq!(
+        layout.general.general_card,
+        Rect::xywh(636.0, 474.0, 768.0, 600.0)
+    );
+    assert_eq!(layout.general.permission_presets.len(), 3);
+    assert!(layout
+        .general
+        .permission_presets
+        .iter()
+        .all(|preset| preset.rect.size.y == 72.0));
+    assert_eq!(layout.general.general_rows.len(), 10);
+    assert!(layout
+        .general
+        .general_rows
+        .iter()
+        .all(|row| row.rect.size.y == 60.0));
+    assert_eq!(
+        layout.general.general_rows.last().unwrap().rect.max_y(),
+        1_074.0
+    );
+    assert_eq!(
+        SettingsPanel::max_scroll_offset(layout.content, &state),
+        0.0
+    );
 }
 
 #[test]

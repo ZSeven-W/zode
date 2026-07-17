@@ -128,7 +128,7 @@ fn settings_page_centers_a_768px_grouped_card_column() {
     let page = SettingsPanel::page_layout(layout.primary_surface);
 
     assert_eq!(page.0, Rect::xywh(636.0, 70.0, 768.0, 1_010.0));
-    assert_eq!(page.1, Rect::xywh(636.0, 154.0, 768.0, 192.0));
+    assert_eq!(page.1, Rect::xywh(636.0, 174.0, 768.0, 216.0));
 
     let mut painter = PaintCapture::default();
     let snapshot = snapshot(layout);

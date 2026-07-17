@@ -5,7 +5,7 @@ use zode_node_protocol::{RuntimeOptions, SandboxMode, WorkspaceUri};
 use super::row::{clip_to_viewport, paint_card, paint_divider, paint_heading};
 use crate::{paint_single_line, stable_widget_id, RectExt, WidgetId, ZodeTheme};
 
-pub(super) const PERMISSION_PRESET_HEIGHT: f32 = 64.0;
+pub(super) const PERMISSION_PRESET_HEIGHT: f32 = 72.0;
 pub(super) const PERMISSION_WORKSPACE_HEIGHT: f32 = 52.0;
 pub(super) const PERMISSION_ROW_HEIGHT: f32 = 42.0;
 

@@ -5,9 +5,12 @@ use crate::{paint_single_line, RectExt, WidgetId, ZodeTheme};
 
 pub(super) const CONTENT_WIDTH: f32 = 768.0;
 pub(super) const CONTENT_TOP: f32 = 70.0;
-pub(super) const SECTION_TOP: f32 = 84.0;
-pub(super) const GENERAL_ROW_HEIGHT: f32 = 52.0;
+pub(super) const SECTION_TOP: f32 = 104.0;
+pub(super) const GENERAL_ROW_HEIGHT: f32 = 60.0;
 pub(super) const APPEARANCE_ROW_HEIGHT: f32 = 44.0;
+
+const TITLE_TOP: f32 = -8.0;
+pub(super) const FIRST_SECTION_TOP: f32 = 66.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingRowLayout {
@@ -78,7 +81,7 @@ pub(super) fn paint_heading(
         title,
         Rect::xywh(
             content.origin.x,
-            content.origin.y + 4.0 - offset,
+            content.origin.y + TITLE_TOP - offset,
             content.size.x,
             40.0,
         ),
@@ -92,7 +95,7 @@ pub(super) fn paint_heading(
         section,
         Rect::xywh(
             content.origin.x,
-            content.origin.y + 50.0 - offset,
+            content.origin.y + FIRST_SECTION_TOP - offset,
             content.size.x,
             24.0,
         ),

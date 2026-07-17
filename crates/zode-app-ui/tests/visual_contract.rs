@@ -671,6 +671,37 @@ fn settings_route_has_a_category_rail_and_centered_grouped_card() {
 }
 
 #[test]
+fn settings_general_paints_reference_heading_and_card_verticals() {
+    let (painter, _) = paint_settings(SettingsCategory::General);
+    let text_origin = |label: &str, size: f32| {
+        painter
+            .text_operations()
+            .find(|(content, origin, font_size)| {
+                *content == label && origin.x >= 600.0 && (*font_size - size).abs() <= 0.01
+            })
+            .map(|(_, origin, _)| origin)
+            .unwrap_or_else(|| panic!("missing settings text: {label}/{size}"))
+    };
+
+    assert_close(text_origin("常规", 24.0).y, 70.0, 2.0, "settings title top");
+    assert_close(
+        text_origin("权限", 13.0).y,
+        142.0,
+        2.0,
+        "permission label top",
+    );
+    assert_close(text_origin("常规", 13.0).y, 442.0, 2.0, "general label top");
+
+    let cards = painter
+        .rounded_rects()
+        .map(|(rect, _)| rect)
+        .filter(|rect| rect.origin.x == 636.0 && rect.size.x == 768.0)
+        .collect::<Vec<_>>();
+    assert!(cards.contains(&Rect::xywh(636.0, 174.0, 768.0, 216.0)));
+    assert!(cards.contains(&Rect::xywh(636.0, 474.0, 768.0, 600.0)));
+}
+
+#[test]
 fn settings_route_does_not_paint_chat_transcript_or_composer() {
     let (painter, _) = paint_settings(SettingsCategory::General);
     let text = painter.texts().join("\n");

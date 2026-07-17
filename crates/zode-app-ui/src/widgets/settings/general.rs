@@ -8,12 +8,14 @@ use super::{
     },
     row::{
         paint_card, paint_divider, paint_heading, paint_section_label, paint_setting_row,
-        setting_row, SettingRowLayout, GENERAL_ROW_HEIGHT, SECTION_TOP,
+        setting_row, SettingRowLayout, FIRST_SECTION_TOP, GENERAL_ROW_HEIGHT, SECTION_TOP,
     },
 };
 use crate::{paint_single_line, RectExt, WidgetId, ZodeTheme};
 
-const GENERAL_SECTION_GAP: f32 = 52.0;
+const GENERAL_SECTION_LABEL_GAP: f32 = 46.0;
+const GENERAL_SECTION_GAP: f32 = 84.0;
+const GENERAL_BOTTOM_GAP: f32 = 6.0;
 const GENERAL_ROW_COUNT: usize = 10;
 const SPEED_SETTING_ID: WidgetId = WidgetId(8_306);
 
@@ -22,7 +24,7 @@ pub(super) const fn content_height() -> f32 {
         + PERMISSION_PRESET_HEIGHT * 3.0
         + GENERAL_SECTION_GAP
         + GENERAL_ROW_HEIGHT * GENERAL_ROW_COUNT as f32
-        + 24.0
+        + GENERAL_BOTTOM_GAP
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,14 +47,14 @@ pub(super) fn layout(content: Rect, state: &ZodeAppState, offset: f32) -> Genera
     );
     let permission_status_rect = Rect::xywh(
         content.origin.x + content.size.x * 0.42,
-        content.origin.y + 50.0 - offset,
+        content.origin.y + FIRST_SECTION_TOP - offset,
         content.size.x * 0.58,
         24.0,
     );
     let permission_presets = preset_layouts(permission_card, content, state);
     let general_section_label = Rect::xywh(
         content.origin.x,
-        permission_card.max_y() + 20.0,
+        permission_card.max_y() + GENERAL_SECTION_LABEL_GAP,
         content.size.x,
         24.0,
     );
