@@ -21,14 +21,16 @@ pub use virtual_list::{visible_range, MeasuredItem, MeasurementCache, VirtualLis
 pub use widgets::{
     group_sessions, ApprovalAction, ApprovalButtonLayout, ApprovalCard, CapabilityCard,
     CapabilityCardLayout, CellPosition, Composer, ComposerController, ComposerOutcome,
-    ComposerSubmission, IntegrationTabLayout, IntegrationsPage, IntegrationsPageLayout,
-    PermissionRow, PermissionRowLayout, ProjectSessionGroup, ProjectSidebar, ReviewDraft,
-    ReviewLine, ReviewLineKind, ReviewPanel, ReviewSelection, SandboxSelection, SettingControl,
-    SettingControlLayout, SettingsPanel, SidebarAction, SidebarItem, SidebarNavigationRowLayout,
-    SidebarRowLayout, SidebarRowTarget, TerminalCell, TerminalColor, TerminalGrid, TerminalLine,
-    TerminalPanel, TerminalPanelController, TerminalSelection, ThreadHeader, ThreadTranscript,
-    ToolCard, ToolTone, TranscriptItemLayout, UsageChip, UsageDisplay, WindowChrome,
-    WorkspaceShell, INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
+    ComposerSubmission, EnvironmentPanel, EnvironmentPanelLayout, IntegrationTabLayout,
+    IntegrationsPage, IntegrationsPageLayout, PermissionRow, PermissionRowLayout,
+    ProjectSessionGroup, ProjectSidebar, ReviewDraft, ReviewLine, ReviewLineKind, ReviewPanel,
+    ReviewSelection, SandboxSelection, SettingControl, SettingControlLayout, SettingsPanel,
+    SidebarAction, SidebarItem, SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget,
+    TerminalCell, TerminalColor, TerminalGrid, TerminalLine, TerminalPanel,
+    TerminalPanelController, TerminalSelection, ThreadHeader, ThreadTranscript, ToolCard, ToolTone,
+    TranscriptItemLayout, UsageChip, UsageDisplay, WindowChrome, WorkspaceShell,
+    ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID, INTEGRATIONS_PLUGINS_TAB_ID,
+    INTEGRATIONS_SKILLS_TAB_ID,
 };
 
 pub const CRATE_READY: bool = true;

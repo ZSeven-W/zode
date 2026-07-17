@@ -1,6 +1,7 @@
 mod approval_card;
 mod composer;
 mod empty_state;
+mod environment_panel;
 mod integrations_page;
 mod project_sidebar;
 mod review_panel;
@@ -20,6 +21,9 @@ pub use composer::{
     Composer, ComposerController, ComposerOutcome, ComposerSubmission, SandboxSelection,
 };
 pub use empty_state::EmptyState;
+pub use environment_panel::{
+    EnvironmentPanel, EnvironmentPanelLayout, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID,
+};
 pub use integrations_page::{
     CapabilityCard, CapabilityCardLayout, IntegrationTabLayout, IntegrationsPage,
     IntegrationsPageLayout, INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
