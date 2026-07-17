@@ -182,6 +182,7 @@ pub fn fixture_state(
                 sources: vec![EnvironmentEntry {
                     id: "desktop-plan".into(),
                     label: "Zode 桌面端实施计划".into(),
+                    value: None,
                 }],
             }),
         },

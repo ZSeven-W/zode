@@ -4,8 +4,9 @@ use accesskit::{Action, NodeId, Role};
 use jian_core::CursorHint;
 use jian_widgets::{Point2D, Rect};
 use zode_app_model::{
-    AppCommand, ComingSoonFeature, IntegrationsTab, LoadState, SecondaryPane, SessionDiffState,
-    SessionPresentationState, SettingsCategory, ShellRoute, TranscriptItem, TranscriptState,
+    AppCommand, ComingSoonFeature, EnvironmentEntry, EnvironmentSectionKind, EnvironmentSnapshot,
+    IntegrationsTab, LoadState, SecondaryPane, SessionDiffState, SessionPresentationState,
+    SettingsCategory, ShellRoute, TranscriptItem, TranscriptState,
 };
 use zode_app_ui::{
     accessibility_tree, ApprovalCard, Composer, EnvironmentPanel, FocusDirection, Insets,
@@ -13,7 +14,8 @@ use zode_app_ui::{
     WorkspaceLayout, WorkspaceSnapshot,
 };
 use zode_node_protocol::{
-    DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus, WorkspaceUri,
+    DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary, ToolCall,
+    ToolStatus, WorkspaceUri,
 };
 
 const NAVIGATION_ID: WidgetId = WidgetId(10);
@@ -133,8 +135,13 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
             diff: SessionDiffState {
                 dirty: false,
                 load: LoadState::Ready(DiffSnapshot {
-                    session,
-                    files: Vec::new(),
+                    session: session.clone(),
+                    files: vec![DiffFile {
+                        path: "src/main.rs".into(),
+                        status: DiffFileStatus::Modified,
+                        additions: 2,
+                        deletions: 1,
+                    }],
                     unified: String::new(),
                 }),
             },
@@ -156,6 +163,63 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
     );
     assert!(environment.node(WidgetId(60)).is_some());
     assert!(environment.node(WidgetId(61)).is_some());
+    assert!(environment
+        .node(EnvironmentPanel::section_widget_id(
+            &session,
+            EnvironmentSectionKind::Changes,
+        ))
+        .is_some());
+    assert!(environment
+        .node(EnvironmentPanel::section_widget_id(
+            &session,
+            EnvironmentSectionKind::Host,
+        ))
+        .is_some());
+    for absent in [
+        EnvironmentSectionKind::Subagents,
+        EnvironmentSectionKind::BackgroundProcesses,
+        EnvironmentSectionKind::Sources,
+    ] {
+        assert!(environment
+            .node(EnvironmentPanel::section_widget_id(&session, absent))
+            .is_none());
+    }
+
+    state
+        .presentation
+        .sessions
+        .get_mut(&session)
+        .expect("current presentation")
+        .context = LoadState::Ready(EnvironmentSnapshot {
+        workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+        branch: None,
+        subagents: (0..20)
+            .map(|index| EnvironmentEntry {
+                id: format!("agent-{index}"),
+                label: format!("agent {index}"),
+                value: None,
+            })
+            .collect(),
+        background_processes: Vec::new(),
+        sources: Vec::new(),
+    });
+    let overflow = WorkspaceSnapshot::build(&state, 1800.0, 1080.0, Insets::ZERO);
+    let overflow_panel = EnvironmentPanel::layout(overflow.layout.context_panel, &state);
+    let review = overflow_panel
+        .review_button
+        .expect("the canonical diff stays reviewable");
+    for kind in [
+        EnvironmentSectionKind::Changes,
+        EnvironmentSectionKind::Host,
+        EnvironmentSectionKind::Comparisons,
+        EnvironmentSectionKind::Subagents,
+    ] {
+        let section = overflow
+            .node(EnvironmentPanel::section_widget_id(&session, kind))
+            .expect("the visible part of a real section is accessible");
+        assert!(section.rect.max_y() <= overflow_panel.content.max_y());
+        assert!(section.rect.max_y() <= review.origin.y - 8.0);
+    }
 
     let collapsed = WorkspaceSnapshot::build(&state, 1399.0, 900.0, Insets::ZERO);
     assert_eq!(collapsed.layout.context_panel.width(), 0.0);

@@ -1,12 +1,14 @@
 use zode_app_model::{
-    demo_state, reduce_agent_event, reduce_navigation_command, reduce_presentation_command,
-    AppCommand, ComingSoonFeature, EnvironmentSnapshot, IntegrationsTab, LoadState,
-    NavigationOutcome, PresentationCommandOutcome, SecondaryPane, SessionPresentationState,
-    SettingsCategory, ShellPage, ShellRoute, TranscriptState,
+    demo_state, environment_sections, reduce_agent_event, reduce_navigation_command,
+    reduce_presentation_command, AppCommand, AttachmentMetadata, ComingSoonFeature,
+    EnvironmentSectionKind, EnvironmentSnapshot, FileArtifact, IntegrationsTab, LoadState,
+    NavigationOutcome, PresentationCommandOutcome, SecondaryPane, SessionDiffState,
+    SessionPresentationState, SettingsCategory, ShellPage, ShellRoute, TranscriptItem,
+    TranscriptState,
 };
 use zode_node_protocol::{
-    AgentEvent, AgentEventKind, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary, TurnId,
-    WorkspaceUri, PROTOCOL_VERSION,
+    AgentEvent, AgentEventKind, DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator,
+    ThreadStatus, ThreadSummary, TurnId, WorkspaceUri, PROTOCOL_VERSION,
 };
 
 fn add_session(
@@ -278,4 +280,172 @@ fn deleting_the_current_session_clears_its_review_projection() {
     assert!(!state.review.open);
     assert!(!state.review.dirty);
     assert_eq!(state.presentation.secondary_pane, None);
+}
+
+#[test]
+fn environment_sections_project_only_real_current_session_facts() {
+    let mut state = demo_state();
+    let session = add_session(&mut state, "current", "file:///repo/zode");
+    state.current_session = Some(session.clone());
+    state.presentation.sessions.insert(
+        session.clone(),
+        SessionPresentationState {
+            context: LoadState::Ready(EnvironmentSnapshot {
+                workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+                branch: Some("codex/zode-jian-desktop".into()),
+                subagents: Vec::new(),
+                background_processes: Vec::new(),
+                sources: Vec::new(),
+            }),
+            diff: SessionDiffState {
+                dirty: false,
+                load: LoadState::Ready(DiffSnapshot {
+                    session: session.clone(),
+                    files: vec![
+                        DiffFile {
+                            path: "src/main.rs".into(),
+                            status: DiffFileStatus::Modified,
+                            additions: 7,
+                            deletions: 2,
+                        },
+                        DiffFile {
+                            path: "README.md".into(),
+                            status: DiffFileStatus::Modified,
+                            additions: 3,
+                            deletions: 1,
+                        },
+                    ],
+                    unified: "real diff".into(),
+                }),
+            },
+        },
+    );
+    state.transcripts.get_mut(&session).unwrap().items = vec![
+        TranscriptItem::FileArtifact(FileArtifact {
+            id: "artifact-1".into(),
+            path: "docs/report.md".into(),
+            summary: "报告".into(),
+            change_summary: None,
+        }),
+        TranscriptItem::Attachment(AttachmentMetadata {
+            id: "attachment-1".into(),
+            path: Some("shots/result.png".into()),
+            display_name: "result.png".into(),
+            media_type: "image/png".into(),
+            width: Some(320),
+            height: Some(180),
+            byte_len: 42,
+        }),
+        TranscriptItem::Attachment(AttachmentMetadata {
+            id: "clipboard".into(),
+            path: None,
+            display_name: "clipboard.png".into(),
+            media_type: "image/png".into(),
+            width: Some(1),
+            height: Some(1),
+            byte_len: 4,
+        }),
+    ];
+
+    let sections = environment_sections(&state);
+    assert_eq!(
+        sections
+            .iter()
+            .map(|section| section.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            EnvironmentSectionKind::Changes,
+            EnvironmentSectionKind::Host,
+            EnvironmentSectionKind::Branch,
+            EnvironmentSectionKind::RepositoryActions,
+            EnvironmentSectionKind::Comparisons,
+            EnvironmentSectionKind::Sources,
+        ]
+    );
+    assert!(sections.iter().all(|section| !section.entries.is_empty()));
+    let sources = sections
+        .iter()
+        .find(|section| section.kind == EnvironmentSectionKind::Sources)
+        .unwrap();
+    assert_eq!(
+        sources
+            .entries
+            .iter()
+            .filter_map(|entry| entry.value.as_deref())
+            .collect::<Vec<_>>(),
+        vec!["docs/report.md", "shots/result.png"]
+    );
+    assert!(!sections.iter().any(|section| matches!(
+        section.kind,
+        EnvironmentSectionKind::Subagents | EnvironmentSectionKind::BackgroundProcesses
+    )));
+}
+
+#[test]
+fn environment_sections_omit_empty_diff_branch_and_sources() {
+    let mut state = demo_state();
+    let session = add_session(&mut state, "empty", "file:///repo/zode");
+    state.current_session = Some(session.clone());
+    state.presentation.sessions.insert(
+        session.clone(),
+        SessionPresentationState {
+            context: LoadState::Ready(EnvironmentSnapshot {
+                workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+                branch: None,
+                subagents: Vec::new(),
+                background_processes: Vec::new(),
+                sources: Vec::new(),
+            }),
+            diff: SessionDiffState {
+                dirty: false,
+                load: LoadState::Ready(DiffSnapshot {
+                    session,
+                    files: Vec::new(),
+                    unified: String::new(),
+                }),
+            },
+        },
+    );
+
+    let sections = environment_sections(&state);
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].kind, EnvironmentSectionKind::Host);
+    assert!(sections.iter().all(|section| !section.entries.is_empty()));
+}
+
+#[test]
+fn environment_sections_reject_a_diff_snapshot_for_another_session() {
+    let mut state = demo_state();
+    let session = add_session(&mut state, "current", "file:///repo/zode");
+    let other = SessionLocator::new(state.host.node_id, "other");
+    state.current_session = Some(session.clone());
+    state.presentation.sessions.insert(
+        session,
+        SessionPresentationState {
+            diff: SessionDiffState {
+                dirty: false,
+                load: LoadState::Ready(DiffSnapshot {
+                    session: other,
+                    files: vec![DiffFile {
+                        path: "other-secret.rs".into(),
+                        status: DiffFileStatus::Modified,
+                        additions: 99,
+                        deletions: 0,
+                    }],
+                    unified: "other secret".into(),
+                }),
+            },
+            ..SessionPresentationState::default()
+        },
+    );
+
+    let sections = environment_sections(&state);
+
+    assert_eq!(
+        sections
+            .iter()
+            .map(|section| section.kind)
+            .collect::<Vec<_>>(),
+        vec![EnvironmentSectionKind::Host]
+    );
 }

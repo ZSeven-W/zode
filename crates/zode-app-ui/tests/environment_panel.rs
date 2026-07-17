@@ -1,7 +1,7 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
-    AppCommand, ConnectionState, EnvironmentEntry, EnvironmentSnapshot, LoadState,
-    SessionDiffState, SessionPresentationState,
+    AppCommand, ConnectionState, EnvironmentEntry, EnvironmentSectionKind, EnvironmentSnapshot,
+    FileArtifact, LoadState, SessionDiffState, SessionPresentationState, TranscriptItem,
 };
 use zode_app_ui::{
     EnvironmentPanel, RectExt, ZodeTheme, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID,
@@ -85,14 +85,17 @@ fn ready_presentation(session: &SessionLocator) -> SessionPresentationState {
             subagents: vec![EnvironmentEntry {
                 id: "agent-1".into(),
                 label: "界面实现".into(),
+                value: None,
             }],
             background_processes: vec![EnvironmentEntry {
                 id: "process-1".into(),
                 label: "cargo test -p zode-app-ui".into(),
+                value: None,
             }],
             sources: vec![EnvironmentEntry {
                 id: "source-1".into(),
                 label: "zode-superpowers.zip".into(),
+                value: None,
             }],
         }),
         diff: SessionDiffState {
@@ -133,7 +136,7 @@ fn contains(outer: Rect, inner: Rect) -> bool {
 }
 
 #[test]
-fn wide_layout_is_a_300px_floating_card_with_stable_real_commands() {
+fn wide_layout_is_a_300px_content_hug_card_with_stable_real_commands() {
     let (mut state, session) = state_with_session("current");
     state.presentation.sessions.insert(
         session,
@@ -145,12 +148,15 @@ fn wide_layout_is_a_300px_floating_card_with_stable_real_commands() {
 
     assert_eq!(layout.card.origin, surface.origin);
     assert_eq!(layout.card.size.x, 300.0);
-    assert_eq!(layout.card.size.y, 512.0);
+    assert!((320.0..=512.0).contains(&layout.card.size.y));
     assert_eq!(layout.close_button, Rect::xywh(1_752.0, 74.0, 20.0, 20.0));
-    assert_eq!(
-        layout.review_button,
-        Some(Rect::xywh(1_500.0, 524.0, 268.0, 34.0)),
-    );
+    let review = layout
+        .review_button
+        .expect("a non-empty diff is reviewable");
+    assert_eq!(review.origin.x, 1_500.0);
+    assert_eq!(review.size.x, 268.0);
+    assert_eq!(review.size.y, 34.0);
+    assert_eq!(layout.card.max_y() - review.max_y(), 16.0);
     assert_eq!(
         EnvironmentPanel::command_for_widget(&state, ENVIRONMENT_CLOSE_ID),
         Some(AppCommand::CloseSecondary),
@@ -214,26 +220,43 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
         .presentation
         .sessions
         .insert(session.clone(), ready_presentation(&session));
+    state
+        .transcripts
+        .entry(session.clone())
+        .or_default()
+        .items
+        .push(TranscriptItem::FileArtifact(FileArtifact {
+            id: "artifact".into(),
+            path: "docs/report.md".into(),
+            summary: "报告".into(),
+            change_summary: None,
+        }));
 
     let painter = paint(&state, Rect::xywh(0.0, 0.0, 300.0, 700.0));
     let text = painter.texts.join("\n");
 
     for expected in [
-        "已就绪",
         "codex/zode-desktop",
         "子智能体",
         "界面实现",
         "后台进程",
         "cargo test -p zode-app-ui",
         "来源",
-        "zode-superpowers.zip",
+        "docs/report.md",
         "2 个文件",
         "+10 -4",
-        "查看变更",
+        "审查 2 项变更",
     ] {
         assert!(text.contains(expected), "missing real value: {expected}");
     }
-    for fabricated in ["51 完成", "main", "网页搜索", "查看全部"] {
+    for fabricated in [
+        "已就绪",
+        "zode-superpowers.zip",
+        "51 完成",
+        "main",
+        "网页搜索",
+        "查看全部",
+    ] {
         assert!(!text.contains(fabricated), "fabricated value: {fabricated}");
     }
     let text_y = |needle: &str| {
@@ -243,11 +266,11 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
             .find_map(|(text, origin)| (text == needle).then_some(origin.y))
             .expect("text is painted")
     };
-    assert!(text_y("变更") < text_y("当前工作区"));
-    assert!(text_y("当前工作区") < text_y("子智能体"));
+    assert!(text_y("变更") < text_y("本地"));
+    assert!(text_y("本地") < text_y("分支"));
     assert!(
-        text_y("上下文") - text_y("file:///repo/zode") >= 18.0,
-        "workspace value and context row must not overlap",
+        (text_y("当前工作区") - text_y("file:///repo/zode")).abs() <= 0.5,
+        "the label and value must share one vertically centered row",
     );
 
     state.presentation.sessions.insert(
@@ -263,23 +286,36 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
             diff: SessionDiffState {
                 dirty: false,
                 load: LoadState::Ready(DiffSnapshot {
-                    session,
+                    session: session.clone(),
                     files: Vec::new(),
                     unified: String::new(),
                 }),
             },
         },
     );
+    state.transcripts.entry(session).or_default().items.clear();
     let empty_ready = paint(&state, Rect::xywh(0.0, 0.0, 300.0, 700.0))
         .texts
         .join("\n");
-    for absent in ["分支", "子智能体", "后台进程", "来源"] {
+    for absent in [
+        "变更",
+        "分支",
+        "仓库操作",
+        "比较分支",
+        "子智能体",
+        "后台进程",
+        "来源",
+        "0 个文件",
+    ] {
         assert!(
             !empty_ready.contains(absent),
             "empty section leaked: {absent}"
         );
     }
-    assert!(empty_ready.contains("0 个文件"));
+    assert_eq!(
+        EnvironmentPanel::command_for_widget(&state, ENVIRONMENT_REVIEW_ID),
+        None,
+    );
 }
 
 #[test]
@@ -364,4 +400,118 @@ fn narrow_short_surfaces_clip_and_keep_all_interaction_rects_contained() {
     assert!(painter.clips.contains(&layout.card));
     assert!(painter.rounded_fills.contains(&layout.card));
     assert!(painter.rounded_strokes.contains(&layout.card));
+}
+
+#[test]
+fn real_sections_drive_content_hug_geometry_and_footer_availability() {
+    let (mut state, session) = state_with_session("current");
+    state
+        .presentation
+        .sessions
+        .insert(session.clone(), ready_presentation(&session));
+    state
+        .transcripts
+        .entry(session.clone())
+        .or_default()
+        .items
+        .push(TranscriptItem::FileArtifact(FileArtifact {
+            id: "artifact".into(),
+            path: "docs/report.md".into(),
+            summary: "报告".into(),
+            change_summary: None,
+        }));
+
+    let layout = EnvironmentPanel::layout(Rect::xywh(0.0, 0.0, 300.0, 900.0), &state);
+    let kinds = layout
+        .sections
+        .iter()
+        .map(|layout| layout.section.kind)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        kinds,
+        vec![
+            EnvironmentSectionKind::Changes,
+            EnvironmentSectionKind::Host,
+            EnvironmentSectionKind::Branch,
+            EnvironmentSectionKind::RepositoryActions,
+            EnvironmentSectionKind::Comparisons,
+            EnvironmentSectionKind::Subagents,
+            EnvironmentSectionKind::BackgroundProcesses,
+            EnvironmentSectionKind::Sources,
+        ]
+    );
+    assert!(layout
+        .sections
+        .iter()
+        .all(|section| !section.section.entries.is_empty()));
+    assert!((320.0..=512.0).contains(&layout.card.size.y));
+    let last_row = layout.last_row.expect("a real section has a final row");
+    assert!(layout.card.max_y() - last_row.max_y() <= 24.0);
+    assert!(layout.review_button.is_some());
+    assert!(layout
+        .review_button
+        .is_none_or(|review| layout.content.max_y() <= review.origin.y - 8.0));
+
+    if let LoadState::Ready(context) = &mut state
+        .presentation
+        .sessions
+        .get_mut(&session)
+        .expect("current session presentation")
+        .context
+    {
+        context
+            .subagents
+            .extend((0..20).map(|index| EnvironmentEntry {
+                id: format!("overflow-agent-{index}"),
+                label: format!("overflow agent {index}"),
+                value: None,
+            }));
+    }
+    let overflow_surface = Rect::xywh(0.0, 0.0, 300.0, 900.0);
+    let overflow = EnvironmentPanel::layout(overflow_surface, &state);
+    let overflow_paint = paint(&state, overflow_surface);
+    let review = overflow
+        .review_button
+        .expect("diff footer remains available");
+    assert_eq!(overflow.card.size.y, 512.0);
+    assert!(overflow.content.max_y() <= review.origin.y - 8.0);
+    assert!(overflow_paint.clips.contains(&overflow.content));
+
+    state.presentation.sessions.insert(
+        session.clone(),
+        SessionPresentationState {
+            context: LoadState::Ready(EnvironmentSnapshot {
+                workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+                branch: None,
+                subagents: Vec::new(),
+                background_processes: Vec::new(),
+                sources: Vec::new(),
+            }),
+            diff: SessionDiffState {
+                dirty: false,
+                load: LoadState::Ready(DiffSnapshot {
+                    session: session.clone(),
+                    files: Vec::new(),
+                    unified: String::new(),
+                }),
+            },
+        },
+    );
+    state.transcripts.entry(session).or_default().items.clear();
+    let reduced = EnvironmentPanel::layout(Rect::xywh(0.0, 0.0, 300.0, 900.0), &state);
+
+    assert!(reduced.card.size.y < layout.card.size.y);
+    assert_eq!(reduced.card.size.y, 320.0);
+    assert_eq!(
+        reduced
+            .sections
+            .iter()
+            .map(|section| section.section.kind)
+            .collect::<Vec<_>>(),
+        vec![EnvironmentSectionKind::Host]
+    );
+    assert!(reduced.review_button.is_none());
+    let reduced_last_row = reduced.last_row.expect("host has a final real row");
+    assert!(reduced.card.max_y() - reduced_last_row.max_y() <= 24.0);
 }

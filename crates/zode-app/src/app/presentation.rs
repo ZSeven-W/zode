@@ -36,38 +36,58 @@ pub(super) fn reduce_local_presentation_command(
     }
 }
 
-pub(super) fn presentation_query_for_refresh(
+pub(super) fn presentation_queries_for_refresh(
     state: &ZodeAppState,
     refresh: PresentationRefresh,
-) -> Option<PresentationQuery> {
-    let session = state.current_session.as_ref()?.clone();
+) -> Vec<PresentationQuery> {
+    let Some(session) = state.current_session.as_ref().cloned() else {
+        return Vec::new();
+    };
     if session.session_id.starts_with("local-error-") || !state.transcripts.contains_key(&session) {
-        return None;
+        return Vec::new();
     }
-    let workspace_uri = state.available_workspace_for_session(&session)?.clone();
-    let pane = state.presentation.secondary_pane?;
+    let Some(workspace_uri) = state.available_workspace_for_session(&session).cloned() else {
+        return Vec::new();
+    };
+    let Some(pane) = state.presentation.secondary_pane else {
+        return Vec::new();
+    };
     match (pane, refresh) {
         (
             SecondaryPane::Environment,
             PresentationRefresh::PaneOpened
             | PresentationRefresh::SessionChanged
             | PresentationRefresh::CommandCompleted,
-        ) => Some(PresentationQuery::Environment {
-            session,
-            workspace_uri,
-        }),
+        ) => vec![
+            PresentationQuery::Environment {
+                session: session.clone(),
+                workspace_uri,
+            },
+            PresentationQuery::Diff { session },
+        ],
+        (SecondaryPane::Environment, PresentationRefresh::DiffInvalidated(invalidated))
+            if invalidated == session =>
+        {
+            vec![
+                PresentationQuery::Environment {
+                    session: session.clone(),
+                    workspace_uri,
+                },
+                PresentationQuery::Diff { session },
+            ]
+        }
         (
             SecondaryPane::Review,
             PresentationRefresh::PaneOpened
             | PresentationRefresh::SessionChanged
             | PresentationRefresh::CommandCompleted,
-        ) => Some(PresentationQuery::Diff { session }),
+        ) => vec![PresentationQuery::Diff { session }],
         (SecondaryPane::Review, PresentationRefresh::DiffInvalidated(invalidated))
             if invalidated == session =>
         {
-            Some(PresentationQuery::Diff { session })
+            vec![PresentationQuery::Diff { session }]
         }
-        _ => None,
+        _ => Vec::new(),
     }
 }
 
@@ -111,18 +131,21 @@ impl DesktopApp {
     }
 
     pub(super) fn request_presentation_refresh(&mut self, refresh: PresentationRefresh) {
-        let Some(query) = presentation_query_for_refresh(&self.app_state, refresh) else {
+        let queries = presentation_queries_for_refresh(&self.app_state, refresh);
+        if queries.is_empty() {
             return;
-        };
+        }
         let Some(bridge) = self.presentation_queries.as_mut() else {
             return;
         };
-        if let Err(query) = bridge.request(&mut self.app_state, query) {
-            mark_presentation_query_failed(
-                &mut self.app_state,
-                query,
-                "the presentation query pump is unavailable".into(),
-            );
+        for query in queries {
+            if let Err(query) = bridge.request(&mut self.app_state, query) {
+                mark_presentation_query_failed(
+                    &mut self.app_state,
+                    query,
+                    "the presentation query pump is unavailable".into(),
+                );
+            }
         }
     }
 
@@ -148,7 +171,7 @@ mod tests {
     use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
     use super::{
-        mark_presentation_query_failed, presentation_query_for_refresh,
+        mark_presentation_query_failed, presentation_queries_for_refresh,
         reduce_local_presentation_command, PresentationRefresh,
     };
     use crate::presentation_bridge::PresentationQuery;
@@ -201,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_environment_queries_the_current_available_workspace() {
+    fn opening_environment_queries_environment_and_canonical_diff() {
         let (mut state, session) = state_with_session(true);
         reduce_local_presentation_command(
             &mut state,
@@ -209,11 +232,14 @@ mod tests {
         );
 
         assert_eq!(
-            presentation_query_for_refresh(&state, PresentationRefresh::PaneOpened),
-            Some(PresentationQuery::Environment {
-                session,
-                workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
-            })
+            presentation_queries_for_refresh(&state, PresentationRefresh::PaneOpened),
+            vec![
+                PresentationQuery::Environment {
+                    session: session.clone(),
+                    workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+                },
+                PresentationQuery::Diff { session },
+            ]
         );
     }
 
@@ -223,8 +249,8 @@ mod tests {
         reduce_local_presentation_command(&mut state, AppCommand::OpenReview);
 
         assert_eq!(
-            presentation_query_for_refresh(&state, PresentationRefresh::PaneOpened),
-            Some(PresentationQuery::Diff { session })
+            presentation_queries_for_refresh(&state, PresentationRefresh::PaneOpened),
+            vec![PresentationQuery::Diff { session }]
         );
     }
 
@@ -233,8 +259,8 @@ mod tests {
         let (mut unavailable, _) = state_with_session(false);
         reduce_local_presentation_command(&mut unavailable, AppCommand::OpenReview);
         assert_eq!(
-            presentation_query_for_refresh(&unavailable, PresentationRefresh::PaneOpened),
-            None
+            presentation_queries_for_refresh(&unavailable, PresentationRefresh::PaneOpened),
+            Vec::<PresentationQuery>::new()
         );
 
         let (mut synthetic, _) = state_with_session(true);
@@ -243,22 +269,22 @@ mod tests {
             "local-error-example",
         ));
         assert_eq!(
-            presentation_query_for_refresh(&synthetic, PresentationRefresh::PaneOpened),
-            None
+            presentation_queries_for_refresh(&synthetic, PresentationRefresh::PaneOpened),
+            Vec::<PresentationQuery>::new()
         );
 
         synthetic.current_session = None;
         assert_eq!(
-            presentation_query_for_refresh(&synthetic, PresentationRefresh::PaneOpened),
-            None
+            presentation_queries_for_refresh(&synthetic, PresentationRefresh::PaneOpened),
+            Vec::<PresentationQuery>::new()
         );
 
         let (mut incomplete, session) = state_with_session(true);
         incomplete.transcripts.remove(&session);
         reduce_local_presentation_command(&mut incomplete, AppCommand::OpenReview);
         assert_eq!(
-            presentation_query_for_refresh(&incomplete, PresentationRefresh::PaneOpened),
-            None
+            presentation_queries_for_refresh(&incomplete, PresentationRefresh::PaneOpened),
+            Vec::<PresentationQuery>::new()
         );
     }
 
@@ -269,15 +295,44 @@ mod tests {
         let other = SessionLocator::new(state.host.node_id, "other");
 
         assert_eq!(
-            presentation_query_for_refresh(&state, PresentationRefresh::DiffInvalidated(other),),
-            None
+            presentation_queries_for_refresh(&state, PresentationRefresh::DiffInvalidated(other),),
+            Vec::<PresentationQuery>::new()
         );
         assert_eq!(
-            presentation_query_for_refresh(
+            presentation_queries_for_refresh(
                 &state,
                 PresentationRefresh::DiffInvalidated(session.clone()),
             ),
-            Some(PresentationQuery::Diff { session })
+            vec![PresentationQuery::Diff { session }]
+        );
+    }
+
+    #[test]
+    fn matching_diff_invalidation_refreshes_open_environment_and_diff() {
+        let (mut state, session) = state_with_session(true);
+        reduce_local_presentation_command(
+            &mut state,
+            AppCommand::OpenSecondary(SecondaryPane::Environment),
+        );
+        let other = SessionLocator::new(state.host.node_id, "other");
+
+        assert!(presentation_queries_for_refresh(
+            &state,
+            PresentationRefresh::DiffInvalidated(other),
+        )
+        .is_empty());
+        assert_eq!(
+            presentation_queries_for_refresh(
+                &state,
+                PresentationRefresh::DiffInvalidated(session.clone()),
+            ),
+            vec![
+                PresentationQuery::Environment {
+                    session: session.clone(),
+                    workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+                },
+                PresentationQuery::Diff { session },
+            ]
         );
     }
 

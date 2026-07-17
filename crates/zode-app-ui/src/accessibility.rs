@@ -429,6 +429,25 @@ fn append_secondary_nodes(
             if !visible_rect(panel.card) {
                 return;
             }
+            if let Some(session) = state.current_session.as_ref() {
+                for section in panel.sections.iter().filter(|section| !section.footer) {
+                    let Some(rect) =
+                        ThreadTranscript::clip_to_viewport(section.rect, panel.content)
+                    else {
+                        continue;
+                    };
+                    nodes.push(node(
+                        EnvironmentPanel::section_widget_id(session, section.section.kind),
+                        rect,
+                        Role::Group,
+                        &EnvironmentPanel::section_accessibility_name(section),
+                        None,
+                        Vec::new(),
+                        None,
+                        CursorHint::Default,
+                    ));
+                }
+            }
             nodes.push(node(
                 ENVIRONMENT_CLOSE_ID,
                 panel.close_button,

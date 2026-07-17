@@ -2,7 +2,7 @@ mod approval_card;
 mod coming_soon_page;
 mod composer;
 mod empty_state;
-mod environment_panel;
+mod environment;
 mod integrations_page;
 mod project_sidebar;
 mod review_panel;
@@ -24,8 +24,9 @@ pub use composer::{
     SandboxSelection,
 };
 pub use empty_state::EmptyState;
-pub use environment_panel::{
-    EnvironmentPanel, EnvironmentPanelLayout, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID,
+pub use environment::{
+    EnvironmentPanel, EnvironmentPanelLayout, EnvironmentSectionLayout, ENVIRONMENT_CLOSE_ID,
+    ENVIRONMENT_REVIEW_ID,
 };
 pub use integrations_page::{
     CapabilityCard, CapabilityCardLayout, IntegrationTabLayout, IntegrationsPage,

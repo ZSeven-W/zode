@@ -7,7 +7,8 @@ use zode_app_ui::{
     ComposerOutcome, ComposerSubmission, Insets, SettingsPanel, WidgetId, WorkspaceSnapshot,
 };
 use zode_node_protocol::{
-    DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary, UserContent, WorkspaceUri,
+    DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
+    UserContent, WorkspaceUri,
 };
 
 use super::{
@@ -92,7 +93,12 @@ fn page_and_pane_widget_ids_map_through_component_commands() {
         .or_default();
     presentation.diff.load = LoadState::Ready(DiffSnapshot {
         session: session.clone(),
-        files: Vec::new(),
+        files: vec![DiffFile {
+            path: "src/main.rs".into(),
+            status: DiffFileStatus::Modified,
+            additions: 1,
+            deletions: 0,
+        }],
         unified: String::new(),
     });
     let expected = [
