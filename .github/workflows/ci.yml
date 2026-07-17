@@ -129,7 +129,7 @@ jobs:
         run: rustup target add --toolchain 1.94.0 "${{ matrix.target }}"
       - name: Check portable protocol, model, and UI crates
         run: >-
-          cargo check --locked
+          cargo +1.94.0 check --locked
           -p zode-node-protocol -p zode-app-model -p zode-app-ui
           --target ${{ matrix.target }}
 
