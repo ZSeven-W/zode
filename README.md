@@ -117,6 +117,20 @@ cargo build --release -p zode
 > The agent runtime lives in the `vendor/agent` git submodule — always clone
 > with `--recurse-submodules` (or run `git submodule update --init`).
 
+### Native desktop preview
+
+The Jian/Casement native desktop shell uses the same `~/.zode` configuration,
+sessions, project permissions, and local agent runtime as the CLI. Start it
+from source with:
+
+```bash
+cargo +1.94 run -p zode-app
+```
+
+See [docs/zode-app.md](docs/zode-app.md) for native packages, persisted state,
+desktop shortcuts, permission semantics, terminal limitations, and the current
+local-only scope.
+
 ## Quick Start
 
 The easiest way is to launch `zode` and run **`/connect`** — an interactive,
@@ -1592,6 +1606,7 @@ Key design points:
 ```bash
 cargo build --workspace                 # build everything
 cargo run -p zode                       # run the TUI
+cargo run -p zode-app                   # run the native desktop preview
 cargo run -p zode -- -p "<prompt>"      # headless single turn
 cargo test --workspace                  # all tests
 cargo clippy --workspace --all-targets -- -D warnings

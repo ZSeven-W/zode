@@ -81,6 +81,18 @@ with no filesystem, network, or terminal bridge.
   no longer erases rows it considers invalid as a side effect of an unrelated
   update; a poisoned watchdog lock fails closed.
 
+## Native desktop preview
+
+The new Jian/Casement `zode-app` shell shares Zode's local runtime, sessions,
+project permissions, diff review, settings, and PTY terminal. Source builds
+start with `cargo +1.94 run -p zode-app`; macOS, Windows, and Linux packaging
+contracts are included for release automation.
+
+The desktop endpoint is local-only in this release. Remote peers and mobile
+apps are not implemented; see [the desktop guide](https://github.com/ZSeven-W/zode/blob/main/docs/zode-app.md)
+for state paths, permission semantics, shortcuts, terminal VT limits, and
+signing status.
+
 ## Install
 
 ### One line (recommended)

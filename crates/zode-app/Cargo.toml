@@ -40,6 +40,8 @@ notify-rust = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+agent = { workspace = true }
+serde_json = { workspace = true }
 x11rb = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

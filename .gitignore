@@ -15,6 +15,7 @@ docs/*
 !docs/grok-build-parity-plan.md
 !docs/readme/
 !docs/readme/**
+!docs/zode-app.md
 
 # Python
 __pycache__/
