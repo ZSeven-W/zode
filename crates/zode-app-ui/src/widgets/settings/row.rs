@@ -173,51 +173,6 @@ pub(super) fn paint_setting_row(
     );
 }
 
-pub(super) fn paint_placeholder(
-    painter: &mut dyn Painter,
-    content: Rect,
-    title: &str,
-    message: &str,
-    theme: &ZodeTheme,
-) {
-    paint_heading(painter, content, title, "即将支持", 0.0, theme);
-    let card = Rect::xywh(
-        content.origin.x,
-        content.origin.y + SECTION_TOP,
-        content.size.x,
-        136.0,
-    );
-    paint_card(painter, card, theme);
-    paint_single_line(
-        painter,
-        message,
-        Rect::xywh(
-            card.origin.x + 18.0,
-            card.origin.y + 24.0,
-            (card.size.x - 36.0).max(0.0),
-            32.0,
-        ),
-        14.0,
-        600,
-        theme.tokens.foreground,
-        HorizontalAlign::Start,
-    );
-    paint_single_line(
-        painter,
-        "接入真实本地状态后，这里会提供对应设置。",
-        Rect::xywh(
-            card.origin.x + 18.0,
-            card.origin.y + 62.0,
-            (card.size.x - 36.0).max(0.0),
-            28.0,
-        ),
-        12.0,
-        400,
-        theme.tokens.muted_foreground,
-        HorizontalAlign::Start,
-    );
-}
-
 pub(super) fn clip_to_viewport(rect: Rect, viewport: Rect) -> Option<Rect> {
     let left = rect.origin.x.max(viewport.origin.x);
     let top = rect.origin.y.max(viewport.origin.y);

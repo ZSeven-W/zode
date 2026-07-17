@@ -1,4 +1,5 @@
 mod archived;
+mod details;
 mod general;
 mod navigation;
 mod permissions;
@@ -22,13 +23,13 @@ pub use archived::{ArchivedTaskGroupLayout, ArchivedTaskRowLayout, ArchivedTasks
 pub use general::GeneralSettingsLayout;
 pub use navigation::{
     SettingsNavigationEntryLayout, SettingsNavigationGroupLayout, SettingsNavigationLayout,
-    SETTINGS_BACK_ID,
+    SETTINGS_BACK_ID, SETTINGS_SEARCH_ID,
 };
 pub use permissions::{PermissionPresetLayout, PermissionRow, PermissionRowLayout};
 pub use row::SettingRowLayout;
 
 use row::{
-    clip_to_viewport, content_rect, paint_card, paint_divider, paint_heading, paint_placeholder,
+    clip_to_viewport, content_rect, paint_card, paint_divider, paint_heading,
     APPEARANCE_ROW_HEIGHT, SECTION_TOP,
 };
 
@@ -315,7 +316,14 @@ impl SettingsPanel {
             snapshot.layout.primary_surface,
             state,
         );
-        navigation::paint(painter, layout.sidebar, &layout.navigation, theme);
+        navigation::paint(
+            painter,
+            layout.sidebar,
+            &layout.navigation,
+            state,
+            snapshot.focused == Some(SETTINGS_SEARCH_ID),
+            theme,
+        );
         painter.save();
         painter.clip_rect(layout.content);
         match Self::active_category(state) {
@@ -338,16 +346,29 @@ impl SettingsPanel {
                 layout.scroll_offset,
                 theme,
             ),
-            SettingsCategory::KeyboardShortcuts => paint_placeholder(
+            SettingsCategory::Profile
+            | SettingsCategory::Voice
+            | SettingsCategory::Configuration
+            | SettingsCategory::Personalization
+            | SettingsCategory::Pets
+            | SettingsCategory::KeyboardShortcuts
+            | SettingsCategory::Usage
+            | SettingsCategory::Account
+            | SettingsCategory::AppSnapshots
+            | SettingsCategory::Browser
+            | SettingsCategory::ComputerUse
+            | SettingsCategory::Hooks
+            | SettingsCategory::Connectors
+            | SettingsCategory::Git
+            | SettingsCategory::Environment
+            | SettingsCategory::Worktree => details::paint(
                 painter,
                 layout.content,
-                "键盘快捷键",
-                "快捷键设置即将支持",
+                state,
+                Self::active_category(state),
+                layout.scroll_offset,
                 theme,
             ),
-            SettingsCategory::Environment => {
-                paint_placeholder(painter, layout.content, "环境", "环境设置即将支持", theme)
-            }
             SettingsCategory::ArchivedTasks => archived::paint(
                 painter,
                 layout.content,
@@ -432,7 +453,24 @@ fn settings_content_height(state: &ZodeAppState) -> f32 {
                     .max(104.0)
                 + 24.0
         }
-        SettingsCategory::KeyboardShortcuts | SettingsCategory::Environment => 244.0,
+        SettingsCategory::Profile
+        | SettingsCategory::Voice
+        | SettingsCategory::Configuration
+        | SettingsCategory::Personalization
+        | SettingsCategory::Pets
+        | SettingsCategory::KeyboardShortcuts
+        | SettingsCategory::Usage
+        | SettingsCategory::Account
+        | SettingsCategory::AppSnapshots
+        | SettingsCategory::Browser
+        | SettingsCategory::ComputerUse
+        | SettingsCategory::Hooks
+        | SettingsCategory::Connectors
+        | SettingsCategory::Git
+        | SettingsCategory::Environment
+        | SettingsCategory::Worktree => {
+            details::content_height(state, SettingsPanel::active_category(state))
+        }
         SettingsCategory::ArchivedTasks => archived::content_height(state),
     }
 }

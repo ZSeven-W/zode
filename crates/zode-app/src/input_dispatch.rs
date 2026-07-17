@@ -138,7 +138,7 @@ pub fn ime_allowed_for_focus(
     }
     match page {
         ShellPage::Terminal => focused == Some(TERMINAL_ID),
-        ShellPage::Settings => false,
+        ShellPage::Settings => focused == Some(zode_app_ui::SETTINGS_SEARCH_ID),
         ShellPage::Conversation | ShellPage::Review | ShellPage::ComingSoon => {
             focused == Some(COMPOSER_ID) || focused == Some(PROJECT_PICKER_SEARCH_ID)
         }

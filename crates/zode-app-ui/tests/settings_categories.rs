@@ -1,9 +1,11 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
-    demo_state, AppCommand, IntegrationsTab, SettingsCategory, ShellPage, ShellRoute,
+    demo_state, AppCommand, IntegrationsTab, LoadState, LocalSettingFact, SettingsCategory,
+    ShellPage, ShellRoute,
 };
 use zode_app_ui::{
     Insets, SettingsPanel, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme, SETTINGS_BACK_ID,
+    SETTINGS_SEARCH_ID,
 };
 use zode_node_protocol::WorkspaceUri;
 
@@ -58,7 +60,7 @@ impl Painter for PaintCapture {
 }
 
 #[test]
-fn category_rail_has_stable_rows_typed_commands_and_honest_placeholders() {
+fn category_rail_has_stable_rows_and_typed_commands() {
     let mut state = demo_state();
     state.presentation.route = ShellRoute::Settings(SettingsCategory::Appearance);
     state.shell.page = ShellPage::Settings;
@@ -68,15 +70,7 @@ fn category_rail_has_stable_rows_typed_commands_and_honest_placeholders() {
     assert_eq!(rows.len(), 20);
     assert_eq!(rows.iter().filter(|row| row.selected).count(), 1);
     assert!(rows.iter().any(|row| row.label == "外观" && row.selected));
-    assert_eq!(rows.iter().filter(|row| row.enabled).count(), 4);
-    assert!(rows.iter().any(|row| row.label == "常规" && row.enabled));
-    assert!(rows.iter().any(|row| row.label == "插件" && row.enabled));
-    assert!(rows
-        .iter()
-        .any(|row| row.label == "已归档任务" && row.enabled));
-    assert!(rows
-        .iter()
-        .any(|row| row.label == "键盘快捷键" && !row.enabled));
+    assert!(rows.iter().all(|row| row.enabled));
     assert_eq!(rows[0].rect, Rect::xywh(8.0, 150.0, 224.0, 28.0));
     assert_eq!(rows[19].rect, Rect::xywh(8.0, 766.0, 224.0, 28.0));
 
@@ -106,14 +100,33 @@ fn category_rail_has_stable_rows_typed_commands_and_honest_placeholders() {
         SettingsPanel::command_for_widget(&state, SETTINGS_BACK_ID),
         Some(AppCommand::Navigate(ShellRoute::Conversation))
     );
+    assert!(!painter.texts.iter().any(|text| text == "即将支持"));
+}
+
+#[test]
+fn settings_search_filters_typed_destinations_without_disabling_search() {
+    let mut state = demo_state();
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::General);
+    state.shell.page = ShellPage::Settings;
+    state.settings_search = "Git".into();
+
+    let rows = SettingsPanel::navigation_entries(Rect::xywh(0.0, 0.0, 240.0, 1_080.0), &state);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].label, "Git");
     assert_eq!(
-        painter
-            .texts
-            .iter()
-            .filter(|text| text.as_str() == "即将支持")
-            .count(),
-        16
+        rows[0].command,
+        Some(AppCommand::SelectSettingsCategory(SettingsCategory::Git))
     );
+
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let search = snapshot.node(SETTINGS_SEARCH_ID).expect("settings search");
+    assert!(!search.disabled);
+    assert!(search.actions.contains(&accesskit::Action::SetValue));
+
+    state.settings_search = "does-not-exist".into();
+    let painter = paint_settings(&state);
+    assert!(painter.texts.join("\n").contains("没有相关设置"));
 }
 
 #[test]
@@ -271,22 +284,30 @@ fn appearance_and_permissions_are_isolated_typed_categories() {
 }
 
 #[test]
-fn unfinished_categories_are_explicit_placeholders_without_fake_controls() {
-    for (category, title) in [
-        (SettingsCategory::KeyboardShortcuts, "键盘快捷键"),
-        (SettingsCategory::Environment, "环境"),
-    ] {
-        let mut state = demo_state();
-        state.shell.page = ShellPage::Settings;
-        state.presentation.route = ShellRoute::Settings(category);
+fn typed_detail_pages_render_real_or_explicitly_unavailable_state() {
+    let mut state = demo_state();
+    state.shell.page = ShellPage::Settings;
+    state.local_settings.git = LoadState::Ready(vec![LocalSettingFact {
+        label: "当前分支".into(),
+        value: "codex/settings".into(),
+    }]);
 
+    for (category, title, evidence) in [
+        (
+            SettingsCategory::KeyboardShortcuts,
+            "键盘快捷键",
+            "切换位置",
+        ),
+        (SettingsCategory::Environment, "环境", "本机已知项目"),
+        (SettingsCategory::Git, "Git", "codex/settings"),
+        (SettingsCategory::Personalization, "个性化", "尚未提供"),
+    ] {
+        state.presentation.route = ShellRoute::Settings(category);
         let text = paint_settings(&state).texts.join("\n");
 
         assert!(text.contains(title));
-        assert!(text.contains("即将支持"));
-        for fake_control in ["启用", "快捷键录制", "环境变量编辑", "保存"] {
-            assert!(!text.contains(fake_control));
-        }
+        assert!(text.contains(evidence));
+        assert!(!text.contains("即将支持"));
     }
 }
 

@@ -175,9 +175,17 @@ pub(super) fn mark_presentation_query_failed(
 
 impl DesktopApp {
     pub(super) fn apply_presentation_command(&mut self, command: AppCommand) -> bool {
+        let settings_category = match &command {
+            AppCommand::Navigate(ShellRoute::Settings(category))
+            | AppCommand::SelectSettingsCategory(category) => Some(*category),
+            _ => None,
+        };
         let Some(outcome) = reduce_local_presentation_command(&mut self.app_state, command) else {
             return false;
         };
+        if let Some(category) = settings_category {
+            self.refresh_local_settings_for_category(category);
+        }
         if let Some(refresh) = outcome.refresh {
             self.request_presentation_refresh(refresh);
         }

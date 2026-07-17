@@ -401,6 +401,11 @@ fn ime_is_enabled_only_for_the_active_page_text_input() {
         Some(zode_app_ui::THEME_SYSTEM_ID),
         true,
     ));
+    assert!(ime_allowed_for_focus(
+        zode_app_model::ShellPage::Settings,
+        Some(zode_app_ui::SETTINGS_SEARCH_ID),
+        true,
+    ));
     assert!(!ime_allowed_for_focus(
         zode_app_model::ShellPage::Conversation,
         Some(zode_app_ui::COMPOSER_ID),

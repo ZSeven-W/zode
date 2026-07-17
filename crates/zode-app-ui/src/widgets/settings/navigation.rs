@@ -1,4 +1,5 @@
-use jian_widgets::{HorizontalAlign, Painter, Rect};
+use jian_core::text_input::TextInputState;
+use jian_widgets::{components::input::Input, HorizontalAlign, Painter, Rect};
 use zode_app_model::{AppCommand, IntegrationsTab, SettingsCategory, ShellRoute, ZodeAppState};
 
 use crate::{paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme};
@@ -9,6 +10,7 @@ pub(super) const SETTINGS_PERMISSIONS_CATEGORY_ID: WidgetId = WidgetId(82);
 pub(super) const SETTINGS_KEYBOARD_SHORTCUTS_CATEGORY_ID: WidgetId = WidgetId(83);
 pub(super) const SETTINGS_ENVIRONMENT_CATEGORY_ID: WidgetId = WidgetId(84);
 pub const SETTINGS_BACK_ID: WidgetId = WidgetId(85);
+pub const SETTINGS_SEARCH_ID: WidgetId = WidgetId(86);
 
 const SETTINGS_PROFILE_ID: WidgetId = WidgetId(8_101);
 const SETTINGS_VOICE_ID: WidgetId = WidgetId(8_102);
@@ -78,7 +80,7 @@ const NAVIGATION: [NavigationDescriptor; 20] = [
         "个人",
         "个人资料",
         SemanticIcon::User,
-        None,
+        Some(NavigationTarget::Settings(SettingsCategory::Profile)),
     ),
     descriptor(
         SETTINGS_APPEARANCE_CATEGORY_ID,
@@ -92,50 +94,60 @@ const NAVIGATION: [NavigationDescriptor; 20] = [
         "个人",
         "语音",
         SemanticIcon::Microphone,
-        None,
+        Some(NavigationTarget::Settings(SettingsCategory::Voice)),
     ),
     descriptor(
         SETTINGS_CONFIGURATION_ID,
         "个人",
         "配置",
         SemanticIcon::Configuration,
-        None,
+        Some(NavigationTarget::Settings(SettingsCategory::Configuration)),
     ),
     descriptor(
         SETTINGS_PERSONALIZATION_ID,
         "个人",
         "个性化",
         SemanticIcon::Sparkles,
-        None,
+        Some(NavigationTarget::Settings(
+            SettingsCategory::Personalization,
+        )),
     ),
-    descriptor(SETTINGS_PETS_ID, "个人", "宠物", SemanticIcon::Pet, None),
+    descriptor(
+        SETTINGS_PETS_ID,
+        "个人",
+        "宠物",
+        SemanticIcon::Pet,
+        Some(NavigationTarget::Settings(SettingsCategory::Pets)),
+    ),
     descriptor(
         SETTINGS_KEYBOARD_SHORTCUTS_CATEGORY_ID,
         "个人",
         "键盘快捷键",
         SemanticIcon::Keyboard,
-        None,
+        Some(NavigationTarget::Settings(
+            SettingsCategory::KeyboardShortcuts,
+        )),
     ),
     descriptor(
         SETTINGS_USAGE_ID,
         "个人",
         "使用情况和计费",
         SemanticIcon::Usage,
-        None,
+        Some(NavigationTarget::Settings(SettingsCategory::Usage)),
     ),
     descriptor(
         SETTINGS_ACCOUNT_ID,
         "个人",
         "账户",
         SemanticIcon::Account,
-        None,
+        Some(NavigationTarget::Settings(SettingsCategory::Account)),
     ),
     descriptor(
         SETTINGS_APP_SNAPSHOTS_ID,
         "集成",
         "应用快照",
         SemanticIcon::Snapshot,
-        None,
+        Some(NavigationTarget::Settings(SettingsCategory::AppSnapshots)),
     ),
     descriptor(
         SETTINGS_PLUGINS_ID,
@@ -149,37 +161,49 @@ const NAVIGATION: [NavigationDescriptor; 20] = [
         "集成",
         "浏览器",
         SemanticIcon::Browser,
-        None,
+        Some(NavigationTarget::Settings(SettingsCategory::Browser)),
     ),
     descriptor(
         SETTINGS_COMPUTER_USE_ID,
         "集成",
         "电脑操控",
         SemanticIcon::Computer,
-        None,
+        Some(NavigationTarget::Settings(SettingsCategory::ComputerUse)),
     ),
-    descriptor(SETTINGS_HOOKS_ID, "编码", "钩子", SemanticIcon::Hook, None),
+    descriptor(
+        SETTINGS_HOOKS_ID,
+        "编码",
+        "钩子",
+        SemanticIcon::Hook,
+        Some(NavigationTarget::Settings(SettingsCategory::Hooks)),
+    ),
     descriptor(
         SETTINGS_CONNECTORS_ID,
         "编码",
         "连接器",
         SemanticIcon::Connect,
-        None,
+        Some(NavigationTarget::Settings(SettingsCategory::Connectors)),
     ),
-    descriptor(SETTINGS_GIT_ID, "编码", "Git", SemanticIcon::Git, None),
+    descriptor(
+        SETTINGS_GIT_ID,
+        "编码",
+        "Git",
+        SemanticIcon::Git,
+        Some(NavigationTarget::Settings(SettingsCategory::Git)),
+    ),
     descriptor(
         SETTINGS_ENVIRONMENT_CATEGORY_ID,
         "编码",
         "环境",
         SemanticIcon::Environment,
-        None,
+        Some(NavigationTarget::Settings(SettingsCategory::Environment)),
     ),
     descriptor(
         SETTINGS_WORKTREE_ID,
         "编码",
         "工作树",
         SemanticIcon::Worktree,
-        None,
+        Some(NavigationTarget::Settings(SettingsCategory::Worktree)),
     ),
     descriptor(
         SETTINGS_ARCHIVED_ID,
@@ -252,7 +276,12 @@ pub(super) fn layout(rect: Rect, state: &ZodeAppState) -> SettingsNavigationLayo
     let mut previous_group = "";
     let mut groups = Vec::new();
     let mut entries = Vec::with_capacity(NAVIGATION.len());
-    for descriptor in NAVIGATION {
+    let query = state.settings_search.trim().to_lowercase();
+    for descriptor in NAVIGATION.into_iter().filter(|descriptor| {
+        query.is_empty()
+            || descriptor.label.to_lowercase().contains(&query)
+            || descriptor.group.to_lowercase().contains(&query)
+    }) {
         if descriptor.group != previous_group {
             if !previous_group.is_empty() {
                 y += GROUP_GAP;
@@ -324,6 +353,8 @@ pub(super) fn paint(
     painter: &mut dyn Painter,
     rect: Rect,
     layout: &SettingsNavigationLayout,
+    state: &ZodeAppState,
+    focused: bool,
     theme: &ZodeTheme,
 ) {
     if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
@@ -357,35 +388,16 @@ pub(super) fn paint(
         theme.tokens.muted_foreground,
         HorizontalAlign::Start,
     );
-    painter.fill_round_rect(layout.search, 8.0, theme.tokens.card);
-    painter.stroke_round_rect(layout.search, 8.0, theme.tokens.border, 1.0);
-    let search_icon = Rect::xywh(
-        layout.search.origin.x + 10.0,
-        layout.search.origin.y + 7.0,
-        16.0,
-        16.0,
-    );
-    painter.stroke_svg_path(
-        SemanticIcon::Search.path(),
-        search_icon.origin,
-        search_icon.size.x,
-        theme.tokens.muted_foreground,
-        SemanticIcon::Search.stroke_width(),
-    );
-    paint_single_line(
-        painter,
-        "搜索设置…",
-        Rect::xywh(
-            search_icon.max_x() + 7.0,
-            layout.search.origin.y,
-            (layout.search.max_x() - search_icon.max_x() - 17.0).max(0.0),
-            layout.search.size.y,
-        ),
-        12.0,
-        400,
-        theme.tokens.muted_foreground,
-        HorizontalAlign::Start,
-    );
+    let search_input = TextInputState::with_text(state.settings_search.clone());
+    Input {
+        state: &search_input,
+        placeholder: "搜索设置…",
+        focused,
+        font_size: 12.0,
+        now_ms: 0,
+        icon_d: Some(SemanticIcon::Search.path()),
+    }
+    .paint(painter, layout.search, &theme.tokens);
     for group in &layout.groups {
         paint_single_line(
             painter,
@@ -422,17 +434,22 @@ pub(super) fn paint(
             color,
             HorizontalAlign::Start,
         );
-        if !entry.enabled {
-            paint_single_line(
-                painter,
-                "即将支持",
-                entry.status_rect,
-                9.0,
-                450,
-                theme.tokens.muted_foreground.with_alpha(0.72),
-                HorizontalAlign::End,
-            );
-        }
+    }
+    if layout.entries.is_empty() {
+        paint_single_line(
+            painter,
+            "没有相关设置",
+            Rect::xywh(
+                rect.origin.x + 16.0,
+                layout.search.max_y() + 28.0,
+                (rect.size.x - 32.0).max(0.0),
+                36.0,
+            ),
+            12.0,
+            450,
+            theme.tokens.muted_foreground,
+            HorizontalAlign::Center,
+        );
     }
     painter.restore();
 }
@@ -451,10 +468,24 @@ pub(super) fn command_for_widget(id: WidgetId) -> Option<AppCommand> {
 pub(super) const fn category_widget_id(category: SettingsCategory) -> WidgetId {
     match category {
         SettingsCategory::General => SETTINGS_GENERAL_CATEGORY_ID,
+        SettingsCategory::Profile => SETTINGS_PROFILE_ID,
         SettingsCategory::Appearance => SETTINGS_APPEARANCE_CATEGORY_ID,
+        SettingsCategory::Voice => SETTINGS_VOICE_ID,
+        SettingsCategory::Configuration => SETTINGS_CONFIGURATION_ID,
+        SettingsCategory::Personalization => SETTINGS_PERSONALIZATION_ID,
+        SettingsCategory::Pets => SETTINGS_PETS_ID,
         SettingsCategory::Permissions => SETTINGS_PERMISSIONS_CATEGORY_ID,
         SettingsCategory::KeyboardShortcuts => SETTINGS_KEYBOARD_SHORTCUTS_CATEGORY_ID,
+        SettingsCategory::Usage => SETTINGS_USAGE_ID,
+        SettingsCategory::Account => SETTINGS_ACCOUNT_ID,
+        SettingsCategory::AppSnapshots => SETTINGS_APP_SNAPSHOTS_ID,
+        SettingsCategory::Browser => SETTINGS_BROWSER_ID,
+        SettingsCategory::ComputerUse => SETTINGS_COMPUTER_USE_ID,
+        SettingsCategory::Hooks => SETTINGS_HOOKS_ID,
+        SettingsCategory::Connectors => SETTINGS_CONNECTORS_ID,
+        SettingsCategory::Git => SETTINGS_GIT_ID,
         SettingsCategory::Environment => SETTINGS_ENVIRONMENT_CATEGORY_ID,
+        SettingsCategory::Worktree => SETTINGS_WORKTREE_ID,
         SettingsCategory::ArchivedTasks => SETTINGS_ARCHIVED_ID,
     }
 }

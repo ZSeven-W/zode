@@ -66,6 +66,7 @@ pub enum AppCommand {
     SetThemePreference(ThemePreference),
     SetReducedMotion(bool),
     SetHighContrast(bool),
+    SetSettingsSearch(String),
     SetSettingsScroll {
         offset: f32,
     },

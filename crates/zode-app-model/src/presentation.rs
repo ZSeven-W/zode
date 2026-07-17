@@ -33,10 +33,24 @@ impl ShellRoute {
 pub enum SettingsCategory {
     #[default]
     General,
+    Profile,
     Appearance,
+    Voice,
+    Configuration,
+    Personalization,
+    Pets,
     Permissions,
     KeyboardShortcuts,
+    Usage,
+    Account,
+    AppSnapshots,
+    Browser,
+    ComputerUse,
+    Hooks,
+    Connectors,
+    Git,
     Environment,
+    Worktree,
     ArchivedTasks,
 }
 

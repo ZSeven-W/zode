@@ -398,6 +398,11 @@ pub fn reduce_settings_command(
             state.ui_preferences.high_contrast = high_contrast;
             SettingsCommandOutcome::Applied
         }
+        AppCommand::SetSettingsSearch(search) => {
+            state.settings_search = search;
+            state.settings_scroll_offset = 0.0;
+            SettingsCommandOutcome::Applied
+        }
         AppCommand::SetSettingsScroll { offset } if offset.is_finite() => {
             state.settings_scroll_offset = offset.max(0.0);
             SettingsCommandOutcome::Applied

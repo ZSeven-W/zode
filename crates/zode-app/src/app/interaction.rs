@@ -1,18 +1,18 @@
 use accesskit::{Action, ActionData};
 use zode_app_model::{
-    reduce_navigation_command, reduce_presentation_command, reduce_settings_command,
-    reduce_tool_command, reduce_transcript_command, AppCommand, NavigationOutcome, PreviewState,
-    PreviewTarget, SettingsCommandOutcome, ShellRoute, ToolCommandOutcome,
-    TranscriptCommandOutcome, ZodeAppState,
+    reduce_navigation_command, reduce_presentation_command, reduce_tool_command,
+    reduce_transcript_command, AppCommand, NavigationOutcome, PreviewState, PreviewTarget,
+    SettingsCommandOutcome, ShellRoute, ToolCommandOutcome, TranscriptCommandOutcome, ZodeAppState,
 };
 use zode_app_ui::{
     Composer, EmptyState, Key, KeyEvent, PointerButton, PointerEvent, PointerEventKind,
-    SettingsPanel, ThreadHeader, ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode,
-    WidgetId, WorkspaceSnapshot, COMPOSER_ID, SEND_ID, TERMINAL_ID,
+    ThreadHeader, ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId,
+    COMPOSER_ID, SEND_ID, SETTINGS_SEARCH_ID, TERMINAL_ID,
 };
 
 use super::{
     session_menu::{close_session_menu_command, session_menu_outside_click_command},
+    settings::{reduce_local_settings_command, settings_interaction_viewport},
     DesktopApp,
 };
 use crate::{
@@ -96,27 +96,6 @@ fn available_new_session_command(
         command,
         AppCommand::NewSession { workspace_uri } if state.available_workspace(workspace_uri)
     )
-}
-
-fn reduce_local_settings_command(
-    state: &mut zode_app_model::ZodeAppState,
-    command: AppCommand,
-) -> SettingsCommandOutcome {
-    if !matches!(
-        command,
-        AppCommand::SetProjectPermissions { .. }
-            | AppCommand::SetThemePreference(_)
-            | AppCommand::SetReducedMotion(_)
-            | AppCommand::SetHighContrast(_)
-            | AppCommand::SetSettingsScroll { .. }
-    ) {
-        return SettingsCommandOutcome::Ignored;
-    }
-    reduce_settings_command(state, command)
-}
-
-fn settings_interaction_viewport(snapshot: &WorkspaceSnapshot) -> jian_widgets::Rect {
-    SettingsPanel::page_layout(snapshot.layout.primary_surface).0
 }
 
 pub(super) fn consume_external_preview_command(
@@ -249,6 +228,9 @@ impl DesktopApp {
         match input {
             UnifiedInputEvent::Keyboard(event) => self.handle_key_event(event),
             UnifiedInputEvent::Ime(event) => {
+                if self.handle_settings_search_ime(&event) {
+                    return;
+                }
                 if self.handle_project_picker_ime(event.clone()) {
                     return;
                 }
@@ -363,6 +345,16 @@ impl DesktopApp {
             }
             return;
         }
+        if self.focused_widget == Some(SETTINGS_SEARCH_ID) {
+            match clipboard.read_text() {
+                Ok(Some(text)) if !text.is_empty() => {
+                    let _ = self.paste_settings_search_text(&text);
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("zode-app: clipboard read failed: {error}"),
+            }
+            return;
+        }
         if self.app_state.presentation.route == ShellRoute::Terminal
             && self.focused_widget == Some(TERMINAL_ID)
         {
@@ -455,7 +447,10 @@ impl DesktopApp {
                 };
                 self.apply_composer_outcome(outcome);
             }
-            COMPOSER_ID | TERMINAL_ID | zode_app_ui::PROJECT_PICKER_SEARCH_ID => {}
+            COMPOSER_ID
+            | TERMINAL_ID
+            | SETTINGS_SEARCH_ID
+            | zode_app_ui::PROJECT_PICKER_SEARCH_ID => {}
             _ => {
                 if let Some(command) = widget_command(&self.app_state, id) {
                     let focus_composer =
@@ -505,6 +500,11 @@ impl DesktopApp {
                 Action::SetValue if id == zode_app_ui::PROJECT_PICKER_SEARCH_ID => {
                     if let Some(ActionData::Value(value)) = request.data {
                         self.set_project_search_value(value.into_string());
+                    }
+                }
+                Action::SetValue if id == SETTINGS_SEARCH_ID => {
+                    if let Some(ActionData::Value(value)) = request.data {
+                        self.set_settings_search_value(value.into_string());
                     }
                 }
                 Action::ScrollUp | Action::ScrollDown if id == zode_app_ui::SETTINGS_ROOT_ID => {
@@ -644,6 +644,9 @@ impl DesktopApp {
         if self.handle_project_picker_key(&event) {
             return;
         }
+        if self.handle_settings_search_key(&event) {
+            return;
+        }
         if self.handle_sidebar_shortcut(&event) {
             return;
         }
@@ -726,19 +729,6 @@ impl DesktopApp {
                     self.apply_composer_outcome(outcome);
                 }
             }
-        }
-    }
-
-    fn apply_settings_scroll_delta(&mut self, delta: f32) {
-        let command = SettingsPanel::scroll_command(
-            settings_interaction_viewport(&self.frame_snapshot),
-            &self.app_state,
-            delta,
-        );
-        if reduce_settings_command(&mut self.app_state, command) == SettingsCommandOutcome::Applied
-        {
-            self.rebuild_frame_snapshot();
-            self.request_redraw();
         }
     }
 

@@ -77,6 +77,19 @@ fn project_permission_projection_preserves_a_known_empty_result() {
 }
 
 #[test]
+fn settings_search_is_reduced_and_resets_content_scroll() {
+    let mut state = demo_state();
+    state.settings_scroll_offset = 240.0;
+
+    assert_eq!(
+        reduce_settings_command(&mut state, AppCommand::SetSettingsSearch("git".into())),
+        SettingsCommandOutcome::Applied,
+    );
+    assert_eq!(state.settings_search, "git");
+    assert_eq!(state.settings_scroll_offset, 0.0);
+}
+
+#[test]
 fn adjacent_text_deltas_extend_one_assistant_item() {
     let (mut state, session, turn_id) = active_state();
 

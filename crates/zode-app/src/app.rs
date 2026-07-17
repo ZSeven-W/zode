@@ -47,6 +47,7 @@ mod project_picker;
 mod queue;
 mod queue_focus;
 mod session_menu;
+mod settings;
 mod sidebar;
 mod terminal;
 mod window;

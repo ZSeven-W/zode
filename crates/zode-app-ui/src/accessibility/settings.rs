@@ -2,7 +2,9 @@ use accesskit::{Action, Role, Toggled};
 use jian_core::CursorHint;
 use zode_app_model::ZodeAppState;
 
-use crate::{SettingsPanel, ThreadTranscript, WorkspaceLayout, SETTINGS_BACK_ID};
+use crate::{
+    SettingsPanel, ThreadTranscript, WorkspaceLayout, SETTINGS_BACK_ID, SETTINGS_SEARCH_ID,
+};
 
 use super::{
     next_order, node, visible_rect, InteractionNode, SETTINGS_ROOT_ID, SIDEBAR_ID, THEME_DARK_ID,
@@ -36,6 +38,16 @@ pub(super) fn append_settings_nodes(
             vec![Action::Click, Action::Focus],
             next_order(focus_order),
             CursorHint::Pointer,
+        ));
+        nodes.push(node(
+            SETTINGS_SEARCH_ID,
+            settings.navigation.search,
+            Role::SearchInput,
+            "搜索设置",
+            Some(state.settings_search.clone()),
+            vec![Action::Focus, Action::SetValue],
+            next_order(focus_order),
+            CursorHint::Text,
         ));
         for entry in &settings.navigation.entries {
             let Some(visible) = ThreadTranscript::clip_to_viewport(entry.rect, layout.sidebar)

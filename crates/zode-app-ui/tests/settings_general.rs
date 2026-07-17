@@ -85,7 +85,7 @@ fn settings_general_matches_the_reference_vertical_rhythm() {
 }
 
 #[test]
-fn unavailable_navigation_and_general_rows_are_semantically_disabled() {
+fn typed_navigation_is_enabled_while_unavailable_general_rows_stay_disabled() {
     let mut state = demo_state();
     state.shell.page = ShellPage::Settings;
     state.presentation.route = ShellRoute::Settings(SettingsCategory::General);
@@ -95,21 +95,12 @@ fn unavailable_navigation_and_general_rows_are_semantically_disabled() {
         &state,
     );
 
-    assert_eq!(
-        layout
-            .navigation
-            .entries
-            .iter()
-            .filter(|entry| entry.enabled)
-            .count(),
-        4
-    );
+    assert!(layout.navigation.entries.iter().all(|entry| entry.enabled));
     assert!(layout
         .navigation
         .entries
         .iter()
-        .filter(|entry| !entry.enabled)
-        .all(|entry| entry.command.is_none()));
+        .all(|entry| entry.command.is_some()));
     assert!(layout
         .general
         .general_rows
@@ -180,7 +171,7 @@ fn sandbox_radios_use_session_runtime_state_and_preserve_network() {
 }
 
 #[test]
-fn frozen_settings_layout_drives_hit_focus_and_disabled_accesskit_semantics() {
+fn frozen_settings_layout_drives_hit_focus_and_accesskit_semantics() {
     let (state, _) = state_with_runtime(SandboxMode::ReadOnly, false);
     let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
     let layout = SettingsPanel::layout(
@@ -196,10 +187,10 @@ fn frozen_settings_layout_drives_hit_focus_and_disabled_accesskit_semantics() {
         .unwrap();
     let profile_node = snapshot.node(profile.id).unwrap();
     assert_eq!(profile_node.rect, profile.rect);
-    assert!(profile_node.disabled);
-    assert!(profile_node.actions.is_empty());
-    assert!(!snapshot.focusable_ids().contains(&profile.id));
-    assert_eq!(snapshot.hit_test(center(profile.rect)), None);
+    assert!(!profile_node.disabled);
+    assert!(profile_node.actions.contains(&Action::Click));
+    assert!(snapshot.focusable_ids().contains(&profile.id));
+    assert_eq!(snapshot.hit_test(center(profile.rect)), Some(profile.id));
 
     let preset = layout
         .general
@@ -227,7 +218,7 @@ fn frozen_settings_layout_drives_hit_focus_and_disabled_accesskit_semantics() {
         .iter()
         .find(|(id, _)| *id == NodeId(profile.id.0))
         .unwrap();
-    assert!(profile_accesskit.1.is_disabled());
+    assert!(!profile_accesskit.1.is_disabled());
 }
 
 fn state_with_runtime(

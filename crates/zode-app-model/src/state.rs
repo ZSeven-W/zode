@@ -178,6 +178,24 @@ impl Default for LocalProfileState {
     }
 }
 
+/// One truthful label/value pair loaded from local desktop configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSettingFact {
+    pub label: String,
+    pub value: String,
+}
+
+/// Read-only local facts used by settings pages that do not yet expose an
+/// editor. Each load state remains explicit so the UI never invents defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalSettingsState {
+    pub configuration: crate::LoadState<Vec<LocalSettingFact>>,
+    pub browser: crate::LoadState<Vec<LocalSettingFact>>,
+    pub hooks: crate::LoadState<Vec<LocalSettingFact>>,
+    pub git: crate::LoadState<Vec<LocalSettingFact>>,
+    pub worktrees: crate::LoadState<Vec<LocalSettingFact>>,
+}
+
 /// Responsive shell state shared by all pages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellState {
@@ -210,7 +228,9 @@ pub struct ZodeAppState {
     pub approvals: BTreeMap<String, SessionLocator>,
     pub tool_expanded: BTreeMap<SessionLocator, BTreeMap<String, bool>>,
     pub project_permissions: BTreeMap<WorkspaceUri, LoadState<Vec<String>>>,
+    pub settings_search: String,
     pub settings_scroll_offset: f32,
+    pub local_settings: LocalSettingsState,
     pub composer: ComposerState,
     pub usage: BTreeMap<SessionLocator, UsageSnapshot>,
     pub presentation: PresentationState,
@@ -325,7 +345,9 @@ pub fn demo_state() -> ZodeAppState {
         approvals: BTreeMap::new(),
         tool_expanded: BTreeMap::new(),
         project_permissions: BTreeMap::new(),
+        settings_search: String::new(),
         settings_scroll_offset: 0.0,
+        local_settings: LocalSettingsState::default(),
         composer: ComposerState::default(),
         usage: BTreeMap::new(),
         presentation: PresentationState::default(),
