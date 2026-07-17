@@ -74,6 +74,15 @@ const ENVIRONMENT_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::ContextPanel, 1484.0, 62.0, 300.0, 1002.0),
 ];
 
+const QUEUE_GEOMETRY: &[GeometryExpectation] = &[
+    GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
+    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 652.0, 70.0, 736.0, 698.0),
+    GeometryExpectation::new(LayoutRect::Composer, 652.0, 796.0, 736.0, 270.0),
+];
+
 fn case_for(name: &'static str) -> SnapshotCase {
     let geometry = match name {
         "empty-task" => EMPTY_TASK_GEOMETRY,
@@ -82,12 +91,13 @@ fn case_for(name: &'static str) -> SnapshotCase {
         "conversation-document-preview" => DOCUMENT_PREVIEW_GEOMETRY,
         "conversation-artifacts" => ARTIFACTS_GEOMETRY,
         "conversation-environment" => ENVIRONMENT_GEOMETRY,
+        "conversation-queue" => QUEUE_GEOMETRY,
         _ => panic!("unregistered reference scene {name}"),
     };
     SnapshotCase::new(name, WIDTH, HEIGHT, SCALE, geometry)
 }
 
-fn six_cases() -> Vec<(SnapshotCase, ReferenceScene)> {
+fn reference_cases() -> Vec<(SnapshotCase, ReferenceScene)> {
     reference_scenes(ThemePreference::Light, WIDTH)
         .into_iter()
         .map(|scene| (case_for(scene.name), scene))
@@ -95,7 +105,7 @@ fn six_cases() -> Vec<(SnapshotCase, ReferenceScene)> {
 }
 
 #[test]
-fn six_reference_scene_registry_has_required_landmarks() {
+fn reference_scene_registry_has_required_landmarks() {
     assert_eq!(scene_names(), REFERENCE_SCENE_NAMES);
     assert_eq!(
         scene_names(),
@@ -106,22 +116,34 @@ fn six_reference_scene_registry_has_required_landmarks() {
             "conversation-document-preview",
             "conversation-artifacts",
             "conversation-environment",
+            "conversation-queue",
         ]
     );
 
-    for (case, scene) in six_cases() {
+    for (case, scene) in reference_cases() {
         assert_scene_landmarks(&scene);
         assert_case_geometry(case, &scene.state);
     }
 }
 
 #[test]
-fn six_reference_scenes() {
+fn reference_scenes_match_platform_goldens() {
     assert_eq!(scene_names(), REFERENCE_SCENE_NAMES);
-    for (case, scene) in six_cases() {
+    for (case, scene) in reference_cases()
+        .into_iter()
+        .filter(|(_, scene)| scene.name != "conversation-queue")
+    {
         assert_scene_landmarks(&scene);
         assert_platform_snapshot(case, &scene.state);
     }
+}
+
+#[test]
+fn conversation_queue_matches_platform_golden() {
+    let scene = named_scene("conversation-queue", ThemePreference::Light, WIDTH)
+        .expect("conversation queue scene is registered");
+    assert_scene_landmarks(&scene);
+    assert_platform_snapshot(case_for(scene.name), &scene.state);
 }
 
 fn assert_scene_landmarks(scene: &ReferenceScene) {
@@ -226,8 +248,46 @@ fn assert_scene_landmarks(scene: &ReferenceScene) {
             assert!(environment_sections(&scene.state).len() >= 5);
             assert_eq!(snapshot.layout.context_panel.width(), 300.0);
         }
+        "conversation-queue" => {
+            let session = scene
+                .state
+                .current_session
+                .as_ref()
+                .expect("queue scene has a current session");
+            let transcript = scene
+                .state
+                .transcripts
+                .get(session)
+                .expect("queue scene has a transcript");
+            let queue = scene
+                .state
+                .message_queues
+                .get(session)
+                .expect("queue scene has pending messages");
+            assert!(transcript.busy);
+            assert_eq!(queue.items.len(), 4);
+            assert!(state_thread_is_running(&scene.state, session));
+            assert!(scene
+                .state
+                .composer
+                .queue_menu
+                .is_some_and(|id| queue.items.iter().any(|message| message.id == id)));
+            let queue_layout = Composer::queue_layout(snapshot.layout.composer, &scene.state)
+                .expect("queue scene lays out the queue surface");
+            assert_eq!(queue_layout.rows.len(), 4);
+            assert!(queue_layout.menu.is_some());
+        }
         _ => panic!("unregistered reference scene {}", scene.name),
     }
+}
+
+fn state_thread_is_running(
+    state: &zode_app_model::ZodeAppState,
+    session: &zode_node_protocol::SessionLocator,
+) -> bool {
+    state.threads.iter().any(|thread| {
+        &thread.session == session && thread.status == zode_node_protocol::ThreadStatus::Running
+    })
 }
 
 /// Test-only rendering entry. It keeps rich fixtures unreachable from the
