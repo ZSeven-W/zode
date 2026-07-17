@@ -35,6 +35,9 @@ impl DesktopApp {
             }
             return;
         }
+        if self.apply_presentation_command(command.clone()) {
+            return;
+        }
         if self.persist_local_navigation_effect(&command) {
             return;
         }
@@ -42,6 +45,7 @@ impl DesktopApp {
             eprintln!("zode-app: endpoint command ignored because no endpoint is attached");
             return;
         }
+        let previous_session = self.app_state.current_session.clone();
         match crate::command_bridge::prepare_dispatch(&mut self.app_state, command) {
             Ok(Some(dispatch)) => {
                 if let Some(bridge) = self.command_bridge.as_ref() {
@@ -60,6 +64,7 @@ impl DesktopApp {
                 format!("invalid endpoint command: {error}"),
             ),
         }
+        self.refresh_if_session_changed(previous_session);
         self.sync_composer_busy();
         self.rebuild_frame_snapshot();
         self.request_redraw();
@@ -211,11 +216,13 @@ impl DesktopApp {
     pub(super) fn activate_widget(&mut self, id: WidgetId) {
         self.set_focused_widget(Some(id));
         if let Some(command) = ProjectSidebar::command_for_widget(&self.app_state, id) {
+            let previous_session = self.app_state.current_session.clone();
             match reduce_navigation_command(&mut self.app_state, command.clone()) {
                 NavigationOutcome::Applied => {}
                 NavigationOutcome::NeedsEffect => self.enqueue_command(command),
                 NavigationOutcome::Ignored => return,
             }
+            self.refresh_if_session_changed(previous_session);
             self.sync_composer_busy();
             self.rebuild_frame_snapshot();
             self.request_redraw();

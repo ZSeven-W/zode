@@ -22,6 +22,7 @@ use crate::{
         composer_outcome_command, map_ime_input, map_keyboard, map_pointer_button,
         map_pointer_move, map_touch, map_wheel,
     },
+    presentation_bridge::PresentationQueryBridge,
     render::{NativeBackend, RasterSurface},
     services::LocalTerminalService,
     terminal_runtime::TerminalRuntime,
@@ -34,6 +35,7 @@ use zode_core::{bootstrap::AppBootstrap, config::ConfigManager};
 use zode_node_protocol::{AgentEndpoint, NodeCapability};
 
 mod interaction;
+mod presentation;
 mod terminal;
 mod window;
 
@@ -82,6 +84,7 @@ pub struct DesktopApp {
     terminal_runtime: TerminalRuntime,
     modifiers: ModifiersState,
     command_bridge: Option<CommandBridge>,
+    presentation_queries: Option<PresentationQueryBridge>,
     settings_touch: crate::input_dispatch::SettingsTouchTracker,
     frame_snapshot: WorkspaceSnapshot,
     focused_widget: Option<WidgetId>,
@@ -190,6 +193,7 @@ impl DesktopApp {
             terminal_runtime,
             modifiers: ModifiersState::empty(),
             command_bridge: None,
+            presentation_queries: None,
             settings_touch: crate::input_dispatch::SettingsTouchTracker::default(),
             frame_snapshot,
             focused_widget,
@@ -211,7 +215,9 @@ impl DesktopApp {
             endpoint.clone(),
             self.proxy.clone(),
         ));
-        self.command_bridge = Some(CommandBridge::spawn(endpoint, self.proxy.clone()));
+        self.command_bridge = Some(CommandBridge::spawn(endpoint.clone(), self.proxy.clone()));
+        self.presentation_queries =
+            Some(PresentationQueryBridge::spawn(endpoint, self.proxy.clone()));
     }
 
     fn sync_composer_busy(&mut self) {
@@ -248,15 +254,34 @@ impl ApplicationHandler<AppWake> for DesktopApp {
         match event {
             AppWake::Redraw => {
                 self.drain_accessibility_actions();
-                let events_applied = self
+                let event_drain = self
                     .agent_events
                     .as_mut()
-                    .map_or(0, |events| events.drain_into(&mut self.app_state));
+                    .map_or_else(Default::default, |events| {
+                        events.drain_into(&mut self.app_state)
+                    });
+                let previous_session = self.app_state.current_session.clone();
                 let commands_applied = self
                     .command_bridge
                     .as_mut()
                     .map_or(0, |commands| commands.drain_into(&mut self.app_state));
-                if events_applied + commands_applied > 0 {
+                if previous_session != self.app_state.current_session {
+                    self.request_presentation_refresh(
+                        presentation::PresentationRefresh::SessionChanged,
+                    );
+                } else if commands_applied > 0 {
+                    self.request_presentation_refresh(
+                        presentation::PresentationRefresh::CommandCompleted,
+                    );
+                } else {
+                    for session in event_drain.diff_invalidated.iter().cloned() {
+                        self.request_presentation_refresh(
+                            presentation::PresentationRefresh::DiffInvalidated(session),
+                        );
+                    }
+                }
+                let queries_applied = self.drain_presentation_queries();
+                if event_drain.applied + commands_applied + queries_applied > 0 {
                     self.rebuild_frame_snapshot();
                 }
                 self.drain_terminal_output();
