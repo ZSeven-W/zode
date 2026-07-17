@@ -9,7 +9,9 @@ use zode_app_model::ZodeAppState;
 
 use crate::{Insets, WorkspaceLayout, ZodeTheme};
 
-pub use composer::Composer;
+pub use composer::{
+    Composer, ComposerController, ComposerOutcome, ComposerSubmission, SandboxSelection,
+};
 pub use project_sidebar::{
     group_sessions, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarItem,
 };
