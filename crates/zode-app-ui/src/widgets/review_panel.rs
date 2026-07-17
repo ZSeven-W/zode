@@ -5,7 +5,8 @@ use zode_app_model::{AppCommand, LoadState, ZodeAppState};
 use zode_node_protocol::{DiffSnapshot, SessionLocator};
 
 use crate::{
-    stable_widget_id, visible_range, MeasuredItem, RectExt, WidgetId, ZodeTheme, REVIEW_CLOSE_ID,
+    stable_widget_id, visible_range, MeasuredItem, RectExt, SemanticIcon, WidgetId, ZodeTheme,
+    REVIEW_CLOSE_ID,
 };
 
 const REVIEW_HEADER_HEIGHT: f32 = 46.0;
@@ -176,16 +177,18 @@ impl ReviewPanel {
             600,
             theme.tokens.foreground,
         );
-        draw_ui_text(
-            painter,
-            "×",
+        let close_icon_size = 14.0_f32
+            .min(layout.close_button.size.x)
+            .min(layout.close_button.size.y);
+        painter.stroke_svg_path(
+            SemanticIcon::Close.path(),
             Point2D::new(
-                layout.close_button.origin.x + 5.0,
-                layout.close_button.origin.y + 17.0,
+                layout.close_button.origin.x + (layout.close_button.size.x - close_icon_size) / 2.0,
+                layout.close_button.origin.y + (layout.close_button.size.y - close_icon_size) / 2.0,
             ),
-            15.0,
-            450,
+            close_icon_size,
             theme.tokens.muted_foreground,
+            SemanticIcon::Close.stroke_width(),
         );
         painter.stroke_line(
             Point2D::new(layout.header.origin.x, layout.header.max_y()),
