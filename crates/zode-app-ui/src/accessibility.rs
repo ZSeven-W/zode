@@ -14,6 +14,7 @@ use crate::{
     INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
 };
 
+mod empty_state;
 mod header;
 mod ids;
 mod project_picker;
@@ -22,6 +23,7 @@ mod settings;
 mod sidebar;
 mod transcript;
 
+use empty_state::append_empty_suggestion_nodes;
 use header::{append_header_menu_nodes, append_header_nodes};
 pub(crate) use ids::stable_widget_id;
 use project_picker::{
@@ -207,6 +209,7 @@ impl WorkspaceSnapshot {
                     append_header_nodes(&mut nodes, &layout, &mut focus_order, state);
                     append_transcript_nodes(&mut nodes, &layout, &mut focus_order, state);
                     append_welcome_project_trigger(&mut nodes, &layout, &mut focus_order, state);
+                    append_empty_suggestion_nodes(&mut nodes, &layout, &mut focus_order, state);
                     let composer_layout = Composer::layout_for_state(layout.composer, state);
                     append_queue_nodes(&mut nodes, &layout, &mut focus_order, state);
                     if let Some(attachment_strip) = composer_layout.attachments {

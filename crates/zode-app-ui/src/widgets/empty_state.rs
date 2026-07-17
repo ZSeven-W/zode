@@ -2,8 +2,11 @@ use jian_widgets::{Color, HorizontalAlign, Painter, Point2D, Rect, TextLayout};
 
 use crate::{
     paint_single_line, BrandMark, ProjectPicker, RectExt, SemanticIcon, WelcomeTitleLayout,
-    ZodeTheme,
+    WidgetId, ZodeTheme,
 };
+
+pub const EMPTY_SUGGESTION_IDS: [WidgetId; 4] =
+    [WidgetId(70), WidgetId(71), WidgetId(72), WidgetId(73)];
 
 const SUGGESTIONS: [(&str, SemanticIcon); 4] = [
     ("探索并理解代码", SemanticIcon::ExploreCode),
@@ -11,6 +14,13 @@ const SUGGESTIONS: [(&str, SemanticIcon); 4] = [
     ("审查代码并提出修改建议", SemanticIcon::ReviewChange),
     ("修复问题和失败", SemanticIcon::FixIssue),
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EmptySuggestionLayout {
+    pub id: WidgetId,
+    pub rect: Rect,
+    pub label: &'static str,
+}
 
 const REFERENCE_HEIGHT: f32 = 868.0;
 const MARK_TOP: f32 = 348.0;
@@ -168,6 +178,22 @@ impl EmptyState {
             workspace_label,
             ProjectPicker::title_font_size(compact),
         ))
+    }
+
+    pub fn suggestion_layouts(rect: Rect) -> [EmptySuggestionLayout; 4] {
+        let layout = EmptyStateLayout::compute(rect);
+        std::array::from_fn(|index| EmptySuggestionLayout {
+            id: EMPTY_SUGGESTION_IDS[index],
+            rect: layout.cards[index],
+            label: SUGGESTIONS[index].0,
+        })
+    }
+
+    pub fn suggestion_prompt(id: WidgetId) -> Option<&'static str> {
+        EMPTY_SUGGESTION_IDS
+            .iter()
+            .position(|candidate| *candidate == id)
+            .map(|index| SUGGESTIONS[index].0)
     }
 
     #[allow(clippy::too_many_arguments)]

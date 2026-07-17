@@ -30,7 +30,7 @@ pub use document_preview::{
     DocumentPreview, DocumentPreviewLayout, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
     DOCUMENT_PREVIEW_EXTERNAL_ID, DOCUMENT_PREVIEW_RETRY_ID,
 };
-pub use empty_state::EmptyState;
+pub use empty_state::{EmptyState, EmptySuggestionLayout, EMPTY_SUGGESTION_IDS};
 pub use environment::{
     EnvironmentPanel, EnvironmentPanelLayout, EnvironmentSectionLayout, ENVIRONMENT_CLOSE_ID,
     ENVIRONMENT_REVIEW_ID,

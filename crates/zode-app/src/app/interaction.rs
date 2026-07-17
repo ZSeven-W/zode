@@ -6,9 +6,9 @@ use zode_app_model::{
     TranscriptCommandOutcome, ZodeAppState,
 };
 use zode_app_ui::{
-    Composer, Key, KeyEvent, PointerButton, PointerEvent, PointerEventKind, SettingsPanel,
-    ThreadHeader, ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId,
-    WorkspaceSnapshot, COMPOSER_ID, SEND_ID, TERMINAL_ID,
+    Composer, EmptyState, Key, KeyEvent, PointerButton, PointerEvent, PointerEventKind,
+    SettingsPanel, ThreadHeader, ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode,
+    WidgetId, WorkspaceSnapshot, COMPOSER_ID, SEND_ID, TERMINAL_ID,
 };
 
 use super::{
@@ -431,6 +431,12 @@ impl DesktopApp {
     }
 
     pub(super) fn activate_widget(&mut self, id: WidgetId) {
+        if let Some(prompt) = EmptyState::suggestion_prompt(id) {
+            self.composer.set_text(prompt);
+            self.set_focused_widget(Some(COMPOSER_ID));
+            self.apply_composer_outcome(zode_app_ui::ComposerOutcome::Edited);
+            return;
+        }
         self.set_focused_widget(Some(id));
         match id {
             SEND_ID => {
