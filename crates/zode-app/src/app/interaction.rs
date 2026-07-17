@@ -200,9 +200,9 @@ impl DesktopApp {
                         delta,
                     );
                     self.apply_terminal_command(command);
-                } else if self.handle_integrations_wheel(delta) {
-                    return;
-                } else if self.app_state.presentation.route == ShellRoute::Conversation {
+                } else if !self.handle_integrations_wheel(delta)
+                    && self.app_state.presentation.route == ShellRoute::Conversation
+                {
                     let empty = std::collections::BTreeMap::new();
                     let command = self.app_state.current_session.as_ref().and_then(|session| {
                         self.app_state.transcripts.get(session).map(|transcript| {
