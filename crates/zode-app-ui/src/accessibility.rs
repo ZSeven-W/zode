@@ -286,20 +286,32 @@ impl WorkspaceSnapshot {
                         if let Some(send_rect) =
                             ThreadTranscript::clip_to_viewport(send_rect, composer_layout.input)
                         {
-                            nodes.push(node(
+                            let busy = current_session_busy(state);
+                            let enabled = busy || Composer::can_submit(&state.composer);
+                            let mut send = node(
                                 SEND_ID,
                                 send_rect,
                                 Role::Button,
-                                if current_session_busy(state) {
-                                    "停止当前运行"
-                                } else {
-                                    "发送"
-                                },
+                                if busy { "停止当前运行" } else { "发送" },
                                 None,
-                                vec![Action::Click, Action::Focus],
-                                next_order(&mut focus_order),
-                                CursorHint::Pointer,
-                            ));
+                                if enabled {
+                                    vec![Action::Click, Action::Focus]
+                                } else {
+                                    Vec::new()
+                                },
+                                if enabled {
+                                    next_order(&mut focus_order)
+                                } else {
+                                    None
+                                },
+                                if enabled {
+                                    CursorHint::Pointer
+                                } else {
+                                    CursorHint::Default
+                                },
+                            );
+                            send.disabled = !enabled;
+                            nodes.push(send);
                         }
                         append_queue_menu_nodes(&mut nodes, &layout, &mut focus_order, state);
                         Some(COMPOSER_ID)

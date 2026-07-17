@@ -1,3 +1,4 @@
+use accesskit::Action;
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
     AttachmentMetadata, ComposerState, EnvironmentSnapshot, GoalProgress, LoadState, ProjectState,
@@ -5,7 +6,7 @@ use zode_app_model::{
 };
 use zode_app_ui::{
     Composer, ComposerController, ImeEvent, Insets, Key, RectExt, WorkspaceShell,
-    WorkspaceSnapshot, ZodeTheme, COMPOSER_ID,
+    WorkspaceSnapshot, ZodeTheme, COMPOSER_ID, PROJECT_DETACH_ID, SEND_ID,
 };
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
@@ -15,6 +16,7 @@ struct TextCapture {
     text_lines: Vec<(String, Point2D, f32)>,
     icons: Vec<(&'static str, Point2D, f32)>,
     fill_rects: Vec<Rect>,
+    round_fills: Vec<(Rect, Color)>,
 }
 
 impl Painter for TextCapture {
@@ -37,7 +39,9 @@ impl Painter for TextCapture {
     }
     fn clip_rect(&mut self, _rect: Rect) {}
     fn stroke_line(&mut self, _from: Point2D, _to: Point2D, _color: Color, _width: f32) {}
-    fn fill_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color) {}
+    fn fill_round_rect(&mut self, rect: Rect, _radius: f32, color: Color) {
+        self.round_fills.push((rect, color));
+    }
     fn stroke_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color, _width: f32) {}
     fn stroke_svg_path(
         &mut self,
@@ -84,6 +88,25 @@ fn composer_uses_text_area_multiline_layout() {
         .texts
         .iter()
         .any(|text| text == "first line\nsecond line"));
+}
+
+#[test]
+fn empty_new_task_uses_the_reference_placeholder() {
+    let state = ComposerState::default();
+    let mut painter = TextCapture::default();
+
+    Composer::paint(
+        &mut painter,
+        Rect::xywh(0.0, 0.0, 736.0, 100.0),
+        &state,
+        &ZodeTheme::light(),
+    );
+
+    assert!(painter.texts.iter().any(|text| text == "随心输入"));
+    assert!(!painter
+        .texts
+        .iter()
+        .any(|text| text == "向 Zode 描述一个任务"));
 }
 
 #[test]
@@ -236,6 +259,10 @@ fn composer_paints_only_explicit_runtime_context_and_permission() {
     for expected in ["本地", "codex/desktop", "工作区写入"] {
         assert!(painter.texts.iter().any(|text| text == expected));
     }
+    assert!(painter
+        .icons
+        .iter()
+        .any(|(path, _, _)| *path == zode_app_ui::SemanticIcon::ShieldAlert.path()));
 }
 
 #[test]
@@ -243,6 +270,7 @@ fn composer_context_uses_semantic_icons_centered_in_the_context_row() {
     let state = ComposerState::default();
     let mut painter = TextCapture::default();
     let rect = Rect::xywh(0.0, 0.0, 500.0, 144.0);
+    let context = Composer::layout(rect, &state).context;
 
     Composer::paint_input_with_workspace_context(
         &mut painter,
@@ -266,8 +294,8 @@ fn composer_context_uses_semantic_icons_centered_in_the_context_row() {
             .iter()
             .find(|(path, _, _)| *path == expected.path())
             .expect("context semantic icon is painted");
-        assert_eq!(*size, 12.0);
-        assert_eq!(origin.y, 16.0);
+        assert_eq!(*size, 14.0);
+        assert_eq!(origin.y, context.min_y() + (context.height() - size) / 2.0);
     }
     for expected in ["zode", "本地", "main"] {
         assert!(painter.texts.iter().any(|text| text == expected));
@@ -276,16 +304,16 @@ fn composer_context_uses_semantic_icons_centered_in_the_context_row() {
             .iter()
             .find(|(text, _, _)| text == expected)
             .expect("context label uses the shared TextBox path");
-        assert!((origin.y + size / 2.0 - 22.0).abs() <= 0.01);
+        assert!((origin.y + size / 2.0 - (context.min_y() + context.height() / 2.0)).abs() <= 0.01);
     }
 }
 
 #[test]
 fn composer_attachment_strip_appears_only_with_metadata() {
-    let rect = Rect::xywh(0.0, 0.0, 500.0, 196.0);
+    let rect = Rect::xywh(0.0, 0.0, 500.0, 190.0);
     let without = Composer::layout(rect, &ComposerState::default());
     assert!(without.attachments.is_none());
-    assert!((without.context.size.y - 44.0).abs() <= 4.0);
+    assert!((without.context.size.y - 38.0).abs() <= f32::EPSILON);
     assert!((without.input.size.y - 100.0).abs() <= 2.0);
 
     let state = ComposerState {
@@ -301,8 +329,9 @@ fn composer_attachment_strip_appears_only_with_metadata() {
         ..ComposerState::default()
     };
     let with = Composer::layout(rect, &state);
-    assert!(with.attachments.is_some());
-    assert!((with.context.size.y - 44.0).abs() <= 4.0);
+    let attachment = with.attachments.expect("attachment strip");
+    assert!((attachment.height() - 52.0).abs() <= f32::EPSILON);
+    assert!((with.context.size.y - 38.0).abs() <= f32::EPSILON);
     assert!((with.input.size.y - 100.0).abs() <= 2.0);
 
     let mut shell_state = zode_app_model::demo_state();
@@ -322,10 +351,23 @@ fn workspace_snapshot_drives_the_full_composer_stack_geometry() {
     let mut state = zode_app_model::demo_state();
     state.composer = empty;
     let without = WorkspaceSnapshot::build(&state, 1_440.0, 1_080.0, Insets::ZERO);
-    assert!((without.layout.composer.height() - 144.0).abs() <= f32::EPSILON);
+    assert!((without.layout.composer.height() - 138.0).abs() <= f32::EPSILON);
+    let without_layout = Composer::layout_for_state(without.layout.composer, &state);
+    assert!((without_layout.context.height() - 38.0).abs() <= f32::EPSILON);
+    assert!(
+        (without_layout.context.min_x() - without_layout.input.min_x() - 14.0).abs()
+            <= f32::EPSILON
+    );
+    assert!(
+        (without_layout.input.max_x() - without_layout.context.max_x() - 14.0).abs()
+            <= f32::EPSILON
+    );
+    assert!((without_layout.context.max_y() - without_layout.input.min_y()).abs() <= f32::EPSILON);
     let without_input = without.node(COMPOSER_ID).expect("composer input node").rect;
+    assert_eq!(without_input, without_layout.input);
     assert!((without_input.height() - 100.0).abs() <= f32::EPSILON);
-    assert!((without_input.min_y() - without.layout.composer.min_y() - 44.0).abs() <= f32::EPSILON);
+    let overlap_point = Point2D::new(without_input.min_x() + 100.0, without_input.min_y() + 1.0);
+    assert_eq!(without.hit_test(overlap_point), Some(COMPOSER_ID));
 
     state.composer.attachments.push(AttachmentMetadata {
         id: "attachment-1".into(),
@@ -337,10 +379,90 @@ fn workspace_snapshot_drives_the_full_composer_stack_geometry() {
         byte_len: 2_048,
     });
     let with = WorkspaceSnapshot::build(&state, 1_440.0, 1_080.0, Insets::ZERO);
-    assert!((with.layout.composer.height() - 196.0).abs() <= f32::EPSILON);
+    assert!(
+        (with.layout.composer.height() - without.layout.composer.height() - 52.0).abs()
+            <= f32::EPSILON
+    );
+    let with_layout = Composer::layout_for_state(with.layout.composer, &state);
+    assert!((with_layout.context.height() - 38.0).abs() <= f32::EPSILON);
+    assert!(
+        (with_layout.attachments.expect("attachment strip").height() - 52.0).abs() <= f32::EPSILON
+    );
     let with_input = with.node(COMPOSER_ID).expect("composer input node").rect;
+    assert_eq!(with_input, with_layout.input);
     assert!((with_input.height() - 100.0).abs() <= f32::EPSILON);
-    assert!((with_input.min_y() - with.layout.composer.min_y() - 96.0).abs() <= f32::EPSILON);
+}
+
+#[test]
+fn context_rail_paints_behind_the_later_input_card() {
+    let state = ComposerState::default();
+    let rect = Rect::xywh(0.0, 0.0, 736.0, 138.0);
+    let layout = Composer::layout(rect, &state);
+    let theme = ZodeTheme::light();
+    let mut painter = TextCapture::default();
+
+    Composer::paint_input_with_workspace_context(
+        &mut painter,
+        rect,
+        &jian_core::text_input::TextInputState::default(),
+        &state,
+        Some("zode"),
+        Some("本地"),
+        Some("main"),
+        None,
+        &theme,
+    );
+
+    let (rail_index, rail) = painter
+        .round_fills
+        .iter()
+        .enumerate()
+        .find(|(_, (_, color))| *color == theme.tokens.muted)
+        .map(|(index, (rect, _))| (index, *rect))
+        .expect("muted context rail surface");
+    let (input_index, _) = painter
+        .round_fills
+        .iter()
+        .enumerate()
+        .find(|(_, (rect, color))| *rect == layout.input && *color == theme.tokens.card)
+        .expect("input card surface");
+
+    assert_eq!(rail.min_x(), layout.context.min_x());
+    assert_eq!(rail.max_x(), layout.context.max_x());
+    assert!((rail.height() - 44.0).abs() <= f32::EPSILON);
+    assert!((rail.max_y() - layout.input.min_y() - 6.0).abs() <= f32::EPSILON);
+    assert!(
+        rail_index < input_index,
+        "input card must cover the rail tail"
+    );
+}
+
+#[test]
+fn empty_draft_disables_send_until_there_is_submittable_content() {
+    let mut state = zode_app_model::demo_state();
+    state.current_session = None;
+    state.composer.draft.clear();
+
+    let empty = WorkspaceSnapshot::build(&state, 1_440.0, 1_080.0, Insets::ZERO);
+    let send = empty
+        .node(SEND_ID)
+        .expect("disabled send remains discoverable");
+    assert_eq!(send.name, "发送");
+    assert!(send.disabled);
+    assert!(send.actions.is_empty());
+    assert_ne!(
+        empty.hit_test(Point2D::new(
+            send.rect.min_x() + send.rect.width() / 2.0,
+            send.rect.min_y() + send.rect.height() / 2.0,
+        )),
+        Some(SEND_ID),
+    );
+
+    state.composer.draft = "  构建一个任务  ".into();
+    let ready = WorkspaceSnapshot::build(&state, 1_440.0, 1_080.0, Insets::ZERO);
+    let send = ready.node(SEND_ID).expect("enabled send");
+    assert!(!send.disabled);
+    assert!(send.actions.contains(&Action::Click));
 }
 
 #[test]
@@ -504,6 +626,44 @@ fn projectless_session_hides_scratch_workspace_and_branch_from_composer() {
     assert!(!composer_texts
         .iter()
         .any(|text| text.contains("task-session") || text.contains("zode-projectless")));
+}
+
+#[test]
+fn projectless_new_task_starts_without_a_project_chip_or_detach_action() {
+    let mut state = zode_app_model::demo_state();
+    state.current_session = None;
+    state.active_workspace = None;
+    state.projects.clear();
+    state.projectless_workspace_root =
+        Some(WorkspaceUri::new("file:///private/tmp/zode-projectless").unwrap());
+
+    let snapshot = WorkspaceSnapshot::build(&state, 1_440.0, 1_080.0, Insets::ZERO);
+    assert!(snapshot.node(PROJECT_DETACH_ID).is_none());
+
+    let mut painter = TextCapture::default();
+    WorkspaceShell::paint(
+        &mut painter,
+        Rect::xywh(0.0, 0.0, 1_440.0, 1_080.0),
+        Insets::ZERO,
+        &state,
+        &ZodeTheme::light(),
+    );
+
+    assert!(painter
+        .texts
+        .iter()
+        .any(|text| text == "我们应该构建什么？"));
+    assert!(!painter.texts.iter().any(|text| text == "我们应该在 "));
+    let composer_texts = painter
+        .text_lines
+        .iter()
+        .filter(|(_, origin, _)| snapshot.layout.composer.contains(*origin))
+        .map(|(text, _, _)| text.as_str())
+        .collect::<Vec<_>>();
+    assert!(composer_texts.contains(&"本地"));
+    assert!(!composer_texts
+        .iter()
+        .any(|text| text.contains("zode-projectless") || *text == "main"));
 }
 
 #[test]

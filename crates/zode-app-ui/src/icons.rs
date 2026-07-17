@@ -64,10 +64,11 @@ pub enum SemanticIcon {
     Help,
     Pin,
     Plus,
+    ShieldAlert,
 }
 
 impl SemanticIcon {
-    pub const ALL: [Self; 56] = [
+    pub const ALL: [Self; 57] = [
         Self::NewTask,
         Self::Scheduled,
         Self::Settings,
@@ -124,6 +125,7 @@ impl SemanticIcon {
         Self::Help,
         Self::Pin,
         Self::Plus,
+        Self::ShieldAlert,
     ];
 
     pub const fn path(self) -> &'static str {
@@ -186,6 +188,7 @@ impl SemanticIcon {
             Self::Help => lucide::CIRCLE_QUESTION_MARK,
             Self::Pin => lucide::PIN,
             Self::Plus => lucide::PLUS,
+            Self::ShieldAlert => lucide::SHIELD_ALERT,
         }
     }
 
@@ -237,6 +240,7 @@ mod tests {
             (SemanticIcon::More, lucide::ELLIPSIS),
             (SemanticIcon::Edit, lucide::PENCIL),
             (SemanticIcon::Plus, lucide::PLUS),
+            (SemanticIcon::ShieldAlert, lucide::SHIELD_ALERT),
         ];
 
         for (icon, path) in mappings {

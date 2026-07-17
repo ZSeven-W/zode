@@ -38,6 +38,7 @@ pub struct ZodeTheme {
     pub user_bubble: Color,
     pub success: Color,
     pub warning: Color,
+    pub composer_permission: Color,
     pub zode_purple: Color,
 }
 
@@ -120,6 +121,7 @@ impl ZodeTheme {
             user_bubble: Color::rgb_u8(245, 245, 246),
             success: Color::rgb_u8(22, 163, 74),
             warning: Color::rgb_u8(217, 119, 6),
+            composer_permission: Color::rgb_u8(255, 79, 10),
             zode_purple: ZODE_PURPLE,
         }
     }
@@ -137,6 +139,7 @@ impl ZodeTheme {
             user_bubble: Color::rgb_u8(42, 42, 44),
             success: Color::rgb_u8(74, 222, 128),
             warning: Color::rgb_u8(251, 191, 36),
+            composer_permission: Color::rgb_u8(255, 138, 76),
             zode_purple: ZODE_PURPLE,
         }
     }
@@ -145,5 +148,22 @@ impl ZodeTheme {
 impl Default for ZodeTheme {
     fn default() -> Self {
         Self::light()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ZodeTheme;
+    use jian_widgets::Color;
+
+    #[test]
+    fn composer_permission_uses_a_dedicated_orange_for_each_color_scheme() {
+        let light = ZodeTheme::light();
+        let dark = ZodeTheme::dark();
+
+        assert_eq!(light.composer_permission, Color::rgb_u8(255, 79, 10));
+        assert_eq!(dark.composer_permission, Color::rgb_u8(255, 138, 76));
+        assert_ne!(light.composer_permission, light.warning);
+        assert_ne!(dark.composer_permission, dark.warning);
     }
 }

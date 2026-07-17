@@ -1,11 +1,17 @@
 use jian_widgets::{components::tooltip::Tooltip, HorizontalAlign, Painter, Point2D, Rect};
 use zode_app_model::GoalProgress;
 
-use crate::{paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme, PROJECT_DETACH_ID};
+use crate::{
+    paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme, COMPOSER_CONTEXT_OVERLAP,
+    PROJECT_DETACH_ID,
+};
 
-const CONTEXT_ICON_SIZE: f32 = 12.0;
-const CONTEXT_ICON_GAP: f32 = 6.0;
-const CONTEXT_ITEM_GAP: f32 = 20.0;
+const CONTEXT_ICON_SIZE: f32 = 14.0;
+const CONTEXT_FONT_SIZE: f32 = 14.0;
+const CONTEXT_ICON_GAP: f32 = 8.0;
+const CONTEXT_ITEM_GAP: f32 = 24.0;
+const CONTEXT_INSET_X: f32 = 18.0;
+const CONTEXT_RADIUS: f32 = 18.0;
 const DETACH_HIT_SIZE: f32 = 24.0;
 const DETACH_VISUAL_SIZE: f32 = 20.0;
 const TOOLTIP_W: f32 = 112.0;
@@ -68,11 +74,16 @@ pub(super) fn paint_interactive(
     if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
         return;
     }
-    painter.fill_round_rect(rect, 12.0, theme.tokens.muted);
-    painter.stroke_round_rect(rect, 12.0, theme.tokens.border, 1.0);
+    let surface = Rect::xywh(
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.x,
+        rect.size.y + COMPOSER_CONTEXT_OVERLAP,
+    );
+    painter.fill_round_rect(surface, CONTEXT_RADIUS, theme.tokens.muted);
     painter.save();
     painter.clip_rect(rect);
-    let mut x = rect.origin.x + 16.0;
+    let mut x = rect.origin.x + CONTEXT_INSET_X;
     let context_layout = layout(rect, detachable_project && workspace_label.is_some());
     if let (Some(label), Some(detach)) = (workspace_label, context_layout.detach) {
         let detach_active =
@@ -103,19 +114,19 @@ pub(super) fn paint_interactive(
                     detach.origin.y + (detach.size.y - CONTEXT_ICON_SIZE) / 2.0,
                 ),
                 CONTEXT_ICON_SIZE,
-                theme.tokens.muted_foreground,
+                theme.tokens.foreground,
                 SemanticIcon::Folder.stroke_width(),
             );
         }
         x = detach.max_x() + 4.0;
-        let label_width = painter.measure_text_weighted(label, 10.0, 400);
+        let label_width = painter.measure_text_weighted(label, CONTEXT_FONT_SIZE, 400);
         paint_single_line(
             painter,
             label,
             Rect::xywh(x, rect.origin.y, label_width, rect.size.y),
-            10.0,
+            CONTEXT_FONT_SIZE,
             400,
-            theme.tokens.muted_foreground,
+            theme.tokens.foreground,
             HorizontalAlign::Start,
         );
         x += label_width + CONTEXT_ITEM_GAP;
@@ -138,22 +149,22 @@ pub(super) fn paint_interactive(
             icon.path(),
             icon_origin,
             CONTEXT_ICON_SIZE,
-            theme.tokens.muted_foreground,
+            theme.tokens.foreground,
             icon.stroke_width(),
         );
         x += CONTEXT_ICON_SIZE + CONTEXT_ICON_GAP;
-        let label_width = painter.measure_text_weighted(label, 10.0, 400);
+        let label_width = painter.measure_text_weighted(label, CONTEXT_FONT_SIZE, 400);
         paint_single_line(
             painter,
             label,
             Rect::xywh(x, rect.origin.y, label_width, rect.size.y),
-            10.0,
+            CONTEXT_FONT_SIZE,
             400,
-            theme.tokens.muted_foreground,
+            theme.tokens.foreground,
             HorizontalAlign::Start,
         );
         x += label_width + CONTEXT_ITEM_GAP;
-        if x >= rect.max_x() - 16.0 {
+        if x >= rect.max_x() - CONTEXT_INSET_X {
             break;
         }
     }
@@ -164,7 +175,7 @@ pub(super) fn paint_interactive(
                 painter,
                 &label,
                 slot,
-                10.0,
+                12.0,
                 500,
                 theme.zode_purple,
                 HorizontalAlign::End,
@@ -194,11 +205,11 @@ pub(super) fn paint_interactive(
 }
 
 fn goal_slot(rect: Rect, occupied_right: f32) -> Option<Rect> {
-    let right = (rect.max_x() - 16.0).max(rect.origin.x);
+    let right = (rect.max_x() - CONTEXT_INSET_X).max(rect.origin.x);
     let desired_width = (rect.size.x * 0.42).clamp(120.0, 300.0);
     let left = (right - desired_width)
         .max(occupied_right + 8.0)
-        .max(rect.origin.x + 16.0);
+        .max(rect.origin.x + CONTEXT_INSET_X);
     let width = (right - left).max(0.0);
     (width >= 48.0).then(|| Rect::xywh(left, rect.origin.y, width, rect.size.y))
 }

@@ -5,10 +5,18 @@ pub const SIDEBAR_W: f32 = 240.0;
 pub const COMPACT_SIDEBAR_W: f32 = 64.0;
 pub const TOP_BAR_H: f32 = 46.0;
 pub const CONTENT_W: f32 = 736.0;
+/// Full painted height of the composer context rail. Its lower edge tucks
+/// behind the next surface to create the attached-card treatment.
 pub const COMPOSER_CONTEXT_H: f32 = 44.0;
+/// Visible content and hit-test height above the input card.
+pub const COMPOSER_CONTEXT_VISIBLE_H: f32 = 38.0;
+/// Painted tail covered by the input card to visually attach both surfaces.
+pub const COMPOSER_CONTEXT_OVERLAP: f32 = COMPOSER_CONTEXT_H - COMPOSER_CONTEXT_VISIBLE_H;
+/// Horizontal inset that makes the rail read as a tray behind the input card.
+pub const COMPOSER_CONTEXT_INSET_X: f32 = 14.0;
 pub const COMPOSER_ATTACHMENT_H: f32 = 52.0;
 pub const COMPOSER_INPUT_H: f32 = 100.0;
-pub const COMPOSER_H: f32 = COMPOSER_CONTEXT_H + COMPOSER_INPUT_H;
+pub const COMPOSER_H: f32 = COMPOSER_CONTEXT_VISIBLE_H + COMPOSER_INPUT_H;
 pub const COMPOSER_QUEUE_MAX_VISIBLE: usize = 4;
 pub const COMPOSER_QUEUE_ROW_H: f32 = 29.0;
 pub const COMPOSER_QUEUE_PAD_Y: f32 = 5.0;

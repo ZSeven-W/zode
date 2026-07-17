@@ -47,11 +47,11 @@ pub(super) fn paint(
         16.0,
     );
     painter.stroke_svg_path(
-        SemanticIcon::NewTask.path(),
+        SemanticIcon::Plus.path(),
         plus.origin,
         plus.size.x,
-        theme.tokens.muted_foreground,
-        SemanticIcon::NewTask.stroke_width(),
+        theme.tokens.foreground,
+        SemanticIcon::Plus.stroke_width(),
     );
     let model_x = (rect.max_x() - 190.0).max(rect.origin.x + 140.0);
     let effort_x = (rect.max_x() - 108.0).max(rect.origin.x + 220.0);
@@ -62,18 +62,31 @@ pub(super) fn paint(
         16.0,
     );
     if !state.sandbox_label.trim().is_empty() {
+        let permission_icon = Rect::xywh(
+            controls.origin.x + 32.0,
+            controls.origin.y + (controls.size.y - 16.0) / 2.0,
+            16.0,
+            16.0,
+        );
+        painter.stroke_svg_path(
+            SemanticIcon::ShieldAlert.path(),
+            permission_icon.origin,
+            permission_icon.size.x,
+            theme.composer_permission,
+            SemanticIcon::ShieldAlert.stroke_width(),
+        );
         paint_single_line(
             painter,
             &state.sandbox_label,
             Rect::xywh(
-                rect.origin.x + 44.0,
+                permission_icon.max_x() + 6.0,
                 controls.origin.y,
-                (model_x - rect.origin.x - 52.0).max(0.0),
+                (model_x - permission_icon.max_x() - 14.0).max(0.0),
                 controls.size.y,
             ),
             11.0,
-            400,
-            theme.tokens.muted_foreground,
+            500,
+            theme.composer_permission,
             HorizontalAlign::Start,
         );
     }
@@ -129,7 +142,12 @@ pub(super) fn paint(
         );
         painter.fill_round_rect(stop, 1.5, theme.tokens.background);
     } else {
-        painter.fill_round_rect(send, 14.0, theme.zode_purple);
+        let send_color = if !input.text().trim().is_empty() || !state.attachments.is_empty() {
+            theme.zode_purple
+        } else {
+            theme.tokens.muted_foreground.with_alpha(0.72)
+        };
+        painter.fill_round_rect(send, 14.0, send_color);
         let send_icon = Rect::xywh(send.origin.x + 6.0, send.origin.y + 6.0, 16.0, 16.0);
         painter.stroke_svg_path(
             SemanticIcon::Send.path(),
@@ -144,7 +162,7 @@ pub(super) fn paint(
 pub(super) fn text_area<'a>(input: &'a TextInputState, focused: bool) -> TextArea<'a> {
     TextArea {
         state: input,
-        placeholder: "向 Zode 描述一个任务",
+        placeholder: "随心输入",
         focused,
         font_size: TEXT_AREA_FONT_SIZE,
         now_ms: 0,

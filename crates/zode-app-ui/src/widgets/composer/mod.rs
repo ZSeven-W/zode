@@ -3,19 +3,18 @@ use jian_widgets::{Painter, Rect};
 use zode_app_model::{AppCommand, AttachmentMetadata, ComposerState, GoalProgress, ZodeAppState};
 use zode_node_protocol::{SandboxMode, UserContent};
 
-use crate::{
-    composer_queue_reserved_height, stable_widget_id, ImeEvent, Key, Modifiers, RectExt, WidgetId,
-    ZodeTheme, COMPOSER_ATTACHMENT_H, COMPOSER_CONTEXT_H, COMPOSER_INPUT_H,
-};
+use crate::{stable_widget_id, ImeEvent, Key, Modifiers, RectExt, WidgetId, ZodeTheme};
 
 mod attachments;
 mod context;
 mod ime;
 mod input;
 mod queue;
+mod stack;
 
 pub use context::ComposerContextLayout;
 pub use queue::{ComposerQueueLayout, ComposerQueueMenuLayout, ComposerQueueRowLayout};
+pub use stack::ComposerLayout;
 
 pub const PROJECT_DETACH_ID: WidgetId = WidgetId(125);
 
@@ -382,14 +381,6 @@ fn estimated_decoded_len(data_base64: &str) -> u64 {
 
 pub struct Composer;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ComposerLayout {
-    pub context: Rect,
-    pub attachments: Option<Rect>,
-    pub queue: Option<Rect>,
-    pub input: Rect,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ComposerAttachmentLayout {
     pub id: String,
@@ -397,6 +388,10 @@ pub(crate) struct ComposerAttachmentLayout {
 }
 
 impl Composer {
+    pub fn can_submit(state: &ComposerState) -> bool {
+        !state.draft.trim().is_empty() || !state.attachments.is_empty()
+    }
+
     pub fn layout(rect: Rect, state: &ComposerState) -> ComposerLayout {
         Self::layout_with_queue_count(rect, state, 0)
     }
@@ -429,67 +424,7 @@ impl Composer {
         state: &ComposerState,
         queue_count: usize,
     ) -> ComposerLayout {
-        if queue_count == 0 {
-            let context_height = COMPOSER_CONTEXT_H.min(rect.size.y.max(0.0));
-            let input_height = COMPOSER_INPUT_H.min((rect.size.y - context_height).max(0.0));
-            let input = Rect::xywh(
-                rect.origin.x,
-                rect.max_y() - input_height,
-                rect.size.x,
-                input_height,
-            );
-            let attachments = (!state.attachments.is_empty()).then(|| {
-                let available = (input.origin.y - rect.origin.y - context_height).max(0.0);
-                Rect::xywh(
-                    rect.origin.x,
-                    rect.origin.y + context_height,
-                    rect.size.x,
-                    COMPOSER_ATTACHMENT_H.min(available),
-                )
-            });
-            return ComposerLayout {
-                context: Rect::xywh(rect.origin.x, rect.origin.y, rect.size.x, context_height),
-                attachments,
-                queue: None,
-                input,
-            };
-        }
-        let context_height = COMPOSER_CONTEXT_H.min(rect.size.y.max(0.0));
-        let input_height = COMPOSER_INPUT_H.min(rect.size.y.max(0.0));
-        let input = Rect::xywh(
-            rect.origin.x,
-            rect.max_y() - input_height,
-            rect.size.x,
-            input_height,
-        );
-        let mut cursor = input.origin.y;
-        let queue_height =
-            composer_queue_reserved_height(queue_count).min((cursor - rect.origin.y).max(0.0));
-        let queue = (queue_height > 0.0).then(|| {
-            cursor -= queue_height;
-            Rect::xywh(rect.origin.x, cursor, rect.size.x, queue_height)
-        });
-        let attachment_height = if state.attachments.is_empty() {
-            0.0
-        } else {
-            COMPOSER_ATTACHMENT_H.min((cursor - rect.origin.y).max(0.0))
-        };
-        let attachments = (attachment_height > 0.0).then(|| {
-            cursor -= attachment_height;
-            Rect::xywh(rect.origin.x, cursor, rect.size.x, attachment_height)
-        });
-        let context_height = context_height.min((cursor - rect.origin.y).max(0.0));
-        ComposerLayout {
-            context: Rect::xywh(
-                rect.origin.x,
-                (cursor - context_height).max(rect.origin.y),
-                rect.size.x,
-                context_height,
-            ),
-            attachments,
-            queue,
-            input,
-        }
+        stack::layout(rect, state, queue_count)
     }
 
     pub fn queue_layout(rect: Rect, state: &ZodeAppState) -> Option<ComposerQueueLayout> {
