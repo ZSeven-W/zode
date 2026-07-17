@@ -3,12 +3,13 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use winit::event_loop::EventLoopProxy;
 use zode_app_model::{
-    reduce_settings_command, AppCommand, TranscriptItem, TranscriptState, ZodeAppState,
+    apply_session_runtime_options, reduce_settings_command, AppCommand, LoadState, TranscriptItem,
+    TranscriptState, ZodeAppState,
 };
 use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentEndpoint, AgentQuery, AgentSnapshot, ApprovalDecision,
-    EndpointErrorKind, SessionLocator, ThreadStatus, ThreadSummary, TurnId, UserContent,
-    WorkspaceUri, PROTOCOL_VERSION,
+    EndpointErrorKind, RuntimeOptions, SessionLocator, ThreadStatus, ThreadSummary, TurnId,
+    UserContent, WorkspaceUri, PROTOCOL_VERSION,
 };
 
 use crate::command_projection::{now_ms, project_global_error, replace_threads};
@@ -23,9 +24,19 @@ pub struct CommandDispatch {
 #[derive(Debug)]
 enum Completion {
     None,
-    NewSession { workspace_uri: WorkspaceUri },
-    Approval { approval_id: String },
-    RefreshPermissions { workspace_uri: WorkspaceUri },
+    NewSession {
+        workspace_uri: WorkspaceUri,
+        session: SessionLocator,
+    },
+    Approval {
+        approval_id: String,
+    },
+    RefreshPermissions {
+        workspace_uri: WorkspaceUri,
+    },
+    RefreshRuntimeOptions {
+        session: SessionLocator,
+    },
     RefreshThreads,
 }
 
@@ -47,6 +58,8 @@ enum CompletionResult {
     None,
     NewSession {
         workspace_uri: WorkspaceUri,
+        session: SessionLocator,
+        runtime_options: Result<RuntimeOptions, String>,
     },
     Approval {
         approval_id: String,
@@ -54,6 +67,10 @@ enum CompletionResult {
     ProjectPermissions {
         workspace_uri: WorkspaceUri,
         tools: Vec<String>,
+    },
+    RuntimeOptions {
+        session: SessionLocator,
+        options: RuntimeOptions,
     },
     Threads(Vec<ThreadSummary>),
 }
@@ -180,9 +197,14 @@ async fn complete(
 ) -> Result<CompletionResult, String> {
     match completion {
         Completion::None => Ok(CompletionResult::None),
-        Completion::NewSession { workspace_uri } => {
-            Ok(CompletionResult::NewSession { workspace_uri })
-        }
+        Completion::NewSession {
+            workspace_uri,
+            session,
+        } => Ok(CompletionResult::NewSession {
+            workspace_uri,
+            runtime_options: query_session_runtime_options(endpoint, &session).await,
+            session,
+        }),
         Completion::Approval { approval_id } => Ok(CompletionResult::Approval { approval_id }),
         Completion::RefreshPermissions { workspace_uri } => {
             match endpoint
@@ -201,6 +223,10 @@ async fn complete(
                 _ => Err("the endpoint returned the wrong project-permissions snapshot".into()),
             }
         }
+        Completion::RefreshRuntimeOptions { session } => {
+            let options = query_session_runtime_options(endpoint, &session).await?;
+            Ok(CompletionResult::RuntimeOptions { session, options })
+        }
         Completion::RefreshThreads => match endpoint
             .query(AgentQuery::Threads)
             .await
@@ -209,6 +235,28 @@ async fn complete(
             AgentSnapshot::Threads(threads) => Ok(CompletionResult::Threads(threads)),
             _ => Err("the endpoint returned the wrong thread snapshot".into()),
         },
+    }
+}
+
+async fn query_session_runtime_options(
+    endpoint: &dyn AgentEndpoint,
+    session: &SessionLocator,
+) -> Result<RuntimeOptions, String> {
+    match endpoint
+        .query(AgentQuery::SessionRuntimeOptions {
+            session: session.clone(),
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        AgentSnapshot::SessionRuntimeOptions {
+            session: snapshot_session,
+            options,
+        } if &snapshot_session == session => Ok(options),
+        AgentSnapshot::SessionRuntimeOptions { .. } => {
+            Err("the endpoint returned runtime options for the wrong session".into())
+        }
+        _ => Err("the endpoint returned the wrong runtime-options snapshot".into()),
     }
 }
 
@@ -224,13 +272,16 @@ pub fn prepare_dispatch(
             let session = SessionLocator::new(state.host.node_id, uuid::Uuid::new_v4().to_string());
             let model = state.composer.model.clone();
             (
-                session,
+                session.clone(),
                 None,
                 AgentCommandKind::CreateSession {
                     workspace_uri: workspace_uri.clone(),
                     model,
                 },
-                Completion::NewSession { workspace_uri },
+                Completion::NewSession {
+                    workspace_uri,
+                    session,
+                },
             )
         }
         AppCommand::RenameSession { session, title } => (
@@ -336,24 +387,33 @@ pub fn prepare_dispatch(
                 Completion::RefreshPermissions { workspace_uri },
             )
         }
-        AppCommand::SetModel(model) => (
-            current_session(state)?,
-            None,
-            AgentCommandKind::SetModel { model },
-            Completion::None,
-        ),
-        AppCommand::SetEffort(effort) => (
-            current_session(state)?,
-            None,
-            AgentCommandKind::SetEffort { effort },
-            Completion::None,
-        ),
-        AppCommand::SetSandbox { mode, network } => (
-            current_session(state)?,
-            None,
-            AgentCommandKind::SetSandbox { mode, network },
-            Completion::None,
-        ),
+        AppCommand::SetModel(model) => {
+            let session = current_session(state)?;
+            (
+                session.clone(),
+                None,
+                AgentCommandKind::SetModel { model },
+                Completion::RefreshRuntimeOptions { session },
+            )
+        }
+        AppCommand::SetEffort(effort) => {
+            let session = current_session(state)?;
+            (
+                session.clone(),
+                None,
+                AgentCommandKind::SetEffort { effort },
+                Completion::RefreshRuntimeOptions { session },
+            )
+        }
+        AppCommand::SetSandbox { mode, network } => {
+            let session = current_session(state)?;
+            (
+                session.clone(),
+                None,
+                AgentCommandKind::SetSandbox { mode, network },
+                Completion::RefreshRuntimeOptions { session },
+            )
+        }
         _ => return Ok(None),
     };
     Ok(Some(CommandDispatch {
@@ -418,10 +478,10 @@ fn prepare_first_submit(
     state.transcripts.insert(session.clone(), transcript);
     state.active_turns.insert(session.clone(), turn_id);
     state.active_workspace = Some(workspace_uri);
-    state.current_session = Some(session);
+    state.current_session = Some(session.clone());
     Ok(CommandDispatch {
         commands: vec![create, start],
-        completion: Completion::None,
+        completion: Completion::RefreshRuntimeOptions { session },
     })
 }
 
@@ -453,11 +513,14 @@ fn append_user_content(transcript: &mut TranscriptState, input: &[UserContent]) 
     }
 }
 
-fn apply_success(state: &mut ZodeAppState, command: &AgentCommand, completion: CompletionResult) {
+fn apply_success(state: &mut ZodeAppState, _command: &AgentCommand, completion: CompletionResult) {
     match completion {
         CompletionResult::None => {}
-        CompletionResult::NewSession { workspace_uri } => {
-            let session = command.session.clone();
+        CompletionResult::NewSession {
+            workspace_uri,
+            session,
+            runtime_options,
+        } => {
             state.threads.insert(
                 0,
                 ThreadSummary {
@@ -482,7 +545,26 @@ fn apply_success(state: &mut ZodeAppState, command: &AgentCommand, completion: C
                 });
             }
             state.active_workspace = Some(workspace_uri);
-            state.current_session = Some(session);
+            state.current_session = Some(session.clone());
+            match runtime_options {
+                Ok(options) => {
+                    let _ = apply_session_runtime_options(state, session, options);
+                }
+                Err(message) => {
+                    state
+                        .presentation
+                        .sessions
+                        .entry(session.clone())
+                        .or_default()
+                        .runtime_options = LoadState::Failed(message.clone());
+                    if let Some(transcript) = state.transcripts.get_mut(&session) {
+                        transcript.items.push(TranscriptItem::Error {
+                            message: format!("运行设置加载失败：{message}"),
+                            retryable: true,
+                        });
+                    }
+                }
+            }
         }
         CompletionResult::Approval { approval_id } => {
             let session = state.approvals.remove(&approval_id);
@@ -505,6 +587,9 @@ fn apply_success(state: &mut ZodeAppState, command: &AgentCommand, completion: C
                     tools,
                 },
             );
+        }
+        CompletionResult::RuntimeOptions { session, options } => {
+            let _ = apply_session_runtime_options(state, session, options);
         }
         CompletionResult::Threads(threads) => replace_threads(state, threads),
     }

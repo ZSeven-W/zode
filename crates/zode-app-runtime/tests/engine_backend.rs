@@ -650,6 +650,21 @@ async fn create_session_preserves_the_caller_locator_and_query_delegates() {
 }
 
 #[tokio::test]
+async fn session_runtime_options_query_rejects_a_remote_session_before_delegating() {
+    let node_id = NodeId::new();
+    let remote = test_session(NodeId::new(), "remote");
+    let driver = Arc::new(FakeDriver::new(Vec::new()));
+    let backend = EngineBackend::new(node_id, driver);
+
+    let error = backend
+        .query(AgentQuery::SessionRuntimeOptions { session: remote })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, EndpointErrorKind::CapabilityDenied);
+}
+
+#[tokio::test]
 async fn aborted_stream_finishes_as_interrupted_without_an_error_event() {
     let node_id = NodeId::new();
     let session = test_session(node_id, "aborted-stream");

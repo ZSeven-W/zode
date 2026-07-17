@@ -1,14 +1,15 @@
 use zode_app_model::{
-    demo_state, environment_sections, reduce_agent_event, reduce_navigation_command,
-    reduce_presentation_command, AppCommand, AttachmentMetadata, ComingSoonFeature,
-    EnvironmentSectionKind, EnvironmentSnapshot, FileArtifact, IntegrationsTab, LoadState,
-    NavigationOutcome, PresentationCommandOutcome, PreviewState, PreviewTarget, SecondaryPane,
-    SessionDiffState, SessionPresentationState, SettingsCategory, ShellPage, ShellRoute,
-    TranscriptItem, TranscriptState,
+    apply_session_runtime_options, demo_state, environment_sections, reduce_agent_event,
+    reduce_navigation_command, reduce_presentation_command, AppCommand, AttachmentMetadata,
+    ComingSoonFeature, EnvironmentSectionKind, EnvironmentSnapshot, FileArtifact, IntegrationsTab,
+    LoadState, NavigationOutcome, PresentationCommandOutcome, PreviewState, PreviewTarget,
+    SecondaryPane, SessionDiffState, SessionPresentationState, SettingsCategory, ShellPage,
+    ShellRoute, TranscriptItem, TranscriptState,
 };
 use zode_node_protocol::{
-    AgentEvent, AgentEventKind, DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator,
-    ThreadStatus, ThreadSummary, TurnId, WorkspaceUri, PROTOCOL_VERSION,
+    AgentEvent, AgentEventKind, DiffFile, DiffFileStatus, DiffSnapshot, RuntimeOptions,
+    SandboxMode, SessionLocator, ThreadStatus, ThreadSummary, TurnId, WorkspaceUri,
+    PROTOCOL_VERSION,
 };
 
 fn add_session(
@@ -59,6 +60,7 @@ fn ready_presentation(
             sources: Vec::new(),
         }),
         preview: PreviewState::Idle,
+        runtime_options: LoadState::Idle,
     }
 }
 
@@ -320,6 +322,7 @@ fn environment_sections_project_only_real_current_session_facts() {
                 }),
             },
             preview: PreviewState::Idle,
+            runtime_options: LoadState::Idle,
         },
     );
     state.transcripts.get_mut(&session).unwrap().items = vec![
@@ -407,6 +410,7 @@ fn environment_sections_omit_empty_diff_branch_and_sources() {
                 }),
             },
             preview: PreviewState::Idle,
+            runtime_options: LoadState::Idle,
         },
     );
 
@@ -467,6 +471,60 @@ fn document_preview_is_distinct_from_diff_review() {
 
     assert_eq!(failed.target(), Some(&target));
     assert_eq!(failed.path(), Some("docs/report.md"));
+}
+
+#[test]
+fn runtime_options_are_applied_only_to_the_addressed_live_session() {
+    let mut state = demo_state();
+    let first = add_session(&mut state, "first", "file:///repo/first");
+    let second = add_session(&mut state, "second", "file:///repo/second");
+    state
+        .presentation
+        .sessions
+        .insert(first.clone(), SessionPresentationState::default());
+    state
+        .presentation
+        .sessions
+        .insert(second.clone(), SessionPresentationState::default());
+    state.current_session = Some(first.clone());
+    let options = RuntimeOptions {
+        models: vec!["model-a".into(), "model-b".into()],
+        active_model: Some("model-b".into()),
+        effort: Some("high".into()),
+        sandbox_mode: SandboxMode::ReadOnly,
+        sandbox_network: true,
+    };
+
+    assert!(apply_session_runtime_options(
+        &mut state,
+        first.clone(),
+        options.clone(),
+    ));
+    assert_eq!(
+        state.presentation.sessions[&first].runtime_options,
+        LoadState::Ready(options)
+    );
+    assert_eq!(
+        state.presentation.sessions[&second].runtime_options,
+        LoadState::Idle
+    );
+    assert_eq!(state.composer.model.as_deref(), Some("model-b"));
+    assert_eq!(state.composer.effort.as_deref(), Some("high"));
+    assert_eq!(state.composer.sandbox_label, "只读");
+
+    let deleted = SessionLocator::new(state.host.node_id, "deleted");
+    assert!(!apply_session_runtime_options(
+        &mut state,
+        deleted.clone(),
+        RuntimeOptions {
+            models: Vec::new(),
+            active_model: None,
+            effort: None,
+            sandbox_mode: SandboxMode::Off,
+            sandbox_network: false,
+        },
+    ));
+    assert!(!state.presentation.sessions.contains_key(&deleted));
 }
 
 #[test]

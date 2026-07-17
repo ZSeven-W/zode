@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use zode_app_model::{ProjectState, TranscriptItem, TranscriptState, ZodeAppState};
+use zode_app_model::{
+    apply_session_runtime_options, LoadState, ProjectState, TranscriptItem, TranscriptState,
+    ZodeAppState,
+};
 use zode_app_runtime::workspace_uri_to_path;
 use zode_node_protocol::{
     AgentEndpoint, AgentQuery, AgentSnapshot, CapabilityManifest, HistoryItem, SessionLocator,
@@ -53,6 +56,7 @@ pub(super) async fn load_initial_state(
                 .find(|project| project.available)
                 .map(|project| project.workspace_uri.clone())
         });
+    load_session_runtime_options(endpoint, &mut state).await;
     for workspace_uri in state
         .projects
         .iter()
@@ -65,16 +69,86 @@ pub(super) async fn load_initial_state(
             })
             .await
         {
-            Ok(AgentSnapshot::ProjectPermissions(tools)) if !tools.is_empty() => {
-                state.project_permissions.insert(workspace_uri, tools);
+            Ok(AgentSnapshot::ProjectPermissions(tools)) => {
+                state
+                    .project_permissions
+                    .insert(workspace_uri, LoadState::Ready(tools));
             }
-            Ok(_) => {}
+            Ok(_) => {
+                state.project_permissions.insert(
+                    workspace_uri,
+                    LoadState::Failed(
+                        "the endpoint returned the wrong project-permissions snapshot".into(),
+                    ),
+                );
+            }
             Err(error) => {
-                eprintln!("zode-app: project permissions could not be loaded: {error}")
+                eprintln!("zode-app: project permissions could not be loaded: {error}");
+                state
+                    .project_permissions
+                    .insert(workspace_uri, LoadState::Failed(error.to_string()));
             }
         }
     }
     Ok(state)
+}
+
+async fn load_session_runtime_options(endpoint: &dyn AgentEndpoint, state: &mut ZodeAppState) {
+    for session in state
+        .threads
+        .iter()
+        .map(|thread| thread.session.clone())
+        .collect::<Vec<_>>()
+    {
+        state
+            .presentation
+            .sessions
+            .entry(session.clone())
+            .or_default()
+            .runtime_options = LoadState::Loading;
+        let result = endpoint
+            .query(AgentQuery::SessionRuntimeOptions {
+                session: session.clone(),
+            })
+            .await;
+        match result {
+            Ok(AgentSnapshot::SessionRuntimeOptions {
+                session: snapshot_session,
+                options,
+            }) if snapshot_session == session => {
+                let _ = apply_session_runtime_options(state, session, options);
+            }
+            Ok(AgentSnapshot::SessionRuntimeOptions { .. }) => {
+                state
+                    .presentation
+                    .sessions
+                    .entry(session)
+                    .or_default()
+                    .runtime_options = LoadState::Failed(
+                    "the endpoint returned runtime options for the wrong session".into(),
+                );
+            }
+            Ok(_) => {
+                state
+                    .presentation
+                    .sessions
+                    .entry(session)
+                    .or_default()
+                    .runtime_options = LoadState::Failed(
+                    "the endpoint returned the wrong runtime-options snapshot".into(),
+                );
+            }
+            Err(error) => {
+                eprintln!("zode-app: session runtime options could not be loaded: {error}");
+                state
+                    .presentation
+                    .sessions
+                    .entry(session)
+                    .or_default()
+                    .runtime_options = LoadState::Failed(error.to_string());
+            }
+        }
+    }
 }
 
 fn newest_available_session(
@@ -176,14 +250,74 @@ fn projects_from_threads(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::collections::BTreeSet;
     use std::fs;
 
     use zode_app_model::TranscriptItem;
     use zode_app_runtime::path_to_workspace_uri;
     use zode_node_protocol::{
-        HistoryItem, NodeId, SessionLocator, ThreadHistory, ThreadStatus, ThreadSummary, ToolCall,
+        AgentEventStream, EndpointError, EndpointErrorKind, HistoryItem, NodeId, RuntimeOptions,
+        SandboxMode, SessionLocator, ThreadHistory, ThreadStatus, ThreadSummary, ToolCall,
         ToolStatus, WorkspaceUri,
     };
+
+    struct BootstrapEndpoint {
+        threads: Vec<ThreadSummary>,
+        good_session: SessionLocator,
+        options: RuntimeOptions,
+    }
+
+    #[async_trait]
+    impl AgentEndpoint for BootstrapEndpoint {
+        async fn command(
+            &self,
+            _command: zode_node_protocol::AgentCommand,
+        ) -> Result<(), EndpointError> {
+            unreachable!("bootstrap never sends commands")
+        }
+
+        async fn query(&self, query: AgentQuery) -> Result<AgentSnapshot, EndpointError> {
+            match query {
+                AgentQuery::Threads => Ok(AgentSnapshot::Threads(self.threads.clone())),
+                AgentQuery::RuntimeOptions => Ok(AgentSnapshot::RuntimeOptions(
+                    default_bootstrap_runtime_options(),
+                )),
+                AgentQuery::History { session } => Ok(AgentSnapshot::History(ThreadHistory {
+                    session,
+                    items: Vec::new(),
+                })),
+                AgentQuery::SessionRuntimeOptions { session } if session == self.good_session => {
+                    Ok(AgentSnapshot::SessionRuntimeOptions {
+                        session,
+                        options: self.options.clone(),
+                    })
+                }
+                AgentQuery::SessionRuntimeOptions { .. } => Err(EndpointError {
+                    kind: EndpointErrorKind::Unavailable,
+                    message: "session settings unavailable".into(),
+                }),
+                AgentQuery::ProjectPermissions { .. } => {
+                    Ok(AgentSnapshot::ProjectPermissions(Vec::new()))
+                }
+                AgentQuery::Capabilities | AgentQuery::Diff { .. } => unreachable!(),
+            }
+        }
+
+        async fn subscribe(&self) -> Result<AgentEventStream, EndpointError> {
+            Ok(Box::pin(futures_util::stream::empty()))
+        }
+    }
+
+    fn default_bootstrap_runtime_options() -> RuntimeOptions {
+        RuntimeOptions {
+            models: vec!["global-model".into()],
+            active_model: Some("global-model".into()),
+            effort: None,
+            sandbox_mode: SandboxMode::Off,
+            sandbox_network: false,
+        }
+    }
 
     #[test]
     fn persisted_history_projects_into_the_desktop_transcript_model() {
@@ -304,6 +438,69 @@ mod tests {
                 &projects,
             ),
             Some(newer_available.session)
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_preserves_per_session_runtime_and_known_empty_permissions() {
+        let node_id = NodeId::new();
+        let workspace = WorkspaceUri::new("file:///repo/bootstrap-runtime").unwrap();
+        let current = SessionLocator::new(node_id, "current");
+        let failed = SessionLocator::new(node_id, "failed");
+        let threads = vec![
+            ThreadSummary {
+                session: current.clone(),
+                workspace_uri: workspace.clone(),
+                title: "current".into(),
+                updated_at_ms: 20,
+                status: ThreadStatus::Idle,
+            },
+            ThreadSummary {
+                session: failed.clone(),
+                workspace_uri: workspace.clone(),
+                title: "failed".into(),
+                updated_at_ms: 10,
+                status: ThreadStatus::Idle,
+            },
+        ];
+        let canonical = RuntimeOptions {
+            models: vec!["session-model".into()],
+            active_model: Some("session-model".into()),
+            effort: Some("high".into()),
+            sandbox_mode: SandboxMode::ReadOnly,
+            sandbox_network: true,
+        };
+        let endpoint = BootstrapEndpoint {
+            threads,
+            good_session: current.clone(),
+            options: canonical.clone(),
+        };
+        let state = load_initial_state(
+            &endpoint,
+            CapabilityManifest {
+                node_id,
+                capabilities: BTreeSet::new(),
+            },
+            workspace.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.current_session.as_ref(), Some(&current));
+        assert_eq!(
+            state.presentation.sessions[&current].runtime_options,
+            LoadState::Ready(canonical)
+        );
+        assert!(matches!(
+            state.presentation.sessions[&failed].runtime_options,
+            LoadState::Failed(_)
+        ));
+        assert_eq!(state.composer.model.as_deref(), Some("session-model"));
+        assert_eq!(state.composer.effort.as_deref(), Some("high"));
+        assert_eq!(state.composer.sandbox_label, "只读");
+        assert_eq!(
+            state.project_permissions[&workspace],
+            LoadState::Ready(Vec::new())
         );
     }
 

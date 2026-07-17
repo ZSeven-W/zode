@@ -1,5 +1,7 @@
 use crate::{default_tool_expanded, AppCommand, TranscriptItem, TranscriptState, ZodeAppState};
-use zode_node_protocol::{AgentEvent, AgentEventKind, ToolCall};
+use zode_node_protocol::{
+    AgentEvent, AgentEventKind, RuntimeOptions, SandboxMode, SessionLocator, ToolCall,
+};
 
 const UNKNOWN_EVENT_CODE: &str = "agent.event.unknown";
 const UNKNOWN_EVENT_MESSAGE: &str = "Ignored an unknown agent event";
@@ -206,11 +208,9 @@ pub fn reduce_settings_command(
         } => {
             tools.sort();
             tools.dedup();
-            if tools.is_empty() {
-                state.project_permissions.remove(&workspace_uri);
-            } else {
-                state.project_permissions.insert(workspace_uri, tools);
-            }
+            state
+                .project_permissions
+                .insert(workspace_uri, crate::LoadState::Ready(tools));
             SettingsCommandOutcome::Applied
         }
         AppCommand::SetThemePreference(theme) => {
@@ -233,7 +233,9 @@ pub fn reduce_settings_command(
             workspace_uri,
             tool,
         } => {
-            let Some(tools) = state.project_permissions.get_mut(&workspace_uri) else {
+            let Some(crate::LoadState::Ready(tools)) =
+                state.project_permissions.get_mut(&workspace_uri)
+            else {
                 return SettingsCommandOutcome::Ignored;
             };
             let previous_len = tools.len();
@@ -241,13 +243,46 @@ pub fn reduce_settings_command(
             if tools.len() == previous_len {
                 return SettingsCommandOutcome::Ignored;
             }
-            if tools.is_empty() {
-                state.project_permissions.remove(&workspace_uri);
-            }
             SettingsCommandOutcome::Applied
         }
         _ => SettingsCommandOutcome::Ignored,
     }
+}
+
+/// Projects a canonical runtime snapshot into exactly one live session.
+/// Unknown or deleted sessions are ignored so delayed query completions cannot
+/// resurrect presentation state.
+pub fn apply_session_runtime_options(
+    state: &mut ZodeAppState,
+    session: SessionLocator,
+    options: RuntimeOptions,
+) -> bool {
+    let live = state.threads.iter().any(|thread| thread.session == session)
+        && state.transcripts.contains_key(&session);
+    if !live {
+        return false;
+    }
+    state
+        .presentation
+        .sessions
+        .entry(session.clone())
+        .or_default()
+        .runtime_options = crate::LoadState::Ready(options.clone());
+    if state.current_session.as_ref() == Some(&session) {
+        sync_composer_runtime(state, &options);
+    }
+    true
+}
+
+fn sync_composer_runtime(state: &mut ZodeAppState, options: &RuntimeOptions) {
+    state.composer.model.clone_from(&options.active_model);
+    state.composer.effort.clone_from(&options.effort);
+    state.composer.sandbox_label = match options.sandbox_mode {
+        SandboxMode::ReadOnly => "只读",
+        SandboxMode::WorkspaceWrite => "工作区写入",
+        SandboxMode::Off => "完全访问",
+    }
+    .into();
 }
 
 /// Applies viewport state emitted by the transcript widget without involving
@@ -310,6 +345,13 @@ pub fn reduce_navigation_command(
                 .entry(session.clone())
                 .or_default();
             state.current_session = Some(session.clone());
+            if let Some(options) = state.presentation.sessions[&session]
+                .runtime_options
+                .ready()
+                .cloned()
+            {
+                sync_composer_runtime(state, &options);
+            }
             state.review.dirty = state.presentation.sessions[&session].diff.dirty;
             state.review.open =
                 state.presentation.secondary_pane == Some(crate::SecondaryPane::Review);

@@ -1,4 +1,4 @@
-use crate::{AttachmentMetadata, LayoutClass, PresentationState, TranscriptState};
+use crate::{AttachmentMetadata, LayoutClass, LoadState, PresentationState, TranscriptState};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zode_node_protocol::{
@@ -132,7 +132,7 @@ pub struct ZodeAppState {
     pub active_turns: BTreeMap<SessionLocator, TurnId>,
     pub approvals: BTreeMap<String, SessionLocator>,
     pub tool_expanded: BTreeMap<SessionLocator, BTreeMap<String, bool>>,
-    pub project_permissions: BTreeMap<WorkspaceUri, Vec<String>>,
+    pub project_permissions: BTreeMap<WorkspaceUri, LoadState<Vec<String>>>,
     pub settings_scroll_offset: f32,
     pub composer: ComposerState,
     pub usage: BTreeMap<SessionLocator, UsageSnapshot>,

@@ -44,6 +44,7 @@ impl LocalAppRuntime {
             bootstrap.template.clone(),
             repository,
             capabilities.clone(),
+            config_dir.clone(),
         ));
         Self::compose(bootstrap, driver, event_capacity, node_id, capabilities)
     }

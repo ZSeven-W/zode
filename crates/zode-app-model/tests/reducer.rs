@@ -1,6 +1,7 @@
 use zode_app_model::{
-    demo_state, reduce_agent_event, reduce_tool_command, AppCommand, ReduceOutcome,
-    ToolCommandOutcome, TranscriptItem, TranscriptState, ZodeAppState,
+    demo_state, reduce_agent_event, reduce_settings_command, reduce_tool_command, AppCommand,
+    LoadState, ReduceOutcome, SettingsCommandOutcome, ToolCommandOutcome, TranscriptItem,
+    TranscriptState, ZodeAppState,
 };
 use zode_node_protocol::{
     AgentEvent, AgentEventKind, SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus,
@@ -52,6 +53,27 @@ fn tool(id: &str, status: ToolStatus, summary: &str) -> ToolCall {
         summary: summary.into(),
         detail: None,
     }
+}
+
+#[test]
+fn project_permission_projection_preserves_a_known_empty_result() {
+    let mut state = demo_state();
+    let workspace = WorkspaceUri::new("file:///repo/settings").unwrap();
+
+    assert_eq!(
+        reduce_settings_command(
+            &mut state,
+            AppCommand::SetProjectPermissions {
+                workspace_uri: workspace.clone(),
+                tools: Vec::new(),
+            },
+        ),
+        SettingsCommandOutcome::Applied,
+    );
+    assert_eq!(
+        state.project_permissions.get(&workspace),
+        Some(&LoadState::Ready(Vec::new()))
+    );
 }
 
 #[test]

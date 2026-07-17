@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use zode_node_protocol::{DiffSnapshot, SessionLocator, WorkspaceUri};
+use zode_node_protocol::{DiffSnapshot, RuntimeOptions, SessionLocator, WorkspaceUri};
 
 /// Typed destinations rendered by the desktop shell.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -205,6 +205,7 @@ pub struct SessionPresentationState {
     pub diff: SessionDiffState,
     pub context: LoadState<EnvironmentSnapshot>,
     pub preview: PreviewState,
+    pub runtime_options: LoadState<RuntimeOptions>,
 }
 
 /// Typed route, pane selection, and session-isolated presentation data.

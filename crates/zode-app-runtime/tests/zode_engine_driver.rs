@@ -19,8 +19,8 @@ use zode_core::session_store::SessionWriteMode;
 use zode_core::EngineTemplate;
 use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentQuery, AgentSnapshot, CapabilityManifest, DiffSnapshot,
-    EndpointError, NodeCapability, NodeId, SessionLocator, TurnId, UsageSnapshot, UserContent,
-    WorkspaceUri, PROTOCOL_VERSION,
+    EndpointError, EndpointErrorKind, NodeCapability, NodeId, RuntimeOptions, SandboxMode,
+    SessionLocator, TurnId, UsageSnapshot, UserContent, WorkspaceUri, PROTOCOL_VERSION,
 };
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
@@ -55,6 +55,9 @@ struct AssemblyRecord {
     cwd: PathBuf,
     model: String,
     template_model: Option<String>,
+    sandbox_mode: SandboxMode,
+    sandbox_network: bool,
+    allowed_tools: Vec<String>,
     prior_messages: usize,
     carried: bool,
 }
@@ -187,6 +190,17 @@ impl SessionEngineFactory for FakeFactory {
             cwd: PathBuf::from(&loaded.meta.cwd),
             model: loaded.meta.model.clone(),
             template_model: template.model().map(str::to_owned),
+            sandbox_mode: template
+                .sandbox()
+                .map(|sandbox| match sandbox.mode() {
+                    zode_core::sandbox::SandboxMode::ReadOnly => SandboxMode::ReadOnly,
+                    zode_core::sandbox::SandboxMode::WorkspaceWrite => SandboxMode::WorkspaceWrite,
+                })
+                .unwrap_or(SandboxMode::Off),
+            sandbox_network: template
+                .sandbox()
+                .is_some_and(zode_core::sandbox::SandboxConfig::allow_network),
+            allowed_tools: template.permissions().allow.clone(),
             prior_messages: loaded.store.len(),
             carried: carry.is_some(),
         });
@@ -197,6 +211,46 @@ impl SessionEngineFactory for FakeFactory {
         );
         Ok(engine)
     }
+}
+
+struct FailOnSecondAssemblyFactory {
+    first: Arc<FakeSessionEngine>,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl SessionEngineFactory for FailOnSecondAssemblyFactory {
+    async fn assemble(
+        &self,
+        _template: &EngineTemplate,
+        _session: &SessionLocator,
+        loaded: LoadedSession,
+        _carry: Option<CarryState>,
+    ) -> Result<Arc<dyn SessionEngine>, EndpointError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Err(EndpointError {
+                kind: EndpointErrorKind::Internal,
+                message: "replacement assembly failed".into(),
+            });
+        }
+        self.first.install(
+            loaded.store,
+            loaded.meta.model,
+            PathBuf::from(loaded.meta.cwd),
+        );
+        Ok(self.first.clone())
+    }
+}
+
+fn assert_runtime_options(
+    snapshot: AgentSnapshot,
+    expected_session: &SessionLocator,
+) -> RuntimeOptions {
+    let AgentSnapshot::SessionRuntimeOptions { session, options } = snapshot else {
+        panic!("expected session runtime options");
+    };
+    assert_eq!(&session, expected_session);
+    options
 }
 
 fn template(cwd: &Path, model: &str) -> EngineTemplate {
@@ -664,4 +718,287 @@ async fn steer_and_all_query_shapes_delegate_to_stable_sources() {
             .unwrap(),
         AgentSnapshot::ProjectPermissions(Vec::new())
     );
+}
+
+#[tokio::test]
+async fn session_runtime_options_read_back_only_the_addressed_loaded_session() {
+    let dir = TestDir::new("session-options");
+    let node_id = NodeId::new();
+    let session_a = session(node_id, "session-a");
+    let session_b = session(node_id, "session-b");
+    let repository = LocalSessionRepository::new(dir.path(), node_id);
+    let engines = (0..5)
+        .map(|_| Arc::new(FakeSessionEngine::new(Vec::new())))
+        .collect();
+    let factory = Arc::new(FakeFactory::new(engines));
+    let driver = ZodeEngineDriver::with_factory(
+        node_id,
+        template(dir.path(), "initial-model"),
+        repository,
+        manifest(node_id),
+        factory,
+    );
+    for (session, project) in [
+        (session_a.clone(), dir.path().join("project-a")),
+        (session_b.clone(), dir.path().join("project-b")),
+    ] {
+        fs::create_dir_all(&project).unwrap();
+        driver
+            .command(create_command(
+                session.clone(),
+                workspace(&project),
+                "initial-model",
+            ))
+            .await
+            .unwrap();
+        let _ = driver
+            .start_turn(
+                start_command(session, TurnId::new(), "load"),
+                AbortController::new(),
+            )
+            .await;
+    }
+
+    driver
+        .command(command(
+            session_a.clone(),
+            None,
+            AgentCommandKind::SetSandbox {
+                mode: SandboxMode::ReadOnly,
+                network: true,
+            },
+        ))
+        .await
+        .unwrap();
+    driver
+        .command(command(
+            session_a.clone(),
+            None,
+            AgentCommandKind::SetModel {
+                model: "session-a-model".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    driver
+        .command(command(
+            session_a.clone(),
+            None,
+            AgentCommandKind::SetEffort {
+                effort: "high".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let options_a = assert_runtime_options(
+        driver
+            .query(AgentQuery::SessionRuntimeOptions {
+                session: session_a.clone(),
+            })
+            .await
+            .unwrap(),
+        &session_a,
+    );
+    assert_eq!(options_a.active_model.as_deref(), Some("session-a-model"));
+    assert_eq!(options_a.effort.as_deref(), Some("high"));
+    assert_eq!(options_a.sandbox_mode, SandboxMode::ReadOnly);
+    assert!(options_a.sandbox_network);
+
+    let options_b = assert_runtime_options(
+        driver
+            .query(AgentQuery::SessionRuntimeOptions {
+                session: session_b.clone(),
+            })
+            .await
+            .unwrap(),
+        &session_b,
+    );
+    assert_eq!(options_b.active_model.as_deref(), Some("initial-model"));
+    assert_eq!(options_b.effort, None);
+    assert_eq!(options_b.sandbox_mode, SandboxMode::Off);
+    assert!(!options_b.sandbox_network);
+}
+
+#[tokio::test]
+async fn unloaded_session_runtime_options_use_its_persisted_workspace_policy_without_assembly() {
+    let dir = TestDir::new("unloaded-options");
+    let config_dir = dir.path().join("config");
+    let project = dir.path().join("project");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&project).unwrap();
+    zode_core::config::ConfigManager::update_project_state(&project, |state| {
+        state.insert(
+            "sandbox".into(),
+            serde_json::json!({
+                "enabled": true,
+                "mode": "read-only",
+                "network": true
+            }),
+        );
+    })
+    .unwrap();
+
+    let node_id = NodeId::new();
+    let session = session(node_id, "unloaded");
+    let repository = LocalSessionRepository::new(dir.path(), node_id);
+    repository
+        .create(&session, &workspace(&project), "session-model".into())
+        .await
+        .unwrap();
+    let factory = Arc::new(FakeFactory::new(Vec::new()));
+    let driver = ZodeEngineDriver::with_factory_and_config_dir(
+        node_id,
+        template(dir.path(), "launch-model"),
+        repository,
+        manifest(node_id),
+        factory.clone(),
+        config_dir,
+    );
+
+    let options = assert_runtime_options(
+        driver
+            .query(AgentQuery::SessionRuntimeOptions {
+                session: session.clone(),
+            })
+            .await
+            .unwrap(),
+        &session,
+    );
+    assert_eq!(options.active_model.as_deref(), Some("session-model"));
+    assert_eq!(options.sandbox_mode, SandboxMode::ReadOnly);
+    assert!(options.sandbox_network);
+    assert!(factory.assemblies.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn engine_assembly_isolates_sandbox_and_permission_policy_per_workspace() {
+    let dir = TestDir::new("workspace-policy");
+    let config_dir = dir.path().join("config");
+    let project_a = dir.path().join("project-a");
+    let project_b = dir.path().join("project-b");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&project_a).unwrap();
+    fs::create_dir_all(&project_b).unwrap();
+    zode_core::config::ConfigManager::update_project_state(&project_a, |state| {
+        state.insert(
+            "sandbox".into(),
+            serde_json::json!({
+                "enabled": true,
+                "mode": "read-only",
+                "network": true
+            }),
+        );
+        state.insert("permissions".into(), serde_json::json!({"allow": ["Bash"]}));
+    })
+    .unwrap();
+    zode_core::config::ConfigManager::update_project_state(&project_b, |state| {
+        state.insert("sandbox".into(), serde_json::json!({"enabled": false}));
+        state.insert(
+            "permissions".into(),
+            serde_json::json!({"allow": ["FileWrite"]}),
+        );
+    })
+    .unwrap();
+
+    let node_id = NodeId::new();
+    let session_a = session(node_id, "workspace-a");
+    let session_b = session(node_id, "workspace-b");
+    let repository = LocalSessionRepository::new(dir.path(), node_id);
+    for (session, project) in [(&session_a, &project_a), (&session_b, &project_b)] {
+        repository
+            .create(session, &workspace(project), "shared-model".into())
+            .await
+            .unwrap();
+    }
+    let factory = Arc::new(FakeFactory::new(vec![
+        Arc::new(FakeSessionEngine::new(Vec::new())),
+        Arc::new(FakeSessionEngine::new(Vec::new())),
+    ]));
+    let driver = ZodeEngineDriver::with_factory_and_config_dir(
+        node_id,
+        template(dir.path(), "launch-model"),
+        repository,
+        manifest(node_id),
+        factory.clone(),
+        config_dir,
+    );
+
+    for session in [session_a, session_b] {
+        let _ = driver
+            .start_turn(
+                start_command(session, TurnId::new(), "load"),
+                AbortController::new(),
+            )
+            .await;
+    }
+
+    let assemblies = factory.assemblies.lock().unwrap();
+    assert_eq!(assemblies[0].sandbox_mode, SandboxMode::ReadOnly);
+    assert!(assemblies[0].sandbox_network);
+    assert_eq!(assemblies[0].allowed_tools, vec!["Bash"]);
+    assert_eq!(assemblies[1].sandbox_mode, SandboxMode::Off);
+    assert!(!assemblies[1].sandbox_network);
+    assert_eq!(assemblies[1].allowed_tools, vec!["FileWrite"]);
+}
+
+#[tokio::test]
+async fn failed_sandbox_reassembly_keeps_live_and_persisted_policy_unchanged() {
+    let dir = TestDir::new("sandbox-transaction");
+    let project = dir.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let node_id = NodeId::new();
+    let session = session(node_id, "sandbox-transaction");
+    let repository = LocalSessionRepository::new(dir.path(), node_id);
+    let factory = Arc::new(FailOnSecondAssemblyFactory {
+        first: Arc::new(FakeSessionEngine::new(Vec::new())),
+        calls: AtomicUsize::new(0),
+    });
+    let driver = ZodeEngineDriver::with_factory(
+        node_id,
+        template(dir.path(), "model"),
+        repository,
+        manifest(node_id),
+        factory,
+    );
+    driver
+        .command(create_command(
+            session.clone(),
+            workspace(&project),
+            "model",
+        ))
+        .await
+        .unwrap();
+    let _ = driver
+        .start_turn(
+            start_command(session.clone(), TurnId::new(), "load"),
+            AbortController::new(),
+        )
+        .await;
+
+    let error = driver
+        .command(command(
+            session.clone(),
+            None,
+            AgentCommandKind::SetSandbox {
+                mode: SandboxMode::ReadOnly,
+                network: true,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, EndpointErrorKind::Internal);
+    assert!(!zode_core::config::ConfigManager::project_state_path(&project).exists());
+
+    let options = assert_runtime_options(
+        driver
+            .query(AgentQuery::SessionRuntimeOptions {
+                session: session.clone(),
+            })
+            .await
+            .unwrap(),
+        &session,
+    );
+    assert_eq!(options.sandbox_mode, SandboxMode::Off);
+    assert!(!options.sandbox_network);
 }

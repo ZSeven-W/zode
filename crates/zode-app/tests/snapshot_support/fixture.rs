@@ -6,8 +6,8 @@ use zode_app_model::{
     ShellRoute, ThemePreference, TranscriptItem, TranscriptState, ZodeAppState,
 };
 use zode_node_protocol::{
-    DiffFile, DiffFileStatus, DiffSnapshot, NodeCapability, SessionLocator, ThreadStatus,
-    ThreadSummary, ToolCall, ToolStatus, UsageSnapshot, WorkspaceUri,
+    DiffFile, DiffFileStatus, DiffSnapshot, NodeCapability, RuntimeOptions, SandboxMode,
+    SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus, UsageSnapshot, WorkspaceUri,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,9 +120,10 @@ pub fn fixture_state(
             cost_usd: None,
         },
     );
-    state
-        .project_permissions
-        .insert(workspace.clone(), vec!["read_file".into(), "shell".into()]);
+    state.project_permissions.insert(
+        workspace.clone(),
+        LoadState::Ready(vec!["read_file".into(), "shell".into()]),
+    );
     state.composer.model = Some("gpt-5.6".into());
     state.composer.effort = Some("high".into());
     state.composer.sandbox_label = "完全访问".into();
@@ -186,6 +187,13 @@ pub fn fixture_state(
                 }],
             }),
             preview: zode_app_model::PreviewState::Idle,
+            runtime_options: LoadState::Ready(RuntimeOptions {
+                models: vec!["gpt-5.6".into()],
+                active_model: Some("gpt-5.6".into()),
+                effort: Some("high".into()),
+                sandbox_mode: SandboxMode::Off,
+                sandbox_network: false,
+            }),
         },
     );
 

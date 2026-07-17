@@ -148,16 +148,8 @@ fn page_and_pane_widget_ids_map_through_component_commands() {
             AppCommand::SelectSettingsCategory(SettingsCategory::Appearance),
         ),
         (
-            82,
-            AppCommand::SelectSettingsCategory(SettingsCategory::Permissions),
-        ),
-        (
-            83,
-            AppCommand::SelectSettingsCategory(SettingsCategory::KeyboardShortcuts),
-        ),
-        (
-            84,
-            AppCommand::SelectSettingsCategory(SettingsCategory::Environment),
+            8_109,
+            AppCommand::Navigate(ShellRoute::Integrations(IntegrationsTab::Plugins)),
         ),
         (100, AppCommand::CloseSecondary),
         (101, AppCommand::OpenReview),
@@ -172,9 +164,10 @@ fn page_and_pane_widget_ids_map_through_component_commands() {
 #[test]
 fn permission_revoke_widget_keeps_its_endpoint_command() {
     let (mut state, _, workspace_uri) = state_with_session();
-    state
-        .project_permissions
-        .insert(workspace_uri.clone(), vec!["write_file".into()]);
+    state.project_permissions.insert(
+        workspace_uri.clone(),
+        LoadState::Ready(vec!["write_file".into()]),
+    );
     let id = SettingsPanel::permission_widget_id(&workspace_uri, "write_file");
 
     assert_eq!(
@@ -189,9 +182,10 @@ fn permission_revoke_widget_keeps_its_endpoint_command() {
 #[test]
 fn permission_revoke_is_not_consumed_as_a_local_settings_update() {
     let (mut state, _, workspace_uri) = state_with_session();
-    state
-        .project_permissions
-        .insert(workspace_uri.clone(), vec!["write_file".into()]);
+    state.project_permissions.insert(
+        workspace_uri.clone(),
+        LoadState::Ready(vec!["write_file".into()]),
+    );
     let command = AppCommand::RevokeProjectPermission {
         workspace_uri: workspace_uri.clone(),
         tool: "write_file".into(),
@@ -201,7 +195,10 @@ fn permission_revoke_is_not_consumed_as_a_local_settings_update() {
         reduce_local_settings_command(&mut state, command.clone()),
         SettingsCommandOutcome::Ignored
     );
-    assert_eq!(state.project_permissions[&workspace_uri], ["write_file"]);
+    assert_eq!(
+        state.project_permissions[&workspace_uri],
+        LoadState::Ready(vec!["write_file".into()])
+    );
     assert!(crate::command_bridge::prepare_dispatch(&mut state, command)
         .unwrap()
         .is_some());

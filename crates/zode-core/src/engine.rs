@@ -2734,6 +2734,20 @@ impl EngineTemplate {
         t
     }
 
+    /// Effective permission rules carried by this template.
+    pub fn permissions(&self) -> &crate::config::PermissionsConfig {
+        &self.cfg.permissions
+    }
+
+    /// Clone with the permission rules replaced. Desktop sessions use this to
+    /// isolate each workspace's merged global/project/state policy instead of
+    /// inheriting the launch workspace's rules.
+    pub fn with_permissions(&self, permissions: crate::config::PermissionsConfig) -> Self {
+        let mut t = self.clone();
+        t.cfg.permissions = permissions;
+        t
+    }
+
     /// Clone with a named provider selected (for the settings provider switch).
     /// `None` if the name isn't in `cfg.providers`. A multi-model provider (no
     /// top-level `model`, several under `models`) defaults to its first listed

@@ -15,6 +15,7 @@ pub enum AgentQuery {
     History { session: SessionLocator },
     Diff { session: SessionLocator },
     RuntimeOptions,
+    SessionRuntimeOptions { session: SessionLocator },
     ProjectPermissions { workspace_uri: WorkspaceUri },
 }
 
@@ -25,6 +26,10 @@ pub enum AgentSnapshot {
     History(ThreadHistory),
     Diff(DiffSnapshot),
     RuntimeOptions(RuntimeOptions),
+    SessionRuntimeOptions {
+        session: SessionLocator,
+        options: RuntimeOptions,
+    },
     ProjectPermissions(Vec<String>),
 }
 

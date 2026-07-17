@@ -23,7 +23,8 @@ use zode_node_protocol::{
 };
 
 use crate::{
-    workspace_uri_to_path, DriverEventStream, EngineDriver, LoadedSession, LocalSessionRepository,
+    runtime_policy, workspace_uri_to_path, DriverEventStream, EngineDriver, LoadedSession,
+    LocalSessionRepository,
 };
 
 /// Serializable pieces needed to persist or rebuild one session engine.
@@ -197,6 +198,7 @@ struct SessionSlot {
 pub struct ZodeEngineDriver {
     node_id: NodeId,
     template: EngineTemplate,
+    config_dir: Option<PathBuf>,
     repository: LocalSessionRepository,
     capabilities: CapabilityManifest,
     factory: Arc<dyn SessionEngineFactory>,
@@ -209,13 +211,15 @@ impl ZodeEngineDriver {
         template: EngineTemplate,
         repository: LocalSessionRepository,
         capabilities: CapabilityManifest,
+        config_dir: PathBuf,
     ) -> Self {
-        Self::with_factory(
+        Self::with_factory_and_config_dir(
             node_id,
             template,
             repository,
             capabilities,
             Arc::new(ZodeSessionEngineFactory),
+            config_dir,
         )
     }
 
@@ -229,6 +233,26 @@ impl ZodeEngineDriver {
         Self {
             node_id,
             template,
+            config_dir: None,
+            repository,
+            capabilities,
+            factory,
+            sessions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn with_factory_and_config_dir(
+        node_id: NodeId,
+        template: EngineTemplate,
+        repository: LocalSessionRepository,
+        capabilities: CapabilityManifest,
+        factory: Arc<dyn SessionEngineFactory>,
+        config_dir: PathBuf,
+    ) -> Self {
+        Self {
+            node_id,
+            template,
+            config_dir: Some(config_dir),
             repository,
             capabilities,
             factory,
@@ -255,6 +279,21 @@ impl ZodeEngineDriver {
         lock(&self.sessions).get(session).cloned()
     }
 
+    fn apply_workspace_policy(
+        &self,
+        template: &EngineTemplate,
+        cwd: &Path,
+    ) -> Result<EngineTemplate, EndpointError> {
+        let Some(config_dir) = self.config_dir.as_deref() else {
+            return Ok(template.clone());
+        };
+        runtime_policy::apply_workspace_policy(template, cwd, config_dir).map_err(map_internal)
+    }
+
+    fn session_template(&self, cwd: &Path, model: String) -> Result<EngineTemplate, EndpointError> {
+        self.apply_workspace_policy(&self.template.with_model(model), cwd)
+    }
+
     async fn ensure_engine(
         &self,
         session: &SessionLocator,
@@ -277,7 +316,8 @@ impl ZodeEngineDriver {
         }
         let loaded = self.repository.load(session).await?;
         let persisted_messages = loaded.store.len();
-        let template = self.template.with_model(loaded.meta.model.clone());
+        let template =
+            self.session_template(Path::new(&loaded.meta.cwd), loaded.meta.model.clone())?;
         let engine = self
             .factory
             .assemble(&template, session, loaded, None)
@@ -294,6 +334,16 @@ impl ZodeEngineDriver {
         &self,
         session: &SessionLocator,
         update: impl FnOnce(&EngineTemplate, &Path) -> Result<EngineTemplate, EndpointError>,
+    ) -> Result<(), EndpointError> {
+        self.reassemble_with_commit(session, update, |_| Ok(()))
+            .await
+    }
+
+    async fn reassemble_with_commit(
+        &self,
+        session: &SessionLocator,
+        update: impl FnOnce(&EngineTemplate, &Path) -> Result<EngineTemplate, EndpointError>,
+        commit: impl FnOnce(&Path) -> Result<(), EndpointError>,
     ) -> Result<(), EndpointError> {
         self.ensure_local(session)?;
         let Some(slot) = self.existing_slot(session) else {
@@ -320,6 +370,7 @@ impl ZodeEngineDriver {
             .factory
             .assemble(&template, session, loaded, Some(snapshot.carry))
             .await?;
+        commit(&snapshot.cwd)?;
         *lock(&slot.runtime) = Some(RuntimeSession {
             engine,
             template,
@@ -365,42 +416,47 @@ impl ZodeEngineDriver {
         network: bool,
     ) -> Result<(), EndpointError> {
         self.ensure_engine(session).await?;
-        self.reassemble(session, move |template, cwd| {
-            let sandbox = match mode {
-                SandboxMode::Off => None,
-                SandboxMode::ReadOnly | SandboxMode::WorkspaceWrite => {
-                    let core_mode = match mode {
-                        SandboxMode::ReadOnly => CoreSandboxMode::ReadOnly,
-                        _ => CoreSandboxMode::WorkspaceWrite,
-                    };
-                    Some(
-                        template
-                            .sandbox()
-                            .cloned()
-                            .map(|sandbox| sandbox.with_mode(core_mode).with_network(network))
-                            .map(Ok)
-                            .unwrap_or_else(|| SandboxConfig::new(cwd, core_mode, network, &[]))
-                            .map_err(map_internal)?,
-                    )
-                }
-            };
-            ConfigManager::update_project_state(cwd, |state| {
-                state.insert(
-                    "sandbox".to_string(),
-                    serde_json::json!({
-                        "enabled": sandbox.is_some(),
-                        "mode": match mode {
-                            SandboxMode::ReadOnly => Some("read-only"),
-                            SandboxMode::WorkspaceWrite => Some("workspace-write"),
-                            SandboxMode::Off => None,
-                        },
-                        "network": sandbox.as_ref().map(|value| value.allow_network()),
-                    }),
-                );
-            })
-            .map_err(map_internal)?;
-            Ok(template.with_sandbox(sandbox))
-        })
+        self.reassemble_with_commit(
+            session,
+            move |template, cwd| {
+                let sandbox = match mode {
+                    SandboxMode::Off => None,
+                    SandboxMode::ReadOnly | SandboxMode::WorkspaceWrite => {
+                        let core_mode = match mode {
+                            SandboxMode::ReadOnly => CoreSandboxMode::ReadOnly,
+                            _ => CoreSandboxMode::WorkspaceWrite,
+                        };
+                        Some(
+                            template
+                                .sandbox()
+                                .cloned()
+                                .map(|sandbox| sandbox.with_mode(core_mode).with_network(network))
+                                .map(Ok)
+                                .unwrap_or_else(|| SandboxConfig::new(cwd, core_mode, network, &[]))
+                                .map_err(map_internal)?,
+                        )
+                    }
+                };
+                Ok(template.with_sandbox(sandbox))
+            },
+            move |cwd| {
+                ConfigManager::update_project_state(cwd, |state| {
+                    state.insert(
+                        "sandbox".to_string(),
+                        serde_json::json!({
+                            "enabled": mode != SandboxMode::Off,
+                            "mode": match mode {
+                                SandboxMode::ReadOnly => Some("read-only"),
+                                SandboxMode::WorkspaceWrite => Some("workspace-write"),
+                                SandboxMode::Off => None,
+                            },
+                            "network": (mode != SandboxMode::Off).then_some(network),
+                        }),
+                    );
+                })
+                .map_err(map_internal)
+            },
+        )
         .await
     }
 
@@ -413,8 +469,10 @@ impl ZodeEngineDriver {
         let cwd = workspace_uri_to_path(workspace_uri)?;
         ConfigManager::revoke_project_tool(&cwd, tool).map_err(map_internal)?;
         if self.runtime_engine(session).is_some() {
-            self.reassemble(session, |template, _| Ok(template.clone()))
-                .await?;
+            self.reassemble(session, |template, cwd| {
+                self.apply_workspace_policy(template, cwd)
+            })
+            .await?;
         }
         Ok(())
     }
@@ -455,18 +513,25 @@ impl ZodeEngineDriver {
     }
 
     fn runtime_options(&self) -> RuntimeOptions {
-        let sandbox = self.template.sandbox();
-        RuntimeOptions {
-            models: self.template.model_ids(),
-            active_model: self.template.model().map(str::to_string),
-            effort: self.template.effort().map(str::to_string),
-            sandbox_mode: match sandbox.map(SandboxConfig::mode) {
-                None => SandboxMode::Off,
-                Some(CoreSandboxMode::ReadOnly) => SandboxMode::ReadOnly,
-                Some(CoreSandboxMode::WorkspaceWrite) => SandboxMode::WorkspaceWrite,
-            },
-            sandbox_network: sandbox.is_some_and(SandboxConfig::allow_network),
+        runtime_policy::runtime_options(&self.template)
+    }
+
+    async fn session_runtime_options(
+        &self,
+        session: &SessionLocator,
+    ) -> Result<RuntimeOptions, EndpointError> {
+        self.ensure_local(session)?;
+        if let Some(slot) = self.existing_slot(session) {
+            if let Some(options) = lock(&slot.runtime)
+                .as_ref()
+                .map(|runtime| runtime_policy::runtime_options(&runtime.template))
+            {
+                return Ok(options);
+            }
         }
+        let loaded = self.repository.load(session).await?;
+        let template = self.session_template(Path::new(&loaded.meta.cwd), loaded.meta.model)?;
+        Ok(runtime_policy::runtime_options(&template))
     }
 }
 
@@ -615,6 +680,10 @@ impl EngineDriver for ZodeEngineDriver {
             )),
             AgentQuery::Diff { session } => Ok(AgentSnapshot::Diff(self.diff(session).await?)),
             AgentQuery::RuntimeOptions => Ok(AgentSnapshot::RuntimeOptions(self.runtime_options())),
+            AgentQuery::SessionRuntimeOptions { session } => {
+                let options = self.session_runtime_options(&session).await?;
+                Ok(AgentSnapshot::SessionRuntimeOptions { session, options })
+            }
             AgentQuery::ProjectPermissions { workspace_uri } => {
                 let cwd = workspace_uri_to_path(&workspace_uri)?;
                 let allowed = ConfigManager::project_allowed_tools(&cwd).map_err(map_internal)?;
