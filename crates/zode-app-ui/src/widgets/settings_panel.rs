@@ -1,6 +1,7 @@
 mod legacy;
+mod rail;
 
-use jian_widgets::{Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
     AppCommand, ConnectionState, SettingsCategory, ShellPage, ShellRoute, ThemePreference,
     ZodeAppState,
@@ -8,8 +9,8 @@ use zode_app_model::{
 use zode_node_protocol::WorkspaceUri;
 
 use crate::{
-    stable_widget_id, RectExt, WidgetId, WorkspaceSnapshot, ZodeTheme, HIGH_CONTRAST_ID,
-    REDUCED_MOTION_ID, THEME_DARK_ID, THEME_LIGHT_ID, THEME_SYSTEM_ID,
+    paint_single_line, stable_widget_id, RectExt, WidgetId, WorkspaceSnapshot, ZodeTheme,
+    HIGH_CONTRAST_ID, REDUCED_MOTION_ID, THEME_DARK_ID, THEME_LIGHT_ID, THEME_SYSTEM_ID,
 };
 
 const CONTENT_WIDTH: f32 = 768.0;
@@ -319,7 +320,7 @@ impl SettingsPanel {
         workspace_uri: Option<&WorkspaceUri>,
         theme: &ZodeTheme,
     ) {
-        paint_category_rail(painter, snapshot.layout.sidebar, state, theme);
+        rail::paint(painter, snapshot.layout.sidebar, state, theme);
         let (content, _) = Self::page_layout(snapshot.layout.primary_surface);
         let offset = Self::scroll_offset(content, state);
         painter.save();
@@ -399,13 +400,19 @@ fn paint_appearance(
         if index > 0 {
             paint_divider(painter, card, index as f32 * APPEARANCE_ROW_HEIGHT, theme);
         }
-        draw_text(
+        paint_single_line(
             painter,
             &layout.control.label,
-            Point2D::new(layout.rect.origin.x + 18.0, layout.rect.origin.y + 27.0),
+            Rect::xywh(
+                layout.rect.origin.x + 18.0,
+                layout.rect.origin.y,
+                (layout.rect.size.x - 84.0).max(0.0),
+                layout.rect.size.y,
+            ),
             13.0,
             500,
             theme.tokens.foreground,
+            HorizontalAlign::Start,
         );
         let indicator = Rect::xywh(
             layout.rect.max_x() - 48.0,
@@ -439,38 +446,52 @@ fn paint_permissions(
         .unwrap_or_default();
     let card = permission_card_rect(content, rows.len(), offset);
     paint_card(painter, card, theme);
-    draw_text(
+    let workspace_row = Rect::xywh(
+        card.origin.x,
+        card.origin.y,
+        card.size.x,
+        PERMISSION_WORKSPACE_HEIGHT,
+    );
+    paint_single_line(
         painter,
         "活动工作区",
-        Point2D::new(card.origin.x + 18.0, card.origin.y + 31.0),
+        Rect::xywh(
+            workspace_row.origin.x + 18.0,
+            workspace_row.origin.y,
+            (workspace_row.size.x - 36.0).max(0.0),
+            workspace_row.size.y,
+        ),
         13.0,
         500,
         theme.tokens.foreground,
+        HorizontalAlign::Start,
     );
     draw_right_aligned(
         painter,
         workspace_uri.map(WorkspaceUri::as_str).unwrap_or("未选择"),
-        card,
-        card.origin.y + 31.0,
+        workspace_row,
         theme,
     );
     paint_divider(painter, card, PERMISSION_WORKSPACE_HEIGHT, theme);
 
     if rows.is_empty() {
-        draw_text(
+        paint_single_line(
             painter,
             if workspace_uri.is_some() {
                 "未保存项目权限"
             } else {
                 "未选择工作区"
             },
-            Point2D::new(
+            Rect::xywh(
                 card.origin.x + 18.0,
-                card.origin.y + PERMISSION_WORKSPACE_HEIGHT + 31.0,
+                card.origin.y + PERMISSION_WORKSPACE_HEIGHT,
+                (card.size.x - 36.0).max(0.0),
+                (card.size.y - PERMISSION_WORKSPACE_HEIGHT).max(0.0),
             ),
             12.0,
             400,
             theme.tokens.muted_foreground,
+            HorizontalAlign::Start,
         );
         return;
     }
@@ -489,22 +510,30 @@ fn paint_permissions(
         }
         let row_y =
             card.origin.y + PERMISSION_WORKSPACE_HEIGHT + index as f32 * PERMISSION_ROW_HEIGHT;
-        draw_text(
+        let row = Rect::xywh(card.origin.x, row_y, card.size.x, PERMISSION_ROW_HEIGHT);
+        paint_single_line(
             painter,
             &layout.tool,
-            Point2D::new(card.origin.x + 18.0, row_y + 27.0),
+            Rect::xywh(
+                row.origin.x + 18.0,
+                row.origin.y,
+                (layout.rect.origin.x - row.origin.x - 30.0).max(0.0),
+                row.size.y,
+            ),
             12.0,
             500,
             theme.tokens.foreground,
+            HorizontalAlign::Start,
         );
         painter.fill_round_rect(layout.rect, 7.0, theme.tokens.destructive.with_alpha(0.12));
-        draw_text(
+        paint_single_line(
             painter,
             "撤销",
-            Point2D::new(layout.rect.origin.x + 18.0, layout.rect.origin.y + 19.0),
+            layout.rect,
             11.0,
             600,
             theme.tokens.destructive,
+            HorizontalAlign::Center,
         );
     }
 }
@@ -579,36 +608,43 @@ fn paint_value_row(
     if index > 0 {
         paint_divider(painter, card, index as f32 * GENERAL_ROW_HEIGHT, theme);
     }
-    let baseline = card.origin.y + index as f32 * GENERAL_ROW_HEIGHT + 31.0;
-    draw_text(
+    let row = Rect::xywh(
+        card.origin.x,
+        card.origin.y + index as f32 * GENERAL_ROW_HEIGHT,
+        card.size.x,
+        GENERAL_ROW_HEIGHT,
+    );
+    paint_single_line(
         painter,
         label,
-        Point2D::new(card.origin.x + 18.0, baseline),
+        Rect::xywh(
+            row.origin.x + 18.0,
+            row.origin.y,
+            (row.size.x - 36.0).max(0.0),
+            row.size.y,
+        ),
         13.0,
         500,
         theme.tokens.foreground,
+        HorizontalAlign::Start,
     );
-    draw_right_aligned(painter, value, card, baseline, theme);
+    draw_right_aligned(painter, value, row, theme);
 }
 
-fn draw_right_aligned(
-    painter: &mut dyn Painter,
-    value: &str,
-    card: Rect,
-    baseline: f32,
-    theme: &ZodeTheme,
-) {
-    let width = painter.measure_text_weighted(value, 12.0, 400);
-    draw_text(
+fn draw_right_aligned(painter: &mut dyn Painter, value: &str, row: Rect, theme: &ZodeTheme) {
+    paint_single_line(
         painter,
         value,
-        Point2D::new(
-            (card.max_x() - 18.0 - width).max(card.origin.x + 150.0),
-            baseline,
+        Rect::xywh(
+            (row.origin.x + 150.0).min(row.max_x()),
+            row.origin.y,
+            (row.size.x - 168.0).max(0.0),
+            row.size.y,
         ),
         12.0,
         400,
         theme.tokens.muted_foreground,
+        HorizontalAlign::End,
     );
 }
 
@@ -670,77 +706,6 @@ const fn category_command_for_widget(id: WidgetId) -> Option<AppCommand> {
         _ => return None,
     };
     Some(AppCommand::SelectSettingsCategory(category))
-}
-
-fn paint_category_rail(
-    painter: &mut dyn Painter,
-    rect: Rect,
-    state: &ZodeAppState,
-    theme: &ZodeTheme,
-) {
-    if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
-        return;
-    }
-    painter.fill_rect(rect, theme.sidebar);
-    draw_text(
-        painter,
-        "设置",
-        Point2D::new(rect.origin.x + 16.0, rect.origin.y + 64.0),
-        16.0,
-        600,
-        theme.sidebar_foreground,
-    );
-    let search = Rect::xywh(
-        rect.origin.x + 8.0,
-        rect.origin.y + 86.0,
-        (rect.size.x - 16.0).max(0.0),
-        28.0,
-    );
-    painter.fill_round_rect(search, 8.0, theme.tokens.card);
-    painter.stroke_round_rect(search, 8.0, theme.tokens.border, 1.0);
-    draw_text(
-        painter,
-        "搜索即将支持",
-        Point2D::new(search.origin.x + 12.0, search.origin.y + 19.0),
-        12.0,
-        400,
-        theme.tokens.muted_foreground,
-    );
-    draw_text(
-        painter,
-        "个人",
-        Point2D::new(rect.origin.x + 16.0, rect.origin.y + 143.0),
-        12.0,
-        500,
-        theme.tokens.muted_foreground,
-    );
-    for (_, row, _, label, selected, available) in SettingsPanel::category_rows(rect, state) {
-        if selected {
-            painter.fill_round_rect(row, 10.0, theme.tokens.row_selected);
-        }
-        draw_text(
-            painter,
-            label,
-            Point2D::new(row.origin.x + 10.0, row.origin.y + 20.0),
-            13.0,
-            if selected { 600 } else { 450 },
-            if available || selected {
-                theme.sidebar_foreground
-            } else {
-                theme.tokens.muted_foreground
-            },
-        );
-        if !available {
-            draw_text(
-                painter,
-                "即将支持",
-                Point2D::new(row.max_x() - 62.0, row.origin.y + 20.0),
-                10.0,
-                450,
-                theme.tokens.muted_foreground,
-            );
-        }
-    }
 }
 
 fn selected_workspace_uri(state: &ZodeAppState) -> Option<&WorkspaceUri> {

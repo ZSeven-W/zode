@@ -1,8 +1,8 @@
-use jian_widgets::{Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{AppCommand, IntegrationsTab, ShellRoute, ZodeAppState};
 use zode_node_protocol::NodeCapability;
 
-use crate::{WidgetId, ZodeTheme};
+use crate::{paint_single_line, WidgetId, ZodeTheme};
 
 pub const INTEGRATIONS_PLUGINS_TAB_ID: WidgetId = WidgetId(70);
 pub const INTEGRATIONS_SKILLS_TAB_ID: WidgetId = WidgetId(71);
@@ -184,10 +184,10 @@ fn paint_tabs(painter: &mut dyn Painter, layout: &IntegrationsPageLayout, theme:
         if tab.selected {
             painter.fill_round_rect(tab.rect, 10.0, theme.tokens.row_selected);
         }
-        draw_text(
+        paint_single_line(
             painter,
             tab.label,
-            Point2D::new(tab.rect.origin.x + 11.0, tab.rect.origin.y + 21.0),
+            tab.rect,
             13.0,
             if tab.selected { 650 } else { 450 },
             if tab.selected {
@@ -195,6 +195,7 @@ fn paint_tabs(painter: &mut dyn Painter, layout: &IntegrationsPageLayout, theme:
             } else {
                 theme.tokens.muted_foreground
             },
+            HorizontalAlign::Center,
         );
     }
 }
@@ -258,21 +259,29 @@ fn paint_plugins(
         );
         painter.fill_round_rect(icon, 10.0, theme.tokens.muted);
         let card_center_y = card.rect.origin.y + card.rect.size.y / 2.0;
-        draw_text(
+        let text_rect = Rect::xywh(
+            card.rect.origin.x + 66.0,
+            card_center_y - 20.0,
+            (card.rect.size.x - 80.0).max(0.0),
+            20.0,
+        );
+        paint_single_line(
             painter,
             card.card.label,
-            Point2D::new(card.rect.origin.x + 66.0, card_center_y - 8.0),
+            text_rect,
             14.0,
             600,
             theme.tokens.foreground,
+            HorizontalAlign::Start,
         );
-        draw_text(
+        paint_single_line(
             painter,
             card.card.description,
-            Point2D::new(card.rect.origin.x + 66.0, card_center_y + 13.0),
+            Rect::xywh(text_rect.origin.x, card_center_y, text_rect.size.x, 20.0),
             12.0,
             400,
             theme.tokens.muted_foreground,
+            HorizontalAlign::Start,
         );
         painter.restore();
     }
@@ -329,13 +338,19 @@ fn paint_skills(painter: &mut dyn Painter, layout: &IntegrationsPageLayout, them
 fn paint_search_status(painter: &mut dyn Painter, rect: Rect, theme: &ZodeTheme) {
     painter.fill_round_rect(rect, 17.0, theme.tokens.muted);
     painter.stroke_round_rect(rect, 17.0, theme.tokens.border, 1.0);
-    draw_text(
+    paint_single_line(
         painter,
         "搜索即将支持",
-        Point2D::new(rect.origin.x + 14.0, rect.origin.y + 22.0),
+        Rect::xywh(
+            rect.origin.x + 14.0,
+            rect.origin.y,
+            (rect.size.x - 28.0).max(0.0),
+            rect.size.y,
+        ),
         13.0,
         400,
         theme.tokens.muted_foreground,
+        HorizontalAlign::Start,
     );
 }
 

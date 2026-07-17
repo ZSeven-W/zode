@@ -1,7 +1,9 @@
-use jian_widgets::{centered_text_baseline_y, Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect};
 use zode_app_model::{AppCommand, SecondaryPane, ZodeAppState};
 
-use crate::{UsageChip, WidgetId, ZodeTheme, HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID};
+use crate::{
+    paint_single_line, UsageChip, WidgetId, ZodeTheme, HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID,
+};
 
 const ACTION_SIZE: f32 = 32.0;
 const ACTION_GAP: f32 = 4.0;
@@ -123,20 +125,14 @@ impl ThreadHeader {
             })
             .map(|thread| thread.title.as_str())
             .unwrap_or("新任务");
-        let layout = TextLayout::single_run(
+        paint_single_line(
+            painter,
             title,
-            "system-ui",
+            header.title,
             13.0,
-            theme.tokens.foreground.to_jian(),
-            Point2D::ZERO,
-        )
-        .with_font_weight(600);
-        painter.draw_text(
-            &layout,
-            Point2D::new(
-                header.title.origin.x,
-                centered_text_baseline_y(header.title, 13.0),
-            ),
+            600,
+            theme.tokens.foreground,
+            HorizontalAlign::Start,
         );
         for (action, label) in [(header.environment, "环境"), (header.review, "审查")] {
             let Some(action) = action else {
@@ -145,20 +141,14 @@ impl ThreadHeader {
             if action.selected {
                 painter.fill_round_rect(action.rect, 9.0, theme.tokens.row_selected);
             }
-            let action_text = TextLayout::single_run(
+            paint_single_line(
+                painter,
                 label,
-                "system-ui",
+                action.rect,
                 11.0,
-                theme.tokens.muted_foreground.to_jian(),
-                Point2D::ZERO,
-            )
-            .with_font_weight(550);
-            painter.draw_text(
-                &action_text,
-                Point2D::new(
-                    action.rect.origin.x + 3.0,
-                    centered_text_baseline_y(action.rect, 11.0),
-                ),
+                550,
+                theme.tokens.muted_foreground,
+                HorizontalAlign::Center,
             );
         }
         if let Some(usage) = state

@@ -1,4 +1,4 @@
-use jian_widgets::{centered_text_baseline_y, Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect};
 use std::collections::BTreeMap;
 
 use zode_app_model::{
@@ -6,9 +6,8 @@ use zode_app_model::{
 };
 use zode_node_protocol::{SessionLocator, ThreadSummary, WorkspaceUri};
 
-use crate::{stable_widget_id, RectExt, WidgetId, ZodeTheme};
+use crate::{paint_single_line, stable_widget_id, RectExt, WidgetId, ZodeTheme};
 
-const FONT: &str = "system-ui";
 const TITLEBAR_H: f32 = 38.0;
 const BRAND_H: f32 = 46.0;
 const HEADER_H: f32 = TITLEBAR_H + BRAND_H;
@@ -530,10 +529,13 @@ fn draw_label(
     weight: u16,
     color: jian_widgets::Color,
 ) {
-    let layout = TextLayout::single_run(text, FONT, size, color.to_jian(), Point2D::ZERO)
-        .with_font_weight(weight);
-    painter.draw_text(
-        &layout,
-        Point2D::new(rect.origin.x, centered_text_baseline_y(rect, size)),
+    paint_single_line(
+        painter,
+        text,
+        rect,
+        size,
+        weight,
+        color,
+        HorizontalAlign::Start,
     );
 }

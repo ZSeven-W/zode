@@ -1,9 +1,9 @@
 use jian_core::text_input::{prev_char_boundary, TextInputState};
-use jian_widgets::{components::text_area::TextArea, Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{components::text_area::TextArea, HorizontalAlign, Painter, Point2D, Rect};
 use zode_app_model::ComposerState;
 use zode_node_protocol::{SandboxMode, UserContent};
 
-use crate::{ImeEvent, Key, Modifiers, RectExt, ZodeTheme};
+use crate::{paint_single_line, ImeEvent, Key, Modifiers, RectExt, ZodeTheme};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposerSubmission {
@@ -310,14 +310,17 @@ impl Composer {
             .flatten()
             .filter(|label| !label.trim().is_empty())
         {
-            draw_text(
+            let label_width = painter.measure_text_weighted(label, 10.0, 400);
+            paint_single_line(
                 painter,
                 label,
-                Point2D::new(rect.origin.x + context_x, rect.origin.y + 18.0),
+                Rect::xywh(rect.origin.x + context_x, rect.origin.y, label_width, 26.0),
                 10.0,
+                400,
                 theme.tokens.muted_foreground,
+                HorizontalAlign::Start,
             );
-            context_x += painter.measure_text_weighted(label, 10.0, 400) + 20.0;
+            context_x += label_width + 20.0;
         }
 
         TextArea {
@@ -339,58 +342,92 @@ impl Composer {
             ),
             &theme.tokens,
         );
-        let controls_y = rect.origin.y + rect.size.y - 17.0;
+        let controls = Rect::xywh(
+            rect.origin.x + 14.0,
+            rect.max_y() - 38.0,
+            (rect.size.x - 28.0).max(0.0),
+            28.0,
+        );
+        let plus = Rect::xywh(
+            controls.origin.x,
+            controls.origin.y + (controls.size.y - 16.0) / 2.0,
+            16.0,
+            16.0,
+        );
         painter.stroke_svg_path(
             "M4 12H20M12 4V20",
-            Point2D::new(rect.origin.x + 14.0, controls_y - 13.0),
+            plus.origin,
             16.0,
             theme.tokens.muted_foreground,
             1.5,
         );
+        let model_x = (rect.max_x() - 190.0).max(rect.origin.x + 140.0);
+        let effort_x = (rect.max_x() - 108.0).max(rect.origin.x + 220.0);
+        let mic = Rect::xywh(
+            rect.max_x() - 70.0,
+            controls.origin.y + (controls.size.y - 16.0) / 2.0,
+            16.0,
+            16.0,
+        );
         if !state.sandbox_label.trim().is_empty() {
-            draw_text(
+            paint_single_line(
                 painter,
                 &state.sandbox_label,
-                Point2D::new(rect.origin.x + 44.0, controls_y),
+                Rect::xywh(
+                    rect.origin.x + 44.0,
+                    controls.origin.y,
+                    (model_x - rect.origin.x - 52.0).max(0.0),
+                    controls.size.y,
+                ),
                 11.0,
+                400,
                 theme.tokens.muted_foreground,
+                HorizontalAlign::Start,
             );
         }
         let model = state.model.as_deref().unwrap_or("选择模型");
-        draw_text(
+        paint_single_line(
             painter,
             model,
-            Point2D::new(
-                (rect.max_x() - 190.0).max(rect.origin.x + 140.0),
-                controls_y,
+            Rect::xywh(
+                model_x,
+                controls.origin.y,
+                (effort_x - model_x - 8.0).max(0.0),
+                controls.size.y,
             ),
             11.0,
+            400,
             theme.tokens.muted_foreground,
+            HorizontalAlign::Start,
         );
         if let Some(effort) = state
             .effort
             .as_deref()
             .filter(|effort| !effort.trim().is_empty())
         {
-            draw_text(
+            paint_single_line(
                 painter,
                 effort,
-                Point2D::new(
-                    (rect.max_x() - 108.0).max(rect.origin.x + 220.0),
-                    controls_y,
+                Rect::xywh(
+                    effort_x,
+                    controls.origin.y,
+                    (mic.origin.x - effort_x - 8.0).max(0.0),
+                    controls.size.y,
                 ),
                 11.0,
+                400,
                 theme.tokens.muted_foreground,
+                HorizontalAlign::Start,
             );
         }
         painter.stroke_svg_path(
             "M9 5V12A3 3 0 0 0 15 12V5M6 11A6 6 0 0 0 18 11M12 17V21",
-            Point2D::new(rect.max_x() - 70.0, controls_y - 14.0),
+            mic.origin,
             16.0,
             theme.tokens.muted_foreground,
             1.4,
         );
-        let send = Rect::xywh(rect.max_x() - 42.0, rect.max_y() - 38.0, 28.0, 28.0);
+        let send = Rect::xywh(rect.max_x() - 42.0, controls.origin.y, 28.0, 28.0);
         painter.fill_round_rect(send, 14.0, theme.zode_purple);
         painter.stroke_svg_path(
             "M7 13L12 8L17 13M12 8V18",
@@ -400,15 +437,4 @@ impl Composer {
             1.6,
         );
     }
-}
-
-fn draw_text(
-    painter: &mut dyn Painter,
-    text: &str,
-    origin: Point2D,
-    size: f32,
-    color: jian_widgets::Color,
-) {
-    let layout = TextLayout::single_run(text, "system-ui", size, color.to_jian(), Point2D::ZERO);
-    painter.draw_text(&layout, origin);
 }

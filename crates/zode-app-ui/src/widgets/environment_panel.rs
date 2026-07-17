@@ -1,7 +1,7 @@
-use jian_widgets::{Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{AppCommand, ConnectionState, EnvironmentEntry, LoadState, ZodeAppState};
 
-use crate::{RectExt, WidgetId, ZodeTheme};
+use crate::{paint_single_line, RectExt, WidgetId, ZodeTheme};
 
 pub const ENVIRONMENT_CLOSE_ID: WidgetId = WidgetId(100);
 pub const ENVIRONMENT_REVIEW_ID: WidgetId = WidgetId(101);
@@ -93,13 +93,19 @@ impl EnvironmentPanel {
         if let Some(button) = layout.review_button {
             painter.fill_round_rect(button, 9.0, theme.tokens.muted);
             painter.stroke_round_rect(button, 9.0, theme.tokens.border, 1.0);
-            draw_text(
+            paint_single_line(
                 painter,
                 "查看变更",
-                Point2D::new(button.origin.x + 12.0, button.origin.y + 22.0),
+                Rect::xywh(
+                    button.origin.x + 12.0,
+                    button.origin.y,
+                    (button.size.x - 24.0).max(0.0),
+                    button.size.y,
+                ),
                 13.0,
                 600,
                 theme.tokens.foreground,
+                HorizontalAlign::Start,
             );
         }
         painter.restore();

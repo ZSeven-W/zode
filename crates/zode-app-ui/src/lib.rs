@@ -4,6 +4,7 @@ mod accessibility;
 mod brand;
 mod input;
 mod layout;
+mod text;
 mod theme;
 mod virtual_list;
 mod widgets;
@@ -44,3 +45,4 @@ pub use accessibility::{
     THEME_SYSTEM_ID, WORKFLOWS_NAV_ID,
 };
 pub(crate) use brand::BrandMark;
+pub(crate) use text::paint_single_line;
