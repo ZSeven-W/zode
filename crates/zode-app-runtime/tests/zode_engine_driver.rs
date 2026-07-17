@@ -656,7 +656,7 @@ async fn steer_and_all_query_shapes_delegate_to_stable_sources() {
     };
     assert_eq!(diff_session, session);
     assert!(files.is_empty());
-    assert!(unified.contains("working tree clean"));
+    assert!(unified.is_empty());
     assert_eq!(
         driver
             .query(AgentQuery::ProjectPermissions { workspace_uri })
