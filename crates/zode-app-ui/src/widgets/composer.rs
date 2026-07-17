@@ -1,5 +1,5 @@
 use jian_core::text_input::{prev_char_boundary, TextInputState};
-use jian_widgets::{Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{components::text_area::TextArea, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::ComposerState;
 use zode_node_protocol::{SandboxMode, UserContent};
 
@@ -233,21 +233,25 @@ impl Composer {
         painter.fill_round_rect(rect, 12.0, theme.tokens.card);
         painter.stroke_round_rect(rect, 12.0, theme.tokens.border, 1.0);
 
-        let prompt = if state.draft.is_empty() {
-            "向 Zode 描述一个任务"
-        } else {
-            state.draft.as_str()
-        };
-        draw_text(
+        let input = TextInputState::with_text(state.draft.clone());
+        TextArea {
+            state: &input,
+            placeholder: "向 Zode 描述一个任务",
+            focused: state.focused,
+            font_size: 14.0,
+            now_ms: 0,
+            pad_x: 8.0,
+            max_visible_lines: 4,
+        }
+        .paint(
             painter,
-            prompt,
-            Point2D::new(rect.origin.x + 16.0, rect.origin.y + 30.0),
-            14.0,
-            if state.draft.is_empty() {
-                theme.tokens.muted_foreground
-            } else {
-                theme.tokens.foreground
-            },
+            Rect::xywh(
+                rect.origin.x + 8.0,
+                rect.origin.y + 10.0,
+                rect.size.x - 16.0,
+                (rect.size.y - 54.0).max(0.0),
+            ),
+            &theme.tokens,
         );
         let model = state.model.as_deref().unwrap_or("选择模型");
         draw_text(
