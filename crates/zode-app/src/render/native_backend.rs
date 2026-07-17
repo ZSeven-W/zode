@@ -110,31 +110,36 @@ impl NativeBackend {
     }
 
     fn draw_text_run(&mut self, canvas: &skia_safe::Canvas, run: &TextRun) {
-        let picture = if let Some(picture) = self.text_pictures.get(run) {
-            picture
-        } else {
-            let mut normalized = run.clone();
-            normalized.origin = Point::new(0.0, 0.0);
-            let mut recorder = skia_safe::PictureRecorder::new();
-            let cull = skia_safe::Rect::from_xywh(
-                -TEXT_PICTURE_CULL_EXTENT,
-                -TEXT_PICTURE_CULL_EXTENT,
-                TEXT_PICTURE_CULL_EXTENT * 2.0,
-                TEXT_PICTURE_CULL_EXTENT * 2.0,
-            );
-            let recording_canvas = recorder.begin_recording(cull, false);
-            self.skia
-                .draw_on_canvas(recording_canvas, &DrawOp::Text(normalized));
-            let Some(picture) = recorder.finish_recording_as_picture(None) else {
-                self.draw_op(canvas, &DrawOp::Text(run.clone()));
-                return;
+        let (picture, recorded_x, recorded_y) =
+            if let Some(cached) = self.text_pictures.get(run, self.dpi) {
+                cached
+            } else {
+                let mut recorder = skia_safe::PictureRecorder::new();
+                let cull = skia_safe::Rect::from_xywh(
+                    -TEXT_PICTURE_CULL_EXTENT,
+                    -TEXT_PICTURE_CULL_EXTENT,
+                    TEXT_PICTURE_CULL_EXTENT * 2.0,
+                    TEXT_PICTURE_CULL_EXTENT * 2.0,
+                );
+                let recording_canvas = recorder.begin_recording(cull, false);
+                self.skia
+                    .draw_on_canvas(recording_canvas, &DrawOp::Text(run.clone()));
+                let Some(picture) = recorder.finish_recording_as_picture(None) else {
+                    self.draw_op(canvas, &DrawOp::Text(run.clone()));
+                    return;
+                };
+                self.text_pictures.insert(run, self.dpi, picture.clone());
+                (picture, run.origin.x, run.origin.y)
             };
-            self.text_pictures.insert(run, picture.clone());
-            picture
-        };
 
-        let matrix = skia_safe::Matrix::translate((run.origin.x, run.origin.y));
-        canvas.draw_picture(&picture, Some(&matrix), None);
+        let offset_x = run.origin.x - recorded_x;
+        let offset_y = run.origin.y - recorded_y;
+        if offset_x == 0.0 && offset_y == 0.0 {
+            canvas.draw_picture(&picture, None, None);
+        } else {
+            let matrix = skia_safe::Matrix::translate((offset_x, offset_y));
+            canvas.draw_picture(&picture, Some(&matrix), None);
+        }
     }
 
     fn prepare_text_run(&self, source: &TextRun, origin: Point2D) -> TextRun {
@@ -692,8 +697,13 @@ mod tests {
 
     #[test]
     fn cached_text_picture_matches_direct_jian_pixels() {
-        const WIDTH: u32 = 320;
-        const HEIGHT: u32 = 96;
+        jian_skia::with_font_lock(assert_cached_text_picture_matches_direct_jian_pixels);
+    }
+
+    fn assert_cached_text_picture_matches_direct_jian_pixels() {
+        const DPI: f32 = 1.5;
+        const WIDTH: u32 = 480;
+        const HEIGHT: u32 = 144;
         let layout = TextLayout::single_run(
             "Cached text 文字",
             "system-ui",
@@ -703,26 +713,40 @@ mod tests {
         )
         .with_font_weight(600);
         let origin = Point2D::new(21.5, 19.25);
-        let mut cached_backend = NativeBackend::new(1.0);
+        // Two logical pixels are three whole device pixels at 1.5x. The
+        // relocated draw must therefore reuse the same cached phase.
+        let moved_origin = Point2D::new(origin.x + 2.0, origin.y + 2.0);
+        let mut cached_backend = NativeBackend::new(DPI);
         let direct_run = cached_backend.prepare_text_run(&layout.runs()[0], origin);
+        let moved_direct_run = cached_backend.prepare_text_run(&layout.runs()[0], moved_origin);
 
         let mut direct = RasterSurface::new(WIDTH, HEIGHT).expect("direct surface");
         direct.canvas().clear(skia_safe::Color::WHITE);
+        direct.canvas().scale((DPI, DPI));
         let mut jian = jian_skia::SkiaBackend::new();
         jian.draw_on_canvas(direct.canvas(), &DrawOp::Text(direct_run));
 
+        let mut moved_direct = RasterSurface::new(WIDTH, HEIGHT).expect("moved direct surface");
+        moved_direct.canvas().clear(skia_safe::Color::WHITE);
+        moved_direct.canvas().scale((DPI, DPI));
+        jian.draw_on_canvas(moved_direct.canvas(), &DrawOp::Text(moved_direct_run));
+
         let mut first = RasterSurface::new(WIDTH, HEIGHT).expect("first cached surface");
         first.canvas().clear(skia_safe::Color::WHITE);
+        first.canvas().scale((DPI, DPI));
         cached_backend.draw_text(first.canvas(), &layout, origin);
 
         let mut second = RasterSurface::new(WIDTH, HEIGHT).expect("hit surface");
         second.canvas().clear(skia_safe::Color::WHITE);
-        cached_backend.draw_text(second.canvas(), &layout, origin);
+        second.canvas().scale((DPI, DPI));
+        cached_backend.draw_text(second.canvas(), &layout, moved_origin);
 
         let mut direct_pixels = vec![0; (WIDTH * HEIGHT * 4) as usize];
+        let mut moved_direct_pixels = vec![0; direct_pixels.len()];
         let mut first_pixels = vec![0; direct_pixels.len()];
         let mut second_pixels = vec![0; direct_pixels.len()];
         assert!(direct.read_rgba8(&mut direct_pixels));
+        assert!(moved_direct.read_rgba8(&mut moved_direct_pixels));
         assert!(first.read_rgba8(&mut first_pixels));
         assert!(second.read_rgba8(&mut second_pixels));
         assert_eq!(
@@ -730,8 +754,9 @@ mod tests {
             "cache miss changed text pixels"
         );
         assert_eq!(
-            second_pixels, direct_pixels,
+            second_pixels, moved_direct_pixels,
             "cache hit changed text pixels"
         );
+        assert_eq!(cached_backend.text_pictures.stats(), (1, 1, 0, 1));
     }
 }

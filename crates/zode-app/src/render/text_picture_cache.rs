@@ -19,10 +19,13 @@ struct TextPictureKey {
     max_width_bits: u32,
     align: u8,
     line_height_bits: u32,
+    dpi_bits: u32,
+    origin_x_phase_bits: u32,
+    origin_y_phase_bits: u32,
 }
 
 impl TextPictureKey {
-    fn from_run(run: &TextRun) -> Self {
+    fn from_run(run: &TextRun, dpi: f32) -> Self {
         Self {
             content: run.content.clone().into_boxed_str(),
             font_family: run.font_family.clone().into_boxed_str(),
@@ -32,10 +35,13 @@ impl TextPictureKey {
             max_width_bits: run.max_width.to_bits(),
             align: align_key(run.align),
             line_height_bits: run.line_height.to_bits(),
+            dpi_bits: dpi.to_bits(),
+            origin_x_phase_bits: device_phase_bits(run.origin.x, dpi),
+            origin_y_phase_bits: device_phase_bits(run.origin.y, dpi),
         }
     }
 
-    fn matches(&self, run: &TextRun) -> bool {
+    fn matches(&self, run: &TextRun, dpi: f32) -> bool {
         self.content.as_ref() == run.content
             && self.font_family.as_ref() == run.font_family
             && self.font_size_bits == run.font_size.to_bits()
@@ -44,6 +50,9 @@ impl TextPictureKey {
             && self.max_width_bits == run.max_width.to_bits()
             && self.align == align_key(run.align)
             && self.line_height_bits == run.line_height.to_bits()
+            && self.dpi_bits == dpi.to_bits()
+            && self.origin_x_phase_bits == device_phase_bits(run.origin.x, dpi)
+            && self.origin_y_phase_bits == device_phase_bits(run.origin.y, dpi)
     }
 }
 
@@ -51,13 +60,15 @@ struct CachedTextPicture {
     id: u64,
     key: TextPictureKey,
     picture: Picture,
+    origin_x: f32,
+    origin_y: f32,
     bytes: usize,
 }
 
 /// Host-owned display-list cache for text whose shaping inputs are unchanged.
 ///
-/// Origins deliberately do not participate in the key. Pictures are recorded
-/// at `(0, 0)` and translated by the caller when replayed.
+/// Device-space subpixel origin phases participate in the key. Pictures keep
+/// their recorded origin and may only be translated to a matching phase.
 pub(super) struct TextPictureCache {
     buckets: HashMap<u64, Vec<CachedTextPicture>>,
     insertion_order: VecDeque<(u64, u64)>,
@@ -95,18 +106,23 @@ impl TextPictureCache {
         }
     }
 
-    pub(super) fn get(&mut self, run: &TextRun) -> Option<Picture> {
-        self.get_with_generation(run, jian_skia::font_generation())
+    pub(super) fn get(&mut self, run: &TextRun, dpi: f32) -> Option<(Picture, f32, f32)> {
+        self.get_with_generation(run, dpi, jian_skia::font_generation())
     }
 
-    fn get_with_generation(&mut self, run: &TextRun, generation: u64) -> Option<Picture> {
+    fn get_with_generation(
+        &mut self,
+        run: &TextRun,
+        dpi: f32,
+        generation: u64,
+    ) -> Option<(Picture, f32, f32)> {
         self.sync_generation(generation);
-        let hash = hash_run(run);
+        let hash = hash_run(run, dpi);
         let picture = self.buckets.get(&hash).and_then(|bucket| {
             bucket
                 .iter()
-                .find(|cached| cached.key.matches(run))
-                .map(|cached| cached.picture.clone())
+                .find(|cached| cached.key.matches(run, dpi))
+                .map(|cached| (cached.picture.clone(), cached.origin_x, cached.origin_y))
         });
         #[cfg(test)]
         if picture.is_some() {
@@ -117,7 +133,7 @@ impl TextPictureCache {
         picture
     }
 
-    pub(super) fn insert(&mut self, run: &TextRun, picture: Picture) {
+    pub(super) fn insert(&mut self, run: &TextRun, dpi: f32, picture: Picture) {
         let bytes = picture.approximate_bytes_used();
         if bytes > MAX_BYTES {
             return;
@@ -128,7 +144,7 @@ impl TextPictureCache {
             }
         }
 
-        let hash = hash_run(run);
+        let hash = hash_run(run, dpi);
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.buckets
@@ -136,8 +152,10 @@ impl TextPictureCache {
             .or_default()
             .push(CachedTextPicture {
                 id,
-                key: TextPictureKey::from_run(run),
+                key: TextPictureKey::from_run(run, dpi),
                 picture,
+                origin_x: run.origin.x,
+                origin_y: run.origin.y,
                 bytes,
             });
         self.insertion_order.push_back((hash, id));
@@ -189,7 +207,7 @@ impl TextPictureCache {
     }
 }
 
-fn hash_run(run: &TextRun) -> u64 {
+fn hash_run(run: &TextRun, dpi: f32) -> u64 {
     let mut hasher = DefaultHasher::new();
     run.content.hash(&mut hasher);
     run.font_family.hash(&mut hasher);
@@ -199,7 +217,23 @@ fn hash_run(run: &TextRun) -> u64 {
     run.max_width.to_bits().hash(&mut hasher);
     align_key(run.align).hash(&mut hasher);
     run.line_height.to_bits().hash(&mut hasher);
+    dpi.to_bits().hash(&mut hasher);
+    device_phase_bits(run.origin.x, dpi).hash(&mut hasher);
+    device_phase_bits(run.origin.y, dpi).hash(&mut hasher);
     hasher.finish()
+}
+
+fn device_phase_bits(value: f32, dpi: f32) -> u32 {
+    let device_value = value * dpi;
+    if !device_value.is_finite() {
+        return device_value.to_bits();
+    }
+    let phase = device_value - device_value.floor();
+    if phase == 0.0 {
+        0.0_f32.to_bits()
+    } else {
+        phase.to_bits()
+    }
 }
 
 fn align_key(align: TextAlign) -> u8 {
@@ -240,14 +274,14 @@ mod tests {
     }
 
     #[test]
-    fn origin_is_ignored_but_visual_properties_are_keyed() {
+    fn integer_device_translation_is_ignored_but_phase_and_visual_properties_are_keyed() {
         let mut cache = TextPictureCache::with_generation(7);
         let base = run("cached");
-        cache.insert(&base, picture());
+        cache.insert(&base, 1.5, picture());
 
         let mut moved = base.clone();
-        moved.origin = Point::new(90.0, 120.0);
-        assert!(cache.get_with_generation(&moved, 7).is_some());
+        moved.origin = Point::new(6.0, 10.0);
+        assert!(cache.get_with_generation(&moved, 1.5, 7).is_some());
 
         let variants = [
             run("different"),
@@ -277,11 +311,15 @@ mod tests {
             },
             TextRun {
                 line_height: 1.5,
+                ..base.clone()
+            },
+            TextRun {
+                origin: Point::new(4.25, 8.0),
                 ..base
             },
         ];
         for variant in &variants {
-            assert!(cache.get_with_generation(variant, 7).is_none());
+            assert!(cache.get_with_generation(variant, 1.5, 7).is_none());
         }
         assert_eq!(cache.stats(), (1, variants.len(), 0, 1));
     }
@@ -290,10 +328,10 @@ mod tests {
     fn font_generation_change_invalidates_cached_pictures() {
         let mut cache = TextPictureCache::with_generation(4);
         let run = run("generation");
-        cache.insert(&run, picture());
-        assert!(cache.get_with_generation(&run, 4).is_some());
+        cache.insert(&run, 1.0, picture());
+        assert!(cache.get_with_generation(&run, 1.0, 4).is_some());
 
-        assert!(cache.get_with_generation(&run, 5).is_none());
+        assert!(cache.get_with_generation(&run, 1.0, 5).is_none());
 
         assert_eq!(cache.stats(), (1, 1, 1, 0));
     }
@@ -302,13 +340,13 @@ mod tests {
     fn entry_limit_evicts_oldest_picture() {
         let mut cache = TextPictureCache::with_generation(9);
         for index in 0..=MAX_ENTRIES {
-            cache.insert(&run(&format!("entry-{index}")), picture());
+            cache.insert(&run(&format!("entry-{index}")), 1.0, picture());
         }
 
         assert_eq!(cache.entries, MAX_ENTRIES);
-        assert!(cache.get_with_generation(&run("entry-0"), 9).is_none());
+        assert!(cache.get_with_generation(&run("entry-0"), 1.0, 9).is_none());
         assert!(cache
-            .get_with_generation(&run(&format!("entry-{MAX_ENTRIES}")), 9)
+            .get_with_generation(&run(&format!("entry-{MAX_ENTRIES}")), 1.0, 9)
             .is_some());
     }
 }

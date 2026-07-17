@@ -5,9 +5,8 @@ use zode_app_model::{
     ComposerContextMenu as ContextMenuKind, ProjectState, TaskLaunchMode,
 };
 use zode_app_ui::{
-    Composer, ComposerContextMenu, WidgetId, ZodeTheme, COMPOSER_BRANCH_CREATE_ID,
-    COMPOSER_BRANCH_SEARCH_ID, COMPOSER_CONTEXT_MENU_SURFACE_ID, COMPOSER_LOCATION_LOCAL_ID,
-    COMPOSER_LOCATION_WORKTREE_ID,
+    Composer, ComposerContextMenu, ZodeTheme, COMPOSER_BRANCH_CREATE_ID, COMPOSER_BRANCH_SEARCH_ID,
+    COMPOSER_CONTEXT_MENU_SURFACE_ID, COMPOSER_LOCATION_LOCAL_ID, COMPOSER_LOCATION_WORKTREE_ID,
 };
 use zode_node_protocol::WorkspaceUri;
 
