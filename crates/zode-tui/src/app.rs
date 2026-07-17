@@ -462,6 +462,8 @@ pub struct TuiApp {
     plugin_picker: Option<PluginPicker>,
     /// `/browser` status panel (bare `/browser`, no subcommand).
     browser_panel: Option<BrowserPanel>,
+    /// `/team` status panel (bare `/team`, no subcommand).
+    team_panel: Option<crate::ui::dialog::team_panel::TeamPanel>,
     agents_dialog: Option<AgentsDialog>,
     workflows_dialog: Option<WorkflowsDialog>,
     mcp_dialog: Option<McpDialog>,
@@ -745,6 +747,7 @@ impl TuiApp {
             connect: None,
             plugin_picker: None,
             browser_panel: None,
+            team_panel: None,
             agents_dialog: None,
             workflows_dialog: None,
             mcp_dialog: None,
@@ -1207,6 +1210,7 @@ impl TuiApp {
         self.session_picker = None;
         self.tasks_panel = None;
         self.subagents_panel = None;
+        self.team_panel = None;
         self.files_panel = None;
         self.browser_panel = None;
         self.show_help = false;
@@ -2297,6 +2301,7 @@ impl TuiApp {
             || self.connect.is_some()
             || self.plugin_picker.is_some()
             || self.browser_panel.is_some()
+            || self.team_panel.is_some()
             || self.agents_dialog.is_some()
             || self.workflows_dialog.is_some()
             || self.mcp_dialog.is_some()
@@ -2671,6 +2676,7 @@ impl TuiApp {
                     self.tasks_panel = None;
                     self.subagents_panel = None;
                     self.files_panel = None;
+                    self.team_panel = None;
                     self.browser_panel = None;
                     self.show_help = false;
                     if self.active_question.is_none() {
@@ -2956,6 +2962,9 @@ impl TuiApp {
         if let Some(panel) = &mut self.browser_panel {
             panel.render(f, area, &theme);
         }
+        if let Some(panel) = &mut self.team_panel {
+            panel.render(f, area, &theme);
+        }
         if self.show_help {
             crate::ui::help::render_help(f, area, &theme);
         }
@@ -3174,6 +3183,25 @@ impl TuiApp {
         // 2f. Browser panel captures nav + Enter (may await a plugin toggle).
         if self.browser_panel.is_some() {
             self.handle_browser_panel_key(key.code, agent_tx).await;
+            return;
+        }
+
+        // 2f'. Team panel: read-only; scroll + Esc to close.
+        if self.team_panel.is_some() {
+            match key.code {
+                KeyCode::Esc => self.team_panel = None,
+                KeyCode::Up => {
+                    if let Some(p) = &mut self.team_panel {
+                        p.scroll_up();
+                    }
+                }
+                KeyCode::Down => {
+                    if let Some(p) = &mut self.team_panel {
+                        p.scroll_down();
+                    }
+                }
+                _ => {}
+            }
             return;
         }
 
@@ -3755,6 +3783,7 @@ impl TuiApp {
             || self.connect.is_some()
             || self.plugin_picker.is_some()
             || self.browser_panel.is_some()
+            || self.team_panel.is_some()
             || self.agents_dialog.is_some()
             || self.workflows_dialog.is_some()
             || self.mcp_dialog.is_some()
@@ -3890,6 +3919,7 @@ impl TuiApp {
             || self.connect.is_some()
             || self.plugin_picker.is_some()
             || self.browser_panel.is_some()
+            || self.team_panel.is_some()
             || self.agents_dialog.is_some()
             || self.workflows_dialog.is_some()
             || self.mcp_dialog.is_some()
@@ -4374,6 +4404,29 @@ impl TuiApp {
     }
 
     /// Open the bare `/browser` status panel.
+    fn open_team_panel(&mut self, team: &std::sync::Arc<zode_core::team::TeamManager>) {
+        use crate::ui::dialog::team_panel::{TeamPanel, TeamPanelRow};
+        let rows: Vec<TeamPanelRow> = team
+            .roster()
+            .into_iter()
+            .map(|t| TeamPanelRow {
+                name: t.name,
+                model_label: t.model_label,
+                status_line: t.status_line,
+                usage_in: t.usage_in,
+                usage_out: t.usage_out,
+            })
+            .collect();
+        let board_summary: Vec<String> = team
+            .board_report()
+            .lines()
+            .skip(1) // drop the "Board (rev N):" header — the panel adds its own
+            .map(|s| s.trim_start().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self.team_panel = Some(TeamPanel::new(rows, board_summary));
+    }
+
     fn open_browser_panel(&mut self) {
         self.browser_panel = Some(BrowserPanel::new(self.browser_panel_status()));
     }
@@ -6337,6 +6390,39 @@ impl TuiApp {
                     // back as events, show the busy spinner, and Esc cancels.
                     Ok(OpCommand::Call { tool, args }) => self.spawn_op_call(tool, args, agent_tx),
                     Ok(OpCommand::Generate { prompt }) => self.spawn_op_generate(prompt, agent_tx),
+                }
+            }
+            "team" => {
+                use zode_core::commands::team::{parse, TeamCommand};
+                let team = self.active_tab().engine.team.clone();
+                let Some(team) = team else {
+                    self.active_tab_mut()
+                        .chat
+                        .push_system("/team: the team tool group is disabled");
+                    return;
+                };
+                // Bare `/team` opens the status panel; subcommands are text.
+                if args.trim().is_empty() {
+                    self.open_team_panel(&team);
+                    return;
+                }
+                let input = format!("/team {args}");
+                match parse(input.trim_end()) {
+                    None => self
+                        .active_tab_mut()
+                        .chat
+                        .push_system("/team: usage: /team [status|board|dismiss <name>]"),
+                    Some(cmd) => {
+                        let line = match cmd {
+                            TeamCommand::Status => team.status_report(),
+                            TeamCommand::Board => team.board_report(),
+                            TeamCommand::Dismiss(name) => match team.dismiss(&name).await {
+                                Ok(()) => format!("dismissed teammate '{name}'"),
+                                Err(e) => e.to_string(),
+                            },
+                        };
+                        self.active_tab_mut().chat.push_system(&line);
+                    }
                 }
             }
             "browser" => {

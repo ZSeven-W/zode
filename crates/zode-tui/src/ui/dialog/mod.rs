@@ -14,4 +14,5 @@ pub mod session_picker;
 pub mod settings;
 pub mod subagents;
 pub mod tasks_panel;
+pub mod team_panel;
 pub mod workflows_dialog;
