@@ -78,7 +78,7 @@ pub fn hidden_window_attributes_for_placement(
 
 fn zode_window_icon() -> Option<Icon> {
     let image = image::load_from_memory_with_format(
-        include_bytes!("../../../assets/brand/zode-512.png"),
+        include_bytes!("../../../assets/logo.png"),
         image::ImageFormat::Png,
     )
     .ok()?
