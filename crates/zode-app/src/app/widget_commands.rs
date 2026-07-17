@@ -1,6 +1,5 @@
 use zode_app_model::{
-    AppCommand, ComposerContextMenu, ComposerFooterMenu, SecondaryPane, ThemePreference,
-    ZodeAppState,
+    AppCommand, ComposerContextMenu, ComposerFooterMenu, ThemePreference, ZodeAppState,
 };
 use zode_app_ui::{
     Composer, ComposerContextMenu as ComposerContextMenuWidget, ComposerFooterMenuWidget,
@@ -55,13 +54,13 @@ pub(super) fn widget_command(state: &ZodeAppState, id: WidgetId) -> Option<AppCo
         .or_else(|| project_picker_command(state, id))
         .or_else(|| composer_context_command(state, id))
         .or_else(|| ComposerContextMenuWidget::command_for_widget(state, id))
-        .or_else(|| composer_footer_command(state, id))
+        .or_else(|| composer_footer_command(id))
         .or_else(|| ComposerFooterMenuWidget::command_for_widget(state, id))
         .or_else(|| Composer::command_for_widget(state, id))
         .or_else(|| ThreadTranscript::command_for_widget(state, id))
 }
 
-fn composer_footer_command(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+fn composer_footer_command(id: WidgetId) -> Option<AppCommand> {
     match id {
         COMPOSER_ADD_ID => Some(AppCommand::ToggleComposerFooterMenu(
             ComposerFooterMenu::Add,

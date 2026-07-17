@@ -1,4 +1,7 @@
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path};
+
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 use zode_app_model::ExternalApplication;
 use zode_node_protocol::WorkspaceUri;

@@ -1,6 +1,9 @@
 use zode_app_model::{reduce_presentation_command, AppCommand, ShellRoute, ZodeAppState};
 
-pub(super) fn normalize_conversation_route(state: &mut ZodeAppState, command: &AppCommand) -> bool {
+pub(in crate::app) fn normalize_conversation_route(
+    state: &mut ZodeAppState,
+    command: &AppCommand,
+) -> bool {
     if !matches!(
         command,
         AppCommand::SelectSession(_) | AppCommand::NewSession { .. } | AppCommand::BeginTask { .. }
