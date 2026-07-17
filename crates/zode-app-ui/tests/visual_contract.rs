@@ -130,6 +130,7 @@ impl Painter for CapturePainter {
         self.operations
             .push(PaintOp::FillRound(rect, radius, color));
     }
+    fn fill_drop_shadow(&mut self, _rect: Rect, _radius: f32, _blur: f32, _color: Color) {}
     fn stroke_round_rect(&mut self, rect: Rect, radius: f32, color: Color, width: f32) {
         self.operations
             .push(PaintOp::StrokeRound(rect, radius, color, width));
@@ -420,7 +421,12 @@ fn empty_conversation_paints_four_distinct_suggestion_cards() {
 
     assert_eq!(cards.len(), 4);
     for (index, (card, _)) in cards.iter().enumerate() {
-        let expected = Rect::xywh(664.0 + index as f32 * 180.5, 563.0, 170.5, 106.0);
+        let expected = Rect::xywh(
+            geometry.transcript.min_x() + 12.0 + index as f32 * 180.5,
+            563.0,
+            170.5,
+            106.0,
+        );
         assert_rect_close(*card, expected, 2.0, &format!("suggestion card {index}"));
     }
     for (index, pair) in cards.windows(2).enumerate() {
@@ -461,15 +467,15 @@ fn empty_conversation_uses_the_theme_specific_repository_brand_mark() {
         assert_eq!(image_id, expected_image_id);
         assert_eq!(encoded, repository_asset(filename));
         assert_eq!(mode, ImageDrawMode::Fit);
+        let main_center = geometry.transcript.min_x() + geometry.transcript.width() / 2.0;
         assert_rect_close(
             rect,
-            Rect::xywh(996.0, 418.0, 48.0, 48.0),
+            Rect::xywh(main_center - 24.0, 418.0, 48.0, 48.0),
             2.0,
             "empty brand mark",
         );
 
         let image_center = rect.min_x() + rect.width() / 2.0;
-        let main_center = geometry.transcript.min_x() + geometry.transcript.width() / 2.0;
         assert_close(image_center, main_center, 2.0, "empty brand center x");
     }
 }
@@ -540,7 +546,7 @@ fn wide_suggestion_copy_wraps_without_shrinking_below_the_reference_size() {
 #[test]
 fn compact_empty_state_uses_a_clipped_readable_two_by_two_grid() {
     let (painter, geometry) = paint_empty_compact();
-    assert_eq!(geometry.transcript.size, Point2D::new(320.0, 224.0));
+    assert_eq!(geometry.transcript.size, Point2D::new(320.0, 230.0));
     let composer = Composer::layout(geometry.composer, &demo_state().composer);
     let empty_viewport = Rect::xywh(
         geometry.transcript.min_x(),
@@ -616,9 +622,8 @@ fn compact_empty_state_uses_a_clipped_readable_two_by_two_grid() {
 fn paint_settings(category: SettingsCategory) -> (CapturePainter, WorkspaceLayout) {
     let mut state = demo_state();
     state.presentation.route = ShellRoute::Settings(category);
-    let geometry = WorkspaceLayout::compute(1800.0, 1080.0, Insets::ZERO);
     let mut painter = CapturePainter::default();
-    WorkspaceShell::paint(
+    let geometry = WorkspaceShell::paint(
         &mut painter,
         Rect::xywh(0.0, 0.0, 1800.0, 1080.0),
         Insets::ZERO,
