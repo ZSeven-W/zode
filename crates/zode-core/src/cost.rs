@@ -429,4 +429,35 @@ mod tests {
         cost.observe(&usage(1000, 1000)).await;
         assert_eq!(cost.sidebar_label().await, "n/a");
     }
+
+    #[tokio::test]
+    async fn usage_totals_use_latest_cumulative_frame_and_reset_at_turn_boundary() {
+        let cost = CostState::new("gpt-4o-mini".into());
+
+        cost.observe(&usage(10, 2)).await;
+        cost.observe(&usage(15, 4)).await;
+        let first_turn = cost.usage_totals().await;
+        assert_eq!(first_turn.input_tokens, 15);
+        assert_eq!(first_turn.output_tokens, 4);
+        assert!(first_turn.cost_usd.is_some());
+
+        cost.finish_turn_usage().await;
+        cost.observe(&usage(15, 4)).await;
+        let session = cost.usage_totals().await;
+        assert_eq!(session.input_tokens, 30);
+        assert_eq!(session.output_tokens, 8);
+        assert!(session.cost_usd.is_some());
+    }
+
+    #[tokio::test]
+    async fn usage_totals_mark_unknown_model_cost_unavailable() {
+        let cost = CostState::new("model-not-in-catalog".into());
+        cost.observe(&usage(15, 4)).await;
+
+        let totals = cost.usage_totals().await;
+
+        assert_eq!(totals.input_tokens, 15);
+        assert_eq!(totals.output_tokens, 4);
+        assert_eq!(totals.cost_usd, None);
+    }
 }

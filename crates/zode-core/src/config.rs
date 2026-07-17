@@ -1951,6 +1951,153 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_project_state_updates_preserve_every_field() {
+        let cwd = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(6));
+        let mut writers = Vec::new();
+        for writer in 0..6 {
+            let cwd = cwd.path().to_path_buf();
+            let barrier = barrier.clone();
+            writers.push(std::thread::spawn(move || {
+                barrier.wait();
+                ConfigManager::update_project_state(&cwd, |state| {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    state.insert(format!("writer{writer}"), serde_json::json!(writer));
+                })
+                .unwrap();
+            }));
+        }
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let state: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(ConfigManager::project_state_path(cwd.path())).unwrap(),
+        )
+        .unwrap();
+        for writer in 0..6 {
+            assert_eq!(state[format!("writer{writer}")], writer);
+        }
+    }
+
+    #[test]
+    fn corrupt_project_state_falls_back_to_a_fresh_object() {
+        let cwd = tempfile::tempdir().unwrap();
+        let path = ConfigManager::project_state_path(cwd.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{broken").unwrap();
+
+        ConfigManager::update_project_state(cwd.path(), |state| {
+            state.insert("recovered".to_string(), serde_json::json!(true));
+        })
+        .unwrap();
+
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(state, serde_json::json!({"recovered": true}));
+    }
+
+    #[test]
+    fn project_tool_permissions_dedupe_and_revoke_only_the_selected_tool() {
+        let cwd = tempfile::tempdir().unwrap();
+        ConfigManager::update_project_state(cwd.path(), |state| {
+            state.insert("sandbox".into(), serde_json::json!({"enabled": false}));
+        })
+        .unwrap();
+
+        ConfigManager::allow_project_tool(cwd.path(), "Bash").unwrap();
+        ConfigManager::allow_project_tool(cwd.path(), "Bash").unwrap();
+        ConfigManager::allow_project_tool(cwd.path(), "FileWrite").unwrap();
+
+        assert_eq!(
+            ConfigManager::project_allowed_tools(cwd.path()).unwrap(),
+            vec!["Bash".to_string(), "FileWrite".to_string()]
+        );
+        let state: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(ConfigManager::project_state_path(cwd.path())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["sandbox"]["enabled"], false);
+        assert_eq!(
+            state["permissions"]["allow"],
+            serde_json::json!(["Bash", "FileWrite"])
+        );
+
+        ConfigManager::revoke_project_tool(cwd.path(), "Bash").unwrap();
+        ConfigManager::revoke_project_tool(cwd.path(), "missing").unwrap();
+        assert_eq!(
+            ConfigManager::project_allowed_tools(cwd.path()).unwrap(),
+            vec!["FileWrite".to_string()]
+        );
+    }
+
+    #[test]
+    fn concurrent_project_tool_allows_are_atomic_and_deduplicated() {
+        let cwd = tempfile::tempdir().unwrap();
+        let tools = ["Bash", "FileWrite", "Git", "Bash", "Git", "FileEdit"];
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(tools.len()));
+        let mut writers = Vec::new();
+        for tool in tools {
+            let cwd = cwd.path().to_path_buf();
+            let barrier = barrier.clone();
+            writers.push(std::thread::spawn(move || {
+                barrier.wait();
+                ConfigManager::allow_project_tool(&cwd, tool).unwrap();
+            }));
+        }
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let allowed = ConfigManager::project_allowed_tools(cwd.path()).unwrap();
+        let actual: std::collections::BTreeSet<_> = allowed.iter().cloned().collect();
+        let expected: std::collections::BTreeSet<_> = ["Bash", "FileWrite", "Git", "FileEdit"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(allowed.len(), expected.len(), "duplicates must not persist");
+    }
+
+    #[test]
+    fn project_tool_permissions_recover_from_corrupt_state() {
+        let cwd = tempfile::tempdir().unwrap();
+        let path = ConfigManager::project_state_path(cwd.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{broken").unwrap();
+
+        assert!(ConfigManager::project_allowed_tools(cwd.path())
+            .unwrap()
+            .is_empty());
+        ConfigManager::allow_project_tool(cwd.path(), "Bash").unwrap();
+
+        assert_eq!(
+            ConfigManager::project_allowed_tools(cwd.path()).unwrap(),
+            vec!["Bash".to_string()]
+        );
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(state["permissions"]["allow"], serde_json::json!(["Bash"]));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn project_tool_permissions_ignore_global_config_dir() {
+        let cwd = tempfile::tempdir().unwrap();
+        let unrelated_global = tempfile::tempdir().unwrap();
+        std::env::set_var("ZODE_CONFIG_DIR", unrelated_global.path());
+
+        ConfigManager::allow_project_tool(cwd.path(), "Bash").unwrap();
+        let allowed = ConfigManager::project_allowed_tools(cwd.path()).unwrap();
+
+        std::env::remove_var("ZODE_CONFIG_DIR");
+        assert_eq!(allowed, vec!["Bash".to_string()]);
+        assert!(ConfigManager::project_state_path(cwd.path()).is_file());
+        assert!(!ConfigManager::project_state_path(unrelated_global.path()).exists());
+        assert!(!unrelated_global.path().join("state.json").exists());
+    }
+
+    #[test]
     fn price_overrides_from_config_fields() {
         // No price fields → None (cost falls back to the built-in catalog).
         assert!(ProviderConfig::default().price_overrides().is_none());
