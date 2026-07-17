@@ -217,8 +217,14 @@ fn draw_inline(
                 MdRun::Color(_) => (500, theme.zode_purple),
                 MdRun::Plain(_) => (400, theme.tokens.foreground),
             };
-            draw_text(painter, run.text(), Point2D::new(x, y), 13.0, weight, color);
-            x += painter.measure_text_weighted(run.text(), 13.0, weight);
+            let content = run.text();
+            let visible = content.trim_start();
+            let leading = &content[..content.len() - visible.len()];
+            x += painter.measure_text_weighted(leading, 13.0, weight);
+            if !visible.is_empty() {
+                draw_text(painter, visible, Point2D::new(x, y), 13.0, weight, color);
+                x += painter.measure_text_weighted(visible, 13.0, weight);
+            }
         }
     }
     lines.len()
