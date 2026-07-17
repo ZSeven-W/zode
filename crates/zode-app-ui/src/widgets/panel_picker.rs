@@ -10,7 +10,9 @@ pub const PANEL_PICKER_MENU_ID: WidgetId = WidgetId(67);
 const MENU_WIDTH: f32 = 244.0;
 const MENU_PADDING: f32 = 5.0;
 const ROW_HEIGHT: f32 = 40.0;
-const ITEM_BASE: u64 = 68;
+// Panel rows can coexist with empty-task suggestions, so their identifiers
+// must not reuse a route-local control range.
+const ITEM_BASE: u64 = 170;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PanelMenuItemLayout {

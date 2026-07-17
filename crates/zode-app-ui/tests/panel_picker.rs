@@ -6,7 +6,7 @@ use zode_app_model::{
 };
 use zode_app_ui::{
     Insets, PanelPicker, RectExt, ThreadHeader, WorkspaceLayout, WorkspaceSnapshot,
-    PANEL_PICKER_ID, TERMINAL_ID, TERMINAL_SECONDARY_CLOSE_ID,
+    EMPTY_SUGGESTION_IDS, PANEL_PICKER_ID, TERMINAL_ID, TERMINAL_SECONDARY_CLOSE_ID,
 };
 use zode_node_protocol::{
     NodeCapability, SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri,
@@ -113,6 +113,22 @@ fn menu_truthfully_enables_real_panes_and_disables_missing_contracts() {
             None
         );
     }
+}
+
+#[test]
+fn panel_rows_do_not_reuse_empty_suggestion_widget_ids() {
+    let mut state = state_with_session();
+    state.presentation.secondary_menu_open = true;
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let anchor = ThreadHeader::layout(snapshot.layout.top_bar, &state)
+        .panel_picker
+        .unwrap();
+    let menu = PanelPicker::menu_layout(anchor.rect, snapshot.layout.viewport, &state).unwrap();
+
+    assert!(menu
+        .items
+        .iter()
+        .all(|item| !EMPTY_SUGGESTION_IDS.contains(&item.id)));
 }
 
 #[test]

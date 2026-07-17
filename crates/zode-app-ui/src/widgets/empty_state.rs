@@ -6,7 +6,7 @@ use crate::{
 };
 
 pub const EMPTY_SUGGESTION_IDS: [WidgetId; 4] =
-    [WidgetId(70), WidgetId(71), WidgetId(72), WidgetId(73)];
+    [WidgetId(180), WidgetId(181), WidgetId(182), WidgetId(183)];
 
 const SUGGESTIONS: [(&str, SemanticIcon); 4] = [
     ("探索并理解代码", SemanticIcon::ExploreCode),
