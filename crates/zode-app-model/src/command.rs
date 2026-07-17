@@ -2,7 +2,7 @@ use zode_node_protocol::{
     ApprovalDecision, SandboxMode, SessionLocator, UserContent, WorkspaceUri,
 };
 
-use crate::ThemePreference;
+use crate::{IntegrationsTab, SecondaryPane, SettingsCategory, ShellRoute, ThemePreference};
 
 /// User intent emitted by widgets for the application controller to handle.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +71,11 @@ pub enum AppCommand {
         relative_path: String,
     },
     ToggleSidebar,
+    Navigate(ShellRoute),
+    OpenSecondary(SecondaryPane),
+    CloseSecondary,
+    SelectSettingsCategory(SettingsCategory),
+    SelectIntegrationsTab(IntegrationsTab),
     OpenReview,
     OpenTerminal,
     SetTerminalFocus(bool),

@@ -1,4 +1,4 @@
-use crate::{LayoutClass, TranscriptState};
+use crate::{LayoutClass, PresentationState, TranscriptState};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zode_node_protocol::{
@@ -136,6 +136,7 @@ pub struct ZodeAppState {
     pub settings_scroll_offset: f32,
     pub composer: ComposerState,
     pub usage: BTreeMap<SessionLocator, UsageSnapshot>,
+    pub presentation: PresentationState,
     pub review: ReviewState,
     pub terminal: TerminalState,
     pub ui_preferences: UiPreferences,
@@ -164,6 +165,12 @@ impl ZodeAppState {
         self.active_workspace
             .as_ref()
             .filter(|workspace_uri| self.available_workspace(workspace_uri))
+    }
+
+    pub fn current_session_presentation(&self) -> Option<&crate::SessionPresentationState> {
+        self.current_session
+            .as_ref()
+            .and_then(|session| self.presentation.sessions.get(session))
     }
 }
 
@@ -195,6 +202,7 @@ pub fn demo_state() -> ZodeAppState {
         settings_scroll_offset: 0.0,
         composer: ComposerState::default(),
         usage: BTreeMap::new(),
+        presentation: PresentationState::default(),
         review: ReviewState::default(),
         terminal: TerminalState::default(),
         ui_preferences: UiPreferences::default(),

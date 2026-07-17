@@ -409,6 +409,7 @@ fn status_notice_appends_a_status_item() {
 #[test]
 fn diff_invalidated_only_marks_review_dirty() {
     let (mut state, session, turn_id) = active_state();
+    state.current_session = Some(session.clone());
 
     reduce_agent_event(
         &mut state,

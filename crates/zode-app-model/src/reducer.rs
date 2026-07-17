@@ -37,6 +37,59 @@ pub enum TerminalCommandOutcome {
     Ignored,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationCommandOutcome {
+    Applied,
+    Ignored,
+}
+
+/// Applies typed shell navigation without dispatching endpoint effects.
+pub fn reduce_presentation_command(
+    state: &mut ZodeAppState,
+    command: AppCommand,
+) -> PresentationCommandOutcome {
+    let route = match command {
+        AppCommand::Navigate(route) => Some(route),
+        AppCommand::SelectSettingsCategory(category) => Some(crate::ShellRoute::Settings(category)),
+        AppCommand::SelectIntegrationsTab(tab) => Some(crate::ShellRoute::Integrations(tab)),
+        AppCommand::OpenSecondary(pane) => {
+            open_secondary(state, pane);
+            return PresentationCommandOutcome::Applied;
+        }
+        AppCommand::CloseSecondary => {
+            close_secondary(state);
+            return PresentationCommandOutcome::Applied;
+        }
+        AppCommand::OpenReview => {
+            open_secondary(state, crate::SecondaryPane::Review);
+            return PresentationCommandOutcome::Applied;
+        }
+        _ => None,
+    };
+
+    let Some(route) = route else {
+        return PresentationCommandOutcome::Ignored;
+    };
+    if route != crate::ShellRoute::Conversation {
+        close_secondary(state);
+    }
+    state.presentation.route = route;
+    state.shell.page = route.legacy_page();
+    PresentationCommandOutcome::Applied
+}
+
+fn open_secondary(state: &mut ZodeAppState, pane: crate::SecondaryPane) {
+    state.presentation.route = crate::ShellRoute::Conversation;
+    state.presentation.secondary_pane = Some(pane);
+    state.shell.page = crate::ShellPage::Conversation;
+    state.review.open = pane == crate::SecondaryPane::Review;
+}
+
+fn close_secondary(state: &mut ZodeAppState) {
+    state.presentation.secondary_pane = None;
+    state.review.open = false;
+}
+
 /// Applies terminal-only UI state and identifies commands that must be
 /// forwarded to the platform terminal service.
 pub fn reduce_terminal_command(
@@ -47,6 +100,9 @@ pub fn reduce_terminal_command(
         AppCommand::OpenTerminal => {
             state.terminal.open = true;
             state.terminal.focused = true;
+            state.presentation.route = crate::ShellRoute::Terminal;
+            state.presentation.secondary_pane = None;
+            state.review.open = false;
             state.shell.page = crate::ShellPage::Terminal;
             TerminalCommandOutcome::Applied
         }
@@ -205,7 +261,15 @@ pub fn reduce_navigation_command(
             else {
                 return NavigationOutcome::Ignored;
             };
-            state.current_session = Some(session);
+            state
+                .presentation
+                .sessions
+                .entry(session.clone())
+                .or_default();
+            state.current_session = Some(session.clone());
+            state.review.dirty = state.presentation.sessions[&session].diff.dirty;
+            state.review.open =
+                state.presentation.secondary_pane == Some(crate::SecondaryPane::Review);
             if state.available_workspace(&workspace_uri) {
                 state.active_workspace = Some(workspace_uri);
             }
@@ -244,15 +308,19 @@ pub fn reduce_navigation_command(
             if state.pending_session_delete.as_ref() != Some(&session) {
                 return NavigationOutcome::Ignored;
             }
+            let deleting_current = state.current_session.as_ref() == Some(&session);
             state.threads.retain(|thread| thread.session != session);
             state.transcripts.remove(&session);
             state.active_turns.remove(&session);
             state.usage.remove(&session);
+            state.presentation.sessions.remove(&session);
             state
                 .approvals
                 .retain(|_, approval_session| approval_session != &session);
-            if state.current_session.as_ref() == Some(&session) {
+            if deleting_current {
                 state.current_session = None;
+                state.review = crate::ReviewState::default();
+                state.presentation.secondary_pane = None;
             }
             state.pending_session_delete = None;
             NavigationOutcome::NeedsEffect
@@ -325,7 +393,18 @@ pub fn reduce_agent_event(state: &mut ZodeAppState, event: AgentEvent) -> Reduce
             });
             state.approvals.insert(approval_id, session);
         }
-        AgentEventKind::DiffInvalidated => state.review.dirty = true,
+        AgentEventKind::DiffInvalidated => {
+            state
+                .presentation
+                .sessions
+                .entry(session.clone())
+                .or_default()
+                .diff
+                .invalidate();
+            if state.current_session.as_ref() == Some(&session) {
+                state.review.dirty = true;
+            }
+        }
         AgentEventKind::Usage { usage } => {
             state.usage.insert(session, usage);
         }
