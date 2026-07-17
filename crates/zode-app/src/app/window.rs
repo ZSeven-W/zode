@@ -295,8 +295,9 @@ impl DesktopApp {
         self.ime.invalidate_native();
     }
 
-    /// Composer typing does not change shell geometry or hit testing. Keep the
-    /// existing snapshot and update only the value exposed to accessibility.
+    /// Composer typing within the same submit-capability state does not change
+    /// shell geometry or hit testing. Keep the existing snapshot and update
+    /// only the value exposed to accessibility.
     pub(super) fn refresh_composer_snapshot_value(&mut self, value_changed: bool) {
         if !self.frame_snapshot_valid {
             return;
