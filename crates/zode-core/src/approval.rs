@@ -674,7 +674,8 @@ mod tests {
     async fn escalation_only_gate_auto_approves_ordinary_mutations() {
         let gate = EscalationOnlyGate::new(std::sync::Arc::new(DenyGate));
         assert_eq!(
-            gate.approve("FileWrite", &json!({"path": "src/lib.rs"})).await,
+            gate.approve("FileWrite", &json!({"path": "src/lib.rs"}))
+                .await,
             Approval::AllowOnce
         );
     }
@@ -683,11 +684,13 @@ mod tests {
     async fn escalation_only_gate_delegates_explicit_and_fallback_escalations() {
         let gate = EscalationOnlyGate::new(std::sync::Arc::new(DenyGate));
         assert_eq!(
-            gate.approve("Bash", &json!({"sandbox_permissions": "require_escalated"})).await,
+            gate.approve("Bash", &json!({"sandbox_permissions": "require_escalated"}))
+                .await,
             Approval::Deny
         );
         assert_eq!(
-            gate.approve("Bash — escalate: outside sandbox", &json!({})).await,
+            gate.approve("Bash — escalate: outside sandbox", &json!({}))
+                .await,
             Approval::Deny
         );
     }
@@ -731,8 +734,14 @@ mod tests {
         let auto = gate_for_policy(ApprovalPolicy::Auto, std::sync::Arc::new(DenyGate));
         let full = gate_for_policy(ApprovalPolicy::Full, std::sync::Arc::new(DenyGate));
 
-        assert_eq!(request.approve("FileWrite", &ordinary).await, Approval::Deny);
-        assert_eq!(auto.approve("FileWrite", &ordinary).await, Approval::AllowOnce);
+        assert_eq!(
+            request.approve("FileWrite", &ordinary).await,
+            Approval::Deny
+        );
+        assert_eq!(
+            auto.approve("FileWrite", &ordinary).await,
+            Approval::AllowOnce
+        );
         assert_eq!(auto.approve("Bash", &escape).await, Approval::Deny);
         assert_eq!(full.approve("Bash", &escape).await, Approval::AllowOnce);
     }
