@@ -64,20 +64,19 @@ pub fn split_main(area: Rect, show_tabs: bool) -> ChromeAreas {
         .max(1);
 
     let mut y = area.y;
-    let header = Some(Rect::new(area.x, y, area.width, header_h));
-    y = y.saturating_add(header_h);
-
     let content_x = area.x;
     let content_w = area.width.saturating_sub(tabs_w);
-    let content_y = y;
-    let content_h = area.height.saturating_sub(header_h);
+    // The header shares its row with the sidebar: it spans only the content
+    // column, and the sidebar runs the full terminal height (no gap above).
+    let header = Some(Rect::new(area.x, y, content_w, header_h));
+    y = y.saturating_add(header_h);
 
     let tabs = if tabs_w > 0 {
         Some(Rect::new(
             area.x.saturating_add(content_w),
-            content_y,
+            area.y,
             tabs_w,
-            content_h,
+            area.height,
         ))
     } else {
         None
@@ -190,8 +189,8 @@ mod tests {
     fn split_main_allocates_header_right_tabs_chat_composer_status() {
         let area = Rect::new(0, 0, 100, 30);
         let split = split_main(area, true);
-        assert_eq!(split.header, Some(Rect::new(0, 0, 100, 1)));
-        assert_eq!(split.tabs, Some(Rect::new(64, 1, 36, 29)));
+        assert_eq!(split.header, Some(Rect::new(0, 0, 64, 1)));
+        assert_eq!(split.tabs, Some(Rect::new(64, 0, 36, 30)));
         assert_eq!(split.chat, Rect::new(0, 1, 64, 24));
         assert_eq!(split.composer, Rect::new(0, 25, 64, 4));
         assert_eq!(split.status, Rect::new(0, 29, 64, 1));

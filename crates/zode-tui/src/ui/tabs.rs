@@ -70,6 +70,10 @@ pub struct SidebarHits {
     pub tabs_first_index: usize,
     /// Number of tab rows currently shown.
     pub tabs_shown: u16,
+    /// First absolute column of the per-row `×` close affordance (the glyph
+    /// plus its trailing pad cell). Clicks on a tab row at or past this
+    /// column close the tab instead of switching to it.
+    pub tabs_close_col: Option<u16>,
 }
 
 impl SidebarHits {
@@ -80,6 +84,12 @@ impl SidebarHits {
             return None;
         }
         Some(self.tabs_first_index + (row - start) as usize)
+    }
+
+    /// Map a click to the tab whose `×` close affordance it hit, if any.
+    pub fn tab_close_at(&self, row: u16, column: u16) -> Option<usize> {
+        let idx = self.tab_index_at(row)?;
+        (column >= self.tabs_close_col?).then_some(idx)
     }
 }
 
@@ -205,8 +215,10 @@ pub fn render_sidebar(
     theme: &Theme,
 ) -> SidebarHits {
     let row_width = area.width.saturating_sub(1) as usize;
-    let content_y = area.y.saturating_add(1);
-    let content_height = area.height.saturating_sub(1);
+    // Content starts on the sidebar's first row: only a LEFT border is drawn
+    // (no top edge), so nothing offsets the paragraph vertically.
+    let content_y = area.y;
+    let content_height = area.height;
     // Sections flowing BELOW the tab list (empty → no-op) plus the pinned
     // version row: reserve room so the tab list yields.
     let sub_h = crate::ui::subagents_sidebar::section_height(info.subagents.len());
@@ -269,6 +281,8 @@ pub fn render_sidebar(
     hits.tabs_rows_start = (shown > 0).then_some(tabs_top);
     hits.tabs_first_index = first;
     hits.tabs_shown = shown;
+    // The `×` close affordance fills each row's last two cells (glyph + pad).
+    hits.tabs_close_col = (shown > 0).then(|| area.x + area.width.saturating_sub(2));
     // Flow the subagents section right after the tabs (no-op when empty).
     lines.extend(crate::ui::subagents_sidebar::section_lines(
         info.subagents,
@@ -317,7 +331,9 @@ fn render_version_row(f: &mut Frame, area: Rect, occupied: u16, version: &str, t
         return;
     }
     let y = area.y + area.height - 1;
-    if y <= area.y.saturating_add(1) + occupied {
+    // Content rows fill [area.y, area.y + occupied); keep one blank row
+    // between the last content row and the pinned version footer.
+    if y <= area.y + occupied {
         return;
     }
     let row_width = area.width.saturating_sub(1) as usize;
@@ -399,7 +415,19 @@ fn append_tab_rows(
         } else {
             Style::default().bg(row_bg).fg(theme.fg_text)
         };
-        let parts = tab_row_parts(i + 1, &tab.title, tab.is_busy(), content_width);
+        // Reserve the row's last two cells for the `×` close affordance
+        // (glyph + trailing pad), mirroring the right-aligned state labels.
+        let parts = tab_row_parts(
+            i + 1,
+            &tab.title,
+            tab.is_busy(),
+            content_width.saturating_sub(2),
+        );
+        let close_style = Style::default().bg(row_bg).fg(if row_active {
+            theme.fg_text
+        } else {
+            theme.fg_subtle
+        });
         lines.push(Line::from(vec![
             Span::styled(if row_active { "▌" } else { " " }, marker_style),
             Span::styled(" ", Style::default().bg(row_bg)),
@@ -410,6 +438,7 @@ fn append_tab_rows(
             ),
             Span::styled(parts.title, title_style),
             Span::styled(parts.padding, Style::default().bg(row_bg)),
+            Span::styled("× ", close_style),
         ]));
     }
     (start, shown)
@@ -430,12 +459,14 @@ fn render_sidebar_block(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>, th
         Paragraph::new(lines)
             .block(
                 Block::default()
-                    .borders(Borders::LEFT | Borders::TOP)
+                    .borders(Borders::LEFT)
                     // Draw the divider with a solid left-eighth block instead of
                     // the box-drawing `│`: many terminal fonts render U+2502 a
                     // hair short so it looks dashed between rows, whereas block
                     // elements tile seamlessly into one continuous line — and it
                     // matches the block glyphs used elsewhere in the chrome.
+                    // No top edge: the sidebar reaches the terminal's first row
+                    // and should read as one full-height column.
                     .border_set(ratatui::symbols::border::Set {
                         vertical_left: "▏",
                         ..ratatui::symbols::border::PLAIN
@@ -633,10 +664,33 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_draws_a_closed_top_edge_and_solid_left_rail() {
+    fn sidebar_starts_content_on_the_first_row_with_a_solid_left_rail() {
         let (rows, _) = draw_rows(info_with_sections(&[], &[], false, false));
-        assert_eq!(rows[0], format!("┌{}", "─".repeat(33)));
+        // No top edge: the first row is already content behind the left rail.
+        assert!(rows[0].starts_with('▏'));
+        assert!(rows[0].contains("session"));
         assert!(rows[1].starts_with('▏'));
+    }
+
+    #[test]
+    fn tab_close_at_maps_only_clicks_in_the_close_column() {
+        let hits = SidebarHits {
+            tabs_rows_start: Some(10),
+            tabs_first_index: 2,
+            tabs_shown: 3,
+            tabs_close_col: Some(32),
+            ..Default::default()
+        };
+        // Row 11 shows tab index 3; the `×` spans columns 32-33.
+        assert_eq!(hits.tab_close_at(11, 32), Some(3));
+        assert_eq!(hits.tab_close_at(11, 33), Some(3));
+        assert_eq!(hits.tab_close_at(11, 31), None); // left of the ×: switch, not close
+        assert_eq!(hits.tab_close_at(13, 33), None); // below the visible rows
+        let no_close = SidebarHits {
+            tabs_close_col: None,
+            ..hits
+        };
+        assert_eq!(no_close.tab_close_at(11, 33), None);
     }
 
     #[test]

@@ -968,6 +968,11 @@ impl TuiApp {
         }
         self.dismiss_input_popups();
         self.queued_edit_index = None;
+        // The sidebar row→tab mapping just changed; drop the hitboxes until
+        // the next draw rebuilds them, so a buffered click processed before
+        // the redraw can't close or switch to the wrong tab via stale rows.
+        // Covers every close trigger (Ctrl+W, the row × click, commands).
+        self.sidebar_hits = crate::ui::tabs::SidebarHits::default();
     }
 
     /// Abort the active tab's in-flight turn, if any. Returns true when a turn
@@ -2288,7 +2293,17 @@ impl TuiApp {
             self.todo_section_collapsed = !self.todo_section_collapsed;
             return true;
         }
-        // A session-tab row focuses that tab (same as the keyboard switch).
+        // A click on a row's `×` closes that tab (same as Ctrl+W on it);
+        // anywhere else on the row focuses it (same as the keyboard switch).
+        if let Some(i) = self.sidebar_hits.tab_close_at(mouse.row, mouse.column) {
+            if i < self.tabs.len() {
+                self.active = i;
+                // close_active_tab also invalidates sidebar_hits so a second
+                // buffered click can't act on the stale row→tab mapping.
+                self.close_active_tab();
+            }
+            return true;
+        }
         if let Some(i) = self.sidebar_hits.tab_index_at(mouse.row) {
             if i < self.tabs.len() && i != self.active {
                 self.active = i;
