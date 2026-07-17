@@ -178,6 +178,20 @@ pub trait EngineDriver: Send + Sync + 'static {
         interrupted: bool,
     ) -> Result<(), EndpointError>;
 
+    /// Feed one raw runtime event into session-scoped accounting. Drivers may
+    /// return a cumulative, display-safe usage snapshot for `Usage` events.
+    async fn observe_event(
+        &self,
+        _session: &SessionLocator,
+        _turn_id: TurnId,
+        _event: &Event,
+    ) -> Option<UsageSnapshot> {
+        None
+    }
+
+    /// Clear per-turn cumulative-usage baselines after every terminal path.
+    fn finish_turn_usage(&self, _session: &SessionLocator, _turn_id: TurnId) {}
+
     async fn query(&self, query: AgentQuery) -> Result<AgentSnapshot, EndpointError>;
 }
 
@@ -395,10 +409,16 @@ async fn drive_turn(
 
         match event {
             Ok(event) => {
+                let cumulative_usage = driver.observe_event(&session, turn_id, &event).await;
                 if let Event::Result { data } = &event {
                     model = data.model.clone();
                 }
-                if let Some(kind) = normalizer.normalize(event) {
+                if let Some(mut kind) = normalizer.normalize(event) {
+                    if let (AgentEventKind::Usage { usage }, Some(cumulative)) =
+                        (&mut kind, cumulative_usage)
+                    {
+                        *usage = cumulative;
+                    }
                     if events.send(session.clone(), turn_id, kind).await.is_err() {
                         abort.abort();
                         interrupted = true;
@@ -426,6 +446,7 @@ async fn drive_turn(
         }
     }
     interrupted |= abort.is_aborted();
+    driver.finish_turn_usage(&session, turn_id);
 
     if let Err(error) = driver
         .finish_turn(&session, turn_id, model, interrupted)
