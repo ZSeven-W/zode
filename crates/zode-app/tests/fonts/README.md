@@ -1,8 +1,11 @@
 # Deterministic screenshot fonts
 
-The screenshot suite bundles two test-only subsets of **Noto Sans SC** so
+The screenshot suite derives two test-only subsets from **Noto Sans SC** so
 Chinese and Latin shaping do not depend on fonts installed on the runner.
-They are not application release assets.
+Their internal family is renamed to the repository-private
+**Zode Snapshot Sans SC**, preventing an installed copy of Noto Sans SC from
+taking precedence over the bundled faces. They are not application release
+assets.
 
 ## Source and license
 
@@ -47,13 +50,18 @@ pyftsubset /tmp/NotoSansSC-SemiBold.ttf \
   --layout-features='*' --glyph-names --symbol-cmap --legacy-cmap \
   --notdef-glyph --notdef-outline --recommended-glyphs \
   --name-IDs='*' --name-legacy --name-languages='*' --canonical-order
+
+python3 crates/zode-app/tests/fonts/rename-family.py \
+  crates/zode-app/tests/fonts/NotoSansSC-Regular.subset.ttf Regular
+python3 crates/zode-app/tests/fonts/rename-family.py \
+  crates/zode-app/tests/fonts/NotoSansSC-SemiBold.subset.ttf SemiBold
 ```
 
 Expected SHA-256 values:
 
 ```text
-b51ff8c2564d9f0d645e874870f17376907117f94bde7c79b7ff9707c2a1cf7f  NotoSansSC-Regular.subset.ttf
-2ec6309d0760919ded4df04effa717ea2a23fc05635feaa4910dfb38d018d55b  NotoSansSC-SemiBold.subset.ttf
+2ba9e43e47db9dd6245076d53be9f149a9ef45994b71d8d923eed296d7701c9d  NotoSansSC-Regular.subset.ttf
+630e93ac0dfa91d6a9f59c14d65c5cc3a55526df6a7122643ece6682ff484563  NotoSansSC-SemiBold.subset.ttf
 ```
 
 When visible copy changes, update `glyphs.txt`, rebuild both subsets, and run

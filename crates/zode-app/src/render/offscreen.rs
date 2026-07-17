@@ -107,7 +107,7 @@ mod tests {
 
         assert_eq!(
             snapshot_font_family(&fonts).as_deref(),
-            Some("Noto Sans SC")
+            Some("Zode Snapshot Sans SC")
         );
     }
 }

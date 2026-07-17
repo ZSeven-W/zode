@@ -428,7 +428,8 @@ mod tests {
             SNAPSHOT_REGULAR.to_vec(),
             SNAPSHOT_SEMIBOLD.to_vec(),
         ]);
-        let mut backend = NativeBackend::with_font_family(1.0, Some("Noto Sans SC".to_string()));
+        let mut backend =
+            NativeBackend::with_font_family(1.0, Some("Zode Snapshot Sans SC".to_string()));
         let mut explicit = NativeBackend::new(1.0);
         let layout = TextLayout::single_run(
             "snapshot",
@@ -442,18 +443,21 @@ mod tests {
         let measured_with_override =
             backend.measure_text("snapshot", 14.0, Some("system-ui"), 400, false);
         let measured_explicitly =
-            explicit.measure_text("snapshot", 14.0, Some("Noto Sans SC"), 400, false);
+            explicit.measure_text("snapshot", 14.0, Some("Zode Snapshot Sans SC"), 400, false);
 
-        assert_eq!(painted.font_family, "Noto Sans SC");
+        assert_eq!(painted.font_family, "Zode Snapshot Sans SC");
         assert_eq!(painted.origin.x, 7.0);
         assert_eq!(painted.origin.y, 10.0);
         assert!(measured_with_override > 0.0);
         assert!((measured_with_override - measured_explicitly).abs() < f32::EPSILON);
         assert_eq!(
             backend.font_family_for_measure(Some("ui-monospace")),
-            Some("Noto Sans SC")
+            Some("Zode Snapshot Sans SC")
         );
-        assert_eq!(backend.font_family_for_measure(None), Some("Noto Sans SC"));
+        assert_eq!(
+            backend.font_family_for_measure(None),
+            Some("Zode Snapshot Sans SC")
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ use zode_app_model::{SystemTheme, ThemePreference};
 
 const SNAPSHOT_REGULAR: &[u8] = include_bytes!("fonts/NotoSansSC-Regular.subset.ttf");
 const SNAPSHOT_SEMIBOLD: &[u8] = include_bytes!("fonts/NotoSansSC-SemiBold.subset.ttf");
+const SNAPSHOT_FAMILY: &str = "Zode Snapshot Sans SC";
 
 #[test]
 fn offscreen_shell_is_reference_size_and_non_empty() {
@@ -59,6 +60,17 @@ fn offscreen_accepts_the_snapshot_font_family() {
     .unwrap();
 
     assert!(image::load_from_memory(&png).is_ok());
+}
+
+#[test]
+fn snapshot_font_assets_use_a_repository_private_family() {
+    let regular = jian_skia::parse_imported_font_meta(SNAPSHOT_REGULAR).unwrap();
+    let semibold = jian_skia::parse_imported_font_meta(SNAPSHOT_SEMIBOLD).unwrap();
+
+    assert_eq!(regular.family, SNAPSHOT_FAMILY);
+    assert_eq!(semibold.family, SNAPSHOT_FAMILY);
+    assert_eq!(regular.weight, 400);
+    assert_eq!(semibold.weight, 600);
 }
 
 #[test]

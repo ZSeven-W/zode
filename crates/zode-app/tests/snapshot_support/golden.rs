@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use image::RgbaImage;
 use zode_app::render::render_offscreen_with_fonts;
 use zode_app_model::ZodeAppState;
+use zode_app_ui::{Insets, WorkspaceSnapshot};
+
+use super::geometry::{assert_snapshot_geometry, GeometryExpectation};
 
 const MAX_CHANGED_FRACTION: f64 = 0.03;
 
@@ -13,15 +16,23 @@ pub struct SnapshotCase {
     pub width: u32,
     pub height: u32,
     pub scale: f32,
+    geometry: &'static [GeometryExpectation],
 }
 
 impl SnapshotCase {
-    pub const fn new(name: &'static str, width: u32, height: u32, scale: f32) -> Self {
+    pub const fn new(
+        name: &'static str,
+        width: u32,
+        height: u32,
+        scale: f32,
+        geometry: &'static [GeometryExpectation],
+    ) -> Self {
         Self {
             name,
             width,
             height,
             scale,
+            geometry,
         }
     }
 
@@ -54,6 +65,9 @@ impl fmt::Debug for PixelDiff {
 }
 
 pub fn assert_platform_snapshot(case: SnapshotCase, state: &ZodeAppState) {
+    let snapshot =
+        WorkspaceSnapshot::build(state, case.width as f32, case.height as f32, Insets::ZERO);
+    assert_snapshot_geometry(case.name, &snapshot, case.scale, case.geometry);
     let actual = render_offscreen_with_fonts(state, case.width, case.height, case.scale, fonts())
         .unwrap_or_else(|error| panic!("{} failed to render: {error}", case.name));
     let actual_image = decode_png(&actual, case, "actual");
