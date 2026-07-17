@@ -142,6 +142,7 @@ pub struct WindowState {
     pub scale_factor: f64,
     pub cursor_logical: Point2D,
     pub safe_area_insets: Insets,
+    pub secondary_sidebar_resize_active: bool,
     pub dirty: bool,
 }
 
@@ -153,6 +154,7 @@ impl WindowState {
             scale_factor: valid_scale(scale_factor),
             cursor_logical: Point2D::ZERO,
             safe_area_insets: Insets::ZERO,
+            secondary_sidebar_resize_active: false,
             dirty: true,
         }
     }

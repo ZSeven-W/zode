@@ -74,20 +74,20 @@ pub fn reduce_presentation_command(
             state.presentation.integration_scope = scope;
             return PresentationCommandOutcome::Applied;
         }
-        AppCommand::ToggleSecondaryMenu => {
+        AppCommand::ToggleSidebar => {
             if state.presentation.route != crate::ShellRoute::Conversation {
                 return PresentationCommandOutcome::Ignored;
             }
-            state.presentation.secondary_menu_open = !state.presentation.secondary_menu_open;
-            state.session_menu = None;
+            state.presentation.secondary_sidebar_open = !state.presentation.secondary_sidebar_open;
+            state.close_session_action_surfaces();
             state.composer.queue_menu = None;
             return PresentationCommandOutcome::Applied;
         }
-        AppCommand::CloseSecondaryMenu => {
-            if !state.presentation.secondary_menu_open {
-                return PresentationCommandOutcome::Ignored;
-            }
-            state.presentation.secondary_menu_open = false;
+        AppCommand::SetSecondarySidebarWidth(width) => {
+            state.ui_preferences.secondary_sidebar_width = width.clamp(
+                crate::MIN_SECONDARY_SIDEBAR_WIDTH,
+                crate::MAX_SECONDARY_SIDEBAR_WIDTH,
+            );
             return PresentationCommandOutcome::Applied;
         }
         AppCommand::OpenSecondary(pane) => {
@@ -103,10 +103,20 @@ pub fn reduce_presentation_command(
                 return PresentationCommandOutcome::Ignored;
             }
             state.presentation.pinned_summary_auto_hidden = hidden;
-            if hidden
-                && state.presentation.secondary_pane == Some(crate::SecondaryPane::Environment)
-            {
-                close_secondary(state);
+            if hidden {
+                state.presentation.pinned_summary_overlay_open = false;
+            }
+            return PresentationCommandOutcome::Applied;
+        }
+        AppCommand::SetPinnedSummaryOverlayOpen(open) => {
+            if state.presentation.route != crate::ShellRoute::Conversation {
+                return PresentationCommandOutcome::Ignored;
+            }
+            state.presentation.pinned_summary_overlay_open = open;
+            if open {
+                state.presentation.pinned_summary_auto_hidden = false;
+                state.close_session_action_surfaces();
+                state.composer.queue_menu = None;
             }
             return PresentationCommandOutcome::Applied;
         }
@@ -150,9 +160,9 @@ pub fn reduce_presentation_command(
     };
     if route != crate::ShellRoute::Conversation {
         close_secondary(state);
+        state.presentation.pinned_summary_overlay_open = false;
     }
     state.close_session_action_surfaces();
-    state.presentation.secondary_menu_open = false;
     state.presentation.route = route;
     state.shell.page = route.legacy_page();
     PresentationCommandOutcome::Applied
@@ -161,12 +171,15 @@ pub fn reduce_presentation_command(
 fn open_secondary(state: &mut ZodeAppState, pane: crate::SecondaryPane) {
     state.close_session_action_surfaces();
     state.composer.queue_menu = None;
-    state.presentation.secondary_menu_open = false;
     state.presentation.route = crate::ShellRoute::Conversation;
-    state.presentation.secondary_pane = Some(pane);
     if pane == crate::SecondaryPane::Environment {
         state.presentation.pinned_summary_auto_hidden = false;
+        state.presentation.pinned_summary_overlay_open = true;
+        state.shell.page = crate::ShellPage::Conversation;
+        return;
     }
+    state.presentation.secondary_pane = Some(pane);
+    state.presentation.secondary_sidebar_open = true;
     state.shell.page = crate::ShellPage::Conversation;
     state.review.open = pane == crate::SecondaryPane::Review;
     state.terminal.open = pane == crate::SecondaryPane::Terminal;
@@ -174,7 +187,6 @@ fn open_secondary(state: &mut ZodeAppState, pane: crate::SecondaryPane) {
 }
 
 fn close_secondary(state: &mut ZodeAppState) {
-    state.presentation.secondary_menu_open = false;
     state.presentation.secondary_pane = None;
     state.review.open = false;
     state.terminal.open = false;
@@ -501,6 +513,10 @@ pub fn reduce_navigation_command(
     state: &mut ZodeAppState,
     command: AppCommand,
 ) -> NavigationOutcome {
+    if let Some(outcome) = crate::open_with_navigation::reduce_open_with_navigation(state, &command)
+    {
+        return outcome;
+    }
     if let Some(outcome) = crate::task_navigation::reduce_task_navigation(state, &command) {
         return outcome;
     }
@@ -531,7 +547,6 @@ pub fn reduce_navigation_command(
                 state.composer.finish_queue_edit();
             }
             state.close_session_action_surfaces();
-            state.presentation.secondary_menu_open = false;
             state.project_picker = crate::ProjectPickerState::default();
             state.current_session = Some(session.clone());
             if let Some(options) = state.presentation.sessions[&session]

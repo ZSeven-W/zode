@@ -419,6 +419,7 @@ fn review_rows_require_available_local_workspace_and_clip_the_last_visible_row()
 fn zero_sized_preview_exposes_no_empty_accessibility_nodes_and_caps_value() {
     let (mut state, session, workspace_uri) = state_with_session();
     state.presentation.secondary_pane = Some(SecondaryPane::DocumentPreview);
+    state.presentation.secondary_sidebar_open = true;
     state
         .presentation
         .sessions

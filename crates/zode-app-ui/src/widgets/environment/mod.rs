@@ -14,6 +14,7 @@ use crate::{paint_single_line, stable_widget_id, RectExt, SemanticIcon, WidgetId
 pub use action::EnvironmentActionLayout;
 pub use section::EnvironmentSectionLayout;
 
+pub const ENVIRONMENT_PANEL_ID: WidgetId = WidgetId(203);
 pub const ENVIRONMENT_CLOSE_ID: WidgetId = WidgetId(100);
 pub const ENVIRONMENT_REVIEW_ID: WidgetId = WidgetId(101);
 pub const ENVIRONMENT_REFRESH_ID: WidgetId = WidgetId(200);
@@ -263,7 +264,7 @@ impl EnvironmentPanel {
 
     pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
         if id == ENVIRONMENT_CLOSE_ID {
-            return Some(AppCommand::CloseSecondary);
+            return Some(AppCommand::SetPinnedSummaryOverlayOpen(false));
         }
         let action = environment_actions(state)
             .into_iter()

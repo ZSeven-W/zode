@@ -215,7 +215,10 @@ fn thread_header_actions_use_centered_semantic_icons() {
             layout.environment.expect("environment action"),
             SemanticIcon::Environment,
         ),
-        (layout.review.expect("review action"), SemanticIcon::Diff),
+        (
+            layout.panel_picker.expect("panel picker action"),
+            SemanticIcon::Panel,
+        ),
     ] {
         let svg = painter.svg(icon.path());
         assert_close(

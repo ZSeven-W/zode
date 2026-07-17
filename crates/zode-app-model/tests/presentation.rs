@@ -154,17 +154,8 @@ fn integration_search_and_scope_are_typed_route_local_state() {
 }
 
 #[test]
-fn secondary_panes_are_mutually_exclusive() {
+fn pinned_summary_overlay_is_independent_from_secondary_panes() {
     let mut state = demo_state();
-
-    reduce_presentation_command(
-        &mut state,
-        AppCommand::OpenSecondary(SecondaryPane::Environment),
-    );
-    assert_eq!(
-        state.presentation.secondary_pane,
-        Some(SecondaryPane::Environment)
-    );
 
     reduce_presentation_command(&mut state, AppCommand::OpenSecondary(SecondaryPane::Review));
     assert_eq!(
@@ -173,8 +164,19 @@ fn secondary_panes_are_mutually_exclusive() {
     );
     assert!(state.review.open);
 
+    reduce_presentation_command(
+        &mut state,
+        AppCommand::OpenSecondary(SecondaryPane::Environment),
+    );
+    assert_eq!(
+        state.presentation.secondary_pane,
+        Some(SecondaryPane::Review)
+    );
+    assert!(state.presentation.pinned_summary_overlay_open);
+
     reduce_presentation_command(&mut state, AppCommand::CloseSecondary);
     assert_eq!(state.presentation.secondary_pane, None);
+    assert!(state.presentation.pinned_summary_overlay_open);
     assert!(!state.review.open);
 }
 
@@ -193,13 +195,12 @@ fn automatic_pinned_summary_can_be_explicitly_suppressed_and_restored() {
         AppCommand::OpenSecondary(SecondaryPane::Environment),
     );
     assert!(!state.presentation.pinned_summary_auto_hidden);
-    assert_eq!(
-        state.presentation.secondary_pane,
-        Some(SecondaryPane::Environment)
-    );
+    assert!(state.presentation.pinned_summary_overlay_open);
+    assert_eq!(state.presentation.secondary_pane, None);
 
     reduce_presentation_command(&mut state, AppCommand::SetPinnedSummaryAutoHidden(true));
     assert_eq!(state.presentation.secondary_pane, None);
+    assert!(!state.presentation.pinned_summary_overlay_open);
 }
 
 #[test]
@@ -213,11 +214,13 @@ fn leaving_conversation_closes_the_secondary_pane() {
 
     for command in routes {
         reduce_presentation_command(&mut state, AppCommand::OpenSecondary(SecondaryPane::Review));
+        reduce_presentation_command(&mut state, AppCommand::SetPinnedSummaryOverlayOpen(true));
         assert!(state.review.open);
 
         reduce_presentation_command(&mut state, command);
 
         assert_eq!(state.presentation.secondary_pane, None);
+        assert!(!state.presentation.pinned_summary_overlay_open);
         assert!(!state.review.open);
     }
 }
@@ -683,14 +686,8 @@ fn preview_command_derives_workspace_from_the_bound_current_session() {
 }
 
 #[test]
-fn secondary_picker_state_is_mutually_exclusive_and_terminal_is_typed() {
+fn secondary_sidebar_keeps_typed_terminal_selection_while_hidden() {
     let mut state = demo_state();
-    assert_eq!(
-        reduce_presentation_command(&mut state, AppCommand::ToggleSecondaryMenu),
-        PresentationCommandOutcome::Applied
-    );
-    assert!(state.presentation.secondary_menu_open);
-
     assert_eq!(
         reduce_presentation_command(
             &mut state,
@@ -703,17 +700,36 @@ fn secondary_picker_state_is_mutually_exclusive_and_terminal_is_typed() {
         state.presentation.secondary_pane,
         Some(SecondaryPane::Terminal)
     );
-    assert!(!state.presentation.secondary_menu_open);
+    assert!(state.presentation.secondary_sidebar_open);
     assert!(state.terminal.open);
     assert!(state.terminal.focused);
+
+    reduce_presentation_command(&mut state, AppCommand::ToggleSidebar);
+    assert!(!state.presentation.secondary_sidebar_open);
+    assert_eq!(
+        state.presentation.secondary_pane,
+        Some(SecondaryPane::Terminal)
+    );
+    reduce_presentation_command(&mut state, AppCommand::ToggleSidebar);
+    assert!(state.presentation.secondary_sidebar_open);
 
     assert_eq!(
         reduce_presentation_command(&mut state, AppCommand::CloseSecondary),
         PresentationCommandOutcome::Applied
     );
     assert_eq!(state.presentation.secondary_pane, None);
+    assert!(state.presentation.secondary_sidebar_open);
     assert!(!state.terminal.open);
     assert!(!state.terminal.focused);
+}
+
+#[test]
+fn secondary_sidebar_width_is_clamped_to_product_limits() {
+    let mut state = demo_state();
+    reduce_presentation_command(&mut state, AppCommand::SetSecondarySidebarWidth(1));
+    assert_eq!(state.ui_preferences.secondary_sidebar_width, 300);
+    reduce_presentation_command(&mut state, AppCommand::SetSecondarySidebarWidth(u16::MAX));
+    assert_eq!(state.ui_preferences.secondary_sidebar_width, 700);
 }
 
 #[test]

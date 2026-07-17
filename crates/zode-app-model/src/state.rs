@@ -228,6 +228,8 @@ pub struct UiPreferences {
     pub task_suggestions: bool,
     #[serde(default = "default_enabled")]
     pub sidebar_tasks_expanded: bool,
+    #[serde(default = "default_secondary_sidebar_width")]
+    pub secondary_sidebar_width: u16,
 }
 
 impl Default for UiPreferences {
@@ -238,12 +240,21 @@ impl Default for UiPreferences {
             high_contrast: false,
             task_suggestions: true,
             sidebar_tasks_expanded: true,
+            secondary_sidebar_width: DEFAULT_SECONDARY_SIDEBAR_WIDTH,
         }
     }
 }
 
 const fn default_enabled() -> bool {
     true
+}
+
+pub const DEFAULT_SECONDARY_SIDEBAR_WIDTH: u16 = 700;
+pub const MIN_SECONDARY_SIDEBAR_WIDTH: u16 = 300;
+pub const MAX_SECONDARY_SIDEBAR_WIDTH: u16 = 700;
+
+const fn default_secondary_sidebar_width() -> u16 {
+    DEFAULT_SECONDARY_SIDEBAR_WIDTH
 }
 
 /// State owned by the node hosting the current application.
@@ -401,6 +412,8 @@ pub struct ZodeAppState {
     pub session_copy_menu: Option<SessionLocator>,
     /// Active task-title rename dialog, if any.
     pub session_rename: Option<SessionRenameState>,
+    /// Header split-button state and asynchronously discovered local applications.
+    pub open_with: crate::OpenWithState,
     pub pending_session_delete: Option<SessionLocator>,
     pub threads: Vec<ThreadSummary>,
     pub pinned_sessions: BTreeSet<SessionLocator>,
@@ -434,6 +447,7 @@ impl ZodeAppState {
         self.session_menu = None;
         self.session_copy_menu = None;
         self.session_rename = None;
+        self.open_with.menu_open = false;
         self.sidebar.project_menu = None;
         self.sidebar.section_menu = None;
         self.composer.context_menu = None;
@@ -481,6 +495,7 @@ impl ZodeAppState {
     pub fn terminal_surface_visible(&self) -> bool {
         self.presentation.route == crate::ShellRoute::Terminal
             || (self.presentation.route == crate::ShellRoute::Conversation
+                && self.presentation.secondary_sidebar_open
                 && self.presentation.secondary_pane == Some(crate::SecondaryPane::Terminal))
     }
 }
@@ -541,6 +556,7 @@ pub fn demo_state() -> ZodeAppState {
         session_menu: None,
         session_copy_menu: None,
         session_rename: None,
+        open_with: crate::OpenWithState::default(),
         pending_session_delete: None,
         threads: Vec::new(),
         pinned_sessions: BTreeSet::new(),

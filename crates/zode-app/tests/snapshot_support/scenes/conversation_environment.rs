@@ -125,7 +125,7 @@ pub fn conversation_environment_scene(
         },
     ];
     state.presentation.route = ShellRoute::Conversation;
-    state.presentation.secondary_pane = Some(SecondaryPane::Environment);
+    state.presentation.pinned_summary_overlay_open = true;
     state.shell.page = ShellRoute::Conversation.legacy_page();
     ReferenceScene {
         name: "conversation-environment",

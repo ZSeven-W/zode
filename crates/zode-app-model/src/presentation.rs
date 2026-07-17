@@ -358,12 +358,15 @@ pub struct SessionPresentationState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PresentationState {
     pub route: ShellRoute,
+    /// Visibility of the resizable auxiliary sidebar. Pane selection is kept
+    /// separately so hiding and restoring the sidebar never loses context.
+    pub secondary_sidebar_open: bool,
     pub secondary_pane: Option<SecondaryPane>,
     /// Explicitly suppresses the otherwise automatic wide-screen summary.
-    /// Narrow overlays continue to use `secondary_pane` so resizing alone
-    /// never opens a floating panel.
     pub pinned_summary_auto_hidden: bool,
-    pub secondary_menu_open: bool,
+    /// Explicit user-controlled overlay state for the pinned summary. This is
+    /// independent from the auxiliary sidebar's selected pane.
+    pub pinned_summary_overlay_open: bool,
     pub sessions: BTreeMap<SessionLocator, SessionPresentationState>,
     pub integrations: LoadState<IntegrationCatalog>,
     pub integration_search: String,

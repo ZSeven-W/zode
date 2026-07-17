@@ -9,7 +9,7 @@ use super::project_sidebar::workspace_label;
 use super::{
     ComingSoonPage, Composer, ComposerContextMenu as ComposerContextMenuWidget,
     ComposerFooterMenuWidget, DocumentPreview, EmptyState, EnvironmentPanel, IntegrationsPage,
-    ProjectPicker, ProjectPickerViewState, ProjectSidebar, ReviewPanel, SettingsPanel,
+    PanelPicker, ProjectPicker, ProjectPickerViewState, ProjectSidebar, ReviewPanel, SettingsPanel,
     TerminalGrid, TerminalPanel, TerminalSecondaryPanel, TerminalSelection, ThreadHeader,
     ThreadTranscript, UnavailableSecondaryPanel, WindowChrome,
 };
@@ -273,17 +273,7 @@ impl WorkspaceShell {
         }
 
         let split_fallback = state.presentation.route == ShellRoute::Conversation
-            && matches!(
-                state.presentation.secondary_pane,
-                Some(
-                    SecondaryPane::Review
-                        | SecondaryPane::DocumentPreview
-                        | SecondaryPane::Terminal
-                        | SecondaryPane::Browser
-                        | SecondaryPane::Files
-                        | SecondaryPane::SideTask
-                )
-            )
+            && state.presentation.secondary_sidebar_open
             && geometry.review_panel.size.x <= 0.0;
         match state.presentation.route {
             ShellRoute::Settings(_) => {
@@ -331,7 +321,11 @@ impl WorkspaceShell {
                 ) => {
                     UnavailableSecondaryPanel::paint(painter, geometry.primary_surface, pane, theme)
                 }
-                Some(SecondaryPane::Environment) | None => {}
+                Some(SecondaryPane::Environment) | None => {
+                    if let Some(home) = PanelPicker::home_layout(geometry.primary_surface, state) {
+                        PanelPicker::paint_home(painter, &home, snapshot.focused, hovered, theme);
+                    }
+                }
             },
             ShellRoute::Conversation => {
                 let fallback_branch_search =
@@ -357,15 +351,24 @@ impl WorkspaceShell {
             }
             match state.presentation.secondary_pane {
                 Some(SecondaryPane::Environment) => {}
-                Some(SecondaryPane::Review) if geometry.review_panel.size.x > 0.0 => {
+                Some(SecondaryPane::Review)
+                    if state.presentation.secondary_sidebar_open
+                        && geometry.review_panel.size.x > 0.0 =>
+                {
                     painter.fill_rect(geometry.divider, theme.tokens.border);
                     ReviewPanel::paint_state(painter, geometry.review_panel, state, theme);
                 }
-                Some(SecondaryPane::DocumentPreview) if geometry.review_panel.size.x > 0.0 => {
+                Some(SecondaryPane::DocumentPreview)
+                    if state.presentation.secondary_sidebar_open
+                        && geometry.review_panel.size.x > 0.0 =>
+                {
                     painter.fill_rect(geometry.divider, theme.tokens.border);
                     DocumentPreview::paint(painter, geometry.review_panel, state, theme);
                 }
-                Some(SecondaryPane::Terminal) if geometry.review_panel.size.x > 0.0 => {
+                Some(SecondaryPane::Terminal)
+                    if state.presentation.secondary_sidebar_open
+                        && geometry.review_panel.size.x > 0.0 =>
+                {
                     painter.fill_rect(geometry.divider, theme.tokens.border);
                     paint_terminal_secondary(
                         painter,
@@ -379,7 +382,9 @@ impl WorkspaceShell {
                 Some(
                     pane
                     @ (SecondaryPane::Browser | SecondaryPane::Files | SecondaryPane::SideTask),
-                ) if geometry.review_panel.size.x > 0.0 => {
+                ) if state.presentation.secondary_sidebar_open
+                    && geometry.review_panel.size.x > 0.0 =>
+                {
                     painter.fill_rect(geometry.divider, theme.tokens.border);
                     UnavailableSecondaryPanel::paint(painter, geometry.review_panel, pane, theme);
                 }
@@ -390,8 +395,17 @@ impl WorkspaceShell {
                     | SecondaryPane::Browser
                     | SecondaryPane::Files
                     | SecondaryPane::SideTask,
-                )
-                | None => {}
+                ) => {}
+                Some(SecondaryPane::Environment) | None
+                    if state.presentation.secondary_sidebar_open
+                        && geometry.review_panel.size.x > 0.0 =>
+                {
+                    painter.fill_rect(geometry.divider, theme.tokens.border);
+                    if let Some(home) = PanelPicker::home_layout(geometry.review_panel, state) {
+                        PanelPicker::paint_home(painter, &home, snapshot.focused, hovered, theme);
+                    }
+                }
+                Some(SecondaryPane::Environment) | None => {}
             }
         }
         if !matches!(state.presentation.route, ShellRoute::Settings(_)) {

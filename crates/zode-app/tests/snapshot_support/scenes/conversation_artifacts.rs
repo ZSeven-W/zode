@@ -124,7 +124,7 @@ pub fn conversation_artifacts_scene(theme: ThemePreference, viewport_width: u32)
     state.composer.attachments = vec![composer_attachment];
     state.composer.draft = "继续检查六张完整画布的文字对齐和视觉密度".into();
     state.presentation.route = ShellRoute::Conversation;
-    state.presentation.secondary_pane = Some(SecondaryPane::Environment);
+    state.presentation.pinned_summary_overlay_open = true;
     state.shell.page = ShellRoute::Conversation.legacy_page();
     ReferenceScene {
         name: "conversation-artifacts",

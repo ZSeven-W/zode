@@ -31,6 +31,10 @@ pub const ENVIRONMENT_PANEL_W: f32 = 300.0;
 pub const REVIEW_PANEL_W: f32 = 700.0;
 pub const SECONDARY_PANE_BREAKPOINT: f32 = 1400.0;
 pub const SPLIT_DIVIDER_W: f32 = 1.0;
+pub const SECONDARY_SIDEBAR_MIN_W: f32 = 300.0;
+pub const SECONDARY_SIDEBAR_MAX_W: f32 = 700.0;
+pub const SECONDARY_SIDEBAR_MAX_VIEWPORT_RATIO: f32 = 0.35;
+pub const SECONDARY_SIDEBAR_MIN_PRIMARY_W: f32 = 560.0;
 
 /// Responsive presentation used by the pinned summary panel.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -117,6 +121,23 @@ pub struct WorkspaceLayoutOptions {
     pub context_panel_width: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SecondarySidebarLayoutOptions {
+    pub open: bool,
+    pub width: f32,
+    pub pinned_summary_overlay: bool,
+}
+
+impl Default for SecondarySidebarLayoutOptions {
+    fn default() -> Self {
+        Self {
+            open: false,
+            width: REVIEW_PANEL_W,
+            pinned_summary_overlay: false,
+        }
+    }
+}
+
 impl Default for WorkspaceLayoutOptions {
     fn default() -> Self {
         Self {
@@ -134,6 +155,7 @@ impl WorkspaceLayout {
             ShellRoute::Conversation,
             SecondaryLayout::None,
             COMPOSER_H,
+            SecondarySidebarLayoutOptions::default(),
         )
     }
 
@@ -156,6 +178,7 @@ impl WorkspaceLayout {
             ShellRoute::Conversation,
             secondary,
             COMPOSER_H,
+            SecondarySidebarLayoutOptions::default(),
         )
     }
 
@@ -168,7 +191,15 @@ impl WorkspaceLayout {
         secondary_pane: Option<SecondaryPane>,
     ) -> Self {
         let secondary = secondary_layout(secondary_pane);
-        Self::compute_internal(width, height, insets, route, secondary, COMPOSER_H)
+        Self::compute_internal(
+            width,
+            height,
+            insets,
+            route,
+            secondary,
+            COMPOSER_H,
+            secondary_sidebar_for_pane(secondary_pane),
+        )
     }
 
     /// Computes the state-dependent composer stack while keeping the rest of
@@ -188,7 +219,15 @@ impl WorkspaceLayout {
             } else {
                 0.0
             };
-        Self::compute_internal(width, height, insets, route, secondary, composer_height)
+        Self::compute_internal(
+            width,
+            height,
+            insets,
+            route,
+            secondary,
+            composer_height,
+            secondary_sidebar_for_pane(secondary_pane),
+        )
     }
 
     /// Computes the shell around an already measured state-dependent composer.
@@ -202,7 +241,35 @@ impl WorkspaceLayout {
         composer_height: f32,
     ) -> Self {
         let secondary = secondary_layout(secondary_pane);
-        Self::compute_internal(width, height, insets, route, secondary, composer_height)
+        Self::compute_internal(
+            width,
+            height,
+            insets,
+            route,
+            secondary,
+            composer_height,
+            secondary_sidebar_for_pane(secondary_pane),
+        )
+    }
+
+    pub fn compute_presentation_with_secondary_sidebar(
+        width: f32,
+        height: f32,
+        insets: Insets,
+        route: ShellRoute,
+        secondary_pane: Option<SecondaryPane>,
+        composer_height: f32,
+        secondary_sidebar: SecondarySidebarLayoutOptions,
+    ) -> Self {
+        Self::compute_internal(
+            width,
+            height,
+            insets,
+            route,
+            secondary_layout(secondary_pane),
+            composer_height,
+            secondary_sidebar,
+        )
     }
 
     fn compute_internal(
@@ -212,6 +279,7 @@ impl WorkspaceLayout {
         route: ShellRoute,
         secondary: SecondaryLayout,
         desired_composer_h: f32,
+        secondary_sidebar: SecondarySidebarLayoutOptions,
     ) -> Self {
         let width = finite_non_negative(width);
         let height = finite_non_negative(height);
@@ -234,8 +302,9 @@ impl WorkspaceLayout {
         let mut primary_right = safe_right;
         let mut divider = empty_rect(safe_right, insets.top);
         let mut review_panel = empty_rect(safe_right, insets.top);
-        if secondary_visible && secondary == SecondaryLayout::Review {
-            let review_w = REVIEW_PANEL_W.min(main_w * 0.45);
+        if secondary_visible && route == ShellRoute::Conversation && secondary_sidebar.open {
+            let review_w =
+                constrained_secondary_sidebar_width(available_w, main_w, secondary_sidebar.width);
             let review_x = safe_right - review_w;
             let divider_w = SPLIT_DIVIDER_W.min((review_x - main_x).max(0.0));
             let divider_x = review_x - divider_w;
@@ -247,6 +316,9 @@ impl WorkspaceLayout {
         let primary_surface = Rect::xywh(main_x, insets.top, primary_w, available_h);
 
         let pinned_summary = match secondary {
+            SecondaryLayout::Environment(_) if secondary_sidebar.pinned_summary_overlay => {
+                PinnedSummaryMode::Overlay
+            }
             SecondaryLayout::Environment(_) if secondary_visible => PinnedSummaryMode::Docked,
             SecondaryLayout::Environment(_)
                 if route == ShellRoute::Conversation && main_w > 0.0 =>
@@ -259,14 +331,14 @@ impl WorkspaceLayout {
         };
         let environment_frame = match (secondary, pinned_summary) {
             (SecondaryLayout::Environment(requested_w), PinnedSummaryMode::Docked) => {
-                let panel_right = (safe_right - CONTENT_GUTTER.min(main_w)).max(main_x);
+                let panel_right = (primary_right - CONTENT_GUTTER.min(primary_w)).max(main_x);
                 let panel_w = requested_w.min((panel_right - main_x).max(0.0));
                 Some((panel_right - panel_w, panel_w))
             }
             (SecondaryLayout::Environment(requested_w), PinnedSummaryMode::Overlay) => {
-                let horizontal_gutter = CONTENT_GUTTER.min(main_w / 2.0);
-                let panel_right = (safe_right - horizontal_gutter).max(main_x);
-                let panel_w = requested_w.min((main_w - horizontal_gutter * 2.0).max(0.0));
+                let horizontal_gutter = CONTENT_GUTTER.min(primary_w / 2.0);
+                let panel_right = (primary_right - horizontal_gutter).max(main_x);
+                let panel_w = requested_w.min((primary_w - horizontal_gutter * 2.0).max(0.0));
                 Some((panel_right - panel_w, panel_w))
             }
             _ => None,
@@ -336,6 +408,24 @@ impl WorkspaceLayout {
     }
 }
 
+pub fn constrained_secondary_sidebar_width(
+    available_width: f32,
+    main_width: f32,
+    requested_width: f32,
+) -> f32 {
+    let available_width = finite_non_negative(available_width);
+    let main_width = finite_non_negative(main_width);
+    let maximum = SECONDARY_SIDEBAR_MAX_W
+        .min(available_width * SECONDARY_SIDEBAR_MAX_VIEWPORT_RATIO)
+        .min(main_width * 0.45)
+        .min((main_width - SECONDARY_SIDEBAR_MIN_PRIMARY_W).max(0.0));
+    if maximum <= 0.0 {
+        return 0.0;
+    }
+    let minimum = SECONDARY_SIDEBAR_MIN_W.min(maximum);
+    finite_non_negative(requested_width).clamp(minimum, maximum)
+}
+
 pub fn composer_queue_reserved_height(item_count: usize) -> f32 {
     let visible = item_count.min(COMPOSER_QUEUE_MAX_VISIBLE);
     if visible == 0 {
@@ -364,6 +454,24 @@ const fn secondary_layout(pane: Option<SecondaryPane>) -> SecondaryLayout {
             | SecondaryPane::SideTask,
         ) => SecondaryLayout::Review,
         None => SecondaryLayout::None,
+    }
+}
+
+const fn secondary_sidebar_for_pane(pane: Option<SecondaryPane>) -> SecondarySidebarLayoutOptions {
+    SecondarySidebarLayoutOptions {
+        open: matches!(
+            pane,
+            Some(
+                SecondaryPane::Review
+                    | SecondaryPane::DocumentPreview
+                    | SecondaryPane::Terminal
+                    | SecondaryPane::Browser
+                    | SecondaryPane::Files
+                    | SecondaryPane::SideTask
+            )
+        ),
+        width: REVIEW_PANEL_W,
+        pinned_summary_overlay: false,
     }
 }
 

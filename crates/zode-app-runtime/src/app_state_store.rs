@@ -4,7 +4,10 @@ use std::{
 };
 
 use serde::{Deserialize, Deserializer, Serialize};
-use zode_app_model::{ProjectDisplayMode, ProjectSortMode, ThemePreference, UiPreferences};
+use zode_app_model::{
+    ProjectDisplayMode, ProjectSortMode, ThemePreference, UiPreferences,
+    DEFAULT_SECONDARY_SIDEBAR_WIDTH,
+};
 use zode_core::{
     config::ConfigManager,
     persistence::{write_atomic, AdvisoryFileLock},
@@ -89,6 +92,7 @@ struct UiPreferencesCompat {
     high_contrast: bool,
     task_suggestions: bool,
     sidebar_tasks_expanded: bool,
+    secondary_sidebar_width: u16,
 }
 
 impl Default for UiPreferencesCompat {
@@ -99,6 +103,7 @@ impl Default for UiPreferencesCompat {
             high_contrast: false,
             task_suggestions: true,
             sidebar_tasks_expanded: true,
+            secondary_sidebar_width: DEFAULT_SECONDARY_SIDEBAR_WIDTH,
         }
     }
 }
@@ -114,6 +119,7 @@ where
         high_contrast: preferences.high_contrast,
         task_suggestions: preferences.task_suggestions,
         sidebar_tasks_expanded: preferences.sidebar_tasks_expanded,
+        secondary_sidebar_width: preferences.secondary_sidebar_width,
     })
 }
 

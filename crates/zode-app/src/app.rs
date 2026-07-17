@@ -14,8 +14,9 @@ use zode_app_ui::{
 };
 
 use crate::services::{
-    ExternalOpenService, LocalExternalOpenService, LocalRepositoryService,
-    NativeSessionWindowService, RepositoryService, SessionWindowService, WorkspaceService,
+    ExternalApplicationService, ExternalOpenService, LocalExternalApplicationService,
+    LocalExternalOpenService, LocalRepositoryService, NativeSessionWindowService,
+    RepositoryService, SessionWindowService, WorkspaceService,
 };
 use crate::{
     accessibility_host::{AccessibilityBridge, AccessibilityHost},
@@ -53,7 +54,8 @@ mod interaction;
 mod local_navigation;
 mod navigation_persistence;
 mod navigation_state;
-mod panel_menu;
+#[path = "app/open-with.rs"]
+mod open_with;
 mod persistence;
 mod presentation;
 #[path = "app/project-actions.rs"]
@@ -121,6 +123,7 @@ pub struct DesktopApp {
     session_window: Arc<dyn SessionWindowService>,
     workspace_picker: project_picker::WorkspacePickerEffect,
     branch_catalog: branch_catalog::BranchCatalogEffect,
+    open_with_effect: open_with::OpenWithEffect,
     app_state_store: Option<AppStateStore>,
     window_geometry: Option<WindowGeometry>,
 }
@@ -224,6 +227,10 @@ impl DesktopApp {
             });
         let workspace_picker = project_picker::WorkspacePickerEffect::new(proxy.clone());
         let branch_catalog = branch_catalog::BranchCatalogEffect::new(proxy.clone());
+        let open_with_effect = open_with::OpenWithEffect::new(
+            proxy.clone(),
+            Arc::new(LocalExternalApplicationService),
+        );
         let frame_snapshot = WorkspaceSnapshot::build(
             &app_state,
             DEFAULT_WINDOW_WIDTH as f32,
@@ -282,6 +289,7 @@ impl DesktopApp {
             session_window: Arc::new(NativeSessionWindowService),
             workspace_picker,
             branch_catalog,
+            open_with_effect,
             app_state_store,
             window_geometry,
         }
@@ -297,6 +305,13 @@ impl DesktopApp {
 
     pub fn set_repository_service(&mut self, service: Arc<dyn RepositoryService>) {
         self.repository_service = service;
+    }
+
+    pub fn set_external_application_service(
+        &mut self,
+        service: Arc<dyn ExternalApplicationService>,
+    ) {
+        self.open_with_effect.set_service(service);
     }
 
     pub fn set_session_window_service(&mut self, service: Arc<dyn SessionWindowService>) {
@@ -467,6 +482,7 @@ impl ApplicationHandler<AppWake> for DesktopApp {
                 self.drain_accessibility_actions();
                 let workspace_picks_applied = self.drain_workspace_pick_results();
                 let branch_catalogs_applied = self.drain_branch_catalog_results();
+                let external_applications_applied = self.drain_open_with_results();
                 let event_drain = self
                     .agent_events
                     .as_mut()
@@ -510,6 +526,7 @@ impl ApplicationHandler<AppWake> for DesktopApp {
                     || queries_applied > 0
                     || workspace_picks_applied > 0
                     || branch_catalogs_applied > 0
+                    || external_applications_applied > 0
                     || terminal_changed;
                 if background_changed {
                     self.rebuild_frame_snapshot();

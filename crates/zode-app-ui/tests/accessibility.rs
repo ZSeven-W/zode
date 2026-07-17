@@ -10,8 +10,8 @@ use zode_app_model::{
 };
 use zode_app_ui::{
     accessibility_tree, ApprovalCard, Composer, EnvironmentPanel, FocusDirection, Insets,
-    InteractionNode, RectExt, SettingsPanel, ThreadTranscript, WidgetId, WorkspaceLayout,
-    WorkspaceSnapshot,
+    InteractionNode, PinnedSummaryMode, RectExt, SettingsPanel, ThreadTranscript, WidgetId,
+    WorkspaceLayout, WorkspaceSnapshot, ENVIRONMENT_PANEL_ID,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary, ToolCall,
@@ -193,14 +193,49 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
         Some(Toggled::False)
     );
 
-    state.presentation.secondary_pane = Some(SecondaryPane::Environment);
+    state.presentation.pinned_summary_overlay_open = true;
 
     let environment = WorkspaceSnapshot::build(&state, 1800.0, 1080.0, Insets::ZERO);
     let panel_layout = EnvironmentPanel::layout(environment.layout.context_panel, &state);
     assert_eq!(environment.layout.context_panel.width(), 300.0);
+    let panel_node = environment
+        .node(ENVIRONMENT_PANEL_ID)
+        .expect("pinned summary exposes an interaction boundary");
+    assert_eq!(panel_node.rect, panel_layout.card);
+    assert_eq!(panel_node.role, Role::Group);
+    assert_eq!(panel_node.name, "置顶摘要面板");
+    assert_eq!(panel_node.actions, vec![Action::Click]);
+    let panel_padding = Point2D::new(
+        panel_layout.card.min_x() + 6.0,
+        panel_layout.card.min_y() + 6.0,
+    );
+    assert_eq!(
+        environment.hit_test(panel_padding),
+        Some(ENVIRONMENT_PANEL_ID)
+    );
     assert_eq!(
         environment.node(WidgetId(100)).unwrap().rect,
         panel_layout.close_button
+    );
+    assert_eq!(
+        environment.hit_test(rect_center(panel_layout.close_button)),
+        Some(WidgetId(100))
+    );
+
+    let overlay = WorkspaceSnapshot::build(&state, 1200.0, 900.0, Insets::ZERO);
+    assert_eq!(overlay.layout.pinned_summary, PinnedSummaryMode::Overlay);
+    let overlay_layout = EnvironmentPanel::layout(overlay.layout.context_panel, &state);
+    let overlay_padding = Point2D::new(
+        overlay_layout.card.min_x() + 6.0,
+        overlay_layout.card.min_y() + 6.0,
+    );
+    assert_eq!(
+        overlay.hit_test(overlay_padding),
+        Some(ENVIRONMENT_PANEL_ID)
+    );
+    assert_eq!(
+        overlay.hit_test(rect_center(overlay_layout.close_button)),
+        Some(WidgetId(100))
     );
     assert_eq!(
         environment.node(WidgetId(101)).unwrap().rect,
@@ -294,11 +329,12 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
     }
     assert!(collapsed.node(WidgetId(61)).is_some());
 
+    state.presentation.pinned_summary_overlay_open = false;
+    state.presentation.secondary_sidebar_open = true;
     state.presentation.secondary_pane = Some(SecondaryPane::Review);
     let review = WorkspaceSnapshot::build(&state, 1800.0, 1080.0, Insets::ZERO);
     let close = review.node(WidgetId(102)).expect("visible review close");
     assert!(review.layout.review_panel.contains(rect_center(close.rect)));
-
     let collapsed = WorkspaceSnapshot::build(&state, 1399.0, 900.0, Insets::ZERO);
     assert_eq!(collapsed.layout.review_panel.width(), 0.0);
     assert_eq!(
@@ -317,7 +353,6 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
         .all(|node| !node.name.contains("question")));
     assert_eq!(collapsed.focused, Some(WidgetId(102)));
 }
-
 #[test]
 fn extreme_typed_snapshots_never_expose_empty_or_out_of_bounds_nodes() {
     let (mut state, _) = transcript_fixture();

@@ -8,6 +8,7 @@ pub(super) fn normalize_conversation_route(state: &mut ZodeAppState, command: &A
         return false;
     }
     let _ = reduce_presentation_command(state, AppCommand::CloseSecondary);
+    let _ = reduce_presentation_command(state, AppCommand::SetPinnedSummaryOverlayOpen(false));
     let _ = reduce_presentation_command(state, AppCommand::Navigate(ShellRoute::Conversation));
     true
 }

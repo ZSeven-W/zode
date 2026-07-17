@@ -1,145 +1,105 @@
 use jian_widgets::{HorizontalAlign, Painter, Rect};
-use zode_app_model::{AppCommand, SecondaryPane, ShellRoute, ZodeAppState};
+use zode_app_model::{AppCommand, SecondaryPane, ZodeAppState};
 use zode_node_protocol::NodeCapability;
 
 use crate::{paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme};
 
 pub const PANEL_PICKER_ID: WidgetId = WidgetId(66);
-pub const PANEL_PICKER_MENU_ID: WidgetId = WidgetId(67);
+pub const SECONDARY_HOME_REVIEW_ID: WidgetId = WidgetId(240);
+pub const SECONDARY_HOME_TERMINAL_ID: WidgetId = WidgetId(241);
+pub const SECONDARY_HOME_BROWSER_ID: WidgetId = WidgetId(242);
+pub const SECONDARY_HOME_FILES_ID: WidgetId = WidgetId(243);
+pub const SECONDARY_HOME_SIDE_TASK_ID: WidgetId = WidgetId(244);
 
-const MENU_WIDTH: f32 = 244.0;
-const MENU_PADDING: f32 = 5.0;
-const ROW_HEIGHT: f32 = 40.0;
-// Panel rows can coexist with empty-task suggestions, so their identifiers
-// must not reuse a route-local control range.
-const ITEM_BASE: u64 = 170;
+const HOME_WIDTH: f32 = 420.0;
+const HOME_ROW_HEIGHT: f32 = 46.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PanelMenuItemLayout {
+pub struct PanelPickerHomeItemLayout {
     pub id: WidgetId,
     pub pane: SecondaryPane,
     pub rect: Rect,
     pub label: &'static str,
+    pub shortcut: Option<&'static str>,
     pub icon: SemanticIcon,
     pub enabled: bool,
-    pub selected: bool,
     pub unavailable_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PanelPickerMenuLayout {
-    pub id: WidgetId,
+pub struct PanelPickerHomeLayout {
     pub rect: Rect,
-    pub items: Vec<PanelMenuItemLayout>,
+    pub items: Vec<PanelPickerHomeItemLayout>,
 }
 
 pub struct PanelPicker;
 
 impl PanelPicker {
-    pub fn menu_layout(
-        anchor: Rect,
-        viewport: Rect,
-        state: &ZodeAppState,
-    ) -> Option<PanelPickerMenuLayout> {
-        if !state.presentation.secondary_menu_open
-            || state.presentation.route != ShellRoute::Conversation
-            || anchor.size.x <= 0.0
-            || anchor.size.y <= 0.0
-        {
+    pub fn home_layout(rect: Rect, state: &ZodeAppState) -> Option<PanelPickerHomeLayout> {
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
             return None;
         }
-
         let descriptors = descriptors();
-        let desired_height = MENU_PADDING * 2.0 + ROW_HEIGHT * descriptors.len() as f32;
-        let height = desired_height.min((viewport.size.y - 16.0).max(0.0));
-        let row_height = ((height - MENU_PADDING * 2.0).max(0.0) / descriptors.len().max(1) as f32)
-            .min(ROW_HEIGHT);
-        let min_x = viewport.origin.x + 8.0;
-        let max_x = (viewport.max_x() - MENU_WIDTH - 8.0).max(min_x);
-        let x = (anchor.max_x() - MENU_WIDTH).clamp(min_x, max_x);
-        let preferred_y = anchor.max_y() + 6.0;
-        let min_y = viewport.origin.y + 8.0;
-        let max_y = (viewport.max_y() - height - 8.0).max(min_y);
-        let y = preferred_y.clamp(min_y, max_y);
-        let rect = Rect::xywh(x, y, MENU_WIDTH, height);
+        let width = HOME_WIDTH.min((rect.size.x - 32.0).max(0.0));
+        let height = HOME_ROW_HEIGHT * descriptors.len() as f32;
+        let x = rect.origin.x + (rect.size.x - width).max(0.0) / 2.0;
+        let y = rect.origin.y + (rect.size.y - height).max(0.0) / 2.0;
         let items = descriptors
             .into_iter()
             .enumerate()
             .map(|(index, descriptor)| {
-                let (enabled, reason) = availability(state, descriptor.pane);
-                PanelMenuItemLayout {
-                    id: WidgetId(ITEM_BASE + index as u64),
+                let (enabled, unavailable_reason) = availability(state, descriptor.pane);
+                PanelPickerHomeItemLayout {
+                    id: home_item_id(descriptor.pane),
                     pane: descriptor.pane,
                     rect: Rect::xywh(
-                        rect.origin.x + MENU_PADDING,
-                        rect.origin.y + MENU_PADDING + index as f32 * row_height,
-                        (rect.size.x - MENU_PADDING * 2.0).max(0.0),
-                        row_height,
+                        x,
+                        y + index as f32 * HOME_ROW_HEIGHT,
+                        width,
+                        HOME_ROW_HEIGHT,
                     ),
                     label: descriptor.label,
+                    shortcut: descriptor.shortcut,
                     icon: descriptor.icon,
                     enabled,
-                    selected: state.presentation.secondary_pane == Some(descriptor.pane),
-                    unavailable_reason: reason,
+                    unavailable_reason,
                 }
             })
             .collect();
-        Some(PanelPickerMenuLayout {
-            id: PANEL_PICKER_MENU_ID,
-            rect,
-            items,
-        })
+        Some(PanelPickerHomeLayout { rect, items })
     }
 
     pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
         if id == PANEL_PICKER_ID {
-            return Some(AppCommand::ToggleSecondaryMenu);
+            return Some(AppCommand::ToggleSidebar);
         }
-        let index = id.0.checked_sub(ITEM_BASE)? as usize;
-        let descriptor = descriptors().get(index).copied()?;
-        let (enabled, _) = availability(state, descriptor.pane);
-        if !state.presentation.secondary_menu_open || !enabled {
-            return None;
+        if let Some(pane) = home_pane_for_id(id) {
+            let (enabled, _) = availability(state, pane);
+            return (state.presentation.secondary_sidebar_open && enabled)
+                .then_some(AppCommand::OpenSecondary(pane));
         }
-        if state.presentation.secondary_pane == Some(descriptor.pane) {
-            Some(AppCommand::CloseSecondary)
-        } else {
-            Some(AppCommand::OpenSecondary(descriptor.pane))
-        }
+        None
     }
 
-    pub fn paint(
+    pub fn paint_home(
         painter: &mut dyn Painter,
-        layout: &PanelPickerMenuLayout,
+        layout: &PanelPickerHomeLayout,
         focused: Option<WidgetId>,
         hovered: Option<WidgetId>,
         theme: &ZodeTheme,
     ) {
-        painter.fill_drop_shadow(
-            Rect::xywh(
-                layout.rect.origin.x,
-                layout.rect.origin.y + 2.0,
-                layout.rect.size.x,
-                layout.rect.size.y,
-            ),
-            10.0,
-            18.0,
-            theme.tokens.foreground.with_alpha(0.12),
-        );
-        painter.fill_round_rect(layout.rect, 11.0, theme.tokens.popover);
-        painter.stroke_round_rect(layout.rect, 11.0, theme.tokens.border, 1.0);
-
+        painter.fill_rect(layout.rect, theme.tokens.background);
         for item in &layout.items {
             if item.enabled && (hovered == Some(item.id) || focused == Some(item.id)) {
-                painter.fill_round_rect(item.rect, 7.0, theme.tokens.accent);
+                painter.fill_round_rect(item.rect, 8.0, theme.tokens.accent);
             }
             let foreground = if item.enabled {
-                theme.tokens.popover_foreground
+                theme.tokens.foreground
             } else {
                 theme.tokens.muted_foreground.with_alpha(0.68)
             };
             let icon = Rect::xywh(
-                item.rect.origin.x + 10.0,
+                item.rect.origin.x + 12.0,
                 item.rect.origin.y + (item.rect.size.y - 16.0) / 2.0,
                 16.0,
                 16.0,
@@ -155,36 +115,34 @@ impl PanelPicker {
                 painter,
                 item.label,
                 Rect::xywh(
-                    icon.max_x() + 9.0,
+                    icon.max_x() + 10.0,
                     item.rect.origin.y,
-                    126.0,
+                    (item.rect.size.x - 112.0).max(0.0),
                     item.rect.size.y,
                 ),
                 13.0,
-                if item.selected { 600 } else { 400 },
+                400,
                 foreground,
                 HorizontalAlign::Start,
             );
-            let status = if item.selected {
-                Some("已打开")
-            } else if !item.enabled {
-                Some("不可用")
+            let trailing = if item.enabled {
+                item.shortcut
             } else {
-                None
+                Some("不可用")
             };
-            if let Some(status) = status {
+            if let Some(trailing) = trailing {
                 paint_single_line(
                     painter,
-                    status,
+                    trailing,
                     Rect::xywh(
-                        item.rect.max_x() - 62.0,
+                        item.rect.max_x() - 70.0,
                         item.rect.origin.y,
-                        50.0,
+                        58.0,
                         item.rect.size.y,
                     ),
                     11.0,
                     400,
-                    foreground,
+                    theme.tokens.muted_foreground,
                     HorizontalAlign::End,
                 );
             }
@@ -197,46 +155,64 @@ struct PanelDescriptor {
     pane: SecondaryPane,
     label: &'static str,
     icon: SemanticIcon,
+    shortcut: Option<&'static str>,
 }
 
-fn descriptors() -> [PanelDescriptor; 7] {
+fn descriptors() -> [PanelDescriptor; 5] {
     [
         PanelDescriptor {
-            pane: SecondaryPane::Environment,
-            label: "置顶摘要",
-            icon: SemanticIcon::Environment,
-        },
-        PanelDescriptor {
             pane: SecondaryPane::Review,
-            label: "审查",
+            label: "审阅",
             icon: SemanticIcon::ReviewChange,
+            shortcut: Some("⌃⇧G"),
         },
         PanelDescriptor {
             pane: SecondaryPane::Terminal,
             label: "终端",
             icon: SemanticIcon::Terminal,
+            shortcut: None,
         },
         PanelDescriptor {
             pane: SecondaryPane::Browser,
             label: "浏览器",
             icon: SemanticIcon::Browser,
+            shortcut: Some("⌘T"),
         },
         PanelDescriptor {
             pane: SecondaryPane::Files,
             label: "文件",
             icon: SemanticIcon::Folder,
-        },
-        PanelDescriptor {
-            pane: SecondaryPane::DocumentPreview,
-            label: "文档预览",
-            icon: SemanticIcon::FileText,
+            shortcut: Some("⌘P"),
         },
         PanelDescriptor {
             pane: SecondaryPane::SideTask,
             label: "侧边任务",
             icon: SemanticIcon::Chat,
+            shortcut: Some("⌥⌘S"),
         },
     ]
+}
+
+const fn home_item_id(pane: SecondaryPane) -> WidgetId {
+    match pane {
+        SecondaryPane::Review => SECONDARY_HOME_REVIEW_ID,
+        SecondaryPane::Terminal => SECONDARY_HOME_TERMINAL_ID,
+        SecondaryPane::Browser => SECONDARY_HOME_BROWSER_ID,
+        SecondaryPane::Files => SECONDARY_HOME_FILES_ID,
+        SecondaryPane::SideTask => SECONDARY_HOME_SIDE_TASK_ID,
+        SecondaryPane::Environment | SecondaryPane::DocumentPreview => WidgetId(0),
+    }
+}
+
+const fn home_pane_for_id(id: WidgetId) -> Option<SecondaryPane> {
+    match id {
+        SECONDARY_HOME_REVIEW_ID => Some(SecondaryPane::Review),
+        SECONDARY_HOME_TERMINAL_ID => Some(SecondaryPane::Terminal),
+        SECONDARY_HOME_BROWSER_ID => Some(SecondaryPane::Browser),
+        SECONDARY_HOME_FILES_ID => Some(SecondaryPane::Files),
+        SECONDARY_HOME_SIDE_TASK_ID => Some(SecondaryPane::SideTask),
+        _ => None,
+    }
 }
 
 fn availability(state: &ZodeAppState, pane: SecondaryPane) -> (bool, Option<&'static str>) {

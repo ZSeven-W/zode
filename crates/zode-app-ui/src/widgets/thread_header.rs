@@ -1,16 +1,18 @@
 use jian_core::text_input::TextInputState;
 use jian_widgets::{components::tooltip::Tooltip, HorizontalAlign, Painter, Point2D, Rect};
-use zode_app_model::{AppCommand, SecondaryPane, ZodeAppState};
+use zode_app_model::{AppCommand, ZodeAppState};
 use zode_node_protocol::{SessionLocator, ThreadSummary};
 
 use crate::{
-    paint_single_line, PanelPicker, PinnedSummaryMode, RectExt, SemanticIcon, UsageChip, WidgetId,
-    ZodeTheme, HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID,
+    current_local_workspace, paint_single_line, OpenWithMenu, OpenWithSplitLayout, PanelPicker,
+    PinnedSummaryMode, RectExt, SemanticIcon, UsageChip, WidgetId, ZodeTheme,
+    HEADER_ENVIRONMENT_ID,
 };
 
 const ACTION_SIZE: f32 = 32.0;
 const ACTION_GAP: f32 = 4.0;
 const ACTION_RIGHT: f32 = 12.0;
+const MIN_TITLE_REGION_WIDTH: f32 = 150.0;
 const TITLE_FONT_SIZE: f32 = 13.0;
 const MENU_WIDTH: f32 = 224.0;
 const MENU_PADDING: f32 = 4.0;
@@ -52,6 +54,7 @@ pub struct HeaderActionLayout {
 pub struct ThreadHeaderLayout {
     pub title: Rect,
     pub more: Option<HeaderActionLayout>,
+    pub open_with: Option<OpenWithSplitLayout>,
     pub environment: Option<HeaderActionLayout>,
     pub review: Option<HeaderActionLayout>,
     pub panel_picker: Option<HeaderActionLayout>,
@@ -103,12 +106,11 @@ pub struct ThreadHeader;
 
 impl ThreadHeader {
     pub fn layout(rect: Rect, state: &ZodeAppState) -> ThreadHeaderLayout {
-        let pinned_summary =
-            if state.presentation.secondary_pane == Some(SecondaryPane::Environment) {
-                PinnedSummaryMode::Overlay
-            } else {
-                PinnedSummaryMode::Hidden
-            };
+        let pinned_summary = if state.presentation.pinned_summary_overlay_open {
+            PinnedSummaryMode::Overlay
+        } else {
+            PinnedSummaryMode::Hidden
+        };
         Self::layout_with_pinned_summary(rect, state, pinned_summary)
     }
 
@@ -117,44 +119,59 @@ impl ThreadHeader {
         state: &ZodeAppState,
         pinned_summary: PinnedSummaryMode,
     ) -> ThreadHeaderLayout {
-        let panel_picker = (rect.size.x > 0.0 && rect.size.y > 0.0).then(|| {
-            let action_size = ACTION_SIZE
-                .min(rect.size.x.max(0.0))
-                .min(rect.size.y.max(0.0));
-            let y = rect.origin.y + (rect.size.y - action_size).max(0.0) / 2.0;
-            let x = (rect.origin.x + rect.size.x - ACTION_RIGHT - action_size).max(rect.origin.x);
-            HeaderActionLayout {
-                id: crate::PANEL_PICKER_ID,
-                rect: Rect::xywh(x, y, action_size, action_size),
-                selected: state.presentation.secondary_menu_open,
-            }
-        });
-        let review = state.current_session.as_ref().and_then(|_| {
-            panel_picker.map(|picker| HeaderActionLayout {
-                id: HEADER_REVIEW_ID,
-                rect: Rect::xywh(
-                    (picker.rect.origin.x - ACTION_GAP - picker.rect.size.x).max(rect.origin.x),
-                    picker.rect.origin.y,
-                    picker.rect.size.x,
-                    picker.rect.size.y,
-                ),
-                selected: state.presentation.secondary_pane == Some(SecondaryPane::Review),
+        let panel_picker = (rect.size.x > ACTION_RIGHT && rect.size.y > 0.0)
+            .then(|| {
+                let action_size = ACTION_SIZE
+                    .min(rect.size.x.max(0.0))
+                    .min(rect.size.y.max(0.0));
+                if rect.size.x - ACTION_RIGHT < action_size {
+                    return None;
+                }
+                let y = rect.origin.y + (rect.size.y - action_size).max(0.0) / 2.0;
+                let x = rect.origin.x + rect.size.x - ACTION_RIGHT - action_size;
+                Some(HeaderActionLayout {
+                    id: crate::PANEL_PICKER_ID,
+                    rect: Rect::xywh(x, y, action_size, action_size),
+                    selected: state.presentation.secondary_sidebar_open,
+                })
+            })
+            .flatten();
+        // Review remains one of the auxiliary panel choices. The header keeps
+        // one panel control instead of exposing a second review-only button.
+        let review: Option<HeaderActionLayout> = None;
+        let environment = state.current_session.as_ref().and_then(|_| {
+            panel_picker.and_then(|picker| {
+                let x = picker.rect.origin.x - ACTION_GAP - picker.rect.size.x;
+                (x >= rect.origin.x + MIN_TITLE_REGION_WIDTH).then(|| HeaderActionLayout {
+                    id: HEADER_ENVIRONMENT_ID,
+                    rect: Rect::xywh(
+                        x,
+                        picker.rect.origin.y,
+                        picker.rect.size.x,
+                        picker.rect.size.y,
+                    ),
+                    selected: pinned_summary != PinnedSummaryMode::Hidden,
+                })
             })
         });
-        let environment = review.map(|review| HeaderActionLayout {
-            id: HEADER_ENVIRONMENT_ID,
-            rect: Rect::xywh(
-                (review.rect.origin.x - ACTION_GAP - review.rect.size.x).max(rect.origin.x),
-                review.rect.origin.y,
-                review.rect.size.x,
-                review.rect.size.y,
-            ),
-            selected: pinned_summary != PinnedSummaryMode::Hidden,
+        let open_with = current_local_workspace(state).and_then(|_| {
+            environment.or(panel_picker).and_then(|action| {
+                let width = 55.0_f32.min(rect.size.x.max(0.0));
+                let x = action.rect.origin.x - ACTION_GAP - width;
+                (x >= rect.origin.x + MIN_TITLE_REGION_WIDTH).then(|| {
+                    OpenWithMenu::split_layout(Rect::xywh(
+                        x,
+                        action.rect.origin.y,
+                        width,
+                        action.rect.size.y,
+                    ))
+                })
+            })
         });
-        let title_right = environment
-            .or(review)
-            .or(panel_picker)
-            .map(|action| action.rect.origin.x - 12.0)
+        let title_right = open_with
+            .map(|split| split.rect.origin.x - 12.0)
+            .or_else(|| environment.map(|action| action.rect.origin.x - 12.0))
+            .or_else(|| panel_picker.map(|action| action.rect.origin.x - 12.0))
             .unwrap_or(rect.origin.x + rect.size.x - 20.0)
             .max(rect.origin.x + 20.0);
 
@@ -185,6 +202,7 @@ impl ThreadHeader {
         ThreadHeaderLayout {
             title: Rect::xywh(title_left, rect.origin.y, title_width, rect.size.y.max(0.0)),
             more,
+            open_with,
             environment,
             review,
             panel_picker,
@@ -287,6 +305,9 @@ impl ThreadHeader {
     }
 
     pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+        if let Some(command) = OpenWithMenu::command_for_widget(state, id) {
+            return Some(command);
+        }
         if let Some(command) = PanelPicker::command_for_widget(state, id) {
             return Some(command);
         }
@@ -357,14 +378,9 @@ impl ThreadHeader {
                     title: rename.draft.trim().to_owned(),
                 })
             }
-            HEADER_ENVIRONMENT_ID => {
-                if state.presentation.secondary_pane == Some(SecondaryPane::Environment) {
-                    Some(AppCommand::CloseSecondary)
-                } else {
-                    Some(AppCommand::OpenSecondary(SecondaryPane::Environment))
-                }
-            }
-            HEADER_REVIEW_ID => Some(AppCommand::OpenReview),
+            HEADER_ENVIRONMENT_ID => Some(AppCommand::SetPinnedSummaryOverlayOpen(
+                !state.presentation.pinned_summary_overlay_open,
+            )),
             _ => None,
         }
     }
@@ -402,12 +418,11 @@ impl ThreadHeader {
     }
 
     pub fn paint(painter: &mut dyn Painter, rect: Rect, state: &ZodeAppState, theme: &ZodeTheme) {
-        let pinned_summary =
-            if state.presentation.secondary_pane == Some(SecondaryPane::Environment) {
-                PinnedSummaryMode::Overlay
-            } else {
-                PinnedSummaryMode::Hidden
-            };
+        let pinned_summary = if state.presentation.pinned_summary_overlay_open {
+            PinnedSummaryMode::Overlay
+        } else {
+            PinnedSummaryMode::Hidden
+        };
         Self::paint_internal(painter, rect, state, true, pinned_summary, theme);
     }
 
@@ -454,6 +469,7 @@ impl ThreadHeader {
                 rect.size.y.max(0.0),
             );
             header.more = None;
+            header.open_with = None;
             header.environment = None;
             header.review = None;
             header.panel_picker = None;
@@ -470,10 +486,12 @@ impl ThreadHeader {
                 HorizontalAlign::Start,
             );
         }
+        if let Some(open_with) = header.open_with {
+            OpenWithMenu::paint_trigger(painter, open_with, state, theme);
+        }
         for (action, icon) in [
             (header.more, SemanticIcon::More),
             (header.environment, SemanticIcon::Environment),
-            (header.review, SemanticIcon::Diff),
             (header.panel_picker, SemanticIcon::Panel),
         ] {
             let Some(action) = action else {
@@ -507,10 +525,14 @@ impl ThreadHeader {
             .and_then(|session| state.usage.get(session))
         {
             let right = header
-                .environment
-                .or(header.review)
-                .or(header.panel_picker)
-                .map(|action| action.rect.origin.x - 12.0)
+                .open_with
+                .map(|split| split.rect.origin.x - 12.0)
+                .or_else(|| header.environment.map(|action| action.rect.origin.x - 12.0))
+                .or_else(|| {
+                    header
+                        .panel_picker
+                        .map(|action| action.rect.origin.x - 12.0)
+                })
                 .unwrap_or(rect.origin.x + rect.size.x - 20.0);
             let width = 260.0_f32.min((right - rect.origin.x - 180.0).max(0.0));
             UsageChip::paint(
@@ -588,9 +610,9 @@ impl ThreadHeader {
                 theme,
             );
         }
-        if let Some(anchor) = Self::layout(rect, state).panel_picker {
-            if let Some(menu) = PanelPicker::menu_layout(anchor.rect, viewport, state) {
-                PanelPicker::paint(painter, &menu, focused, hovered, theme);
+        if let Some(anchor) = Self::layout(rect, state).open_with {
+            if let Some(menu) = OpenWithMenu::menu_layout(anchor.rect, viewport, state) {
+                OpenWithMenu::paint_menu(painter, &menu, state, focused, hovered, theme);
             }
         }
         if hovered == Some(HEADER_ENVIRONMENT_ID) {

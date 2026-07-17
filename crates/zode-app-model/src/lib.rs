@@ -1,8 +1,12 @@
 #![forbid(unsafe_code)]
 
 mod command;
+#[path = "external-application.rs"]
+mod external_application;
 mod layout;
 mod message_queue;
+#[path = "open-with-navigation.rs"]
+mod open_with_navigation;
 mod presentation;
 mod reducer;
 #[path = "session-navigation.rs"]
@@ -15,6 +19,7 @@ mod task_navigation;
 mod transcript;
 
 pub use command::AppCommand;
+pub use external_application::{ExternalApplication, OpenWithState};
 pub use layout::LayoutClass;
 pub use message_queue::{MessageQueueState, QueuedMessage, QueuedMessageId};
 pub use presentation::*;

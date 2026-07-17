@@ -1,8 +1,12 @@
+use winit::window::CursorIcon;
 use zode_app_model::{
     reduce_presentation_command, AppCommand, LoadState, PresentationCommandOutcome, PreviewState,
     SecondaryPane, ShellRoute, ZodeAppState,
 };
-use zode_app_ui::{COMPOSER_ID, TERMINAL_ID};
+use zode_app_ui::{
+    PointerButton, PointerEvent, PointerEventKind, RectExt, WorkspaceLayout, COMPOSER_ID,
+    TERMINAL_ID,
+};
 use zode_node_protocol::SessionLocator;
 
 use super::DesktopApp;
@@ -36,6 +40,8 @@ pub(super) fn reduce_local_presentation_command(
         AppCommand::OpenSecondary(_)
             | AppCommand::OpenReview
             | AppCommand::PreviewWorkspaceFile { .. }
+            | AppCommand::SetPinnedSummaryOverlayOpen(true)
+            | AppCommand::SetPinnedSummaryAutoHidden(false)
     ) {
         Some(PresentationRefresh::PaneOpened)
     } else {
@@ -79,64 +85,65 @@ pub(super) fn presentation_queries_for_refresh(
     let Some(workspace_uri) = state.available_workspace_for_session(&session).cloned() else {
         return Vec::new();
     };
-    let pane = state.presentation.secondary_pane.or_else(|| {
-        (state.presentation.route == ShellRoute::Conversation
-            && !state.presentation.pinned_summary_auto_hidden)
-            .then_some(SecondaryPane::Environment)
-    });
-    let Some(pane) = pane else {
+    let refreshes_session = matches!(
+        &refresh,
+        PresentationRefresh::PaneOpened
+            | PresentationRefresh::SessionChanged
+            | PresentationRefresh::CommandCompleted
+    ) || matches!(
+        &refresh,
+        PresentationRefresh::DiffInvalidated(invalidated) if invalidated == &session
+    );
+    if !refreshes_session {
         return Vec::new();
-    };
-    match (pane, refresh) {
-        (
-            SecondaryPane::Environment,
-            PresentationRefresh::PaneOpened
-            | PresentationRefresh::SessionChanged
-            | PresentationRefresh::CommandCompleted,
-        ) => vec![
-            PresentationQuery::Environment {
-                session: session.clone(),
-                workspace_uri,
-            },
-            PresentationQuery::Diff { session },
-        ],
-        (SecondaryPane::Environment, PresentationRefresh::DiffInvalidated(invalidated))
-            if invalidated == session =>
-        {
-            vec![
-                PresentationQuery::Environment {
-                    session: session.clone(),
-                    workspace_uri,
-                },
-                PresentationQuery::Diff { session },
-            ]
-        }
-        (
-            SecondaryPane::Review,
-            PresentationRefresh::PaneOpened
-            | PresentationRefresh::SessionChanged
-            | PresentationRefresh::CommandCompleted,
-        ) => vec![PresentationQuery::Diff { session }],
-        (SecondaryPane::Review, PresentationRefresh::DiffInvalidated(invalidated))
-            if invalidated == session =>
-        {
-            vec![PresentationQuery::Diff { session }]
-        }
-        (
-            SecondaryPane::DocumentPreview,
-            PresentationRefresh::PaneOpened | PresentationRefresh::SessionChanged,
-        ) => state
-            .presentation
-            .sessions
-            .get(&session)
-            .and_then(|presentation| presentation.preview.target())
-            .filter(|target| target.workspace_uri == workspace_uri)
-            .cloned()
-            .map(|target| PresentationQuery::DocumentPreview { session, target })
-            .into_iter()
-            .collect(),
-        _ => Vec::new(),
     }
+
+    let mut queries = Vec::new();
+    let summary_requested = state.presentation.route == ShellRoute::Conversation
+        && (state.presentation.pinned_summary_overlay_open
+            || (!state.presentation.pinned_summary_auto_hidden
+                && !state.presentation.secondary_sidebar_open)
+            || state.presentation.secondary_pane == Some(SecondaryPane::Environment));
+    if summary_requested {
+        queries.push(PresentationQuery::Environment {
+            session: session.clone(),
+            workspace_uri: workspace_uri.clone(),
+        });
+        queries.push(PresentationQuery::Diff {
+            session: session.clone(),
+        });
+    }
+
+    match state.presentation.secondary_pane {
+        Some(SecondaryPane::Review) => {
+            let diff = PresentationQuery::Diff {
+                session: session.clone(),
+            };
+            if !queries.contains(&diff) {
+                queries.push(diff);
+            }
+        }
+        Some(SecondaryPane::DocumentPreview)
+            if matches!(
+                refresh,
+                PresentationRefresh::PaneOpened | PresentationRefresh::SessionChanged
+            ) =>
+        {
+            if let Some(query) = state
+                .presentation
+                .sessions
+                .get(&session)
+                .and_then(|presentation| presentation.preview.target())
+                .filter(|target| target.workspace_uri == workspace_uri)
+                .cloned()
+                .map(|target| PresentationQuery::DocumentPreview { session, target })
+            {
+                queries.push(query);
+            }
+        }
+        _ => {}
+    }
+    queries
 }
 
 pub(super) fn mark_presentation_query_failed(
@@ -186,11 +193,19 @@ impl DesktopApp {
             | AppCommand::SelectSettingsCategory(category) => Some(*category),
             _ => None,
         };
-        let opens_terminal = command == AppCommand::OpenSecondary(SecondaryPane::Terminal);
-        let closes_terminal = (command == AppCommand::CloseSecondary
-            || matches!(&command, AppCommand::OpenSecondary(_)))
+        let toggles_retained_terminal = command == AppCommand::ToggleSidebar
+            && self.app_state.presentation.secondary_pane == Some(SecondaryPane::Terminal);
+        let opens_terminal = command == AppCommand::OpenSecondary(SecondaryPane::Terminal)
+            || (toggles_retained_terminal && !self.app_state.presentation.secondary_sidebar_open);
+        let replaces_terminal = matches!(
+            &command,
+            AppCommand::OpenSecondary(pane) if *pane != SecondaryPane::Environment
+        );
+        let closes_terminal = ((command == AppCommand::CloseSecondary || replaces_terminal)
             && self.app_state.presentation.secondary_pane == Some(SecondaryPane::Terminal)
-            && !opens_terminal;
+            && !opens_terminal)
+            || (toggles_retained_terminal && self.app_state.presentation.secondary_sidebar_open);
+        let persist_preferences = matches!(command, AppCommand::SetSecondarySidebarWidth(_));
         let Some(outcome) = reduce_local_presentation_command(&mut self.app_state, command) else {
             return false;
         };
@@ -199,6 +214,9 @@ impl DesktopApp {
         }
         if let Some(refresh) = outcome.refresh {
             self.request_presentation_refresh(refresh);
+        }
+        if persist_preferences {
+            self.persist_ui_state();
         }
         if opens_terminal {
             self.ensure_terminal_runtime();
@@ -213,6 +231,56 @@ impl DesktopApp {
             self.request_redraw();
         }
         true
+    }
+
+    pub(super) fn handle_secondary_sidebar_resize_pointer(&mut self, event: PointerEvent) -> bool {
+        let intent = secondary_sidebar_resize_intent(
+            self.window_state.secondary_sidebar_resize_active,
+            event,
+            self.frame_snapshot.layout,
+        );
+        match intent {
+            SecondarySidebarResizeIntent::Ignored => false,
+            SecondarySidebarResizeIntent::Hover => {
+                self.set_secondary_sidebar_resize_cursor(true);
+                true
+            }
+            SecondarySidebarResizeIntent::Begin => {
+                self.window_state.secondary_sidebar_resize_active = true;
+                self.set_secondary_sidebar_resize_cursor(true);
+                true
+            }
+            SecondarySidebarResizeIntent::Resize(width) => {
+                if reduce_presentation_command(
+                    &mut self.app_state,
+                    AppCommand::SetSecondarySidebarWidth(width),
+                ) == PresentationCommandOutcome::Applied
+                {
+                    self.rebuild_frame_snapshot();
+                    self.request_redraw();
+                }
+                self.set_secondary_sidebar_resize_cursor(true);
+                true
+            }
+            SecondarySidebarResizeIntent::Finish => {
+                self.window_state.secondary_sidebar_resize_active = false;
+                self.persist_ui_state();
+                let still_over_handle = secondary_sidebar_resize_handle(self.frame_snapshot.layout)
+                    .is_some_and(|rect| rect.contains(event.position));
+                self.set_secondary_sidebar_resize_cursor(still_over_handle);
+                true
+            }
+        }
+    }
+
+    fn set_secondary_sidebar_resize_cursor(&self, resize: bool) {
+        if let Some(window) = self.window.as_ref() {
+            window.set_cursor(if resize {
+                CursorIcon::EwResize
+            } else {
+                CursorIcon::Default
+            });
+        }
     }
 
     pub(super) fn request_presentation_refresh(&mut self, refresh: PresentationRefresh) {
@@ -252,6 +320,61 @@ impl DesktopApp {
             self.request_presentation_refresh(PresentationRefresh::SessionChanged);
         }
     }
+}
+
+const SECONDARY_SIDEBAR_RESIZE_HIT_W: f32 = 8.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecondarySidebarResizeIntent {
+    Ignored,
+    Hover,
+    Begin,
+    Resize(u16),
+    Finish,
+}
+
+fn secondary_sidebar_resize_intent(
+    active: bool,
+    event: PointerEvent,
+    layout: WorkspaceLayout,
+) -> SecondarySidebarResizeIntent {
+    if active {
+        return match (event.kind, event.button) {
+            (PointerEventKind::Move, _) => SecondarySidebarResizeIntent::Resize(
+                secondary_sidebar_width_at_pointer(layout, event.position.x),
+            ),
+            (PointerEventKind::Release, Some(PointerButton::Primary)) => {
+                SecondarySidebarResizeIntent::Finish
+            }
+            _ => SecondarySidebarResizeIntent::Ignored,
+        };
+    }
+    let over_handle = secondary_sidebar_resize_handle(layout)
+        .is_some_and(|handle| handle.contains(event.position));
+    match (event.kind, event.button, over_handle) {
+        (PointerEventKind::Move, _, true) => SecondarySidebarResizeIntent::Hover,
+        (PointerEventKind::Press, Some(PointerButton::Primary), true) => {
+            SecondarySidebarResizeIntent::Begin
+        }
+        _ => SecondarySidebarResizeIntent::Ignored,
+    }
+}
+
+fn secondary_sidebar_resize_handle(layout: WorkspaceLayout) -> Option<jian_widgets::Rect> {
+    (layout.review_panel.size.x > 0.0 && layout.divider.size.y > 0.0).then(|| {
+        jian_widgets::Rect::xywh(
+            layout.divider.origin.x
+                - (SECONDARY_SIDEBAR_RESIZE_HIT_W - layout.divider.size.x) / 2.0,
+            layout.divider.origin.y,
+            SECONDARY_SIDEBAR_RESIZE_HIT_W,
+            layout.divider.size.y,
+        )
+    })
+}
+
+fn secondary_sidebar_width_at_pointer(layout: WorkspaceLayout, pointer_x: f32) -> u16 {
+    let width = (layout.review_panel.max_x() - pointer_x).round();
+    width.clamp(0.0, f32::from(u16::MAX)) as u16
 }
 
 #[cfg(test)]
@@ -445,6 +568,7 @@ mod tests {
     #[test]
     fn diff_invalidation_refreshes_only_the_matching_open_review() {
         let (mut state, session) = state_with_session(true);
+        state.presentation.pinned_summary_auto_hidden = true;
         reduce_local_presentation_command(&mut state, AppCommand::OpenReview);
         let other = SessionLocator::new(state.host.node_id, "other");
 
@@ -540,7 +664,7 @@ mod tests {
         state.active_workspace = Some(new_workspace);
 
         assert!(
-            presentation_queries_for_refresh(&state, PresentationRefresh::SessionChanged,)
+            presentation_queries_for_refresh(&state, PresentationRefresh::SessionChanged)
                 .is_empty()
         );
     }

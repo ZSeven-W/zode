@@ -1,3 +1,5 @@
+#[path = "external-application.rs"]
+mod external_application;
 mod external_open;
 mod file;
 mod notification;
@@ -12,6 +14,7 @@ use async_trait::async_trait;
 use zode_app_model::SystemTheme;
 use zode_node_protocol::{EndpointErrorKind, WorkspaceUri};
 
+pub use external_application::LocalExternalApplicationService;
 pub use external_open::LocalExternalOpenService;
 pub use file::LocalFileService;
 pub use notification::LocalNotificationService;
@@ -90,6 +93,17 @@ pub trait FileService: Send + Sync {
 
 pub trait NotificationService: Send + Sync {
     fn notify(&self, title: &str, body: &str) -> Result<(), ServiceError>;
+}
+
+pub trait ExternalApplicationService: Send + Sync {
+    fn installed_applications(
+        &self,
+    ) -> Result<Vec<zode_app_model::ExternalApplication>, ServiceError>;
+    fn open_workspace(
+        &self,
+        workspace: &WorkspaceUri,
+        application: zode_app_model::ExternalApplication,
+    ) -> Result<(), ServiceError>;
 }
 
 pub trait ExternalOpenService: Send + Sync {

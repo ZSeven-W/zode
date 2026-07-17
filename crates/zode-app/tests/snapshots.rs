@@ -47,12 +47,12 @@ const SETTINGS_GEOMETRY: &[GeometryExpectation] = &[
 const DOCUMENT_PREVIEW_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
     GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 859.0, 46.0),
-    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 859.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 301.5, 70.0, 736.0, 830.0),
-    GeometryExpectation::new(LayoutRect::Composer, 301.5, 928.0, 736.0, 138.0),
-    GeometryExpectation::new(LayoutRect::Divider, 1099.0, 0.0, 1.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::ReviewPanel, 1100.0, 0.0, 700.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 929.0, 46.0),
+    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 929.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 336.5, 70.0, 736.0, 830.0),
+    GeometryExpectation::new(LayoutRect::Composer, 336.5, 928.0, 736.0, 138.0),
+    GeometryExpectation::new(LayoutRect::Divider, 1169.0, 0.0, 1.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::ReviewPanel, 1170.0, 0.0, 630.0, 1080.0),
 ];
 
 const ARTIFACTS_GEOMETRY: &[GeometryExpectation] = &[
@@ -223,16 +223,13 @@ fn assert_scene_landmarks(scene: &ReferenceScene) {
                     .map(|state| &state.preview),
                 Some(PreviewState::Ready { .. })
             ));
-            assert_eq!(snapshot.layout.review_panel.width(), 700.0);
+            assert_eq!(snapshot.layout.review_panel.width(), 630.0);
         }
         "conversation-artifacts" => {
             assert!(scene.block_count() >= 12);
             assert!(scene.visual_kinds().len() >= 5);
             assert!(!scene.state.composer.attachments.is_empty());
-            assert_eq!(
-                scene.state.presentation.secondary_pane,
-                Some(SecondaryPane::Environment)
-            );
+            assert!(scene.state.presentation.pinned_summary_overlay_open);
             assert_eq!(snapshot.layout.context_panel.width(), 300.0);
             assert!(scene.state.composer.attachments.iter().all(|attachment| {
                 !attachment.media_type.starts_with("data:")
@@ -242,10 +239,7 @@ fn assert_scene_landmarks(scene: &ReferenceScene) {
         "conversation-environment" => {
             assert!(scene.block_count() >= 12);
             assert!(scene.visual_kinds().len() >= 5);
-            assert_eq!(
-                scene.state.presentation.secondary_pane,
-                Some(SecondaryPane::Environment)
-            );
+            assert!(scene.state.presentation.pinned_summary_overlay_open);
             assert!(environment_sections(&scene.state).len() >= 5);
             assert_eq!(snapshot.layout.context_panel.width(), 300.0);
         }

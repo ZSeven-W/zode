@@ -7,7 +7,8 @@ use zode_app_model::{
 use zode_app_ui::{
     EnvironmentPanel, RectExt, ZodeTheme, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_EXTERNAL_ID,
     DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_COMMIT_PUSH_ID,
-    ENVIRONMENT_OPEN_WORKSPACE_ID, ENVIRONMENT_REFRESH_ID, ENVIRONMENT_REVIEW_ID,
+    ENVIRONMENT_OPEN_WORKSPACE_ID, ENVIRONMENT_PANEL_ID, ENVIRONMENT_REFRESH_ID,
+    ENVIRONMENT_REVIEW_ID,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
@@ -178,7 +179,7 @@ fn wide_layout_is_a_300px_content_hug_card_with_stable_real_commands() {
     assert_eq!(layout.repository_actions[1].rect, review);
     assert_eq!(
         EnvironmentPanel::command_for_widget(&state, ENVIRONMENT_CLOSE_ID),
-        Some(AppCommand::CloseSecondary),
+        Some(AppCommand::SetPinnedSummaryOverlayOpen(false)),
     );
     assert_eq!(
         EnvironmentPanel::command_for_widget(&state, ENVIRONMENT_REVIEW_ID),
@@ -210,6 +211,7 @@ fn wide_layout_is_a_300px_content_hug_card_with_stable_real_commands() {
 #[test]
 fn environment_action_ids_are_disjoint_from_document_preview_controls() {
     let environment_ids = [
+        ENVIRONMENT_PANEL_ID,
         ENVIRONMENT_REFRESH_ID,
         ENVIRONMENT_OPEN_WORKSPACE_ID,
         ENVIRONMENT_COMMIT_PUSH_ID,

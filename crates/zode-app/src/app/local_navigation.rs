@@ -11,7 +11,14 @@ impl DesktopApp {
         let previous_context_menu = self.app_state.composer.context_menu;
         let previous_footer_menu = self.app_state.composer.footer_menu;
         let outcome = reduce_navigation_command(&mut self.app_state, command.clone());
+        let request_open_with_catalog = matches!(command, AppCommand::ToggleOpenWithMenu)
+            && self.app_state.open_with.menu_open
+            && matches!(
+                self.app_state.open_with.applications,
+                zode_app_model::LoadState::Loading
+            );
         let branch_load_after_toggle = self.branch_load_after_context_toggle(command);
+        let open_with_focus = self.sync_open_with_after_navigation(command);
         let session_focus = self.sync_session_action_after_navigation(command);
         self.sync_queue_editor_after_state_change(previous_session.clone(), previous_queue_edit);
         self.prune_queued_payloads();
@@ -28,6 +35,17 @@ impl DesktopApp {
                 if matches!(command, AppCommand::OpenProjectInFinder { .. }) =>
             {
                 self.apply_project_action_command(command)
+            }
+            NavigationOutcome::NeedsEffect
+                if matches!(command, AppCommand::OpenWorkspaceExternally { .. }) =>
+            {
+                self.apply_open_with_command(command)
+            }
+            NavigationOutcome::NeedsEffect
+                if matches!(command, AppCommand::LoadExternalApplications) =>
+            {
+                self.request_open_with_catalog();
+                true
             }
             NavigationOutcome::NeedsEffect
                 if matches!(
@@ -65,7 +83,8 @@ impl DesktopApp {
         ) {
             self.persist_ui_state();
         }
-        let focus_after = session_focus
+        let focus_after = open_with_focus
+            .or(session_focus)
             .or_else(|| {
                 self.sync_project_picker_after_navigation(
                     command,
@@ -85,6 +104,9 @@ impl DesktopApp {
         }
         if let Some(workspace_uri) = branch_load_after_toggle {
             self.enqueue_command(AppCommand::LoadBranches { workspace_uri });
+        }
+        if request_open_with_catalog {
+            self.request_open_with_catalog();
         }
         true
     }

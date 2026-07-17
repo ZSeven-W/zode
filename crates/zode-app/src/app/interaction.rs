@@ -12,7 +12,6 @@ use zode_app_ui::{
 
 use super::{
     external_preview::consume_external_preview_command,
-    panel_menu::close_panel_menu_command,
     session_menu::{consume_session_window_command, session_menu_outside_click_command},
     settings::{reduce_local_settings_command, settings_interaction_viewport},
     DesktopApp,
@@ -534,6 +533,9 @@ impl DesktopApp {
 
     fn handle_pointer_event(&mut self, event: PointerEvent) {
         self.window_state.cursor_logical = event.position;
+        if self.handle_secondary_sidebar_resize_pointer(event) {
+            return;
+        }
         if event.kind == PointerEventKind::Move {
             let hovered = self.frame_snapshot.hit_test(event.position);
             if self.hovered_widget != hovered {
@@ -583,6 +585,9 @@ impl DesktopApp {
         if self.handle_composer_footer_pointer(event.position) {
             return;
         }
+        if self.handle_open_with_pointer(event.position) {
+            return;
+        }
         if let Some(command) = session_menu_outside_click_command(
             &self.app_state,
             &self.frame_snapshot,
@@ -592,9 +597,6 @@ impl DesktopApp {
             return;
         }
         if self.handle_sidebar_menu_pointer(event.position) {
-            return;
-        }
-        if self.handle_panel_menu_pointer(event.position) {
             return;
         }
         if self.app_state.session_menu.is_some() {
@@ -648,6 +650,9 @@ impl DesktopApp {
     }
 
     fn handle_key_event(&mut self, event: KeyEvent) {
+        if self.handle_open_with_key(&event) {
+            return;
+        }
         if self.handle_session_action_key(&event) {
             return;
         }
@@ -683,10 +688,6 @@ impl DesktopApp {
             return;
         }
         if event.pressed && event.key == Key::Escape {
-            if let Some(command) = close_panel_menu_command(&self.app_state) {
-                self.enqueue_command(command);
-                return;
-            }
             if let (Some(session), Some(id)) = (
                 self.app_state.current_session.clone(),
                 self.app_state.composer.queue_menu,

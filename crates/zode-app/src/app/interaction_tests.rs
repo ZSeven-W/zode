@@ -7,10 +7,10 @@ use zode_app_model::{
     TranscriptState,
 };
 use zode_app_ui::{
-    ComposerController, ComposerOutcome, ComposerSubmission, Insets, Key, Modifiers, ProjectPicker,
-    SettingsPanel, ThreadHeader, WidgetId, WorkspaceSnapshot, ENVIRONMENT_CLOSE_ID,
-    HEADER_ENVIRONMENT_ID, PROJECT_DETACH_ID, PROJECT_PICKER_NEW_ID, PROJECT_PICKER_PROJECTLESS_ID,
-    PROJECT_PICKER_TRIGGER_ID,
+    ComposerController, ComposerOutcome, ComposerSubmission, Insets, Key, Modifiers,
+    PinnedSummaryMode, ProjectPicker, SettingsPanel, ThreadHeader, WidgetId, WorkspaceSnapshot,
+    ENVIRONMENT_CLOSE_ID, HEADER_ENVIRONMENT_ID, PROJECT_DETACH_ID, PROJECT_PICKER_NEW_ID,
+    PROJECT_PICKER_PROJECTLESS_ID, PROJECT_PICKER_TRIGGER_ID,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
@@ -89,22 +89,33 @@ fn pinned_summary_toggle_is_responsive_to_the_current_snapshot() {
         Some(AppCommand::SetPinnedSummaryAutoHidden(false))
     );
 
+    state.presentation.secondary_sidebar_open = true;
+    state.presentation.secondary_pane = Some(SecondaryPane::Review);
+    let auxiliary = WorkspaceSnapshot::build(&state, 1_800.0, 900.0, Insets::ZERO);
+    assert_eq!(auxiliary.layout.pinned_summary, PinnedSummaryMode::Hidden);
+    assert_eq!(
+        widget_command_for_snapshot(&state, &auxiliary, HEADER_ENVIRONMENT_ID),
+        Some(AppCommand::SetPinnedSummaryOverlayOpen(true))
+    );
+
     state.presentation.pinned_summary_auto_hidden = false;
+    state.presentation.secondary_sidebar_open = false;
+    state.presentation.secondary_pane = None;
     let narrow = WorkspaceSnapshot::build(&state, 1_200.0, 900.0, Insets::ZERO);
     assert_eq!(
         widget_command_for_snapshot(&state, &narrow, HEADER_ENVIRONMENT_ID),
-        Some(AppCommand::OpenSecondary(SecondaryPane::Environment))
+        Some(AppCommand::SetPinnedSummaryOverlayOpen(true))
     );
 
-    state.presentation.secondary_pane = Some(SecondaryPane::Environment);
+    state.presentation.pinned_summary_overlay_open = true;
     let overlay = WorkspaceSnapshot::build(&state, 1_200.0, 900.0, Insets::ZERO);
     assert_eq!(
         widget_command_for_snapshot(&state, &overlay, HEADER_ENVIRONMENT_ID),
-        Some(AppCommand::CloseSecondary)
+        Some(AppCommand::SetPinnedSummaryOverlayOpen(false))
     );
     assert_eq!(
         widget_command_for_snapshot(&state, &overlay, ENVIRONMENT_CLOSE_ID),
-        Some(AppCommand::CloseSecondary)
+        Some(AppCommand::SetPinnedSummaryOverlayOpen(false))
     );
 }
 
@@ -222,8 +233,7 @@ fn page_and_pane_widget_ids_map_through_component_commands() {
         sources: Vec::new(),
     });
     let expected = [
-        (60, AppCommand::OpenSecondary(SecondaryPane::Environment)),
-        (61, AppCommand::OpenReview),
+        (60, AppCommand::SetPinnedSummaryOverlayOpen(true)),
         (
             70,
             AppCommand::SelectIntegrationsTab(IntegrationsTab::Plugins),
@@ -244,7 +254,7 @@ fn page_and_pane_widget_ids_map_through_component_commands() {
             8_109,
             AppCommand::Navigate(ShellRoute::Integrations(IntegrationsTab::Plugins)),
         ),
-        (100, AppCommand::CloseSecondary),
+        (100, AppCommand::SetPinnedSummaryOverlayOpen(false)),
         (
             101,
             AppCommand::RunEnvironmentAction {

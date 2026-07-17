@@ -278,34 +278,24 @@ fn header_actions_are_stable_real_commands_and_picker_survives_without_a_session
     let layout = ThreadHeader::layout(rect, &state);
 
     let environment = layout.environment.expect("environment action");
-    let review = layout.review.expect("review action");
     let picker = layout.panel_picker.expect("panel picker");
     assert_eq!(environment.id, HEADER_ENVIRONMENT_ID);
-    assert_eq!(environment.rect, Rect::xywh(1_684.0, 7.0, 32.0, 32.0));
-    assert_eq!(review.id, HEADER_REVIEW_ID);
-    assert_eq!(review.rect, Rect::xywh(1_720.0, 7.0, 32.0, 32.0));
+    assert_eq!(environment.rect, Rect::xywh(1_720.0, 7.0, 32.0, 32.0));
+    assert!(layout.review.is_none());
     assert_eq!(picker.id, PANEL_PICKER_ID);
     assert_eq!(picker.rect, Rect::xywh(1_756.0, 7.0, 32.0, 32.0));
     assert_eq!(
         ThreadHeader::command_for_widget(&state, environment.id),
-        Some(AppCommand::OpenSecondary(SecondaryPane::Environment)),
+        Some(AppCommand::SetPinnedSummaryOverlayOpen(true)),
     );
-    assert_eq!(
-        ThreadHeader::command_for_widget(&state, review.id),
-        Some(AppCommand::OpenReview),
-    );
-
-    state.presentation.secondary_pane = Some(SecondaryPane::Environment);
+    state.presentation.pinned_summary_overlay_open = true;
     let selected = ThreadHeader::layout(rect, &state);
     assert!(selected.environment.unwrap().selected);
-    assert!(!selected.review.unwrap().selected);
+    assert!(selected.review.is_none());
 
     let narrow = ThreadHeader::layout(Rect::xywh(240.0, 0.0, 960.0, 46.0), &state);
     assert!(narrow.environment.is_some());
-    assert_eq!(
-        narrow.review.unwrap().rect,
-        Rect::xywh(1_120.0, 7.0, 32.0, 32.0),
-    );
+    assert!(narrow.review.is_none());
 
     state.current_session = None;
     let empty = ThreadHeader::layout(rect, &state);
@@ -323,10 +313,10 @@ fn header_actions_are_stable_real_commands_and_picker_survives_without_a_session
 }
 
 #[test]
-fn environment_secondary_pane_paints_the_real_current_session_context() {
+fn pinned_summary_paints_the_real_current_session_context() {
     let (mut state, _) = state_with_ready_session();
     state.presentation.route = ShellRoute::Conversation;
-    state.presentation.secondary_pane = Some(SecondaryPane::Environment);
+    state.presentation.pinned_summary_overlay_open = true;
 
     let (painter, layout) = paint_shell(&state, 1_800.0);
     let text = text(&painter);
@@ -379,7 +369,7 @@ fn pinned_summary_auto_docks_only_when_conversation_space_is_available() {
         );
     }
 
-    state.presentation.secondary_pane = Some(SecondaryPane::Environment);
+    state.presentation.pinned_summary_overlay_open = true;
     let (overlay, overlay_layout) = paint_shell(&state, 1_200.0);
     assert_eq!(overlay_layout.pinned_summary, PinnedSummaryMode::Overlay);
     assert_eq!(overlay_layout.context_panel.size.x, 300.0);
@@ -397,10 +387,11 @@ fn pinned_summary_auto_docks_only_when_conversation_space_is_available() {
 }
 
 #[test]
-fn explicit_review_has_priority_over_the_automatic_summary() {
+fn auxiliary_sidebar_hides_auto_summary_but_explicit_overlay_preserves_the_pane() {
     let (mut state, _) = state_with_ready_session();
     state.presentation.route = ShellRoute::Conversation;
     state.presentation.secondary_pane = Some(SecondaryPane::Review);
+    state.presentation.secondary_sidebar_open = true;
 
     let (painter, layout) = paint_shell(&state, 1_800.0);
 
@@ -408,6 +399,18 @@ fn explicit_review_has_priority_over_the_automatic_summary() {
     assert_eq!(layout.context_panel.size.x, 0.0);
     assert!(layout.review_panel.size.x > 0.0);
     assert!(!text(&painter).contains("置顶摘要"));
+    assert!(text(&painter).contains("workspace_shell.rs"));
+
+    state.presentation.pinned_summary_overlay_open = true;
+    let (painter, layout) = paint_shell(&state, 1_800.0);
+    assert_eq!(layout.pinned_summary, PinnedSummaryMode::Overlay);
+    assert_eq!(
+        state.presentation.secondary_pane,
+        Some(SecondaryPane::Review)
+    );
+    assert!(layout.review_panel.size.x > 0.0);
+    assert!(text(&painter).contains("置顶摘要"));
+    assert!(text(&painter).contains("workspace_shell.rs"));
 }
 
 #[test]
@@ -415,10 +418,11 @@ fn wide_review_is_a_real_split_and_narrow_review_falls_back_to_the_primary_surfa
     let (mut state, _) = state_with_ready_session();
     state.presentation.route = ShellRoute::Conversation;
     state.presentation.secondary_pane = Some(SecondaryPane::Review);
+    state.presentation.secondary_sidebar_open = true;
 
     let (wide, wide_layout) = paint_shell(&state, 1_800.0);
     let wide_text = text(&wide);
-    assert_eq!(wide_layout.review_panel.size.x, 700.0);
+    assert_eq!(wide_layout.review_panel.size.x, 630.0);
     assert_eq!(wide_layout.divider.size.x, 1.0);
     assert!(wide_text.contains("Zode 桌面端"));
     assert!(wide_text.contains("变更"));

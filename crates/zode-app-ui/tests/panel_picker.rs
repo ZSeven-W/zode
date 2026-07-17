@@ -5,8 +5,10 @@ use zode_app_model::{
     TranscriptState,
 };
 use zode_app_ui::{
-    Insets, PanelPicker, RectExt, ThreadHeader, WorkspaceLayout, WorkspaceSnapshot,
-    EMPTY_SUGGESTION_IDS, PANEL_PICKER_ID, TERMINAL_ID, TERMINAL_SECONDARY_CLOSE_ID,
+    Insets, PanelPicker, RectExt, ThreadHeader, WorkspaceSnapshot, EMPTY_SUGGESTION_IDS,
+    PANEL_PICKER_ID, SECONDARY_HOME_BROWSER_ID, SECONDARY_HOME_FILES_ID, SECONDARY_HOME_REVIEW_ID,
+    SECONDARY_HOME_SIDE_TASK_ID, SECONDARY_HOME_TERMINAL_ID, TERMINAL_ID,
+    TERMINAL_SECONDARY_CLOSE_ID,
 };
 use zode_node_protocol::{
     NodeCapability, SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri,
@@ -66,49 +68,99 @@ fn header_exposes_one_unified_panel_picker() {
     assert_eq!(picker.id, PANEL_PICKER_ID);
     assert_eq!(
         ThreadHeader::command_for_widget(&state, picker.id),
-        Some(AppCommand::ToggleSecondaryMenu)
+        Some(AppCommand::ToggleSidebar)
     );
 }
 
 #[test]
-fn menu_truthfully_enables_real_panes_and_disables_missing_contracts() {
+fn open_sidebar_without_a_selected_pane_exposes_the_picker_home() {
     let mut state = state_with_session();
-    state.presentation.secondary_menu_open = true;
+    state.presentation.secondary_sidebar_open = true;
     let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
-    let anchor = ThreadHeader::layout(snapshot.layout.top_bar, &state)
-        .panel_picker
-        .unwrap();
-    let menu = PanelPicker::menu_layout(anchor.rect, snapshot.layout.viewport, &state).unwrap();
-    assert_eq!(menu.items.len(), 7);
-
-    for pane in [
-        SecondaryPane::Environment,
-        SecondaryPane::Review,
-        SecondaryPane::Terminal,
-        SecondaryPane::DocumentPreview,
+    let home = PanelPicker::home_layout(snapshot.layout.review_panel, &state).expect("picker home");
+    assert_eq!(
+        home.items.iter().map(|item| item.label).collect::<Vec<_>>(),
+        vec!["审阅", "终端", "浏览器", "文件", "侧边任务"]
+    );
+    for (id, pane) in [
+        (SECONDARY_HOME_REVIEW_ID, SecondaryPane::Review),
+        (SECONDARY_HOME_TERMINAL_ID, SecondaryPane::Terminal),
     ] {
-        assert!(
-            menu.items
-                .iter()
-                .find(|item| item.pane == pane)
-                .unwrap()
-                .enabled
-        );
-    }
-    for pane in [
-        SecondaryPane::Browser,
-        SecondaryPane::Files,
-        SecondaryPane::SideTask,
-    ] {
-        let item = menu.items.iter().find(|item| item.pane == pane).unwrap();
-        assert!(!item.enabled);
-        assert!(item.unavailable_reason.is_some());
-        assert_eq!(PanelPicker::command_for_widget(&state, item.id), None);
-        assert!(snapshot.node(item.id).is_some_and(|node| node.disabled));
+        let node = snapshot.node(id).expect("home item accessibility node");
+        assert!(!node.disabled);
+        assert!(node.actions.contains(&accesskit::Action::Click));
         assert_eq!(
             snapshot.hit_test(jian_widgets::Point2D::new(
-                item.rect.origin.x + item.rect.size.x / 2.0,
-                item.rect.origin.y + item.rect.size.y / 2.0,
+                node.rect.origin.x + 4.0,
+                node.rect.origin.y + 4.0,
+            )),
+            Some(id)
+        );
+        assert_eq!(
+            PanelPicker::command_for_widget(&state, id),
+            Some(AppCommand::OpenSecondary(pane))
+        );
+        assert!(!EMPTY_SUGGESTION_IDS.contains(&id));
+    }
+    for id in [
+        SECONDARY_HOME_BROWSER_ID,
+        SECONDARY_HOME_FILES_ID,
+        SECONDARY_HOME_SIDE_TASK_ID,
+    ] {
+        let node = snapshot.node(id).expect("disabled home item node");
+        assert!(node.disabled);
+        assert!(node.actions.is_empty());
+        assert!(node.value.is_some());
+        assert_eq!(PanelPicker::command_for_widget(&state, id), None);
+        assert_eq!(
+            snapshot.hit_test(jian_widgets::Point2D::new(
+                node.rect.origin.x + node.rect.size.x / 2.0,
+                node.rect.origin.y + node.rect.size.y / 2.0,
+            )),
+            None
+        );
+        assert!(!EMPTY_SUGGESTION_IDS.contains(&id));
+    }
+}
+
+#[test]
+fn picker_home_stays_inside_narrow_split_fallback_geometry() {
+    let mut state = state_with_session();
+    state.presentation.secondary_sidebar_open = true;
+    let snapshot = WorkspaceSnapshot::build(&state, 760.0, 420.0, Insets::ZERO);
+    assert_eq!(snapshot.layout.review_panel.size.x, 0.0);
+    let home =
+        PanelPicker::home_layout(snapshot.layout.primary_surface, &state).expect("picker home");
+    assert!(snapshot.layout.primary_surface.contains(home.rect.origin));
+    assert!(home.rect.max_x() <= snapshot.layout.primary_surface.max_x());
+    assert!(home.rect.max_y() <= snapshot.layout.primary_surface.max_y());
+}
+
+#[test]
+fn projectless_home_entries_are_disabled_for_accessibility_and_clicks() {
+    let mut state = demo_state();
+    state.current_session = None;
+    state.active_workspace = None;
+    state.projectless_workspace_root = None;
+    state.projects.clear();
+    state.presentation.secondary_sidebar_open = true;
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+
+    for id in [
+        SECONDARY_HOME_REVIEW_ID,
+        SECONDARY_HOME_TERMINAL_ID,
+        SECONDARY_HOME_BROWSER_ID,
+        SECONDARY_HOME_FILES_ID,
+        SECONDARY_HOME_SIDE_TASK_ID,
+    ] {
+        let node = snapshot.node(id).expect("disabled projectless home item");
+        assert!(node.disabled);
+        assert!(node.actions.is_empty());
+        assert_eq!(PanelPicker::command_for_widget(&state, id), None);
+        assert_eq!(
+            snapshot.hit_test(jian_widgets::Point2D::new(
+                node.rect.origin.x + node.rect.size.x / 2.0,
+                node.rect.origin.y + node.rect.size.y / 2.0,
             )),
             None
         );
@@ -116,75 +168,10 @@ fn menu_truthfully_enables_real_panes_and_disables_missing_contracts() {
 }
 
 #[test]
-fn panel_rows_do_not_reuse_empty_suggestion_widget_ids() {
-    let mut state = state_with_session();
-    state.presentation.secondary_menu_open = true;
-    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
-    let anchor = ThreadHeader::layout(snapshot.layout.top_bar, &state)
-        .panel_picker
-        .unwrap();
-    let menu = PanelPicker::menu_layout(anchor.rect, snapshot.layout.viewport, &state).unwrap();
-
-    assert!(menu
-        .items
-        .iter()
-        .all(|item| !EMPTY_SUGGESTION_IDS.contains(&item.id)));
-}
-
-#[test]
-fn menu_items_switch_or_close_the_selected_real_pane() {
-    let mut state = state_with_session();
-    state.presentation.secondary_menu_open = true;
-    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
-    let anchor = ThreadHeader::layout(snapshot.layout.top_bar, &state)
-        .panel_picker
-        .unwrap();
-    let menu = PanelPicker::menu_layout(anchor.rect, snapshot.layout.viewport, &state).unwrap();
-    let terminal = menu
-        .items
-        .iter()
-        .find(|item| item.pane == SecondaryPane::Terminal)
-        .unwrap();
-    assert_eq!(
-        PanelPicker::command_for_widget(&state, terminal.id),
-        Some(AppCommand::OpenSecondary(SecondaryPane::Terminal))
-    );
-
-    state.presentation.secondary_pane = Some(SecondaryPane::Terminal);
-    assert_eq!(
-        PanelPicker::command_for_widget(&state, terminal.id),
-        Some(AppCommand::CloseSecondary)
-    );
-}
-
-#[test]
-fn picker_menu_and_terminal_pane_stay_inside_narrow_geometry() {
-    let mut state = state_with_session();
-    state.presentation.secondary_menu_open = true;
-    let snapshot = WorkspaceSnapshot::build(&state, 760.0, 420.0, Insets::ZERO);
-    let anchor = ThreadHeader::layout(snapshot.layout.top_bar, &state)
-        .panel_picker
-        .unwrap();
-    let menu = PanelPicker::menu_layout(anchor.rect, snapshot.layout.viewport, &state).unwrap();
-    assert!(snapshot.layout.viewport.contains(menu.rect.origin));
-    assert!(menu.rect.max_x() <= snapshot.layout.viewport.max_x());
-    assert!(menu.rect.max_y() <= snapshot.layout.viewport.max_y());
-
-    let terminal = WorkspaceLayout::compute_presentation(
-        760.0,
-        420.0,
-        Insets::ZERO,
-        zode_app_model::ShellRoute::Conversation,
-        Some(SecondaryPane::Terminal),
-    );
-    assert_eq!(terminal.review_panel.size.x, 0.0);
-    assert!(terminal.primary_surface.size.x > 0.0);
-}
-
-#[test]
 fn terminal_secondary_uses_real_terminal_input_and_close_nodes() {
     let mut state = state_with_session();
     state.presentation.secondary_pane = Some(SecondaryPane::Terminal);
+    state.presentation.secondary_sidebar_open = true;
     state.terminal.open = true;
     let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
 

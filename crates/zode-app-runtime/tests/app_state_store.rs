@@ -63,6 +63,7 @@ fn store_round_trips_versioned_state_atomically() {
         high_contrast: true,
         task_suggestions: false,
         sidebar_tasks_expanded: false,
+        secondary_sidebar_width: 612,
     };
     state.window_geometry = Some(WindowGeometry {
         x: -1800,
@@ -185,6 +186,7 @@ fn partial_legacy_preferences_use_field_defaults() {
     assert!(!loaded.ui_preferences.high_contrast);
     assert!(loaded.ui_preferences.task_suggestions);
     assert!(loaded.ui_preferences.sidebar_tasks_expanded);
+    assert_eq!(loaded.ui_preferences.secondary_sidebar_width, 700);
 }
 
 #[test]

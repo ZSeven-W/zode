@@ -3,15 +3,16 @@ use jian_core::CursorHint;
 use zode_app_model::ZodeAppState;
 
 use crate::widgets::{
-    ThreadMenuActionLayout, HEADER_COPY_DETAILS_ID, HEADER_COPY_MENU_ID, HEADER_COPY_SESSION_ID,
-    HEADER_COPY_TITLE_ID, HEADER_MENU_ARCHIVE_ID, HEADER_MENU_CONTINUE_ID, HEADER_MENU_COPY_ID,
-    HEADER_MENU_ID, HEADER_MENU_NEW_WINDOW_ID, HEADER_MENU_PIN_ID, HEADER_MENU_RENAME_ID,
-    HEADER_MENU_SCHEDULE_ID, HEADER_MENU_SIDE_TASK_ID, HEADER_MORE_ID, HEADER_RENAME_CANCEL_ID,
-    HEADER_RENAME_DIALOG_ID, HEADER_RENAME_INPUT_ID, HEADER_RENAME_SAVE_ID,
+    HeaderActionLayout, ThreadMenuActionLayout, HEADER_COPY_DETAILS_ID, HEADER_COPY_MENU_ID,
+    HEADER_COPY_SESSION_ID, HEADER_COPY_TITLE_ID, HEADER_MENU_ARCHIVE_ID, HEADER_MENU_CONTINUE_ID,
+    HEADER_MENU_COPY_ID, HEADER_MENU_ID, HEADER_MENU_NEW_WINDOW_ID, HEADER_MENU_PIN_ID,
+    HEADER_MENU_RENAME_ID, HEADER_MENU_SCHEDULE_ID, HEADER_MENU_SIDE_TASK_ID, HEADER_MORE_ID,
+    HEADER_RENAME_CANCEL_ID, HEADER_RENAME_DIALOG_ID, HEADER_RENAME_INPUT_ID,
+    HEADER_RENAME_SAVE_ID,
 };
 use crate::{
-    PanelPicker, ThreadHeader, ThreadTranscript, WorkspaceLayout, HEADER_ENVIRONMENT_ID,
-    HEADER_REVIEW_ID, PANEL_PICKER_ID, PANEL_PICKER_MENU_ID,
+    OpenWithMenu, ThreadHeader, ThreadTranscript, WorkspaceLayout, HEADER_ENVIRONMENT_ID,
+    OPEN_WITH_DROPDOWN_ID, OPEN_WITH_MENU_ID, OPEN_WITH_PRIMARY_ID, PANEL_PICKER_ID,
 };
 
 use super::{next_order, node, visible_rect, InteractionNode};
@@ -24,80 +25,109 @@ pub(super) fn append_header_nodes(
 ) {
     let header =
         ThreadHeader::layout_with_pinned_summary(layout.top_bar, state, layout.pinned_summary);
-    for (action, id, label) in [
-        (header.more, HEADER_MORE_ID, "任务操作"),
-        (
-            header.environment,
-            HEADER_ENVIRONMENT_ID,
-            "切换置顶摘要面板",
-        ),
-        (header.review, HEADER_REVIEW_ID, "审查变更"),
-        (header.panel_picker, PANEL_PICKER_ID, "选择侧边面板"),
-    ] {
-        let Some(action) = action.filter(|action| visible_rect(action.rect)) else {
-            continue;
-        };
-        debug_assert_eq!(action.id, id);
-        let mut interaction = node(
-            id,
-            action.rect,
+    append_header_action(nodes, focus_order, header.more, HEADER_MORE_ID, "任务操作");
+    if let Some(open_with) = header.open_with {
+        nodes.push(node(
+            OPEN_WITH_PRIMARY_ID,
+            open_with.primary,
             Role::Button,
-            label,
+            format!(
+                "使用 {} 打开项目",
+                state.open_with.primary_application().label()
+            ),
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        ));
+        let mut dropdown = node(
+            OPEN_WITH_DROPDOWN_ID,
+            open_with.dropdown,
+            Role::Button,
+            "选择打开项目的应用",
             None,
             vec![Action::Click, Action::Focus],
             next_order(focus_order),
             CursorHint::Pointer,
         );
-        interaction.toggled = Some(action.selected.into());
-        nodes.push(interaction);
+        dropdown.toggled = Some(state.open_with.menu_open.into());
+        nodes.push(dropdown);
     }
+    append_header_action(
+        nodes,
+        focus_order,
+        header.environment,
+        HEADER_ENVIRONMENT_ID,
+        "切换置顶摘要面板",
+    );
+    append_header_action(
+        nodes,
+        focus_order,
+        header.panel_picker,
+        PANEL_PICKER_ID,
+        "显示或隐藏侧边栏",
+    );
 }
 
-pub(super) fn append_panel_picker_nodes(
+fn append_header_action(
+    nodes: &mut Vec<InteractionNode>,
+    focus_order: &mut u32,
+    action: Option<HeaderActionLayout>,
+    id: crate::WidgetId,
+    label: &str,
+) {
+    let Some(action) = action.filter(|action| visible_rect(action.rect)) else {
+        return;
+    };
+    debug_assert_eq!(action.id, id);
+    let mut interaction = node(
+        id,
+        action.rect,
+        Role::Button,
+        label,
+        None,
+        vec![Action::Click, Action::Focus],
+        next_order(focus_order),
+        CursorHint::Pointer,
+    );
+    interaction.toggled = Some(action.selected.into());
+    nodes.push(interaction);
+}
+
+pub(super) fn append_open_with_menu_nodes(
     nodes: &mut Vec<InteractionNode>,
     layout: &WorkspaceLayout,
     focus_order: &mut u32,
     state: &ZodeAppState,
-) {
-    let Some(anchor) = ThreadHeader::layout(layout.top_bar, state).panel_picker else {
-        return;
-    };
-    let Some(menu) = PanelPicker::menu_layout(anchor.rect, layout.viewport, state) else {
-        return;
-    };
-    debug_assert_eq!(menu.id, PANEL_PICKER_MENU_ID);
+) -> Option<crate::WidgetId> {
+    let anchor = ThreadHeader::layout(layout.top_bar, state).open_with?;
+    let menu = OpenWithMenu::menu_layout(anchor.rect, layout.viewport, state)?;
+    debug_assert_eq!(menu.id, OPEN_WITH_MENU_ID);
     nodes.push(node(
-        PANEL_PICKER_MENU_ID,
+        OPEN_WITH_MENU_ID,
         menu.rect,
         Role::Menu,
-        "侧边面板",
-        None,
+        "打开项目",
+        menu.status.map(str::to_owned),
         Vec::new(),
         None,
         CursorHint::Default,
     ));
+    let mut first = None;
     for item in menu.items {
-        let mut interaction = node(
+        first.get_or_insert(item.id);
+        nodes.push(node(
             item.id,
             item.rect,
             Role::MenuItem,
-            item.label,
-            item.unavailable_reason.map(str::to_owned),
-            if item.enabled {
-                vec![Action::Click, Action::Focus]
-            } else {
-                Vec::new()
-            },
-            item.enabled.then(|| next_order(focus_order)).flatten(),
-            if item.enabled {
-                CursorHint::Pointer
-            } else {
-                CursorHint::Default
-            },
-        );
-        interaction.disabled = !item.enabled;
-        nodes.push(interaction);
+            item.application.label(),
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        ));
     }
+    first.or(Some(OPEN_WITH_DROPDOWN_ID))
 }
 
 pub(super) fn append_header_menu_nodes(

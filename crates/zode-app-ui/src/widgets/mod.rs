@@ -7,6 +7,8 @@ mod document_preview;
 mod empty_state;
 mod environment;
 mod integrations;
+#[path = "open-with-menu.rs"]
+mod open_with_menu;
 mod panel_picker;
 mod project_picker;
 mod project_sidebar;
@@ -59,7 +61,7 @@ pub use empty_state::{EmptyState, EmptySuggestionLayout, EMPTY_SUGGESTION_IDS};
 pub use environment::{
     EnvironmentActionLayout, EnvironmentPanel, EnvironmentPanelLayout, EnvironmentSectionLayout,
     ENVIRONMENT_CLOSE_ID, ENVIRONMENT_COMMIT_PUSH_ID, ENVIRONMENT_OPEN_WORKSPACE_ID,
-    ENVIRONMENT_REFRESH_ID, ENVIRONMENT_REVIEW_ID,
+    ENVIRONMENT_PANEL_ID, ENVIRONMENT_REFRESH_ID, ENVIRONMENT_REVIEW_ID,
 };
 pub use integrations::{
     CatalogSectionLayout, InstalledIconLayout, IntegrationRowLayout, IntegrationScopeLayout,
@@ -67,8 +69,14 @@ pub use integrations::{
     INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_PUBLIC_SCOPE_ID, INTEGRATIONS_SEARCH_ID,
     INTEGRATIONS_SKILLS_TAB_ID,
 };
+pub use open_with_menu::{
+    current_local_workspace, OpenWithMenu, OpenWithMenuItemLayout, OpenWithMenuLayout,
+    OpenWithSplitLayout, OPEN_WITH_DROPDOWN_ID, OPEN_WITH_MENU_ID, OPEN_WITH_PRIMARY_ID,
+};
 pub use panel_picker::{
-    PanelMenuItemLayout, PanelPicker, PanelPickerMenuLayout, PANEL_PICKER_ID, PANEL_PICKER_MENU_ID,
+    PanelPicker, PanelPickerHomeItemLayout, PanelPickerHomeLayout, PANEL_PICKER_ID,
+    SECONDARY_HOME_BROWSER_ID, SECONDARY_HOME_FILES_ID, SECONDARY_HOME_REVIEW_ID,
+    SECONDARY_HOME_SIDE_TASK_ID, SECONDARY_HOME_TERMINAL_ID,
 };
 pub use project_picker::{
     ProjectChoice, ProjectPicker, ProjectPickerController, ProjectPickerLayout,

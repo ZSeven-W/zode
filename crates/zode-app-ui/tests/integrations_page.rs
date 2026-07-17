@@ -395,7 +395,11 @@ fn integration_static_ids_do_not_overlap_adjacent_shell_components() {
     ];
     let reserved = [
         zode_app_ui::PANEL_PICKER_ID,
-        zode_app_ui::PANEL_PICKER_MENU_ID,
+        zode_app_ui::SECONDARY_HOME_REVIEW_ID,
+        zode_app_ui::SECONDARY_HOME_TERMINAL_ID,
+        zode_app_ui::SECONDARY_HOME_BROWSER_ID,
+        zode_app_ui::SECONDARY_HOME_FILES_ID,
+        zode_app_ui::SECONDARY_HOME_SIDE_TASK_ID,
         zode_app_ui::EMPTY_SUGGESTION_IDS[0],
         zode_app_ui::EMPTY_SUGGESTION_IDS[1],
         zode_app_ui::EMPTY_SUGGESTION_IDS[2],

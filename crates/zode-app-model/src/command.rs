@@ -4,9 +4,9 @@ use zode_node_protocol::{
 
 use crate::{
     BranchCatalog, ComposerContextMenu, ComposerFooterMenu, EnvironmentActionKind,
-    IntegrationScope, IntegrationsTab, ProjectDisplayMode, ProjectSortMode, QueuedMessageId,
-    SecondaryPane, SettingsCategory, ShellRoute, SidebarSectionMenu, TaskLaunchMode,
-    ThemePreference,
+    ExternalApplication, IntegrationScope, IntegrationsTab, ProjectDisplayMode, ProjectSortMode,
+    QueuedMessageId, SecondaryPane, SettingsCategory, ShellRoute, SidebarSectionMenu,
+    TaskLaunchMode, ThemePreference,
 };
 
 /// User intent emitted by widgets for the application controller to handle.
@@ -92,6 +92,14 @@ pub enum AppCommand {
     },
     OpenProjectInFinder {
         workspace_uri: WorkspaceUri,
+    },
+    ToggleOpenWithMenu,
+    LoadExternalApplications,
+    ExternalApplicationsLoaded(Vec<ExternalApplication>),
+    ExternalApplicationsFailed(String),
+    OpenWorkspaceExternally {
+        workspace_uri: WorkspaceUri,
+        application: ExternalApplication,
     },
     ArchiveProjectTasks {
         workspace_uri: WorkspaceUri,
@@ -206,12 +214,12 @@ pub enum AppCommand {
         relative_path: String,
     },
     ToggleSidebar,
+    SetSecondarySidebarWidth(u16),
     Navigate(ShellRoute),
-    ToggleSecondaryMenu,
-    CloseSecondaryMenu,
     OpenSecondary(SecondaryPane),
     CloseSecondary,
     SetPinnedSummaryAutoHidden(bool),
+    SetPinnedSummaryOverlayOpen(bool),
     SelectSettingsCategory(SettingsCategory),
     SelectIntegrationsTab(IntegrationsTab),
     SetIntegrationSearch(String),

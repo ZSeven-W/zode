@@ -121,6 +121,7 @@ pub fn conversation_document_preview_scene(
     };
     state.presentation.route = ShellRoute::Conversation;
     state.presentation.secondary_pane = Some(SecondaryPane::DocumentPreview);
+    state.presentation.secondary_sidebar_open = true;
     state.shell.page = ShellRoute::Conversation.legacy_page();
     ReferenceScene {
         name: "conversation-document-preview",

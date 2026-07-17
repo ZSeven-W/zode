@@ -23,15 +23,15 @@ pub(super) fn widget_command_for_snapshot(
     {
         return match snapshot.layout.pinned_summary {
             PinnedSummaryMode::Docked => Some(AppCommand::SetPinnedSummaryAutoHidden(true)),
-            PinnedSummaryMode::Overlay => Some(AppCommand::CloseSecondary),
+            PinnedSummaryMode::Overlay => Some(AppCommand::SetPinnedSummaryOverlayOpen(false)),
             PinnedSummaryMode::Hidden if snapshot.layout.viewport.size.x > 0.0 => {
-                if state.presentation.secondary_pane.is_none()
+                if !state.presentation.secondary_sidebar_open
                     && snapshot.layout.viewport.size.x >= SECONDARY_PANE_BREAKPOINT
                     && state.presentation.pinned_summary_auto_hidden
                 {
                     Some(AppCommand::SetPinnedSummaryAutoHidden(false))
                 } else {
-                    Some(AppCommand::OpenSecondary(SecondaryPane::Environment))
+                    Some(AppCommand::SetPinnedSummaryOverlayOpen(true))
                 }
             }
             PinnedSummaryMode::Hidden => None,
