@@ -1,9 +1,13 @@
+use std::collections::BTreeSet;
+use std::path::Path;
+
 use image::GenericImageView;
 use zode_app::render::{render_offscreen, render_offscreen_with_fonts};
 use zode_app_model::{SystemTheme, ThemePreference};
 
 const SNAPSHOT_REGULAR: &[u8] = include_bytes!("fonts/NotoSansSC-Regular.subset.ttf");
 const SNAPSHOT_SEMIBOLD: &[u8] = include_bytes!("fonts/NotoSansSC-SemiBold.subset.ttf");
+const SNAPSHOT_GLYPHS: &str = include_str!("fonts/glyphs.txt");
 const SNAPSHOT_FAMILY: &str = "Zode Snapshot Sans SC";
 
 #[test]
@@ -71,6 +75,67 @@ fn snapshot_font_assets_use_a_repository_private_family() {
     assert_eq!(semibold.family, SNAPSHOT_FAMILY);
     assert_eq!(regular.weight, 400);
     assert_eq!(semibold.weight, 600);
+}
+
+#[test]
+fn snapshot_font_manifest_covers_visible_app_sources() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let crates_dir = manifest_dir.parent().unwrap();
+    let mut required = BTreeSet::new();
+    for root in [
+        manifest_dir.join("src"),
+        manifest_dir.join("tests/snapshot_support"),
+        crates_dir.join("zode-app-model/src"),
+        crates_dir.join("zode-app-ui/src"),
+    ] {
+        collect_non_ascii_rust_chars(&root, &mut required);
+    }
+
+    let manifest = SNAPSHOT_GLYPHS.chars().collect::<BTreeSet<_>>();
+    let missing = required.difference(&manifest).collect::<String>();
+    assert!(
+        missing.is_empty(),
+        "snapshot font manifest is missing visible source characters: {missing}"
+    );
+}
+
+#[test]
+fn snapshot_font_assets_cover_the_checked_in_manifest() {
+    let manager = skia_safe::FontMgr::new();
+    for (name, bytes) in [
+        ("regular", SNAPSHOT_REGULAR),
+        ("semibold", SNAPSHOT_SEMIBOLD),
+    ] {
+        let typeface = manager
+            .new_from_data(bytes, None)
+            .unwrap_or_else(|| panic!("{name} snapshot font must parse"));
+        let missing = SNAPSHOT_GLYPHS
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .filter(|character| typeface.unichar_to_glyph(*character as i32) == 0)
+            .collect::<String>();
+        assert!(
+            missing.is_empty(),
+            "{name} snapshot font is missing manifest glyphs: {missing}"
+        );
+    }
+}
+
+fn collect_non_ascii_rust_chars(path: &Path, output: &mut BTreeSet<char>) {
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path).unwrap() {
+            collect_non_ascii_rust_chars(&entry.unwrap().path(), output);
+        }
+        return;
+    }
+    if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+        return;
+    }
+    for character in std::fs::read_to_string(path).unwrap().chars() {
+        if !character.is_ascii() && !character.is_whitespace() && character != '\u{fffd}' {
+            output.insert(character);
+        }
+    }
 }
 
 #[test]
