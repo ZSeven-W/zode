@@ -158,7 +158,7 @@ impl TerminalService for LocalTerminalService {
         command.cwd(cwd.as_os_str());
         let mut child = pair.slave.spawn_command(command).map_err(platform_error)?;
         #[cfg(unix)]
-        let process_group = pair.master.process_group_leader();
+        let process_group = child.process_id().and_then(|pid| i32::try_from(pid).ok());
         if let Err(error) = configure_nonblocking(&*pair.master) {
             let _ = stop_child(&mut *child);
             return Err(error);
