@@ -483,7 +483,7 @@ impl ThreadHeader {
                 painter.fill_round_rect(action.rect, 9.0, theme.tokens.row_selected);
             }
             let (icon_size, icon_color, stroke_width) = if icon == SemanticIcon::More {
-                (18.0, theme.tokens.foreground, 2.25)
+                (18.0, theme.tokens.foreground, icon.stroke_width())
             } else {
                 (16.0, theme.tokens.muted_foreground, icon.stroke_width())
             };

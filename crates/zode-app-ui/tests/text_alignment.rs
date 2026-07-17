@@ -230,7 +230,7 @@ fn thread_header_actions_use_centered_semantic_icons() {
         );
         if icon == SemanticIcon::More {
             assert_eq!(svg.color, ZodeTheme::light().tokens.foreground);
-            assert!(svg.width >= 2.0);
+            assert_eq!(svg.width, SemanticIcon::More.stroke_width());
             assert_eq!(svg.size, 18.0);
         }
     }
