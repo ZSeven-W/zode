@@ -1,5 +1,5 @@
-use casement::window::ResizeDirection;
 use jian_widgets::Point2D;
+use winit::window::ResizeDirection;
 use zode_app::event_map::{is_drag_region, resize_direction};
 use zode_app_ui::{Insets, WorkspaceLayout};
 

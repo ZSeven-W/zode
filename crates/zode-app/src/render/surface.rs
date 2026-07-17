@@ -23,4 +23,12 @@ impl RasterSurface {
     pub fn encode_png(&mut self) -> Result<Vec<u8>, RenderError> {
         self.inner.encode_png().ok_or(RenderError::PngEncode)
     }
+
+    pub fn read_rgba8(&mut self, buffer: &mut [u8]) -> bool {
+        self.inner.read_rgba8(buffer)
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.inner.width() as u32, self.inner.height() as u32)
+    }
 }

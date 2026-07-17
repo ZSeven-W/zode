@@ -17,6 +17,7 @@ jian-skia = { workspace = true }
 skia-safe = { workspace = true }
 casement = { workspace = true }
 glutin = { workspace = true }
+softbuffer = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 futures-core = { workspace = true }

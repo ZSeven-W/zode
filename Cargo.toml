@@ -87,6 +87,7 @@ jian-skia = { path = "vendor/jian/crates/jian-skia", version = "0.0.1", features
 skia-safe = "0.97.0"
 casement = { path = "vendor/casement", version = "0.30.13" }
 glutin = "0.32"
+softbuffer = "0.4"
 accesskit = "0.24"
 # accesskit_winit hard-depends on crates.io winit, whose Window types are
 # incompatible with the casement fork. Platform adapters avoid a second winit.

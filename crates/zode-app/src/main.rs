@@ -28,9 +28,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error:
             println!("rendered {}", path.display());
             Ok(())
         }
-        Some("--demo") => {
-            Err("the interactive demo window is introduced by desktop Task 10".into())
-        }
+        Some("--demo") => zode_app::app::run_demo(),
         Some(argument) => Err(format!("unknown argument: {argument}").into()),
         None => {
             println!("usage: zode-app --render-snapshot <path> | --demo");
