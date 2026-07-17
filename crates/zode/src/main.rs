@@ -706,4 +706,66 @@ mod tests {
         assert_eq!(template.tool_access(), zode_core::ToolAccessMode::Auto);
         assert!(!template.plan_mode());
     }
+
+    #[test]
+    fn bootstrap_overrides_carry_provider_model_and_yolo() {
+        let args = Args::parse_from([
+            "zode",
+            "--provider",
+            "work",
+            "--model",
+            "chosen-model",
+            "--yolo",
+        ]);
+
+        let overrides = bootstrap_overrides(&args);
+
+        assert_eq!(overrides.provider.as_deref(), Some("work"));
+        assert_eq!(overrides.model.as_deref(), Some("chosen-model"));
+        assert!(overrides.yolo);
+    }
+
+    #[test]
+    fn bootstrap_overrides_preserve_sandbox_tristate_and_no_sandbox_precedence() {
+        let defaults = bootstrap_overrides(&Args::parse_from(["zode"]));
+        let enabled = bootstrap_overrides(&Args::parse_from(["zode", "--sandbox"]));
+        let disabled = bootstrap_overrides(&Args::parse_from(["zode", "--no-sandbox"]));
+        let conflicted =
+            bootstrap_overrides(&Args::parse_from(["zode", "--sandbox", "--no-sandbox"]));
+
+        assert_eq!(defaults.sandbox_enabled, None);
+        assert_eq!(enabled.sandbox_enabled, Some(true));
+        assert_eq!(disabled.sandbox_enabled, Some(false));
+        assert_eq!(conflicted.sandbox_enabled, Some(false));
+    }
+
+    #[test]
+    fn bootstrap_overrides_carry_sandbox_policy_flags() {
+        let args = Args::parse_from([
+            "zode",
+            "--sandbox-read-only",
+            "--sandbox-allow-network",
+            "--sandbox-strict-read",
+        ]);
+
+        let overrides = bootstrap_overrides(&args);
+
+        assert!(overrides.sandbox_read_only);
+        assert!(overrides.sandbox_allow_network);
+        assert!(overrides.sandbox_strict_read);
+    }
+
+    #[test]
+    fn bootstrap_overrides_preserve_browser_tristate_and_no_browser_precedence() {
+        let defaults = bootstrap_overrides(&Args::parse_from(["zode"]));
+        let enabled = bootstrap_overrides(&Args::parse_from(["zode", "--browser"]));
+        let disabled = bootstrap_overrides(&Args::parse_from(["zode", "--no-browser"]));
+        let conflicted =
+            bootstrap_overrides(&Args::parse_from(["zode", "--browser", "--no-browser"]));
+
+        assert_eq!(defaults.browser_enabled, None);
+        assert_eq!(enabled.browser_enabled, Some(true));
+        assert_eq!(disabled.browser_enabled, Some(false));
+        assert_eq!(conflicted.browser_enabled, Some(false));
+    }
 }
