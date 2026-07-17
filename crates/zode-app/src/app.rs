@@ -12,10 +12,12 @@ use zode_app_model::{SystemTheme, ZodeAppState};
 use zode_app_ui::{Insets, WorkspaceLayout, WorkspaceShell, ZodeTheme};
 
 use crate::{
+    event_bridge::AgentEventBridge,
     event_map::{is_drag_region, resize_direction},
     render::{FramePainter, NativeBackend, RasterSurface},
     window_state::{AppWake, WindowState},
 };
+use zode_node_protocol::AgentEndpoint;
 
 pub fn run_demo() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::<AppWake>::with_user_event().build()?;
@@ -34,6 +36,7 @@ pub struct DesktopApp {
     renderer: NativeBackend,
     window_state: WindowState,
     proxy: EventLoopProxy<AppWake>,
+    agent_events: Option<AgentEventBridge>,
 }
 
 impl DesktopApp {
@@ -46,7 +49,14 @@ impl DesktopApp {
             renderer: NativeBackend::new(1.0),
             window_state: WindowState::new(1221, 992, 1.0),
             proxy,
+            agent_events: None,
         }
+    }
+
+    /// Connect a live endpoint stream to the winit wake path. Call while the
+    /// application Tokio runtime is entered, before `run_app` takes control.
+    pub fn attach_endpoint(&mut self, endpoint: Arc<dyn AgentEndpoint>) {
+        self.agent_events = Some(AgentEventBridge::spawn(endpoint, self.proxy.clone()));
     }
 
     fn open_window(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
@@ -186,6 +196,9 @@ impl ApplicationHandler<AppWake> for DesktopApp {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppWake) {
         match event {
             AppWake::Redraw => {
+                if let Some(events) = self.agent_events.as_mut() {
+                    events.drain_into(&mut self.app_state);
+                }
                 self.window_state.dirty = true;
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
