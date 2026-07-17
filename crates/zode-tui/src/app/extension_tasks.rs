@@ -584,7 +584,7 @@ fn spawn_prepared_extension_turn(
                     .map_err(|error| format!("vision provider failed: {error}"))?;
                 if !assembled.supports_images() {
                     return Err(format!(
-                        "vision provider '{}' does not declare image support",
+                        "vision provider '{}' does not declare image support; set supportsImages=true on it (or its models entry) in config.json",
                         vision.provider_name
                     ));
                 }

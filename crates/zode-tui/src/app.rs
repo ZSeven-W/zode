@@ -5577,7 +5577,7 @@ impl TuiApp {
                         })?;
                     if !assembled.supports_images() {
                         return Err(crate::tr(
-                            "vision provider '{provider_name}' does not declare image support",
+                            "vision provider '{provider_name}' does not declare image support; set supportsImages=true on it (or its models entry) in config.json",
                         )
                         .replace("{provider_name}", &provider_name));
                     }
@@ -7023,7 +7023,7 @@ impl TuiApp {
                 {
                     self.toast = Some(Toast::error(
                         crate::tr(
-                            "vision provider '{provider_name}' does not declare image support",
+                            "vision provider '{provider_name}' does not declare image support; set supportsImages=true on it (or its models entry) in config.json",
                         )
                         .replace("{provider_name}", value),
                     ));
@@ -7108,7 +7108,7 @@ impl TuiApp {
                 .any(|name| name == provider)
             {
                 self.toast = Some(Toast::error(
-                    crate::tr("vision provider '{provider_name}' does not declare image support")
+                    crate::tr("vision provider '{provider_name}' does not declare image support; set supportsImages=true on it (or its models entry) in config.json")
                         .replace("{provider_name}", provider),
                 ));
                 return;

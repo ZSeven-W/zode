@@ -246,7 +246,7 @@ const ZH_ONLY: &[(&str, &str, &str)] = &[
     ("vision model disabled (image mode → auto)", "视觉模型已禁用（图像模式 → auto）", "視覺模型已停用（圖像模式 → auto）"),
     ("vision prompt updated", "视觉提示词已更新", "視覺提示詞已更新"),
     ("vision provider", "视觉服务商", "視覺服務商"),
-    ("vision provider '{provider_name}' does not declare image support", "视觉服务商 '{provider_name}' 未声明支持图像", "視覺服務商 '{provider_name}' 未宣告支援圖像"),
+    ("vision provider '{provider_name}' does not declare image support; set supportsImages=true on it (or its models entry) in config.json", "视觉服务商 '{provider_name}' 未声明支持图像；请在 config.json 中为该服务商（或其 models 条目）设置 supportsImages=true", "視覺服務商 '{provider_name}' 未宣告支援圖像；請在 config.json 中為該服務商（或其 models 條目）設定 supportsImages=true"),
     ("vision provider '{provider_name}' is not configured", "未配置视觉服务商 '{provider_name}'", "未設定視覺服務商 '{provider_name}'"),
     ("vision provider failed", "视觉服务商失败", "視覺服務商失敗"),
     ("vision providers", "视觉服务商", "視覺服務商"),
