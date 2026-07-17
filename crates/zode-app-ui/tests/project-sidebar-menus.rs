@@ -94,7 +94,7 @@ fn project_row_keeps_its_hover_background() {
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
         PaintOp::FillRound(active, color)
-            if *active == project.rect && *color == theme.tokens.muted.with_alpha(0.72)
+            if *active == project.rect && *color == theme.sidebar_row_hover
     )));
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
