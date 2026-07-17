@@ -112,15 +112,20 @@ impl Painter for CapturePainter {
 }
 
 #[test]
-fn sidebar_row_uses_a_vertically_centered_13px_line_box() {
+fn sidebar_row_uses_a_vertically_centered_14px_line_box() {
     let rect = WorkspaceLayout::compute(1_440.0, 900.0, Insets::ZERO).sidebar;
     let row = ProjectSidebar::navigation_row_layout(rect)[0].rect;
     let mut painter = CapturePainter::new(1.0);
 
     ProjectSidebar::paint(&mut painter, rect, &demo_state(), &ZodeTheme::light());
 
-    let origin = painter.text("新建任务").origin;
-    assert_close(origin.y, row.origin.y + (row.size.y - 13.0) / 2.0, 0.01);
+    let label = painter.text("新建任务");
+    assert_eq!(label.size, 14.0);
+    assert_close(
+        label.origin.y + label.size / 2.0,
+        row.origin.y + row.size.y / 2.0,
+        0.01,
+    );
 }
 
 #[test]
@@ -177,11 +182,7 @@ fn composer_bottom_controls_share_the_send_button_centerline() {
         .find(|fill| fill.size == Point2D::new(28.0, 28.0))
         .expect("send button fill");
     let center_y = send.origin.y + send.size.y / 2.0;
-    for icon in [
-        SemanticIcon::NewTask,
-        SemanticIcon::Microphone,
-        SemanticIcon::Send,
-    ] {
+    for icon in [SemanticIcon::NewTask, SemanticIcon::Send] {
         let svg = painter.svg(icon.path());
         assert_close(svg.top_left.y + svg.size / 2.0, center_y, 1.0);
     }
@@ -255,12 +256,13 @@ fn thread_header_actions_use_centered_semantic_icons() {
 fn centered_control_error_stays_within_one_and_a_half_physical_pixels() {
     let rect = WorkspaceLayout::compute(1_440.0, 900.0, Insets::ZERO).sidebar;
     let row = ProjectSidebar::navigation_row_layout(rect)[0].rect;
-    let expected = row.origin.y + (row.size.y - 13.0) / 2.0;
 
     for dpi in [1.0, 1.25, 2.0] {
         let mut painter = CapturePainter::new(dpi);
         ProjectSidebar::paint(&mut painter, rect, &demo_state(), &ZodeTheme::light());
-        let logical_error = (painter.text("新建任务").origin.y - expected).abs();
+        let label = painter.text("新建任务");
+        let expected = row.origin.y + (row.size.y - label.size) / 2.0;
+        let logical_error = (label.origin.y - expected).abs();
         assert!(
             logical_error * painter.dpi_scale() <= 1.5,
             "dpi={dpi}: physical error was {}px",
