@@ -345,6 +345,30 @@ pub struct ThreadSummary {
     pub status: ThreadStatus,
 }
 
+/// Display-safe persisted content for restoring one conversation transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadHistory {
+    pub session: SessionLocator,
+    pub items: Vec<HistoryItem>,
+}
+
+/// A renderable persisted transcript entry independent of any desktop UI model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum HistoryItem {
+    UserText { text: String },
+    AssistantText { text: String },
+    Thinking { text: String },
+    Tool { tool: ToolCall },
+    Status { code: String, message: String },
+    Error { message: String, retryable: bool },
+}
+
 /// Status of one file in a diff snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

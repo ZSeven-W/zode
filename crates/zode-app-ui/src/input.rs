@@ -12,8 +12,15 @@ pub enum PointerButton {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PointerEvent {
     pub position: Point2D,
-    pub button: PointerButton,
-    pub pressed: bool,
+    pub kind: PointerEventKind,
+    pub button: Option<PointerButton>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerEventKind {
+    Move,
+    Press,
+    Release,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +42,13 @@ pub struct TouchEvent {
 pub struct WheelEvent {
     pub delta_x: f32,
     pub delta_y: f32,
+    pub mode: WheelDeltaMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelDeltaMode {
+    Pixel,
+    Line,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +60,8 @@ pub enum Key {
     ArrowRight,
     Home,
     End,
+    PageUp,
+    PageDown,
     Tab,
     Escape,
     Character(String),
@@ -91,4 +107,13 @@ pub enum ImeEvent {
     Update { text: String, cursor: Option<usize> },
     Commit(String),
     End,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnifiedInputEvent {
+    Pointer(PointerEvent),
+    Touch(TouchEvent),
+    Wheel(WheelEvent),
+    Keyboard(KeyEvent),
+    Ime(ImeEvent),
 }

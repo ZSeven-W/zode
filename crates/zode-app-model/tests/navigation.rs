@@ -4,6 +4,40 @@ use zode_app_model::{
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
 #[test]
+fn available_project_and_session_selection_update_the_active_workspace() {
+    let mut state = demo_state();
+    let first = WorkspaceUri::new("file:///repo/first").unwrap();
+    let second = WorkspaceUri::new("file:///repo/second").unwrap();
+    let session = SessionLocator::new(state.host.node_id, "second-session");
+    for workspace_uri in [first.clone(), second.clone()] {
+        state.projects.push(zode_app_model::ProjectState {
+            workspace_uri,
+            expanded: true,
+            available: true,
+            last_opened_ms: 0,
+        });
+    }
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: second.clone(),
+        title: "second".into(),
+        updated_at_ms: 1,
+        status: ThreadStatus::Idle,
+    });
+
+    assert_eq!(
+        reduce_navigation_command(&mut state, AppCommand::ToggleProject(first.clone())),
+        NavigationOutcome::NeedsEffect
+    );
+    assert_eq!(state.active_workspace, Some(first));
+    assert_eq!(
+        reduce_navigation_command(&mut state, AppCommand::SelectSession(session)),
+        NavigationOutcome::Applied
+    );
+    assert_eq!(state.active_workspace, Some(second));
+}
+
+#[test]
 fn delete_requires_confirmation_before_removing_session_state() {
     let mut state = demo_state();
     let session = SessionLocator::new(state.host.node_id, "delete-me");

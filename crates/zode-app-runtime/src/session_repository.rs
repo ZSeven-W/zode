@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agent::message::MessageStore;
+use agent::message::{ContentBlock, Message, MessageStore};
 use agent::session::SessionError;
 use zode_core::session_meta::SessionMeta;
 use zode_core::session_store::{
@@ -11,8 +11,8 @@ use zode_core::session_store::{
 };
 use zode_core::CoreError;
 use zode_node_protocol::{
-    EndpointError, EndpointErrorKind, NodeId, SessionLocator, ThreadStatus, ThreadSummary,
-    WorkspaceUri,
+    EndpointError, EndpointErrorKind, HistoryItem, NodeId, SessionLocator, ThreadHistory,
+    ThreadStatus, ThreadSummary, ToolCall, ToolStatus, WorkspaceUri,
 };
 
 use crate::AppStateStore;
@@ -58,6 +58,15 @@ impl LocalSessionRepository {
         let meta = self.find_meta(id)?;
         let store = self.inner.load(id).await.map_err(map_core_error)?;
         Ok(LoadedSession { meta, store })
+    }
+
+    /// Load one persisted transcript as display-safe, transport-neutral history.
+    pub async fn history(&self, session: &SessionLocator) -> Result<ThreadHistory, EndpointError> {
+        let loaded = self.load(session).await?;
+        Ok(ThreadHistory {
+            session: session.clone(),
+            items: project_history(&loaded.store),
+        })
     }
 
     /// Create an empty session using the caller-allocated session identity.
@@ -188,13 +197,10 @@ impl LocalSessionRepository {
         &self,
         existing: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), EndpointError> {
-        let mut state = self.app_state.load().map_err(map_core_error)?;
-        let original = state.clone();
-        state.reconcile(existing);
-        if state != original {
-            self.app_state.save(&state).map_err(map_core_error)?;
-        }
-        Ok(())
+        let existing = existing.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        self.app_state
+            .update(|state| state.reconcile(&existing))
+            .map_err(map_core_error)
     }
 
     fn thread_summary(&self, meta: SessionMeta) -> Result<ThreadSummary, EndpointError> {
@@ -208,6 +214,96 @@ impl LocalSessionRepository {
             updated_at_ms,
             status: ThreadStatus::Idle,
         })
+    }
+}
+
+fn project_history(store: &MessageStore) -> Vec<HistoryItem> {
+    let mut items = Vec::new();
+    for message in store.iter() {
+        match message {
+            Message::User { content, .. } => {
+                for block in content {
+                    project_content_block(block, HistoryRole::User, &mut items);
+                }
+            }
+            Message::Assistant { content, .. } => {
+                for block in content {
+                    project_content_block(block, HistoryRole::Assistant, &mut items);
+                }
+            }
+            Message::Progress { note, .. } => items.push(HistoryItem::Status {
+                code: "history.progress".into(),
+                message: note.clone(),
+            }),
+            // System prompts and tombstones are runtime internals, not transcript content.
+            Message::System { .. } | Message::Tombstone { .. } => {}
+        }
+    }
+    items
+}
+
+#[derive(Clone, Copy)]
+enum HistoryRole {
+    User,
+    Assistant,
+}
+
+fn project_content_block(block: &ContentBlock, role: HistoryRole, items: &mut Vec<HistoryItem>) {
+    match block {
+        ContentBlock::Text { text } if !text.is_empty() => match role {
+            HistoryRole::User => items.push(HistoryItem::UserText { text: text.clone() }),
+            HistoryRole::Assistant => items.push(HistoryItem::AssistantText { text: text.clone() }),
+        },
+        ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
+            items.push(HistoryItem::Thinking {
+                text: thinking.clone(),
+            });
+        }
+        ContentBlock::ToolUse { id, name, .. } => items.push(HistoryItem::Tool {
+            tool: ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                status: ToolStatus::Running,
+                summary: name.clone(),
+                detail: None,
+            },
+        }),
+        ContentBlock::ToolResult {
+            tool_use_id,
+            is_error,
+            ..
+        } => project_tool_result(items, tool_use_id, *is_error),
+        ContentBlock::Image { .. } => items.push(HistoryItem::Status {
+            code: "history.attachment.image".into(),
+            message: "Image attachment".into(),
+        }),
+        ContentBlock::Document { .. } => items.push(HistoryItem::Status {
+            code: "history.attachment.document".into(),
+            message: "Document attachment".into(),
+        }),
+        ContentBlock::Text { .. } | ContentBlock::Thinking { .. } => {}
+    }
+}
+
+fn project_tool_result(items: &mut Vec<HistoryItem>, tool_use_id: &str, is_error: bool) {
+    if let Some(tool) = items.iter_mut().rev().find_map(|item| match item {
+        HistoryItem::Tool { tool } if tool.id == tool_use_id => Some(tool),
+        _ => None,
+    }) {
+        tool.status = if is_error {
+            ToolStatus::Failed
+        } else {
+            ToolStatus::Completed
+        };
+    } else {
+        items.push(HistoryItem::Status {
+            code: "history.tool_result".into(),
+            message: if is_error {
+                format!("Tool {tool_use_id} failed")
+            } else {
+                format!("Tool {tool_use_id} completed")
+            },
+        });
     }
 }
 

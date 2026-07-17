@@ -1,8 +1,9 @@
 use serde_json::{json, Value};
 use zode_node_protocol::{
-    AgentCommand, AgentCommandKind, AgentEvent, AgentEventKind, ApprovalDecision, NodeId,
-    ProtocolError, RuntimeOptions, SandboxMode, SessionLocator, TerminalId, ToolCall, ToolStatus,
-    TurnId, UsageSnapshot, UserContent, WorkspaceUri, PROTOCOL_VERSION,
+    AgentCommand, AgentCommandKind, AgentEvent, AgentEventKind, ApprovalDecision, EndpointError,
+    EndpointErrorKind, NodeId, ProtocolError, RuntimeOptions, SandboxMode, SessionLocator,
+    TerminalId, ToolCall, ToolStatus, TurnId, UsageSnapshot, UserContent, WorkspaceUri,
+    PROTOCOL_VERSION,
 };
 
 const NODE_ID: &str = "00000000-0000-0000-0000-000000000001";
@@ -663,4 +664,34 @@ fn non_turn_commands_may_retain_an_optional_turn_association() {
 
     command.validate().unwrap();
     assert_eq!(command.turn_id, Some(turn_id()));
+}
+
+#[test]
+fn partial_success_is_a_stable_endpoint_error_kind() {
+    let value = serde_json::to_value(EndpointError {
+        kind: EndpointErrorKind::PartialSuccess,
+        message: "fallback applied".into(),
+    })
+    .unwrap();
+
+    assert_eq!(value["kind"], "partialSuccess");
+    assert_eq!(
+        serde_json::from_value::<EndpointError>(value).unwrap().kind,
+        EndpointErrorKind::PartialSuccess,
+    );
+}
+
+#[test]
+fn request_expired_is_a_stable_endpoint_error_kind() {
+    let value = serde_json::to_value(EndpointError {
+        kind: EndpointErrorKind::RequestExpired,
+        message: "request expired".into(),
+    })
+    .unwrap();
+
+    assert_eq!(value["kind"], "requestExpired");
+    assert_eq!(
+        serde_json::from_value::<EndpointError>(value).unwrap().kind,
+        EndpointErrorKind::RequestExpired,
+    );
 }

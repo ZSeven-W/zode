@@ -1,0 +1,634 @@
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+use winit::event_loop::EventLoopProxy;
+use zode_app_model::{
+    reduce_settings_command, AppCommand, TranscriptItem, TranscriptState, ZodeAppState,
+};
+use zode_node_protocol::{
+    AgentCommand, AgentCommandKind, AgentEndpoint, AgentQuery, AgentSnapshot, ApprovalDecision,
+    EndpointErrorKind, SessionLocator, ThreadStatus, ThreadSummary, TurnId, UserContent,
+    WorkspaceUri, PROTOCOL_VERSION,
+};
+
+use crate::command_projection::{now_ms, project_global_error, replace_threads};
+use crate::window_state::AppWake;
+
+#[derive(Debug)]
+pub struct CommandDispatch {
+    commands: Vec<AgentCommand>,
+    completion: Completion,
+}
+
+#[derive(Debug)]
+enum Completion {
+    None,
+    NewSession { workspace_uri: WorkspaceUri },
+    Approval { approval_id: String },
+    RefreshPermissions { workspace_uri: WorkspaceUri },
+    RefreshThreads,
+}
+
+enum CommandResult {
+    Succeeded {
+        command: AgentCommand,
+        completion: CompletionResult,
+    },
+    Failed {
+        failed_command: AgentCommand,
+        recovery_command: AgentCommand,
+        executed_prefix: usize,
+        kind: Option<EndpointErrorKind>,
+        message: String,
+    },
+}
+
+enum CompletionResult {
+    None,
+    NewSession {
+        workspace_uri: WorkspaceUri,
+    },
+    Approval {
+        approval_id: String,
+    },
+    ProjectPermissions {
+        workspace_uri: WorkspaceUri,
+        tools: Vec<String>,
+    },
+    Threads(Vec<ThreadSummary>),
+}
+
+/// Sequential endpoint command pump. Keeping one worker preserves user intent
+/// order (for example, CreateSession before a later StartTurn) without ever
+/// blocking winit's main thread.
+pub struct CommandBridge {
+    sender: mpsc::UnboundedSender<CommandDispatch>,
+    results: mpsc::UnboundedReceiver<CommandResult>,
+}
+
+impl CommandBridge {
+    /// Must be called while a Tokio runtime is entered.
+    pub fn spawn(endpoint: Arc<dyn AgentEndpoint>, proxy: EventLoopProxy<AppWake>) -> Self {
+        Self::spawn_with_wake(endpoint, move || {
+            let _ = proxy.send_event(AppWake::Redraw);
+        })
+    }
+
+    fn spawn_with_wake(
+        endpoint: Arc<dyn AgentEndpoint>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        let (sender, mut commands) = mpsc::unbounded_channel::<CommandDispatch>();
+        let (result_sender, results) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(dispatch) = commands.recv().await {
+                let command = dispatch
+                    .commands
+                    .last()
+                    .cloned()
+                    .expect("every prepared dispatch has at least one command");
+                let mut failure = None;
+                let mut executed_prefix = 0;
+                for wire_command in dispatch.commands {
+                    match endpoint.command(wire_command.clone()).await {
+                        Ok(()) => executed_prefix += 1,
+                        Err(error) => {
+                            failure = Some((wire_command, error.kind, error.message));
+                            break;
+                        }
+                    }
+                }
+                let result = if let Some((failed_command, kind, message)) = failure {
+                    CommandResult::Failed {
+                        failed_command,
+                        recovery_command: command,
+                        executed_prefix,
+                        kind: Some(kind),
+                        message,
+                    }
+                } else {
+                    complete(&*endpoint, dispatch.completion)
+                        .await
+                        .map(|completion| CommandResult::Succeeded {
+                            command: command.clone(),
+                            completion,
+                        })
+                        .unwrap_or_else(|message| CommandResult::Failed {
+                            failed_command: command.clone(),
+                            recovery_command: command,
+                            executed_prefix,
+                            kind: None,
+                            message,
+                        })
+                };
+                if result_sender.send(result).is_ok() {
+                    wake();
+                }
+            }
+        });
+        Self { sender, results }
+    }
+
+    pub fn dispatch(&self, dispatch: CommandDispatch) -> Result<(), CommandDispatch> {
+        self.sender.send(dispatch).map_err(|error| error.0)
+    }
+
+    pub fn drain_into(&mut self, state: &mut ZodeAppState) -> usize {
+        let mut applied = 0;
+        while let Ok(result) = self.results.try_recv() {
+            match result {
+                CommandResult::Succeeded {
+                    command,
+                    completion,
+                } => apply_success(state, &command, completion),
+                CommandResult::Failed {
+                    failed_command,
+                    recovery_command,
+                    executed_prefix,
+                    kind,
+                    message,
+                } => apply_batch_failure(
+                    state,
+                    &failed_command,
+                    &recovery_command,
+                    executed_prefix,
+                    kind,
+                    message,
+                ),
+            }
+            applied += 1;
+        }
+        applied
+    }
+}
+
+pub fn reject_dispatch(state: &mut ZodeAppState, dispatch: CommandDispatch, message: String) {
+    if let (Some(failed), Some(recovery)) = (dispatch.commands.first(), dispatch.commands.last()) {
+        apply_batch_failure(state, failed, recovery, 0, None, message);
+    } else {
+        project_global_error(state, message);
+    }
+}
+
+pub fn project_command_error(state: &mut ZodeAppState, message: String) {
+    project_global_error(state, message);
+}
+
+async fn complete(
+    endpoint: &dyn AgentEndpoint,
+    completion: Completion,
+) -> Result<CompletionResult, String> {
+    match completion {
+        Completion::None => Ok(CompletionResult::None),
+        Completion::NewSession { workspace_uri } => {
+            Ok(CompletionResult::NewSession { workspace_uri })
+        }
+        Completion::Approval { approval_id } => Ok(CompletionResult::Approval { approval_id }),
+        Completion::RefreshPermissions { workspace_uri } => {
+            match endpoint
+                .query(AgentQuery::ProjectPermissions {
+                    workspace_uri: workspace_uri.clone(),
+                })
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                AgentSnapshot::ProjectPermissions(tools) => {
+                    Ok(CompletionResult::ProjectPermissions {
+                        workspace_uri,
+                        tools,
+                    })
+                }
+                _ => Err("the endpoint returned the wrong project-permissions snapshot".into()),
+            }
+        }
+        Completion::RefreshThreads => match endpoint
+            .query(AgentQuery::Threads)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            AgentSnapshot::Threads(threads) => Ok(CompletionResult::Threads(threads)),
+            _ => Err("the endpoint returned the wrong thread snapshot".into()),
+        },
+    }
+}
+
+pub fn prepare_dispatch(
+    state: &mut ZodeAppState,
+    command: AppCommand,
+) -> Result<Option<CommandDispatch>, String> {
+    let (session, turn_id, kind, completion) = match command {
+        AppCommand::NewSession { workspace_uri } => {
+            if !state.available_workspace(&workspace_uri) {
+                return Err("the workspace is unavailable for a new session".into());
+            }
+            let session = SessionLocator::new(state.host.node_id, uuid::Uuid::new_v4().to_string());
+            let model = state.composer.model.clone();
+            (
+                session,
+                None,
+                AgentCommandKind::CreateSession {
+                    workspace_uri: workspace_uri.clone(),
+                    model,
+                },
+                Completion::NewSession { workspace_uri },
+            )
+        }
+        AppCommand::RenameSession { session, title } => (
+            session,
+            None,
+            AgentCommandKind::RenameSession { title },
+            Completion::RefreshThreads,
+        ),
+        AppCommand::DeleteSession(session) => (
+            session,
+            None,
+            AgentCommandKind::DeleteSession,
+            Completion::RefreshThreads,
+        ),
+        AppCommand::Submit(input) => {
+            let session = state
+                .current_session
+                .clone()
+                .filter(|session| state.available_workspace_for_session(session).is_some());
+            let Some(session) = session else {
+                return prepare_first_submit(state, input).map(Some);
+            };
+            let turn_id = TurnId::new();
+            state.active_turns.insert(session.clone(), turn_id);
+            if let Some(transcript) = state.transcripts.get_mut(&session) {
+                append_user_content(transcript, &input);
+                transcript.busy = true;
+            }
+            if let Some(thread) = state
+                .threads
+                .iter_mut()
+                .find(|thread| thread.session == session)
+            {
+                thread.status = ThreadStatus::Running;
+            }
+            (
+                session,
+                Some(turn_id),
+                AgentCommandKind::StartTurn { input },
+                Completion::None,
+            )
+        }
+        AppCommand::Steer(input) => {
+            let session = current_session(state)?;
+            let turn_id = active_turn(state, &session)?;
+            if let Some(transcript) = state.transcripts.get_mut(&session) {
+                append_user_content(transcript, &input);
+            }
+            (
+                session,
+                Some(turn_id),
+                AgentCommandKind::SteerTurn { input },
+                Completion::None,
+            )
+        }
+        AppCommand::Interrupt => {
+            let session = current_session(state)?;
+            let turn_id = active_turn(state, &session)?;
+            (
+                session,
+                Some(turn_id),
+                AgentCommandKind::InterruptTurn,
+                Completion::None,
+            )
+        }
+        AppCommand::Approve { id, decision } => {
+            let session = state
+                .approvals
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| "the approval is no longer pending".to_owned())?;
+            let turn_id = state.active_turns.get(&session).copied();
+            (
+                session,
+                turn_id,
+                AgentCommandKind::Approve {
+                    approval_id: id.clone(),
+                    decision,
+                },
+                Completion::Approval { approval_id: id },
+            )
+        }
+        AppCommand::RevokeProjectPermission {
+            workspace_uri,
+            tool,
+        } => {
+            let session = state
+                .threads
+                .iter()
+                .find(|thread| thread.workspace_uri == workspace_uri)
+                .map(|thread| thread.session.clone())
+                .unwrap_or_else(|| {
+                    SessionLocator::new(state.host.node_id, "settings-permission-revoke")
+                });
+            (
+                session,
+                None,
+                AgentCommandKind::RevokeProjectPermission {
+                    workspace_uri: workspace_uri.clone(),
+                    tool,
+                },
+                Completion::RefreshPermissions { workspace_uri },
+            )
+        }
+        AppCommand::SetModel(model) => (
+            current_session(state)?,
+            None,
+            AgentCommandKind::SetModel { model },
+            Completion::None,
+        ),
+        AppCommand::SetEffort(effort) => (
+            current_session(state)?,
+            None,
+            AgentCommandKind::SetEffort { effort },
+            Completion::None,
+        ),
+        AppCommand::SetSandbox { mode, network } => (
+            current_session(state)?,
+            None,
+            AgentCommandKind::SetSandbox { mode, network },
+            Completion::None,
+        ),
+        _ => return Ok(None),
+    };
+    Ok(Some(CommandDispatch {
+        commands: vec![AgentCommand {
+            version: PROTOCOL_VERSION,
+            session,
+            turn_id,
+            kind,
+        }],
+        completion,
+    }))
+}
+
+fn prepare_first_submit(
+    state: &mut ZodeAppState,
+    input: Vec<UserContent>,
+) -> Result<CommandDispatch, String> {
+    let workspace_uri = state
+        .active_available_workspace()
+        .cloned()
+        .or_else(|| {
+            state
+                .projects
+                .iter()
+                .find(|project| project.available)
+                .map(|project| project.workspace_uri.clone())
+        })
+        .ok_or_else(|| "there is no workspace available for a new session".to_owned())?;
+    let session = SessionLocator::new(state.host.node_id, uuid::Uuid::new_v4().to_string());
+    let turn_id = TurnId::new();
+    let model = state.composer.model.clone();
+    let create = AgentCommand {
+        version: PROTOCOL_VERSION,
+        session: session.clone(),
+        turn_id: None,
+        kind: AgentCommandKind::CreateSession {
+            workspace_uri: workspace_uri.clone(),
+            model,
+        },
+    };
+    let start = AgentCommand {
+        version: PROTOCOL_VERSION,
+        session: session.clone(),
+        turn_id: Some(turn_id),
+        kind: AgentCommandKind::StartTurn {
+            input: input.clone(),
+        },
+    };
+    let mut transcript = TranscriptState::default();
+    append_user_content(&mut transcript, &input);
+    transcript.busy = true;
+    state.threads.insert(
+        0,
+        ThreadSummary {
+            session: session.clone(),
+            workspace_uri: workspace_uri.clone(),
+            title: "新任务".into(),
+            updated_at_ms: now_ms(),
+            status: ThreadStatus::Running,
+        },
+    );
+    state.transcripts.insert(session.clone(), transcript);
+    state.active_turns.insert(session.clone(), turn_id);
+    state.active_workspace = Some(workspace_uri);
+    state.current_session = Some(session);
+    Ok(CommandDispatch {
+        commands: vec![create, start],
+        completion: Completion::None,
+    })
+}
+
+fn current_session(state: &ZodeAppState) -> Result<SessionLocator, String> {
+    state
+        .current_session
+        .clone()
+        .ok_or_else(|| "there is no active session for this command".to_owned())
+}
+
+fn active_turn(state: &ZodeAppState, session: &SessionLocator) -> Result<TurnId, String> {
+    state
+        .active_turns
+        .get(session)
+        .copied()
+        .ok_or_else(|| "there is no active turn for this command".to_owned())
+}
+
+fn append_user_content(transcript: &mut TranscriptState, input: &[UserContent]) {
+    for content in input {
+        match content {
+            UserContent::Text { text } => transcript
+                .items
+                .push(TranscriptItem::UserText(text.clone())),
+            UserContent::Image { display_name, .. } => {
+                transcript.items.push(TranscriptItem::Status {
+                    code: "composer.image.attached".into(),
+                    message: format!("已附加图像：{display_name}"),
+                })
+            }
+        }
+    }
+}
+
+fn apply_success(state: &mut ZodeAppState, command: &AgentCommand, completion: CompletionResult) {
+    match completion {
+        CompletionResult::None => {}
+        CompletionResult::NewSession { workspace_uri } => {
+            let session = command.session.clone();
+            state.threads.insert(
+                0,
+                ThreadSummary {
+                    session: session.clone(),
+                    workspace_uri: workspace_uri.clone(),
+                    title: "新任务".into(),
+                    updated_at_ms: now_ms(),
+                    status: ThreadStatus::Idle,
+                },
+            );
+            state.transcripts.entry(session.clone()).or_default();
+            if !state
+                .projects
+                .iter()
+                .any(|project| project.workspace_uri == workspace_uri)
+            {
+                state.projects.push(zode_app_model::ProjectState {
+                    workspace_uri: workspace_uri.clone(),
+                    expanded: true,
+                    available: true,
+                    last_opened_ms: now_ms(),
+                });
+            }
+            state.active_workspace = Some(workspace_uri);
+            state.current_session = Some(session);
+        }
+        CompletionResult::Approval { approval_id } => {
+            let session = state.approvals.remove(&approval_id);
+            if let Some(transcript) =
+                session.and_then(|session| state.transcripts.get_mut(&session))
+            {
+                transcript.items.retain(
+                    |item| !matches!(item, TranscriptItem::Approval { id, .. } if id == &approval_id),
+                );
+            }
+        }
+        CompletionResult::ProjectPermissions {
+            workspace_uri,
+            tools,
+        } => {
+            let _ = reduce_settings_command(
+                state,
+                AppCommand::SetProjectPermissions {
+                    workspace_uri,
+                    tools,
+                },
+            );
+        }
+        CompletionResult::Threads(threads) => replace_threads(state, threads),
+    }
+}
+
+fn apply_failure(state: &mut ZodeAppState, command: &AgentCommand, message: String) {
+    if matches!(command.kind, AgentCommandKind::StartTurn { .. }) {
+        state.active_turns.remove(&command.session);
+        if let Some(transcript) = state.transcripts.get_mut(&command.session) {
+            transcript.busy = false;
+        }
+        if let Some(thread) = state
+            .threads
+            .iter_mut()
+            .find(|thread| thread.session == command.session)
+        {
+            thread.status = ThreadStatus::Failed;
+        }
+    }
+    let target_session = if state.transcripts.contains_key(&command.session) {
+        Some(command.session.clone())
+    } else {
+        state
+            .current_session
+            .as_ref()
+            .filter(|session| state.transcripts.contains_key(*session))
+            .cloned()
+    };
+    if let Some(transcript) = target_session.and_then(|session| state.transcripts.get_mut(&session))
+    {
+        transcript.items.push(TranscriptItem::Error {
+            message: format!("命令执行失败：{message}"),
+            retryable: true,
+        });
+    } else {
+        project_global_error(state, message);
+    }
+}
+
+fn apply_batch_failure(
+    state: &mut ZodeAppState,
+    failed_command: &AgentCommand,
+    recovery_command: &AgentCommand,
+    executed_prefix: usize,
+    kind: Option<EndpointErrorKind>,
+    message: String,
+) {
+    if kind == Some(EndpointErrorKind::PartialSuccess) {
+        if let AgentCommandKind::Approve {
+            approval_id,
+            decision: ApprovalDecision::AllowAlways,
+        } = &failed_command.kind
+        {
+            apply_approval_fallback(state, &failed_command.session, approval_id, message);
+            return;
+        }
+    }
+    if kind == Some(EndpointErrorKind::RequestExpired) {
+        if let AgentCommandKind::Approve { approval_id, .. } = &failed_command.kind {
+            apply_expired_approval(state, &failed_command.session, approval_id);
+            return;
+        }
+    }
+    let create_never_succeeded = executed_prefix == 0
+        && matches!(failed_command.kind, AgentCommandKind::CreateSession { .. })
+        && matches!(recovery_command.kind, AgentCommandKind::StartTurn { .. });
+    if create_never_succeeded {
+        state.active_turns.remove(&recovery_command.session);
+        state
+            .threads
+            .retain(|thread| thread.session != recovery_command.session);
+        state.transcripts.remove(&recovery_command.session);
+        if state.current_session.as_ref() == Some(&recovery_command.session) {
+            state.current_session = None;
+        }
+        project_global_error(state, message);
+    } else {
+        apply_failure(state, recovery_command, message);
+    }
+}
+
+fn apply_expired_approval(
+    state: &mut ZodeAppState,
+    command_session: &SessionLocator,
+    approval_id: &str,
+) {
+    let session = state
+        .approvals
+        .remove(approval_id)
+        .unwrap_or_else(|| command_session.clone());
+    if let Some(transcript) = state.transcripts.get_mut(&session) {
+        transcript.items.retain(
+            |item| !matches!(item, TranscriptItem::Approval { id, .. } if id == approval_id),
+        );
+        transcript.items.push(TranscriptItem::Status {
+            code: "approval.request_expired".into(),
+            message: "批准请求已失效；请重新触发该操作。".into(),
+        });
+    }
+}
+
+fn apply_approval_fallback(
+    state: &mut ZodeAppState,
+    command_session: &SessionLocator,
+    approval_id: &str,
+    detail: String,
+) {
+    let session = state
+        .approvals
+        .remove(approval_id)
+        .unwrap_or_else(|| command_session.clone());
+    if let Some(transcript) = state.transcripts.get_mut(&session) {
+        transcript.items.retain(
+            |item| !matches!(item, TranscriptItem::Approval { id, .. } if id == approval_id),
+        );
+        transcript.items.push(TranscriptItem::Status {
+            code: "approval.allow_always_fallback".into(),
+            message: format!("已仅允许一次，记忆失败：{detail}"),
+        });
+    }
+}
+
+#[cfg(test)]
+#[path = "command_bridge_tests.rs"]
+mod tests;

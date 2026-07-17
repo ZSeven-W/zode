@@ -70,21 +70,100 @@ fn high_contrast_uses_a_distinct_accessible_token_set() {
     let high_contrast = ZodeTheme::for_preferences(SystemTheme::Light, &state.ui_preferences);
 
     assert_ne!(high_contrast, regular);
-    for (foreground, background) in [
-        (
-            high_contrast.tokens.foreground,
-            high_contrast.tokens.background,
-        ),
-        (
-            high_contrast.tokens.card_foreground,
-            high_contrast.tokens.card,
-        ),
-        (
-            high_contrast.tokens.muted_foreground,
-            high_contrast.tokens.muted,
-        ),
-    ] {
-        assert!(contrast_ratio(foreground, background) >= 4.5);
+    for theme in [high_contrast, ZodeTheme::high_contrast(ThemeMode::Dark)] {
+        let destructive_notice = composite(
+            theme.tokens.destructive.with_alpha(0.12),
+            theme.tokens.background,
+        );
+        let destructive_card =
+            composite(theme.tokens.destructive.with_alpha(0.12), theme.tokens.card);
+        let destructive_muted = composite(
+            theme.tokens.destructive.with_alpha(0.12),
+            theme.tokens.muted,
+        );
+        for (name, foreground, background) in [
+            ("canvas", theme.tokens.foreground, theme.tokens.background),
+            ("card", theme.tokens.card_foreground, theme.tokens.card),
+            (
+                "popover",
+                theme.tokens.popover_foreground,
+                theme.tokens.popover,
+            ),
+            ("muted", theme.tokens.muted_foreground, theme.tokens.muted),
+            ("muted body", theme.tokens.foreground, theme.tokens.muted),
+            (
+                "accent",
+                theme.tokens.accent_foreground,
+                theme.tokens.accent,
+            ),
+            (
+                "secondary",
+                theme.tokens.secondary_foreground,
+                theme.tokens.secondary,
+            ),
+            (
+                "primary",
+                theme.tokens.primary_foreground,
+                theme.tokens.primary,
+            ),
+            (
+                "destructive surface",
+                theme.tokens.destructive_foreground,
+                theme.tokens.destructive,
+            ),
+            (
+                "destructive notice text",
+                theme.tokens.destructive,
+                destructive_notice,
+            ),
+            (
+                "destructive card text",
+                theme.tokens.destructive,
+                destructive_card,
+            ),
+            (
+                "destructive approval text",
+                theme.tokens.destructive,
+                destructive_muted,
+            ),
+            ("sidebar", theme.sidebar_foreground, theme.sidebar),
+            ("user bubble", theme.tokens.foreground, theme.user_bubble),
+            (
+                "muted text on canvas",
+                theme.tokens.muted_foreground,
+                theme.tokens.background,
+            ),
+            (
+                "muted text on card",
+                theme.tokens.muted_foreground,
+                theme.tokens.card,
+            ),
+            (
+                "brand on canvas",
+                theme.zode_purple,
+                theme.tokens.background,
+            ),
+            ("brand on sidebar", theme.zode_purple, theme.sidebar),
+            ("brand on card", theme.zode_purple, theme.tokens.card),
+        ] {
+            assert!(
+                contrast_ratio(foreground, background) >= 4.5,
+                "{name} contrast must be at least 4.5:1"
+            );
+        }
+    }
+}
+
+fn composite(
+    foreground: jian_widgets::Color,
+    background: jian_widgets::Color,
+) -> jian_widgets::Color {
+    let alpha = foreground.a;
+    jian_widgets::Color {
+        r: foreground.r * alpha + background.r * (1.0 - alpha),
+        g: foreground.g * alpha + background.g * (1.0 - alpha),
+        b: foreground.b * alpha + background.b * (1.0 - alpha),
+        a: 1.0,
     }
 }
 

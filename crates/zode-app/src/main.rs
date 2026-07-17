@@ -30,9 +30,6 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error:
         }
         Some("--demo") => zode_app::app::run_demo(),
         Some(argument) => Err(format!("unknown argument: {argument}").into()),
-        None => {
-            println!("usage: zode-app --render-snapshot <path> | --demo");
-            Ok(())
-        }
+        None => zode_app::app::run_demo(),
     }
 }

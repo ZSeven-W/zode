@@ -173,20 +173,9 @@ impl LocalRuntimeBackend {
         approval_id: &str,
         decision: ApprovalDecision,
     ) -> Result<(), EndpointError> {
-        let pending = {
-            let mut approvals = lock(&self.approvals);
-            let Some(current) = approvals.get(approval_id) else {
-                return Err(not_found("approval request was not found"));
-            };
-            if &current.session != session {
-                return Err(denied("approval request belongs to another session"));
-            }
-            approvals
-                .remove(approval_id)
-                .expect("approval checked before removal")
-        };
-        let approval = match decision {
-            ApprovalDecision::AllowOnce => Approval::AllowOnce,
+        let tool = pending_tool(&self.approvals, approval_id, session)?;
+        let (approval, partial_success_message) = match decision {
+            ApprovalDecision::AllowOnce => (Approval::AllowOnce, None),
             ApprovalDecision::AllowAlways => {
                 let workspace = match self.engine.query(AgentQuery::Threads).await? {
                     AgentSnapshot::Threads(threads) => threads
@@ -197,22 +186,26 @@ impl LocalRuntimeBackend {
                 }
                 .ok_or_else(|| not_found("approval session workspace was not found"))?;
                 let cwd = workspace_uri_to_path(&workspace)?;
-                match persist_project_allow(&cwd, &pending.tool) {
-                    PersistedApproval::AllowAlways => Approval::AllowAlways,
+                match persist_project_allow(&cwd, &tool) {
+                    PersistedApproval::AllowAlways => (Approval::AllowAlways, None),
                     PersistedApproval::AllowOnceFallback { message } => {
-                        pending.request.respond(Approval::AllowOnce).map_err(|_| {
-                            unavailable("approval requester is no longer available")
-                        })?;
-                        return Err(internal(message));
+                        (Approval::AllowOnce, Some(message))
                     }
                 }
             }
-            ApprovalDecision::Deny => Approval::Deny,
+            ApprovalDecision::Deny => (Approval::Deny, None),
         };
-        pending
-            .request
-            .respond(approval)
-            .map_err(|_| unavailable("approval requester is no longer available"))
+
+        // Fallible prerequisites above leave the request in the map so the UI
+        // card remains genuinely retryable. Remove only once a response is
+        // ready to be delivered.
+        let pending = take_pending(&self.approvals, approval_id, session)?;
+        respond_pending(pending, approval)?;
+        if let Some(message) = partial_success_message {
+            Err(partial_success(message))
+        } else {
+            Ok(())
+        }
     }
 
     fn deny_pending(&self, session: &SessionLocator) {
@@ -228,6 +221,45 @@ impl LocalRuntimeBackend {
             }
         }
     }
+}
+
+fn pending_tool(
+    approvals: &Arc<Mutex<HashMap<String, PendingApproval>>>,
+    approval_id: &str,
+    session: &SessionLocator,
+) -> Result<String, EndpointError> {
+    let approvals = lock(approvals);
+    let Some(current) = approvals.get(approval_id) else {
+        return Err(request_expired("approval request is no longer pending"));
+    };
+    if &current.session != session {
+        return Err(denied("approval request belongs to another session"));
+    }
+    Ok(current.tool.clone())
+}
+
+fn take_pending(
+    approvals: &Arc<Mutex<HashMap<String, PendingApproval>>>,
+    approval_id: &str,
+    session: &SessionLocator,
+) -> Result<PendingApproval, EndpointError> {
+    let mut approvals = lock(approvals);
+    let Some(current) = approvals.get(approval_id) else {
+        return Err(request_expired("approval request is no longer pending"));
+    };
+    if &current.session != session {
+        return Err(denied("approval request belongs to another session"));
+    }
+    Ok(approvals
+        .remove(approval_id)
+        .expect("approval was revalidated before removal"))
+}
+
+fn respond_pending(pending: PendingApproval, approval: Approval) -> Result<(), EndpointError> {
+    pending
+        .request
+        .respond(approval)
+        .map_err(|_| request_expired("approval requester is no longer available"))
 }
 
 fn spawn_approval_pump(
@@ -337,17 +369,82 @@ fn denied(message: impl Into<String>) -> EndpointError {
     endpoint_error(EndpointErrorKind::CapabilityDenied, message)
 }
 
-fn unavailable(message: impl Into<String>) -> EndpointError {
-    endpoint_error(EndpointErrorKind::Unavailable, message)
-}
-
 fn internal(message: impl Into<String>) -> EndpointError {
     endpoint_error(EndpointErrorKind::Internal, message)
+}
+
+fn partial_success(message: impl Into<String>) -> EndpointError {
+    endpoint_error(EndpointErrorKind::PartialSuccess, message)
+}
+
+fn request_expired(message: impl Into<String>) -> EndpointError {
+    endpoint_error(EndpointErrorKind::RequestExpired, message)
 }
 
 fn endpoint_error(kind: EndpointErrorKind, message: impl Into<String>) -> EndpointError {
     EndpointError {
         kind,
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zode_core::approval::approval_queue;
+
+    #[tokio::test]
+    async fn approval_preflight_lookup_does_not_consume_the_pending_request() {
+        let (queue, mut receiver) = approval_queue();
+        let waiter = tokio::spawn(async move {
+            queue
+                .request("write_file", &serde_json::json!({}), Some("source".into()))
+                .await
+        });
+        let request = receiver.next().await.unwrap();
+        let session = SessionLocator::new(NodeId::new(), "session");
+        let approvals = Arc::new(Mutex::new(HashMap::from([(
+            "approval-1".into(),
+            PendingApproval {
+                session: session.clone(),
+                tool: "write_file".into(),
+                request,
+            },
+        )])));
+
+        assert_eq!(
+            pending_tool(&approvals, "approval-1", &session).unwrap(),
+            "write_file"
+        );
+        assert!(lock(&approvals).contains_key("approval-1"));
+
+        let pending = take_pending(&approvals, "approval-1", &session).unwrap();
+        respond_pending(pending, Approval::Deny).unwrap();
+        assert_eq!(waiter.await.unwrap(), Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn dropped_approval_requester_has_a_structured_expired_error() {
+        let (queue, mut receiver) = approval_queue();
+        let waiter = tokio::spawn(async move {
+            queue
+                .request("write_file", &serde_json::json!({}), Some("source".into()))
+                .await
+        });
+        let request = receiver.next().await.unwrap();
+        waiter.abort();
+        let _ = waiter.await;
+        let pending = PendingApproval {
+            session: SessionLocator::new(NodeId::new(), "session"),
+            tool: "write_file".into(),
+            request,
+        };
+
+        assert_eq!(
+            respond_pending(pending, Approval::AllowOnce)
+                .unwrap_err()
+                .kind,
+            EndpointErrorKind::RequestExpired
+        );
     }
 }

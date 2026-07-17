@@ -393,8 +393,11 @@ impl NodeBackend for EngineBackend {
     }
 
     async fn query(&self, query: AgentQuery) -> Result<AgentSnapshot, EndpointError> {
-        if let AgentQuery::Diff { session } = &query {
-            self.ensure_local(session)?;
+        match &query {
+            AgentQuery::Diff { session } | AgentQuery::History { session } => {
+                self.ensure_local(session)?;
+            }
+            _ => {}
         }
         self.driver
             .query(query)

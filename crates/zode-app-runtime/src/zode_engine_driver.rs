@@ -610,6 +610,9 @@ impl EngineDriver for ZodeEngineDriver {
         match query {
             AgentQuery::Capabilities => Ok(AgentSnapshot::Capabilities(self.capabilities.clone())),
             AgentQuery::Threads => Ok(AgentSnapshot::Threads(self.repository.list()?)),
+            AgentQuery::History { session } => Ok(AgentSnapshot::History(
+                self.repository.history(&session).await?,
+            )),
             AgentQuery::Diff { session } => Ok(AgentSnapshot::Diff(self.diff(session).await?)),
             AgentQuery::RuntimeOptions => Ok(AgentSnapshot::RuntimeOptions(self.runtime_options())),
             AgentQuery::ProjectPermissions { workspace_uri } => {

@@ -37,3 +37,24 @@ fn unknown_workspace_has_no_stale_permission_rows() {
     let workspace = WorkspaceUri::new("file:///repo/missing").unwrap();
     assert!(SettingsPanel::permission_rows(&state, &workspace).is_empty());
 }
+
+#[test]
+fn revoke_reducer_removes_only_the_requested_tool() {
+    let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
+    let mut state = demo_state();
+    state
+        .project_permissions
+        .insert(workspace.clone(), vec!["Bash".into(), "FileEdit".into()]);
+
+    assert_eq!(
+        reduce_settings_command(
+            &mut state,
+            AppCommand::RevokeProjectPermission {
+                workspace_uri: workspace.clone(),
+                tool: "Bash".into(),
+            },
+        ),
+        SettingsCommandOutcome::Applied,
+    );
+    assert_eq!(state.project_permissions[&workspace], ["FileEdit"]);
+}

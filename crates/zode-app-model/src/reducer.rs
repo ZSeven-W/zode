@@ -107,12 +107,46 @@ pub fn reduce_settings_command(
         } => {
             tools.sort();
             tools.dedup();
-            state.project_permissions.insert(workspace_uri, tools);
+            if tools.is_empty() {
+                state.project_permissions.remove(&workspace_uri);
+            } else {
+                state.project_permissions.insert(workspace_uri, tools);
+            }
             SettingsCommandOutcome::Applied
         }
-        AppCommand::SetThemePreference(_)
-        | AppCommand::SetReducedMotion(_)
-        | AppCommand::SetHighContrast(_) => SettingsCommandOutcome::Ignored,
+        AppCommand::SetThemePreference(theme) => {
+            state.ui_preferences.theme = theme;
+            SettingsCommandOutcome::Applied
+        }
+        AppCommand::SetReducedMotion(reduced_motion) => {
+            state.ui_preferences.reduced_motion = reduced_motion;
+            SettingsCommandOutcome::Applied
+        }
+        AppCommand::SetHighContrast(high_contrast) => {
+            state.ui_preferences.high_contrast = high_contrast;
+            SettingsCommandOutcome::Applied
+        }
+        AppCommand::SetSettingsScroll { offset } if offset.is_finite() => {
+            state.settings_scroll_offset = offset.max(0.0);
+            SettingsCommandOutcome::Applied
+        }
+        AppCommand::RevokeProjectPermission {
+            workspace_uri,
+            tool,
+        } => {
+            let Some(tools) = state.project_permissions.get_mut(&workspace_uri) else {
+                return SettingsCommandOutcome::Ignored;
+            };
+            let previous_len = tools.len();
+            tools.retain(|candidate| candidate != &tool);
+            if tools.len() == previous_len {
+                return SettingsCommandOutcome::Ignored;
+            }
+            if tools.is_empty() {
+                state.project_permissions.remove(&workspace_uri);
+            }
+            SettingsCommandOutcome::Applied
+        }
         _ => SettingsCommandOutcome::Ignored,
     }
 }
@@ -163,10 +197,18 @@ pub fn reduce_navigation_command(
 ) -> NavigationOutcome {
     match command {
         AppCommand::SelectSession(session) => {
-            if !state.threads.iter().any(|thread| thread.session == session) {
+            let Some(workspace_uri) = state
+                .threads
+                .iter()
+                .find(|thread| thread.session == session)
+                .map(|thread| thread.workspace_uri.clone())
+            else {
                 return NavigationOutcome::Ignored;
-            }
+            };
             state.current_session = Some(session);
+            if state.available_workspace(&workspace_uri) {
+                state.active_workspace = Some(workspace_uri);
+            }
             NavigationOutcome::Applied
         }
         AppCommand::RenameSession { session, title } => {
@@ -192,7 +234,7 @@ pub fn reduce_navigation_command(
                 return NavigationOutcome::Ignored;
             }
             state.pending_session_delete = Some(session);
-            NavigationOutcome::NeedsEffect
+            NavigationOutcome::Applied
         }
         AppCommand::CancelDeleteSession => {
             state.pending_session_delete = None;
@@ -224,6 +266,9 @@ pub fn reduce_navigation_command(
                 return NavigationOutcome::Ignored;
             };
             project.expanded = !project.expanded;
+            if project.available {
+                state.active_workspace = Some(workspace_uri);
+            }
             NavigationOutcome::NeedsEffect
         }
         _ => NavigationOutcome::Ignored,

@@ -124,6 +124,7 @@ pub struct ShellState {
 pub struct ZodeAppState {
     pub host: HostState,
     pub projects: Vec<ProjectState>,
+    pub active_workspace: Option<WorkspaceUri>,
     pub current_session: Option<SessionLocator>,
     pub pending_session_delete: Option<SessionLocator>,
     pub threads: Vec<ThreadSummary>,
@@ -132,12 +133,38 @@ pub struct ZodeAppState {
     pub approvals: BTreeMap<String, SessionLocator>,
     pub tool_expanded: BTreeMap<String, bool>,
     pub project_permissions: BTreeMap<WorkspaceUri, Vec<String>>,
+    pub settings_scroll_offset: f32,
     pub composer: ComposerState,
     pub usage: BTreeMap<SessionLocator, UsageSnapshot>,
     pub review: ReviewState,
     pub terminal: TerminalState,
     pub ui_preferences: UiPreferences,
     pub shell: ShellState,
+}
+
+impl ZodeAppState {
+    pub fn available_workspace(&self, workspace_uri: &WorkspaceUri) -> bool {
+        self.projects
+            .iter()
+            .any(|project| &project.workspace_uri == workspace_uri && project.available)
+    }
+
+    pub fn available_workspace_for_session(
+        &self,
+        session: &SessionLocator,
+    ) -> Option<&WorkspaceUri> {
+        self.threads
+            .iter()
+            .find(|thread| &thread.session == session)
+            .map(|thread| &thread.workspace_uri)
+            .filter(|workspace_uri| self.available_workspace(workspace_uri))
+    }
+
+    pub fn active_available_workspace(&self) -> Option<&WorkspaceUri> {
+        self.active_workspace
+            .as_ref()
+            .filter(|workspace_uri| self.available_workspace(workspace_uri))
+    }
 }
 
 /// Creates a deterministic empty state for previews and reducer tests.
@@ -156,6 +183,7 @@ pub fn demo_state() -> ZodeAppState {
             system_theme: SystemTheme::Light,
         },
         projects: Vec::new(),
+        active_workspace: None,
         current_session: None,
         pending_session_delete: None,
         threads: Vec::new(),
@@ -164,6 +192,7 @@ pub fn demo_state() -> ZodeAppState {
         approvals: BTreeMap::new(),
         tool_expanded: BTreeMap::new(),
         project_permissions: BTreeMap::new(),
+        settings_scroll_offset: 0.0,
         composer: ComposerState::default(),
         usage: BTreeMap::new(),
         review: ReviewState::default(),

@@ -1,4 +1,5 @@
 use accesskit::{Action, Role};
+use jian_core::CursorHint;
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{demo_state, ShellPage};
 use zode_app_ui::{
@@ -183,6 +184,8 @@ fn snapshot_paint_uses_the_composer_interaction_rect() {
             value: Some(String::new()),
             actions: vec![Action::Focus, Action::SetValue],
             focus_order: Some(0),
+            cursor: CursorHint::Text,
+            toggled: None,
         }],
         focused: Some(composer_id),
     };

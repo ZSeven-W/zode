@@ -1,6 +1,6 @@
 use crate::{
     AgentCommand, AgentEvent, CapabilityManifest, DiffSnapshot, EndpointError, RuntimeOptions,
-    SessionLocator, ThreadSummary, WorkspaceUri,
+    SessionLocator, ThreadHistory, ThreadSummary, WorkspaceUri,
 };
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -12,6 +12,7 @@ pub type AgentEventStream = Pin<Box<dyn Stream<Item = Result<AgentEvent, Endpoin
 pub enum AgentQuery {
     Capabilities,
     Threads,
+    History { session: SessionLocator },
     Diff { session: SessionLocator },
     RuntimeOptions,
     ProjectPermissions { workspace_uri: WorkspaceUri },
@@ -21,6 +22,7 @@ pub enum AgentQuery {
 pub enum AgentSnapshot {
     Capabilities(CapabilityManifest),
     Threads(Vec<ThreadSummary>),
+    History(ThreadHistory),
     Diff(DiffSnapshot),
     RuntimeOptions(RuntimeOptions),
     ProjectPermissions(Vec<String>),

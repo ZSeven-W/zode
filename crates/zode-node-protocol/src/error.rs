@@ -9,6 +9,12 @@ pub enum EndpointErrorKind {
     CapabilityDenied,
     NotFound,
     Busy,
+    /// The receiver for a one-shot request disappeared after the caller had
+    /// already chosen a response; retrying the stale request cannot succeed.
+    RequestExpired,
+    /// The requested durable effect failed, but the endpoint completed a
+    /// documented safe fallback and the caller must reconcile its UI.
+    PartialSuccess,
     Internal,
 }
 

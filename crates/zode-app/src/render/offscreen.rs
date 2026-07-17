@@ -1,7 +1,7 @@
 use jian_widgets::Rect;
 use thiserror::Error;
-use zode_app_model::{SystemTheme, ZodeAppState};
-use zode_app_ui::{Insets, WorkspaceShell, ZodeTheme};
+use zode_app_model::ZodeAppState;
+use zode_app_ui::{Insets, WorkspaceShell};
 
 use super::{FramePainter, NativeBackend, RasterSurface};
 
@@ -48,10 +48,7 @@ pub fn render_offscreen_with_fonts(
     canvas.clear(skia_safe::Color::WHITE);
     canvas.scale((scale, scale));
 
-    let theme = match state.host.system_theme {
-        SystemTheme::Light => ZodeTheme::light(),
-        SystemTheme::Dark => ZodeTheme::dark(),
-    };
+    let theme = crate::preferences::theme_for_state(state);
     {
         let mut backend = NativeBackend::new(scale);
         let mut painter = FramePainter::new(&mut backend, canvas);

@@ -1,10 +1,15 @@
 use std::collections::BTreeSet;
 
 use accesskit::{Action, NodeId, Role};
+use jian_core::CursorHint;
 use jian_widgets::{Point2D, Rect};
+use zode_app_model::{AppCommand, TranscriptItem, TranscriptState};
 use zode_app_ui::{
-    accessibility_tree, FocusDirection, Insets, InteractionNode, RectExt, WidgetId,
-    WorkspaceLayout, WorkspaceSnapshot,
+    accessibility_tree, ApprovalCard, FocusDirection, Insets, InteractionNode, ProjectSidebar,
+    RectExt, ThreadTranscript, WidgetId, WorkspaceLayout, WorkspaceSnapshot,
+};
+use zode_node_protocol::{
+    SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus, WorkspaceUri,
 };
 
 const NAVIGATION_ID: WidgetId = WidgetId(10);
@@ -30,6 +35,8 @@ fn interaction_fixture() -> WorkspaceSnapshot {
                 value: None,
                 actions: vec![Action::Focus],
                 focus_order: Some(0),
+                cursor: CursorHint::Default,
+                toggled: None,
             },
             InteractionNode {
                 id: COMPOSER_ID,
@@ -39,6 +46,8 @@ fn interaction_fixture() -> WorkspaceSnapshot {
                 value: Some("draft".into()),
                 actions: vec![Action::Focus, Action::SetValue],
                 focus_order: Some(1),
+                cursor: CursorHint::Text,
+                toggled: None,
             },
             InteractionNode {
                 id: SEND_ID,
@@ -53,6 +62,8 @@ fn interaction_fixture() -> WorkspaceSnapshot {
                 value: None,
                 actions: vec![Action::Click, Action::Focus],
                 focus_order: Some(2),
+                cursor: CursorHint::Pointer,
+                toggled: None,
             },
         ],
         focused: Some(COMPOSER_ID),
@@ -75,6 +86,23 @@ fn generated_widget_ids_are_stable_unique_and_cover_core_interactions() {
     );
     assert_eq!(first_ids, second_ids, "WidgetId values are stable");
     assert!(first_ids.len() >= 3, "core shell interactions are present");
+}
+
+#[test]
+fn each_page_has_a_useful_default_focus_target() {
+    let mut state = zode_app_model::demo_state();
+    state.composer.focused = false;
+    let conversation = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    assert_eq!(conversation.focused, Some(zode_app_ui::COMPOSER_ID));
+
+    state.shell.page = zode_app_model::ShellPage::Terminal;
+    state.terminal.focused = false;
+    let terminal = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    assert_eq!(terminal.focused, Some(zode_app_ui::TERMINAL_ID));
+
+    state.shell.page = zode_app_model::ShellPage::Settings;
+    let settings = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    assert_eq!(settings.focused, Some(zode_app_ui::THEME_SYSTEM_ID));
 }
 
 #[test]
@@ -175,4 +203,432 @@ fn accesskit_composer_node_preserves_id_physical_rect_and_semantics() {
             f64::from(composer_rect.max_y()) * 2.0,
         ),
     );
+}
+
+#[test]
+fn markdown_height_and_follow_tail_share_one_virtual_layout() {
+    let (mut state, session) = transcript_fixture();
+    let transcript = state.transcripts.get_mut(&session).unwrap();
+    transcript.items = vec![
+        TranscriptItem::AssistantText(
+            (0..20)
+                .map(|index| format!("paragraph {index} with enough words to wrap"))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ),
+        TranscriptItem::Status {
+            code: "after".into(),
+            message: "after markdown".into(),
+        },
+    ];
+    transcript.item_heights.clear();
+    transcript.follow_tail = false;
+    let viewport = Rect::xywh(0.0, 0.0, 360.0, 2_000.0);
+    let rows = ThreadTranscript::visible_item_layout(viewport, transcript);
+    assert!(rows[0].rect.size.y > 72.0);
+    assert!(rows[1].rect.origin.y >= rows[0].rect.max_y() + 12.0);
+
+    transcript.items = (0..40)
+        .map(|index| TranscriptItem::Status {
+            code: format!("status-{index}"),
+            message: format!("status {index}"),
+        })
+        .collect();
+    transcript.follow_tail = true;
+    let viewport = Rect::xywh(0.0, 0.0, 360.0, 240.0);
+    let tail = ThreadTranscript::visible_item_layout(viewport, transcript);
+    assert!(tail.first().unwrap().index > 0);
+    let command = ThreadTranscript::scroll_command(
+        session,
+        viewport,
+        transcript,
+        &state.tool_expanded,
+        -100.0,
+    );
+    assert!(matches!(
+        command,
+        AppCommand::SetTranscriptViewport {
+            follow_tail: false,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn visible_transcript_semantics_share_painted_item_rects_without_entering_tab_order() {
+    let (state, session) = transcript_fixture();
+    let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    let transcript = state.transcripts.get(&session).unwrap();
+    let rows = ThreadTranscript::visible_item_layout(snapshot.layout.transcript, transcript);
+
+    for (index, expected_label) in ["question", "answer", "working", "ready", "failed"]
+        .into_iter()
+        .enumerate()
+    {
+        let node = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.name.contains(expected_label))
+            .expect("each visible readable item has a semantic node");
+        assert_eq!(node.rect, rows[index].visible_rect);
+        assert!(node.actions.is_empty());
+        assert_eq!(node.focus_order, None);
+        assert_eq!(snapshot.hit_test(rect_center(node.rect)), None);
+    }
+}
+
+#[test]
+fn tool_and_approval_controls_share_visible_geometry_and_emit_commands() {
+    let (mut state, session) = transcript_fixture();
+    let transcript = state.transcripts.get_mut(&session).unwrap();
+    transcript.items = vec![
+        TranscriptItem::Tool(tool("tool-stable")),
+        TranscriptItem::Approval {
+            id: "approval-stable".into(),
+            tool: "write_file".into(),
+        },
+    ];
+    transcript.item_heights = vec![72.0, 72.0];
+    let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    let rows = ThreadTranscript::visible_item_layout(
+        snapshot.layout.transcript,
+        state.transcripts.get(&session).unwrap(),
+    );
+
+    let tool_node = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.name.contains("read_file"))
+        .expect("tool node");
+    assert_eq!(tool_node.rect, rows[0].visible_rect);
+    assert!(tool_node.actions.contains(&Action::Click));
+    assert!(tool_node.actions.contains(&Action::Focus));
+    assert_eq!(
+        snapshot.hit_test(rect_center(tool_node.rect)),
+        Some(tool_node.id)
+    );
+    assert_eq!(
+        ThreadTranscript::command_for_widget(&state, tool_node.id),
+        Some(AppCommand::SetToolExpanded {
+            tool_id: "tool-stable".into(),
+            expanded: true,
+        }),
+    );
+
+    let buttons = ApprovalCard::button_layout(rows[1].rect);
+    for button in buttons {
+        let node = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.rect == button.rect)
+            .expect("approval button semantic node");
+        assert_eq!(node.name, button.label);
+        assert!(node.actions.contains(&Action::Click));
+        assert!(node.actions.contains(&Action::Focus));
+        assert_eq!(snapshot.hit_test(rect_center(button.rect)), Some(node.id));
+        assert_eq!(
+            ThreadTranscript::command_for_widget(&state, node.id),
+            Some(ApprovalCard::command("approval-stable", button.action)),
+        );
+    }
+}
+
+#[test]
+fn partially_visible_transcript_controls_are_clipped_to_the_viewport() {
+    let (mut state, session) = transcript_fixture();
+    let transcript = state.transcripts.get_mut(&session).unwrap();
+    transcript.items = std::iter::once(TranscriptItem::Tool(tool("edge-tool")))
+        .chain((0..20).map(|index| TranscriptItem::Status {
+            code: format!("status-{index}"),
+            message: format!("status {index}"),
+        }))
+        .collect();
+    transcript.item_heights = vec![72.0; transcript.items.len()];
+    transcript.scroll_offset = 36.0;
+    let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 600.0, Insets::ZERO);
+    let tool_node = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.name.contains("read_file"))
+        .unwrap();
+    assert_eq!(tool_node.rect.origin.y, snapshot.layout.transcript.origin.y);
+    assert!(
+        tool_node.rect.origin.y + tool_node.rect.size.y
+            <= snapshot.layout.transcript.origin.y + snapshot.layout.transcript.size.y
+    );
+    assert_eq!(
+        snapshot.hit_test(Point2D::new(
+            tool_node.rect.origin.x + 4.0,
+            snapshot.layout.transcript.origin.y - 1.0,
+        )),
+        None,
+    );
+
+    let transcript = state.transcripts.get_mut(&session).unwrap();
+    transcript.items[0] = TranscriptItem::Approval {
+        id: "clipped-approval".into(),
+        tool: "write_file".into(),
+    };
+    transcript.scroll_offset = 60.0;
+    let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 600.0, Insets::ZERO);
+    assert!(snapshot
+        .nodes
+        .iter()
+        .all(|node| { !matches!(node.name.as_str(), "允许一次" | "始终允许" | "拒绝") }));
+}
+
+#[test]
+fn stable_dynamic_ids_follow_domain_keys_instead_of_list_order() {
+    let (mut state, session) = transcript_fixture();
+    let transcript = state.transcripts.get_mut(&session).unwrap();
+    transcript.items = vec![
+        TranscriptItem::Tool(tool("tool-stable")),
+        TranscriptItem::Approval {
+            id: "approval-stable".into(),
+            tool: "write_file".into(),
+        },
+    ];
+    let first = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    let tool_id = first
+        .nodes
+        .iter()
+        .find(|node| node.name.contains("read_file"))
+        .unwrap()
+        .id;
+    let allow_id = first
+        .nodes
+        .iter()
+        .find(|node| node.name == "允许一次")
+        .unwrap()
+        .id;
+
+    state
+        .transcripts
+        .get_mut(&session)
+        .unwrap()
+        .items
+        .insert(0, TranscriptItem::Thinking("prepended".into()));
+    let second = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    assert_eq!(
+        second
+            .nodes
+            .iter()
+            .find(|node| node.name.contains("read_file"))
+            .unwrap()
+            .id,
+        tool_id,
+    );
+    assert_eq!(
+        second
+            .nodes
+            .iter()
+            .find(|node| node.name == "允许一次")
+            .unwrap()
+            .id,
+        allow_id,
+    );
+}
+
+#[test]
+fn sidebar_dynamic_rows_share_snapshot_hit_rects_and_keep_stable_ids() {
+    let mut state = zode_app_model::demo_state();
+    let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
+    let session = SessionLocator::new(state.host.node_id, "session-stable");
+    state.projects.push(zode_app_model::ProjectState {
+        workspace_uri: workspace.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
+    });
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: workspace,
+        title: "Stable task".into(),
+        updated_at_ms: 1,
+        status: ThreadStatus::Idle,
+    });
+    let first = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    let rows = ProjectSidebar::dynamic_row_layout(first.layout.sidebar, &state);
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        let node = first.node(row.id).expect("row is represented in snapshot");
+        assert_eq!(node.rect, row.rect);
+        assert_eq!(first.hit_test(rect_center(row.rect)), Some(row.id));
+    }
+    assert_eq!(
+        ProjectSidebar::command_for_widget(&state, rows[1].id),
+        Some(AppCommand::SelectSession(session.clone())),
+    );
+
+    state.threads.insert(
+        0,
+        ThreadSummary {
+            session: SessionLocator::new(state.host.node_id, "newer-session"),
+            workspace_uri: WorkspaceUri::new("file:///repo/other").unwrap(),
+            title: "Newer".into(),
+            updated_at_ms: 100,
+            status: ThreadStatus::Idle,
+        },
+    );
+    let second = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    let stable_session_id = ProjectSidebar::session_widget_id(&session);
+    assert!(first.node(stable_session_id).is_some());
+    assert!(second.node(stable_session_id).is_some());
+}
+
+#[test]
+fn sidebar_includes_projects_without_threads_and_static_rows_share_paint_layout() {
+    let mut state = zode_app_model::demo_state();
+    state.projects.push(zode_app_model::ProjectState {
+        workspace_uri: WorkspaceUri::new("file:///repo/empty-project").unwrap(),
+        expanded: false,
+        available: false,
+        last_opened_ms: 10,
+    });
+    let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    let dynamic = ProjectSidebar::dynamic_row_layout(snapshot.layout.sidebar, &state);
+    assert_eq!(dynamic.len(), 1);
+    assert!(dynamic[0].label.contains("empty-project"));
+    assert!(dynamic[0].label.contains("unavailable"));
+    assert!(snapshot.node(dynamic[0].id).is_some());
+
+    let navigation = ProjectSidebar::navigation_row_layout(snapshot.layout.sidebar);
+    for (row, id) in navigation.into_iter().zip([
+        zode_app_ui::NEW_SESSION_ID,
+        zode_app_ui::WORKFLOWS_NAV_ID,
+        zode_app_ui::PLUGINS_NAV_ID,
+        zode_app_ui::OPENPENCIL_NAV_ID,
+        zode_app_ui::BROWSER_NAV_ID,
+        zode_app_ui::SETTINGS_NAV_ID,
+    ]) {
+        assert_eq!(snapshot.node(id).unwrap().rect, row.rect);
+    }
+}
+
+#[test]
+fn orphan_workspace_group_is_semantic_but_does_not_claim_an_unavailable_toggle() {
+    let mut state = zode_app_model::demo_state();
+    let workspace = WorkspaceUri::new("file:///repo/orphan").unwrap();
+    state.threads.push(ThreadSummary {
+        session: SessionLocator::new(state.host.node_id, "orphan-session"),
+        workspace_uri: workspace,
+        title: "Orphan task".into(),
+        updated_at_ms: 1,
+        status: ThreadStatus::Idle,
+    });
+    let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    let rows = ProjectSidebar::dynamic_row_layout(snapshot.layout.sidebar, &state);
+    let project = rows
+        .iter()
+        .find(|row| matches!(row.target, zode_app_ui::SidebarRowTarget::Project(_)))
+        .unwrap();
+    let project_node = snapshot.node(project.id).unwrap();
+
+    assert!(!project.actionable);
+    assert!(project_node.actions.is_empty());
+    assert_eq!(project_node.focus_order, None);
+    assert_eq!(ProjectSidebar::command_for_widget(&state, project.id), None);
+}
+
+#[test]
+fn dynamic_sidebar_rows_are_capped_by_available_height() {
+    let mut state = zode_app_model::demo_state();
+    for index in 0..20 {
+        state.projects.push(zode_app_model::ProjectState {
+            workspace_uri: WorkspaceUri::new(format!("file:///repo/project-{index}")).unwrap(),
+            expanded: false,
+            available: true,
+            last_opened_ms: index,
+        });
+    }
+    let snapshot = WorkspaceSnapshot::build(&state, 900.0, 480.0, Insets::ZERO);
+    let rows = ProjectSidebar::dynamic_row_layout(snapshot.layout.sidebar, &state);
+    assert!(!rows.is_empty());
+    assert!(rows
+        .iter()
+        .all(|row| row.rect.max_y() <= snapshot.layout.sidebar.max_y()));
+    for row in rows {
+        assert!(snapshot.node(row.id).is_some());
+    }
+}
+
+#[test]
+fn mixed_static_dynamic_and_transcript_ids_are_nonzero_unique_and_repeatable() {
+    let (mut state, session) = transcript_fixture();
+    let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
+    state.projects.push(zode_app_model::ProjectState {
+        workspace_uri: workspace.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
+    });
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: workspace,
+        title: "Semantic task".into(),
+        updated_at_ms: 1,
+        status: ThreadStatus::Idle,
+    });
+    state.transcripts.get_mut(&session).unwrap().items.extend([
+        TranscriptItem::Tool(tool("unique-tool")),
+        TranscriptItem::Approval {
+            id: "unique-approval".into(),
+            tool: "write_file".into(),
+        },
+    ]);
+    let first = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    let second = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    let ids = first.nodes.iter().map(|node| node.id).collect::<Vec<_>>();
+    let unique = ids.iter().copied().collect::<BTreeSet<_>>();
+
+    assert!(ids.iter().all(|id| id.0 != 0));
+    assert_eq!(unique.len(), ids.len());
+    assert_eq!(
+        ids,
+        second.nodes.iter().map(|node| node.id).collect::<Vec<_>>()
+    );
+}
+
+fn transcript_fixture() -> (zode_app_model::ZodeAppState, SessionLocator) {
+    let mut state = zode_app_model::demo_state();
+    let session = SessionLocator::new(state.host.node_id, "semantic-transcript");
+    state.current_session = Some(session.clone());
+    state.transcripts.insert(
+        session.clone(),
+        TranscriptState {
+            items: vec![
+                TranscriptItem::UserText("question".into()),
+                TranscriptItem::AssistantText("answer".into()),
+                TranscriptItem::Thinking("working".into()),
+                TranscriptItem::Status {
+                    code: "ready".into(),
+                    message: "ready".into(),
+                },
+                TranscriptItem::Error {
+                    message: "failed".into(),
+                    retryable: false,
+                },
+            ],
+            item_heights: vec![72.0; 5],
+            ..TranscriptState::default()
+        },
+    );
+    (state, session)
+}
+
+fn tool(id: &str) -> ToolCall {
+    ToolCall {
+        id: id.into(),
+        name: "read_file".into(),
+        status: ToolStatus::Completed,
+        summary: "read complete".into(),
+        detail: None,
+    }
+}
+
+fn rect_center(rect: Rect) -> Point2D {
+    Point2D::new(
+        rect.origin.x + rect.size.x / 2.0,
+        rect.origin.y + rect.size.y / 2.0,
+    )
 }

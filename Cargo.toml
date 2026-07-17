@@ -63,6 +63,7 @@ opentelemetry_sdk = { version = "0.32", default-features = false, features = ["t
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
 hmac = "0.12"
 libc = "0.2"
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 
 thiserror = "1"
 anyhow = "1"
@@ -94,6 +95,10 @@ accesskit = "0.24"
 accesskit_macos = "0.26"
 accesskit_windows = "0.33"
 accesskit_unix = "0.22"
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSGraphics", "NSScreen"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSDictionary", "NSObject", "NSString"] }
+x11rb = { version = "0.13.2", features = ["randr"] }
 image = { version = "=0.25.8", default-features = false, features = ["png"] }
 futures-core = "0.3"
 fs2 = "0.4"

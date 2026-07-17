@@ -40,6 +40,9 @@ pub enum AppCommand {
     SetThemePreference(ThemePreference),
     SetReducedMotion(bool),
     SetHighContrast(bool),
+    SetSettingsScroll {
+        offset: f32,
+    },
     RequestDeleteSession(SessionLocator),
     CancelDeleteSession,
     DeleteSession(SessionLocator),

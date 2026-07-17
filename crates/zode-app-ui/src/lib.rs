@@ -8,8 +8,8 @@ mod virtual_list;
 mod widgets;
 
 pub use input::{
-    ImeEvent, Key, KeyEvent, Modifiers, PointerButton, PointerEvent, TouchEvent, TouchPhase,
-    WheelEvent,
+    ImeEvent, Key, KeyEvent, Modifiers, PointerButton, PointerEvent, PointerEventKind, TouchEvent,
+    TouchPhase, UnifiedInputEvent, WheelDeltaMode, WheelEvent,
 };
 pub use layout::{
     Insets, RectExt, WorkspaceLayout, WorkspaceLayoutOptions, COMPACT_SIDEBAR_W, COMPOSER_BOTTOM,
@@ -19,16 +19,21 @@ pub use layout::{
 pub use theme::{animation_duration_ms, resolve_theme, ThemeMode, ZodeTheme, ZODE_PURPLE};
 pub use virtual_list::{visible_range, MeasuredItem, MeasurementCache, VirtualListState};
 pub use widgets::{
-    group_sessions, ApprovalAction, ApprovalCard, CellPosition, Composer, ComposerController,
-    ComposerOutcome, ComposerSubmission, PermissionRow, ProjectSessionGroup, ProjectSidebar,
-    ReviewDraft, ReviewLine, ReviewLineKind, ReviewPanel, ReviewSelection, SandboxSelection,
-    SettingControl, SettingsPanel, SidebarAction, SidebarItem, TerminalCell, TerminalColor,
-    TerminalGrid, TerminalLine, TerminalPanel, TerminalPanelController, TerminalSelection,
-    ThreadHeader, ThreadTranscript, ToolCard, ToolTone, UsageChip, UsageDisplay, WindowChrome,
-    WorkspaceShell,
+    group_sessions, ApprovalAction, ApprovalButtonLayout, ApprovalCard, CellPosition, Composer,
+    ComposerController, ComposerOutcome, ComposerSubmission, PermissionRow, PermissionRowLayout,
+    ProjectSessionGroup, ProjectSidebar, ReviewDraft, ReviewLine, ReviewLineKind, ReviewPanel,
+    ReviewSelection, SandboxSelection, SettingControl, SettingControlLayout, SettingsPanel,
+    SidebarAction, SidebarItem, SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget,
+    TerminalCell, TerminalColor, TerminalGrid, TerminalLine, TerminalPanel,
+    TerminalPanelController, TerminalSelection, ThreadHeader, ThreadTranscript, ToolCard, ToolTone,
+    TranscriptItemLayout, UsageChip, UsageDisplay, WindowChrome, WorkspaceShell,
 };
 
 pub const CRATE_READY: bool = true;
+pub(crate) use accessibility::stable_widget_id;
 pub use accessibility::{
     accessibility_tree, FocusDirection, InteractionNode, WidgetId, WorkspaceSnapshot,
+    BROWSER_NAV_ID, COMPOSER_ID, HIGH_CONTRAST_ID, NEW_SESSION_ID, OPENPENCIL_NAV_ID,
+    PLUGINS_NAV_ID, REDUCED_MOTION_ID, SEND_ID, SETTINGS_NAV_ID, SETTINGS_ROOT_ID, SIDEBAR_ID,
+    TERMINAL_ID, THEME_DARK_ID, THEME_LIGHT_ID, THEME_SYSTEM_ID, WORKFLOWS_NAV_ID,
 };

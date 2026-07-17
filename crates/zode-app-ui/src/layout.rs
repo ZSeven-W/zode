@@ -99,7 +99,7 @@ impl WorkspaceLayout {
         width: f32,
         height: f32,
         insets: Insets,
-        _options: WorkspaceLayoutOptions,
+        options: WorkspaceLayoutOptions,
     ) -> Self {
         let width = finite_non_negative(width);
         let height = finite_non_negative(height);
@@ -131,6 +131,18 @@ impl WorkspaceLayout {
             (height - insets.bottom - COMPOSER_BOTTOM - composer_h).max(insets.top + top_bar_h);
         let transcript_y = insets.top + top_bar_h + TRANSCRIPT_TOP_GAP;
         let transcript_bottom = (composer_y - TRANSCRIPT_COMPOSER_GAP).max(transcript_y);
+        let requested_context_w = finite_non_negative(options.context_panel_width);
+        let context_right = (width - insets.right - CONTENT_GUTTER).max(0.0);
+        let context_left = content_x + content_w + CONTENT_GUTTER;
+        let available_context_w = (context_right - context_left).max(0.0);
+        let context_w = if class == LayoutClass::Wide {
+            requested_context_w.min(available_context_w)
+        } else {
+            0.0
+        };
+        let context_x = (context_right - context_w).max(context_left.min(context_right));
+        let context_y = insets.top + top_bar_h + CONTENT_GUTTER;
+        let context_h = (height - insets.bottom - context_y - CONTENT_GUTTER).max(0.0);
 
         Self {
             class,
@@ -144,7 +156,7 @@ impl WorkspaceLayout {
                 transcript_bottom - transcript_y,
             ),
             composer: Rect::xywh(content_x, composer_y, content_w, composer_h),
-            context_panel: Rect::ZERO,
+            context_panel: Rect::xywh(context_x, context_y, context_w, context_h),
         }
     }
 }

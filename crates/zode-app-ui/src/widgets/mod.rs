@@ -1,5 +1,6 @@
 mod approval_card;
 mod composer;
+mod empty_state;
 mod project_sidebar;
 mod review_panel;
 mod settings_panel;
@@ -16,17 +17,21 @@ use jian_core::text_input::TextInputState;
 use jian_widgets::{Painter, Rect};
 use zode_app_model::{ShellPage, ZodeAppState};
 
-use crate::{Insets, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme};
+use crate::{Insets, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme, COMPOSER_ID};
 
-pub use approval_card::{ApprovalAction, ApprovalCard};
+pub use approval_card::{ApprovalAction, ApprovalButtonLayout, ApprovalCard};
 pub use composer::{
     Composer, ComposerController, ComposerOutcome, ComposerSubmission, SandboxSelection,
 };
+pub use empty_state::EmptyState;
 pub use project_sidebar::{
     group_sessions, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarItem,
+    SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget,
 };
 pub use review_panel::{ReviewDraft, ReviewLine, ReviewLineKind, ReviewPanel, ReviewSelection};
-pub use settings_panel::{PermissionRow, SettingControl, SettingsPanel};
+pub use settings_panel::{
+    PermissionRow, PermissionRowLayout, SettingControl, SettingControlLayout, SettingsPanel,
+};
 pub use terminal_controller::TerminalPanelController;
 pub use terminal_grid::{
     CellPosition, TerminalCell, TerminalColor, TerminalGrid, TerminalLine, TerminalSelection,
@@ -34,7 +39,7 @@ pub use terminal_grid::{
 pub use terminal_panel::TerminalPanel;
 pub use thread_header::ThreadHeader;
 pub use tool_card::{ToolCard, ToolTone};
-pub use transcript::ThreadTranscript;
+pub use transcript::{ThreadTranscript, TranscriptItemLayout};
 pub use usage_chip::{UsageChip, UsageDisplay};
 pub use window_chrome::WindowChrome;
 
@@ -46,12 +51,11 @@ impl WorkspaceShell {
     pub fn paint_snapshot(
         painter: &mut dyn Painter,
         snapshot: &WorkspaceSnapshot,
-        _state: &ZodeAppState,
-        _theme: &ZodeTheme,
+        state: &ZodeAppState,
+        theme: &ZodeTheme,
     ) -> WorkspaceLayout {
-        painter.begin_frame();
-        painter.end_frame();
-        snapshot.layout
+        let input = TextInputState::with_text(state.composer.draft.clone());
+        Self::paint_snapshot_content(painter, snapshot, state, &input, None, None, theme)
     }
 
     pub fn paint(
@@ -61,8 +65,8 @@ impl WorkspaceShell {
         state: &ZodeAppState,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
-        let input = TextInputState::with_text(state.composer.draft.clone());
-        Self::paint_with_composer_input(painter, viewport, insets, state, &input, theme)
+        let snapshot = WorkspaceSnapshot::build(state, viewport.size.x, viewport.size.y, insets);
+        Self::paint_snapshot(painter, &snapshot, state, theme)
     }
 
     pub fn paint_with_composer_input(
@@ -73,16 +77,8 @@ impl WorkspaceShell {
         composer_input: &TextInputState,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
-        Self::paint_content(
-            painter,
-            viewport,
-            insets,
-            state,
-            composer_input,
-            None,
-            None,
-            theme,
-        )
+        let snapshot = WorkspaceSnapshot::build(state, viewport.size.x, viewport.size.y, insets);
+        Self::paint_snapshot_content(painter, &snapshot, state, composer_input, None, None, theme)
     }
 
     pub fn paint_with_terminal(
@@ -95,10 +91,10 @@ impl WorkspaceShell {
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
         let input = TextInputState::with_text(state.composer.draft.clone());
-        Self::paint_content(
+        let snapshot = WorkspaceSnapshot::build(state, viewport.size.x, viewport.size.y, insets);
+        Self::paint_snapshot_content(
             painter,
-            viewport,
-            insets,
+            &snapshot,
             state,
             &input,
             Some(terminal_grid),
@@ -118,10 +114,31 @@ impl WorkspaceShell {
         terminal_selection: Option<TerminalSelection>,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
-        Self::paint_content(
+        let snapshot = WorkspaceSnapshot::build(state, viewport.size.x, viewport.size.y, insets);
+        Self::paint_snapshot_with_composer_and_terminal_input(
             painter,
-            viewport,
-            insets,
+            &snapshot,
+            state,
+            composer_input,
+            terminal_grid,
+            terminal_selection,
+            theme,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_snapshot_with_composer_and_terminal_input(
+        painter: &mut dyn Painter,
+        snapshot: &WorkspaceSnapshot,
+        state: &ZodeAppState,
+        composer_input: &TextInputState,
+        terminal_grid: &TerminalGrid,
+        terminal_selection: Option<TerminalSelection>,
+        theme: &ZodeTheme,
+    ) -> WorkspaceLayout {
+        Self::paint_snapshot_content(
+            painter,
+            snapshot,
             state,
             composer_input,
             Some(terminal_grid),
@@ -131,21 +148,25 @@ impl WorkspaceShell {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn paint_content(
+    fn paint_snapshot_content(
         painter: &mut dyn Painter,
-        viewport: Rect,
-        insets: Insets,
+        snapshot: &WorkspaceSnapshot,
         state: &ZodeAppState,
         composer_input: &TextInputState,
         terminal_grid: Option<&TerminalGrid>,
         terminal_selection: Option<TerminalSelection>,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
-        let geometry = WorkspaceLayout::compute(viewport.size.x, viewport.size.y, insets);
+        let geometry = snapshot.layout;
         painter.begin_frame();
-        WindowChrome::paint(painter, viewport, &geometry, theme);
-        ProjectSidebar::paint(painter, geometry.sidebar, state, theme);
-        ThreadHeader::paint(painter, geometry.top_bar, state, theme);
+        WindowChrome::paint(painter, geometry.viewport, &geometry, theme);
+        if state.shell.page == ShellPage::Settings {
+            let workspace = SettingsPanel::active_workspace_uri(state);
+            SettingsPanel::paint_page(painter, snapshot, state, workspace, theme);
+        } else {
+            ProjectSidebar::paint(painter, geometry.sidebar, state, theme);
+            ThreadHeader::paint(painter, geometry.top_bar, state, theme);
+        }
         if state.shell.page == ShellPage::Terminal {
             let fallback = TerminalGrid::new(1, 1);
             let grid = terminal_grid.unwrap_or(&fallback);
@@ -164,11 +185,18 @@ impl WorkspaceShell {
                 terminal_selection,
                 theme,
             );
-        } else {
-            ThreadTranscript::paint(painter, geometry.transcript, state, theme);
+        } else if state.shell.page != ShellPage::Settings {
+            if state.current_session.is_none() {
+                EmptyState::paint(painter, geometry.transcript, theme);
+            } else {
+                ThreadTranscript::paint(painter, geometry.transcript, state, theme);
+            }
+            let composer_rect = snapshot
+                .node(COMPOSER_ID)
+                .map_or(geometry.composer, |node| node.rect);
             Composer::paint_input(
                 painter,
-                geometry.composer,
+                composer_rect,
                 composer_input,
                 &state.composer,
                 theme,

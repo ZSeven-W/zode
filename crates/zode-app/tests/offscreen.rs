@@ -1,5 +1,6 @@
 use image::GenericImageView;
 use zode_app::render::{render_offscreen, render_offscreen_with_fonts};
+use zode_app_model::{SystemTheme, ThemePreference};
 
 #[test]
 fn offscreen_shell_is_reference_size_and_non_empty() {
@@ -27,4 +28,18 @@ fn offscreen_rejects_invalid_dimensions_and_accepts_optional_fonts() {
     let png = render_offscreen_with_fonts(&zode_app_model::demo_state(), 320, 240, 1.0, Vec::new())
         .unwrap();
     assert!(image::load_from_memory(&png).is_ok());
+}
+
+#[test]
+fn offscreen_render_honors_explicit_theme_over_the_observed_system_theme() {
+    let mut state = zode_app_model::demo_state();
+    state.host.system_theme = SystemTheme::Light;
+    state.ui_preferences.theme = ThemePreference::Dark;
+
+    let png = render_offscreen(&state, 1221, 992, 1.0).unwrap();
+    let image = image::load_from_memory(&png).unwrap();
+    let pixel = image.get_pixel(500, 400);
+
+    assert!(pixel.0[0] < 64 && pixel.0[1] < 64 && pixel.0[2] < 64);
+    assert_eq!(state.host.system_theme, SystemTheme::Light);
 }

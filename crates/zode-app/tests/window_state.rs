@@ -1,6 +1,7 @@
+use winit::dpi::{PhysicalSize, Size};
 use zode_app::window_state::{
     restore_window_geometry, update_window_geometry, MonitorWorkArea, WindowGeometry,
-    DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH,
+    DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, MIN_WINDOW_WIDTH,
 };
 
 #[test]
@@ -97,9 +98,100 @@ fn maximized_notifications_keep_the_last_normal_geometry() {
             maximized: true,
         },
         true,
+        false,
     );
 
     assert_eq!((saved.x, saved.y), (100, 80));
     assert_eq!((saved.width, saved.height), (1221, 992));
     assert!(saved.maximized);
+
+    update_window_geometry(
+        &mut saved,
+        WindowGeometry {
+            x: -1400,
+            y: 120,
+            width: 1100,
+            height: 760,
+            maximized: false,
+        },
+        false,
+        false,
+    );
+
+    assert_eq!(
+        saved,
+        WindowGeometry {
+            x: -1400,
+            y: 120,
+            width: 1100,
+            height: 760,
+            maximized: false,
+        },
+    );
+}
+
+#[test]
+fn minimized_or_zero_extent_notifications_preserve_last_normal_geometry() {
+    let original = WindowGeometry {
+        x: 100,
+        y: 80,
+        width: 1221,
+        height: 992,
+        maximized: false,
+    };
+    for (width, height, minimized) in [(0, 992, false), (1221, 0, false), (1, 1, true)] {
+        let mut saved = original;
+        update_window_geometry(
+            &mut saved,
+            WindowGeometry {
+                x: 0,
+                y: 0,
+                width,
+                height,
+                maximized: false,
+            },
+            false,
+            minimized,
+        );
+        assert_eq!(saved, original);
+    }
+}
+
+#[test]
+fn native_minimum_width_does_not_block_the_phone_breakpoint() {
+    const {
+        assert!(MIN_WINDOW_WIDTH <= 390.0);
+        assert!(MIN_WINDOW_WIDTH < 720.0);
+    }
+}
+
+#[test]
+fn first_launch_default_is_logical_and_remains_full_sized_at_two_x() {
+    let attributes = zode_app::window_bootstrap::hidden_window_attributes(None);
+    let Some(Size::Logical(size)) = attributes.inner_size else {
+        panic!("first-launch size must use logical units");
+    };
+
+    assert_eq!((size.width, size.height), (1221.0, 992.0));
+    assert_eq!(size.to_physical::<u32>(2.0), PhysicalSize::new(2442, 1984),);
+    assert!(attributes.position.is_none());
+}
+
+#[test]
+fn persisted_bounds_remain_explicit_physical_geometry() {
+    let saved = WindowGeometry {
+        x: -900,
+        y: 40,
+        width: 1221,
+        height: 992,
+        maximized: true,
+    };
+    let attributes = zode_app::window_bootstrap::hidden_window_attributes(Some(saved));
+
+    assert_eq!(
+        attributes.inner_size,
+        Some(Size::Physical(PhysicalSize::new(1221, 992))),
+    );
+    assert!(attributes.position.is_some());
+    assert!(!attributes.maximized);
 }

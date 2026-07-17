@@ -11,6 +11,13 @@ pub enum ApprovalAction {
     Deny,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ApprovalButtonLayout {
+    pub action: ApprovalAction,
+    pub label: &'static str,
+    pub rect: Rect,
+}
+
 pub struct ApprovalCard;
 
 impl ApprovalCard {
@@ -29,6 +36,29 @@ impl ApprovalCard {
         }
     }
 
+    /// Returns the exact button geometry consumed by paint, hit testing and
+    /// accessibility. Keeping this calculation in one place prevents a
+    /// semantic control from drifting away from its visible target.
+    pub fn button_layout(rect: Rect) -> [ApprovalButtonLayout; 3] {
+        let labels = ["允许一次", "始终允许", "拒绝"];
+        let actions = [
+            ApprovalAction::AllowOnce,
+            ApprovalAction::AllowAlways,
+            ApprovalAction::Deny,
+        ];
+        let button_width = 72.0;
+        std::array::from_fn(|index| ApprovalButtonLayout {
+            action: actions[index],
+            label: labels[index],
+            rect: Rect::xywh(
+                rect.origin.x + 12.0 + index as f32 * (button_width + 8.0),
+                rect.origin.y + 32.0,
+                button_width,
+                26.0,
+            ),
+        })
+    }
+
     pub fn paint(painter: &mut dyn Painter, rect: Rect, tool: &str, theme: &ZodeTheme) {
         painter.fill_round_rect(rect, 10.0, theme.tokens.muted);
         painter.stroke_round_rect(rect, 10.0, theme.tokens.border, 1.0);
@@ -40,13 +70,9 @@ impl ApprovalCard {
             600,
             theme.tokens.foreground,
         );
-        let labels = ["允许一次", "始终允许", "拒绝"];
-        let button_width = 72.0;
-        for (index, label) in labels.iter().enumerate() {
-            let x = rect.origin.x + 12.0 + index as f32 * (button_width + 8.0);
-            let button = Rect::xywh(x, rect.origin.y + 32.0, button_width, 26.0);
+        for (index, button) in Self::button_layout(rect).into_iter().enumerate() {
             painter.fill_round_rect(
-                button,
+                button.rect,
                 7.0,
                 if index == 2 {
                     theme.tokens.destructive.with_alpha(0.12)
@@ -56,8 +82,8 @@ impl ApprovalCard {
             );
             draw_text(
                 painter,
-                label,
-                Point2D::new(x + 8.0, rect.origin.y + 50.0),
+                button.label,
+                Point2D::new(button.rect.origin.x + 8.0, rect.origin.y + 50.0),
                 11.0,
                 500,
                 if index == 2 {

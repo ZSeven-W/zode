@@ -82,6 +82,11 @@ impl ComposerController {
         self.busy = busy;
     }
 
+    pub fn set_text(&mut self, text: impl Into<String>) {
+        self.input.set_text(text.into());
+        self.input.clear_composition();
+    }
+
     pub fn key(&mut self, key: Key, modifiers: Modifiers) -> ComposerOutcome {
         self.now_ms = self.now_ms.saturating_add(1);
         match key {
@@ -134,7 +139,9 @@ impl ComposerController {
                 self.input.insert_str(&character, self.now_ms);
                 ComposerOutcome::Edited
             }
-            Key::Tab | Key::Escape | Key::Character(_) => ComposerOutcome::Ignored,
+            Key::PageUp | Key::PageDown | Key::Tab | Key::Escape | Key::Character(_) => {
+                ComposerOutcome::Ignored
+            }
         }
     }
 
@@ -244,6 +251,16 @@ impl Composer {
         painter.fill_round_rect(rect, 12.0, theme.tokens.card);
         painter.stroke_round_rect(rect, 12.0, theme.tokens.border, 1.0);
 
+        for (label, x) in [("zode", 16.0), ("本地", 74.0), ("main", 124.0)] {
+            draw_text(
+                painter,
+                label,
+                Point2D::new(rect.origin.x + x, rect.origin.y + 18.0),
+                10.0,
+                theme.tokens.muted_foreground,
+            );
+        }
+
         TextArea {
             state: input,
             placeholder: "向 Zode 描述一个任务",
@@ -257,9 +274,9 @@ impl Composer {
             painter,
             Rect::xywh(
                 rect.origin.x + 8.0,
-                rect.origin.y + 10.0,
+                rect.origin.y + 26.0,
                 rect.size.x - 16.0,
-                (rect.size.y - 54.0).max(0.0),
+                (rect.size.y - 70.0).max(0.0),
             ),
             &theme.tokens,
         );
@@ -268,6 +285,17 @@ impl Composer {
             painter,
             model,
             Point2D::new(rect.origin.x + 16.0, rect.origin.y + rect.size.y - 16.0),
+            11.0,
+            theme.tokens.muted_foreground,
+        );
+        draw_text(
+            painter,
+            if state.sandbox_label.is_empty() {
+                "完全访问"
+            } else {
+                &state.sandbox_label
+            },
+            Point2D::new(rect.origin.x + 120.0, rect.origin.y + rect.size.y - 16.0),
             11.0,
             theme.tokens.muted_foreground,
         );

@@ -3,7 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use zode_app_model::{ThemePreference, UiPreferences};
 use zode_core::{
     config::ConfigManager,
     persistence::{write_atomic, AdvisoryFileLock},
@@ -20,15 +21,28 @@ pub struct SessionUiState {
     pub failed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Last known windowed bounds plus whether the native window was maximized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WindowGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct AppStateFile {
     pub version: u32,
     pub last_session: Option<String>,
-    #[serde(default)]
     pub sessions: BTreeMap<String, SessionUiState>,
-    #[serde(default)]
     pub collapsed_workspaces: BTreeSet<String>,
+    #[serde(deserialize_with = "deserialize_ui_preferences")]
+    pub ui_preferences: UiPreferences,
+    pub window_geometry: Option<WindowGeometry>,
 }
 
 impl Default for AppStateFile {
@@ -38,8 +52,30 @@ impl Default for AppStateFile {
             last_session: None,
             sessions: BTreeMap::new(),
             collapsed_workspaces: BTreeSet::new(),
+            ui_preferences: UiPreferences::default(),
+            window_geometry: None,
         }
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct UiPreferencesCompat {
+    theme: ThemePreference,
+    reduced_motion: bool,
+    high_contrast: bool,
+}
+
+fn deserialize_ui_preferences<'de, D>(deserializer: D) -> Result<UiPreferences, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let preferences = UiPreferencesCompat::deserialize(deserializer)?;
+    Ok(UiPreferences {
+        theme: preferences.theme,
+        reduced_motion: preferences.reduced_motion,
+        high_contrast: preferences.high_contrast,
+    })
 }
 
 impl AppStateFile {
@@ -85,6 +121,23 @@ impl AppStateStore {
 
     pub fn load(&self) -> Result<AppStateFile, CoreError> {
         let _lock = AdvisoryFileLock::acquire(&self.path)?;
+        self.load_locked()
+    }
+
+    pub fn save(&self, state: &AppStateFile) -> Result<(), CoreError> {
+        let _lock = AdvisoryFileLock::acquire(&self.path)?;
+        self.save_locked(state)
+    }
+
+    /// Mutate the current state while holding one lock across read and publish.
+    pub fn update(&self, update: impl FnOnce(&mut AppStateFile)) -> Result<(), CoreError> {
+        let _lock = AdvisoryFileLock::acquire(&self.path)?;
+        let mut state = self.load_locked()?;
+        update(&mut state);
+        self.save_locked(&state)
+    }
+
+    fn load_locked(&self) -> Result<AppStateFile, CoreError> {
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -102,14 +155,13 @@ impl AppStateStore {
         Ok(state)
     }
 
-    pub fn save(&self, state: &AppStateFile) -> Result<(), CoreError> {
+    fn save_locked(&self, state: &AppStateFile) -> Result<(), CoreError> {
         if state.version != APP_STATE_VERSION {
             return Err(CoreError::Other(format!(
                 "unsupported app state version: {}",
                 state.version
             )));
         }
-        let _lock = AdvisoryFileLock::acquire(&self.path)?;
         let bytes = serde_json::to_vec_pretty(state)?;
         write_atomic(&self.path, &bytes)
     }
