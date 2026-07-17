@@ -85,7 +85,7 @@ impl ComposerFooterMenuWidget {
         let permission = Rect::xywh(add.max_x() + 4.0, y, permission_w, CONTROL_H);
         let send = Rect::xywh(input.max_x() - 42.0, y, CONTROL_H, CONTROL_H);
         let available = (send.origin.x - permission.max_x() - 12.0).max(0.0);
-        let model_w = available.min(190.0).max(0.0);
+        let model_w = available.clamp(0.0, 190.0);
         let model = Rect::xywh(send.origin.x - model_w - 6.0, y, model_w, CONTROL_H);
         ComposerFooterLayout {
             add,

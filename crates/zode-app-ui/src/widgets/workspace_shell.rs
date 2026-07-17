@@ -336,10 +336,12 @@ impl WorkspaceShell {
                     painter,
                     &snapshot,
                     state,
-                    composer_input,
-                    hovered,
-                    project_picker,
-                    branch_search_input.unwrap_or(&fallback_branch_search),
+                    ConversationPaintContext {
+                        composer_input,
+                        hovered,
+                        project_picker,
+                        branch_search_input: branch_search_input.unwrap_or(&fallback_branch_search),
+                    },
                     theme,
                 )
             }
@@ -454,16 +456,26 @@ impl WorkspaceShell {
     }
 }
 
+struct ConversationPaintContext<'a> {
+    composer_input: &'a TextInputState,
+    hovered: Option<WidgetId>,
+    project_picker: Option<(&'a ProjectPickerViewState, &'a TextInputState)>,
+    branch_search_input: &'a TextInputState,
+}
+
 fn paint_conversation(
     painter: &mut dyn Painter,
     snapshot: &WorkspaceSnapshot,
     state: &ZodeAppState,
-    composer_input: &TextInputState,
-    hovered: Option<WidgetId>,
-    project_picker: Option<(&ProjectPickerViewState, &TextInputState)>,
-    branch_search_input: &TextInputState,
+    context: ConversationPaintContext<'_>,
     theme: &ZodeTheme,
 ) {
+    let ConversationPaintContext {
+        composer_input,
+        hovered,
+        project_picker,
+        branch_search_input,
+    } = context;
     let geometry = snapshot.layout;
     let workspace_label = current_workspace_label(state);
     let mut welcome_title = None;
