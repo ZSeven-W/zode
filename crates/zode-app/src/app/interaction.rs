@@ -1,14 +1,16 @@
 use accesskit::{Action, ActionData};
 use zode_app_model::{
-    reduce_navigation_command, reduce_settings_command, reduce_tool_command,
-    reduce_transcript_command, AppCommand, NavigationOutcome, SettingsCommandOutcome, ShellPage,
-    ThemePreference, ToolCommandOutcome, TranscriptCommandOutcome,
+    reduce_navigation_command, reduce_presentation_command, reduce_settings_command,
+    reduce_tool_command, reduce_transcript_command, AppCommand, NavigationOutcome,
+    SettingsCommandOutcome, ShellRoute, ThemePreference, ToolCommandOutcome,
+    TranscriptCommandOutcome,
 };
 use zode_app_ui::{
-    Key, KeyEvent, PointerButton, PointerEvent, PointerEventKind, ProjectSidebar, SettingsPanel,
-    ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId, COMPOSER_ID,
-    HIGH_CONTRAST_ID, NEW_SESSION_ID, REDUCED_MOTION_ID, SEND_ID, SETTINGS_NAV_ID, TERMINAL_ID,
-    THEME_DARK_ID, THEME_LIGHT_ID, THEME_SYSTEM_ID,
+    EnvironmentPanel, IntegrationsPage, Key, KeyEvent, PointerButton, PointerEvent,
+    PointerEventKind, ProjectSidebar, ReviewPanel, SettingsPanel, SidebarAction, ThreadHeader,
+    ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId, WorkspaceSnapshot,
+    COMPOSER_ID, HIGH_CONTRAST_ID, REDUCED_MOTION_ID, SEND_ID, TERMINAL_ID, THEME_DARK_ID,
+    THEME_LIGHT_ID, THEME_SYSTEM_ID,
 };
 
 use super::DesktopApp;
@@ -22,6 +24,116 @@ use crate::{
         settings_scroll_delta_for_key, KeyDispatch, SettingsTouchOutcome,
     },
 };
+
+#[cfg(test)]
+#[path = "interaction_tests.rs"]
+mod tests;
+
+fn widget_command(state: &zode_app_model::ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+    static_sidebar_command(state, id)
+        .or_else(|| ProjectSidebar::command_for_widget(state, id))
+        .or_else(|| ThreadHeader::command_for_widget(state, id))
+        .or_else(|| IntegrationsPage::command_for_widget(id))
+        .or_else(|| SettingsPanel::command_for_widget(state, id))
+        .or_else(|| EnvironmentPanel::command_for_widget(state, id))
+        .or_else(|| ReviewPanel::command_for_widget(id))
+        .or_else(|| appearance_command(state, id))
+        .or_else(|| ThreadTranscript::command_for_widget(state, id))
+}
+
+fn static_sidebar_command(
+    state: &zode_app_model::ZodeAppState,
+    id: WidgetId,
+) -> Option<AppCommand> {
+    let action = match id.0 {
+        2..=7 => {
+            ProjectSidebar::navigation_items()
+                .get((id.0 - 2) as usize)?
+                .action
+        }
+        9 => ProjectSidebar::footer_item().action,
+        _ => return None,
+    };
+    match action {
+        SidebarAction::NewSession => new_session_command(state),
+        SidebarAction::Navigate(route) => Some(AppCommand::Navigate(route)),
+    }
+}
+
+fn new_session_command(state: &zode_app_model::ZodeAppState) -> Option<AppCommand> {
+    state
+        .active_available_workspace()
+        .cloned()
+        .or_else(|| {
+            state
+                .projects
+                .iter()
+                .find(|project| project.available)
+                .map(|project| project.workspace_uri.clone())
+        })
+        .map(|workspace_uri| AppCommand::NewSession { workspace_uri })
+}
+
+fn appearance_command(state: &zode_app_model::ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+    match id {
+        THEME_SYSTEM_ID => Some(AppCommand::SetThemePreference(ThemePreference::System)),
+        THEME_LIGHT_ID => Some(AppCommand::SetThemePreference(ThemePreference::Light)),
+        THEME_DARK_ID => Some(AppCommand::SetThemePreference(ThemePreference::Dark)),
+        REDUCED_MOTION_ID => Some(AppCommand::SetReducedMotion(
+            !state.ui_preferences.reduced_motion,
+        )),
+        HIGH_CONTRAST_ID => Some(AppCommand::SetHighContrast(
+            !state.ui_preferences.high_contrast,
+        )),
+        _ => None,
+    }
+}
+
+fn normalize_conversation_route(
+    state: &mut zode_app_model::ZodeAppState,
+    command: &AppCommand,
+) -> bool {
+    if !matches!(
+        command,
+        AppCommand::SelectSession(_) | AppCommand::NewSession { .. }
+    ) {
+        return false;
+    }
+    let _ = reduce_presentation_command(state, AppCommand::CloseSecondary);
+    let _ = reduce_presentation_command(state, AppCommand::Navigate(ShellRoute::Conversation));
+    true
+}
+
+fn available_new_session_command(
+    state: &zode_app_model::ZodeAppState,
+    command: &AppCommand,
+) -> bool {
+    matches!(
+        command,
+        AppCommand::NewSession { workspace_uri } if state.available_workspace(workspace_uri)
+    )
+}
+
+fn reduce_local_settings_command(
+    state: &mut zode_app_model::ZodeAppState,
+    command: AppCommand,
+) -> SettingsCommandOutcome {
+    if !matches!(
+        command,
+        AppCommand::SetProjectPermissions { .. }
+            | AppCommand::SetThemePreference(_)
+            | AppCommand::SetReducedMotion(_)
+            | AppCommand::SetHighContrast(_)
+            | AppCommand::SetSettingsScroll { .. }
+    ) {
+        return SettingsCommandOutcome::Ignored;
+    }
+    reduce_settings_command(state, command)
+}
+
+fn settings_interaction_viewport(snapshot: &WorkspaceSnapshot) -> jian_widgets::Rect {
+    SettingsPanel::page_layout(snapshot.layout.primary_surface).0
+}
 
 impl DesktopApp {
     pub(super) fn enqueue_command(&mut self, command: AppCommand) {
@@ -38,11 +150,31 @@ impl DesktopApp {
         if self.apply_presentation_command(command.clone()) {
             return;
         }
-        if self.persist_local_navigation_effect(&command) {
+        if reduce_local_settings_command(&mut self.app_state, command.clone())
+            == SettingsCommandOutcome::Applied
+        {
+            self.persist_ui_state();
+            self.rebuild_frame_snapshot();
+            self.request_redraw();
             return;
         }
+        if reduce_tool_command(&mut self.app_state, command.clone()) == ToolCommandOutcome::Applied
+        {
+            self.rebuild_frame_snapshot();
+            self.request_redraw();
+            return;
+        }
+        if self.apply_local_navigation_command(&command) {
+            return;
+        }
+        let normalized = available_new_session_command(&self.app_state, &command)
+            && normalize_conversation_route(&mut self.app_state, &command);
         if self.command_bridge.is_none() {
             eprintln!("zode-app: endpoint command ignored because no endpoint is attached");
+            if normalized {
+                self.rebuild_frame_snapshot();
+                self.request_redraw();
+            }
             return;
         }
         let previous_session = self.app_state.current_session.clone();
@@ -74,7 +206,7 @@ impl DesktopApp {
         match input {
             UnifiedInputEvent::Keyboard(event) => self.handle_key_event(event),
             UnifiedInputEvent::Ime(event) => {
-                if self.app_state.shell.page == ShellPage::Terminal
+                if self.app_state.presentation.route == ShellRoute::Terminal
                     && self.focused_widget == Some(TERMINAL_ID)
                 {
                     if let (Some(id), zode_app_ui::ImeEvent::Commit(text)) =
@@ -96,7 +228,7 @@ impl DesktopApp {
                     WheelDeltaMode::Line => 20.0,
                     WheelDeltaMode::Pixel => 1.0,
                 };
-                if self.app_state.shell.page == ShellPage::Terminal {
+                if self.app_state.presentation.route == ShellRoute::Terminal {
                     let command = self.terminal_controller.scroll_command(
                         &self.app_state.terminal,
                         &self.terminal_grid,
@@ -104,7 +236,7 @@ impl DesktopApp {
                         -event.delta_y * multiplier,
                     );
                     self.apply_terminal_command(command);
-                } else if self.app_state.shell.page == ShellPage::Conversation {
+                } else if self.app_state.presentation.route == ShellRoute::Conversation {
                     let command = self.app_state.current_session.as_ref().and_then(|session| {
                         self.app_state.transcripts.get(session).map(|transcript| {
                             ThreadTranscript::scroll_command(
@@ -124,16 +256,14 @@ impl DesktopApp {
                             self.request_redraw();
                         }
                     }
-                } else if self.app_state.shell.page == ShellPage::Settings {
+                } else if matches!(self.app_state.presentation.route, ShellRoute::Settings(_)) {
                     self.apply_settings_scroll_delta(-event.delta_y * multiplier);
                 }
             }
             UnifiedInputEvent::Touch(event) => {
-                if self.app_state.shell.page == ShellPage::Settings {
-                    match self
-                        .settings_touch
-                        .handle(event, self.frame_snapshot.layout.transcript)
-                    {
+                if matches!(self.app_state.presentation.route, ShellRoute::Settings(_)) {
+                    let viewport = settings_interaction_viewport(&self.frame_snapshot);
+                    match self.settings_touch.handle(event, viewport) {
                         SettingsTouchOutcome::Captured => return,
                         SettingsTouchOutcome::Scroll(delta) => {
                             self.apply_settings_scroll_delta(delta);
@@ -168,7 +298,7 @@ impl DesktopApp {
         let Some(clipboard) = self.clipboard.clone() else {
             return;
         };
-        if self.app_state.shell.page == ShellPage::Terminal
+        if self.app_state.presentation.route == ShellRoute::Terminal
             && self.focused_widget == Some(TERMINAL_ID)
         {
             match clipboard.read_text() {
@@ -197,7 +327,7 @@ impl DesktopApp {
         self.focused_widget = focused;
         self.app_state.composer.focused = self.window_focused && focused == Some(COMPOSER_ID);
         let terminal_focused = self.window_focused
-            && self.app_state.shell.page == ShellPage::Terminal
+            && self.app_state.presentation.route == ShellRoute::Terminal
             && focused == Some(TERMINAL_ID);
         let _ = zode_app_model::reduce_terminal_command(
             &mut self.app_state,
@@ -205,7 +335,7 @@ impl DesktopApp {
         );
         if let Some(window) = self.window.as_ref() {
             window.set_ime_allowed(ime_allowed_for_focus(
-                self.app_state.shell.page,
+                self.app_state.presentation.route.legacy_page(),
                 focused,
                 self.window_focused,
             ));
@@ -215,86 +345,18 @@ impl DesktopApp {
 
     pub(super) fn activate_widget(&mut self, id: WidgetId) {
         self.set_focused_widget(Some(id));
-        if let Some(command) = ProjectSidebar::command_for_widget(&self.app_state, id) {
-            let previous_session = self.app_state.current_session.clone();
-            match reduce_navigation_command(&mut self.app_state, command.clone()) {
-                NavigationOutcome::Applied => {}
-                NavigationOutcome::NeedsEffect => self.enqueue_command(command),
-                NavigationOutcome::Ignored => return,
-            }
-            self.refresh_if_session_changed(previous_session);
-            self.sync_composer_busy();
-            self.rebuild_frame_snapshot();
-            self.request_redraw();
-            return;
-        }
-        if let Some(command) = ThreadTranscript::command_for_widget(&self.app_state, id) {
-            match command {
-                command @ AppCommand::SetToolExpanded { .. } => {
-                    if reduce_tool_command(&mut self.app_state, command)
-                        == ToolCommandOutcome::Applied
-                    {
-                        self.rebuild_frame_snapshot();
-                        self.request_redraw();
-                    }
-                }
-                command @ AppCommand::Approve { .. } => self.enqueue_command(command),
-                _ => {}
-            }
-            return;
-        }
-        if let Some(command) = SettingsPanel::command_for_widget(&self.app_state, id) {
-            self.enqueue_command(command);
-            return;
-        }
         match id {
             SEND_ID => {
                 self.set_focused_widget(Some(COMPOSER_ID));
                 let outcome = self.composer.key(Key::Enter, zode_app_ui::Modifiers::NONE);
                 self.apply_composer_outcome(outcome);
             }
-            SETTINGS_NAV_ID if self.app_state.shell.page != ShellPage::Settings => {
-                self.app_state.shell.page = ShellPage::Settings;
-                self.rebuild_frame_snapshot();
-                self.set_focused_widget(self.frame_snapshot.focused);
-            }
-            NEW_SESSION_ID => {
-                let workspace = self
-                    .app_state
-                    .active_available_workspace()
-                    .cloned()
-                    .or_else(|| {
-                        self.app_state
-                            .projects
-                            .iter()
-                            .find(|project| project.available)
-                            .map(|project| project.workspace_uri.clone())
-                    });
-                if let Some(workspace_uri) = workspace {
-                    self.enqueue_command(AppCommand::NewSession { workspace_uri });
+            COMPOSER_ID | TERMINAL_ID => {}
+            _ => {
+                if let Some(command) = widget_command(&self.app_state, id) {
+                    self.enqueue_command(command);
                 }
             }
-            THEME_SYSTEM_ID => {
-                self.apply_setting(AppCommand::SetThemePreference(ThemePreference::System));
-            }
-            THEME_LIGHT_ID => {
-                self.apply_setting(AppCommand::SetThemePreference(ThemePreference::Light));
-            }
-            THEME_DARK_ID => {
-                self.apply_setting(AppCommand::SetThemePreference(ThemePreference::Dark));
-            }
-            REDUCED_MOTION_ID => {
-                self.apply_setting(AppCommand::SetReducedMotion(
-                    !self.app_state.ui_preferences.reduced_motion,
-                ));
-            }
-            HIGH_CONTRAST_ID => {
-                self.apply_setting(AppCommand::SetHighContrast(
-                    !self.app_state.ui_preferences.high_contrast,
-                ));
-            }
-            COMPOSER_ID | TERMINAL_ID | SETTINGS_NAV_ID => {}
-            _ => {}
         }
     }
 
@@ -321,7 +383,7 @@ impl DesktopApp {
                 Action::ScrollUp | Action::ScrollDown if id == zode_app_ui::SETTINGS_ROOT_ID => {
                     if let Some(delta) = settings_scroll_delta_for_action(
                         request.action,
-                        self.frame_snapshot.layout.transcript.size.y,
+                        settings_interaction_viewport(&self.frame_snapshot).size.y,
                     ) {
                         self.apply_settings_scroll_delta(delta);
                     }
@@ -355,7 +417,7 @@ impl DesktopApp {
         self.window_focused = focused;
         self.app_state.composer.focused = focused && self.focused_widget == Some(COMPOSER_ID);
         let terminal_focused = focused
-            && self.app_state.shell.page == ShellPage::Terminal
+            && self.app_state.presentation.route == ShellRoute::Terminal
             && self.focused_widget == Some(TERMINAL_ID);
         let _ = zode_app_model::reduce_terminal_command(
             &mut self.app_state,
@@ -363,7 +425,7 @@ impl DesktopApp {
         );
         if let Some(window) = self.window.as_ref() {
             window.set_ime_allowed(ime_allowed_for_focus(
-                self.app_state.shell.page,
+                self.app_state.presentation.route.legacy_page(),
                 self.focused_widget,
                 focused,
             ));
@@ -380,7 +442,7 @@ impl DesktopApp {
                     event.position,
                 )));
             }
-            if self.app_state.shell.page == ShellPage::Terminal
+            if self.app_state.presentation.route == ShellRoute::Terminal
                 && self.terminal_controller.pointer_move(
                     self.terminal_rect(),
                     event.position,
@@ -401,7 +463,7 @@ impl DesktopApp {
         if event.button != Some(PointerButton::Primary) {
             return;
         }
-        if self.app_state.shell.page == ShellPage::Terminal
+        if self.app_state.presentation.route == ShellRoute::Terminal
             && self.frame_snapshot.hit_test(event.position) == Some(TERMINAL_ID)
         {
             self.set_focused_widget(Some(TERMINAL_ID));
@@ -427,7 +489,7 @@ impl DesktopApp {
             self.apply_terminal_command(command);
             return;
         }
-        let terminal_focused = self.app_state.shell.page == ShellPage::Terminal
+        let terminal_focused = self.app_state.presentation.route == ShellRoute::Terminal
             && self.focused_widget == Some(TERMINAL_ID);
         if is_paste_shortcut(&event, terminal_focused) {
             self.handle_paste();
@@ -435,17 +497,16 @@ impl DesktopApp {
         }
         if event.pressed
             && event.key == Key::Escape
-            && self.app_state.shell.page == ShellPage::Settings
+            && matches!(self.app_state.presentation.route, ShellRoute::Settings(_))
         {
-            self.app_state.shell.page = ShellPage::Conversation;
-            self.rebuild_frame_snapshot();
+            self.enqueue_command(AppCommand::Navigate(ShellRoute::Conversation));
             self.set_focused_widget(Some(COMPOSER_ID));
             return;
         }
-        if event.pressed && self.app_state.shell.page == ShellPage::Settings {
+        if event.pressed && matches!(self.app_state.presentation.route, ShellRoute::Settings(_)) {
             if let Some(delta) = settings_scroll_delta_for_key(
                 &event.key,
-                self.frame_snapshot.layout.transcript.size.y,
+                settings_interaction_viewport(&self.frame_snapshot).size.y,
             ) {
                 self.apply_settings_scroll_delta(delta);
                 return;
@@ -478,17 +539,9 @@ impl DesktopApp {
         }
     }
 
-    fn apply_setting(&mut self, command: AppCommand) {
-        if reduce_settings_command(&mut self.app_state, command) == SettingsCommandOutcome::Applied
-        {
-            self.persist_ui_state();
-            self.request_redraw();
-        }
-    }
-
     fn apply_settings_scroll_delta(&mut self, delta: f32) {
         let command = SettingsPanel::scroll_command(
-            self.frame_snapshot.layout.transcript,
+            settings_interaction_viewport(&self.frame_snapshot),
             &self.app_state,
             delta,
         );
@@ -535,6 +588,35 @@ impl DesktopApp {
         if let Err(error) = result {
             eprintln!("zode-app: navigation state could not be persisted: {error}");
         }
+        true
+    }
+
+    fn apply_local_navigation_command(&mut self, command: &AppCommand) -> bool {
+        let previous_session = self.app_state.current_session.clone();
+        let outcome = reduce_navigation_command(&mut self.app_state, command.clone());
+        let handled = match outcome {
+            NavigationOutcome::Applied => true,
+            NavigationOutcome::NeedsEffect
+                if matches!(
+                    command,
+                    AppCommand::ToggleProject(_)
+                        | AppCommand::SetSessionPinned { .. }
+                        | AppCommand::RequestDeleteSession(_)
+                ) =>
+            {
+                let _ = self.persist_local_navigation_effect(command);
+                true
+            }
+            NavigationOutcome::NeedsEffect | NavigationOutcome::Ignored => false,
+        };
+        if !handled {
+            return false;
+        }
+        normalize_conversation_route(&mut self.app_state, command);
+        self.refresh_if_session_changed(previous_session);
+        self.sync_composer_busy();
+        self.rebuild_frame_snapshot();
+        self.request_redraw();
         true
     }
 }
