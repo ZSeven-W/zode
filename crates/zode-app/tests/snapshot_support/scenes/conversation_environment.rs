@@ -1,6 +1,6 @@
 use zode_app_model::{
-    ActivityEntry, EnvironmentEntry, FileArtifact, GoalProgress, LoadState, SecondaryPane,
-    ShellRoute, ThemePreference, TranscriptItem,
+    ActivityEntry, EnvironmentEntry, FileArtifact, GoalProgress, LoadState, ShellRoute,
+    ThemePreference, TranscriptItem,
 };
 use zode_node_protocol::{ToolCall, ToolStatus};
 

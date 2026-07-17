@@ -10,7 +10,7 @@ use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentEndpoint, AgentEventStream, AgentQuery, AgentSnapshot,
     ApprovalDecision, EndpointError, EndpointErrorKind, IntegrationRegistryEntry,
     IntegrationRegistryKind, IntegrationRegistrySnapshot, IntegrationRegistryState, RuntimeOptions,
-    SandboxMode, SessionLocator, ThreadStatus, ThreadSummary, TurnId, UserContent, WorkspaceUri,
+    SandboxMode, SessionLocator, ThreadStatus, ThreadSummary, UserContent, WorkspaceUri,
 };
 
 use super::{prepare_dispatch, reject_dispatch, CommandBridge};

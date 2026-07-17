@@ -663,9 +663,12 @@ mod tests {
             .workspace_uri = new_workspace.clone();
         state.active_workspace = Some(new_workspace);
 
+        let queries = presentation_queries_for_refresh(&state, PresentationRefresh::SessionChanged);
         assert!(
-            presentation_queries_for_refresh(&state, PresentationRefresh::SessionChanged)
-                .is_empty()
+            !queries
+                .iter()
+                .any(|query| matches!(query, PresentationQuery::DocumentPreview { .. })),
+            "retargeting planned a stale document query: {queries:?}"
         );
     }
 }
