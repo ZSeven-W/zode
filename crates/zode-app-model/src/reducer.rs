@@ -1,4 +1,4 @@
-use crate::{AppCommand, TranscriptItem, TranscriptState, ZodeAppState};
+use crate::{default_tool_expanded, AppCommand, TranscriptItem, TranscriptState, ZodeAppState};
 use zode_node_protocol::{AgentEvent, AgentEventKind, ToolCall};
 
 const UNKNOWN_EVENT_CODE: &str = "agent.event.unknown";
@@ -22,6 +22,52 @@ pub enum NavigationOutcome {
 pub enum TranscriptCommandOutcome {
     Applied,
     Ignored,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCommandOutcome {
+    Applied,
+    Ignored,
+}
+
+pub fn reduce_tool_command(state: &mut ZodeAppState, command: AppCommand) -> ToolCommandOutcome {
+    let AppCommand::SetToolExpanded { tool_id, expanded } = command else {
+        return ToolCommandOutcome::Ignored;
+    };
+    let exists = state.transcripts.values().any(|transcript| {
+        transcript
+            .items
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::Tool(tool) if tool.id == tool_id))
+    });
+    if !exists {
+        return ToolCommandOutcome::Ignored;
+    }
+    state.tool_expanded.insert(tool_id, expanded);
+    ToolCommandOutcome::Applied
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsCommandOutcome {
+    Applied,
+    Ignored,
+}
+
+pub fn reduce_settings_command(
+    state: &mut ZodeAppState,
+    command: AppCommand,
+) -> SettingsCommandOutcome {
+    let AppCommand::SetProjectPermissions {
+        workspace_uri,
+        mut tools,
+    } = command
+    else {
+        return SettingsCommandOutcome::Ignored;
+    };
+    tools.sort();
+    tools.dedup();
+    state.project_permissions.insert(workspace_uri, tools);
+    SettingsCommandOutcome::Applied
 }
 
 /// Applies viewport state emitted by the transcript widget without involving
@@ -169,7 +215,12 @@ pub fn reduce_agent_event(state: &mut ZodeAppState, event: AgentEvent) -> Reduce
     match kind {
         AgentEventKind::TextDelta { delta } => append_assistant_text(transcript, delta),
         AgentEventKind::ThinkingDelta { delta } => append_thinking(transcript, delta),
-        AgentEventKind::ToolStarted { tool } => upsert_started_tool(transcript, tool),
+        AgentEventKind::ToolStarted { tool } => {
+            let id = tool.id.clone();
+            let expanded = default_tool_expanded(&tool.name);
+            upsert_started_tool(transcript, tool);
+            state.tool_expanded.entry(id).or_insert(expanded);
+        }
         AgentEventKind::ToolCompleted { tool } => complete_existing_tool(transcript, tool),
         AgentEventKind::ApprovalRequested {
             approval_id,

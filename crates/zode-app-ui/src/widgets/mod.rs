@@ -1,7 +1,11 @@
+mod approval_card;
 mod composer;
 mod project_sidebar;
+mod settings_panel;
 mod thread_header;
+mod tool_card;
 mod transcript;
+mod usage_chip;
 mod window_chrome;
 
 use jian_core::text_input::TextInputState;
@@ -10,14 +14,18 @@ use zode_app_model::ZodeAppState;
 
 use crate::{Insets, WorkspaceLayout, ZodeTheme};
 
+pub use approval_card::{ApprovalAction, ApprovalCard};
 pub use composer::{
     Composer, ComposerController, ComposerOutcome, ComposerSubmission, SandboxSelection,
 };
 pub use project_sidebar::{
     group_sessions, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarItem,
 };
+pub use settings_panel::{PermissionRow, SettingsPanel};
 pub use thread_header::ThreadHeader;
+pub use tool_card::{ToolCard, ToolTone};
 pub use transcript::ThreadTranscript;
+pub use usage_chip::{UsageChip, UsageDisplay};
 pub use window_chrome::WindowChrome;
 
 /// Paints the complete platform-neutral workbench shell in stable z-order.

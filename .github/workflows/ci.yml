@@ -40,21 +40,35 @@ jobs:
         with:
           submodules: recursive
       - uses: EmbarkStudios/cargo-deny-action@v2
-<<<<<<< HEAD
 
-  sdk:
-    runs-on: ubuntu-latest
-=======
   macos-app:
     runs-on: macos-15
->>>>>>> bf1599a (ci: verify macos desktop host)
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-<<<<<<< HEAD
+      - name: verify arm64 runner
+        run: test "$(uname -m)" = arm64
+      - name: test desktop app
+        run: cargo test -p zode-app --all-targets
+      - name: build desktop app
+        run: cargo build -p zode-app
+      - name: upload desktop app
+        uses: actions/upload-artifact@v4
+        with:
+          name: zode-app-macos-arm64
+          path: target/debug/zode-app
+
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -106,16 +120,3 @@ jobs:
         env:
           ZODE_SANDBOX_IT: "1"
         run: cargo test -p zode-core --features sandbox-test-runner --test windows-sandbox-it -- --ignored
-=======
-      - name: verify arm64 runner
-        run: test "$(uname -m)" = arm64
-      - name: test desktop app
-        run: cargo test -p zode-app --all-targets
-      - name: build desktop app
-        run: cargo build -p zode-app
-      - name: upload desktop app
-        uses: actions/upload-artifact@v4
-        with:
-          name: zode-app-macos-arm64
-          path: target/debug/zode-app
->>>>>>> bf1599a (ci: verify macos desktop host)

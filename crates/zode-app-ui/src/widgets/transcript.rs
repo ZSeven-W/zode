@@ -4,7 +4,7 @@ use jian_widgets::{
 };
 use zode_app_model::{TranscriptItem, TranscriptState, ZodeAppState};
 
-use crate::{visible_range, MeasurementCache, ZodeTheme};
+use crate::{visible_range, ApprovalCard, MeasurementCache, ToolCard, ZodeTheme};
 
 const ESTIMATED_ITEM_HEIGHT: f32 = 72.0;
 const ITEM_GAP: f32 = 12.0;
@@ -54,7 +54,7 @@ impl ThreadTranscript {
             return;
         }
 
-        paint_items(painter, rect, transcript, theme);
+        paint_items(painter, rect, transcript, &state.tool_expanded, theme);
         painter.restore();
     }
 }
@@ -63,6 +63,7 @@ fn paint_items(
     painter: &mut dyn Painter,
     rect: Rect,
     transcript: &TranscriptState,
+    tool_expanded: &BTreeMap<String, bool>,
     theme: &ZodeTheme,
 ) {
     let mut cache =
@@ -85,11 +86,23 @@ fn paint_items(
             rect.size.x,
             (measurement.bottom - measurement.top - ITEM_GAP).max(1.0),
         );
-        paint_item(painter, item_rect, &transcript.items[index], theme);
+        paint_item(
+            painter,
+            item_rect,
+            &transcript.items[index],
+            tool_expanded,
+            theme,
+        );
     }
 }
 
-fn paint_item(painter: &mut dyn Painter, rect: Rect, item: &TranscriptItem, theme: &ZodeTheme) {
+fn paint_item(
+    painter: &mut dyn Painter,
+    rect: Rect,
+    item: &TranscriptItem,
+    tool_expanded: &BTreeMap<String, bool>,
+    theme: &ZodeTheme,
+) {
     match item {
         TranscriptItem::UserText(text) => paint_user(painter, rect, text, theme),
         TranscriptItem::AssistantText(markdown) => paint_markdown(painter, rect, markdown, theme),
@@ -101,20 +114,17 @@ fn paint_item(painter: &mut dyn Painter, rect: Rect, item: &TranscriptItem, them
             400,
             theme.tokens.muted_foreground,
         ),
-        TranscriptItem::Tool(tool) => paint_notice(
+        TranscriptItem::Tool(tool) => ToolCard::paint(
             painter,
             rect,
-            &format!("{} · {}", tool.name, tool.summary),
-            theme.tokens.muted,
-            theme.tokens.foreground,
+            tool,
+            tool_expanded
+                .get(&tool.id)
+                .copied()
+                .unwrap_or_else(|| ToolCard::default_expanded(tool)),
+            theme,
         ),
-        TranscriptItem::Approval { tool, .. } => paint_notice(
-            painter,
-            rect,
-            &format!("需要批准：{tool}"),
-            theme.tokens.muted,
-            theme.tokens.foreground,
-        ),
+        TranscriptItem::Approval { tool, .. } => ApprovalCard::paint(painter, rect, tool, theme),
         TranscriptItem::Status { message, .. } => draw_text(
             painter,
             message,
@@ -289,3 +299,4 @@ fn draw_text(
         .with_font_weight(weight);
     painter.draw_text(&layout, origin);
 }
+use std::collections::BTreeMap;

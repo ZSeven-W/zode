@@ -1,7 +1,7 @@
 use jian_widgets::{centered_text_baseline_y, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::ZodeAppState;
 
-use crate::ZodeTheme;
+use crate::{UsageChip, ZodeTheme};
 
 pub struct ThreadHeader;
 
@@ -39,6 +39,24 @@ impl ThreadHeader {
                 centered_text_baseline_y(label_rect, 13.0),
             ),
         );
+        if let Some(usage) = state
+            .current_session
+            .as_ref()
+            .and_then(|session| state.usage.get(session))
+        {
+            UsageChip::paint(
+                painter,
+                Rect::xywh(
+                    rect.origin.x + (rect.size.x - 280.0).max(160.0),
+                    rect.origin.y + 12.0,
+                    260.0_f32.min((rect.size.x - 180.0).max(0.0)),
+                    24.0,
+                ),
+                state.composer.model.as_deref(),
+                usage,
+                theme,
+            );
+        }
         painter.stroke_line(
             Point2D::new(rect.origin.x, rect.origin.y + rect.size.y),
             Point2D::new(rect.origin.x + rect.size.x, rect.origin.y + rect.size.y),

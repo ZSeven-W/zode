@@ -1788,6 +1788,16 @@ fn set_project_allowed_tools(
         .insert("allow".to_string(), serde_json::json!(allowed));
 }
 
+/// Public semantic entry point shared by TUI and desktop approval surfaces.
+pub fn persist_allow_always(cwd: &Path, tool: &str) -> Result<(), CoreError> {
+    ConfigManager::allow_project_tool(cwd, tool)
+}
+
+/// Revoke one project-scoped allow-always rule without touching siblings.
+pub fn revoke_allow_always(cwd: &Path, tool: &str) -> Result<(), CoreError> {
+    ConfigManager::revoke_project_tool(cwd, tool)
+}
+
 /// Append `add` to `target`, skipping values already present (preserves order).
 fn extend_dedup(target: &mut Vec<String>, add: Vec<String>) {
     for v in add {

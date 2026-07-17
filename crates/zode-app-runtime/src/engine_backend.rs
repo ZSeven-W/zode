@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,6 +15,23 @@ use zode_node_protocol::{
 };
 
 use crate::{EventSink, NodeBackend};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersistedApproval {
+    AllowAlways,
+    AllowOnceFallback { message: String },
+}
+
+/// Persist an allow-always rule, falling back explicitly instead of leaving
+/// the waiting tool request unresolved when project state cannot be written.
+pub fn persist_project_allow(cwd: &Path, tool: &str) -> PersistedApproval {
+    match zode_core::persist_allow_always(cwd, tool) {
+        Ok(()) => PersistedApproval::AllowAlways,
+        Err(_) => PersistedApproval::AllowOnceFallback {
+            message: "project permission could not be persisted; allowed once".into(),
+        },
+    }
+}
 
 const UNKNOWN_EVENT_CODE: &str = "agent.event.unknown";
 const UNKNOWN_EVENT_MESSAGE: &str = "Ignored an unsupported agent runtime event";

@@ -12,7 +12,10 @@ mod zode_engine_driver;
 
 pub use app_state_store::{AppStateFile, AppStateStore, SessionUiState};
 pub use bootstrap::LocalAppRuntime;
-pub use engine_backend::{DriverEventStream, EngineBackend, EngineDriver, EventNormalizer};
+pub use engine_backend::{
+    persist_project_allow, DriverEventStream, EngineBackend, EngineDriver, EventNormalizer,
+    PersistedApproval,
+};
 pub use event_sink::EventSink;
 pub use local_endpoint::LocalAgentEndpoint;
 pub use node::NodeBackend;

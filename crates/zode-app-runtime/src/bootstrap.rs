@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use zode_core::approval::{Approval, ApprovalReceiver, ApprovalRequest};
 use zode_core::bootstrap::ResolvedBootstrap;
-use zode_core::config::ConfigManager;
 use zode_core::question::QuestionReceiver;
 use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentEventKind, AgentQuery, AgentSnapshot, ApprovalDecision,
@@ -17,8 +16,9 @@ use zode_node_protocol::{
 };
 
 use crate::{
-    workspace_uri_to_path, EngineBackend, EngineDriver, EventSink, LocalAgentEndpoint,
-    LocalSessionRepository, NodeBackend, NodeIdentityStore, ZodeEngineDriver,
+    persist_project_allow, workspace_uri_to_path, EngineBackend, EngineDriver, EventSink,
+    LocalAgentEndpoint, LocalSessionRepository, NodeBackend, NodeIdentityStore, PersistedApproval,
+    ZodeEngineDriver,
 };
 
 /// Fully composed local node plus the stable identity it advertises.
@@ -197,9 +197,15 @@ impl LocalRuntimeBackend {
                 }
                 .ok_or_else(|| not_found("approval session workspace was not found"))?;
                 let cwd = workspace_uri_to_path(&workspace)?;
-                ConfigManager::allow_project_tool(&cwd, &pending.tool)
-                    .map_err(|_| internal("project permission could not be persisted"))?;
-                Approval::AllowAlways
+                match persist_project_allow(&cwd, &pending.tool) {
+                    PersistedApproval::AllowAlways => Approval::AllowAlways,
+                    PersistedApproval::AllowOnceFallback { message } => {
+                        pending.request.respond(Approval::AllowOnce).map_err(|_| {
+                            unavailable("approval requester is no longer available")
+                        })?;
+                        return Err(internal(message));
+                    }
+                }
             }
             ApprovalDecision::Deny => Approval::Deny,
         };

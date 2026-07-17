@@ -27,6 +27,14 @@ pub enum AppCommand {
         index: usize,
         height: f32,
     },
+    SetToolExpanded {
+        tool_id: String,
+        expanded: bool,
+    },
+    SetProjectPermissions {
+        workspace_uri: WorkspaceUri,
+        tools: Vec<String>,
+    },
     RequestDeleteSession(SessionLocator),
     CancelDeleteSession,
     DeleteSession(SessionLocator),
