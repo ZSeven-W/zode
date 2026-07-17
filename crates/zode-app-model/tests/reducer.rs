@@ -90,6 +90,66 @@ fn settings_search_is_reduced_and_resets_content_scroll() {
 }
 
 #[test]
+fn local_general_preferences_update_real_ui_state() {
+    let mut state = demo_state();
+
+    assert_eq!(
+        reduce_settings_command(&mut state, AppCommand::SetTaskSuggestions(false)),
+        SettingsCommandOutcome::Applied,
+    );
+    assert!(!state.ui_preferences.task_suggestions);
+    assert_eq!(
+        reduce_settings_command(&mut state, AppCommand::SetSidebarTasksExpanded(false)),
+        SettingsCommandOutcome::Applied,
+    );
+    assert!(!state.ui_preferences.sidebar_tasks_expanded);
+    assert!(!state.sidebar.tasks_expanded);
+}
+
+#[test]
+fn archived_task_filters_accept_only_real_archived_workspaces() {
+    let mut state = demo_state();
+    let session = SessionLocator::new(state.host.node_id, "archived");
+    let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: workspace.clone(),
+        title: "fix settings".into(),
+        updated_at_ms: 1,
+        status: ThreadStatus::Idle,
+    });
+    state.archived_sessions.insert(session);
+    state.settings_scroll_offset = 50.0;
+
+    assert_eq!(
+        reduce_settings_command(
+            &mut state,
+            AppCommand::SetArchivedTaskSearch("settings".into()),
+        ),
+        SettingsCommandOutcome::Applied,
+    );
+    assert_eq!(state.archived_tasks.search, "settings");
+    assert_eq!(state.settings_scroll_offset, 0.0);
+    assert_eq!(
+        reduce_settings_command(
+            &mut state,
+            AppCommand::SetArchivedTaskWorkspaceFilter(Some(workspace.clone())),
+        ),
+        SettingsCommandOutcome::Applied,
+    );
+    assert_eq!(state.archived_tasks.workspace_filter, Some(workspace));
+    assert_eq!(
+        reduce_settings_command(
+            &mut state,
+            AppCommand::SetArchivedTaskWorkspaceFilter(Some(
+                WorkspaceUri::new("file:///repo/missing").unwrap(),
+            )),
+        ),
+        SettingsCommandOutcome::Ignored,
+    );
+}
+
+#[test]
 fn adjacent_text_deltas_extend_one_assistant_item() {
     let (mut state, session, turn_id) = active_state();
 

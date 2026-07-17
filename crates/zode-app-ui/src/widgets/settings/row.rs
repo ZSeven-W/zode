@@ -1,4 +1,4 @@
-use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect};
+use jian_widgets::{components::switch::Switch, HorizontalAlign, Painter, Point2D, Rect};
 use zode_app_model::AppCommand;
 
 use crate::{paint_single_line, RectExt, WidgetId, ZodeTheme};
@@ -19,8 +19,10 @@ pub struct SettingRowLayout {
     pub visible_rect: Option<Rect>,
     pub label_rect: Rect,
     pub value_rect: Rect,
+    pub toggle_rect: Option<Rect>,
     pub label: &'static str,
     pub value: String,
+    pub toggled: Option<bool>,
     pub enabled: bool,
     pub command: Option<AppCommand>,
 }
@@ -33,15 +35,28 @@ pub(super) fn content_rect(primary_surface: Rect) -> Rect {
     Rect::xywh(x, y, width, (primary_surface.max_y() - y).max(0.0))
 }
 
-pub(super) fn setting_row(
-    id: WidgetId,
-    rect: Rect,
-    viewport: Rect,
-    label: &'static str,
-    value: impl Into<String>,
-    enabled: bool,
-    command: Option<AppCommand>,
-) -> SettingRowLayout {
+pub(super) struct SettingRowSpec {
+    pub id: WidgetId,
+    pub rect: Rect,
+    pub viewport: Rect,
+    pub label: &'static str,
+    pub value: String,
+    pub toggled: Option<bool>,
+    pub enabled: bool,
+    pub command: Option<AppCommand>,
+}
+
+pub(super) fn setting_row(spec: SettingRowSpec) -> SettingRowLayout {
+    let SettingRowSpec {
+        id,
+        rect,
+        viewport,
+        label,
+        value,
+        toggled,
+        enabled,
+        command,
+    } = spec;
     let value_width = (rect.size.x * 0.42).clamp(132.0, 300.0);
     let value_rect = Rect::xywh(
         rect.max_x() - value_width - 18.0,
@@ -49,6 +64,14 @@ pub(super) fn setting_row(
         value_width,
         rect.size.y,
     );
+    let toggle_rect = toggled.map(|_| {
+        Rect::xywh(
+            rect.max_x() - 32.0 - 18.0,
+            rect.origin.y + (rect.size.y - 18.0) / 2.0,
+            32.0,
+            18.0,
+        )
+    });
     let label_rect = Rect::xywh(
         rect.origin.x + 18.0,
         rect.origin.y,
@@ -61,8 +84,10 @@ pub(super) fn setting_row(
         visible_rect: clip_to_viewport(rect, viewport),
         label_rect,
         value_rect,
+        toggle_rect,
         label,
-        value: value.into(),
+        value,
+        toggled,
         enabled,
         command: enabled.then_some(command).flatten(),
     }
@@ -162,15 +187,25 @@ pub(super) fn paint_setting_row(
         foreground,
         HorizontalAlign::Start,
     );
-    paint_single_line(
-        painter,
-        &layout.value,
-        layout.value_rect,
-        12.0,
-        450,
-        theme.tokens.muted_foreground,
-        HorizontalAlign::End,
-    );
+    if let (Some(toggle_rect), Some(toggled)) = (layout.toggle_rect, layout.toggled) {
+        Switch {
+            on: toggled,
+            enabled: layout.enabled,
+            hovered: false,
+            pressed: false,
+        }
+        .paint(painter, toggle_rect, &theme.tokens);
+    } else {
+        paint_single_line(
+            painter,
+            &layout.value,
+            layout.value_rect,
+            12.0,
+            450,
+            theme.tokens.muted_foreground,
+            HorizontalAlign::End,
+        );
+    }
 }
 
 pub(super) fn clip_to_viewport(rect: Rect, viewport: Rect) -> Option<Rect> {

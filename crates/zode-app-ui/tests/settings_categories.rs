@@ -201,6 +201,8 @@ fn general_page_exposes_permissions_and_honest_disabled_local_settings() {
         "默认文件打开目标",
         "语言",
         "默认终端位置",
+        "建议提示",
+        "侧边栏任务列表",
         "打开源许可证",
         "选择任务后加载运行时权限",
     ] {

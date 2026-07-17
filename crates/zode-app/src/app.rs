@@ -125,6 +125,7 @@ impl DesktopApp {
             });
         if let Some(persisted) = persisted.as_ref() {
             app_state.ui_preferences = persisted.ui_preferences.clone();
+            app_state.sidebar.tasks_expanded = app_state.ui_preferences.sidebar_tasks_expanded;
             navigation_state::hydrate_session_navigation(&mut app_state, persisted);
             for project in &mut app_state.projects {
                 project.expanded = !persisted

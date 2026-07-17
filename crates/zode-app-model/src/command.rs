@@ -88,7 +88,11 @@ pub enum AppCommand {
     SetThemePreference(ThemePreference),
     SetReducedMotion(bool),
     SetHighContrast(bool),
+    SetTaskSuggestions(bool),
+    SetSidebarTasksExpanded(bool),
     SetSettingsSearch(String),
+    SetArchivedTaskSearch(String),
+    SetArchivedTaskWorkspaceFilter(Option<WorkspaceUri>),
     SetSettingsScroll {
         offset: f32,
     },

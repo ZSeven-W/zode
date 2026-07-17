@@ -12,7 +12,10 @@ pub(super) fn append_empty_suggestion_nodes(
     focus_order: &mut u32,
     state: &ZodeAppState,
 ) {
-    if state.current_session.is_some() || state.project_picker.open {
+    if state.current_session.is_some()
+        || state.project_picker.open
+        || !state.ui_preferences.task_suggestions
+    {
         return;
     }
     let input = Composer::layout_for_state(layout.composer, state).input;

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use jian_widgets::{HorizontalAlign, Painter, Rect};
+use jian_core::text_input::TextInputState;
+use jian_widgets::{components::input::Input, HorizontalAlign, Painter, Rect};
 use zode_app_model::{AppCommand, SettingsCategory, ShellRoute, ZodeAppState};
 use zode_node_protocol::{SessionLocator, ThreadSummary, WorkspaceUri};
 
@@ -8,6 +9,10 @@ use super::row::{clip_to_viewport, paint_card, paint_divider, paint_heading, SEC
 use crate::{paint_single_line, stable_widget_id, RectExt, SemanticIcon, WidgetId, ZodeTheme};
 
 const GROUP_HEADING_HEIGHT: f32 = 24.0;
+const TOOLBAR_HEIGHT: f32 = 36.0;
+const TOOLBAR_GAP: f32 = 24.0;
+const TOOLBAR_CONTROL_GAP: f32 = 10.0;
+const FILTER_WIDTH: f32 = 176.0;
 const GROUP_CARD_GAP: f32 = 10.0;
 const GROUP_GAP: f32 = 32.0;
 const TASK_ROW_HEIGHT: f32 = 64.0;
@@ -15,6 +20,9 @@ const ACTION_WIDTH: f32 = 94.0;
 const ACTION_HEIGHT: f32 = 28.0;
 const EMPTY_CARD_HEIGHT: f32 = 128.0;
 const BOTTOM_GAP: f32 = 24.0;
+
+pub const ARCHIVED_TASK_SEARCH_ID: WidgetId = WidgetId(8_400);
+pub const ARCHIVED_TASK_FILTER_ID: WidgetId = WidgetId(8_401);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArchivedTaskRowLayout {
@@ -42,27 +50,64 @@ pub struct ArchivedTaskGroupLayout {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArchivedTasksLayout {
+    pub search_rect: Rect,
+    pub filter_rect: Rect,
+    pub filter_label: String,
+    pub filter_enabled: bool,
     pub groups: Vec<ArchivedTaskGroupLayout>,
     pub empty_card: Option<Rect>,
+    pub empty_title: Option<&'static str>,
     pub content_height: f32,
 }
 
 pub(super) fn layout(content: Rect, state: &ZodeAppState, offset: f32) -> ArchivedTasksLayout {
     let archived = archived_groups(state);
+    let toolbar_y = content.origin.y + SECTION_TOP - offset;
+    let filter_width = FILTER_WIDTH.min(content.size.x * 0.38);
+    let filter_rect = Rect::xywh(
+        content.max_x() - filter_width,
+        toolbar_y,
+        filter_width,
+        TOOLBAR_HEIGHT,
+    );
+    let search_rect = Rect::xywh(
+        content.origin.x,
+        toolbar_y,
+        (filter_rect.origin.x - content.origin.x - TOOLBAR_CONTROL_GAP).max(0.0),
+        TOOLBAR_HEIGHT,
+    );
+    let filter_label = state
+        .archived_tasks
+        .workspace_filter
+        .as_ref()
+        .map(workspace_label)
+        .unwrap_or_else(|| "所有项目".into());
+    let filter_enabled = !archived_workspace_options(state).is_empty();
+    let group_top = toolbar_y + TOOLBAR_HEIGHT + TOOLBAR_GAP;
     if archived.is_empty() {
+        let has_archived = has_archived_tasks(state);
         return ArchivedTasksLayout {
+            search_rect,
+            filter_rect,
+            filter_label,
+            filter_enabled,
             groups: Vec::new(),
             empty_card: Some(Rect::xywh(
                 content.origin.x,
-                content.origin.y + SECTION_TOP - offset,
+                group_top,
                 content.size.x,
                 EMPTY_CARD_HEIGHT,
             )),
+            empty_title: Some(if has_archived {
+                "没有符合筛选条件的任务"
+            } else {
+                "暂无已归档任务"
+            }),
             content_height: content_height(state),
         };
     }
 
-    let mut y = content.origin.y + SECTION_TOP - offset;
+    let mut y = group_top;
     let mut groups = Vec::with_capacity(archived.len());
     for (workspace_uri, threads) in archived {
         let heading_rect = Rect::xywh(content.origin.x, y, content.size.x, GROUP_HEADING_HEIGHT);
@@ -96,8 +141,13 @@ pub(super) fn layout(content: Rect, state: &ZodeAppState, offset: f32) -> Archiv
     }
 
     ArchivedTasksLayout {
+        search_rect,
+        filter_rect,
+        filter_label,
+        filter_enabled,
         groups,
         empty_card: None,
+        empty_title: None,
         content_height: content_height(state),
     }
 }
@@ -105,7 +155,7 @@ pub(super) fn layout(content: Rect, state: &ZodeAppState, offset: f32) -> Archiv
 pub(super) fn content_height(state: &ZodeAppState) -> f32 {
     let archived = archived_groups(state);
     if archived.is_empty() {
-        return SECTION_TOP + EMPTY_CARD_HEIGHT + BOTTOM_GAP;
+        return SECTION_TOP + TOOLBAR_HEIGHT + TOOLBAR_GAP + EMPTY_CARD_HEIGHT + BOTTOM_GAP;
     }
     let groups_height = archived
         .iter()
@@ -113,7 +163,12 @@ pub(super) fn content_height(state: &ZodeAppState) -> f32 {
             GROUP_HEADING_HEIGHT + GROUP_CARD_GAP + TASK_ROW_HEIGHT * threads.len() as f32
         })
         .sum::<f32>();
-    SECTION_TOP + groups_height + GROUP_GAP * archived.len().saturating_sub(1) as f32 + BOTTOM_GAP
+    SECTION_TOP
+        + TOOLBAR_HEIGHT
+        + TOOLBAR_GAP
+        + groups_height
+        + GROUP_GAP * archived.len().saturating_sub(1) as f32
+        + BOTTOM_GAP
 }
 
 pub(super) fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
@@ -122,6 +177,26 @@ pub(super) fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<A
         ShellRoute::Settings(SettingsCategory::ArchivedTasks)
     ) {
         return None;
+    }
+    if id == ARCHIVED_TASK_FILTER_ID {
+        let options = archived_workspace_options(state);
+        if options.is_empty() {
+            return None;
+        }
+        let next = state
+            .archived_tasks
+            .workspace_filter
+            .as_ref()
+            .and_then(|current| options.iter().position(|workspace| workspace == current))
+            .and_then(|index| options.get(index + 1).cloned())
+            .or_else(|| {
+                state
+                    .archived_tasks
+                    .workspace_filter
+                    .is_none()
+                    .then(|| options[0].clone())
+            });
+        return Some(AppCommand::SetArchivedTaskWorkspaceFilter(next));
     }
     state
         .threads
@@ -140,15 +215,61 @@ pub(super) fn paint(
     painter: &mut dyn Painter,
     content: Rect,
     layout: &ArchivedTasksLayout,
+    state: &ZodeAppState,
     offset: f32,
+    search_focused: bool,
     theme: &ZodeTheme,
 ) {
     paint_heading(painter, content, "已归档任务", "本机任务", offset, theme);
+    let search_input = TextInputState::with_text(state.archived_tasks.search.clone());
+    Input {
+        state: &search_input,
+        placeholder: "搜索已归档任务",
+        focused: search_focused,
+        font_size: 12.0,
+        now_ms: 0,
+        icon_d: Some(SemanticIcon::Search.path()),
+    }
+    .paint(painter, layout.search_rect, &theme.tokens);
+    painter.fill_round_rect(layout.filter_rect, 9.0, theme.tokens.card);
+    painter.stroke_round_rect(layout.filter_rect, 9.0, theme.tokens.border, 1.0);
+    painter.stroke_svg_path(
+        SemanticIcon::Folder.path(),
+        jian_widgets::Point2D::new(
+            layout.filter_rect.origin.x + 12.0,
+            layout.filter_rect.origin.y + 10.0,
+        ),
+        16.0,
+        if layout.filter_enabled {
+            theme.tokens.foreground
+        } else {
+            theme.tokens.muted_foreground
+        },
+        SemanticIcon::Folder.stroke_width(),
+    );
+    paint_single_line(
+        painter,
+        &layout.filter_label,
+        Rect::xywh(
+            layout.filter_rect.origin.x + 36.0,
+            layout.filter_rect.origin.y,
+            (layout.filter_rect.size.x - 48.0).max(0.0),
+            layout.filter_rect.size.y,
+        ),
+        12.0,
+        500,
+        if layout.filter_enabled {
+            theme.tokens.foreground
+        } else {
+            theme.tokens.muted_foreground
+        },
+        HorizontalAlign::Start,
+    );
     if let Some(card) = layout.empty_card {
         paint_card(painter, card, theme);
         paint_single_line(
             painter,
-            "暂无已归档任务",
+            layout.empty_title.unwrap_or("暂无已归档任务"),
             Rect::xywh(
                 card.origin.x + 18.0,
                 card.origin.y + 24.0,
@@ -162,7 +283,11 @@ pub(super) fn paint(
         );
         paint_single_line(
             painter,
-            "归档的任务会保留在本机，可在这里取消归档。",
+            if !has_archived_tasks(state) {
+                "归档的任务会保留在本机，可在这里取消归档。"
+            } else {
+                "调整搜索词或项目筛选后重试。"
+            },
             Rect::xywh(
                 card.origin.x + 18.0,
                 card.origin.y + 58.0,
@@ -253,8 +378,26 @@ pub(super) fn paint(
 
 fn archived_groups(state: &ZodeAppState) -> Vec<(WorkspaceUri, Vec<&ThreadSummary>)> {
     let mut grouped = BTreeMap::<String, Vec<&ThreadSummary>>::new();
+    let search = state.archived_tasks.search.trim().to_lowercase();
     for thread in &state.threads {
-        if state.archived_sessions.contains(&thread.session) {
+        let workspace_matches = state
+            .archived_tasks
+            .workspace_filter
+            .as_ref()
+            .is_none_or(|workspace| workspace == &thread.workspace_uri);
+        let search_matches = search.is_empty()
+            || thread.title.to_lowercase().contains(&search)
+            || thread.session.session_id.to_lowercase().contains(&search)
+            || thread
+                .workspace_uri
+                .as_str()
+                .to_lowercase()
+                .contains(&search)
+            || workspace_label(&thread.workspace_uri)
+                .to_lowercase()
+                .contains(&search);
+        if state.archived_sessions.contains(&thread.session) && workspace_matches && search_matches
+        {
             grouped
                 .entry(thread.workspace_uri.as_str().to_owned())
                 .or_default()
@@ -273,6 +416,25 @@ fn archived_groups(state: &ZodeAppState) -> Vec<(WorkspaceUri, Vec<&ThreadSummar
             (threads[0].workspace_uri.clone(), threads)
         })
         .collect()
+}
+
+fn archived_workspace_options(state: &ZodeAppState) -> Vec<WorkspaceUri> {
+    let mut workspaces = BTreeMap::<String, WorkspaceUri>::new();
+    for thread in &state.threads {
+        if state.archived_sessions.contains(&thread.session) {
+            workspaces
+                .entry(thread.workspace_uri.as_str().to_owned())
+                .or_insert_with(|| thread.workspace_uri.clone());
+        }
+    }
+    workspaces.into_values().collect()
+}
+
+fn has_archived_tasks(state: &ZodeAppState) -> bool {
+    state
+        .threads
+        .iter()
+        .any(|thread| state.archived_sessions.contains(&thread.session))
 }
 
 fn task_row(

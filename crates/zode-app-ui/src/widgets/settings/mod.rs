@@ -19,7 +19,10 @@ use crate::{
     REDUCED_MOTION_ID, THEME_DARK_ID, THEME_LIGHT_ID, THEME_SYSTEM_ID,
 };
 
-pub use archived::{ArchivedTaskGroupLayout, ArchivedTaskRowLayout, ArchivedTasksLayout};
+pub use archived::{
+    ArchivedTaskGroupLayout, ArchivedTaskRowLayout, ArchivedTasksLayout, ARCHIVED_TASK_FILTER_ID,
+    ARCHIVED_TASK_SEARCH_ID,
+};
 pub use general::GeneralSettingsLayout;
 pub use navigation::{
     SettingsNavigationEntryLayout, SettingsNavigationGroupLayout, SettingsNavigationLayout,
@@ -373,7 +376,9 @@ impl SettingsPanel {
                 painter,
                 layout.content,
                 &layout.archived,
+                state,
                 layout.scroll_offset,
+                snapshot.focused == Some(ARCHIVED_TASK_SEARCH_ID),
                 theme,
             ),
         }

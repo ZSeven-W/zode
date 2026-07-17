@@ -43,6 +43,19 @@ fn compact_suggestion_layout_keeps_four_non_overlapping_hit_targets() {
 }
 
 #[test]
+fn disabled_task_suggestions_leave_no_hidden_actions() {
+    let mut state = demo_state();
+    state.current_session = None;
+    state.presentation.route = ShellRoute::Conversation;
+    state.ui_preferences.task_suggestions = false;
+
+    let snapshot = WorkspaceSnapshot::build(&state, 1800.0, 1080.0, Insets::ZERO);
+    assert!(EMPTY_SUGGESTION_IDS
+        .into_iter()
+        .all(|id| snapshot.node(id).is_none()));
+}
+
+#[test]
 fn unknown_widget_is_not_a_suggestion() {
     assert_eq!(
         EmptyState::suggestion_prompt(zode_app_ui::WidgetId(999_999)),

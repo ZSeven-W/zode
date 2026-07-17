@@ -56,6 +56,8 @@ fn store_round_trips_versioned_state_atomically() {
         theme: ThemePreference::Dark,
         reduced_motion: true,
         high_contrast: true,
+        task_suggestions: false,
+        sidebar_tasks_expanded: false,
     };
     state.window_geometry = Some(WindowGeometry {
         x: -1800,
@@ -170,6 +172,8 @@ fn partial_legacy_preferences_use_field_defaults() {
     assert_eq!(loaded.ui_preferences.theme, ThemePreference::Dark);
     assert!(!loaded.ui_preferences.reduced_motion);
     assert!(!loaded.ui_preferences.high_contrast);
+    assert!(loaded.ui_preferences.task_suggestions);
+    assert!(loaded.ui_preferences.sidebar_tasks_expanded);
 }
 
 #[test]

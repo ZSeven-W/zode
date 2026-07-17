@@ -205,6 +205,27 @@ impl EmptyState {
         project_hovered: bool,
         theme: &ZodeTheme,
     ) {
+        Self::paint_with_workspace_suggestions(
+            painter,
+            rect,
+            workspace_label,
+            project_focused,
+            project_hovered,
+            true,
+            theme,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_with_workspace_suggestions(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        workspace_label: Option<&str>,
+        project_focused: bool,
+        project_hovered: bool,
+        show_suggestions: bool,
+        theme: &ZodeTheme,
+    ) {
         if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
             return;
         }
@@ -236,6 +257,10 @@ impl EmptyState {
                 project_hovered,
                 theme,
             );
+        }
+
+        if !show_suggestions {
+            return;
         }
 
         for (index, ((text, icon), card)) in SUGGESTIONS.iter().zip(layout.cards).enumerate() {

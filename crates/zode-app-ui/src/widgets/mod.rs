@@ -74,7 +74,7 @@ pub use settings::{
     PermissionPresetLayout, PermissionRow, PermissionRowLayout, SettingControl,
     SettingControlLayout, SettingRowLayout, SettingsNavigationEntryLayout,
     SettingsNavigationGroupLayout, SettingsNavigationLayout, SettingsPanel, SettingsPanelLayout,
-    SETTINGS_BACK_ID, SETTINGS_SEARCH_ID,
+    ARCHIVED_TASK_FILTER_ID, ARCHIVED_TASK_SEARCH_ID, SETTINGS_BACK_ID, SETTINGS_SEARCH_ID,
 };
 pub use terminal_controller::TerminalPanelController;
 pub use terminal_grid::{

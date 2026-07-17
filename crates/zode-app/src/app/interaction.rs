@@ -7,7 +7,8 @@ use zode_app_model::{
 use zode_app_ui::{
     Composer, EmptyState, Key, KeyEvent, PointerButton, PointerEvent, PointerEventKind,
     ThreadHeader, ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId,
-    COMPOSER_ID, INTEGRATIONS_SEARCH_ID, SEND_ID, SETTINGS_SEARCH_ID, TERMINAL_ID,
+    ARCHIVED_TASK_SEARCH_ID, COMPOSER_ID, INTEGRATIONS_SEARCH_ID, SEND_ID, SETTINGS_SEARCH_ID,
+    TERMINAL_ID,
 };
 
 use super::{
@@ -327,7 +328,10 @@ impl DesktopApp {
             }
             return;
         }
-        if self.focused_widget == Some(SETTINGS_SEARCH_ID) {
+        if matches!(
+            self.focused_widget,
+            Some(SETTINGS_SEARCH_ID | ARCHIVED_TASK_SEARCH_ID)
+        ) {
             match clipboard.read_text() {
                 Ok(Some(text)) if !text.is_empty() => {
                     let _ = self.paste_settings_search_text(&text);
@@ -441,6 +445,7 @@ impl DesktopApp {
             | TERMINAL_ID
             | INTEGRATIONS_SEARCH_ID
             | SETTINGS_SEARCH_ID
+            | ARCHIVED_TASK_SEARCH_ID
             | zode_app_ui::PROJECT_PICKER_SEARCH_ID
             | zode_app_ui::HEADER_RENAME_INPUT_ID => {}
             _ => {
@@ -494,9 +499,9 @@ impl DesktopApp {
                         self.set_project_search_value(value.into_string());
                     }
                 }
-                Action::SetValue if id == SETTINGS_SEARCH_ID => {
+                Action::SetValue if matches!(id, SETTINGS_SEARCH_ID | ARCHIVED_TASK_SEARCH_ID) => {
                     if let Some(ActionData::Value(value)) = request.data {
-                        self.set_settings_search_value(value.into_string());
+                        self.set_settings_input_value(id, value.into_string());
                     }
                 }
                 Action::SetValue if id == INTEGRATIONS_SEARCH_ID => {
@@ -780,6 +785,7 @@ impl DesktopApp {
             AppCommand::BeginTask { .. }
                 | AppCommand::SelectSession(_)
                 | AppCommand::SetSessionArchived { archived: true, .. }
+                | AppCommand::ToggleSidebarTasks
         ) {
             self.persist_ui_state();
         }

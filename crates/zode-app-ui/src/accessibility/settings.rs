@@ -3,7 +3,8 @@ use jian_core::CursorHint;
 use zode_app_model::ZodeAppState;
 
 use crate::{
-    SettingsPanel, ThreadTranscript, WorkspaceLayout, SETTINGS_BACK_ID, SETTINGS_SEARCH_ID,
+    SettingsPanel, ThreadTranscript, WorkspaceLayout, ARCHIVED_TASK_FILTER_ID,
+    ARCHIVED_TASK_SEARCH_ID, SETTINGS_BACK_ID, SETTINGS_SEARCH_ID,
 };
 
 use super::{
@@ -133,7 +134,11 @@ pub(super) fn append_settings_nodes(
             let mut setting = node(
                 row.id,
                 visible_rect,
-                Role::Button,
+                if row.toggled.is_some() {
+                    Role::Switch
+                } else {
+                    Role::Button
+                },
                 row.label,
                 Some(row.value.clone()),
                 if row.enabled {
@@ -148,6 +153,7 @@ pub(super) fn append_settings_nodes(
                     CursorHint::NotAllowed
                 },
             );
+            setting.toggled = row.toggled.map(Toggled::from);
             setting.disabled = !row.enabled;
             nodes.push(setting);
         }
@@ -181,6 +187,48 @@ pub(super) fn append_settings_nodes(
     }
 
     if SettingsPanel::active_category(state) == zode_app_model::SettingsCategory::ArchivedTasks {
+        if let Some(search_rect) =
+            ThreadTranscript::clip_to_viewport(settings.archived.search_rect, content)
+        {
+            nodes.push(node(
+                ARCHIVED_TASK_SEARCH_ID,
+                search_rect,
+                Role::SearchInput,
+                "搜索已归档任务",
+                Some(state.archived_tasks.search.clone()),
+                vec![Action::Focus, Action::SetValue],
+                next_order(focus_order),
+                CursorHint::Text,
+            ));
+        }
+        if let Some(filter_rect) =
+            ThreadTranscript::clip_to_viewport(settings.archived.filter_rect, content)
+        {
+            let mut filter = node(
+                ARCHIVED_TASK_FILTER_ID,
+                filter_rect,
+                Role::Button,
+                "筛选归档任务项目",
+                Some(settings.archived.filter_label.clone()),
+                if settings.archived.filter_enabled {
+                    vec![Action::Click, Action::Focus]
+                } else {
+                    Vec::new()
+                },
+                settings
+                    .archived
+                    .filter_enabled
+                    .then(|| next_order(focus_order))
+                    .flatten(),
+                if settings.archived.filter_enabled {
+                    CursorHint::Pointer
+                } else {
+                    CursorHint::NotAllowed
+                },
+            );
+            filter.disabled = !settings.archived.filter_enabled;
+            nodes.push(filter);
+        }
         for row in settings
             .archived
             .groups

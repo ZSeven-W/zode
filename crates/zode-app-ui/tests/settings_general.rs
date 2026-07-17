@@ -107,6 +107,28 @@ fn typed_navigation_is_enabled_while_unavailable_general_rows_stay_disabled() {
         .iter()
         .filter(|row| !row.enabled)
         .all(|row| row.command.is_none()));
+    let suggestions = layout
+        .general
+        .general_rows
+        .iter()
+        .find(|row| row.label == "建议提示")
+        .unwrap();
+    assert_eq!(suggestions.toggled, Some(true));
+    assert_eq!(
+        suggestions.command,
+        Some(AppCommand::SetTaskSuggestions(false))
+    );
+    let sidebar_tasks = layout
+        .general
+        .general_rows
+        .iter()
+        .find(|row| row.label == "侧边栏任务列表")
+        .unwrap();
+    assert_eq!(sidebar_tasks.toggled, Some(true));
+    assert_eq!(
+        sidebar_tasks.command,
+        Some(AppCommand::SetSidebarTasksExpanded(false))
+    );
     assert!(layout
         .general
         .permission_presets

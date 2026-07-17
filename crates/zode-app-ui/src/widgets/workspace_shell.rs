@@ -416,12 +416,13 @@ fn paint_conversation(
             empty_bottom - geometry.transcript.origin.y,
         );
         welcome_title = EmptyState::welcome_title_layout(empty_rect, workspace_label.as_deref());
-        EmptyState::paint_with_workspace(
+        EmptyState::paint_with_workspace_suggestions(
             painter,
             empty_rect,
             workspace_label.as_deref(),
             snapshot.focused == Some(crate::PROJECT_PICKER_TRIGGER_ID),
             hovered == Some(crate::PROJECT_PICKER_TRIGGER_ID),
+            state.ui_preferences.task_suggestions,
             theme,
         );
     } else {

@@ -1,10 +1,13 @@
 use accesskit::{Action, Role, Toggled};
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
-    demo_state, reduce_navigation_command, NavigationOutcome, SettingsCategory, ShellPage,
-    ShellRoute,
+    demo_state, reduce_navigation_command, reduce_settings_command, AppCommand, NavigationOutcome,
+    SettingsCategory, SettingsCommandOutcome, ShellPage, ShellRoute,
 };
-use zode_app_ui::{Insets, SettingsPanel, WorkspaceSnapshot, ZodeTheme};
+use zode_app_ui::{
+    Insets, SettingsPanel, WorkspaceSnapshot, ZodeTheme, ARCHIVED_TASK_FILTER_ID,
+    ARCHIVED_TASK_SEARCH_ID,
+};
 use zode_node_protocol::{NodeId, SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
 #[derive(Default)]
@@ -135,6 +138,70 @@ fn archived_restore_action_shares_visual_hit_and_accessibility_geometry() {
     let category = snapshot.node(category_id).expect("archived category node");
     assert_eq!(category.toggled, Some(Toggled::True));
     assert!(!category.disabled);
+}
+
+#[test]
+fn archived_search_and_project_filter_use_real_threads_and_accessibility_nodes() {
+    let (mut state, _, _, _) = archived_fixture();
+    let openpencil = WorkspaceUri::new("file:///repo/openpencil").unwrap();
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let search = snapshot
+        .node(ARCHIVED_TASK_SEARCH_ID)
+        .expect("archived search input");
+    assert_eq!(search.role, Role::SearchInput);
+    assert!(search.actions.contains(&Action::SetValue));
+    let filter = snapshot
+        .node(ARCHIVED_TASK_FILTER_ID)
+        .expect("archived project filter");
+    assert_eq!(filter.role, Role::Button);
+    assert!(!filter.disabled);
+    assert_eq!(filter.value.as_deref(), Some("所有项目"));
+    assert_eq!(
+        SettingsPanel::command_for_widget(&state, ARCHIVED_TASK_FILTER_ID),
+        Some(AppCommand::SetArchivedTaskWorkspaceFilter(Some(
+            openpencil.clone(),
+        )))
+    );
+
+    assert_eq!(
+        reduce_settings_command(&mut state, AppCommand::SetArchivedTaskSearch("zode".into()),),
+        SettingsCommandOutcome::Applied,
+    );
+    let content = SettingsPanel::page_layout(snapshot.layout.primary_surface).0;
+    let searched = SettingsPanel::archived_task_layout(content, &state);
+    assert_eq!(searched.groups.len(), 1);
+    assert_eq!(searched.groups[0].label, "zode");
+
+    assert_eq!(
+        reduce_settings_command(&mut state, AppCommand::SetArchivedTaskSearch(String::new()),),
+        SettingsCommandOutcome::Applied,
+    );
+    assert_eq!(
+        reduce_settings_command(
+            &mut state,
+            AppCommand::SetArchivedTaskWorkspaceFilter(Some(openpencil)),
+        ),
+        SettingsCommandOutcome::Applied,
+    );
+    let filtered = SettingsPanel::archived_task_layout(content, &state);
+    assert_eq!(filtered.groups.len(), 1);
+    assert_eq!(filtered.groups[0].label, "openpencil");
+    assert_eq!(filtered.groups[0].rows.len(), 2);
+}
+
+#[test]
+fn unmatched_archived_search_reports_an_honest_empty_result() {
+    let (mut state, _, _, _) = archived_fixture();
+    state.archived_tasks.search = "definitely missing".into();
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let content = SettingsPanel::page_layout(snapshot.layout.primary_surface).0;
+    let layout = SettingsPanel::archived_task_layout(content, &state);
+
+    assert!(layout.groups.is_empty());
+    assert_eq!(layout.empty_title, Some("没有符合筛选条件的任务"));
+    let mut painter = PaintCapture::default();
+    SettingsPanel::paint_page(&mut painter, &snapshot, &state, None, &ZodeTheme::light());
+    assert!(painter.texts.join("\n").contains("没有符合筛选条件的任务"));
 }
 
 #[test]

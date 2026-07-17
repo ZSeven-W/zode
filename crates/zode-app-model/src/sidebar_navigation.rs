@@ -54,6 +54,7 @@ pub(crate) fn reduce_sidebar_navigation(
         }
         AppCommand::ToggleSidebarTasks => {
             state.sidebar.tasks_expanded = !state.sidebar.tasks_expanded;
+            state.ui_preferences.sidebar_tasks_expanded = state.sidebar.tasks_expanded;
             NavigationOutcome::Applied
         }
         AppCommand::ShowAllProjects => {

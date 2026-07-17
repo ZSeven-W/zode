@@ -119,12 +119,32 @@ pub enum ThemePreference {
 }
 
 /// Durable appearance and motion preferences shared by every render surface.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiPreferences {
     pub theme: ThemePreference,
     pub reduced_motion: bool,
     pub high_contrast: bool,
+    #[serde(default = "default_enabled")]
+    pub task_suggestions: bool,
+    #[serde(default = "default_enabled")]
+    pub sidebar_tasks_expanded: bool,
+}
+
+impl Default for UiPreferences {
+    fn default() -> Self {
+        Self {
+            theme: ThemePreference::default(),
+            reduced_motion: false,
+            high_contrast: false,
+            task_suggestions: true,
+            sidebar_tasks_expanded: true,
+        }
+    }
+}
+
+const fn default_enabled() -> bool {
+    true
 }
 
 /// State owned by the node hosting the current application.
@@ -205,6 +225,13 @@ pub struct LocalSettingsState {
     pub worktrees: crate::LoadState<Vec<LocalSettingFact>>,
 }
 
+/// Transient controls for the local archived-task browser.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArchivedTasksState {
+    pub search: String,
+    pub workspace_filter: Option<WorkspaceUri>,
+}
+
 /// Responsive shell state shared by all pages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellState {
@@ -244,6 +271,7 @@ pub struct ZodeAppState {
     pub settings_search: String,
     pub settings_scroll_offset: f32,
     pub local_settings: LocalSettingsState,
+    pub archived_tasks: ArchivedTasksState,
     pub composer: ComposerState,
     pub usage: BTreeMap<SessionLocator, UsageSnapshot>,
     pub presentation: PresentationState,
@@ -375,6 +403,7 @@ pub fn demo_state() -> ZodeAppState {
         settings_search: String::new(),
         settings_scroll_offset: 0.0,
         local_settings: LocalSettingsState::default(),
+        archived_tasks: ArchivedTasksState::default(),
         composer: ComposerState::default(),
         usage: BTreeMap::new(),
         presentation: PresentationState::default(),

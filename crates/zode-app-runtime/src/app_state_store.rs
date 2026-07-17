@@ -75,12 +75,26 @@ impl Default for AppStateFile {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct UiPreferencesCompat {
     theme: ThemePreference,
     reduced_motion: bool,
     high_contrast: bool,
+    task_suggestions: bool,
+    sidebar_tasks_expanded: bool,
+}
+
+impl Default for UiPreferencesCompat {
+    fn default() -> Self {
+        Self {
+            theme: ThemePreference::default(),
+            reduced_motion: false,
+            high_contrast: false,
+            task_suggestions: true,
+            sidebar_tasks_expanded: true,
+        }
+    }
 }
 
 fn deserialize_ui_preferences<'de, D>(deserializer: D) -> Result<UiPreferences, D::Error>
@@ -92,6 +106,8 @@ where
         theme: preferences.theme,
         reduced_motion: preferences.reduced_motion,
         high_contrast: preferences.high_contrast,
+        task_suggestions: preferences.task_suggestions,
+        sidebar_tasks_expanded: preferences.sidebar_tasks_expanded,
     })
 }
 

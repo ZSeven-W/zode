@@ -8,7 +8,8 @@ use super::{
     },
     row::{
         paint_card, paint_divider, paint_heading, paint_section_label, paint_setting_row,
-        setting_row, SettingRowLayout, FIRST_SECTION_TOP, GENERAL_ROW_HEIGHT, SECTION_TOP,
+        setting_row, SettingRowLayout, SettingRowSpec, FIRST_SECTION_TOP, GENERAL_ROW_HEIGHT,
+        SECTION_TOP,
     },
 };
 use crate::{paint_single_line, RectExt, WidgetId, ZodeTheme};
@@ -18,6 +19,10 @@ const GENERAL_SECTION_GAP: f32 = 84.0;
 const GENERAL_BOTTOM_GAP: f32 = 6.0;
 const GENERAL_ROW_COUNT: usize = 10;
 const SPEED_SETTING_ID: WidgetId = WidgetId(8_306);
+const TASK_SUGGESTIONS_SETTING_ID: WidgetId = WidgetId(8_307);
+const SIDEBAR_TASKS_SETTING_ID: WidgetId = WidgetId(8_302);
+
+type GeneralRowDescriptor = (&'static str, String, Option<bool>, bool, Option<AppCommand>);
 
 pub(super) const fn content_height() -> f32 {
     SECTION_TOP
@@ -74,41 +79,69 @@ pub(super) fn layout(content: Rect, state: &ZodeAppState, offset: f32) -> Genera
         },
     );
     let speed_command = next_effort(state).map(|effort| AppCommand::SetEffort(effort.into()));
-    let descriptors: [(&'static str, String, bool, Option<AppCommand>); GENERAL_ROW_COUNT] = [
-        ("默认文件打开目标", "即将支持".into(), false, None),
-        ("语言", "即将支持".into(), false, None),
-        ("在菜单栏中显示", "即将支持".into(), false, None),
-        ("底部面板", "即将支持".into(), false, None),
-        ("默认终端位置", "即将支持".into(), false, None),
-        ("运行时防止系统休眠", "即将支持".into(), false, None),
-        ("速度", speed, speed_command.is_some(), speed_command),
-        ("建议提示", "即将支持".into(), false, None),
+    let descriptors: [GeneralRowDescriptor; GENERAL_ROW_COUNT] = [
+        ("默认文件打开目标", "即将支持".into(), None, false, None),
+        ("语言", "即将支持".into(), None, false, None),
+        (
+            "侧边栏任务列表",
+            if state.sidebar.tasks_expanded {
+                "展开"
+            } else {
+                "折叠"
+            }
+            .into(),
+            Some(state.sidebar.tasks_expanded),
+            true,
+            Some(AppCommand::SetSidebarTasksExpanded(
+                !state.sidebar.tasks_expanded,
+            )),
+        ),
+        ("底部面板", "即将支持".into(), None, false, None),
+        ("默认终端位置", "即将支持".into(), None, false, None),
+        ("运行时防止系统休眠", "即将支持".into(), None, false, None),
+        ("速度", speed, None, speed_command.is_some(), speed_command),
+        (
+            "建议提示",
+            if state.ui_preferences.task_suggestions {
+                "开启"
+            } else {
+                "关闭"
+            }
+            .into(),
+            Some(state.ui_preferences.task_suggestions),
+            true,
+            Some(AppCommand::SetTaskSuggestions(
+                !state.ui_preferences.task_suggestions,
+            )),
+        ),
         (
             "从其他 AI 应用导入工作内容",
             "导入即将支持".into(),
+            None,
             false,
             None,
         ),
-        ("打开源许可证", "查看即将支持".into(), false, None),
+        ("打开源许可证", "查看即将支持".into(), None, false, None),
     ];
     let general_rows = descriptors
         .into_iter()
         .enumerate()
-        .map(|(index, (label, value, enabled, command))| {
-            setting_row(
-                WidgetId(8_300 + index as u64),
-                Rect::xywh(
+        .map(|(index, (label, value, toggled, enabled, command))| {
+            setting_row(SettingRowSpec {
+                id: WidgetId(8_300 + index as u64),
+                rect: Rect::xywh(
                     general_card.origin.x,
                     general_card.origin.y + index as f32 * GENERAL_ROW_HEIGHT,
                     general_card.size.x,
                     GENERAL_ROW_HEIGHT,
                 ),
-                content,
+                viewport: content,
                 label,
                 value,
+                toggled,
                 enabled,
                 command,
-            )
+            })
         })
         .collect();
     let content_height = content_height();
@@ -124,6 +157,16 @@ pub(super) fn layout(content: Rect, state: &ZodeAppState, offset: f32) -> Genera
 }
 
 pub(super) fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+    if id == TASK_SUGGESTIONS_SETTING_ID {
+        return Some(AppCommand::SetTaskSuggestions(
+            !state.ui_preferences.task_suggestions,
+        ));
+    }
+    if id == SIDEBAR_TASKS_SETTING_ID {
+        return Some(AppCommand::SetSidebarTasksExpanded(
+            !state.sidebar.tasks_expanded,
+        ));
+    }
     (id == SPEED_SETTING_ID)
         .then(|| next_effort(state))
         .flatten()

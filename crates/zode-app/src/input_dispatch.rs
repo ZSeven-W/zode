@@ -3,8 +3,8 @@ use jian_widgets::{Point2D, Rect};
 use zode_app_model::ShellPage;
 use zode_app_ui::{
     FocusDirection, Key, KeyEvent, TouchEvent, TouchPhase, WidgetId, WorkspaceSnapshot,
-    COMPOSER_ID, HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID, PROJECT_PICKER_SEARCH_ID,
-    TERMINAL_ID,
+    ARCHIVED_TASK_SEARCH_ID, COMPOSER_ID, HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID,
+    PROJECT_PICKER_SEARCH_ID, SETTINGS_SEARCH_ID, TERMINAL_ID,
 };
 
 use crate::event_map::{route_key_event, InputRoute};
@@ -139,7 +139,9 @@ pub fn ime_allowed_for_focus(
     }
     match page {
         ShellPage::Terminal => focused == Some(TERMINAL_ID),
-        ShellPage::Settings => focused == Some(zode_app_ui::SETTINGS_SEARCH_ID),
+        ShellPage::Settings => {
+            matches!(focused, Some(SETTINGS_SEARCH_ID | ARCHIVED_TASK_SEARCH_ID))
+        }
         ShellPage::Conversation | ShellPage::Review | ShellPage::ComingSoon => {
             focused == Some(COMPOSER_ID)
                 || focused == Some(PROJECT_PICKER_SEARCH_ID)
@@ -152,7 +154,10 @@ pub fn ime_allowed_for_focus(
 #[cfg(test)]
 mod tests {
     use zode_app_model::ShellPage;
-    use zode_app_ui::{WidgetId, HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID};
+    use zode_app_ui::{
+        WidgetId, ARCHIVED_TASK_SEARCH_ID, HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID,
+        SETTINGS_SEARCH_ID,
+    };
 
     use super::ime_allowed_for_focus;
 
@@ -185,6 +190,25 @@ mod tests {
         assert!(!ime_allowed_for_focus(
             ShellPage::ComingSoon,
             Some(INTEGRATIONS_SEARCH_ID),
+            false,
+        ));
+    }
+
+    #[test]
+    fn both_settings_search_fields_enable_ime() {
+        assert!(ime_allowed_for_focus(
+            ShellPage::Settings,
+            Some(SETTINGS_SEARCH_ID),
+            true,
+        ));
+        assert!(ime_allowed_for_focus(
+            ShellPage::Settings,
+            Some(ARCHIVED_TASK_SEARCH_ID),
+            true,
+        ));
+        assert!(!ime_allowed_for_focus(
+            ShellPage::Settings,
+            Some(ARCHIVED_TASK_SEARCH_ID),
             false,
         ));
     }

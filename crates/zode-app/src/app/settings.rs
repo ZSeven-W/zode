@@ -5,10 +5,19 @@ use zode_app_model::{
     SettingsCommandOutcome, ShellRoute, ZodeAppState,
 };
 use zode_app_runtime::workspace_uri_to_path;
-use zode_app_ui::{Key, KeyEvent, Modifiers, SettingsPanel, SETTINGS_SEARCH_ID};
+use zode_app_ui::{
+    Key, KeyEvent, Modifiers, SettingsPanel, WidgetId, ARCHIVED_TASK_SEARCH_ID, SETTINGS_SEARCH_ID,
+};
 use zode_core::config::{ConfigManager, ZodeConfig};
 
 use super::DesktopApp;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchKeyOutcome {
+    Changed,
+    Consumed,
+    Ignored,
+}
 
 pub(super) fn reduce_local_settings_command(
     state: &mut ZodeAppState,
@@ -20,7 +29,11 @@ pub(super) fn reduce_local_settings_command(
             | AppCommand::SetThemePreference(_)
             | AppCommand::SetReducedMotion(_)
             | AppCommand::SetHighContrast(_)
+            | AppCommand::SetTaskSuggestions(_)
+            | AppCommand::SetSidebarTasksExpanded(_)
             | AppCommand::SetSettingsSearch(_)
+            | AppCommand::SetArchivedTaskSearch(_)
+            | AppCommand::SetArchivedTaskWorkspaceFilter(_)
             | AppCommand::SetSettingsScroll { .. }
     ) {
         return SettingsCommandOutcome::Ignored;
@@ -58,74 +71,69 @@ impl DesktopApp {
     }
 
     pub(super) fn handle_settings_search_key(&mut self, event: &KeyEvent) -> bool {
-        if !event.pressed
-            || !matches!(self.app_state.presentation.route, ShellRoute::Settings(_))
-            || self.focused_widget != Some(SETTINGS_SEARCH_ID)
-        {
+        if !event.pressed {
             return false;
         }
-        let mut query = self.app_state.settings_search.clone();
-        match &event.key {
-            Key::Escape if !query.is_empty() => query.clear(),
-            Key::Escape => return false,
-            Key::Backspace => {
-                query.pop();
-            }
-            Key::Delete => query.clear(),
-            Key::Character(value)
-                if event.modifiers.primary() && value.eq_ignore_ascii_case("a") =>
-            {
-                query.clear();
-            }
-            Key::Character(value)
-                if !event.modifiers.primary() && !event.modifiers.contains(Modifiers::ALT) =>
-            {
-                query.push_str(value);
-            }
-            Key::Enter
-            | Key::ArrowLeft
-            | Key::ArrowRight
-            | Key::ArrowUp
-            | Key::ArrowDown
-            | Key::Home
-            | Key::End
-            | Key::PageUp
-            | Key::PageDown => return true,
-            Key::Tab | Key::Character(_) => return false,
+        let Some((id, mut query)) = self.focused_settings_input() else {
+            return false;
+        };
+        match edit_search_query(&mut query, event) {
+            SearchKeyOutcome::Changed => self.set_settings_input_value(id, query),
+            SearchKeyOutcome::Consumed => return true,
+            SearchKeyOutcome::Ignored => return false,
         }
-        self.set_settings_search_value(query);
         true
     }
 
     pub(super) fn handle_settings_search_ime(&mut self, event: &zode_app_ui::ImeEvent) -> bool {
-        if !matches!(self.app_state.presentation.route, ShellRoute::Settings(_))
-            || self.focused_widget != Some(SETTINGS_SEARCH_ID)
-        {
+        let Some((id, mut query)) = self.focused_settings_input() else {
             return false;
-        }
-        if let zode_app_ui::ImeEvent::Commit(text) = event {
-            let mut query = self.app_state.settings_search.clone();
-            query.push_str(text);
-            self.set_settings_search_value(query);
+        };
+        if append_ime_commit(&mut query, event) {
+            self.set_settings_input_value(id, query);
         }
         true
     }
 
     pub(super) fn paste_settings_search_text(&mut self, text: &str) -> bool {
-        if !matches!(self.app_state.presentation.route, ShellRoute::Settings(_))
-            || self.focused_widget != Some(SETTINGS_SEARCH_ID)
-        {
+        let Some((id, mut query)) = self.focused_settings_input() else {
             return false;
-        }
-        let mut query = self.app_state.settings_search.clone();
+        };
         query.push_str(text);
-        self.set_settings_search_value(query);
+        self.set_settings_input_value(id, query);
         true
     }
 
-    pub(super) fn set_settings_search_value(&mut self, value: String) {
-        if reduce_settings_command(&mut self.app_state, AppCommand::SetSettingsSearch(value))
-            == SettingsCommandOutcome::Applied
+    fn focused_settings_input(&self) -> Option<(WidgetId, String)> {
+        match (self.app_state.presentation.route, self.focused_widget) {
+            (ShellRoute::Settings(_), Some(SETTINGS_SEARCH_ID)) => {
+                Some((SETTINGS_SEARCH_ID, self.app_state.settings_search.clone()))
+            }
+            (
+                ShellRoute::Settings(SettingsCategory::ArchivedTasks),
+                Some(ARCHIVED_TASK_SEARCH_ID),
+            ) => Some((
+                ARCHIVED_TASK_SEARCH_ID,
+                self.app_state.archived_tasks.search.clone(),
+            )),
+            _ => None,
+        }
+    }
+
+    pub(super) fn set_settings_input_value(&mut self, id: WidgetId, value: String) {
+        let command = match id {
+            SETTINGS_SEARCH_ID => AppCommand::SetSettingsSearch(value),
+            ARCHIVED_TASK_SEARCH_ID
+                if matches!(
+                    self.app_state.presentation.route,
+                    ShellRoute::Settings(SettingsCategory::ArchivedTasks)
+                ) =>
+            {
+                AppCommand::SetArchivedTaskSearch(value)
+            }
+            _ => return,
+        };
+        if reduce_settings_command(&mut self.app_state, command) == SettingsCommandOutcome::Applied
         {
             self.rebuild_frame_snapshot();
             self.request_redraw();
@@ -144,6 +152,44 @@ impl DesktopApp {
             self.request_redraw();
         }
     }
+}
+
+fn edit_search_query(query: &mut String, event: &KeyEvent) -> SearchKeyOutcome {
+    match &event.key {
+        Key::Escape if !query.is_empty() => query.clear(),
+        Key::Escape => return SearchKeyOutcome::Ignored,
+        Key::Backspace => {
+            query.pop();
+        }
+        Key::Delete => query.clear(),
+        Key::Character(value) if event.modifiers.primary() && value.eq_ignore_ascii_case("a") => {
+            query.clear();
+        }
+        Key::Character(value)
+            if !event.modifiers.primary() && !event.modifiers.contains(Modifiers::ALT) =>
+        {
+            query.push_str(value);
+        }
+        Key::Enter
+        | Key::ArrowLeft
+        | Key::ArrowRight
+        | Key::ArrowUp
+        | Key::ArrowDown
+        | Key::Home
+        | Key::End
+        | Key::PageUp
+        | Key::PageDown => return SearchKeyOutcome::Consumed,
+        Key::Tab | Key::Character(_) => return SearchKeyOutcome::Ignored,
+    }
+    SearchKeyOutcome::Changed
+}
+
+fn append_ime_commit(query: &mut String, event: &zode_app_ui::ImeEvent) -> bool {
+    let zode_app_ui::ImeEvent::Commit(text) = event else {
+        return false;
+    };
+    query.push_str(text);
+    true
 }
 
 fn settings_workspace_path(state: &ZodeAppState) -> Option<PathBuf> {
@@ -361,7 +407,8 @@ fn fact(label: impl Into<String>, value: impl ToString) -> LocalSettingFact {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_worktrees;
+    use super::{append_ime_commit, edit_search_query, parse_worktrees, SearchKeyOutcome};
+    use zode_app_ui::{ImeEvent, Key, KeyEvent, Modifiers};
 
     #[test]
     fn porcelain_worktrees_are_projected_without_inventing_branches() {
@@ -372,5 +419,35 @@ mod tests {
         assert_eq!(facts[0].label, "zode");
         assert_eq!(facts[0].value, "main · /repo/zode");
         assert_eq!(facts[1].value, "detached HEAD · /tmp/detached");
+    }
+
+    #[test]
+    fn settings_search_keyboard_and_ime_edits_are_unicode_safe() {
+        let mut query = "归档".to_owned();
+        assert_eq!(
+            edit_search_query(
+                &mut query,
+                &KeyEvent {
+                    key: Key::Backspace,
+                    modifiers: Modifiers::NONE,
+                    pressed: true,
+                },
+            ),
+            SearchKeyOutcome::Changed,
+        );
+        assert_eq!(query, "归");
+        assert!(append_ime_commit(
+            &mut query,
+            &ImeEvent::Commit("任务".into())
+        ));
+        assert_eq!(query, "归任务");
+        assert!(!append_ime_commit(
+            &mut query,
+            &ImeEvent::Update {
+                text: "候选".into(),
+                cursor: Some(2),
+            },
+        ));
+        assert_eq!(query, "归任务");
     }
 }
