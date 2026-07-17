@@ -31,6 +31,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install skia text dependencies
         run: sudo apt-get update && sudo apt-get install -y bubblewrap fonts-noto-cjk libfontconfig1-dev libfreetype6-dev
+      - name: enable bubblewrap user namespaces
+        run: |
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
