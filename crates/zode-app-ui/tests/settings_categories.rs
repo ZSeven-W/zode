@@ -2,7 +2,9 @@ use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
     demo_state, AppCommand, IntegrationsTab, SettingsCategory, ShellPage, ShellRoute,
 };
-use zode_app_ui::{Insets, SettingsPanel, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme};
+use zode_app_ui::{
+    Insets, SettingsPanel, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme, SETTINGS_BACK_ID,
+};
 use zode_node_protocol::WorkspaceUri;
 
 #[derive(Default)]
@@ -95,6 +97,12 @@ fn category_rail_has_stable_rows_typed_commands_and_honest_placeholders() {
     let painter = paint_settings(&state);
     let text = painter.texts.join("\n");
     assert!(text.contains("搜索设置…"));
+    assert!(text.contains("返回应用"));
+    assert!(!painter.texts.iter().any(|text| text == "设置"));
+    assert_eq!(
+        SettingsPanel::command_for_widget(&state, SETTINGS_BACK_ID),
+        Some(AppCommand::Navigate(ShellRoute::Conversation))
+    );
     assert_eq!(
         painter
             .texts

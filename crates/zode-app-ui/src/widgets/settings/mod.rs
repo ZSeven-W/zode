@@ -20,6 +20,7 @@ use crate::{
 pub use general::GeneralSettingsLayout;
 pub use navigation::{
     SettingsNavigationEntryLayout, SettingsNavigationGroupLayout, SettingsNavigationLayout,
+    SETTINGS_BACK_ID,
 };
 pub use permissions::{PermissionPresetLayout, PermissionRow, PermissionRowLayout};
 pub use row::SettingRowLayout;

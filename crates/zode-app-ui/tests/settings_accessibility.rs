@@ -4,7 +4,8 @@ use zode_app_model::{
     reduce_settings_command, AppCommand, SettingsCategory, SettingsCommandOutcome, ShellRoute,
 };
 use zode_app_ui::{
-    accessibility_tree, Insets, RectExt, SettingsPanel, WorkspaceSnapshot, SETTINGS_ROOT_ID,
+    accessibility_tree, Insets, RectExt, SettingsPanel, WorkspaceSnapshot, SETTINGS_BACK_ID,
+    SETTINGS_ROOT_ID,
 };
 use zode_node_protocol::{
     NodeId as AgentNodeId, SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri,
@@ -49,6 +50,32 @@ fn settings_nodes_expose_current_toggle_state_and_full_visual_hit_width() {
     assert_eq!(
         snapshot.hit_test(visual_toggle_edge),
         Some(zode_app_ui::THEME_DARK_ID),
+    );
+}
+
+#[test]
+fn settings_back_control_shares_visual_hit_and_accessibility_geometry() {
+    let mut state = zode_app_model::demo_state();
+    state.shell.page = zode_app_model::ShellPage::Settings;
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::General);
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let layout = SettingsPanel::layout(
+        snapshot.layout.sidebar,
+        snapshot.layout.primary_surface,
+        &state,
+    );
+    let node = snapshot.node(SETTINGS_BACK_ID).expect("settings back node");
+
+    assert_eq!(node.rect, layout.navigation.title);
+    assert_eq!(node.role, Role::Button);
+    assert!(node.actions.contains(&Action::Click));
+    assert_eq!(
+        snapshot.hit_test(rect_center(node.rect)),
+        Some(SETTINGS_BACK_ID)
+    );
+    assert_eq!(
+        SettingsPanel::command_for_widget(&state, SETTINGS_BACK_ID),
+        Some(AppCommand::Navigate(ShellRoute::Conversation))
     );
 }
 

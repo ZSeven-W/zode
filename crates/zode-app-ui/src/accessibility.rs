@@ -12,7 +12,7 @@ use crate::{
     ReviewPanel, SettingsPanel, SidebarRowTarget, ThreadHeader, ThreadTranscript, WorkspaceLayout,
     DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID, DOCUMENT_PREVIEW_EXTERNAL_ID,
     DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID,
-    INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
+    INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID, SETTINGS_BACK_ID,
 };
 
 mod transcript;
@@ -789,6 +789,16 @@ fn append_settings_nodes(
             Vec::new(),
             None,
             CursorHint::Default,
+        ));
+        nodes.push(node(
+            SETTINGS_BACK_ID,
+            settings.navigation.title,
+            Role::Button,
+            "返回应用",
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
         ));
         for entry in &settings.navigation.entries {
             let Some(visible) = ThreadTranscript::clip_to_viewport(entry.rect, layout.sidebar)

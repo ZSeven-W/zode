@@ -50,6 +50,7 @@ pub use settings::{
     GeneralSettingsLayout, PermissionPresetLayout, PermissionRow, PermissionRowLayout,
     SettingControl, SettingControlLayout, SettingRowLayout, SettingsNavigationEntryLayout,
     SettingsNavigationGroupLayout, SettingsNavigationLayout, SettingsPanel, SettingsPanelLayout,
+    SETTINGS_BACK_ID,
 };
 pub use terminal_controller::TerminalPanelController;
 pub use terminal_grid::{

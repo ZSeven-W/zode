@@ -8,6 +8,7 @@ pub(super) const SETTINGS_APPEARANCE_CATEGORY_ID: WidgetId = WidgetId(81);
 pub(super) const SETTINGS_PERMISSIONS_CATEGORY_ID: WidgetId = WidgetId(82);
 pub(super) const SETTINGS_KEYBOARD_SHORTCUTS_CATEGORY_ID: WidgetId = WidgetId(83);
 pub(super) const SETTINGS_ENVIRONMENT_CATEGORY_ID: WidgetId = WidgetId(84);
+pub const SETTINGS_BACK_ID: WidgetId = WidgetId(85);
 
 const SETTINGS_PROFILE_ID: WidgetId = WidgetId(8_101);
 const SETTINGS_VOICE_ID: WidgetId = WidgetId(8_102);
@@ -236,9 +237,9 @@ pub struct SettingsNavigationLayout {
 
 pub(super) fn layout(rect: Rect, state: &ZodeAppState) -> SettingsNavigationLayout {
     let title = Rect::xywh(
-        rect.origin.x + 16.0,
+        rect.origin.x + 8.0,
         rect.origin.y + 48.0,
-        (rect.size.x - 32.0).max(0.0),
+        (rect.size.x - 16.0).max(0.0),
         30.0,
     );
     let search = Rect::xywh(
@@ -331,13 +332,29 @@ pub(super) fn paint(
     painter.fill_rect(rect, theme.sidebar);
     painter.save();
     painter.clip_rect(rect);
+    let back_icon_size = 16.0_f32.min(layout.title.size.y);
+    painter.stroke_svg_path(
+        SemanticIcon::Back.path(),
+        jian_widgets::Point2D::new(
+            layout.title.origin.x + 8.0,
+            layout.title.origin.y + (layout.title.size.y - back_icon_size) / 2.0,
+        ),
+        back_icon_size,
+        theme.tokens.muted_foreground,
+        SemanticIcon::Back.stroke_width(),
+    );
     paint_single_line(
         painter,
-        "设置",
-        layout.title,
-        16.0,
-        650,
-        theme.sidebar_foreground,
+        "返回应用",
+        Rect::xywh(
+            layout.title.origin.x + 32.0,
+            layout.title.origin.y,
+            (layout.title.size.x - 40.0).max(0.0),
+            layout.title.size.y,
+        ),
+        13.0,
+        450,
+        theme.tokens.muted_foreground,
         HorizontalAlign::Start,
     );
     painter.fill_round_rect(layout.search, 8.0, theme.tokens.card);
@@ -421,6 +438,9 @@ pub(super) fn paint(
 }
 
 pub(super) fn command_for_widget(id: WidgetId) -> Option<AppCommand> {
+    if id == SETTINGS_BACK_ID {
+        return Some(AppCommand::Navigate(ShellRoute::Conversation));
+    }
     NAVIGATION
         .iter()
         .find(|descriptor| descriptor.id == id)
