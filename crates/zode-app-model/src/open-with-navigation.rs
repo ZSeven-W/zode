@@ -12,13 +12,13 @@ pub(crate) fn reduce_open_with_navigation(
             let opening = !state.open_with.menu_open;
             state.close_session_action_surfaces();
             state.open_with.menu_open = opening;
-            if opening {
-                if matches!(
+            if opening
+                && matches!(
                     state.open_with.applications,
                     LoadState::Idle | LoadState::Failed(_)
-                ) {
-                    state.open_with.applications = LoadState::Loading;
-                }
+                )
+            {
+                state.open_with.applications = LoadState::Loading;
             }
             NavigationOutcome::Applied
         }
