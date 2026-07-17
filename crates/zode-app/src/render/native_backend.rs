@@ -4,7 +4,7 @@ use jian_core::{
     geometry::{Point, Rect as JianRect, Size},
     render::{
         BorderRadii, DrawOp, GradientStop, ImageSource, LinearGradient, MeshGradient, Paint,
-        RadialGradient, ShaderSpec, ShaderUniform, ShadowSpec, StrokeOp,
+        RadialGradient, ShaderSpec, ShaderUniform, ShadowSpec, StrokeOp, TextRun,
     },
 };
 use jian_widgets::{Color, ImageAdjustments, ImageDrawMode, Point2D, Rect, TextLayout};
@@ -15,14 +15,20 @@ pub struct NativeBackend {
     skia: jian_skia::SkiaBackend,
     dpi: f32,
     fonts: jian_skia::FontResolver,
+    font_family_override: Option<String>,
 }
 
 impl NativeBackend {
     pub fn new(dpi: f32) -> Self {
+        Self::with_font_family(dpi, None)
+    }
+
+    pub(crate) fn with_font_family(dpi: f32, font_family_override: Option<String>) -> Self {
         Self {
             skia: jian_skia::SkiaBackend::new(),
             dpi,
             fonts: jian_skia::FontResolver::new(skia_safe::FontMgr::new()),
+            font_family_override,
         }
     }
 
@@ -62,10 +68,18 @@ impl NativeBackend {
 
     pub fn draw_text(&mut self, canvas: &skia_safe::Canvas, layout: &TextLayout, origin: Point2D) {
         for source in layout.runs() {
-            let mut run = source.clone();
-            run.origin = Point::new(run.origin.x + origin.x, run.origin.y + origin.y);
+            let run = self.prepare_text_run(source, origin);
             self.draw_op(canvas, &DrawOp::Text(run));
         }
+    }
+
+    fn prepare_text_run(&self, source: &TextRun, origin: Point2D) -> TextRun {
+        let mut run = source.clone();
+        if let Some(family) = self.font_family_override.as_deref() {
+            run.font_family = family.to_string();
+        }
+        run.origin = Point::new(run.origin.x + origin.x, run.origin.y + origin.y);
+        run
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -334,8 +348,13 @@ impl NativeBackend {
         weight: u16,
         italic: bool,
     ) -> f32 {
+        let family = self.font_family_for_measure(family);
         self.fonts
             .measure_text(text, font_size, family, weight, italic)
+    }
+
+    fn font_family_for_measure<'a>(&'a self, requested: Option<&'a str>) -> Option<&'a str> {
+        self.font_family_override.as_deref().or(requested)
     }
 }
 
@@ -390,4 +409,71 @@ fn gradient_stops(stops: &[(f32, Color)]) -> Vec<GradientStop> {
 
 fn round_rect(rect: Rect, radius: f32) -> skia_safe::RRect {
     skia_safe::RRect::new_rect_xy(to_sk_rect(rect), radius, radius)
+}
+
+#[cfg(test)]
+mod tests {
+    use jian_widgets::{Color, Point2D, TextLayout};
+
+    use super::NativeBackend;
+
+    const SNAPSHOT_REGULAR: &[u8] =
+        include_bytes!("../../tests/fonts/NotoSansSC-Regular.subset.ttf");
+    const SNAPSHOT_SEMIBOLD: &[u8] =
+        include_bytes!("../../tests/fonts/NotoSansSC-SemiBold.subset.ttf");
+
+    #[test]
+    fn injected_family_overrides_paint_and_measure_requests() {
+        jian_skia::register_bundled_fonts(vec![
+            SNAPSHOT_REGULAR.to_vec(),
+            SNAPSHOT_SEMIBOLD.to_vec(),
+        ]);
+        let mut backend = NativeBackend::with_font_family(1.0, Some("Noto Sans SC".to_string()));
+        let mut explicit = NativeBackend::new(1.0);
+        let layout = TextLayout::single_run(
+            "snapshot",
+            "system-ui",
+            14.0,
+            Color::BLACK.to_jian(),
+            Point2D::new(2.0, 3.0),
+        );
+
+        let painted = backend.prepare_text_run(&layout.runs()[0], Point2D::new(5.0, 7.0));
+        let measured_with_override =
+            backend.measure_text("snapshot", 14.0, Some("system-ui"), 400, false);
+        let measured_explicitly =
+            explicit.measure_text("snapshot", 14.0, Some("Noto Sans SC"), 400, false);
+
+        assert_eq!(painted.font_family, "Noto Sans SC");
+        assert_eq!(painted.origin.x, 7.0);
+        assert_eq!(painted.origin.y, 10.0);
+        assert!(measured_with_override > 0.0);
+        assert!((measured_with_override - measured_explicitly).abs() < f32::EPSILON);
+        assert_eq!(
+            backend.font_family_for_measure(Some("ui-monospace")),
+            Some("Noto Sans SC")
+        );
+        assert_eq!(backend.font_family_for_measure(None), Some("Noto Sans SC"));
+    }
+
+    #[test]
+    fn default_backend_preserves_requested_system_family() {
+        let backend = NativeBackend::new(1.0);
+        let layout = TextLayout::single_run(
+            "runtime",
+            "system-ui",
+            14.0,
+            Color::BLACK.to_jian(),
+            Point2D::new(0.0, 0.0),
+        );
+
+        let painted = backend.prepare_text_run(&layout.runs()[0], Point2D::new(0.0, 0.0));
+
+        assert_eq!(painted.font_family, "system-ui");
+        assert_eq!(
+            backend.font_family_for_measure(Some("system-ui")),
+            Some("system-ui")
+        );
+        assert_eq!(backend.font_family_for_measure(None), None);
+    }
 }
