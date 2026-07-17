@@ -293,7 +293,10 @@
         use agent_tools_code::FsSink;
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
-        let config = match SandboxConfig::new(cwd, SandboxMode::WorkspaceWrite, false, &[]) {
+        // This test isolates the filesystem contract. Some containerized CI
+        // hosts let bwrap create mount namespaces but forbid the separate
+        // network namespace, so keep networking out of this assertion.
+        let config = match SandboxConfig::new(cwd, SandboxMode::WorkspaceWrite, true, &[]) {
             Ok(c) => c,
             Err(_) => return, // unsupported OS — nothing to prove here
         };
