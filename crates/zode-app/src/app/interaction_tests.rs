@@ -1,14 +1,20 @@
 use zode_app_model::{
-    demo_state, AppCommand, ComingSoonFeature, IntegrationsTab, LoadState, ProjectState,
-    SecondaryPane, SettingsCategory, SettingsCommandOutcome, ShellRoute, TranscriptState,
+    demo_state, AppCommand, AttachmentMetadata, ComingSoonFeature, IntegrationsTab, LoadState,
+    ProjectState, SecondaryPane, SettingsCategory, SettingsCommandOutcome, ShellRoute,
+    TranscriptState,
 };
-use zode_app_ui::{Insets, SettingsPanel, WidgetId, WorkspaceSnapshot};
-use zode_node_protocol::{DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
+use zode_app_ui::{
+    ComposerOutcome, ComposerSubmission, Insets, SettingsPanel, WidgetId, WorkspaceSnapshot,
+};
+use zode_node_protocol::{
+    DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary, UserContent, WorkspaceUri,
+};
 
 use super::{
-    normalize_conversation_route, reduce_local_settings_command, settings_interaction_viewport,
-    widget_command,
+    normalize_conversation_route, project_composer_outcome, reduce_local_settings_command,
+    settings_interaction_viewport, widget_command,
 };
+use crate::{command_bridge::prepare_dispatch, event_map::composer_outcome_command};
 
 fn state_with_session() -> (zode_app_model::ZodeAppState, SessionLocator, WorkspaceUri) {
     let mut state = demo_state();
@@ -222,4 +228,142 @@ fn interaction_page_behavior_reads_the_typed_route() {
     let source = include_str!("interaction.rs");
     assert!(!source.contains("app_state.shell.page"));
     assert!(source.contains("app_state.presentation.route"));
+}
+
+#[test]
+fn applying_composer_outcome_projects_attachment_metadata() {
+    let mut state = demo_state();
+    let metadata = AttachmentMetadata {
+        id: "attachment-1".into(),
+        path: None,
+        display_name: "shot.png".into(),
+        media_type: "image/png".into(),
+        width: Some(640),
+        height: Some(360),
+        byte_len: 1_024,
+    };
+
+    project_composer_outcome(
+        &mut state,
+        &ComposerOutcome::AttachmentsChanged(vec![metadata.clone()]),
+    );
+
+    assert_eq!(state.composer.attachments, vec![metadata]);
+}
+
+#[test]
+fn sending_clears_projected_attachments_without_dropping_payload() {
+    let mut state = demo_state();
+    state.composer.attachments.push(AttachmentMetadata {
+        id: "attachment-1".into(),
+        path: None,
+        display_name: "shot.png".into(),
+        media_type: "image/png".into(),
+        width: Some(640),
+        height: Some(360),
+        byte_len: 1_024,
+    });
+    let outcome = ComposerOutcome::Send(ComposerSubmission {
+        content: vec![UserContent::Image {
+            mime_type: "image/png".into(),
+            data_base64: "cGF5bG9hZA==".into(),
+            display_name: "shot.png".into(),
+        }],
+        attachments: state.composer.attachments.clone(),
+    });
+
+    project_composer_outcome(&mut state, &outcome);
+
+    assert!(state.composer.attachments.is_empty());
+    let ComposerOutcome::Send(submission) = outcome else {
+        unreachable!();
+    };
+    assert!(matches!(
+        &submission.content[0],
+        UserContent::Image { data_base64, .. } if data_base64 == "cGF5bG9hZA=="
+    ));
+}
+
+#[test]
+fn composer_attachment_metadata_enters_the_transcript_after_sending() {
+    let (mut state, session, _) = state_with_session();
+    let attachment = AttachmentMetadata {
+        id: "attachment-1".into(),
+        path: None,
+        display_name: "shot.png".into(),
+        media_type: "image/png".into(),
+        width: Some(640),
+        height: Some(360),
+        byte_len: 1_024,
+    };
+    let outcome = ComposerOutcome::Send(ComposerSubmission {
+        content: vec![UserContent::Image {
+            mime_type: "image/png".into(),
+            data_base64: "cGF5bG9hZA==".into(),
+            display_name: "shot.png".into(),
+        }],
+        attachments: vec![attachment.clone()],
+    });
+
+    project_composer_outcome(&mut state, &outcome);
+
+    assert!(matches!(
+        state.transcripts[&session].items.last(),
+        Some(zode_app_model::TranscriptItem::Attachment(projected)) if projected == &attachment
+    ));
+}
+
+#[test]
+fn first_attachment_submit_creates_session_before_metadata_projection() {
+    let mut state = demo_state();
+    let workspace_uri = WorkspaceUri::new("file:///repo/zode").unwrap();
+    state.projects.push(ProjectState {
+        workspace_uri: workspace_uri.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 0,
+    });
+    state.active_workspace = Some(workspace_uri);
+    let attachment = AttachmentMetadata {
+        id: "attachment-first".into(),
+        path: None,
+        display_name: "first.png".into(),
+        media_type: "image/png".into(),
+        width: Some(640),
+        height: Some(360),
+        byte_len: 1_024,
+    };
+    let mut outcome = ComposerOutcome::Send(ComposerSubmission {
+        content: vec![UserContent::Image {
+            mime_type: "image/png".into(),
+            data_base64: "cGF5bG9hZA==".into(),
+            display_name: "first.png".into(),
+        }],
+        attachments: vec![attachment.clone()],
+    });
+
+    let command = composer_outcome_command(&mut outcome).expect("submit command");
+    let ComposerOutcome::Send(submission) = &outcome else {
+        unreachable!();
+    };
+    assert!(submission.content.is_empty());
+    assert_eq!(
+        submission.attachments.as_slice(),
+        std::slice::from_ref(&attachment)
+    );
+
+    let dispatch = prepare_dispatch(&mut state, command)
+        .expect("first submit is valid")
+        .expect("first submit dispatch");
+    assert!(format!("{dispatch:?}").contains("CreateSession"));
+    assert!(format!("{dispatch:?}").contains("StartTurn"));
+    let session = state.current_session.clone().expect("created session");
+    assert!(state.transcripts.contains_key(&session));
+
+    project_composer_outcome(&mut state, &outcome);
+
+    assert!(matches!(
+        state.transcripts[&session].items.last(),
+        Some(zode_app_model::TranscriptItem::Attachment(projected)) if projected == &attachment
+    ));
 }

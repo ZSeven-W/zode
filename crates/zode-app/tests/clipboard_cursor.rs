@@ -91,6 +91,28 @@ fn injected_clipboard_pastes_text_and_rgba_image_into_composer() {
 }
 
 #[test]
+fn clipboard_paste_preserves_attachment_dimensions_and_byte_length() {
+    let clipboard = FakeClipboard {
+        text: None,
+        image: Some(ClipboardImage {
+            width: 2,
+            height: 3,
+            rgba8: vec![255; 2 * 3 * 4],
+        }),
+        writes: Mutex::new(Vec::new()),
+    };
+    let mut composer = ComposerController::fixture("");
+
+    assert_eq!(paste_from_clipboard(&clipboard, &mut composer).unwrap(), 1);
+    let [attachment] = composer.attachment_metadata() else {
+        panic!("one attachment should be projected");
+    };
+    assert_eq!((attachment.width, attachment.height), (Some(2), Some(3)));
+    assert!(attachment.byte_len > 0);
+    assert_eq!(attachment.display_name, "clipboard.png");
+}
+
+#[test]
 fn invalid_rgba_clipboard_image_is_rejected() {
     let clipboard = FakeClipboard {
         text: None,

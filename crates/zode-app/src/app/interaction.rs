@@ -3,7 +3,7 @@ use zode_app_model::{
     reduce_navigation_command, reduce_presentation_command, reduce_settings_command,
     reduce_tool_command, reduce_transcript_command, AppCommand, NavigationOutcome,
     SettingsCommandOutcome, ShellRoute, ThemePreference, ToolCommandOutcome,
-    TranscriptCommandOutcome,
+    TranscriptCommandOutcome, ZodeAppState,
 };
 use zode_app_ui::{
     EnvironmentPanel, IntegrationsPage, Key, KeyEvent, PointerButton, PointerEvent,
@@ -28,6 +28,40 @@ use crate::{
 #[cfg(test)]
 #[path = "interaction_tests.rs"]
 mod tests;
+
+pub(super) fn project_composer_outcome(
+    state: &mut ZodeAppState,
+    outcome: &zode_app_ui::ComposerOutcome,
+) {
+    match outcome {
+        zode_app_ui::ComposerOutcome::AttachmentsChanged(attachments) => {
+            state.composer.attachments.clone_from(attachments);
+        }
+        zode_app_ui::ComposerOutcome::Send(submission)
+        | zode_app_ui::ComposerOutcome::Steer(submission) => {
+            state.composer.attachments.clear();
+            let Some(session) = state.current_session.clone() else {
+                return;
+            };
+            let Some(transcript) = state.transcripts.get_mut(&session) else {
+                return;
+            };
+            transcript.items.extend(
+                submission
+                    .attachments
+                    .iter()
+                    .cloned()
+                    .map(zode_app_model::TranscriptItem::Attachment),
+            );
+        }
+        zode_app_ui::ComposerOutcome::Ignored
+        | zode_app_ui::ComposerOutcome::Edited
+        | zode_app_ui::ComposerOutcome::Stop
+        | zode_app_ui::ComposerOutcome::SetModel(_)
+        | zode_app_ui::ComposerOutcome::SetEffort(_)
+        | zode_app_ui::ComposerOutcome::SetSandbox(_) => {}
+    }
+}
 
 fn widget_command(state: &zode_app_model::ZodeAppState, id: WidgetId) -> Option<AppCommand> {
     static_sidebar_command(state, id)
@@ -237,13 +271,16 @@ impl DesktopApp {
                     );
                     self.apply_terminal_command(command);
                 } else if self.app_state.presentation.route == ShellRoute::Conversation {
+                    let empty = std::collections::BTreeMap::new();
                     let command = self.app_state.current_session.as_ref().and_then(|session| {
                         self.app_state.transcripts.get(session).map(|transcript| {
+                            let tool_expanded =
+                                self.app_state.tool_expanded.get(session).unwrap_or(&empty);
                             ThreadTranscript::scroll_command(
                                 session.clone(),
                                 self.frame_snapshot.layout.transcript,
                                 transcript,
-                                &self.app_state.tool_expanded,
+                                tool_expanded,
                                 -event.delta_y * multiplier,
                             )
                         })
@@ -317,7 +354,15 @@ impl DesktopApp {
         }
         match paste_from_clipboard(clipboard.as_ref(), &mut self.composer) {
             Ok(0) => {}
-            Ok(_) => self.apply_composer_outcome(zode_app_ui::ComposerOutcome::Edited),
+            Ok(_) => {
+                let attachments = self.composer.attachment_metadata().to_vec();
+                let outcome = if attachments.is_empty() {
+                    zode_app_ui::ComposerOutcome::Edited
+                } else {
+                    zode_app_ui::ComposerOutcome::AttachmentsChanged(attachments)
+                };
+                self.apply_composer_outcome(outcome);
+            }
             Err(error) => eprintln!("zode-app: clipboard read failed: {error}"),
         }
     }

@@ -1,5 +1,6 @@
 use zode_app_model::{
-    demo_state, reduce_agent_event, ReduceOutcome, TranscriptItem, TranscriptState, ZodeAppState,
+    demo_state, reduce_agent_event, reduce_tool_command, AppCommand, ReduceOutcome,
+    ToolCommandOutcome, TranscriptItem, TranscriptState, ZodeAppState,
 };
 use zode_node_protocol::{
     AgentEvent, AgentEventKind, SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus,
@@ -123,6 +124,58 @@ fn adjacent_thinking_deltas_extend_one_thinking_item() {
         state.transcripts[&session].items,
         vec![TranscriptItem::Thinking("先想".into())],
     );
+}
+
+#[test]
+fn streaming_update_invalidates_cached_item_height() {
+    let (mut state, session, turn_id) = active_state();
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            1,
+            AgentEventKind::TextDelta { delta: "a".into() },
+        ),
+    );
+    state.transcripts.get_mut(&session).unwrap().item_heights = vec![88.0];
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            2,
+            AgentEventKind::TextDelta {
+                delta: " much longer response".into(),
+            },
+        ),
+    );
+    assert_eq!(state.transcripts[&session].item_heights, [0.0]);
+
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            3,
+            AgentEventKind::ToolStarted {
+                tool: tool("tool-1", ToolStatus::Running, "running"),
+            },
+        ),
+    );
+    state.transcripts.get_mut(&session).unwrap().item_heights = vec![0.0, 64.0];
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            4,
+            AgentEventKind::ToolCompleted {
+                tool: tool("tool-1", ToolStatus::Completed, "completed with detail"),
+            },
+        ),
+    );
+    assert_eq!(state.transcripts[&session].item_heights, [0.0, 0.0]);
 }
 
 #[test]
@@ -308,6 +361,51 @@ fn tool_completed_does_not_insert_a_missing_tool() {
 
     assert!(state.transcripts[&session].items.is_empty());
     assert_eq!(state.transcripts[&session].last_sequence, 1);
+}
+
+#[test]
+fn tool_expansion_invalidates_cached_item_height() {
+    let (mut state, session, _) = active_state();
+    state.transcripts.insert(
+        session.clone(),
+        TranscriptState {
+            items: vec![
+                TranscriptItem::Tool(tool("target", ToolStatus::Completed, "target")),
+                TranscriptItem::Tool(tool("other", ToolStatus::Completed, "other")),
+            ],
+            item_heights: vec![42.0, 64.0],
+            ..TranscriptState::default()
+        },
+    );
+    let second = SessionLocator::new(state.host.node_id, "s2");
+    state.transcripts.insert(
+        second.clone(),
+        TranscriptState {
+            items: vec![
+                TranscriptItem::Tool(tool("other", ToolStatus::Completed, "other")),
+                TranscriptItem::Tool(tool("target", ToolStatus::Completed, "target")),
+            ],
+            item_heights: vec![70.0, 80.0],
+            ..TranscriptState::default()
+        },
+    );
+
+    assert_eq!(
+        reduce_tool_command(
+            &mut state,
+            AppCommand::SetToolExpanded {
+                session: session.clone(),
+                tool_id: "target".into(),
+                expanded: true,
+            },
+        ),
+        ToolCommandOutcome::Applied,
+    );
+
+    assert_eq!(state.transcripts[&session].item_heights, [0.0, 64.0]);
+    assert_eq!(state.transcripts[&second].item_heights, [70.0, 80.0]);
+    assert_eq!(state.tool_expanded[&session].get("target"), Some(&true));
+    assert!(!state.tool_expanded.contains_key(&second));
 }
 
 #[test]

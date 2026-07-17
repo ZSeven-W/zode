@@ -511,7 +511,7 @@ fn dynamic_row_rect(rect: Rect, project_y: f32, index: usize) -> Rect {
     )
 }
 
-fn workspace_label(workspace: &WorkspaceUri, available: bool) -> String {
+pub(crate) fn workspace_label(workspace: &WorkspaceUri, available: bool) -> String {
     let value = workspace.as_str().trim_end_matches('/');
     let name = value.rsplit('/').next().unwrap_or(value);
     if available {

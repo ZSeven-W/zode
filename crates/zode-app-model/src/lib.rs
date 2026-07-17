@@ -18,7 +18,8 @@ pub use reducer::{
 };
 pub use state::*;
 pub use transcript::{
-    default_tool_expanded, tool_category, ToolCategory, TranscriptItem, TranscriptState,
+    default_tool_expanded, tool_category, ActivityEntry, AttachmentMetadata, FileArtifact,
+    GoalProgress, ToolCategory, TranscriptItem, TranscriptState, TranscriptVisualKind,
 };
 
 pub const CRATE_READY: bool = true;

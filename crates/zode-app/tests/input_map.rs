@@ -14,11 +14,11 @@ use zode_app::input_dispatch::{
     ime_allowed_for_focus, settings_scroll_delta_for_action, settings_scroll_delta_for_key,
     SettingsTouchOutcome, SettingsTouchTracker,
 };
-use zode_app_model::{AppCommand, SystemTheme};
+use zode_app_model::{AppCommand, AttachmentMetadata, SystemTheme};
 use zode_app_ui::{
-    ComposerOutcome, FocusDirection, ImeEvent, Key, KeyEvent, Modifiers, PointerButton,
-    PointerEvent, PointerEventKind, TouchEvent, TouchPhase, UnifiedInputEvent, WheelDeltaMode,
-    WheelEvent,
+    ComposerOutcome, ComposerSubmission, FocusDirection, ImeEvent, Key, KeyEvent, Modifiers,
+    PointerButton, PointerEvent, PointerEventKind, TouchEvent, TouchPhase, UnifiedInputEvent,
+    WheelDeltaMode, WheelEvent,
 };
 use zode_node_protocol::UserContent;
 
@@ -151,23 +151,67 @@ fn ime_preedit_uses_the_cursor_end_and_preserves_lifecycle() {
 
 #[test]
 fn composer_outcomes_map_to_controller_commands() {
+    let mut send = ComposerOutcome::Send("hello".into());
     assert_eq!(
-        composer_outcome_command(ComposerOutcome::Send("hello".into())),
+        composer_outcome_command(&mut send),
         Some(AppCommand::Submit(vec![UserContent::Text {
             text: "hello".into(),
         }])),
     );
+    let ComposerOutcome::Send(submission) = send else {
+        unreachable!();
+    };
+    assert!(submission.content.is_empty());
+
+    let mut steer = ComposerOutcome::Steer("redirect".into());
     assert_eq!(
-        composer_outcome_command(ComposerOutcome::Steer("redirect".into())),
+        composer_outcome_command(&mut steer),
         Some(AppCommand::Steer(vec![UserContent::Text {
             text: "redirect".into(),
         }])),
     );
+    let ComposerOutcome::Steer(submission) = steer else {
+        unreachable!();
+    };
+    assert!(submission.content.is_empty());
+
+    let mut stop = ComposerOutcome::Stop;
     assert_eq!(
-        composer_outcome_command(ComposerOutcome::Stop),
+        composer_outcome_command(&mut stop),
         Some(AppCommand::Interrupt),
     );
-    assert_eq!(composer_outcome_command(ComposerOutcome::Edited), None,);
+    let mut edited = ComposerOutcome::Edited;
+    assert_eq!(composer_outcome_command(&mut edited), None,);
+}
+
+#[test]
+fn composer_command_moves_payload_but_preserves_attachment_metadata() {
+    let attachment = AttachmentMetadata {
+        id: "attachment-1".into(),
+        path: None,
+        display_name: "shot.png".into(),
+        media_type: "image/png".into(),
+        width: Some(640),
+        height: Some(360),
+        byte_len: 1_024,
+    };
+    let mut outcome = ComposerOutcome::Send(ComposerSubmission {
+        content: vec![UserContent::Image {
+            mime_type: "image/png".into(),
+            data_base64: "cGF5bG9hZA==".into(),
+            display_name: "shot.png".into(),
+        }],
+        attachments: vec![attachment.clone()],
+    });
+
+    let command = composer_outcome_command(&mut outcome).expect("send command");
+
+    assert!(matches!(command, AppCommand::Submit(content) if content.len() == 1));
+    let ComposerOutcome::Send(submission) = outcome else {
+        unreachable!();
+    };
+    assert!(submission.content.is_empty());
+    assert_eq!(submission.attachments, [attachment]);
 }
 
 #[test]

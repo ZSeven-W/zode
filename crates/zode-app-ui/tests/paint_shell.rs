@@ -3,8 +3,8 @@ use zode_app_model::{
     demo_state, ComingSoonFeature, IntegrationsTab, SettingsCategory, ShellPage, ShellRoute,
 };
 use zode_app_ui::{
-    Insets, ProjectSidebar, RectExt, SidebarAction, TerminalGrid, WorkspaceLayout, WorkspaceShell,
-    ZodeTheme,
+    Composer, Insets, ProjectSidebar, RectExt, SidebarAction, TerminalGrid, WorkspaceLayout,
+    WorkspaceShell, ZodeTheme,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +69,7 @@ fn workspace_shell_paints_the_shared_geometry_boundaries() {
     let mut painter = CapturePainter::default();
 
     WorkspaceShell::paint(&mut painter, viewport, Insets::ZERO, &state, &theme);
+    let composer = Composer::layout(geometry.composer, &state.composer);
 
     assert!(painter
         .operations
@@ -83,7 +84,7 @@ fn workspace_shell_paints_the_shared_geometry_boundaries() {
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
         PaintOp::FillRound(rect, _, color)
-            if *rect == geometry.composer && *color == theme.tokens.card
+            if *rect == composer.input && *color == theme.tokens.card
     )));
     assert_eq!(geometry.composer.max_y(), 978.0);
 }

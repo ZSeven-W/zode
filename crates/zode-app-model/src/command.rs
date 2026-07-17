@@ -30,6 +30,7 @@ pub enum AppCommand {
         height: f32,
     },
     SetToolExpanded {
+        session: SessionLocator,
         tool_id: String,
         expanded: bool,
     },

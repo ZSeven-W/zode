@@ -2,7 +2,7 @@ use std::{borrow::Cow, io::Cursor, sync::Mutex};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use image::{DynamicImage, ImageFormat, RgbaImage};
-use zode_app_model::AppCommand;
+use zode_app_model::{AppCommand, AttachmentMetadata};
 use zode_app_ui::ComposerController;
 
 use crate::services::ServiceError;
@@ -91,21 +91,41 @@ pub fn paste_from_clipboard(
     let text = clipboard.read_text()?.filter(|text| !text.is_empty());
     let image = clipboard
         .read_image()?
-        .map(|image| encode_png(&image))
+        .map(|image| {
+            let encoded = encode_png(&image)?;
+            Ok::<_, ServiceError>((image.width, image.height, encoded))
+        })
         .transpose()?;
     let mut pasted = 0;
     if let Some(text) = text {
         composer.paste_text(&text);
         pasted += 1;
     }
-    if let Some(encoded) = image {
-        composer.paste_image("image/png", encoded, "clipboard.png");
+    if let Some((width, height, encoded)) = image {
+        composer.paste_image_with_metadata(
+            "image/png",
+            encoded.data_base64,
+            AttachmentMetadata {
+                id: String::new(),
+                path: None,
+                display_name: "clipboard.png".into(),
+                media_type: "image/png".into(),
+                width: Some(width),
+                height: Some(height),
+                byte_len: encoded.byte_len,
+            },
+        );
         pasted += 1;
     }
     Ok(pasted)
 }
 
-fn encode_png(image: &ClipboardImage) -> Result<String, ServiceError> {
+struct EncodedImage {
+    data_base64: String,
+    byte_len: u64,
+}
+
+fn encode_png(image: &ClipboardImage) -> Result<EncodedImage, ServiceError> {
     if image.width == 0 || image.height == 0 {
         return Err(ServiceError::Platform(
             "clipboard image dimensions must be positive".into(),
@@ -117,5 +137,9 @@ fn encode_png(image: &ClipboardImage) -> Result<String, ServiceError> {
     DynamicImage::ImageRgba8(pixels)
         .write_to(&mut output, ImageFormat::Png)
         .map_err(|error| ServiceError::Platform(error.to_string()))?;
-    Ok(STANDARD.encode(output.into_inner()))
+    let bytes = output.into_inner();
+    Ok(EncodedImage {
+        byte_len: bytes.len() as u64,
+        data_base64: STANDARD.encode(bytes),
+    })
 }

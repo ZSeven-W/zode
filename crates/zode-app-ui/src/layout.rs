@@ -5,7 +5,10 @@ pub const SIDEBAR_W: f32 = 240.0;
 pub const COMPACT_SIDEBAR_W: f32 = 64.0;
 pub const TOP_BAR_H: f32 = 46.0;
 pub const CONTENT_W: f32 = 736.0;
-pub const COMPOSER_H: f32 = 100.0;
+pub const COMPOSER_CONTEXT_H: f32 = 44.0;
+pub const COMPOSER_ATTACHMENT_H: f32 = 52.0;
+pub const COMPOSER_INPUT_H: f32 = 100.0;
+pub const COMPOSER_H: f32 = COMPOSER_CONTEXT_H + COMPOSER_INPUT_H;
 pub const COMPOSER_BOTTOM: f32 = 14.0;
 pub const CONTENT_GUTTER: f32 = 16.0;
 pub const TRANSCRIPT_TOP_GAP: f32 = 24.0;
@@ -107,6 +110,7 @@ impl WorkspaceLayout {
             insets,
             ShellRoute::Conversation,
             SecondaryLayout::None,
+            false,
         )
     }
 
@@ -122,7 +126,14 @@ impl WorkspaceLayout {
         } else {
             SecondaryLayout::None
         };
-        Self::compute_internal(width, height, insets, ShellRoute::Conversation, secondary)
+        Self::compute_internal(
+            width,
+            height,
+            insets,
+            ShellRoute::Conversation,
+            secondary,
+            false,
+        )
     }
 
     /// Computes geometry for a typed desktop route and its optional side pane.
@@ -138,7 +149,25 @@ impl WorkspaceLayout {
             Some(SecondaryPane::Review) => SecondaryLayout::Review,
             None => SecondaryLayout::None,
         };
-        Self::compute_internal(width, height, insets, route, secondary)
+        Self::compute_internal(width, height, insets, route, secondary, false)
+    }
+
+    /// Computes the state-dependent composer stack while keeping the rest of
+    /// the route geometry identical to `compute_presentation`.
+    pub fn compute_presentation_with_attachments(
+        width: f32,
+        height: f32,
+        insets: Insets,
+        route: ShellRoute,
+        secondary_pane: Option<SecondaryPane>,
+        has_attachments: bool,
+    ) -> Self {
+        let secondary = match secondary_pane {
+            Some(SecondaryPane::Environment) => SecondaryLayout::Environment(ENVIRONMENT_PANEL_W),
+            Some(SecondaryPane::Review) => SecondaryLayout::Review,
+            None => SecondaryLayout::None,
+        };
+        Self::compute_internal(width, height, insets, route, secondary, has_attachments)
     }
 
     fn compute_internal(
@@ -147,6 +176,7 @@ impl WorkspaceLayout {
         insets: Insets,
         route: ShellRoute,
         secondary: SecondaryLayout,
+        has_attachments: bool,
     ) -> Self {
         let width = finite_non_negative(width);
         let height = finite_non_negative(height);
@@ -204,7 +234,13 @@ impl WorkspaceLayout {
 
         let top_bar_h = TOP_BAR_H.min(available_h);
         let top_bar = Rect::xywh(main_x, insets.top, primary_w, top_bar_h);
-        let composer_h = COMPOSER_H
+        let desired_composer_h = COMPOSER_H
+            + if has_attachments {
+                COMPOSER_ATTACHMENT_H
+            } else {
+                0.0
+            };
+        let composer_h = desired_composer_h
             .min((available_h - top_bar_h - COMPOSER_BOTTOM - TRANSCRIPT_TOP_GAP).max(0.0));
         let composer_bottom_gap = COMPOSER_BOTTOM.min((safe_bottom - top_bar.max_y()).max(0.0));
         let composer_y = (safe_bottom - composer_bottom_gap - composer_h).max(top_bar.max_y());

@@ -20,7 +20,8 @@ mod workspace_shell;
 pub use approval_card::{ApprovalAction, ApprovalButtonLayout, ApprovalCard};
 pub use coming_soon_page::ComingSoonPage;
 pub use composer::{
-    Composer, ComposerController, ComposerOutcome, ComposerSubmission, SandboxSelection,
+    Composer, ComposerController, ComposerLayout, ComposerOutcome, ComposerSubmission,
+    SandboxSelection,
 };
 pub use empty_state::EmptyState;
 pub use environment_panel::{

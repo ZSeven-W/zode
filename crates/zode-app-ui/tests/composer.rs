@@ -1,3 +1,4 @@
+use zode_app_model::AttachmentMetadata;
 use zode_app_ui::{
     ComposerController, ComposerOutcome, ImeEvent, Key, Modifiers, SandboxSelection,
 };
@@ -57,10 +58,11 @@ fn ime_commit_is_applied_once_and_end_only_clears_preedit() {
 fn paste_preserves_text_and_image_in_submission() {
     let mut composer = ComposerController::fixture("describe");
     assert_eq!(composer.paste_text(" this"), ComposerOutcome::Edited);
-    assert_eq!(
+    assert!(matches!(
         composer.paste_image("image/png", "aGVsbG8=", "reference.png"),
-        ComposerOutcome::Edited,
-    );
+        ComposerOutcome::AttachmentsChanged(attachments)
+            if attachments.len() == 1 && attachments[0].display_name == "reference.png"
+    ));
 
     let ComposerOutcome::Send(submission) = composer.key(Key::Enter, Modifiers::NONE) else {
         panic!("expected a send outcome");
@@ -78,6 +80,50 @@ fn paste_preserves_text_and_image_in_submission() {
             },
         ],
     );
+}
+
+#[test]
+fn submitting_clears_projected_attachments_without_dropping_payload() {
+    let mut composer = ComposerController::fixture("describe this image");
+    let metadata = AttachmentMetadata {
+        id: "attachment-1".into(),
+        path: None,
+        display_name: "reference.png".into(),
+        media_type: "image/png".into(),
+        width: Some(640),
+        height: Some(360),
+        byte_len: 5,
+    };
+    assert_eq!(
+        composer.paste_image_with_metadata("image/png", "aGVsbG8=", metadata.clone(),),
+        ComposerOutcome::AttachmentsChanged(vec![metadata]),
+    );
+
+    let ComposerOutcome::Send(submission) = composer.key(Key::Enter, Modifiers::NONE) else {
+        panic!("expected a send outcome");
+    };
+
+    assert!(composer.attachment_metadata().is_empty());
+    assert!(matches!(
+        &submission.content[1],
+        UserContent::Image { data_base64, .. } if data_base64 == "aGVsbG8="
+    ));
+}
+
+#[test]
+fn same_named_attachments_receive_distinct_stable_ids() {
+    let mut composer = ComposerController::fixture("");
+    let first = composer.paste_image("image/png", "YQ==", "same.png");
+    let second = composer.paste_image("image/png", "Yg==", "same.png");
+
+    let ComposerOutcome::AttachmentsChanged(first) = first else {
+        panic!("first image should project metadata");
+    };
+    let ComposerOutcome::AttachmentsChanged(second) = second else {
+        panic!("second image should project metadata");
+    };
+    assert_ne!(first[0].id, second[1].id);
+    assert_eq!(first[0].display_name, second[1].display_name);
 }
 
 #[test]

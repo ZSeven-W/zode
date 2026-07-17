@@ -1,19 +1,29 @@
 use jian_core::text_input::{prev_char_boundary, TextInputState};
-use jian_widgets::{components::text_area::TextArea, HorizontalAlign, Painter, Point2D, Rect};
-use zode_app_model::ComposerState;
+use jian_widgets::{Painter, Rect};
+use zode_app_model::{AttachmentMetadata, ComposerState, GoalProgress};
 use zode_node_protocol::{SandboxMode, UserContent};
 
-use crate::{paint_single_line, ImeEvent, Key, Modifiers, RectExt, ZodeTheme};
+use crate::{
+    stable_widget_id, ImeEvent, Key, Modifiers, RectExt, WidgetId, ZodeTheme,
+    COMPOSER_ATTACHMENT_H, COMPOSER_CONTEXT_H, COMPOSER_INPUT_H,
+};
+
+mod attachments;
+mod context;
+mod input;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposerSubmission {
     pub content: Vec<UserContent>,
+    /// Lightweight projection for the conversation UI. Endpoint dispatch uses only `content`.
+    pub attachments: Vec<AttachmentMetadata>,
 }
 
 impl From<String> for ComposerSubmission {
     fn from(text: String) -> Self {
         Self {
             content: vec![UserContent::Text { text }],
+            attachments: Vec::new(),
         }
     }
 }
@@ -34,6 +44,7 @@ pub struct SandboxSelection {
 pub enum ComposerOutcome {
     Ignored,
     Edited,
+    AttachmentsChanged(Vec<AttachmentMetadata>),
     Send(ComposerSubmission),
     Steer(ComposerSubmission),
     Stop,
@@ -45,7 +56,9 @@ pub enum ComposerOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposerController {
     input: TextInputState,
-    attachments: Vec<UserContent>,
+    attachment_payloads: Vec<UserContent>,
+    attachment_metadata: Vec<AttachmentMetadata>,
+    next_attachment_id: u64,
     busy: bool,
     now_ms: u64,
 }
@@ -54,7 +67,9 @@ impl ComposerController {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             input: TextInputState::with_text(text),
-            attachments: Vec::new(),
+            attachment_payloads: Vec::new(),
+            attachment_metadata: Vec::new(),
+            next_attachment_id: 1,
             busy: false,
             now_ms: 0,
         }
@@ -70,6 +85,10 @@ impl ComposerController {
 
     pub fn input_state(&self) -> &TextInputState {
         &self.input
+    }
+
+    pub fn attachment_metadata(&self) -> &[AttachmentMetadata] {
+        &self.attachment_metadata
     }
 
     pub fn composition_text(&self) -> Option<&str> {
@@ -175,12 +194,55 @@ impl ComposerController {
         data_base64: impl Into<String>,
         display_name: impl Into<String>,
     ) -> ComposerOutcome {
-        self.attachments.push(UserContent::Image {
-            mime_type: mime_type.into(),
+        let mime_type = mime_type.into();
+        let data_base64 = data_base64.into();
+        let display_name = display_name.into();
+        let byte_len = estimated_decoded_len(&data_base64);
+        self.paste_image_with_metadata(
+            mime_type.clone(),
+            data_base64,
+            AttachmentMetadata {
+                id: String::new(),
+                path: None,
+                display_name,
+                media_type: mime_type,
+                width: None,
+                height: None,
+                byte_len,
+            },
+        )
+    }
+
+    pub fn paste_image_with_metadata(
+        &mut self,
+        mime_type: impl Into<String>,
+        data_base64: impl Into<String>,
+        mut metadata: AttachmentMetadata,
+    ) -> ComposerOutcome {
+        let mime_type = mime_type.into();
+        metadata.id = format!("attachment-{}", self.next_attachment_id);
+        self.next_attachment_id = self.next_attachment_id.saturating_add(1);
+        metadata.media_type.clone_from(&mime_type);
+        self.attachment_payloads.push(UserContent::Image {
+            mime_type,
             data_base64: data_base64.into(),
-            display_name: display_name.into(),
+            display_name: metadata.display_name.clone(),
         });
-        ComposerOutcome::Edited
+        self.attachment_metadata.push(metadata);
+        ComposerOutcome::AttachmentsChanged(self.attachment_metadata.clone())
+    }
+
+    pub fn remove_attachment(&mut self, id: &str) -> ComposerOutcome {
+        let Some(index) = self
+            .attachment_metadata
+            .iter()
+            .position(|attachment| attachment.id == id)
+        else {
+            return ComposerOutcome::Ignored;
+        };
+        self.attachment_metadata.remove(index);
+        self.attachment_payloads.remove(index);
+        ComposerOutcome::AttachmentsChanged(self.attachment_metadata.clone())
     }
 
     pub fn stop(&self) -> ComposerOutcome {
@@ -204,18 +266,22 @@ impl ComposerController {
     }
 
     fn submit(&mut self) -> ComposerOutcome {
-        if self.input.text().trim().is_empty() && self.attachments.is_empty() {
+        if self.input.text().trim().is_empty() && self.attachment_payloads.is_empty() {
             return ComposerOutcome::Ignored;
         }
-        let mut content = Vec::with_capacity(1 + self.attachments.len());
+        let mut content = Vec::with_capacity(1 + self.attachment_payloads.len());
         if !self.input.text().trim().is_empty() {
             content.push(UserContent::Text {
                 text: self.input.text().to_owned(),
             });
         }
-        content.append(&mut self.attachments);
+        content.append(&mut self.attachment_payloads);
+        let attachments = std::mem::take(&mut self.attachment_metadata);
         self.input.set_text("");
-        let submission = ComposerSubmission { content };
+        let submission = ComposerSubmission {
+            content,
+            attachments,
+        };
         if self.busy {
             ComposerOutcome::Steer(submission)
         } else {
@@ -224,9 +290,105 @@ impl ComposerController {
     }
 }
 
+fn estimated_decoded_len(data_base64: &str) -> u64 {
+    let padding = data_base64
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count();
+    data_base64
+        .len()
+        .saturating_mul(3)
+        .checked_div(4)
+        .unwrap_or(0)
+        .saturating_sub(padding) as u64
+}
+
 pub struct Composer;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ComposerLayout {
+    pub context: Rect,
+    pub attachments: Option<Rect>,
+    pub input: Rect,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ComposerAttachmentLayout {
+    pub id: String,
+    pub rect: Rect,
+}
+
 impl Composer {
+    pub fn layout(rect: Rect, state: &ComposerState) -> ComposerLayout {
+        let context_height = COMPOSER_CONTEXT_H.min(rect.size.y.max(0.0));
+        let input_height = COMPOSER_INPUT_H.min((rect.size.y - context_height).max(0.0));
+        let input = Rect::xywh(
+            rect.origin.x,
+            rect.max_y() - input_height,
+            rect.size.x,
+            input_height,
+        );
+        let attachments = (!state.attachments.is_empty()).then(|| {
+            let available = (input.origin.y - rect.origin.y - context_height).max(0.0);
+            Rect::xywh(
+                rect.origin.x,
+                rect.origin.y + context_height,
+                rect.size.x,
+                COMPOSER_ATTACHMENT_H.min(available),
+            )
+        });
+        ComposerLayout {
+            context: Rect::xywh(rect.origin.x, rect.origin.y, rect.size.x, context_height),
+            attachments,
+            input,
+        }
+    }
+
+    pub(crate) fn attachment_layouts(
+        rect: Rect,
+        state: &ComposerState,
+    ) -> Vec<ComposerAttachmentLayout> {
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 || state.attachments.is_empty() {
+            return Vec::new();
+        }
+        let available = (rect.size.x - 24.0).max(0.0);
+        let desired: f32 = 180.0;
+        let gap: f32 = 8.0;
+        state
+            .attachments
+            .iter()
+            .enumerate()
+            .scan(rect.origin.x + 12.0, |x, (index, attachment)| {
+                let remaining = (rect.max_x() - 12.0 - *x).max(0.0);
+                if remaining <= 0.0 {
+                    return None;
+                }
+                let remaining_count = state.attachments.len() - index;
+                let shared = ((available - gap * (remaining_count.saturating_sub(1) as f32))
+                    / remaining_count as f32)
+                    .max(0.0);
+                let width = desired.min(shared).min(remaining);
+                let item = ComposerAttachmentLayout {
+                    id: attachment.id.clone(),
+                    rect: Rect::xywh(
+                        *x,
+                        rect.origin.y + (rect.size.y - 32.0).max(0.0) / 2.0,
+                        width,
+                        32.0_f32.min(rect.size.y),
+                    ),
+                };
+                *x += width + gap;
+                Some(item)
+            })
+            .collect()
+    }
+
+    pub(crate) fn attachment_widget_id(id: &str) -> WidgetId {
+        stable_widget_id(0x41, &id)
+    }
+
     pub fn paint(painter: &mut dyn Painter, rect: Rect, state: &ComposerState, theme: &ZodeTheme) {
         Self::paint_with_context(painter, rect, state, None, None, theme);
     }
@@ -286,155 +448,57 @@ impl Composer {
     pub fn paint_input_with_context(
         painter: &mut dyn Painter,
         rect: Rect,
-        input: &TextInputState,
+        text_input: &TextInputState,
         state: &ComposerState,
         connection_label: Option<&str>,
         branch: Option<&str>,
         theme: &ZodeTheme,
     ) {
-        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
-            return;
-        }
-        painter.fill_drop_shadow(
-            Rect::xywh(rect.origin.x, rect.origin.y + 2.0, rect.size.x, rect.size.y),
-            12.0,
-            18.0,
-            theme.tokens.foreground.with_alpha(0.08),
-        );
-        painter.fill_round_rect(rect, 12.0, theme.tokens.card);
-        painter.stroke_round_rect(rect, 12.0, theme.tokens.border, 1.0);
-
-        let mut context_x = 16.0;
-        for label in [Some("zode"), connection_label, branch]
-            .into_iter()
-            .flatten()
-            .filter(|label| !label.trim().is_empty())
-        {
-            let label_width = painter.measure_text_weighted(label, 10.0, 400);
-            paint_single_line(
-                painter,
-                label,
-                Rect::xywh(rect.origin.x + context_x, rect.origin.y, label_width, 26.0),
-                10.0,
-                400,
-                theme.tokens.muted_foreground,
-                HorizontalAlign::Start,
-            );
-            context_x += label_width + 20.0;
-        }
-
-        TextArea {
-            state: input,
-            placeholder: "向 Zode 描述一个任务",
-            focused: state.focused,
-            font_size: 14.0,
-            now_ms: 0,
-            pad_x: 8.0,
-            max_visible_lines: 4,
-        }
-        .paint(
+        Self::paint_input_with_workspace_context(
             painter,
-            Rect::xywh(
-                rect.origin.x + 8.0,
-                rect.origin.y + 26.0,
-                rect.size.x - 16.0,
-                (rect.size.y - 70.0).max(0.0),
-            ),
-            &theme.tokens,
+            rect,
+            text_input,
+            state,
+            None,
+            connection_label,
+            branch,
+            None,
+            theme,
         );
-        let controls = Rect::xywh(
-            rect.origin.x + 14.0,
-            rect.max_y() - 38.0,
-            (rect.size.x - 28.0).max(0.0),
-            28.0,
-        );
-        let plus = Rect::xywh(
-            controls.origin.x,
-            controls.origin.y + (controls.size.y - 16.0) / 2.0,
-            16.0,
-            16.0,
-        );
-        painter.stroke_svg_path(
-            "M4 12H20M12 4V20",
-            plus.origin,
-            16.0,
-            theme.tokens.muted_foreground,
-            1.5,
-        );
-        let model_x = (rect.max_x() - 190.0).max(rect.origin.x + 140.0);
-        let effort_x = (rect.max_x() - 108.0).max(rect.origin.x + 220.0);
-        let mic = Rect::xywh(
-            rect.max_x() - 70.0,
-            controls.origin.y + (controls.size.y - 16.0) / 2.0,
-            16.0,
-            16.0,
-        );
-        if !state.sandbox_label.trim().is_empty() {
-            paint_single_line(
-                painter,
-                &state.sandbox_label,
-                Rect::xywh(
-                    rect.origin.x + 44.0,
-                    controls.origin.y,
-                    (model_x - rect.origin.x - 52.0).max(0.0),
-                    controls.size.y,
-                ),
-                11.0,
-                400,
-                theme.tokens.muted_foreground,
-                HorizontalAlign::Start,
-            );
-        }
-        let model = state.model.as_deref().unwrap_or("选择模型");
-        paint_single_line(
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_input_with_workspace_context(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        text_input: &TextInputState,
+        state: &ComposerState,
+        workspace_label: Option<&str>,
+        connection_label: Option<&str>,
+        branch: Option<&str>,
+        goal: Option<&GoalProgress>,
+        theme: &ZodeTheme,
+    ) {
+        let layout = Self::layout(rect, state);
+        context::paint(
             painter,
-            model,
-            Rect::xywh(
-                model_x,
-                controls.origin.y,
-                (effort_x - model_x - 8.0).max(0.0),
-                controls.size.y,
-            ),
-            11.0,
-            400,
-            theme.tokens.muted_foreground,
-            HorizontalAlign::Start,
+            layout.context,
+            workspace_label,
+            connection_label,
+            branch,
+            goal,
+            theme,
         );
-        if let Some(effort) = state
-            .effort
-            .as_deref()
-            .filter(|effort| !effort.trim().is_empty())
-        {
-            paint_single_line(
+        if let Some(attachment_rect) = layout.attachments {
+            let attachment_layouts = Self::attachment_layouts(attachment_rect, state);
+            attachments::paint(
                 painter,
-                effort,
-                Rect::xywh(
-                    effort_x,
-                    controls.origin.y,
-                    (mic.origin.x - effort_x - 8.0).max(0.0),
-                    controls.size.y,
-                ),
-                11.0,
-                400,
-                theme.tokens.muted_foreground,
-                HorizontalAlign::Start,
+                attachment_rect,
+                &attachment_layouts,
+                &state.attachments,
+                theme,
             );
         }
-        painter.stroke_svg_path(
-            "M9 5V12A3 3 0 0 0 15 12V5M6 11A6 6 0 0 0 18 11M12 17V21",
-            mic.origin,
-            16.0,
-            theme.tokens.muted_foreground,
-            1.4,
-        );
-        let send = Rect::xywh(rect.max_x() - 42.0, controls.origin.y, 28.0, 28.0);
-        painter.fill_round_rect(send, 14.0, theme.zode_purple);
-        painter.stroke_svg_path(
-            "M7 13L12 8L17 13M12 8V18",
-            Point2D::new(send.origin.x + 6.0, send.origin.y + 6.0),
-            16.0,
-            jian_widgets::Color::WHITE,
-            1.6,
-        );
+        input::paint(painter, layout.input, text_input, state, theme);
     }
 }

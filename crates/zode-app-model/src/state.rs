@@ -1,16 +1,16 @@
-use crate::{LayoutClass, PresentationState, TranscriptState};
+use crate::{AttachmentMetadata, LayoutClass, PresentationState, TranscriptState};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zode_node_protocol::{
-    CapabilityManifest, NodeId, SessionLocator, ThreadSummary, TurnId, UsageSnapshot, UserContent,
-    WorkspaceUri,
+    CapabilityManifest, NodeId, SessionLocator, ThreadSummary, TurnId, UsageSnapshot, WorkspaceUri,
 };
 
 /// Editable composer settings for the current session.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ComposerState {
     pub draft: String,
-    pub attachments: Vec<UserContent>,
+    /// Lightweight attachment projection only. Encoded payloads stay in the controller.
+    pub attachments: Vec<AttachmentMetadata>,
     pub focused: bool,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -131,7 +131,7 @@ pub struct ZodeAppState {
     pub transcripts: BTreeMap<SessionLocator, TranscriptState>,
     pub active_turns: BTreeMap<SessionLocator, TurnId>,
     pub approvals: BTreeMap<String, SessionLocator>,
-    pub tool_expanded: BTreeMap<String, bool>,
+    pub tool_expanded: BTreeMap<SessionLocator, BTreeMap<String, bool>>,
     pub project_permissions: BTreeMap<WorkspaceUri, Vec<String>>,
     pub settings_scroll_offset: f32,
     pub composer: ComposerState,

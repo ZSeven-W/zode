@@ -3,8 +3,8 @@ use jian_core::CursorHint;
 use jian_widgets::{Color, ImageDrawMode, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{demo_state, SettingsCategory, ShellRoute};
 use zode_app_ui::{
-    Insets, InteractionNode, RectExt, ThemeMode, WidgetId, WorkspaceLayout, WorkspaceShell,
-    WorkspaceSnapshot, ZodeTheme, CONTENT_W, SIDEBAR_W,
+    Composer, Insets, InteractionNode, RectExt, ThemeMode, WidgetId, WorkspaceLayout,
+    WorkspaceShell, WorkspaceSnapshot, ZodeTheme, CONTENT_W, SIDEBAR_W, TRANSCRIPT_COMPOSER_GAP,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -275,8 +275,10 @@ fn wide_shell_keeps_the_warm_rail_white_canvas_and_floating_composer_contract() 
     let geometry = WorkspaceLayout::compute(1800.0, 1080.0, Insets::ZERO);
     let theme = ZodeTheme::light();
     let mut painter = CapturePainter::default();
+    let state = demo_state();
 
-    WorkspaceShell::paint(&mut painter, viewport, Insets::ZERO, &demo_state(), &theme);
+    WorkspaceShell::paint(&mut painter, viewport, Insets::ZERO, &state, &theme);
+    let composer = Composer::layout(geometry.composer, &state.composer);
 
     assert_eq!(geometry.sidebar.width(), SIDEBAR_W);
     assert_eq!(geometry.composer.width(), CONTENT_W);
@@ -292,7 +294,7 @@ fn wide_shell_keeps_the_warm_rail_white_canvas_and_floating_composer_contract() 
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
         PaintOp::FillRound(rect, radius, color)
-            if *rect == geometry.composer
+            if *rect == composer.input
                 && (10.0..=16.0).contains(radius)
                 && *color == theme.tokens.card
     )));
@@ -300,7 +302,7 @@ fn wide_shell_keeps_the_warm_rail_white_canvas_and_floating_composer_contract() 
 }
 
 #[test]
-fn snapshot_paint_uses_the_composer_interaction_rect() {
+fn snapshot_paint_uses_the_full_stack_not_an_input_node_override() {
     let state = demo_state();
     let layout = WorkspaceLayout::compute(1221.0, 992.0, Insets::ZERO);
     let composer_id = WidgetId(20);
@@ -329,9 +331,14 @@ fn snapshot_paint_uses_the_composer_interaction_rect() {
 
     let painted =
         WorkspaceShell::paint_snapshot(&mut painter, &snapshot, &state, &ZodeTheme::light());
+    let composer = Composer::layout(snapshot.layout.composer, &state.composer);
 
     assert_eq!(painted, snapshot.layout);
     assert!(painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::FillRound(rect, _, _) if *rect == composer.input
+    )));
+    assert!(!painter.operations.iter().any(|operation| matches!(
         operation,
         PaintOp::FillRound(rect, _, _) if *rect == snapshot.nodes[0].rect
     )));
@@ -359,9 +366,8 @@ fn empty_conversation_exposes_zode_guidance_and_full_composer_chrome() {
     ] {
         assert!(!text.contains(superseded_copy));
     }
-    for composer_chrome in ["zode", "本地"] {
-        assert!(text.contains(composer_chrome));
-    }
+    assert!(text.contains("本地"));
+    assert!(!painter.texts().contains(&"zode"));
     assert!(!painter.texts().contains(&"main"));
     assert!(!painter.texts().contains(&"完全访问"));
     assert!(geometry.composer.min_y() > 900.0);
@@ -516,11 +522,19 @@ fn wide_suggestion_copy_wraps_without_shrinking_below_the_reference_size() {
 #[test]
 fn compact_empty_state_uses_a_clipped_readable_two_by_two_grid() {
     let (painter, geometry) = paint_empty_compact();
-    assert_eq!(geometry.transcript.size, Point2D::new(320.0, 268.0));
+    assert_eq!(geometry.transcript.size, Point2D::new(320.0, 224.0));
+    let composer = Composer::layout(geometry.composer, &demo_state().composer);
+    let empty_viewport = Rect::xywh(
+        geometry.transcript.min_x(),
+        geometry.transcript.min_y(),
+        geometry.transcript.width(),
+        composer.input.min_y() - TRANSCRIPT_COMPOSER_GAP - geometry.transcript.min_y(),
+    );
+    assert_eq!(empty_viewport.size, Point2D::new(320.0, 268.0));
     let cards = painter
         .rounded_rects()
         .filter(|(rect, _)| {
-            contained_by(*rect, geometry.transcript) && rect.width() > 80.0 && rect.height() > 60.0
+            contained_by(*rect, empty_viewport) && rect.width() > 80.0 && rect.height() > 60.0
         })
         .map(|(rect, _)| rect)
         .collect::<Vec<_>>();
@@ -540,7 +554,7 @@ fn compact_empty_state_uses_a_clipped_readable_two_by_two_grid() {
         "compact y gap",
     );
     for (index, card) in cards.iter().enumerate() {
-        assert!(contained_by(*card, geometry.transcript));
+        assert!(contained_by(*card, empty_viewport));
         for other in cards.iter().skip(index + 1) {
             assert!(!overlaps(*card, *other));
         }

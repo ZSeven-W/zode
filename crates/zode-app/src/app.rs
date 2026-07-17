@@ -230,11 +230,13 @@ impl DesktopApp {
         self.composer.set_busy(busy);
     }
 
-    fn apply_composer_outcome(&mut self, outcome: zode_app_ui::ComposerOutcome) {
+    fn apply_composer_outcome(&mut self, mut outcome: zode_app_ui::ComposerOutcome) {
         self.app_state.composer.draft = self.composer.text().to_owned();
-        if let Some(command) = composer_outcome_command(outcome) {
+        if let Some(command) = composer_outcome_command(&mut outcome) {
             self.enqueue_command(command);
         }
+        interaction::project_composer_outcome(&mut self.app_state, &outcome);
+        self.rebuild_frame_snapshot();
         self.window_state.dirty = true;
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();

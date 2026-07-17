@@ -2,12 +2,14 @@ use jian_core::text_input::TextInputState;
 use jian_widgets::{Painter, Rect};
 use zode_app_model::{ConnectionState, SecondaryPane, ShellRoute, ZodeAppState};
 
+use super::project_sidebar::workspace_label;
 use super::{
     ComingSoonPage, Composer, EmptyState, EnvironmentPanel, IntegrationsPage, ProjectSidebar,
     ReviewPanel, SettingsPanel, TerminalGrid, TerminalPanel, TerminalSelection, ThreadHeader,
     ThreadTranscript, WindowChrome,
 };
-use crate::{Insets, RectExt, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme, COMPOSER_ID};
+use crate::TRANSCRIPT_COMPOSER_GAP;
+use crate::{Insets, RectExt, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme};
 
 /// Paints the complete platform-neutral workbench shell in stable z-order.
 pub struct WorkspaceShell;
@@ -196,15 +198,26 @@ fn paint_conversation(
 ) {
     let geometry = snapshot.layout;
     if state.current_session.is_none() {
-        EmptyState::paint(painter, geometry.transcript, theme);
+        // Keep the reference empty-task composition anchored above the input
+        // surface. Context/attachment strips may occupy the gap, but the
+        // guidance itself never reaches that lower area.
+        let input = Composer::layout(geometry.composer, &state.composer).input;
+        let empty_bottom = (input.origin.y - TRANSCRIPT_COMPOSER_GAP)
+            .max(geometry.transcript.origin.y)
+            .min(geometry.primary_surface.max_y());
+        EmptyState::paint(
+            painter,
+            Rect::xywh(
+                geometry.transcript.origin.x,
+                geometry.transcript.origin.y,
+                geometry.transcript.size.x,
+                empty_bottom - geometry.transcript.origin.y,
+            ),
+            theme,
+        );
     } else {
         ThreadTranscript::paint(painter, geometry.transcript, state, theme);
     }
-    let composer_rect = snapshot
-        .node(COMPOSER_ID)
-        .map(|node| node.rect)
-        .filter(|rect| contained_by(*rect, geometry.primary_surface))
-        .unwrap_or(geometry.composer);
     let branch = state
         .current_session_presentation()
         .and_then(|presentation| presentation.context.ready())
@@ -214,15 +227,40 @@ fn paint_conversation(
         ConnectionState::Connecting => "连接中",
         ConnectionState::Unavailable => "不可用",
     };
-    Composer::paint_input_with_context(
+    let workspace_label = current_workspace_label(state);
+    let goal = current_goal_progress(state);
+    Composer::paint_input_with_workspace_context(
         painter,
-        composer_rect,
+        geometry.composer,
         composer_input,
         &state.composer,
+        workspace_label.as_deref(),
         Some(connection_label),
         branch,
+        goal,
         theme,
     );
+}
+
+fn current_goal_progress(state: &ZodeAppState) -> Option<&zode_app_model::GoalProgress> {
+    let session = state.current_session.as_ref()?;
+    let transcript = state.transcripts.get(session)?;
+    if !transcript.busy {
+        return None;
+    }
+    transcript.items.iter().rev().find_map(|item| match item {
+        zode_app_model::TranscriptItem::GoalProgress(goal) => Some(goal),
+        _ => None,
+    })
+}
+
+fn current_workspace_label(state: &ZodeAppState) -> Option<String> {
+    let workspace = state
+        .current_session
+        .as_ref()
+        .and_then(|session| state.available_workspace_for_session(session))
+        .or_else(|| state.active_available_workspace())?;
+    Some(workspace_label(workspace, true))
 }
 
 fn paint_terminal(
@@ -249,11 +287,4 @@ fn paint_terminal(
         terminal_selection,
         theme,
     );
-}
-
-fn contained_by(inner: Rect, outer: Rect) -> bool {
-    inner.min_x() >= outer.min_x()
-        && inner.min_y() >= outer.min_y()
-        && inner.max_x() <= outer.max_x()
-        && inner.max_y() <= outer.max_y()
 }

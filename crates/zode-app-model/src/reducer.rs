@@ -130,19 +130,34 @@ pub fn reduce_terminal_command(
 }
 
 pub fn reduce_tool_command(state: &mut ZodeAppState, command: AppCommand) -> ToolCommandOutcome {
-    let AppCommand::SetToolExpanded { tool_id, expanded } = command else {
+    let AppCommand::SetToolExpanded {
+        session,
+        tool_id,
+        expanded,
+    } = command
+    else {
         return ToolCommandOutcome::Ignored;
     };
-    let exists = state.transcripts.values().any(|transcript| {
-        transcript
-            .items
-            .iter()
-            .any(|item| matches!(item, TranscriptItem::Tool(tool) if tool.id == tool_id))
-    });
+    let Some(transcript) = state.transcripts.get_mut(&session) else {
+        return ToolCommandOutcome::Ignored;
+    };
+    let mut exists = false;
+    for (index, item) in transcript.items.iter().enumerate() {
+        if matches!(item, TranscriptItem::Tool(tool) if tool.id == tool_id) {
+            exists = true;
+            if let Some(height) = transcript.item_heights.get_mut(index) {
+                *height = 0.0;
+            }
+        }
+    }
     if !exists {
         return ToolCommandOutcome::Ignored;
     }
-    state.tool_expanded.insert(tool_id, expanded);
+    state
+        .tool_expanded
+        .entry(session)
+        .or_default()
+        .insert(tool_id, expanded);
     ToolCommandOutcome::Applied
 }
 
@@ -311,6 +326,7 @@ pub fn reduce_navigation_command(
             let deleting_current = state.current_session.as_ref() == Some(&session);
             state.threads.retain(|thread| thread.session != session);
             state.transcripts.remove(&session);
+            state.tool_expanded.remove(&session);
             state.active_turns.remove(&session);
             state.usage.remove(&session);
             state.presentation.sessions.remove(&session);
@@ -379,7 +395,12 @@ pub fn reduce_agent_event(state: &mut ZodeAppState, event: AgentEvent) -> Reduce
             let id = tool.id.clone();
             let expanded = default_tool_expanded(&tool.name);
             upsert_started_tool(transcript, tool);
-            state.tool_expanded.entry(id).or_insert(expanded);
+            state
+                .tool_expanded
+                .entry(session.clone())
+                .or_default()
+                .entry(id)
+                .or_insert(expanded);
         }
         AgentEventKind::ToolCompleted { tool } => complete_existing_tool(transcript, tool),
         AgentEventKind::ApprovalRequested {
@@ -438,38 +459,47 @@ pub fn reduce_agent_event(state: &mut ZodeAppState, event: AgentEvent) -> Reduce
 
 fn append_assistant_text(transcript: &mut TranscriptState, delta: String) {
     match transcript.items.last_mut() {
-        Some(TranscriptItem::AssistantText(text)) => text.push_str(&delta),
+        Some(TranscriptItem::AssistantText(text)) => {
+            text.push_str(&delta);
+            invalidate_item_height(transcript, transcript.items.len().saturating_sub(1));
+        }
         _ => transcript.items.push(TranscriptItem::AssistantText(delta)),
     }
 }
 
 fn append_thinking(transcript: &mut TranscriptState, delta: String) {
     match transcript.items.last_mut() {
-        Some(TranscriptItem::Thinking(text)) => text.push_str(&delta),
+        Some(TranscriptItem::Thinking(text)) => {
+            text.push_str(&delta);
+            invalidate_item_height(transcript, transcript.items.len().saturating_sub(1));
+        }
         _ => transcript.items.push(TranscriptItem::Thinking(delta)),
     }
 }
 
 fn upsert_started_tool(transcript: &mut TranscriptState, tool: ToolCall) {
-    if let Some(item) = find_tool_mut(transcript, &tool.id) {
-        *item = TranscriptItem::Tool(tool);
+    if let Some(index) = find_tool_index(transcript, &tool.id) {
+        let _ = transcript.replace_item(index, TranscriptItem::Tool(tool));
     } else {
         transcript.items.push(TranscriptItem::Tool(tool));
     }
 }
 
 fn complete_existing_tool(transcript: &mut TranscriptState, tool: ToolCall) {
-    if let Some(item) = find_tool_mut(transcript, &tool.id) {
-        *item = TranscriptItem::Tool(tool);
+    if let Some(index) = find_tool_index(transcript, &tool.id) {
+        let _ = transcript.replace_item(index, TranscriptItem::Tool(tool));
     }
 }
 
-fn find_tool_mut<'a>(
-    transcript: &'a mut TranscriptState,
-    tool_id: &str,
-) -> Option<&'a mut TranscriptItem> {
+fn find_tool_index(transcript: &TranscriptState, tool_id: &str) -> Option<usize> {
     transcript
         .items
-        .iter_mut()
-        .find(|item| matches!(item, TranscriptItem::Tool(existing) if existing.id == tool_id))
+        .iter()
+        .position(|item| matches!(item, TranscriptItem::Tool(existing) if existing.id == tool_id))
+}
+
+fn invalidate_item_height(transcript: &mut TranscriptState, index: usize) {
+    if let Some(height) = transcript.item_heights.get_mut(index) {
+        *height = 0.0;
+    }
 }

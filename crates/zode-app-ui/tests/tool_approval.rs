@@ -81,7 +81,7 @@ fn expanded_state_is_keyed_by_tool_id() {
     let mut state = demo_state();
     let session = SessionLocator::new(state.host.node_id, "tools");
     state.transcripts.insert(
-        session,
+        session.clone(),
         TranscriptState {
             items: vec![TranscriptItem::Tool(tool(
                 "tool-1",
@@ -96,13 +96,14 @@ fn expanded_state_is_keyed_by_tool_id() {
         reduce_tool_command(
             &mut state,
             AppCommand::SetToolExpanded {
+                session: session.clone(),
                 tool_id: "tool-1".into(),
                 expanded: true,
             },
         ),
         ToolCommandOutcome::Applied,
     );
-    assert_eq!(state.tool_expanded.get("tool-1"), Some(&true));
+    assert_eq!(state.tool_expanded[&session].get("tool-1"), Some(&true));
 }
 
 #[test]

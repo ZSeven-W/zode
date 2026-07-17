@@ -446,12 +446,9 @@ fn append_user_content(transcript: &mut TranscriptState, input: &[UserContent]) 
             UserContent::Text { text } => transcript
                 .items
                 .push(TranscriptItem::UserText(text.clone())),
-            UserContent::Image { display_name, .. } => {
-                transcript.items.push(TranscriptItem::Status {
-                    code: "composer.image.attached".into(),
-                    message: format!("已附加图像：{display_name}"),
-                })
-            }
+            // The desktop controller appends the real lightweight attachment metadata
+            // after this payload is prepared. Do not downgrade it to a fabricated status.
+            UserContent::Image { .. } => {}
         }
     }
 }

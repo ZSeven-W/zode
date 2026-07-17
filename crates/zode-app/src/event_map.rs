@@ -177,16 +177,25 @@ pub fn map_ime(event: &Ime) -> ImeEvent {
     }
 }
 
-pub fn composer_outcome_command(outcome: ComposerOutcome) -> Option<AppCommand> {
+pub fn composer_outcome_command(outcome: &mut ComposerOutcome) -> Option<AppCommand> {
     match outcome {
-        ComposerOutcome::Ignored | ComposerOutcome::Edited => None,
-        ComposerOutcome::Send(submission) => Some(AppCommand::Submit(submission.content)),
-        ComposerOutcome::Steer(submission) => Some(AppCommand::Steer(submission.content)),
+        ComposerOutcome::Ignored
+        | ComposerOutcome::Edited
+        | ComposerOutcome::AttachmentsChanged(_) => None,
+        ComposerOutcome::Send(submission) => {
+            Some(AppCommand::Submit(std::mem::take(&mut submission.content)))
+        }
+        ComposerOutcome::Steer(submission) => {
+            Some(AppCommand::Steer(std::mem::take(&mut submission.content)))
+        }
         ComposerOutcome::Stop => Some(AppCommand::Interrupt),
-        ComposerOutcome::SetModel(model) => Some(AppCommand::SetModel(model)),
-        ComposerOutcome::SetEffort(effort) => Some(AppCommand::SetEffort(effort)),
+        ComposerOutcome::SetModel(model) => Some(AppCommand::SetModel(std::mem::take(model))),
+        ComposerOutcome::SetEffort(effort) => Some(AppCommand::SetEffort(std::mem::take(effort))),
         ComposerOutcome::SetSandbox(SandboxSelection { mode, network }) => {
-            Some(AppCommand::SetSandbox { mode, network })
+            Some(AppCommand::SetSandbox {
+                mode: *mode,
+                network: *network,
+            })
         }
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use accesskit::{Action, NodeId, Role};
 use jian_core::CursorHint;
@@ -8,9 +8,9 @@ use zode_app_model::{
     SessionPresentationState, SettingsCategory, ShellRoute, TranscriptItem, TranscriptState,
 };
 use zode_app_ui::{
-    accessibility_tree, ApprovalCard, EnvironmentPanel, FocusDirection, Insets, InteractionNode,
-    ProjectSidebar, RectExt, SettingsPanel, ThreadTranscript, WidgetId, WorkspaceLayout,
-    WorkspaceSnapshot,
+    accessibility_tree, ApprovalCard, Composer, EnvironmentPanel, FocusDirection, Insets,
+    InteractionNode, ProjectSidebar, RectExt, SettingsPanel, ThreadTranscript, WidgetId,
+    WorkspaceLayout, WorkspaceSnapshot,
 };
 use zode_node_protocol::{
     DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus, WorkspaceUri,
@@ -239,7 +239,14 @@ fn generated_nodes_carry_role_name_value_actions_and_layout_rect() {
     assert_eq!(composer.value.as_deref(), Some(""));
     assert!(composer.actions.contains(&Action::Focus));
     assert!(composer.actions.contains(&Action::SetValue));
-    assert_eq!(composer.rect, snapshot.layout.composer);
+    assert_eq!(
+        composer.rect,
+        Composer::layout(
+            snapshot.layout.composer,
+            &zode_app_model::demo_state().composer,
+        )
+        .input
+    );
 }
 
 #[test]
@@ -358,13 +365,8 @@ fn markdown_height_and_follow_tail_share_one_virtual_layout() {
     let viewport = Rect::xywh(0.0, 0.0, 360.0, 240.0);
     let tail = ThreadTranscript::visible_item_layout(viewport, transcript);
     assert!(tail.first().unwrap().index > 0);
-    let command = ThreadTranscript::scroll_command(
-        session,
-        viewport,
-        transcript,
-        &state.tool_expanded,
-        -100.0,
-    );
+    let command =
+        ThreadTranscript::scroll_command(session, viewport, transcript, &BTreeMap::new(), -100.0);
     assert!(matches!(
         command,
         AppCommand::SetTranscriptViewport {
@@ -430,6 +432,7 @@ fn tool_and_approval_controls_share_visible_geometry_and_emit_commands() {
     assert_eq!(
         ThreadTranscript::command_for_widget(&state, tool_node.id),
         Some(AppCommand::SetToolExpanded {
+            session: session.clone(),
             tool_id: "tool-stable".into(),
             expanded: true,
         }),

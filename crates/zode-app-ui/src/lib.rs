@@ -14,16 +14,16 @@ pub use input::{
     TouchPhase, UnifiedInputEvent, WheelDeltaMode, WheelEvent,
 };
 pub use layout::{
-    Insets, RectExt, WorkspaceLayout, WorkspaceLayoutOptions, COMPACT_SIDEBAR_W, COMPOSER_BOTTOM,
-    COMPOSER_H, CONTENT_GUTTER, CONTENT_W, SIDEBAR_W, TOP_BAR_H, TRANSCRIPT_COMPOSER_GAP,
-    TRANSCRIPT_TOP_GAP,
+    Insets, RectExt, WorkspaceLayout, WorkspaceLayoutOptions, COMPACT_SIDEBAR_W,
+    COMPOSER_ATTACHMENT_H, COMPOSER_BOTTOM, COMPOSER_CONTEXT_H, COMPOSER_H, COMPOSER_INPUT_H,
+    CONTENT_GUTTER, CONTENT_W, SIDEBAR_W, TOP_BAR_H, TRANSCRIPT_COMPOSER_GAP, TRANSCRIPT_TOP_GAP,
 };
 pub use theme::{animation_duration_ms, resolve_theme, ThemeMode, ZodeTheme, ZODE_PURPLE};
 pub use virtual_list::{visible_range, MeasuredItem, MeasurementCache, VirtualListState};
 pub use widgets::{
     group_sessions, ApprovalAction, ApprovalButtonLayout, ApprovalCard, CapabilityCard,
     CapabilityCardLayout, CellPosition, ComingSoonPage, Composer, ComposerController,
-    ComposerOutcome, ComposerSubmission, EnvironmentPanel, EnvironmentPanelLayout,
+    ComposerLayout, ComposerOutcome, ComposerSubmission, EnvironmentPanel, EnvironmentPanelLayout,
     HeaderActionLayout, IntegrationTabLayout, IntegrationsPage, IntegrationsPageLayout,
     PermissionRow, PermissionRowLayout, ProjectSessionGroup, ProjectSidebar, ReviewDraft,
     ReviewLine, ReviewLineKind, ReviewPanel, ReviewPanelLayout, ReviewSelection, SandboxSelection,

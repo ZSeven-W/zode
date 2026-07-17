@@ -6,7 +6,7 @@ use jian_widgets::{Point2D, Rect};
 use zode_app_model::{ComingSoonFeature, IntegrationsTab, SecondaryPane, ShellRoute, ZodeAppState};
 
 use crate::{
-    EnvironmentPanel, Insets, IntegrationsPage, ProjectSidebar, RectExt, ReviewPanel,
+    Composer, EnvironmentPanel, Insets, IntegrationsPage, ProjectSidebar, RectExt, ReviewPanel,
     SettingsPanel, SidebarRowTarget, ThreadHeader, ThreadTranscript, WorkspaceLayout,
     ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID, INTEGRATIONS_PLUGINS_TAB_ID,
     INTEGRATIONS_SKILLS_TAB_ID,
@@ -73,12 +73,13 @@ pub struct WorkspaceSnapshot {
 impl WorkspaceSnapshot {
     pub fn build(state: &ZodeAppState, width: f32, height: f32, insets: Insets) -> Self {
         let route = state.presentation.route;
-        let layout = WorkspaceLayout::compute_presentation(
+        let layout = WorkspaceLayout::compute_presentation_with_attachments(
             width,
             height,
             insets,
             route,
             state.presentation.secondary_pane,
+            route == ShellRoute::Conversation && !state.composer.attachments.is_empty(),
         );
         let mut nodes = Vec::new();
         let mut focus_order = 0;
@@ -144,10 +145,42 @@ impl WorkspaceSnapshot {
                 } else {
                     append_header_nodes(&mut nodes, &layout, &mut focus_order, state);
                     append_transcript_nodes(&mut nodes, &layout, &mut focus_order, state);
-                    if visible_rect(layout.composer) {
+                    let composer_layout = Composer::layout(layout.composer, &state.composer);
+                    if let Some(attachment_strip) = composer_layout.attachments {
+                        for attachment_layout in
+                            Composer::attachment_layouts(attachment_strip, &state.composer)
+                        {
+                            let Some(attachment) = state
+                                .composer
+                                .attachments
+                                .iter()
+                                .find(|attachment| attachment.id == attachment_layout.id)
+                            else {
+                                continue;
+                            };
+                            let dimensions = match (attachment.width, attachment.height) {
+                                (Some(width), Some(height)) => format!("{width}×{height}"),
+                                _ => "尺寸未知".into(),
+                            };
+                            nodes.push(node(
+                                Composer::attachment_widget_id(&attachment.id),
+                                attachment_layout.rect,
+                                Role::Image,
+                                &format!("附件 {}", attachment.display_name),
+                                Some(format!(
+                                    "{}，{}，{} 字节",
+                                    attachment.media_type, dimensions, attachment.byte_len
+                                )),
+                                Vec::new(),
+                                None,
+                                CursorHint::Default,
+                            ));
+                        }
+                    }
+                    if visible_rect(composer_layout.input) {
                         nodes.push(node(
                             COMPOSER_ID,
-                            layout.composer,
+                            composer_layout.input,
                             Role::TextInput,
                             "要求后续变更",
                             Some(state.composer.draft.clone()),
@@ -156,13 +189,13 @@ impl WorkspaceSnapshot {
                             CursorHint::Text,
                         ));
                         let send_rect = Rect::xywh(
-                            layout.composer.max_x() - 42.0,
-                            layout.composer.max_y() - 38.0,
+                            composer_layout.input.max_x() - 42.0,
+                            composer_layout.input.max_y() - 38.0,
                             28.0,
                             28.0,
                         );
                         if let Some(send_rect) =
-                            ThreadTranscript::clip_to_viewport(send_rect, layout.composer)
+                            ThreadTranscript::clip_to_viewport(send_rect, composer_layout.input)
                         {
                             nodes.push(node(
                                 SEND_ID,

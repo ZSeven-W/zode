@@ -52,6 +52,11 @@ fn delete_requires_confirmation_before_removing_session_state() {
     state
         .transcripts
         .insert(session.clone(), TranscriptState::default());
+    state
+        .tool_expanded
+        .entry(session.clone())
+        .or_default()
+        .insert("tool-1".into(), true);
 
     assert_eq!(
         reduce_navigation_command(
@@ -69,6 +74,7 @@ fn delete_requires_confirmation_before_removing_session_state() {
     );
     assert!(state.threads.is_empty());
     assert!(!state.transcripts.contains_key(&session));
+    assert!(!state.tool_expanded.contains_key(&session));
     assert_eq!(state.current_session, None);
     assert_eq!(state.pending_session_delete, None);
 }
