@@ -21,10 +21,9 @@ use crate::{
     clipboard::{execute_clipboard_command, paste_from_clipboard},
     cursor::{cursor_hint_at, cursor_icon_for_hint},
     event_map::{is_paste_shortcut, terminal_shortcut_command},
-    ime::set_cursor_area,
     input_dispatch::{
         dispatch_key, ime_allowed_for_focus, settings_scroll_delta_for_action,
-        settings_scroll_delta_for_key, KeyDispatch, SettingsTouchOutcome,
+        settings_scroll_delta_for_key, KeyDispatch, ScrollTouchOutcome,
     },
 };
 
@@ -201,6 +200,8 @@ impl DesktopApp {
                         delta,
                     );
                     self.apply_terminal_command(command);
+                } else if self.handle_integrations_wheel(delta) {
+                    return;
                 } else if self.app_state.presentation.route == ShellRoute::Conversation {
                     let empty = std::collections::BTreeMap::new();
                     let command = self.app_state.current_session.as_ref().and_then(|session| {
@@ -229,15 +230,18 @@ impl DesktopApp {
                 }
             }
             UnifiedInputEvent::Touch(event) => {
+                if self.handle_integrations_touch(event) {
+                    return;
+                }
                 if matches!(self.app_state.presentation.route, ShellRoute::Settings(_)) {
                     let viewport = settings_interaction_viewport(&self.frame_snapshot);
-                    match self.settings_touch.handle(event, viewport) {
-                        SettingsTouchOutcome::Captured => return,
-                        SettingsTouchOutcome::Scroll(delta) => {
+                    match self.scroll_touch.handle(event, viewport) {
+                        ScrollTouchOutcome::Captured => return,
+                        ScrollTouchOutcome::Scroll(delta) => {
                             self.apply_settings_scroll_delta(delta);
                             return;
                         }
-                        SettingsTouchOutcome::Tap(position) => {
+                        ScrollTouchOutcome::Tap(position) => {
                             self.handle_pointer_event(PointerEvent {
                                 position,
                                 kind: PointerEventKind::Press,
@@ -245,7 +249,7 @@ impl DesktopApp {
                             });
                             return;
                         }
-                        SettingsTouchOutcome::Ignored => {}
+                        ScrollTouchOutcome::Ignored => {}
                     }
                 }
                 let kind = match event.phase {
@@ -339,11 +343,14 @@ impl DesktopApp {
 
     pub(super) fn set_focused_widget(&mut self, focused: Option<WidgetId>) {
         let focused = focused.filter(|id| self.frame_snapshot.node(*id).is_some());
+        if self.focused_widget != focused {
+            self.ime.invalidate_native();
+        }
         self.focused_widget = focused;
         self.refresh_snapshot_focus(focused);
         self.app_state.composer.focused = self.window_focused && focused == Some(COMPOSER_ID);
         if focused == Some(COMPOSER_ID) {
-            self.composer_ime_cursor_area_dirty = true;
+            self.ime.mark_area_dirty();
         }
         let terminal_focused = self.window_focused
             && self.app_state.terminal_surface_visible()
@@ -356,8 +363,8 @@ impl DesktopApp {
         self.request_redraw();
     }
 
-    fn sync_ime_for_focus(&self, focused: Option<WidgetId>, window_focused: bool) {
-        let Some(window) = self.window.as_ref() else {
+    fn sync_ime_for_focus(&mut self, focused: Option<WidgetId>, window_focused: bool) {
+        let Some(window) = self.window.clone() else {
             return;
         };
         let ime_page = if self.app_state.terminal_surface_visible() && focused == Some(TERMINAL_ID)
@@ -369,8 +376,8 @@ impl DesktopApp {
         let allowed = ime_allowed_for_focus(ime_page, focused, window_focused);
         if allowed {
             let area = if focused == Some(COMPOSER_ID) {
-                (!self.composer_ime_cursor_area_dirty)
-                    .then_some(self.composer_ime_cursor_area)
+                (!self.ime.needs_area_measurement())
+                    .then_some(self.ime.area())
                     .flatten()
                     .or_else(|| {
                         focused
@@ -383,8 +390,10 @@ impl DesktopApp {
                     .map(crate::ime::fallback_cursor_area)
             };
             if let Some(area) = area {
-                set_cursor_area(window, area);
+                self.ime.update_native(window.as_ref(), area);
             }
+        } else {
+            self.ime.invalidate_native();
         }
         window.set_ime_allowed(allowed);
     }
@@ -509,6 +518,11 @@ impl DesktopApp {
                         self.apply_settings_scroll_delta(delta);
                     }
                 }
+                Action::ScrollUp | Action::ScrollDown
+                    if id == zode_app_ui::INTEGRATIONS_ROOT_ID =>
+                {
+                    let _ = self.handle_integrations_accessibility_scroll(request.action);
+                }
                 Action::ScrollUp | Action::ScrollDown if id == zode_app_ui::SIDEBAR_ID => {
                     let _ = self.handle_sidebar_accessibility_scroll(request.action);
                 }
@@ -520,6 +534,9 @@ impl DesktopApp {
     pub(super) fn sync_window_focus(&mut self, focused: bool) {
         if !focused {
             self.cancel_primary_sidebar_resize();
+        }
+        if self.window_focused != focused {
+            self.ime.invalidate_native();
         }
         self.window_focused = focused;
         self.app_state.composer.focused = focused && self.focused_widget == Some(COMPOSER_ID);
@@ -534,7 +551,7 @@ impl DesktopApp {
         self.request_redraw();
     }
 
-    fn handle_pointer_event(&mut self, event: PointerEvent) {
+    pub(super) fn handle_pointer_event(&mut self, event: PointerEvent) {
         self.window_state.cursor_logical = event.position;
         if self.handle_primary_sidebar_resize_pointer(event) {
             return;
@@ -672,6 +689,9 @@ impl DesktopApp {
             return;
         }
         if self.handle_project_picker_key(&event) {
+            return;
+        }
+        if self.handle_integrations_page_key(&event) {
             return;
         }
         if self.handle_integration_search_key(&event) {

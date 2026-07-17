@@ -1,4 +1,4 @@
-use accesskit::{Action, Node, NodeId, Role, Toggled, Tree, TreeId, TreeUpdate};
+use accesskit::{Action, Role, Toggled};
 use jian_core::CursorHint;
 use jian_widgets::{Point2D, Rect};
 use zode_app_model::{
@@ -26,6 +26,7 @@ mod queue;
 mod settings;
 mod sidebar;
 mod transcript;
+mod tree;
 
 use composer_footer::{append_composer_footer_nodes, append_composer_footer_overlay};
 use empty_state::append_empty_suggestion_nodes;
@@ -41,6 +42,7 @@ use queue::{append_queue_menu_nodes, append_queue_nodes};
 use settings::append_settings_nodes;
 use sidebar::{append_sidebar_menu_nodes, append_sidebar_nodes};
 use transcript::append_transcript_nodes;
+pub use tree::accessibility_tree;
 
 pub const SIDEBAR_ID: WidgetId = WidgetId(1);
 pub const NEW_SESSION_ID: WidgetId = WidgetId(2);
@@ -53,6 +55,7 @@ pub const PULL_REQUESTS_NAV_ID: WidgetId = WidgetId(6);
 pub const BROWSER_NAV_ID: WidgetId = PULL_REQUESTS_NAV_ID;
 pub const CHATS_NAV_ID: WidgetId = WidgetId(7);
 pub const SETTINGS_ROOT_ID: WidgetId = WidgetId(8);
+pub const INTEGRATIONS_ROOT_ID: WidgetId = WidgetId(193);
 pub const SETTINGS_NAV_ID: WidgetId = WidgetId(9);
 pub const HELP_ID: WidgetId = WidgetId(10);
 pub const COMPOSER_ID: WidgetId = WidgetId(20);
@@ -713,56 +716,6 @@ fn preview_accessibility_excerpt(content: &str) -> String {
     }
 }
 
-pub fn accessibility_tree(snapshot: &WorkspaceSnapshot, physical_scale: f64) -> TreeUpdate {
-    let scale = if physical_scale.is_finite() && physical_scale > 0.0 {
-        physical_scale
-    } else {
-        1.0
-    };
-    let root_id = NodeId(0);
-    let child_ids = snapshot
-        .nodes
-        .iter()
-        .map(|node| NodeId(node.id.0))
-        .collect::<Vec<_>>();
-    let mut root = Node::new(Role::Window);
-    root.set_label("Zode");
-    root.set_bounds(physical_rect(snapshot.layout.viewport, scale));
-    root.set_children(child_ids);
-
-    let mut nodes = Vec::with_capacity(snapshot.nodes.len() + 1);
-    nodes.push((root_id, root));
-    for source in &snapshot.nodes {
-        let mut target = Node::new(source.role);
-        target.set_label(source.name.clone());
-        if let Some(value) = source.value.as_ref() {
-            target.set_value(value.clone());
-        }
-        target.set_bounds(physical_rect(source.rect, scale));
-        for action in source.actions.iter().copied() {
-            target.add_action(action);
-        }
-        if let Some(toggled) = source.toggled {
-            target.set_toggled(toggled);
-        }
-        if source.disabled {
-            target.set_disabled();
-        }
-        nodes.push((NodeId(source.id.0), target));
-    }
-
-    let focus = snapshot
-        .focused
-        .filter(|focused| snapshot.node(*focused).is_some())
-        .map_or(root_id, |focused| NodeId(focused.0));
-    TreeUpdate {
-        nodes,
-        tree: Some(Tree::new(root_id)),
-        tree_id: TreeId::ROOT,
-        focus,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn node(
     id: WidgetId,
@@ -792,13 +745,4 @@ fn next_order(order: &mut u32) -> Option<u32> {
     let current = *order;
     *order = (*order).saturating_add(1);
     Some(current)
-}
-
-fn physical_rect(rect: Rect, scale: f64) -> accesskit::Rect {
-    accesskit::Rect {
-        x0: f64::from(rect.origin.x) * scale,
-        y0: f64::from(rect.origin.y) * scale,
-        x1: f64::from(rect.origin.x + rect.size.x) * scale,
-        y1: f64::from(rect.origin.y + rect.size.y) * scale,
-    }
 }

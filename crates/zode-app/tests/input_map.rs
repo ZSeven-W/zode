@@ -12,7 +12,7 @@ use zode_app::event_map::{
 };
 use zode_app::input_dispatch::{
     ime_allowed_for_focus, settings_scroll_delta_for_action, settings_scroll_delta_for_key,
-    SettingsTouchOutcome, SettingsTouchTracker,
+    ScrollTouchOutcome, ScrollTouchTracker,
 };
 use zode_app_model::{AppCommand, AttachmentMetadata, SystemTheme};
 use zode_app_ui::{
@@ -100,9 +100,9 @@ fn settings_keyboard_and_accessibility_scroll_share_page_sized_deltas() {
 }
 
 #[test]
-fn settings_touch_pan_scrolls_without_also_becoming_a_tap() {
+fn scroll_touch_pan_scrolls_without_also_becoming_a_tap() {
     let content = jian_widgets::Rect::xywh(0.0, 0.0, 300.0, 400.0);
-    let mut tracker = SettingsTouchTracker::default();
+    let mut tracker = ScrollTouchTracker::default();
     let touch = |y, phase| TouchEvent {
         id: 7,
         position: jian_widgets::Point2D::new(20.0, y),
@@ -111,24 +111,24 @@ fn settings_touch_pan_scrolls_without_also_becoming_a_tap() {
 
     assert_eq!(
         tracker.handle(touch(200.0, TouchPhase::Started), content),
-        SettingsTouchOutcome::Captured
+        ScrollTouchOutcome::Captured
     );
     assert_eq!(
         tracker.handle(touch(150.0, TouchPhase::Moved), content),
-        SettingsTouchOutcome::Scroll(50.0)
+        ScrollTouchOutcome::Scroll(50.0)
     );
     assert_eq!(
         tracker.handle(touch(150.0, TouchPhase::Ended), content),
-        SettingsTouchOutcome::Captured
+        ScrollTouchOutcome::Captured
     );
 
     assert_eq!(
         tracker.handle(touch(80.0, TouchPhase::Started), content),
-        SettingsTouchOutcome::Captured
+        ScrollTouchOutcome::Captured
     );
     assert_eq!(
         tracker.handle(touch(80.0, TouchPhase::Ended), content),
-        SettingsTouchOutcome::Tap(jian_widgets::Point2D::new(20.0, 80.0))
+        ScrollTouchOutcome::Tap(jian_widgets::Point2D::new(20.0, 80.0))
     );
 }
 

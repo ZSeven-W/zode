@@ -227,6 +227,9 @@ pub enum AppCommand {
     SelectIntegrationsTab(IntegrationsTab),
     SetIntegrationSearch(String),
     SetIntegrationScope(IntegrationScope),
+    SetIntegrationsScroll {
+        offset: f32,
+    },
     SetIntegrationEnabled {
         workspace_uri: WorkspaceUri,
         source_id: String,

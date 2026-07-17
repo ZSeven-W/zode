@@ -108,12 +108,11 @@ pub struct DesktopApp {
     modifiers: ModifiersState,
     command_bridge: Option<CommandBridge>,
     presentation_queries: Option<PresentationQueryBridge>,
-    settings_touch: crate::input_dispatch::SettingsTouchTracker,
+    scroll_touch: crate::input_dispatch::ScrollTouchTracker,
     frame_snapshot: WorkspaceSnapshot,
     frame_snapshot_valid: bool,
     accessibility_tree_dirty: bool,
-    composer_ime_cursor_area: Option<jian_widgets::Rect>,
-    composer_ime_cursor_area_dirty: bool,
+    ime: crate::ime::ImeState,
     terminal_grid_resize_pending: bool,
     window_metrics_update_pending: bool,
     focused_widget: Option<WidgetId>,
@@ -274,12 +273,11 @@ impl DesktopApp {
             modifiers: ModifiersState::empty(),
             command_bridge: None,
             presentation_queries: None,
-            settings_touch: crate::input_dispatch::SettingsTouchTracker::default(),
+            scroll_touch: crate::input_dispatch::ScrollTouchTracker::default(),
             frame_snapshot,
             frame_snapshot_valid: true,
             accessibility_tree_dirty: true,
-            composer_ime_cursor_area: None,
-            composer_ime_cursor_area_dirty: true,
+            ime: crate::ime::ImeState::default(),
             terminal_grid_resize_pending: false,
             window_metrics_update_pending: false,
             focused_widget,
@@ -418,7 +416,7 @@ impl DesktopApp {
         }
         if incremental_edit {
             self.refresh_composer_snapshot_value(draft_changed);
-            self.composer_ime_cursor_area_dirty = true;
+            self.ime.mark_area_dirty();
             self.request_redraw();
             return;
         }

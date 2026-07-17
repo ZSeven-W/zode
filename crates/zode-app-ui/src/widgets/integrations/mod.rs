@@ -212,6 +212,31 @@ impl IntegrationsPage {
         catalog::layout(&Self::layout(rect, state), state)
     }
 
+    pub fn max_scroll_offset(rect: Rect, state: &ZodeAppState) -> f32 {
+        if !catalog_matches_active_workspace(state) {
+            return 0.0;
+        }
+        catalog::max_scroll_offset(&Self::layout(rect, state), state)
+    }
+
+    pub fn scroll_offset(rect: Rect, state: &ZodeAppState) -> f32 {
+        let max_offset = Self::max_scroll_offset(rect, state);
+        if !state.integration_scroll_offset.is_finite() {
+            return 0.0;
+        }
+        state.integration_scroll_offset.clamp(0.0, max_offset)
+    }
+
+    pub fn scroll_command(rect: Rect, state: &ZodeAppState, delta: f32) -> Option<AppCommand> {
+        if !delta.is_finite() {
+            return None;
+        }
+        let max_offset = Self::max_scroll_offset(rect, state);
+        let current = Self::scroll_offset(rect, state);
+        let offset = (current + delta).clamp(0.0, max_offset);
+        (offset != current).then_some(AppCommand::SetIntegrationsScroll { offset })
+    }
+
     pub fn row_widget_id(source_id: &str) -> WidgetId {
         row::widget_id(source_id)
     }

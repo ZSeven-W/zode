@@ -2,6 +2,9 @@ use crate::{default_tool_expanded, AppCommand, TranscriptItem, TranscriptState, 
 use std::time::Instant;
 use zode_node_protocol::{AgentEvent, AgentEventKind, RuntimeOptions, SessionLocator, ToolCall};
 
+#[path = "reducer/presentation-integrations.rs"]
+mod presentation_integrations;
+
 const UNKNOWN_EVENT_CODE: &str = "agent.event.unknown";
 const UNKNOWN_EVENT_MESSAGE: &str = "Ignored an unknown agent event";
 
@@ -56,24 +59,16 @@ pub fn reduce_presentation_command(
     state: &mut ZodeAppState,
     command: AppCommand,
 ) -> PresentationCommandOutcome {
+    if let Some(outcome) =
+        presentation_integrations::reduce_integration_presentation_command(state, &command)
+    {
+        return outcome;
+    }
+    let previous_route = state.presentation.route;
     let route = match command {
         AppCommand::Navigate(route) => Some(route),
         AppCommand::SelectSettingsCategory(category) => Some(crate::ShellRoute::Settings(category)),
         AppCommand::SelectIntegrationsTab(tab) => Some(crate::ShellRoute::Integrations(tab)),
-        AppCommand::SetIntegrationSearch(search) => {
-            if !matches!(state.presentation.route, crate::ShellRoute::Integrations(_)) {
-                return PresentationCommandOutcome::Ignored;
-            }
-            state.presentation.integration_search = search;
-            return PresentationCommandOutcome::Applied;
-        }
-        AppCommand::SetIntegrationScope(scope) => {
-            if !matches!(state.presentation.route, crate::ShellRoute::Integrations(_)) {
-                return PresentationCommandOutcome::Ignored;
-            }
-            state.presentation.integration_scope = scope;
-            return PresentationCommandOutcome::Applied;
-        }
         AppCommand::TogglePrimarySidebar => {
             if matches!(state.presentation.route, crate::ShellRoute::Settings(_)) {
                 return PresentationCommandOutcome::Ignored;
@@ -178,6 +173,9 @@ pub fn reduce_presentation_command(
     if route != crate::ShellRoute::Conversation {
         close_secondary(state);
         state.presentation.pinned_summary_overlay_open = false;
+    }
+    if matches!(route, crate::ShellRoute::Integrations(_)) && route != previous_route {
+        state.integration_scroll_offset = 0.0;
     }
     state.close_session_action_surfaces();
     state.presentation.route = route;

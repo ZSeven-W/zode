@@ -4,7 +4,7 @@ use zode_app_model::ZodeAppState;
 
 use crate::{IntegrationsPage, ThreadTranscript, WorkspaceLayout, INTEGRATIONS_SEARCH_ID};
 
-use super::{next_order, node, InteractionNode};
+use super::{next_order, node, visible_rect, InteractionNode, INTEGRATIONS_ROOT_ID};
 
 pub(super) fn append_integration_nodes(
     nodes: &mut Vec<InteractionNode>,
@@ -77,12 +77,32 @@ pub(super) fn append_integration_nodes(
             CursorHint::Default,
         ));
     }
+    if visible_rect(page.catalog) {
+        let max_scroll = IntegrationsPage::max_scroll_offset(layout.primary_surface, state);
+        let scroll_offset = IntegrationsPage::scroll_offset(layout.primary_surface, state);
+        let mut actions = Vec::new();
+        if scroll_offset > 0.0 {
+            actions.push(Action::ScrollUp);
+        }
+        if scroll_offset < max_scroll {
+            actions.push(Action::ScrollDown);
+        }
+        nodes.push(node(
+            INTEGRATIONS_ROOT_ID,
+            page.catalog,
+            Role::ScrollView,
+            "集成目录",
+            None,
+            actions,
+            None,
+            CursorHint::Default,
+        ));
+    }
     for row in IntegrationsPage::catalog_section_layout(layout.primary_surface, state)
         .into_iter()
         .flat_map(|section| section.rows)
     {
-        let Some(rect) = ThreadTranscript::clip_to_viewport(row.rect, layout.primary_surface)
-        else {
+        let Some(rect) = ThreadTranscript::clip_to_viewport(row.rect, page.catalog) else {
             continue;
         };
         nodes.push(node(
@@ -95,8 +115,7 @@ pub(super) fn append_integration_nodes(
             None,
             CursorHint::Default,
         ));
-        let Some(action_rect) =
-            ThreadTranscript::clip_to_viewport(row.action_rect, layout.primary_surface)
+        let Some(action_rect) = ThreadTranscript::clip_to_viewport(row.action_rect, page.catalog)
         else {
             continue;
         };

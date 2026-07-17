@@ -1,3 +1,4 @@
+use accesskit::{Action, Role};
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
     demo_state, integration_catalog, AppCommand, IntegrationScope, IntegrationsTab, LoadState,
@@ -255,6 +256,12 @@ fn paint_renders_installed_categories_and_honest_states_without_marketplace_clai
         assert!(!text.contains(forbidden), "fabricated state: {forbidden}");
     }
     assert!(painter.clips.contains(&surface));
+    assert!(
+        painter
+            .clips
+            .contains(&IntegrationsPage::layout(surface, &state).catalog),
+        "catalog rows must be clipped below the fixed header"
+    );
 }
 
 #[test]
@@ -387,8 +394,98 @@ fn narrow_layout_never_produces_negative_or_overlapping_row_columns() {
 }
 
 #[test]
+fn catalog_scroll_geometry_clamps_both_boundaries_and_preserves_fixed_header() {
+    let mut state = catalog_state(IntegrationsTab::Plugins);
+    let surface = Rect::xywh(0.0, 0.0, 420.0, 720.0);
+    let page = IntegrationsPage::layout(surface, &state);
+    let baseline = IntegrationsPage::catalog_section_layout(surface, &state);
+    let baseline_first_y = baseline[0].rect.origin.y;
+    let max_offset = IntegrationsPage::max_scroll_offset(surface, &state);
+
+    assert!(max_offset > 120.0);
+    assert_eq!(
+        IntegrationsPage::scroll_command(surface, &state, -1.0),
+        None
+    );
+    assert_eq!(
+        IntegrationsPage::scroll_command(surface, &state, 120.0),
+        Some(AppCommand::SetIntegrationsScroll { offset: 120.0 })
+    );
+
+    state.integration_scroll_offset = 120.0;
+    let scrolled = IntegrationsPage::catalog_section_layout(surface, &state);
+    assert_eq!(baseline_first_y - scrolled[0].rect.origin.y, 120.0);
+    assert_eq!(
+        IntegrationsPage::layout(surface, &state).directory_status,
+        page.directory_status,
+        "the directory status belongs to the fixed header"
+    );
+
+    state.integration_scroll_offset = max_offset + 100.0;
+    let bottom = IntegrationsPage::catalog_section_layout(surface, &state);
+    let last_bottom = bottom.last().unwrap().rect.max_y();
+    assert!((last_bottom - page.catalog.max_y()).abs() < 0.001);
+    assert_eq!(IntegrationsPage::scroll_command(surface, &state, 1.0), None);
+    assert_eq!(
+        IntegrationsPage::scroll_command(surface, &state, -f32::MAX),
+        Some(AppCommand::SetIntegrationsScroll { offset: 0.0 })
+    );
+    assert_eq!(
+        IntegrationsPage::scroll_command(surface, &state, f32::NAN),
+        None
+    );
+}
+
+#[test]
+fn accessibility_omits_catalog_rows_scrolled_above_the_catalog_viewport() {
+    let mut state = catalog_state(IntegrationsTab::Plugins);
+    let width = 680.0;
+    let height = 720.0;
+    let initial = WorkspaceSnapshot::build(&state, width, height, Insets::ZERO);
+    let max_offset = IntegrationsPage::max_scroll_offset(initial.layout.primary_surface, &state);
+    assert!(max_offset > 0.0);
+    let initial_scroll_view = initial.node(zode_app_ui::INTEGRATIONS_ROOT_ID).unwrap();
+    assert_eq!(initial_scroll_view.role, Role::ScrollView);
+    assert_eq!(
+        initial_scroll_view.rect,
+        IntegrationsPage::layout(initial.layout.primary_surface, &state).catalog
+    );
+    assert!(!initial_scroll_view.actions.contains(&Action::ScrollUp));
+    assert!(initial_scroll_view.actions.contains(&Action::ScrollDown));
+
+    state.integration_scroll_offset = max_offset;
+    let snapshot = WorkspaceSnapshot::build(&state, width, height, Insets::ZERO);
+    let bottom_scroll_view = snapshot.node(zode_app_ui::INTEGRATIONS_ROOT_ID).unwrap();
+    assert!(bottom_scroll_view.actions.contains(&Action::ScrollUp));
+    assert!(!bottom_scroll_view.actions.contains(&Action::ScrollDown));
+    let sections =
+        IntegrationsPage::catalog_section_layout(snapshot.layout.primary_surface, &state);
+    let first = sections
+        .iter()
+        .flat_map(|section| &section.rows)
+        .next()
+        .unwrap();
+    let last = sections
+        .iter()
+        .flat_map(|section| &section.rows)
+        .last()
+        .unwrap();
+
+    assert!(
+        first.rect.max_y()
+            <= IntegrationsPage::layout(snapshot.layout.primary_surface, &state)
+                .catalog
+                .origin
+                .y
+    );
+    assert!(snapshot.node(first.id).is_none());
+    assert!(snapshot.node(last.id).is_some());
+}
+
+#[test]
 fn integration_static_ids_do_not_overlap_adjacent_shell_components() {
     let integration_ids = [
+        zode_app_ui::INTEGRATIONS_ROOT_ID,
         zode_app_ui::INTEGRATIONS_SEARCH_ID,
         zode_app_ui::INTEGRATIONS_PUBLIC_SCOPE_ID,
         zode_app_ui::INTEGRATIONS_PERSONAL_SCOPE_ID,

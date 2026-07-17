@@ -35,16 +35,14 @@ pub(super) fn layout(
         _ => return Vec::new(),
     };
     let sections = visible_sections(catalog, tab, state);
-    let columns = if page.catalog.size.x < 600.0 { 1 } else { 2 };
+    let columns = columns(page);
     let column_gap = if columns == 1 { 0.0 } else { COLUMN_GAP };
     let column_width = ((page.catalog.size.x - column_gap) / columns as f32).max(0.0);
-    let mut cursor_y = page.catalog.origin.y;
+    let mut cursor_y = page.catalog.origin.y - scroll_offset(page, state);
     sections
         .into_iter()
         .map(|section| {
-            let row_count = section.rows.len().div_ceil(columns);
-            let rows_height =
-                row_count as f32 * ROW_HEIGHT + row_count.saturating_sub(1) as f32 * ROW_GAP;
+            let height = section_height(section.rows.len(), columns);
             let header = Rect::xywh(
                 page.catalog.origin.x,
                 cursor_y,
@@ -72,7 +70,6 @@ pub(super) fn layout(
                     )
                 })
                 .collect::<Vec<_>>();
-            let height = HEADER_HEIGHT + 8.0 + rows_height;
             let result = CatalogSectionLayout {
                 category: section.category,
                 title: section.category.title(),
@@ -84,6 +81,50 @@ pub(super) fn layout(
             result
         })
         .collect()
+}
+
+pub(super) fn max_scroll_offset(page: &IntegrationsPageLayout, state: &ZodeAppState) -> f32 {
+    (content_height(page, state) - page.catalog.size.y).max(0.0)
+}
+
+fn scroll_offset(page: &IntegrationsPageLayout, state: &ZodeAppState) -> f32 {
+    if !state.integration_scroll_offset.is_finite() {
+        return 0.0;
+    }
+    state
+        .integration_scroll_offset
+        .clamp(0.0, max_scroll_offset(page, state))
+}
+
+fn content_height(page: &IntegrationsPageLayout, state: &ZodeAppState) -> f32 {
+    let LoadState::Ready(catalog) = &state.presentation.integrations else {
+        return 0.0;
+    };
+    let ShellRoute::Integrations(tab) = state.presentation.route else {
+        return 0.0;
+    };
+    let columns = columns(page);
+    visible_sections(catalog, tab, state)
+        .iter()
+        .enumerate()
+        .map(|(index, section)| {
+            section_height(section.rows.len(), columns) + if index == 0 { 0.0 } else { SECTION_GAP }
+        })
+        .sum()
+}
+
+fn columns(page: &IntegrationsPageLayout) -> usize {
+    if page.catalog.size.x < 600.0 {
+        1
+    } else {
+        2
+    }
+}
+
+fn section_height(row_len: usize, columns: usize) -> f32 {
+    let row_count = row_len.div_ceil(columns);
+    let rows_height = row_count as f32 * ROW_HEIGHT + row_count.saturating_sub(1) as f32 * ROW_GAP;
+    HEADER_HEIGHT + 8.0 + rows_height
 }
 
 pub(super) fn paint(
@@ -114,6 +155,8 @@ pub(super) fn paint(
             HorizontalAlign::Start,
         );
     }
+    painter.save();
+    painter.clip_rect(page.catalog);
     let sections = layout(page, state);
     if sections.is_empty() {
         paint_single_line(
@@ -141,22 +184,23 @@ pub(super) fn paint(
             theme.tokens.muted_foreground,
             HorizontalAlign::Center,
         );
-        return;
-    }
-    for section in sections {
-        paint_single_line(
-            painter,
-            section.title,
-            section.header,
-            16.0,
-            600,
-            theme.tokens.foreground,
-            HorizontalAlign::Start,
-        );
-        for row_layout in &section.rows {
-            row::paint(painter, row_layout, theme);
+    } else {
+        for section in sections {
+            paint_single_line(
+                painter,
+                section.title,
+                section.header,
+                16.0,
+                600,
+                theme.tokens.foreground,
+                HorizontalAlign::Start,
+            );
+            for row_layout in &section.rows {
+                row::paint(painter, row_layout, theme);
+            }
         }
     }
+    painter.restore();
 }
 
 struct VisibleSection<'a> {

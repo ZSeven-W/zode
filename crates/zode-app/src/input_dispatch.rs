@@ -17,7 +17,7 @@ pub enum KeyDispatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SettingsTouchOutcome {
+pub enum ScrollTouchOutcome {
     Ignored,
     Captured,
     Scroll(f32),
@@ -25,7 +25,7 @@ pub enum SettingsTouchOutcome {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ActiveSettingsTouch {
+struct ActiveScrollTouch {
     id: u64,
     start_y: f32,
     last_y: f32,
@@ -33,55 +33,58 @@ struct ActiveSettingsTouch {
 }
 
 #[derive(Debug, Default)]
-pub struct SettingsTouchTracker {
-    active: Option<ActiveSettingsTouch>,
+pub struct ScrollTouchTracker {
+    active: Option<ActiveScrollTouch>,
 }
 
-impl SettingsTouchTracker {
-    pub fn handle(&mut self, event: TouchEvent, content: Rect) -> SettingsTouchOutcome {
+pub type SettingsTouchOutcome = ScrollTouchOutcome;
+pub type SettingsTouchTracker = ScrollTouchTracker;
+
+impl ScrollTouchTracker {
+    pub fn handle(&mut self, event: TouchEvent, content: Rect) -> ScrollTouchOutcome {
         match event.phase {
             TouchPhase::Started if self.active.is_none() && content.contains(event.position) => {
-                self.active = Some(ActiveSettingsTouch {
+                self.active = Some(ActiveScrollTouch {
                     id: event.id,
                     start_y: event.position.y,
                     last_y: event.position.y,
                     moved: false,
                 });
-                SettingsTouchOutcome::Captured
+                ScrollTouchOutcome::Captured
             }
             TouchPhase::Moved => {
                 let Some(active) = self.active.as_mut().filter(|active| active.id == event.id)
                 else {
-                    return SettingsTouchOutcome::Ignored;
+                    return ScrollTouchOutcome::Ignored;
                 };
                 let delta = active.last_y - event.position.y;
                 active.last_y = event.position.y;
                 active.moved |= (event.position.y - active.start_y).abs() >= 4.0;
                 if active.moved && delta != 0.0 {
-                    SettingsTouchOutcome::Scroll(delta)
+                    ScrollTouchOutcome::Scroll(delta)
                 } else {
-                    SettingsTouchOutcome::Captured
+                    ScrollTouchOutcome::Captured
                 }
             }
             TouchPhase::Ended => {
                 let Some(active) = self.active.filter(|active| active.id == event.id) else {
-                    return SettingsTouchOutcome::Ignored;
+                    return ScrollTouchOutcome::Ignored;
                 };
                 self.active = None;
                 if !active.moved && content.contains(event.position) {
-                    SettingsTouchOutcome::Tap(event.position)
+                    ScrollTouchOutcome::Tap(event.position)
                 } else {
-                    SettingsTouchOutcome::Captured
+                    ScrollTouchOutcome::Captured
                 }
             }
             TouchPhase::Cancelled => {
                 if self.active.is_some_and(|active| active.id == event.id) {
                     self.active = None;
-                    return SettingsTouchOutcome::Captured;
+                    return ScrollTouchOutcome::Captured;
                 }
-                SettingsTouchOutcome::Ignored
+                ScrollTouchOutcome::Ignored
             }
-            TouchPhase::Started => SettingsTouchOutcome::Ignored,
+            TouchPhase::Started => ScrollTouchOutcome::Ignored,
         }
     }
 }

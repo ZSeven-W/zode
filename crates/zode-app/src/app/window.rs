@@ -41,6 +41,7 @@ impl DesktopApp {
                 .map_err(|error| error.to_string())?,
         );
         window.set_ime_allowed(false);
+        self.ime.invalidate_native();
         self.app_state.host.system_theme = map_system_theme(window.theme());
         let size = window.inner_size();
         self.window_state = WindowState::new(size.width, size.height, window.scale_factor());
@@ -151,8 +152,7 @@ impl DesktopApp {
             // only after input/layout changes thereafter.
             let composer = (self.window_focused
                 && self.focused_widget == Some(COMPOSER_ID)
-                && (self.composer_ime_cursor_area_dirty
-                    || self.composer_ime_cursor_area.is_none()))
+                && self.ime.needs_area_measurement())
             .then(|| {
                 Composer::ime_cursor_area(
                     &mut painter,
@@ -178,20 +178,17 @@ impl DesktopApp {
             (composer, branch_search)
         };
         if let Some(area) = composer_ime_cursor_area {
-            self.composer_ime_cursor_area = Some(area);
-            self.composer_ime_cursor_area_dirty = false;
+            self.ime.set_area(area);
         }
         if self.window_focused && self.focused_widget == Some(COMPOSER_ID) {
-            if let (Some(window), Some(area)) =
-                (self.window.as_deref(), self.composer_ime_cursor_area)
-            {
-                crate::ime::set_cursor_area(window, area);
+            if let (Some(window), Some(area)) = (self.window.as_deref(), self.ime.area()) {
+                self.ime.update_native(window, area);
             }
         } else if self.window_focused && self.focused_widget == Some(COMPOSER_BRANCH_SEARCH_ID) {
             if let (Some(window), Some(area)) =
                 (self.window.as_deref(), branch_search_ime_cursor_area)
             {
-                crate::ime::set_cursor_area(window, area);
+                self.ime.update_native(window, area);
             }
         }
 
@@ -256,13 +253,14 @@ impl DesktopApp {
         self.frame_snapshot = snapshot;
         self.frame_snapshot_valid = true;
         self.accessibility_tree_dirty = true;
-        self.composer_ime_cursor_area_dirty = true;
+        self.ime.mark_area_dirty();
     }
 
     pub(super) fn invalidate_frame_snapshot(&mut self) {
         self.frame_snapshot_valid = false;
         self.accessibility_tree_dirty = true;
-        self.composer_ime_cursor_area_dirty = true;
+        self.ime.mark_area_dirty();
+        self.ime.invalidate_native();
     }
 
     /// Composer typing does not change shell geometry or hit testing. Keep the
