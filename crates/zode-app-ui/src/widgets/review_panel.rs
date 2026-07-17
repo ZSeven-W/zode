@@ -1,10 +1,14 @@
 use std::ops::Range;
 
 use jian_widgets::{Painter, Point2D, Rect, TextLayout};
-use zode_app_model::AppCommand;
+use zode_app_model::{AppCommand, LoadState, ZodeAppState};
 use zode_node_protocol::{DiffSnapshot, WorkspaceUri};
 
-use crate::{visible_range, MeasuredItem, ZodeTheme};
+use crate::{visible_range, MeasuredItem, RectExt, WidgetId, ZodeTheme, REVIEW_CLOSE_ID};
+
+const REVIEW_HEADER_HEIGHT: f32 = 46.0;
+const REVIEW_CLOSE_SIZE: f32 = 24.0;
+const REVIEW_INSET: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewLineKind {
@@ -35,6 +39,13 @@ pub struct ReviewDraft {
     comment: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReviewPanelLayout {
+    pub header: Rect,
+    pub content: Rect,
+    pub close_button: Rect,
+}
+
 impl ReviewDraft {
     pub fn select(&mut self, selection: ReviewSelection) {
         self.selection = Some(selection);
@@ -56,6 +67,123 @@ impl ReviewDraft {
 pub struct ReviewPanel;
 
 impl ReviewPanel {
+    pub fn layout(rect: Rect) -> ReviewPanelLayout {
+        let width = finite_non_negative(rect.size.x);
+        let height = finite_non_negative(rect.size.y);
+        let header_height = REVIEW_HEADER_HEIGHT.min(height);
+        let header = Rect::xywh(rect.origin.x, rect.origin.y, width, header_height);
+        let close_size = REVIEW_CLOSE_SIZE.min(width).min(header_height);
+        let close_button = Rect::xywh(
+            (rect.origin.x + width - REVIEW_INSET - close_size).max(rect.origin.x),
+            rect.origin.y + (header_height - close_size).max(0.0) / 2.0,
+            close_size,
+            close_size,
+        );
+        ReviewPanelLayout {
+            header,
+            content: Rect::xywh(
+                rect.origin.x,
+                rect.origin.y + header_height,
+                width,
+                (height - header_height).max(0.0),
+            ),
+            close_button,
+        }
+    }
+
+    pub const fn command_for_widget(id: WidgetId) -> Option<AppCommand> {
+        match id {
+            REVIEW_CLOSE_ID => Some(AppCommand::CloseSecondary),
+            _ => None,
+        }
+    }
+
+    pub fn paint_state(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        state: &ZodeAppState,
+        theme: &ZodeTheme,
+    ) {
+        let layout = Self::layout(rect);
+        if layout.header.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return;
+        }
+        painter.fill_rect(rect, theme.tokens.background);
+        painter.save();
+        painter.clip_rect(rect);
+        draw_ui_text(
+            painter,
+            "变更",
+            Point2D::new(layout.header.origin.x + 16.0, layout.header.origin.y + 29.0),
+            14.0,
+            600,
+            theme.tokens.foreground,
+        );
+        draw_ui_text(
+            painter,
+            "×",
+            Point2D::new(
+                layout.close_button.origin.x + 5.0,
+                layout.close_button.origin.y + 17.0,
+            ),
+            15.0,
+            450,
+            theme.tokens.muted_foreground,
+        );
+        painter.stroke_line(
+            Point2D::new(layout.header.origin.x, layout.header.max_y()),
+            Point2D::new(layout.header.max_x(), layout.header.max_y()),
+            theme.tokens.border,
+            1.0,
+        );
+
+        let Some(session) = state.current_session.as_ref() else {
+            paint_status(painter, layout.content, "选择任务以查看变更", theme);
+            painter.restore();
+            return;
+        };
+        let diff = state
+            .presentation
+            .sessions
+            .get(session)
+            .map(|presentation| &presentation.diff.load);
+        match diff {
+            None | Some(LoadState::Idle) => {
+                paint_status(painter, layout.content, "变更尚未加载", theme)
+            }
+            Some(LoadState::Loading) => paint_status(painter, layout.content, "变更加载中", theme),
+            Some(LoadState::Failed(error)) => paint_status(
+                painter,
+                layout.content,
+                &format!("变更加载失败：{error}"),
+                theme,
+            ),
+            Some(LoadState::Ready(snapshot)) => {
+                let (additions, deletions) =
+                    snapshot.files.iter().fold((0_u64, 0_u64), |totals, file| {
+                        (
+                            totals.0 + u64::from(file.additions),
+                            totals.1 + u64::from(file.deletions),
+                        )
+                    });
+                let summary = format!("{} 个文件  +{additions} -{deletions}", snapshot.files.len());
+                draw_ui_text(
+                    painter,
+                    &summary,
+                    Point2D::new(layout.header.origin.x + 64.0, layout.header.origin.y + 29.0),
+                    12.0,
+                    450,
+                    theme.tokens.muted_foreground,
+                );
+                Self::paint(painter, layout.content, snapshot, 0.0, theme);
+                if snapshot.files.is_empty() {
+                    paint_status(painter, layout.content, "没有变更", theme);
+                }
+            }
+        }
+        painter.restore();
+    }
+
     pub fn parse_unified(unified: &str) -> Vec<ReviewLine> {
         let mut lines = Vec::new();
         let mut old_line = 0;
@@ -216,6 +344,17 @@ impl ReviewPanel {
     }
 }
 
+fn paint_status(painter: &mut dyn Painter, rect: Rect, status: &str, theme: &ZodeTheme) {
+    draw_ui_text(
+        painter,
+        status,
+        Point2D::new(rect.origin.x + 20.0, rect.origin.y + 30.0),
+        13.0,
+        450,
+        theme.tokens.muted_foreground,
+    );
+}
+
 fn hunk_starts(header: &str) -> Option<(u32, u32)> {
     let mut parts = header.split_whitespace();
     (parts.next()? == "@@").then_some(())?;
@@ -239,4 +378,25 @@ fn draw_text(
     let layout = TextLayout::single_run(text, "ui-monospace", size, color.to_jian(), Point2D::ZERO)
         .with_font_weight(weight);
     painter.draw_text(&layout, origin);
+}
+
+fn draw_ui_text(
+    painter: &mut dyn Painter,
+    text: &str,
+    origin: Point2D,
+    size: f32,
+    weight: u16,
+    color: jian_widgets::Color,
+) {
+    let layout = TextLayout::single_run(text, "system-ui", size, color.to_jian(), Point2D::ZERO)
+        .with_font_weight(weight);
+    painter.draw_text(&layout, origin);
+}
+
+fn finite_non_negative(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
 }

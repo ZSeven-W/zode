@@ -41,8 +41,9 @@ fn settings_nodes_expose_current_toggle_state_and_full_visual_hit_width() {
     );
 
     let dark = snapshot.node(zode_app_ui::THEME_DARK_ID).unwrap();
+    let content = SettingsPanel::page_layout(snapshot.layout.primary_surface).0;
     let visual_toggle_edge = Point2D::new(
-        snapshot.layout.transcript.max_x() - 19.0,
+        content.max_x() - 19.0,
         dark.rect.origin.y + dark.rect.size.y / 2.0,
     );
     assert_eq!(
@@ -69,7 +70,10 @@ fn settings_scroll_view_exposes_accessibility_scroll_actions() {
     assert!(settings.node(zode_app_ui::SETTINGS_NAV_ID).is_none());
     let scroll_view = settings.node(SETTINGS_ROOT_ID).unwrap();
     assert_eq!(scroll_view.role, Role::ScrollView);
-    assert_eq!(scroll_view.rect, settings.layout.transcript);
+    assert_eq!(
+        scroll_view.rect,
+        SettingsPanel::page_layout(settings.layout.primary_surface).0
+    );
     assert!(scroll_view.actions.contains(&Action::ScrollUp));
     assert!(scroll_view.actions.contains(&Action::ScrollDown));
     assert_ne!(zode_app_ui::SETTINGS_NAV_ID, SETTINGS_ROOT_ID);
@@ -91,7 +95,8 @@ fn project_permission_revoke_uses_shared_visible_action_geometry() {
         .project_permissions
         .insert(workspace.clone(), vec!["write_file".into()]);
     let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
-    let row = SettingsPanel::permission_row_layout(snapshot.layout.transcript, &state, &workspace)
+    let content = SettingsPanel::page_layout(snapshot.layout.primary_surface).0;
+    let row = SettingsPanel::permission_row_layout(content, &state, &workspace)
         .pop()
         .unwrap();
     let node = snapshot.node(row.id).expect("revoke button semantic node");
@@ -159,7 +164,8 @@ fn many_permissions_never_expose_controls_beyond_a_480px_root() {
         .iter()
         .all(|node| node.rect.max_y() <= snapshot.layout.viewport.max_y()));
 
-    let command = SettingsPanel::scroll_command(snapshot.layout.transcript, &state, 10_000.0);
+    let content = SettingsPanel::page_layout(snapshot.layout.primary_surface).0;
+    let command = SettingsPanel::scroll_command(content, &state, 10_000.0);
     assert_eq!(
         reduce_settings_command(&mut state, command),
         SettingsCommandOutcome::Applied
@@ -175,7 +181,8 @@ fn many_permissions_never_expose_controls_beyond_a_480px_root() {
         .iter()
         .find(|node| node.name == "撤销 tool-39 权限")
         .expect("the final permission is reachable by scrolling");
-    assert!(last.rect.max_y() <= scrolled.layout.transcript.max_y());
+    let content = SettingsPanel::page_layout(scrolled.layout.primary_surface).0;
+    assert!(last.rect.max_y() <= content.max_y());
     assert_eq!(scrolled.hit_test(rect_center(last.rect)), Some(last.id));
     assert_eq!(
         SettingsPanel::command_for_widget(&state, last.id),

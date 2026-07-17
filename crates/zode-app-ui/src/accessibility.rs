@@ -3,21 +3,31 @@ use std::hash::{Hash, Hasher};
 use accesskit::{Action, Node, NodeId, Role, Toggled, Tree, TreeId, TreeUpdate};
 use jian_core::CursorHint;
 use jian_widgets::{Point2D, Rect};
-use zode_app_model::{ShellPage, TranscriptItem, ZodeAppState};
+use zode_app_model::{ComingSoonFeature, IntegrationsTab, SecondaryPane, ShellRoute, ZodeAppState};
 
 use crate::{
-    ApprovalCard, Insets, ProjectSidebar, RectExt, SettingsPanel, SidebarRowTarget,
-    ThreadTranscript, ToolCard, WorkspaceLayout,
+    EnvironmentPanel, Insets, IntegrationsPage, ProjectSidebar, RectExt, ReviewPanel,
+    SettingsPanel, SidebarRowTarget, ThreadHeader, ThreadTranscript, WorkspaceLayout,
+    ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID, INTEGRATIONS_PLUGINS_TAB_ID,
+    INTEGRATIONS_SKILLS_TAB_ID,
 };
+
+mod transcript;
+
+use transcript::append_transcript_nodes;
 
 pub const SIDEBAR_ID: WidgetId = WidgetId(1);
 pub const NEW_SESSION_ID: WidgetId = WidgetId(2);
-pub const WORKFLOWS_NAV_ID: WidgetId = WidgetId(3);
+pub const SCHEDULED_NAV_ID: WidgetId = WidgetId(3);
+pub const WORKFLOWS_NAV_ID: WidgetId = SCHEDULED_NAV_ID;
 pub const PLUGINS_NAV_ID: WidgetId = WidgetId(4);
-pub const OPENPENCIL_NAV_ID: WidgetId = WidgetId(5);
-pub const BROWSER_NAV_ID: WidgetId = WidgetId(6);
-pub const SETTINGS_NAV_ID: WidgetId = WidgetId(7);
+pub const SITES_NAV_ID: WidgetId = WidgetId(5);
+pub const OPENPENCIL_NAV_ID: WidgetId = SITES_NAV_ID;
+pub const PULL_REQUESTS_NAV_ID: WidgetId = WidgetId(6);
+pub const BROWSER_NAV_ID: WidgetId = PULL_REQUESTS_NAV_ID;
+pub const CHATS_NAV_ID: WidgetId = WidgetId(7);
 pub const SETTINGS_ROOT_ID: WidgetId = WidgetId(8);
+pub const SETTINGS_NAV_ID: WidgetId = WidgetId(9);
 pub const COMPOSER_ID: WidgetId = WidgetId(20);
 pub const SEND_ID: WidgetId = WidgetId(21);
 pub const TERMINAL_ID: WidgetId = WidgetId(30);
@@ -26,6 +36,9 @@ pub const THEME_LIGHT_ID: WidgetId = WidgetId(41);
 pub const THEME_DARK_ID: WidgetId = WidgetId(42);
 pub const REDUCED_MOTION_ID: WidgetId = WidgetId(43);
 pub const HIGH_CONTRAST_ID: WidgetId = WidgetId(44);
+pub const HEADER_ENVIRONMENT_ID: WidgetId = WidgetId(60);
+pub const HEADER_REVIEW_ID: WidgetId = WidgetId(61);
+pub const REVIEW_CLOSE_ID: WidgetId = WidgetId(102);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WidgetId(pub u64);
@@ -59,141 +72,124 @@ pub struct WorkspaceSnapshot {
 
 impl WorkspaceSnapshot {
     pub fn build(state: &ZodeAppState, width: f32, height: f32, insets: Insets) -> Self {
-        let layout = WorkspaceLayout::compute(width, height, insets);
+        let route = state.presentation.route;
+        let layout = WorkspaceLayout::compute_presentation(
+            width,
+            height,
+            insets,
+            route,
+            state.presentation.secondary_pane,
+        );
         let mut nodes = Vec::new();
         let mut focus_order = 0;
+        let review_fallback = route == ShellRoute::Conversation
+            && state.presentation.secondary_pane == Some(SecondaryPane::Review)
+            && !visible_rect(layout.review_panel)
+            && visible_rect(layout.primary_surface);
 
-        if layout.sidebar.size.x > 0.0 && state.shell.page != ShellPage::Settings {
-            nodes.push(node(
-                SIDEBAR_ID,
-                layout.sidebar,
-                Role::Navigation,
-                "项目",
-                None,
-                Vec::new(),
-                None,
-                CursorHint::Default,
-            ));
-            for (row, (id, enabled)) in ProjectSidebar::navigation_row_layout(layout.sidebar)
-                .into_iter()
-                .zip([
-                    (NEW_SESSION_ID, true),
-                    (WORKFLOWS_NAV_ID, false),
-                    (PLUGINS_NAV_ID, false),
-                    (OPENPENCIL_NAV_ID, false),
-                    (BROWSER_NAV_ID, false),
-                    (SETTINGS_NAV_ID, true),
-                ])
-            {
-                nodes.push(node(
-                    id,
-                    row.rect,
-                    Role::Button,
-                    row.item.label,
-                    None,
-                    if enabled {
-                        vec![Action::Click, Action::Focus]
-                    } else {
-                        Vec::new()
-                    },
-                    if enabled {
-                        next_order(&mut focus_order)
-                    } else {
-                        None
-                    },
-                    if enabled {
-                        CursorHint::Pointer
-                    } else {
-                        CursorHint::NotAllowed
-                    },
-                ));
-            }
-            for row in ProjectSidebar::dynamic_row_layout(layout.sidebar, state) {
-                let name = match &row.target {
-                    SidebarRowTarget::Project(_) => format!("项目 {}", row.label),
-                    SidebarRowTarget::Session(_) => row.label.clone(),
-                };
-                nodes.push(node(
-                    row.id,
-                    row.rect,
-                    Role::Button,
-                    &name,
-                    None,
-                    if row.actionable {
-                        vec![Action::Click, Action::Focus]
-                    } else {
-                        Vec::new()
-                    },
-                    if row.actionable {
-                        next_order(&mut focus_order)
-                    } else {
-                        None
-                    },
-                    if row.actionable {
-                        CursorHint::Pointer
-                    } else {
-                        CursorHint::Default
-                    },
-                ));
-            }
+        if visible_rect(layout.sidebar) && !matches!(route, ShellRoute::Settings(_)) {
+            append_sidebar_nodes(&mut nodes, &layout, &mut focus_order, state);
         }
 
-        let focused = match state.shell.page {
-            ShellPage::Settings => {
+        let focused = match route {
+            ShellRoute::Settings(category) => {
                 append_settings_nodes(&mut nodes, &layout, &mut focus_order, state);
                 nodes
                     .iter()
-                    .find(|node| node.focus_order.is_some())
+                    .find(|node| node.id == SettingsPanel::category_widget_id(category))
+                    .filter(|node| node.focus_order.is_some())
+                    .or_else(|| nodes.iter().find(|node| node.focus_order.is_some()))
                     .map(|node| node.id)
             }
-            ShellPage::Terminal => {
+            ShellRoute::Terminal => {
                 let rect = Rect::xywh(
                     layout.transcript.origin.x,
                     layout.transcript.origin.y,
                     layout.transcript.size.x,
                     layout.composer.max_y() - layout.transcript.origin.y,
                 );
-                nodes.push(node(
-                    TERMINAL_ID,
-                    rect,
-                    Role::TextInput,
-                    "终端",
-                    None,
-                    vec![Action::Focus],
-                    next_order(&mut focus_order),
-                    CursorHint::Text,
-                ));
-                Some(TERMINAL_ID)
+                if visible_rect(rect) {
+                    nodes.push(node(
+                        TERMINAL_ID,
+                        rect,
+                        Role::TextInput,
+                        "终端",
+                        None,
+                        vec![Action::Focus],
+                        next_order(&mut focus_order),
+                        CursorHint::Text,
+                    ));
+                    Some(TERMINAL_ID)
+                } else {
+                    None
+                }
             }
-            _ => {
-                append_transcript_nodes(&mut nodes, &layout, &mut focus_order, state);
-                nodes.push(node(
-                    COMPOSER_ID,
-                    layout.composer,
-                    Role::TextInput,
-                    "要求后续变更",
-                    Some(state.composer.draft.clone()),
-                    vec![Action::Focus, Action::SetValue],
-                    next_order(&mut focus_order),
-                    CursorHint::Text,
-                ));
-                nodes.push(node(
-                    SEND_ID,
-                    Rect::xywh(
-                        layout.composer.max_x() - 42.0,
-                        layout.composer.max_y() - 38.0,
-                        28.0,
-                        28.0,
-                    ),
-                    Role::Button,
-                    "发送",
-                    None,
-                    vec![Action::Click, Action::Focus],
-                    next_order(&mut focus_order),
-                    CursorHint::Pointer,
-                ));
-                Some(COMPOSER_ID)
+            ShellRoute::Integrations(tab) => {
+                append_integration_nodes(&mut nodes, &layout, &mut focus_order, state);
+                let selected = match tab {
+                    IntegrationsTab::Plugins => INTEGRATIONS_PLUGINS_TAB_ID,
+                    IntegrationsTab::Skills => INTEGRATIONS_SKILLS_TAB_ID,
+                };
+                nodes
+                    .iter()
+                    .any(|node| node.id == selected)
+                    .then_some(selected)
             }
+            ShellRoute::ComingSoon(feature) => {
+                coming_soon_focus(feature).filter(|id| nodes.iter().any(|node| node.id == *id))
+            }
+            ShellRoute::Conversation => {
+                if review_fallback {
+                    None
+                } else {
+                    append_header_nodes(&mut nodes, &layout, &mut focus_order, state);
+                    append_transcript_nodes(&mut nodes, &layout, &mut focus_order, state);
+                    if visible_rect(layout.composer) {
+                        nodes.push(node(
+                            COMPOSER_ID,
+                            layout.composer,
+                            Role::TextInput,
+                            "要求后续变更",
+                            Some(state.composer.draft.clone()),
+                            vec![Action::Focus, Action::SetValue],
+                            next_order(&mut focus_order),
+                            CursorHint::Text,
+                        ));
+                        let send_rect = Rect::xywh(
+                            layout.composer.max_x() - 42.0,
+                            layout.composer.max_y() - 38.0,
+                            28.0,
+                            28.0,
+                        );
+                        if let Some(send_rect) =
+                            ThreadTranscript::clip_to_viewport(send_rect, layout.composer)
+                        {
+                            nodes.push(node(
+                                SEND_ID,
+                                send_rect,
+                                Role::Button,
+                                "发送",
+                                None,
+                                vec![Action::Click, Action::Focus],
+                                next_order(&mut focus_order),
+                                CursorHint::Pointer,
+                            ));
+                        }
+                        Some(COMPOSER_ID)
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+        append_secondary_nodes(&mut nodes, &layout, &mut focus_order, state);
+        let focused = if review_fallback {
+            nodes
+                .iter()
+                .find(|node| node.id == REVIEW_CLOSE_ID)
+                .map(|node| node.id)
+        } else {
+            focused
         };
 
         Self {
@@ -245,6 +241,219 @@ impl WorkspaceSnapshot {
         };
         Some(order[index])
     }
+}
+
+fn append_sidebar_nodes(
+    nodes: &mut Vec<InteractionNode>,
+    layout: &WorkspaceLayout,
+    focus_order: &mut u32,
+    state: &ZodeAppState,
+) {
+    nodes.push(node(
+        SIDEBAR_ID,
+        layout.sidebar,
+        Role::Navigation,
+        "项目",
+        None,
+        Vec::new(),
+        None,
+        CursorHint::Default,
+    ));
+    for (row, id) in ProjectSidebar::navigation_row_layout(layout.sidebar)
+        .into_iter()
+        .zip([
+            NEW_SESSION_ID,
+            SCHEDULED_NAV_ID,
+            PLUGINS_NAV_ID,
+            SITES_NAV_ID,
+            PULL_REQUESTS_NAV_ID,
+            CHATS_NAV_ID,
+        ])
+    {
+        let Some(rect) = ThreadTranscript::clip_to_viewport(row.rect, layout.sidebar) else {
+            continue;
+        };
+        nodes.push(node(
+            id,
+            rect,
+            Role::Button,
+            row.item.label,
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        ));
+    }
+    for row in ProjectSidebar::dynamic_row_layout(layout.sidebar, state) {
+        let name = match &row.target {
+            SidebarRowTarget::Project(_) => format!("项目 {}", row.label),
+            SidebarRowTarget::Session(_) => row.label.clone(),
+        };
+        nodes.push(node(
+            row.id,
+            row.rect,
+            Role::Button,
+            &name,
+            None,
+            if row.actionable {
+                vec![Action::Click, Action::Focus]
+            } else {
+                Vec::new()
+            },
+            if row.actionable {
+                next_order(focus_order)
+            } else {
+                None
+            },
+            if row.actionable {
+                CursorHint::Pointer
+            } else {
+                CursorHint::Default
+            },
+        ));
+    }
+    let footer = ProjectSidebar::footer_rect(layout.sidebar);
+    if visible_rect(footer) {
+        nodes.push(node(
+            SETTINGS_NAV_ID,
+            footer,
+            Role::Button,
+            ProjectSidebar::footer_item().label,
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        ));
+    }
+}
+
+fn append_header_nodes(
+    nodes: &mut Vec<InteractionNode>,
+    layout: &WorkspaceLayout,
+    focus_order: &mut u32,
+    state: &ZodeAppState,
+) {
+    let header = ThreadHeader::layout(layout.top_bar, state);
+    for (action, id, label) in [
+        (header.environment, HEADER_ENVIRONMENT_ID, "环境信息"),
+        (header.review, HEADER_REVIEW_ID, "审查变更"),
+    ] {
+        let Some(action) = action.filter(|action| visible_rect(action.rect)) else {
+            continue;
+        };
+        debug_assert_eq!(action.id, id);
+        nodes.push(node(
+            id,
+            action.rect,
+            Role::Button,
+            label,
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        ));
+    }
+}
+
+fn append_integration_nodes(
+    nodes: &mut Vec<InteractionNode>,
+    layout: &WorkspaceLayout,
+    focus_order: &mut u32,
+    state: &ZodeAppState,
+) {
+    for tab in IntegrationsPage::layout(layout.primary_surface, state).tabs {
+        let Some(rect) = ThreadTranscript::clip_to_viewport(tab.rect, layout.primary_surface)
+        else {
+            continue;
+        };
+        let mut tab_node = node(
+            tab.id,
+            rect,
+            Role::Tab,
+            tab.label,
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        );
+        tab_node.toggled = Some(Toggled::from(tab.selected));
+        nodes.push(tab_node);
+    }
+}
+
+fn append_secondary_nodes(
+    nodes: &mut Vec<InteractionNode>,
+    layout: &WorkspaceLayout,
+    focus_order: &mut u32,
+    state: &ZodeAppState,
+) {
+    if state.presentation.route != ShellRoute::Conversation {
+        return;
+    }
+    match state.presentation.secondary_pane {
+        Some(SecondaryPane::Environment) if visible_rect(layout.context_panel) => {
+            let panel = EnvironmentPanel::layout(layout.context_panel, state);
+            if !visible_rect(panel.card) {
+                return;
+            }
+            nodes.push(node(
+                ENVIRONMENT_CLOSE_ID,
+                panel.close_button,
+                Role::Button,
+                "关闭环境信息",
+                None,
+                vec![Action::Click, Action::Focus],
+                next_order(focus_order),
+                CursorHint::Pointer,
+            ));
+            if let Some(review_button) = panel.review_button.filter(|rect| visible_rect(*rect)) {
+                nodes.push(node(
+                    ENVIRONMENT_REVIEW_ID,
+                    review_button,
+                    Role::Button,
+                    "查看变更",
+                    None,
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
+        }
+        Some(SecondaryPane::Review) => {
+            let panel_rect = if visible_rect(layout.review_panel) {
+                layout.review_panel
+            } else {
+                layout.primary_surface
+            };
+            let rect = ReviewPanel::layout(panel_rect).close_button;
+            if visible_rect(rect) {
+                nodes.push(node(
+                    REVIEW_CLOSE_ID,
+                    rect,
+                    Role::Button,
+                    "关闭审查",
+                    None,
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
+        }
+        Some(SecondaryPane::Environment) | None => {}
+    }
+}
+
+const fn coming_soon_focus(feature: ComingSoonFeature) -> Option<WidgetId> {
+    Some(match feature {
+        ComingSoonFeature::ScheduledTasks => SCHEDULED_NAV_ID,
+        ComingSoonFeature::Sites => SITES_NAV_ID,
+        ComingSoonFeature::PullRequests => PULL_REQUESTS_NAV_ID,
+        ComingSoonFeature::Chats => CHATS_NAV_ID,
+    })
+}
+
+fn visible_rect(rect: Rect) -> bool {
+    rect.size.x > 0.0 && rect.size.y > 0.0
 }
 
 /// Stable FNV-1a IDs occupy a namespace byte plus a deterministic 56-bit
@@ -361,17 +570,59 @@ fn append_settings_nodes(
     focus_order: &mut u32,
     state: &ZodeAppState,
 ) {
-    nodes.push(node(
-        SETTINGS_ROOT_ID,
-        layout.transcript,
-        Role::ScrollView,
-        "设置内容",
-        None,
-        vec![Action::ScrollUp, Action::ScrollDown],
-        None,
-        CursorHint::Default,
-    ));
-    for control_layout in SettingsPanel::appearance_control_layout(layout.transcript, state) {
+    if visible_rect(layout.sidebar) {
+        nodes.push(node(
+            SIDEBAR_ID,
+            layout.sidebar,
+            Role::Navigation,
+            "设置分类",
+            None,
+            Vec::new(),
+            None,
+            CursorHint::Default,
+        ));
+        for (id, rect, _, label, selected, available) in
+            SettingsPanel::category_rows(layout.sidebar, state)
+        {
+            let Some(visible) = ThreadTranscript::clip_to_viewport(rect, layout.sidebar) else {
+                continue;
+            };
+            let mut category = node(
+                id,
+                visible,
+                Role::Button,
+                label,
+                None,
+                if available {
+                    vec![Action::Click, Action::Focus]
+                } else {
+                    Vec::new()
+                },
+                available.then(|| next_order(focus_order)).flatten(),
+                if available {
+                    CursorHint::Pointer
+                } else {
+                    CursorHint::NotAllowed
+                },
+            );
+            category.toggled = Some(Toggled::from(selected));
+            nodes.push(category);
+        }
+    }
+    let content = SettingsPanel::page_layout(layout.primary_surface).0;
+    if visible_rect(content) {
+        nodes.push(node(
+            SETTINGS_ROOT_ID,
+            content,
+            Role::ScrollView,
+            "设置内容",
+            None,
+            vec![Action::ScrollUp, Action::ScrollDown],
+            None,
+            CursorHint::Default,
+        ));
+    }
+    for control_layout in SettingsPanel::appearance_control_layout(content, state) {
         let role = if matches!(
             control_layout.id,
             THEME_SYSTEM_ID | THEME_LIGHT_ID | THEME_DARK_ID
@@ -401,7 +652,7 @@ fn append_settings_nodes(
     let Some(workspace_uri) = SettingsPanel::active_workspace_uri(state) else {
         return;
     };
-    for row in SettingsPanel::permission_row_layout(layout.transcript, state, workspace_uri) {
+    for row in SettingsPanel::permission_row_layout(content, state, workspace_uri) {
         nodes.push(node(
             row.id,
             row.visible_rect,
@@ -412,127 +663,6 @@ fn append_settings_nodes(
             next_order(focus_order),
             CursorHint::Pointer,
         ));
-    }
-}
-
-fn append_transcript_nodes(
-    nodes: &mut Vec<InteractionNode>,
-    layout: &WorkspaceLayout,
-    focus_order: &mut u32,
-    state: &ZodeAppState,
-) {
-    let Some(session) = state.current_session.as_ref() else {
-        return;
-    };
-    let Some(transcript) = state.transcripts.get(session) else {
-        return;
-    };
-    for item_layout in ThreadTranscript::visible_item_layout_with_tools(
-        layout.transcript,
-        transcript,
-        &state.tool_expanded,
-    ) {
-        let item = &transcript.items[item_layout.index];
-        match item {
-            TranscriptItem::UserText(text) => nodes.push(node(
-                ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
-                item_layout.visible_rect,
-                Role::Paragraph,
-                &format!("你：{text}"),
-                None,
-                Vec::new(),
-                None,
-                CursorHint::Default,
-            )),
-            TranscriptItem::AssistantText(text) => nodes.push(node(
-                ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
-                item_layout.visible_rect,
-                Role::Paragraph,
-                text,
-                None,
-                Vec::new(),
-                None,
-                CursorHint::Default,
-            )),
-            TranscriptItem::Thinking(text) => nodes.push(node(
-                ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
-                item_layout.visible_rect,
-                Role::Status,
-                &format!("思考：{text}"),
-                None,
-                Vec::new(),
-                None,
-                CursorHint::Default,
-            )),
-            TranscriptItem::Tool(tool) => {
-                let expanded = state
-                    .tool_expanded
-                    .get(&tool.id)
-                    .copied()
-                    .unwrap_or_else(|| ToolCard::default_expanded(tool));
-                let mut control = node(
-                    ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
-                    item_layout.visible_rect,
-                    Role::Button,
-                    &format!("{}：{}", tool.name, tool.summary),
-                    None,
-                    vec![Action::Click, Action::Focus],
-                    next_order(focus_order),
-                    CursorHint::Pointer,
-                );
-                control.toggled = Some(Toggled::from(expanded));
-                nodes.push(control);
-            }
-            TranscriptItem::Approval { id, tool } => {
-                nodes.push(node(
-                    ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
-                    item_layout.visible_rect,
-                    Role::Group,
-                    &format!("需要批准：{tool}"),
-                    None,
-                    Vec::new(),
-                    None,
-                    CursorHint::Default,
-                ));
-                for button in ApprovalCard::button_layout(item_layout.rect) {
-                    let Some(visible_button) =
-                        ThreadTranscript::clip_to_viewport(button.rect, layout.transcript)
-                    else {
-                        continue;
-                    };
-                    nodes.push(node(
-                        ThreadTranscript::approval_widget_id(session, id, button.action),
-                        visible_button,
-                        Role::Button,
-                        button.label,
-                        None,
-                        vec![Action::Click, Action::Focus],
-                        next_order(focus_order),
-                        CursorHint::Pointer,
-                    ));
-                }
-            }
-            TranscriptItem::Status { message, .. } => nodes.push(node(
-                ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
-                item_layout.visible_rect,
-                Role::Status,
-                message,
-                None,
-                Vec::new(),
-                None,
-                CursorHint::Default,
-            )),
-            TranscriptItem::Error { message, .. } => nodes.push(node(
-                ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
-                item_layout.visible_rect,
-                Role::Alert,
-                message,
-                None,
-                Vec::new(),
-                None,
-                CursorHint::Default,
-            )),
-        }
     }
 }
 

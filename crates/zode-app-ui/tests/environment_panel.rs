@@ -4,7 +4,7 @@ use zode_app_model::{
     SessionDiffState, SessionPresentationState,
 };
 use zode_app_ui::{
-    ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID, EnvironmentPanel, RectExt, ZodeTheme,
+    EnvironmentPanel, RectExt, ZodeTheme, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,

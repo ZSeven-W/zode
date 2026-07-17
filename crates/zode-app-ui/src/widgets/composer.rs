@@ -228,8 +228,18 @@ pub struct Composer;
 
 impl Composer {
     pub fn paint(painter: &mut dyn Painter, rect: Rect, state: &ComposerState, theme: &ZodeTheme) {
+        Self::paint_with_branch(painter, rect, state, None, theme);
+    }
+
+    pub fn paint_with_branch(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        state: &ComposerState,
+        branch: Option<&str>,
+        theme: &ZodeTheme,
+    ) {
         let input = TextInputState::with_text(state.draft.clone());
-        Self::paint_input(painter, rect, &input, state, theme);
+        Self::paint_input_with_branch(painter, rect, &input, state, branch, theme);
     }
 
     pub fn paint_input(
@@ -237,6 +247,17 @@ impl Composer {
         rect: Rect,
         input: &TextInputState,
         state: &ComposerState,
+        theme: &ZodeTheme,
+    ) {
+        Self::paint_input_with_branch(painter, rect, input, state, None, theme);
+    }
+
+    pub fn paint_input_with_branch(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        input: &TextInputState,
+        state: &ComposerState,
+        branch: Option<&str>,
         theme: &ZodeTheme,
     ) {
         if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
@@ -251,11 +272,20 @@ impl Composer {
         painter.fill_round_rect(rect, 12.0, theme.tokens.card);
         painter.stroke_round_rect(rect, 12.0, theme.tokens.border, 1.0);
 
-        for (label, x) in [("zode", 16.0), ("本地", 74.0), ("main", 124.0)] {
+        for (label, x) in [("zode", 16.0), ("本地", 74.0)] {
             draw_text(
                 painter,
                 label,
                 Point2D::new(rect.origin.x + x, rect.origin.y + 18.0),
+                10.0,
+                theme.tokens.muted_foreground,
+            );
+        }
+        if let Some(branch) = branch.filter(|branch| !branch.trim().is_empty()) {
+            draw_text(
+                painter,
+                branch,
+                Point2D::new(rect.origin.x + 124.0, rect.origin.y + 18.0),
                 10.0,
                 theme.tokens.muted_foreground,
             );

@@ -1,6 +1,6 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
-    ComingSoonFeature, IntegrationsTab, SettingsCategory, ShellPage, ShellRoute, demo_state,
+    demo_state, ComingSoonFeature, IntegrationsTab, SettingsCategory, ShellPage, ShellRoute,
 };
 use zode_app_ui::{
     Insets, ProjectSidebar, RectExt, SidebarAction, TerminalGrid, WorkspaceLayout, WorkspaceShell,
@@ -70,22 +70,16 @@ fn workspace_shell_paints_the_shared_geometry_boundaries() {
 
     WorkspaceShell::paint(&mut painter, viewport, Insets::ZERO, &state, &theme);
 
-    assert!(
-        painter
-            .operations
-            .contains(&PaintOp::Fill(viewport, theme.tokens.background))
-    );
-    assert!(
-        painter
-            .operations
-            .contains(&PaintOp::Fill(geometry.sidebar, theme.sidebar))
-    );
+    assert!(painter
+        .operations
+        .contains(&PaintOp::Fill(viewport, theme.tokens.background)));
+    assert!(painter
+        .operations
+        .contains(&PaintOp::Fill(geometry.sidebar, theme.sidebar)));
     assert_eq!(geometry.sidebar.size.x, 240.0);
-    assert!(
-        painter
-            .operations
-            .contains(&PaintOp::Fill(geometry.top_bar, theme.tokens.background))
-    );
+    assert!(painter
+        .operations
+        .contains(&PaintOp::Fill(geometry.top_bar, theme.tokens.background)));
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
         PaintOp::FillRound(rect, _, color)
@@ -155,6 +149,7 @@ fn shell_uses_theme_tokens_for_both_color_schemes() {
 fn workspace_shell_routes_the_terminal_page_through_terminal_panel() {
     let mut state = demo_state();
     state.shell.page = ShellPage::Terminal;
+    state.presentation.route = ShellRoute::Terminal;
     state.terminal.open = true;
     state.terminal.unavailable_reason = Some("Terminal unavailable on this node".into());
     let grid = TerminalGrid::new(80, 24);

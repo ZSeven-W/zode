@@ -90,3 +90,38 @@ fn composer_paints_live_ime_preedit() {
 
     assert!(painter.texts.iter().any(|text| text.contains("中文")));
 }
+
+#[test]
+fn composer_does_not_fabricate_a_git_branch_without_environment_data() {
+    let state = ComposerState::default();
+    let mut painter = TextCapture::default();
+
+    Composer::paint(
+        &mut painter,
+        Rect::xywh(0.0, 0.0, 500.0, 120.0),
+        &state,
+        &ZodeTheme::light(),
+    );
+
+    assert!(!painter.texts.iter().any(|text| text == "main"));
+}
+
+#[test]
+fn composer_paints_only_the_verified_environment_branch() {
+    let state = ComposerState::default();
+    let mut painter = TextCapture::default();
+
+    Composer::paint_with_branch(
+        &mut painter,
+        Rect::xywh(0.0, 0.0, 500.0, 120.0),
+        &state,
+        Some("codex/zode-jian-desktop"),
+        &ZodeTheme::light(),
+    );
+
+    assert!(painter
+        .texts
+        .iter()
+        .any(|text| text == "codex/zode-jian-desktop"));
+    assert!(!painter.texts.iter().any(|text| text == "main"));
+}

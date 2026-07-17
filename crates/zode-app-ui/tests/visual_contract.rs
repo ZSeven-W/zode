@@ -1,7 +1,7 @@
 use accesskit::{Action, Role};
 use jian_core::CursorHint;
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
-use zode_app_model::{demo_state, ShellPage};
+use zode_app_model::{demo_state, SettingsCategory, ShellRoute};
 use zode_app_ui::{
     Insets, InteractionNode, RectExt, WidgetId, WorkspaceLayout, WorkspaceShell, WorkspaceSnapshot,
     ZodeTheme, CONTENT_W, SIDEBAR_W,
@@ -16,6 +16,11 @@ enum PaintOp {
         content: String,
         origin: Point2D,
         font_size: f32,
+    },
+    Svg {
+        top_left: Point2D,
+        size: f32,
+        color: Color,
     },
 }
 
@@ -93,11 +98,16 @@ impl Painter for CapturePainter {
     fn stroke_svg_path(
         &mut self,
         _d: &str,
-        _top_left: Point2D,
-        _size: f32,
-        _color: Color,
+        top_left: Point2D,
+        size: f32,
+        color: Color,
         _width: f32,
     ) {
+        self.operations.push(PaintOp::Svg {
+            top_left,
+            size,
+            color,
+        });
     }
     fn save(&mut self) {}
     fn restore(&mut self) {}
@@ -210,9 +220,10 @@ fn empty_conversation_exposes_zode_guidance_and_full_composer_chrome() {
     for suggestion in ["探索代码", "构建功能", "审查变更", "修复问题"] {
         assert!(text.contains(suggestion));
     }
-    for composer_chrome in ["zode", "本地", "main", "完全访问"] {
+    for composer_chrome in ["zode", "本地", "完全访问"] {
         assert!(text.contains(composer_chrome));
     }
+    assert!(!painter.texts().contains(&"main"));
     assert!(geometry.composer.min_y() > 900.0);
 }
 
@@ -250,9 +261,36 @@ fn empty_conversation_paints_four_distinct_suggestion_cards() {
     }
 }
 
-fn paint_settings() -> (CapturePainter, WorkspaceLayout) {
+#[test]
+fn empty_conversation_uses_a_zode_mark_and_colored_suggestion_glyphs() {
+    let (painter, geometry) = paint_empty_wide();
+    let glyphs = painter
+        .operations
+        .iter()
+        .filter_map(|operation| match operation {
+            PaintOp::Svg {
+                top_left,
+                size,
+                color,
+            } if geometry.transcript.contains(*top_left) => Some((*top_left, *size, *color)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(glyphs.len(), 6);
+    assert!(glyphs.iter().any(|(_, size, _)| *size >= 36.0));
+    let mut colors = Vec::new();
+    for (_, _, color) in glyphs {
+        if !colors.contains(&color) {
+            colors.push(color);
+        }
+    }
+    assert!(colors.len() >= 5);
+}
+
+fn paint_settings(category: SettingsCategory) -> (CapturePainter, WorkspaceLayout) {
     let mut state = demo_state();
-    state.shell.page = ShellPage::Settings;
+    state.presentation.route = ShellRoute::Settings(category);
     let geometry = WorkspaceLayout::compute(1800.0, 1080.0, Insets::ZERO);
     let mut painter = CapturePainter::default();
     WorkspaceShell::paint(
@@ -266,9 +304,9 @@ fn paint_settings() -> (CapturePainter, WorkspaceLayout) {
 }
 
 #[test]
-fn settings_route_exposes_appearance_and_project_permissions_without_cloud_login() {
-    let (painter, _) = paint_settings();
-    let text = painter.texts().join("\n");
+fn settings_routes_expose_real_local_categories_without_cloud_login() {
+    let (appearance, _) = paint_settings(SettingsCategory::Appearance);
+    let appearance = appearance.texts().join("\n");
 
     for label in [
         "设置",
@@ -278,16 +316,26 @@ fn settings_route_exposes_appearance_and_project_permissions_without_cloud_login
         "深色",
         "减少动画",
         "高对比度",
-        "项目权限",
     ] {
-        assert!(text.contains(label), "missing settings label: {label}");
+        assert!(
+            appearance.contains(label),
+            "missing appearance label: {label}"
+        );
     }
-    assert!(!text.contains("登录"));
+    assert!(!appearance.contains("项目权限"));
+    assert!(!appearance.contains("登录"));
+
+    let (general, _) = paint_settings(SettingsCategory::General);
+    let general = general.texts().join("\n");
+    for label in ["常规", "本地运行状态", "主机连接", "活动工作区"] {
+        assert!(general.contains(label), "missing general label: {label}");
+    }
+    assert!(!general.contains("登录"));
 }
 
 #[test]
-fn settings_route_has_a_category_rail_and_centered_grouped_cards() {
-    let (painter, geometry) = paint_settings();
+fn settings_route_has_a_category_rail_and_centered_grouped_card() {
+    let (painter, geometry) = paint_settings(SettingsCategory::General);
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
         PaintOp::Fill(rect, _) if *rect == geometry.sidebar
@@ -306,7 +354,7 @@ fn settings_route_has_a_category_rail_and_centered_grouped_cards() {
         })
         .collect::<Vec<_>>();
 
-    assert!(cards.len() >= 2, "settings has multiple grouped cards");
+    assert!(!cards.is_empty(), "settings has a grouped card");
     let main_center =
         geometry.sidebar.max_x() + (geometry.viewport.max_x() - geometry.sidebar.max_x()) / 2.0;
     for (card, _) in cards {
@@ -316,7 +364,7 @@ fn settings_route_has_a_category_rail_and_centered_grouped_cards() {
 
 #[test]
 fn settings_route_does_not_paint_chat_transcript_or_composer() {
-    let (painter, _) = paint_settings();
+    let (painter, _) = paint_settings(SettingsCategory::General);
     let text = painter.texts().join("\n");
 
     assert!(!text.contains("向 Zode 描述一个任务"));

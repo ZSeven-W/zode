@@ -1,6 +1,6 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
-use zode_app_model::{IntegrationsTab, ProjectState, SettingsCategory, ShellRoute, demo_state};
-use zode_app_ui::{ProjectSidebar, RectExt, ZodeTheme, group_sessions};
+use zode_app_model::{demo_state, IntegrationsTab, ProjectState, SettingsCategory, ShellRoute};
+use zode_app_ui::{group_sessions, ProjectSidebar, RectExt, ZodeTheme};
 use zode_node_protocol::{NodeId, SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,11 +92,10 @@ fn local_settings_is_painted_in_the_bottom_footer() {
         (text == "本地设置").then_some(*origin)
     });
     assert!(settings_origin.is_some_and(|origin| origin.y > 560.0));
-    assert!(
-        !painter.operations.iter().any(
-            |operation| matches!(operation, PaintOp::Text(text, _, _) if text.contains("账户"))
-        )
-    );
+    assert!(!painter
+        .operations
+        .iter()
+        .any(|operation| matches!(operation, PaintOp::Text(text, _, _) if text.contains("账户"))));
 }
 
 #[test]
@@ -260,12 +259,10 @@ fn zero_height_footer_is_not_painted() {
         &ZodeTheme::light(),
     );
 
-    assert!(
-        !painter
-            .operations
-            .iter()
-            .any(|operation| matches!(operation, PaintOp::Text(text, _, _) if text == "本地设置"))
-    );
+    assert!(!painter
+        .operations
+        .iter()
+        .any(|operation| matches!(operation, PaintOp::Text(text, _, _) if text == "本地设置")));
 }
 
 #[test]

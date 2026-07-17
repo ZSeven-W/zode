@@ -3,13 +3,17 @@ use std::collections::BTreeSet;
 use accesskit::{Action, NodeId, Role};
 use jian_core::CursorHint;
 use jian_widgets::{Point2D, Rect};
-use zode_app_model::{AppCommand, TranscriptItem, TranscriptState};
+use zode_app_model::{
+    AppCommand, ComingSoonFeature, IntegrationsTab, LoadState, SecondaryPane, SessionDiffState,
+    SessionPresentationState, SettingsCategory, ShellRoute, TranscriptItem, TranscriptState,
+};
 use zode_app_ui::{
-    accessibility_tree, ApprovalCard, FocusDirection, Insets, InteractionNode, ProjectSidebar,
-    RectExt, ThreadTranscript, WidgetId, WorkspaceLayout, WorkspaceSnapshot,
+    accessibility_tree, ApprovalCard, EnvironmentPanel, FocusDirection, Insets, InteractionNode,
+    ProjectSidebar, RectExt, SettingsPanel, ThreadTranscript, WidgetId, WorkspaceLayout,
+    WorkspaceSnapshot,
 };
 use zode_node_protocol::{
-    SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus, WorkspaceUri,
+    DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus, WorkspaceUri,
 };
 
 const NAVIGATION_ID: WidgetId = WidgetId(10);
@@ -92,17 +96,133 @@ fn generated_widget_ids_are_stable_unique_and_cover_core_interactions() {
 fn each_page_has_a_useful_default_focus_target() {
     let mut state = zode_app_model::demo_state();
     state.composer.focused = false;
+    state.shell.page = zode_app_model::ShellPage::Settings;
+    state.presentation.route = ShellRoute::Conversation;
     let conversation = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
     assert_eq!(conversation.focused, Some(zode_app_ui::COMPOSER_ID));
 
-    state.shell.page = zode_app_model::ShellPage::Terminal;
+    state.presentation.route = ShellRoute::Terminal;
     state.terminal.focused = false;
     let terminal = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
     assert_eq!(terminal.focused, Some(zode_app_ui::TERMINAL_ID));
 
-    state.shell.page = zode_app_model::ShellPage::Settings;
+    state.presentation.route = ShellRoute::Integrations(IntegrationsTab::Skills);
+    let integrations = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    assert_eq!(integrations.focused, Some(WidgetId(71)));
+
+    state.presentation.route = ShellRoute::ComingSoon(ComingSoonFeature::Sites);
+    let coming_soon = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    assert_eq!(coming_soon.focused, Some(WidgetId(5)));
+
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::Appearance);
     let settings = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
-    assert_eq!(settings.focused, Some(zode_app_ui::THEME_SYSTEM_ID));
+    assert_eq!(
+        settings.focused,
+        Some(SettingsPanel::category_widget_id(
+            SettingsCategory::Appearance
+        ))
+    );
+}
+
+#[test]
+fn typed_secondary_panes_expose_only_visible_shared_geometry() {
+    let (mut state, session) = transcript_fixture();
+    state.presentation.sessions.insert(
+        session.clone(),
+        SessionPresentationState {
+            diff: SessionDiffState {
+                dirty: false,
+                load: LoadState::Ready(DiffSnapshot {
+                    session,
+                    files: Vec::new(),
+                    unified: String::new(),
+                }),
+            },
+            ..SessionPresentationState::default()
+        },
+    );
+    state.presentation.secondary_pane = Some(SecondaryPane::Environment);
+
+    let environment = WorkspaceSnapshot::build(&state, 1800.0, 1080.0, Insets::ZERO);
+    let panel_layout = EnvironmentPanel::layout(environment.layout.context_panel, &state);
+    assert_eq!(environment.layout.context_panel.width(), 300.0);
+    assert_eq!(
+        environment.node(WidgetId(100)).unwrap().rect,
+        panel_layout.close_button
+    );
+    assert_eq!(
+        environment.node(WidgetId(101)).unwrap().rect,
+        panel_layout.review_button.unwrap()
+    );
+    assert!(environment.node(WidgetId(60)).is_some());
+    assert!(environment.node(WidgetId(61)).is_some());
+
+    let collapsed = WorkspaceSnapshot::build(&state, 1399.0, 900.0, Insets::ZERO);
+    assert_eq!(collapsed.layout.context_panel.width(), 0.0);
+    for id in [WidgetId(60), WidgetId(100), WidgetId(101)] {
+        assert!(collapsed.node(id).is_none());
+    }
+    assert!(collapsed.node(WidgetId(61)).is_some());
+
+    state.presentation.secondary_pane = Some(SecondaryPane::Review);
+    let review = WorkspaceSnapshot::build(&state, 1800.0, 1080.0, Insets::ZERO);
+    let close = review.node(WidgetId(102)).expect("visible review close");
+    assert!(review.layout.review_panel.contains(rect_center(close.rect)));
+
+    let collapsed = WorkspaceSnapshot::build(&state, 1399.0, 900.0, Insets::ZERO);
+    assert_eq!(collapsed.layout.review_panel.width(), 0.0);
+    assert_eq!(
+        collapsed.node(WidgetId(102)).unwrap().rect,
+        zode_app_ui::ReviewPanel::layout(collapsed.layout.primary_surface).close_button
+    );
+    for hidden in [WidgetId(20), WidgetId(21), WidgetId(60), WidgetId(61)] {
+        assert!(
+            collapsed.node(hidden).is_none(),
+            "review fallback must not expose hidden node {hidden:?}"
+        );
+    }
+    assert!(collapsed
+        .nodes
+        .iter()
+        .all(|node| !node.name.contains("question")));
+    assert_eq!(collapsed.focused, Some(WidgetId(102)));
+}
+
+#[test]
+fn extreme_typed_snapshots_never_expose_empty_or_out_of_bounds_nodes() {
+    let (mut state, _) = transcript_fixture();
+    for route in [
+        ShellRoute::Conversation,
+        ShellRoute::Terminal,
+        ShellRoute::Integrations(IntegrationsTab::Plugins),
+        ShellRoute::Settings(SettingsCategory::General),
+        ShellRoute::ComingSoon(ComingSoonFeature::Chats),
+    ] {
+        state.presentation.route = route;
+        state.presentation.secondary_pane = Some(SecondaryPane::Review);
+        for (width, height, insets) in [
+            (0.0, 0.0, Insets::ZERO),
+            (
+                390.0,
+                180.0,
+                Insets {
+                    top: 500.0,
+                    right: 500.0,
+                    bottom: 500.0,
+                    left: 500.0,
+                },
+            ),
+        ] {
+            let snapshot = WorkspaceSnapshot::build(&state, width, height, insets);
+            for node in &snapshot.nodes {
+                assert!(node.rect.min_x().is_finite() && node.rect.min_y().is_finite());
+                assert!(node.rect.width() > 0.0 && node.rect.height() > 0.0);
+                assert!(node.rect.min_x() >= 0.0 && node.rect.min_y() >= 0.0);
+                assert!(node.rect.max_x() <= snapshot.layout.viewport.max_x());
+                assert!(node.rect.max_y() <= snapshot.layout.viewport.max_y());
+            }
+        }
+    }
 }
 
 #[test]
@@ -500,10 +620,20 @@ fn sidebar_includes_projects_without_threads_and_static_rows_share_paint_layout(
         zode_app_ui::PLUGINS_NAV_ID,
         zode_app_ui::OPENPENCIL_NAV_ID,
         zode_app_ui::BROWSER_NAV_ID,
-        zode_app_ui::SETTINGS_NAV_ID,
+        WidgetId(7),
     ]) {
         assert_eq!(snapshot.node(id).unwrap().rect, row.rect);
     }
+    assert_eq!(zode_app_ui::NEW_SESSION_ID, WidgetId(2));
+    assert_eq!(zode_app_ui::WORKFLOWS_NAV_ID, WidgetId(3));
+    assert_eq!(zode_app_ui::PLUGINS_NAV_ID, WidgetId(4));
+    assert_eq!(zode_app_ui::OPENPENCIL_NAV_ID, WidgetId(5));
+    assert_eq!(zode_app_ui::BROWSER_NAV_ID, WidgetId(6));
+    assert_eq!(zode_app_ui::SETTINGS_NAV_ID, WidgetId(9));
+    assert_eq!(
+        snapshot.node(zode_app_ui::SETTINGS_NAV_ID).unwrap().rect,
+        ProjectSidebar::footer_rect(snapshot.layout.sidebar)
+    );
 }
 
 #[test]

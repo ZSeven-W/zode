@@ -1,4 +1,5 @@
 mod approval_card;
+mod coming_soon_page;
 mod composer;
 mod empty_state;
 mod environment_panel;
@@ -17,6 +18,7 @@ mod window_chrome;
 mod workspace_shell;
 
 pub use approval_card::{ApprovalAction, ApprovalButtonLayout, ApprovalCard};
+pub use coming_soon_page::ComingSoonPage;
 pub use composer::{
     Composer, ComposerController, ComposerOutcome, ComposerSubmission, SandboxSelection,
 };
@@ -32,7 +34,9 @@ pub use project_sidebar::{
     group_sessions, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarItem,
     SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget,
 };
-pub use review_panel::{ReviewDraft, ReviewLine, ReviewLineKind, ReviewPanel, ReviewSelection};
+pub use review_panel::{
+    ReviewDraft, ReviewLine, ReviewLineKind, ReviewPanel, ReviewPanelLayout, ReviewSelection,
+};
 pub use settings_panel::{
     PermissionRow, PermissionRowLayout, SettingControl, SettingControlLayout, SettingsPanel,
 };
@@ -41,7 +45,7 @@ pub use terminal_grid::{
     CellPosition, TerminalCell, TerminalColor, TerminalGrid, TerminalLine, TerminalSelection,
 };
 pub use terminal_panel::TerminalPanel;
-pub use thread_header::ThreadHeader;
+pub use thread_header::{HeaderActionLayout, ThreadHeader, ThreadHeaderLayout};
 pub use tool_card::{ToolCard, ToolTone};
 pub use transcript::{ThreadTranscript, TranscriptItemLayout};
 pub use usage_chip::{UsageChip, UsageDisplay};

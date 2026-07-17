@@ -1,4 +1,4 @@
-use jian_widgets::{Painter, Point2D, Rect, TextLayout, centered_text_baseline_y};
+use jian_widgets::{centered_text_baseline_y, Painter, Point2D, Rect, TextLayout};
 use std::collections::BTreeMap;
 
 use zode_app_model::{
@@ -6,7 +6,7 @@ use zode_app_model::{
 };
 use zode_node_protocol::{SessionLocator, ThreadSummary, WorkspaceUri};
 
-use crate::{RectExt, WidgetId, ZodeTheme, stable_widget_id};
+use crate::{stable_widget_id, RectExt, WidgetId, ZodeTheme};
 
 const FONT: &str = "system-ui";
 const HEADER_H: f32 = 46.0;
