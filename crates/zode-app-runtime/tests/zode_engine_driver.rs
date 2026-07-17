@@ -361,16 +361,17 @@ async fn create_is_lazy_and_first_turn_persists_snapshot_model_and_title() {
         )
         .await;
     assert_eq!(factory.assemblies.lock().unwrap().len(), 1);
-    let started = engine.started.lock().unwrap();
-    assert!(
-        matches!(&started[0][0], ContentBlock::Text { text } if text == "Design the desktop shell")
-    );
-    assert!(matches!(
-        &started[0][1],
-        ContentBlock::Image { source: ImageSource::Base64 { media_type, data } }
-            if media_type == "image/png" && data == "aGVsbG8="
-    ));
-    drop(started);
+    {
+        let started = engine.started.lock().unwrap();
+        assert!(
+            matches!(&started[0][0], ContentBlock::Text { text } if text == "Design the desktop shell")
+        );
+        assert!(matches!(
+            &started[0][1],
+            ContentBlock::Image { source: ImageSource::Base64 { media_type, data } }
+                if media_type == "image/png" && data == "aGVsbG8="
+        ));
+    }
 
     let raw = collect_stream(events).await;
     let usage_event = raw
@@ -410,7 +411,7 @@ async fn restart_lazily_restores_the_persisted_transcript() {
         )
         .await
         .unwrap();
-    repository
+    let _saved = repository
         .save(
             &session,
             loaded.meta,
@@ -496,13 +497,14 @@ async fn idle_model_switch_reassembles_with_carry_and_preserves_transcript() {
         .await
         .unwrap();
 
-    let assemblies = factory.assemblies.lock().unwrap();
-    assert_eq!(assemblies.len(), 2);
-    assert_eq!(assemblies[1].model, "new-model");
-    assert_eq!(assemblies[1].template_model.as_deref(), Some("new-model"));
-    assert_eq!(assemblies[1].prior_messages, 2);
-    assert!(assemblies[1].carried);
-    drop(assemblies);
+    {
+        let assemblies = factory.assemblies.lock().unwrap();
+        assert_eq!(assemblies.len(), 2);
+        assert_eq!(assemblies[1].model, "new-model");
+        assert_eq!(assemblies[1].template_model.as_deref(), Some("new-model"));
+        assert_eq!(assemblies[1].prior_messages, 2);
+        assert!(assemblies[1].carried);
+    }
     let loaded = repository.load(&session).await.unwrap();
     assert_eq!(loaded.meta.model, "new-model");
     assert_eq!(loaded.store.len(), 2);
