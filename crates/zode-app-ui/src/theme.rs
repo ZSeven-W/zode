@@ -210,7 +210,14 @@ impl ZodeTheme {
         if self.sidebar_material {
             Color::BLACK.with_alpha(0.09)
         } else {
-            self.tokens.border.with_alpha(0.72)
+            // `tokens.border` is already `foreground.with_alpha(0.08)` -
+            // `with_alpha` replaces rather than multiplies alpha, so calling
+            // it again here would discard that 8% and recomposite the same
+            // near-black `foreground` RGB at 72% alpha, rendering a solid
+            // dark line instead of a subtle divider. Compute straight from
+            // `foreground` at a modest alpha that keeps the same soft
+            // weight the old flat `#e5e5e5`-based border had at 0.72.
+            self.tokens.foreground.with_alpha(0.16)
         }
     }
 
@@ -561,7 +568,7 @@ mod tests {
         );
         assert_eq!(
             dark.sidebar_footer_divider(),
-            dark.tokens.border.with_alpha(0.72)
+            dark.tokens.foreground.with_alpha(0.16)
         );
     }
 

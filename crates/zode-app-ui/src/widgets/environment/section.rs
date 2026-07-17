@@ -124,7 +124,10 @@ pub(super) fn paint(
         painter.stroke_line(
             jian_widgets::Point2D::new(layout.rect.origin.x, separator_y),
             jian_widgets::Point2D::new(layout.rect.max_x(), separator_y),
-            theme.tokens.border.with_alpha(0.72),
+            // See the identical note in `environment/mod.rs`: `tokens.border`
+            // is already translucent, so `with_alpha` here must recompute
+            // from `foreground` rather than re-alphaing the border color.
+            theme.tokens.foreground.with_alpha(0.16),
             1.0,
         );
     }

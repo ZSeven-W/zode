@@ -385,7 +385,11 @@ impl EnvironmentPanel {
         painter.stroke_line(
             jian_widgets::Point2D::new(layout.content.origin.x, separator_y),
             jian_widgets::Point2D::new(layout.content.max_x(), separator_y),
-            theme.tokens.border.with_alpha(0.72),
+            // `tokens.border` already carries `foreground.with_alpha(0.08)`;
+            // re-alphaing it here would replace (not multiply) that 8% with
+            // 72%, painting a solid dark line instead of a soft divider.
+            // Compute straight from `foreground` at a modest alpha instead.
+            theme.tokens.foreground.with_alpha(0.16),
             1.0,
         );
         for status in &layout.statuses {

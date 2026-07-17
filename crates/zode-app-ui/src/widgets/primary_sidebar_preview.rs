@@ -67,7 +67,12 @@ impl PrimarySidebarPreview {
         painter.stroke_line(
             Point2D::new(sidebar.max_x(), sidebar.origin.y),
             Point2D::new(sidebar.max_x(), sidebar.max_y()),
-            theme.tokens.border.with_alpha(0.72),
+            // `tokens.border` is already `foreground.with_alpha(0.08)`;
+            // `with_alpha` replaces rather than multiplies, so chaining it
+            // here discarded that 8% and recomposited near-black
+            // `foreground` at 72%, painting a solid dark edge instead of a
+            // soft one. Compute straight from `foreground` at a modest alpha.
+            theme.tokens.foreground.with_alpha(0.16),
             1.0,
         );
         ProjectSidebar::paint_with_interaction(

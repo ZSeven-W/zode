@@ -2,16 +2,20 @@ mod snapshot_support;
 
 use std::path::{Path, PathBuf};
 
+use image::GenericImageView;
+use jian_widgets::Rect as JianRect;
 use snapshot_support::{
     assert_case_geometry, assert_platform_snapshot, compare_reference_images, named_scene,
     reference_scenes, render_snapshot, scene_names, GeometryExpectation, LayoutRect,
     ReferenceScene, SnapshotCase, REFERENCE_SCENE_NAMES,
 };
+use zode_app::render::{FramePainter, NativeBackend, RasterSurface};
 use zode_app_model::{
     environment_sections, LoadState, PreviewState, SecondaryPane, ThemePreference,
 };
 use zode_app_ui::{
-    Composer, Insets, RectExt, SettingsPanel, WorkspaceSnapshot, TRANSCRIPT_COMPOSER_GAP,
+    Composer, EnvironmentPanel, Insets, RectExt, SettingsPanel, WorkspaceShell, WorkspaceSnapshot,
+    TRANSCRIPT_COMPOSER_GAP,
 };
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
@@ -159,6 +163,143 @@ fn conversation_queue_matches_platform_golden() {
         .expect("conversation queue scene is registered");
     assert_scene_landmarks(&scene);
     assert_platform_snapshot(case_for(scene.name), &scene.state);
+}
+
+/// Regression guard for a border-darkening bug: several widgets called
+/// `theme.tokens.border.with_alpha(x)` to paint an "emphasized" divider.
+/// `Color::with_alpha` *replaces* the alpha channel rather than multiplying
+/// it, and `tokens.border` is already `foreground.with_alpha(0.08)` - so
+/// those call sites silently discarded the 8% and recomposited the
+/// near-black `foreground` RGB at the new (much higher) alpha, painting a
+/// solid dark line instead of a soft one.
+///
+/// The bug was largely invisible in the offscreen goldens above (always
+/// rendered at `SCALE = 1.0`) because a 1-logical-pixel stroke line lands on
+/// a fractional physical row at that scale and gets diluted by
+/// antialiasing. At the real macOS retina scale (2.0, what
+/// `crates/zode-app/src/app/window.rs` actually uses), the same stroke
+/// lands on a fully-covered physical row and renders at its true, much
+/// darker color - this reproduces the reported "thick, dark border"
+/// regression that the scale-1.0 goldens missed. This test renders the
+/// conversation-environment scene at both scales and asserts every sampled
+/// border/divider pixel stays within the soft range the design intends.
+#[test]
+fn environment_and_composer_borders_stay_soft_at_retina_scale() {
+    // Anything darker than this (out of 255) is no longer a soft hairline -
+    // well above the current soft value (~218) and well below the buggy
+    // value the fix replaced (~90).
+    const MAX_ACCEPTABLE_DARKNESS: u8 = 200;
+
+    let scene = named_scene("conversation-environment", ThemePreference::Light, WIDTH)
+        .expect("conversation-environment scene is registered");
+    let snapshot =
+        WorkspaceSnapshot::build(&scene.state, WIDTH as f32, HEIGHT as f32, Insets::ZERO);
+    let env_layout = EnvironmentPanel::layout(snapshot.layout.context_panel, &scene.state);
+    let composer_input = Composer::layout(snapshot.layout.composer, &scene.state.composer).input;
+
+    for scale in [1.0_f32, 2.0] {
+        let png = render_scene_at_scale(&scene.state, scale);
+
+        let card_left = env_layout.card.origin.x;
+        let mid_y = env_layout.card.origin.y + env_layout.card.size.y / 2.0;
+        let card_edge = darkest_along(
+            &png,
+            mid_y,
+            (card_left - 2.0, card_left + 2.0),
+            scale,
+            false,
+        );
+        assert!(
+            card_edge >= MAX_ACCEPTABLE_DARKNESS,
+            "environment card border darkened to {card_edge} at scale={scale} \
+             (expected a soft hairline)"
+        );
+
+        let card_mid_x = env_layout.card.origin.x + env_layout.card.size.x / 2.0;
+        let divider_y = env_layout.environment_group_end;
+        let divider = darkest_along(
+            &png,
+            card_mid_x,
+            (divider_y - 20.0, divider_y + 20.0),
+            scale,
+            true,
+        );
+        assert!(
+            divider >= MAX_ACCEPTABLE_DARKNESS,
+            "environment panel internal divider darkened to {divider} at scale={scale} \
+             (this is the exact regression a `tokens.border.with_alpha(x)` reintroduces - \
+             `tokens.border` is already translucent, so `with_alpha` must be applied to \
+             `tokens.foreground` instead, never chained onto `tokens.border`)"
+        );
+
+        let composer_left = composer_input.origin.x;
+        let composer_mid_y = composer_input.origin.y + composer_input.size.y / 2.0;
+        let composer_edge = darkest_along(
+            &png,
+            composer_mid_y,
+            (composer_left - 2.0, composer_left + 2.0),
+            scale,
+            false,
+        );
+        assert!(
+            composer_edge >= MAX_ACCEPTABLE_DARKNESS,
+            "composer input border darkened to {composer_edge} at scale={scale} \
+             (expected a soft hairline)"
+        );
+    }
+}
+
+fn render_scene_at_scale(state: &zode_app_model::ZodeAppState, scale: f32) -> Vec<u8> {
+    let physical_width = (WIDTH as f32 * scale).round() as u32;
+    let physical_height = (HEIGHT as f32 * scale).round() as u32;
+    let mut surface = RasterSurface::new(physical_width, physical_height).unwrap();
+    let canvas = surface.canvas();
+    canvas.clear(skia_safe::Color::WHITE);
+    canvas.scale((scale, scale));
+    let theme = zode_app::preferences::theme_for_state(state);
+    {
+        let mut backend = NativeBackend::new(scale);
+        let mut painter = FramePainter::new(&mut backend, canvas);
+        WorkspaceShell::paint(
+            &mut painter,
+            JianRect::xywh(0.0, 0.0, WIDTH as f32, HEIGHT as f32),
+            Insets::ZERO,
+            state,
+            &theme,
+        );
+    }
+    surface.encode_png().unwrap()
+}
+
+/// Scans a short logical span straddling `fixed_logical` (perpendicular to
+/// the stroke direction) and returns the darkest gray value found - this
+/// locates the true stroke color even when antialiasing means the exact
+/// logical coordinate does not land on the most-covered physical pixel.
+fn darkest_along(
+    png: &[u8],
+    fixed_logical: f32,
+    span: (f32, f32),
+    scale: f32,
+    along_y: bool,
+) -> u8 {
+    let image = image::load_from_memory(png).unwrap();
+    let fixed_px = (fixed_logical * scale).round() as i64;
+    let start_px = (span.0 * scale).round() as i64;
+    let end_px = (span.1 * scale).round() as i64;
+    let mut darkest = 255u8;
+    for t_px in start_px..=end_px {
+        let (x, y) = if along_y {
+            (fixed_px, t_px)
+        } else {
+            (t_px, fixed_px)
+        };
+        if x < 0 || y < 0 || x as u32 >= image.width() || y as u32 >= image.height() {
+            continue;
+        }
+        let pixel = image.get_pixel(x as u32, y as u32);
+        darkest = darkest.min(pixel[0]).min(pixel[1]).min(pixel[2]);
+    }
+    darkest
 }
 
 fn assert_scene_landmarks(scene: &ReferenceScene) {

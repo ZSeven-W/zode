@@ -35,7 +35,12 @@ pub(super) fn paint(painter: &mut dyn Painter, rect: Rect, label: &str, theme: &
     painter.stroke_line(
         Point2D::new(row.origin.x, row.max_y() - 1.0),
         Point2D::new(row.max_x(), row.max_y() - 1.0),
-        theme.tokens.border.with_alpha(0.82),
+        // `tokens.border` is already `foreground.with_alpha(0.08)`;
+        // `with_alpha` replaces rather than multiplies, so chaining it here
+        // discarded that 8% and recomposited near-black `foreground` at 82%,
+        // painting a solid dark rule under every collapsed turn instead of a
+        // soft one. Compute straight from `foreground` at a modest alpha.
+        theme.tokens.foreground.with_alpha(0.2),
         1.0,
     );
 }
