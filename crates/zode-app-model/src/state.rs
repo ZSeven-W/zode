@@ -1,4 +1,7 @@
-use crate::{AttachmentMetadata, LayoutClass, LoadState, PresentationState, TranscriptState};
+use crate::{
+    AttachmentMetadata, LayoutClass, LoadState, MessageQueueState, PresentationState,
+    TranscriptState,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zode_node_protocol::{
@@ -15,6 +18,29 @@ pub struct ComposerState {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub sandbox_label: String,
+    pub queue_menu: Option<crate::QueuedMessageId>,
+    pub editing_queued_message: Option<crate::QueuedMessageId>,
+    pub draft_before_queue_edit: Option<String>,
+    pub send_hovered: bool,
+}
+
+impl ComposerState {
+    pub fn begin_queue_edit(&mut self, id: crate::QueuedMessageId, text: &str) {
+        if self.editing_queued_message.is_none() {
+            self.draft_before_queue_edit = Some(self.draft.clone());
+        }
+        self.draft = text.to_owned();
+        self.editing_queued_message = Some(id);
+        self.queue_menu = None;
+    }
+
+    pub fn finish_queue_edit(&mut self) {
+        if self.editing_queued_message.take().is_some() {
+            self.draft = self.draft_before_queue_edit.take().unwrap_or_default();
+        } else {
+            self.draft_before_queue_edit = None;
+        }
+    }
 }
 
 /// Change-review panel state.
@@ -129,6 +155,7 @@ pub struct ZodeAppState {
     pub pending_session_delete: Option<SessionLocator>,
     pub threads: Vec<ThreadSummary>,
     pub transcripts: BTreeMap<SessionLocator, TranscriptState>,
+    pub message_queues: BTreeMap<SessionLocator, MessageQueueState>,
     pub active_turns: BTreeMap<SessionLocator, TurnId>,
     pub approvals: BTreeMap<String, SessionLocator>,
     pub tool_expanded: BTreeMap<SessionLocator, BTreeMap<String, bool>>,
@@ -195,6 +222,7 @@ pub fn demo_state() -> ZodeAppState {
         pending_session_delete: None,
         threads: Vec::new(),
         transcripts: BTreeMap::new(),
+        message_queues: BTreeMap::new(),
         active_turns: BTreeMap::new(),
         approvals: BTreeMap::new(),
         tool_expanded: BTreeMap::new(),

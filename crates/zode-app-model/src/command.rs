@@ -2,7 +2,9 @@ use zode_node_protocol::{
     ApprovalDecision, SandboxMode, SessionLocator, UserContent, WorkspaceUri,
 };
 
-use crate::{IntegrationsTab, SecondaryPane, SettingsCategory, ShellRoute, ThemePreference};
+use crate::{
+    IntegrationsTab, QueuedMessageId, SecondaryPane, SettingsCategory, ShellRoute, ThemePreference,
+};
 
 /// User intent emitted by widgets for the application controller to handle.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +52,41 @@ pub enum AppCommand {
     ToggleProject(WorkspaceUri),
     Submit(Vec<UserContent>),
     Steer(Vec<UserContent>),
+    EnqueueMessage {
+        session: SessionLocator,
+        content: Vec<UserContent>,
+        attachments: Vec<crate::AttachmentMetadata>,
+    },
+    EditQueuedMessageText {
+        session: SessionLocator,
+        id: QueuedMessageId,
+        text: String,
+    },
+    RemoveQueuedMessage {
+        session: SessionLocator,
+        id: QueuedMessageId,
+    },
+    ClearMessageQueue {
+        session: SessionLocator,
+    },
+    ToggleQueuedMessageMenu {
+        session: SessionLocator,
+        id: QueuedMessageId,
+    },
+    BeginEditQueuedMessage {
+        session: SessionLocator,
+        id: QueuedMessageId,
+    },
+    CancelQueuedMessageEdit {
+        session: SessionLocator,
+    },
+    GuideQueuedMessage {
+        session: SessionLocator,
+        id: QueuedMessageId,
+    },
+    DispatchNextQueuedMessage {
+        session: SessionLocator,
+    },
     Interrupt,
     Approve {
         id: String,

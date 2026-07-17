@@ -33,6 +33,13 @@ pub enum ToolCommandOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueCommandOutcome {
+    Applied,
+    Enqueued(crate::QueuedMessageId),
+    Ignored,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalCommandOutcome {
     Applied,
     NeedsEffect,
@@ -191,6 +198,169 @@ pub fn reduce_tool_command(state: &mut ZodeAppState, command: AppCommand) -> Too
     ToolCommandOutcome::Applied
 }
 
+/// Applies session-local queue edits. Dispatch commands remain an effect so the
+/// controller can remove a message only when it is ready to start the next turn.
+pub fn reduce_queue_command(state: &mut ZodeAppState, command: &AppCommand) -> QueueCommandOutcome {
+    let session = match command {
+        AppCommand::EnqueueMessage { session, .. }
+        | AppCommand::EditQueuedMessageText { session, .. }
+        | AppCommand::RemoveQueuedMessage { session, .. }
+        | AppCommand::ClearMessageQueue { session }
+        | AppCommand::ToggleQueuedMessageMenu { session, .. }
+        | AppCommand::BeginEditQueuedMessage { session, .. }
+        | AppCommand::CancelQueuedMessageEdit { session }
+        | AppCommand::GuideQueuedMessage { session, .. }
+        | AppCommand::DispatchNextQueuedMessage { session } => session,
+        _ => return QueueCommandOutcome::Ignored,
+    };
+    let live = state
+        .threads
+        .iter()
+        .any(|thread| &thread.session == session)
+        && state.transcripts.contains_key(session);
+    if !live {
+        return QueueCommandOutcome::Ignored;
+    }
+
+    match command {
+        AppCommand::EnqueueMessage {
+            session,
+            content,
+            attachments,
+        } => {
+            let text = content
+                .iter()
+                .filter_map(|content| match content {
+                    zode_node_protocol::UserContent::Text { text } => Some(text.as_str()),
+                    zode_node_protocol::UserContent::Image { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.trim().is_empty() && attachments.is_empty() {
+                return QueueCommandOutcome::Ignored;
+            }
+            state
+                .message_queues
+                .entry(session.clone())
+                .or_default()
+                .enqueue(text, attachments.clone())
+                .map_or(QueueCommandOutcome::Ignored, QueueCommandOutcome::Enqueued)
+        }
+        AppCommand::EditQueuedMessageText { session, id, text } => {
+            let edited = state
+                .message_queues
+                .get_mut(session)
+                .is_some_and(|queue| queue.edit_text(*id, text.clone()));
+            if !edited {
+                return QueueCommandOutcome::Ignored;
+            }
+            if state.current_session.as_ref() == Some(session) {
+                if state.composer.editing_queued_message == Some(*id) {
+                    state.composer.finish_queue_edit();
+                }
+                if state.composer.queue_menu == Some(*id) {
+                    state.composer.queue_menu = None;
+                }
+            }
+            QueueCommandOutcome::Applied
+        }
+        AppCommand::RemoveQueuedMessage { session, id } => {
+            let removed = state
+                .message_queues
+                .get_mut(session)
+                .is_some_and(|queue| queue.remove_exact(*id).is_some());
+            if !removed {
+                return QueueCommandOutcome::Ignored;
+            }
+            clear_queue_ephemeral_for_message(state, session, *id);
+            QueueCommandOutcome::Applied
+        }
+        AppCommand::ClearMessageQueue { session } => {
+            let cleared = state
+                .message_queues
+                .get_mut(session)
+                .is_some_and(crate::MessageQueueState::clear);
+            if !cleared {
+                return QueueCommandOutcome::Ignored;
+            }
+            clear_queue_ephemeral(state, session);
+            QueueCommandOutcome::Applied
+        }
+        AppCommand::ToggleQueuedMessageMenu { session, id } => {
+            if state.current_session.as_ref() != Some(session)
+                || !queue_contains(state, session, *id)
+            {
+                return QueueCommandOutcome::Ignored;
+            }
+            state.composer.queue_menu = (state.composer.queue_menu != Some(*id)).then_some(*id);
+            QueueCommandOutcome::Applied
+        }
+        AppCommand::BeginEditQueuedMessage { session, id } => {
+            if state.current_session.as_ref() != Some(session) {
+                return QueueCommandOutcome::Ignored;
+            }
+            let Some(message) = state
+                .message_queues
+                .get(session)
+                .and_then(|queue| queue.items.iter().find(|message| message.id == *id))
+            else {
+                return QueueCommandOutcome::Ignored;
+            };
+            let text = message.text.clone();
+            state.composer.begin_queue_edit(*id, &text);
+            QueueCommandOutcome::Applied
+        }
+        AppCommand::CancelQueuedMessageEdit { session } => {
+            if state.current_session.as_ref() != Some(session)
+                || state.composer.editing_queued_message.is_none()
+            {
+                return QueueCommandOutcome::Ignored;
+            }
+            state.composer.finish_queue_edit();
+            QueueCommandOutcome::Applied
+        }
+        AppCommand::GuideQueuedMessage { .. } | AppCommand::DispatchNextQueuedMessage { .. } => {
+            QueueCommandOutcome::Ignored
+        }
+        _ => QueueCommandOutcome::Ignored,
+    }
+}
+
+fn queue_contains(
+    state: &ZodeAppState,
+    session: &SessionLocator,
+    id: crate::QueuedMessageId,
+) -> bool {
+    state
+        .message_queues
+        .get(session)
+        .is_some_and(|queue| queue.items.iter().any(|message| message.id == id))
+}
+
+fn clear_queue_ephemeral_for_message(
+    state: &mut ZodeAppState,
+    session: &SessionLocator,
+    id: crate::QueuedMessageId,
+) {
+    if state.current_session.as_ref() != Some(session) {
+        return;
+    }
+    if state.composer.queue_menu == Some(id) {
+        state.composer.queue_menu = None;
+    }
+    if state.composer.editing_queued_message == Some(id) {
+        state.composer.finish_queue_edit();
+    }
+}
+
+fn clear_queue_ephemeral(state: &mut ZodeAppState, session: &SessionLocator) {
+    if state.current_session.as_ref() != Some(session) {
+        return;
+    }
+    state.composer.queue_menu = None;
+    state.composer.finish_queue_edit();
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsCommandOutcome {
     Applied,
@@ -344,6 +514,12 @@ pub fn reduce_navigation_command(
                 .sessions
                 .entry(session.clone())
                 .or_default();
+            let changing_session = state.current_session.as_ref() != Some(&session);
+            if changing_session {
+                state.composer.queue_menu = None;
+                state.composer.send_hovered = false;
+                state.composer.finish_queue_edit();
+            }
             state.current_session = Some(session.clone());
             if let Some(options) = state.presentation.sessions[&session]
                 .runtime_options
@@ -396,6 +572,7 @@ pub fn reduce_navigation_command(
             let deleting_current = state.current_session.as_ref() == Some(&session);
             state.threads.retain(|thread| thread.session != session);
             state.transcripts.remove(&session);
+            state.message_queues.remove(&session);
             state.tool_expanded.remove(&session);
             state.active_turns.remove(&session);
             state.usage.remove(&session);
@@ -405,6 +582,8 @@ pub fn reduce_navigation_command(
                 .retain(|_, approval_session| approval_session != &session);
             if deleting_current {
                 state.current_session = None;
+                state.composer.queue_menu = None;
+                state.composer.finish_queue_edit();
                 state.review = crate::ReviewState::default();
                 state.presentation.secondary_pane = None;
             }
