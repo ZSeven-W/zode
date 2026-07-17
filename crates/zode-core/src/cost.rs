@@ -9,6 +9,15 @@ use tokio::sync::Mutex;
 
 use crate::currency::Currency;
 
+/// Machine-readable session usage for app/runtime event projection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UsageTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// Session cost in USD, or `None` when any observed model lacks prices.
+    pub cost_usd: Option<f64>,
+}
+
 pub struct CostState {
     /// Model that NEW usage is attributed to. Behind a lock so a model
     /// hot-swap can retarget it in place while preserving the accumulated
@@ -153,6 +162,37 @@ impl CostState {
                 }
             }
         }
+    }
+
+    /// Return cumulative session token and USD totals without display
+    /// formatting. Unknown-priced usage makes the cost unavailable rather than
+    /// exposing a misleading partial total for the known-priced models.
+    pub async fn usage_totals(&self) -> UsageTotals {
+        let snapshot = self.tracker.lock().await.snapshot();
+        let mut input_tokens = 0u64;
+        let mut output_tokens = 0u64;
+        for usage in snapshot.per_model.values() {
+            input_tokens = input_tokens.saturating_add(usage.input_tokens);
+            output_tokens = output_tokens.saturating_add(usage.output_tokens);
+        }
+        for usage in snapshot.unknown_models.values() {
+            input_tokens = input_tokens.saturating_add(usage.input_tokens);
+            output_tokens = output_tokens.saturating_add(usage.output_tokens);
+        }
+        let cost_usd = (!snapshot.has_unknown_models()).then_some(snapshot.total_usd());
+        UsageTotals {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+        }
+    }
+
+    /// Mark the current model's cumulative Usage stream as finished. The next
+    /// Usage frame is the first cumulative value of a new turn and must be
+    /// charged in full even when it equals the prior turn's final frame.
+    pub async fn finish_turn_usage(&self) {
+        let model = self.model();
+        self.tracker.lock().await.clear_event_baseline(&model);
     }
 
     /// Human-readable report for `/cost`. Includes prompt-cache hits when the

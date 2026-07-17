@@ -1673,6 +1673,39 @@ impl ConfigManager {
         Ok(())
     }
 
+    /// Persist one project-scoped allow-always tool permission. The existing
+    /// project state is updated under the same advisory lock and atomic rename
+    /// used by all other machine-managed state fields.
+    pub fn allow_project_tool(cwd: &Path, tool: &str) -> Result<(), CoreError> {
+        Self::update_project_state(cwd, |state| {
+            let mut allowed = project_allowed_tools_from_state(state);
+            if !allowed.iter().any(|allowed_tool| allowed_tool == tool) {
+                allowed.push(tool.to_string());
+            }
+            set_project_allowed_tools(state, allowed);
+        })
+    }
+
+    /// Read project-scoped allow-always tool permissions. Missing or corrupt
+    /// state follows the existing project-state policy and reads as empty.
+    pub fn project_allowed_tools(cwd: &Path) -> Result<Vec<String>, CoreError> {
+        let state = Self::read_project_state(cwd);
+        Ok(state
+            .as_object()
+            .map(project_allowed_tools_from_state)
+            .unwrap_or_default())
+    }
+
+    /// Remove one project-scoped allow-always tool permission while preserving
+    /// every other permission and unrelated project-state field.
+    pub fn revoke_project_tool(cwd: &Path, tool: &str) -> Result<(), CoreError> {
+        Self::update_project_state(cwd, |state| {
+            let mut allowed = project_allowed_tools_from_state(state);
+            allowed.retain(|allowed_tool| allowed_tool != tool);
+            set_project_allowed_tools(state, allowed);
+        })
+    }
+
     /// Persist to the global config path (creates the dir if needed). Writes
     /// ATOMICALLY (temp file + rename) so a crash / disk-full mid-write can
     /// never leave a partial `config.json` that a later startup would abort on
@@ -1719,6 +1752,40 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+fn project_allowed_tools_from_state(
+    state: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<String> {
+    let mut allowed = Vec::new();
+    let Some(values) = state
+        .get("permissions")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|permissions| permissions.get("allow"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return allowed;
+    };
+    for tool in values.iter().filter_map(serde_json::Value::as_str) {
+        if !allowed.iter().any(|allowed_tool| allowed_tool == tool) {
+            allowed.push(tool.to_string());
+        }
+    }
+    allowed
+}
+
+fn set_project_allowed_tools(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    allowed: Vec<String>,
+) {
+    let permissions = state
+        .entry("permissions".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !permissions.is_object() {
+        *permissions = serde_json::json!({});
+    }
+    permissions
+        .as_object_mut()
+        .expect("permissions normalized to object")
+        .insert("allow".to_string(), serde_json::json!(allowed));
 }
 
 /// Append `add` to `target`, skipping values already present (preserves order).
