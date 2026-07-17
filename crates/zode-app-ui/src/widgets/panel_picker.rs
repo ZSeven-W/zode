@@ -130,11 +130,8 @@ impl PanelPicker {
         painter.stroke_round_rect(layout.rect, 11.0, theme.tokens.border, 1.0);
 
         for item in &layout.items {
-            if item.enabled && hovered == Some(item.id) {
+            if item.enabled && (hovered == Some(item.id) || focused == Some(item.id)) {
                 painter.fill_round_rect(item.rect, 7.0, theme.tokens.accent);
-            }
-            if focused == Some(item.id) {
-                painter.stroke_round_rect(item.rect, 7.0, theme.tokens.ring, 1.5);
             }
             let foreground = if item.enabled {
                 theme.tokens.popover_foreground

@@ -465,9 +465,6 @@ fn paint_welcome_title(
             theme.tokens.muted_foreground,
             if project_focused { 1.5 } else { 1.0 },
         );
-        if project_focused {
-            painter.stroke_round_rect(project_rect, 3.0, theme.tokens.ring, 1.5);
-        }
     }
     paint_single_line(
         painter,

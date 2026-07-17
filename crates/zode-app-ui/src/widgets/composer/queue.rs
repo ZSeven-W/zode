@@ -348,6 +348,7 @@ pub(super) fn paint_rows(
         );
         let more_visual = centered_square(row.more, MORE_VISUAL_SIZE);
         if hovered == Some(row.more_id)
+            || focused == Some(row.more_id)
             || layout
                 .menu
                 .as_ref()
@@ -355,13 +356,6 @@ pub(super) fn paint_rows(
         {
             painter.fill_round_rect(more_visual, MORE_VISUAL_SIZE / 2.0, theme.tokens.muted);
         }
-        paint_focus_ring(
-            painter,
-            more_visual,
-            focused == Some(row.more_id),
-            MORE_VISUAL_SIZE / 2.0,
-            theme,
-        );
         paint_guide(painter, row.guide, theme);
         paint_centered_icon(
             painter,
@@ -567,21 +561,8 @@ fn paint_action_state(
     radius: f32,
     theme: &ZodeTheme,
 ) {
-    if hovered {
+    if hovered || focused {
         painter.fill_round_rect(rect, radius, theme.tokens.muted);
-    }
-    paint_focus_ring(painter, rect, focused, radius, theme);
-}
-
-fn paint_focus_ring(
-    painter: &mut dyn Painter,
-    rect: Rect,
-    focused: bool,
-    radius: f32,
-    theme: &ZodeTheme,
-) {
-    if focused {
-        painter.stroke_round_rect(rect, radius, theme.tokens.ring, 1.5);
     }
 }
 

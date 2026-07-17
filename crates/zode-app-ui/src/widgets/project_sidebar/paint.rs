@@ -417,12 +417,7 @@ fn paint_control(
                 theme,
             );
         }
-        SidebarControlTarget::ToggleTasks => {
-            let _ = state;
-            if focused == Some(SIDEBAR_TASKS_TOGGLE_ID) {
-                painter.stroke_round_rect(control.rect, 6.0, theme.tokens.ring, 1.5);
-            }
-        }
+        SidebarControlTarget::ToggleTasks => {}
         SidebarControlTarget::ShowAllProjects | SidebarControlTarget::ShowAllProjectSessions(_) => {
             if focused == Some(control.id) || hovered == Some(control.id) {
                 painter.fill_round_rect(control.rect, 6.0, theme.tokens.muted);
@@ -454,9 +449,6 @@ pub(super) fn paint_icon_button(
 ) {
     if hovered || focused {
         painter.fill_round_rect(rect, 6.0, theme.tokens.muted);
-    }
-    if focused {
-        painter.stroke_round_rect(rect, 6.0, theme.tokens.ring, 1.25);
     }
     let size = 14.0;
     painter.stroke_svg_path(

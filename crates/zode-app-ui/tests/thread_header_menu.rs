@@ -13,6 +13,7 @@ struct PaintCapture {
     texts: Vec<String>,
     paths: Vec<String>,
     rounded_fills: Vec<Rect>,
+    rounded_strokes: Vec<(Rect, Color, f32)>,
 }
 
 impl Painter for PaintCapture {
@@ -34,7 +35,9 @@ impl Painter for PaintCapture {
     fn fill_round_rect(&mut self, rect: Rect, _radius: f32, _color: Color) {
         self.rounded_fills.push(rect);
     }
-    fn stroke_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color, _width: f32) {}
+    fn stroke_round_rect(&mut self, rect: Rect, _radius: f32, color: Color, width: f32) {
+        self.rounded_strokes.push((rect, color, width));
+    }
     fn stroke_svg_path(
         &mut self,
         path: &str,
@@ -278,6 +281,26 @@ fn rename_dialog_focuses_an_editable_accessible_input_and_disables_blank_save() 
     assert_eq!(input.role, Role::TextInput);
     assert_eq!(input.value.as_deref(), Some("zode 桌面端"));
     assert!(input.actions.contains(&Action::SetValue));
+
+    let theme = ZodeTheme::light();
+    let rename = ThreadHeader::rename_layout(Rect::xywh(240.0, 0.0, 1_560.0, 46.0), &state)
+        .expect("rename layout");
+    let mut painter = PaintCapture::default();
+    ThreadHeader::paint_overlays(
+        &mut painter,
+        Rect::xywh(240.0, 0.0, 1_560.0, 46.0),
+        Rect::xywh(0.0, 0.0, 1_800.0, 1_080.0),
+        &state,
+        Some(HEADER_RENAME_INPUT_ID),
+        None,
+        &theme,
+    );
+    assert!(
+        painter
+            .rounded_strokes
+            .contains(&(rename.input, theme.tokens.ring, 1.5)),
+        "focused text inputs must retain their focus border"
+    );
 
     state.session_rename = Some(SessionRenameState {
         session,

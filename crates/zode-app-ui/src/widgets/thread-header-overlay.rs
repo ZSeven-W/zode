@@ -166,11 +166,8 @@ fn paint_menu_action(
     hovered: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
-    if action.enabled && hovered == Some(action.id) {
+    if action.enabled && (hovered == Some(action.id) || focused == Some(action.id)) {
         painter.fill_round_rect(action.rect, 7.0, theme.tokens.accent);
-    }
-    if action.enabled && focused == Some(action.id) {
-        painter.stroke_round_rect(action.rect, 7.0, theme.tokens.ring, 1.5);
     }
     let foreground = if action.enabled {
         theme.tokens.popover_foreground
@@ -236,16 +233,13 @@ fn paint_text_button(
     let enabled = action.enabled;
     let background = if primary && enabled {
         theme.tokens.foreground
-    } else if hovered == Some(action.id) && enabled {
+    } else if (hovered == Some(action.id) || focused == Some(action.id)) && enabled {
         theme.tokens.muted
     } else {
         theme.tokens.card
     };
     painter.fill_round_rect(action.rect, 8.0, background);
     painter.stroke_round_rect(action.rect, 8.0, theme.tokens.border, 1.0);
-    if focused == Some(action.id) && enabled {
-        painter.stroke_round_rect(action.rect, 8.0, theme.tokens.ring, 1.5);
-    }
     paint_single_line(
         painter,
         label,

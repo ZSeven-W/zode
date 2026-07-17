@@ -492,9 +492,6 @@ fn paint_row(
 ) {
     if focused == Some(row.id) || hovered == Some(row.id) {
         painter.fill_round_rect(row.rect, theme.tokens.radius, theme.tokens.accent);
-        if focused == Some(row.id) {
-            painter.stroke_round_rect(row.rect, theme.tokens.radius, theme.tokens.ring, 1.5);
-        }
     }
     let icon = match row.target {
         ProjectPickerTarget::Project(_) => SemanticIcon::Folder,

@@ -299,7 +299,7 @@ fn dark_busy_composer_paints_a_theme_adaptive_solid_stop_square() {
 }
 
 #[test]
-fn keyboard_focus_paints_rings_for_queue_actions_and_menu_items() {
+fn keyboard_focus_does_not_outline_queue_actions_or_menu_items() {
     let (mut state, _) = queue_state(2);
     state.composer.queue_menu = Some(QueuedMessageId::from_u64(1));
     let snapshot = WorkspaceSnapshot::build(&state, 1_440.0, 1_080.0, Insets::ZERO);
@@ -337,10 +337,10 @@ fn keyboard_focus_paints_rings_for_queue_actions_and_menu_items() {
         );
 
         assert!(
-            painter
+            !painter
                 .strokes
                 .contains(&(focus_rect, radius, theme.tokens.ring, 1.5)),
-            "focused queue control {id:?} must paint a visible ring"
+            "focused queue control {id:?} must not paint a purple outline"
         );
     }
 }

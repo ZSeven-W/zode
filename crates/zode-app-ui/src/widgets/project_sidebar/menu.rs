@@ -418,11 +418,8 @@ fn paint_item(
     hovered: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
-    if item.enabled && hovered == Some(item.id) {
+    if item.enabled && (hovered == Some(item.id) || focused == Some(item.id)) {
         painter.fill_round_rect(item.rect, 7.0, theme.tokens.accent);
-    }
-    if item.enabled && focused == Some(item.id) {
-        painter.stroke_round_rect(item.rect, 7.0, theme.tokens.ring, 1.5);
     }
     let foreground = if item.enabled {
         theme.tokens.popover_foreground

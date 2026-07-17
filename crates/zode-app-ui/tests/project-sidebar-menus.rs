@@ -12,6 +12,7 @@ use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceU
 #[derive(Debug, Clone, PartialEq)]
 enum PaintOp {
     FillRound(Rect, Color),
+    StrokeRound(Rect, Color),
     Text(String),
     Svg(String),
 }
@@ -40,7 +41,9 @@ impl Painter for CapturePainter {
     fn fill_round_rect(&mut self, rect: Rect, _radius: f32, color: Color) {
         self.operations.push(PaintOp::FillRound(rect, color));
     }
-    fn stroke_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color, _width: f32) {}
+    fn stroke_round_rect(&mut self, rect: Rect, _radius: f32, color: Color, _width: f32) {
+        self.operations.push(PaintOp::StrokeRound(rect, color));
+    }
     fn fill_drop_shadow(&mut self, _rect: Rect, _radius: f32, _blur: f32, _color: Color) {}
     fn stroke_svg_path(
         &mut self,
@@ -170,6 +173,62 @@ fn new_task_and_project_section_reveal_reference_hover_affordances() {
 }
 
 #[test]
+fn sidebar_buttons_ellipsis_and_menu_items_do_not_paint_focus_outlines() {
+    let rect = Rect::xywh(0.0, 0.0, 240.0, 800.0);
+    let theme = ZodeTheme::light();
+
+    let state = demo_state();
+    let mut section_button = CapturePainter::default();
+    ProjectSidebar::paint_with_interaction(
+        &mut section_button,
+        rect,
+        &state,
+        Some(zode_app_ui::SIDEBAR_TASKS_TOGGLE_ID),
+        None,
+        false,
+        &theme,
+    );
+
+    let mut ellipsis = CapturePainter::default();
+    ProjectSidebar::paint_with_interaction(
+        &mut ellipsis,
+        rect,
+        &state,
+        Some(SIDEBAR_PROJECTS_MORE_ID),
+        None,
+        false,
+        &theme,
+    );
+
+    let mut menu_state = state;
+    menu_state.sidebar.section_menu = Some(SidebarSectionMenu::Projects);
+    let mut menu_item = CapturePainter::default();
+    ProjectSidebar::paint_with_interaction(
+        &mut menu_item,
+        rect,
+        &menu_state,
+        Some(SIDEBAR_PROJECTS_MENU_FLAT_ID),
+        None,
+        false,
+        &theme,
+    );
+
+    for (name, painter) in [
+        ("section button", section_button),
+        ("ellipsis", ellipsis),
+        ("menu item", menu_item),
+    ] {
+        assert!(
+            !painter.operations.iter().any(|operation| matches!(
+                operation,
+                PaintOp::StrokeRound(_, color) if *color == theme.tokens.ring
+            )),
+            "{name} must not paint a purple focus outline"
+        );
+    }
+}
+
+#[test]
 fn project_and_section_menus_emit_commands_and_change_real_layout_order() {
     let mut state = demo_state();
     state.projects.clear();
@@ -273,7 +332,7 @@ fn painted_labels(painter: &CapturePainter) -> Vec<&str> {
         .iter()
         .filter_map(|operation| match operation {
             PaintOp::Text(text) => Some(text.as_str()),
-            PaintOp::FillRound(..) | PaintOp::Svg(_) => None,
+            PaintOp::FillRound(..) | PaintOp::StrokeRound(..) | PaintOp::Svg(_) => None,
         })
         .collect()
 }

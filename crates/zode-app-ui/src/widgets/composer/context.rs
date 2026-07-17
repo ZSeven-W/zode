@@ -103,9 +103,6 @@ pub(super) fn paint_interactive(
                 theme.tokens.accent_foreground,
                 SemanticIcon::Close.stroke_width(),
             );
-            if focused == Some(PROJECT_DETACH_ID) {
-                painter.stroke_round_rect(visual, DETACH_VISUAL_SIZE / 2.0, theme.tokens.ring, 1.5);
-            }
         } else {
             painter.stroke_svg_path(
                 SemanticIcon::Folder.path(),
