@@ -19,14 +19,16 @@ pub use layout::{
 pub use theme::{animation_duration_ms, resolve_theme, ThemeMode, ZodeTheme, ZODE_PURPLE};
 pub use virtual_list::{visible_range, MeasuredItem, MeasurementCache, VirtualListState};
 pub use widgets::{
-    group_sessions, ApprovalAction, ApprovalButtonLayout, ApprovalCard, CellPosition, Composer,
-    ComposerController, ComposerOutcome, ComposerSubmission, PermissionRow, PermissionRowLayout,
-    ProjectSessionGroup, ProjectSidebar, ReviewDraft, ReviewLine, ReviewLineKind, ReviewPanel,
-    ReviewSelection, SandboxSelection, SettingControl, SettingControlLayout, SettingsPanel,
-    SidebarAction, SidebarItem, SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget,
-    TerminalCell, TerminalColor, TerminalGrid, TerminalLine, TerminalPanel,
-    TerminalPanelController, TerminalSelection, ThreadHeader, ThreadTranscript, ToolCard, ToolTone,
-    TranscriptItemLayout, UsageChip, UsageDisplay, WindowChrome, WorkspaceShell,
+    group_sessions, ApprovalAction, ApprovalButtonLayout, ApprovalCard, CapabilityCard,
+    CapabilityCardLayout, CellPosition, Composer, ComposerController, ComposerOutcome,
+    ComposerSubmission, IntegrationTabLayout, IntegrationsPage, IntegrationsPageLayout,
+    PermissionRow, PermissionRowLayout, ProjectSessionGroup, ProjectSidebar, ReviewDraft,
+    ReviewLine, ReviewLineKind, ReviewPanel, ReviewSelection, SandboxSelection, SettingControl,
+    SettingControlLayout, SettingsPanel, SidebarAction, SidebarItem, SidebarNavigationRowLayout,
+    SidebarRowLayout, SidebarRowTarget, TerminalCell, TerminalColor, TerminalGrid, TerminalLine,
+    TerminalPanel, TerminalPanelController, TerminalSelection, ThreadHeader, ThreadTranscript,
+    ToolCard, ToolTone, TranscriptItemLayout, UsageChip, UsageDisplay, WindowChrome,
+    WorkspaceShell, INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
 };
 
 pub const CRATE_READY: bool = true;
