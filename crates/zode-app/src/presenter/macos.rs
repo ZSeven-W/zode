@@ -4,11 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use objc2::{
-    define_class, msg_send,
-    rc::{Allocated, Retained},
-    ClassType, MainThreadMarker, MainThreadOnly,
-};
+use objc2::{rc::Retained, ClassType, MainThreadMarker};
 use objc2_app_kit::{
     NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
     NSVisualEffectView, NSWindowOrderingMode,
@@ -28,32 +24,9 @@ use crate::render::RasterSurface;
 
 use super::PresentationFrame;
 
-define_class!(
-    // SAFETY: NSVisualEffectView has no subclassing requirements used here.
-    // The subclass owns no ivars and is confined to the AppKit main thread.
-    #[unsafe(super(NSVisualEffectView))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "ZodeSidebarVisualEffectView"]
-    struct SidebarVisualEffectView;
-
-    impl SidebarVisualEffectView {
-        #[unsafe(method_id(initWithFrame:))]
-        fn init_with_frame(this: Allocated<Self>, frame: CGRect) -> Retained<Self> {
-            // SAFETY: This is the designated NSView frame initializer.
-            unsafe { msg_send![super(this), initWithFrame: frame] }
-        }
-
-        #[unsafe(method_id(hitTest:))]
-        fn hit_test(&self, _point: CGPoint) -> Option<Retained<NSView>> {
-            // Keep Winit's original content view as the mouse-event target.
-            None
-        }
-    }
-);
-
-pub(super) struct MacMaterialPresenter {
+pub(crate) struct MacMaterialPresenter {
     window: Arc<Window>,
-    effect_view: Retained<SidebarVisualEffectView>,
+    effect_view: Retained<NSVisualEffectView>,
     foreground_layer: Retained<CALayer>,
     color_space: CFRetained<CGColorSpace>,
 }
@@ -79,10 +52,8 @@ impl MacMaterialPresenter {
         root_layer.setOpaque(false);
 
         let zero_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0));
-        let effect_view = SidebarVisualEffectView::init_with_frame(
-            SidebarVisualEffectView::alloc(mtm),
-            zero_frame,
-        );
+        let effect_view =
+            NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), zero_frame);
         effect_view.setMaterial(NSVisualEffectMaterial::Sidebar);
         effect_view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
         effect_view.setState(NSVisualEffectState::FollowsWindowActiveState);
@@ -98,7 +69,7 @@ impl MacMaterialPresenter {
         let color_space = CGColorSpace::new_device_rgb()
             .ok_or_else(|| "Core Graphics RGB color space is unavailable".to_owned())?;
 
-        let effect_as_view = effect_view.as_super().as_super();
+        let effect_as_view = effect_view.as_super();
         content_view.addSubview_positioned_relativeTo(
             effect_as_view,
             NSWindowOrderingMode::Below,
@@ -168,7 +139,7 @@ impl MacMaterialPresenter {
 impl Drop for MacMaterialPresenter {
     fn drop(&mut self) {
         self.foreground_layer.removeFromSuperlayer();
-        self.effect_view.as_super().as_super().removeFromSuperview();
+        self.effect_view.as_super().removeFromSuperview();
     }
 }
 

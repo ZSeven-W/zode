@@ -22,7 +22,7 @@ pub(super) fn paint_footer(
             layout.footer.size.x,
             1.0,
         ),
-        theme.tokens.border.with_alpha(0.72),
+        theme.sidebar_footer_divider(),
     );
     if ProjectSidebar::footer_selected(state) {
         painter.fill_round_rect(layout.profile, 0.0, theme.sidebar_row_selected);

@@ -65,8 +65,24 @@ impl ZodeTheme {
         if self.sidebar_material {
             self.native_sidebar_material = true;
             self.sidebar = Color::TRANSPARENT;
+            // Native macOS sidebar material supplies the luminance variation.
+            // Keep semantic ink and interaction layers translucent so they
+            // preserve that material instead of reintroducing flat fills.
+            self.sidebar_foreground = Color::rgb_u8(52, 56, 58);
+            self.sidebar_muted_foreground = Color::rgb_u8(142, 143, 144);
+            self.sidebar_disabled_foreground = Color::rgb_u8(171, 171, 173);
+            self.sidebar_row_selected = Color::BLACK.with_alpha(0.05);
+            self.sidebar_row_hover = Color::BLACK.with_alpha(0.025);
         }
         self
+    }
+
+    pub fn sidebar_footer_divider(&self) -> Color {
+        if self.sidebar_material {
+            Color::BLACK.with_alpha(0.09)
+        } else {
+            self.tokens.border.with_alpha(0.72)
+        }
     }
 
     pub fn for_preferences(system: SystemTheme, preferences: &UiPreferences) -> Self {
@@ -242,8 +258,33 @@ mod tests {
 
         assert!(light.uses_native_sidebar_material());
         assert_eq!(light.sidebar, Color::TRANSPARENT);
+        assert_eq!(light.sidebar_foreground, Color::rgb_u8(52, 56, 58));
+        assert_eq!(light.sidebar_muted_foreground, Color::rgb_u8(142, 143, 144));
+        assert_eq!(
+            light.sidebar_disabled_foreground,
+            Color::rgb_u8(171, 171, 173)
+        );
+        assert_eq!(light.sidebar_row_selected, Color::BLACK.with_alpha(0.05));
+        assert_eq!(light.sidebar_row_hover, Color::BLACK.with_alpha(0.025));
         assert!(!dark.uses_native_sidebar_material());
         assert_eq!(dark.sidebar, ZodeTheme::dark().sidebar);
+    }
+
+    #[test]
+    fn material_footer_divider_preserves_the_reference_hairline() {
+        let flat = ZodeTheme::light();
+        let native = flat.with_native_sidebar_material();
+        let dark = ZodeTheme::dark();
+
+        assert_eq!(flat.sidebar_footer_divider(), Color::BLACK.with_alpha(0.09));
+        assert_eq!(
+            native.sidebar_footer_divider(),
+            Color::BLACK.with_alpha(0.09)
+        );
+        assert_eq!(
+            dark.sidebar_footer_divider(),
+            dark.tokens.border.with_alpha(0.72)
+        );
     }
 
     #[test]

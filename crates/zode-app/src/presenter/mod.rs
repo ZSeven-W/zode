@@ -17,6 +17,7 @@ pub(crate) struct PresentationFrame {
     pub native_sidebar_material: bool,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct LogicalLayerGeometry {
     pub width: f64,
@@ -24,6 +25,7 @@ pub(crate) struct LogicalLayerGeometry {
     pub sidebar_width: f64,
 }
 
+#[cfg(target_os = "macos")]
 impl PresentationFrame {
     pub(crate) fn logical_geometry(self) -> LogicalLayerGeometry {
         let scale = if self.scale_factor.is_finite() && self.scale_factor > 0.0 {
@@ -90,6 +92,7 @@ impl LivePresenter {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn fallback_on_error<T, E>(
     primary: Result<T, E>,
     fallback: impl FnOnce() -> Result<T, E>,
@@ -106,8 +109,10 @@ fn fallback_on_error<T, E>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
     use super::{fallback_on_error, PresentationFrame};
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn geometry_uses_logical_points_and_clamps_sidebar() {
         let frame = PresentationFrame {
@@ -124,6 +129,7 @@ mod tests {
         assert_eq!(geometry.sidebar_width, 900.0);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn failed_primary_initialization_uses_fallback() {
         let mut fallback_called = false;

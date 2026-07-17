@@ -12,6 +12,7 @@ use zode_node_protocol::{NodeId, SessionLocator, ThreadStatus, ThreadSummary, Wo
 
 #[derive(Debug, Clone, PartialEq)]
 enum PaintOp {
+    Fill(Rect, Color),
     FillRound(Rect, Color),
     Shadow(Rect),
     Text(String, Point2D, Color),
@@ -26,7 +27,9 @@ struct CapturePainter {
 impl Painter for CapturePainter {
     fn begin_frame(&mut self) {}
     fn end_frame(&mut self) {}
-    fn fill_rect(&mut self, _rect: Rect, _color: Color) {}
+    fn fill_rect(&mut self, rect: Rect, color: Color) {
+        self.operations.push(PaintOp::Fill(rect, color));
+    }
     fn stroke_rect(&mut self, _rect: Rect, _color: Color, _width: f32) {}
     fn draw_text(&mut self, layout: &TextLayout, origin: Point2D) {
         let text = layout
@@ -328,7 +331,10 @@ fn compact_sidebar_keeps_navigation_and_settings_readable() {
         .iter()
         .filter_map(|operation| match operation {
             PaintOp::Text(text, _, _) => Some(text.as_str()),
-            PaintOp::FillRound(_, _) | PaintOp::Shadow(_) | PaintOp::Svg(..) => None,
+            PaintOp::Fill(_, _)
+            | PaintOp::FillRound(_, _)
+            | PaintOp::Shadow(_)
+            | PaintOp::Svg(..) => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -386,8 +392,60 @@ fn sidebar_three_zones_keep_brand_scroll_content_and_profile_anchored() {
     );
     assert_eq!(first.footer.max_y(), rect.max_y());
     assert_eq!(taller.footer.max_y(), 1_077.0);
-    assert_eq!(first.footer.size.y, 44.0);
+    assert_eq!(first.footer.size.y, 46.0);
     assert!(first.scroll_viewport.max_y() <= first.footer.origin.y);
+}
+
+#[test]
+fn native_material_sidebar_paints_translucent_rows_and_footer_hairline() {
+    let mut state = demo_state();
+    state.projects.clear();
+    state.threads.clear();
+    state.projects.push(ProjectState {
+        workspace_uri: WorkspaceUri::new("file:///repo/material-hover").unwrap(),
+        expanded: false,
+        available: true,
+        last_opened_ms: 1,
+    });
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::General);
+    let rect = Rect::xywh(0.0, 0.0, 240.0, 600.0);
+    let theme = ZodeTheme::light().with_native_sidebar_material();
+    let mut painter = CapturePainter::default();
+
+    ProjectSidebar::paint(&mut painter, rect, &state, &theme);
+
+    assert!(painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::FillRound(selected, color)
+            if *selected == ProjectSidebar::profile_rect(rect)
+                && *color == Color::BLACK.with_alpha(0.05)
+    )));
+    assert!(painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::Fill(divider, color)
+            if *divider == Rect::xywh(0.0, 554.0, 240.0, 1.0)
+                && *color == Color::BLACK.with_alpha(0.09)
+    )));
+
+    let hover_row = ProjectSidebar::dynamic_row_layout(rect, &state)
+        .into_iter()
+        .next()
+        .expect("material hover project is visible");
+    let mut hovered = CapturePainter::default();
+    ProjectSidebar::paint_with_interaction(
+        &mut hovered,
+        rect,
+        &state,
+        None,
+        Some(hover_row.id),
+        false,
+        &theme,
+    );
+    assert!(hovered.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::FillRound(row, color)
+            if *row == hover_row.rect && *color == Color::BLACK.with_alpha(0.025)
+    )));
 }
 
 #[test]
@@ -749,7 +807,10 @@ fn painted_labels(painter: &CapturePainter) -> Vec<&str> {
         .iter()
         .filter_map(|operation| match operation {
             PaintOp::Text(text, _, _) => Some(text.as_str()),
-            PaintOp::FillRound(_, _) | PaintOp::Shadow(_) | PaintOp::Svg(..) => None,
+            PaintOp::Fill(_, _)
+            | PaintOp::FillRound(_, _)
+            | PaintOp::Shadow(_)
+            | PaintOp::Svg(..) => None,
         })
         .collect()
 }

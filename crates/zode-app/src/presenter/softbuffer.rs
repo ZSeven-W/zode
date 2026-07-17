@@ -6,7 +6,7 @@ use crate::render::RasterSurface;
 
 use super::PresentationFrame;
 
-pub(super) struct SoftbufferPresenter {
+pub(crate) struct SoftbufferPresenter {
     window: Arc<Window>,
     surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
     size: Option<(u32, u32)>,

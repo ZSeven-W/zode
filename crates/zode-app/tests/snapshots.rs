@@ -80,8 +80,9 @@ const QUEUE_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
     GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
     GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 652.0, 70.0, 736.0, 704.0),
-    GeometryExpectation::new(LayoutRect::Composer, 652.0, 802.0, 736.0, 264.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 494.0, 70.0, 736.0, 704.0),
+    GeometryExpectation::new(LayoutRect::Composer, 494.0, 802.0, 736.0, 264.0),
+    GeometryExpectation::new(LayoutRect::ContextPanel, 1484.0, 62.0, 300.0, 1002.0),
 ];
 
 fn case_for(name: &'static str) -> SnapshotCase {
