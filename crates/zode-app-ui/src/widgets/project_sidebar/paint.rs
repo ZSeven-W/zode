@@ -18,6 +18,7 @@ pub(super) fn paint(
     state: &ZodeAppState,
     focused: Option<WidgetId>,
     hovered: Option<WidgetId>,
+    show_shortcuts: bool,
     theme: &ZodeTheme,
 ) {
     if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
@@ -55,7 +56,7 @@ pub(super) fn paint(
             );
         }
         for row in &layout.rows {
-            paint_dynamic_row(painter, row, focused, hovered, theme);
+            paint_dynamic_row(painter, row, focused, hovered, show_shortcuts, theme);
         }
         for control in &layout.controls {
             paint_control(painter, control, state, focused, hovered, theme);
@@ -159,6 +160,7 @@ fn paint_dynamic_row(
     row: &SidebarRowLayout,
     focused: Option<WidgetId>,
     hovered: Option<WidgetId>,
+    show_shortcuts: bool,
     theme: &ZodeTheme,
 ) {
     let action_active = row_interaction_active(row, focused, hovered);
@@ -202,11 +204,34 @@ fn paint_dynamic_row(
     if action_active {
         paint_session_actions(painter, row, focused, hovered, theme);
     } else {
-        paint_row_trailing(painter, row, theme);
+        paint_row_trailing(painter, row, show_shortcuts, theme);
     }
 }
 
-fn paint_row_trailing(painter: &mut dyn Painter, row: &SidebarRowLayout, theme: &ZodeTheme) {
+fn paint_row_trailing(
+    painter: &mut dyn Painter,
+    row: &SidebarRowLayout,
+    show_shortcuts: bool,
+    theme: &ZodeTheme,
+) {
+    if show_shortcuts {
+        if let Some(shortcut) = row.shortcut {
+            draw_label(
+                painter,
+                &format!("⌘{shortcut}"),
+                Rect::xywh(
+                    row.rect.max_x() - 30.0,
+                    row.rect.origin.y,
+                    24.0,
+                    row.rect.size.y,
+                ),
+                10.0,
+                400,
+                theme.tokens.muted_foreground,
+            );
+            return;
+        }
+    }
     match row.status {
         Some(ThreadStatus::Running) => painter.stroke_svg_path(
             SemanticIcon::Refresh.path(),
@@ -228,23 +253,7 @@ fn paint_row_trailing(painter: &mut dyn Painter, row: &SidebarRowLayout, theme: 
             700,
             theme.tokens.destructive,
         ),
-        Some(ThreadStatus::Idle) | None => {
-            if let Some(shortcut) = row.shortcut {
-                draw_label(
-                    painter,
-                    &format!("⌘{shortcut}"),
-                    Rect::xywh(
-                        row.rect.max_x() - 30.0,
-                        row.rect.origin.y,
-                        24.0,
-                        row.rect.size.y,
-                    ),
-                    10.0,
-                    400,
-                    theme.tokens.muted_foreground,
-                );
-            }
-        }
+        Some(ThreadStatus::Idle) | None => {}
     }
 }
 

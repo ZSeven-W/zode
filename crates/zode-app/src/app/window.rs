@@ -127,6 +127,7 @@ impl DesktopApp {
                 self.project_picker_controller.input_state(),
                 self.session_rename_controller.input_state(),
                 self.hovered_widget,
+                self.modifiers.super_key(),
                 &theme,
             );
             // Focus sync installs a caret-shaped fallback before IME is

@@ -454,6 +454,66 @@ fn pinned_project_and_projectless_tasks_render_in_distinct_order() {
 }
 
 #[test]
+fn command_shortcuts_appear_only_while_command_is_held() {
+    let mut state = demo_state();
+    state.projects.clear();
+    state.threads.clear();
+    let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
+    let session = SessionLocator::new(state.host.node_id, "shortcut-task");
+    state.projects.push(ProjectState {
+        workspace_uri: workspace.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
+    });
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: workspace,
+        title: "Shortcut task".into(),
+        updated_at_ms: 1,
+        status: ThreadStatus::Idle,
+    });
+    let rect = Rect::xywh(0.0, 0.0, 240.0, 800.0);
+    let row = ProjectSidebar::dynamic_row_layout(rect, &state)
+        .into_iter()
+        .find(|row| row.session() == Some(&session))
+        .unwrap();
+    let theme = ZodeTheme::light();
+
+    let mut normal = CapturePainter::default();
+    ProjectSidebar::paint_with_interaction(&mut normal, rect, &state, None, None, false, &theme);
+    assert!(!painted_labels(&normal)
+        .iter()
+        .any(|label| label.starts_with('⌘')));
+
+    let mut hovered = CapturePainter::default();
+    ProjectSidebar::paint_with_interaction(
+        &mut hovered,
+        rect,
+        &state,
+        None,
+        Some(row.id),
+        false,
+        &theme,
+    );
+    assert!(!painted_labels(&hovered)
+        .iter()
+        .any(|label| label.starts_with('⌘')));
+
+    let mut command_held = CapturePainter::default();
+    ProjectSidebar::paint_with_interaction(
+        &mut command_held,
+        rect,
+        &state,
+        None,
+        None,
+        true,
+        &theme,
+    );
+    assert!(painted_labels(&command_held).contains(&"⌘1"));
+}
+
+#[test]
 fn session_actions_and_scroll_emit_typed_commands() {
     let mut state = demo_state();
     let scratch_root = WorkspaceUri::new("file:///tmp/zode-tasks").unwrap();
@@ -540,7 +600,15 @@ fn action_hover_keeps_row_active_and_matches_the_reference_preview_card() {
     let theme = ZodeTheme::light();
     let mut painter = CapturePainter::default();
 
-    ProjectSidebar::paint_with_interaction(&mut painter, rect, &state, None, Some(pin), &theme);
+    ProjectSidebar::paint_with_interaction(
+        &mut painter,
+        rect,
+        &state,
+        None,
+        Some(pin),
+        false,
+        &theme,
+    );
     ProjectSidebar::paint_hover_overlay(&mut painter, rect, &state, Some(pin), &theme);
 
     assert!(painter.operations.iter().any(|operation| matches!(
@@ -600,6 +668,7 @@ fn project_row_keeps_its_hover_background() {
         &state,
         None,
         Some(project.id),
+        false,
         &theme,
     );
 

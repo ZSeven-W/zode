@@ -555,7 +555,11 @@ impl ApplicationHandler<AppWake> for DesktopApp {
                 self.sync_window_focus(focused);
             }
             WindowEvent::ModifiersChanged(modifiers) => {
+                let command_was_pressed = self.modifiers.super_key();
                 self.modifiers = modifiers.state();
+                if command_was_pressed != self.modifiers.super_key() {
+                    self.request_redraw();
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(input) = map_keyboard(

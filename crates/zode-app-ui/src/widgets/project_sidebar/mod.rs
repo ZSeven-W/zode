@@ -318,7 +318,7 @@ impl ProjectSidebar {
     }
 
     pub fn paint(painter: &mut dyn Painter, rect: Rect, state: &ZodeAppState, theme: &ZodeTheme) {
-        Self::paint_with_interaction(painter, rect, state, None, None, theme);
+        Self::paint_with_interaction(painter, rect, state, None, None, false, theme);
     }
 
     pub fn paint_with_interaction(
@@ -327,9 +327,18 @@ impl ProjectSidebar {
         state: &ZodeAppState,
         focused: Option<WidgetId>,
         hovered: Option<WidgetId>,
+        show_shortcuts: bool,
         theme: &ZodeTheme,
     ) {
-        paint::paint(painter, rect, state, focused, hovered, theme);
+        paint::paint(
+            painter,
+            rect,
+            state,
+            focused,
+            hovered,
+            show_shortcuts,
+            theme,
+        );
     }
 
     /// Drawn after the primary surface so the hover card is not occluded by
