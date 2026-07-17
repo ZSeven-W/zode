@@ -270,12 +270,16 @@ impl DesktopApp {
                     WheelDeltaMode::Line => 20.0,
                     WheelDeltaMode::Pixel => 1.0,
                 };
+                let delta = -event.delta_y * multiplier;
+                if self.handle_sidebar_scroll_delta(delta) {
+                    return;
+                }
                 if self.app_state.presentation.route == ShellRoute::Terminal {
                     let command = self.terminal_controller.scroll_command(
                         &self.app_state.terminal,
                         &self.terminal_grid,
                         self.terminal_rect().size.y,
-                        -event.delta_y * multiplier,
+                        delta,
                     );
                     self.apply_terminal_command(command);
                 } else if self.app_state.presentation.route == ShellRoute::Conversation {
@@ -289,7 +293,7 @@ impl DesktopApp {
                                 self.frame_snapshot.layout.transcript,
                                 transcript,
                                 tool_expanded,
-                                -event.delta_y * multiplier,
+                                delta,
                             )
                         })
                     });
@@ -302,7 +306,7 @@ impl DesktopApp {
                         }
                     }
                 } else if matches!(self.app_state.presentation.route, ShellRoute::Settings(_)) {
-                    self.apply_settings_scroll_delta(-event.delta_y * multiplier);
+                    self.apply_settings_scroll_delta(delta);
                 }
             }
             UnifiedInputEvent::Touch(event) => {
@@ -487,6 +491,9 @@ impl DesktopApp {
                         self.apply_settings_scroll_delta(delta);
                     }
                 }
+                Action::ScrollUp | Action::ScrollDown if id == zode_app_ui::SIDEBAR_ID => {
+                    let _ = self.handle_sidebar_accessibility_scroll(request.action);
+                }
                 _ => {}
             }
         }
@@ -601,6 +608,9 @@ impl DesktopApp {
         if self.handle_project_picker_key(&event) {
             return;
         }
+        if self.handle_sidebar_shortcut(&event) {
+            return;
+        }
         if let Some(command) = terminal_shortcut_command(&event) {
             self.apply_terminal_command(command);
             return;
@@ -692,45 +702,6 @@ impl DesktopApp {
         }
     }
 
-    fn persist_local_navigation_effect(&self, command: &AppCommand) -> bool {
-        let Some(store) = self.app_state_store.as_ref() else {
-            return matches!(
-                command,
-                AppCommand::ToggleProject(_) | AppCommand::SetSessionPinned { .. }
-            );
-        };
-        let result = match command {
-            AppCommand::ToggleProject(workspace_uri) => {
-                let collapsed = self
-                    .app_state
-                    .projects
-                    .iter()
-                    .find(|project| &project.workspace_uri == workspace_uri)
-                    .is_some_and(|project| !project.expanded);
-                let key = workspace_uri.as_str().to_owned();
-                store.update(move |state| {
-                    if collapsed {
-                        state.collapsed_workspaces.insert(key);
-                    } else {
-                        state.collapsed_workspaces.remove(&key);
-                    }
-                })
-            }
-            AppCommand::SetSessionPinned { session, pinned } => {
-                let key = session.session_id.clone();
-                let pinned = *pinned;
-                store.update(move |state| {
-                    state.sessions.entry(key).or_default().pinned = pinned;
-                })
-            }
-            _ => return false,
-        };
-        if let Err(error) = result {
-            eprintln!("zode-app: navigation state could not be persisted: {error}");
-        }
-        true
-    }
-
     fn apply_local_navigation_command(&mut self, command: &AppCommand) -> bool {
         let previous_session = self.app_state.current_session.clone();
         let previous_queue_edit = self.app_state.composer.editing_queued_message;
@@ -749,6 +720,7 @@ impl DesktopApp {
                     command,
                     AppCommand::ToggleProject(_)
                         | AppCommand::SetSessionPinned { .. }
+                        | AppCommand::SetSessionArchived { .. }
                         | AppCommand::RequestDeleteSession(_)
                 ) =>
             {
@@ -763,7 +735,9 @@ impl DesktopApp {
         normalize_conversation_route(&mut self.app_state, command);
         if matches!(
             command,
-            AppCommand::BeginTask { .. } | AppCommand::SelectSession(_)
+            AppCommand::BeginTask { .. }
+                | AppCommand::SelectSession(_)
+                | AppCommand::SetSessionArchived { archived: true, .. }
         ) {
             self.persist_ui_state();
         }

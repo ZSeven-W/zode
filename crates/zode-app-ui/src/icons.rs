@@ -52,12 +52,15 @@ pub enum SemanticIcon {
     Close,
     Check,
     ChevronRight,
+    ChevronDown,
     Refresh,
     ExternalOpen,
+    Help,
+    Pin,
 }
 
 impl SemanticIcon {
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 53] = [
         Self::NewTask,
         Self::Scheduled,
         Self::Settings,
@@ -106,8 +109,11 @@ impl SemanticIcon {
         Self::Close,
         Self::Check,
         Self::ChevronRight,
+        Self::ChevronDown,
         Self::Refresh,
         Self::ExternalOpen,
+        Self::Help,
+        Self::Pin,
     ];
 
     pub const fn path(self) -> &'static str {
@@ -164,8 +170,11 @@ impl SemanticIcon {
             Self::Close => "M6 6L18 18M18 6L6 18",
             Self::Check => "M5 12L10 17L19 7",
             Self::ChevronRight => "M9 6L15 12L9 18",
+            Self::ChevronDown => "M6 9L12 15L18 9",
             Self::Refresh => "M20 7V12H15M4 17V12H9M6.1 8A7 7 0 0 1 18 7M17.9 16A7 7 0 0 1 6 17",
             Self::ExternalOpen => "M14 4H20V10M20 4L11 13M18 13V20H4V6H11",
+            Self::Help => "M9.5 9A2.75 2.75 0 1 1 13 11.65C12.35 11.95 12 12.5 12 13.5M12 17H12.1M12 2A10 10 0 1 0 12 22A10 10 0 1 0 12 2",
+            Self::Pin => "M8 3H16V7L19 10V13H5V10L8 7ZM12 13V21",
         }
     }
 

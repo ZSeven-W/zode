@@ -5,6 +5,7 @@ mod layout;
 mod message_queue;
 mod presentation;
 mod reducer;
+mod sidebar_navigation;
 mod state;
 mod task_navigation;
 mod transcript;

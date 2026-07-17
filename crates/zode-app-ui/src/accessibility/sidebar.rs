@@ -1,12 +1,16 @@
-use accesskit::{Action, Role};
+use accesskit::{Action, Role, Toggled};
 use jian_core::CursorHint;
 use zode_app_model::ZodeAppState;
 
 use super::{
-    next_order, node, visible_rect, InteractionNode, CHATS_NAV_ID, NEW_SESSION_ID, PLUGINS_NAV_ID,
-    PULL_REQUESTS_NAV_ID, SCHEDULED_NAV_ID, SETTINGS_NAV_ID, SIDEBAR_ID, SITES_NAV_ID,
+    next_order, node, visible_rect, InteractionNode, CHATS_NAV_ID, HELP_ID, NEW_SESSION_ID,
+    PLUGINS_NAV_ID, PULL_REQUESTS_NAV_ID, SCHEDULED_NAV_ID, SETTINGS_NAV_ID, SIDEBAR_ID,
+    SITES_NAV_ID,
 };
-use crate::{ProjectSidebar, SidebarRowTarget, ThreadTranscript, WorkspaceLayout};
+use crate::{
+    ProjectSidebar, SidebarControlTarget, SidebarRowTarget, ThreadTranscript, WidgetId,
+    WorkspaceLayout,
+};
 
 pub(super) fn append_sidebar_nodes(
     nodes: &mut Vec<InteractionNode>,
@@ -14,32 +18,38 @@ pub(super) fn append_sidebar_nodes(
     focus_order: &mut u32,
     state: &ZodeAppState,
 ) {
+    let sidebar = ProjectSidebar::layout(layout.sidebar, state);
+    let mut scroll_actions = Vec::new();
+    if sidebar.scroll_offset > 0.0 {
+        scroll_actions.push(Action::ScrollUp);
+    }
+    if sidebar.scroll_offset < sidebar.max_scroll {
+        scroll_actions.push(Action::ScrollDown);
+    }
     nodes.push(node(
         SIDEBAR_ID,
-        layout.sidebar,
+        sidebar.scroll_viewport,
         Role::Navigation,
-        "项目",
+        "侧边栏",
         None,
-        Vec::new(),
+        scroll_actions,
         None,
         CursorHint::Default,
     ));
-    for (row, id) in ProjectSidebar::navigation_row_layout(layout.sidebar)
-        .into_iter()
-        .zip([
-            NEW_SESSION_ID,
-            SCHEDULED_NAV_ID,
-            PLUGINS_NAV_ID,
-            SITES_NAV_ID,
-            PULL_REQUESTS_NAV_ID,
-            CHATS_NAV_ID,
-        ])
-    {
-        let Some(rect) = ThreadTranscript::clip_to_viewport(row.rect, layout.sidebar) else {
+
+    for row in &sidebar.navigation_rows {
+        let Some(rect) = ThreadTranscript::clip_to_viewport(
+            row.rect,
+            if row.index == 0 {
+                layout.sidebar
+            } else {
+                sidebar.scroll_viewport
+            },
+        ) else {
             continue;
         };
         nodes.push(node(
-            id,
+            navigation_id(row.index),
             rect,
             Role::Button,
             row.item.label,
@@ -49,15 +59,21 @@ pub(super) fn append_sidebar_nodes(
             CursorHint::Pointer,
         ));
     }
-    for row in ProjectSidebar::dynamic_row_layout(layout.sidebar, state) {
+
+    for row in &sidebar.rows {
+        let Some(rect) = ThreadTranscript::clip_to_viewport(row.rect, sidebar.scroll_viewport)
+        else {
+            continue;
+        };
         let name = match &row.target {
             SidebarRowTarget::Project(_) => format!("项目 {}", row.label),
             SidebarRowTarget::Task(_) => format!("任务 {}", row.label),
+            SidebarRowTarget::Session(_) if row.pinned => format!("置顶任务 {}", row.label),
             SidebarRowTarget::Session(_) => row.label.clone(),
         };
-        nodes.push(node(
+        let mut row_node = node(
             row.id,
-            row.rect,
+            rect,
             Role::Button,
             &name,
             None,
@@ -66,29 +82,118 @@ pub(super) fn append_sidebar_nodes(
             } else {
                 Vec::new()
             },
-            if row.actionable {
-                next_order(focus_order)
-            } else {
-                None
-            },
+            row.actionable.then(|| next_order(focus_order)).flatten(),
             if row.actionable {
                 CursorHint::Pointer
             } else {
                 CursorHint::Default
             },
-        ));
+        );
+        if row.selected {
+            row_node.toggled = Some(Toggled::True);
+        }
+        nodes.push(row_node);
+
+        let Some(session) = row.session() else {
+            continue;
+        };
+        if let (Some(id), Some(action_rect)) = (row.pin_id, ProjectSidebar::session_pin_rect(row)) {
+            if let Some(action_rect) =
+                ThreadTranscript::clip_to_viewport(action_rect, sidebar.scroll_viewport)
+            {
+                nodes.push(node(
+                    id,
+                    action_rect,
+                    Role::Button,
+                    if row.pinned { "取消置顶" } else { "置顶" },
+                    Some(session.session_id.clone()),
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
+        }
+        if let (Some(id), Some(action_rect)) =
+            (row.archive_id, ProjectSidebar::session_archive_rect(row))
+        {
+            if let Some(action_rect) =
+                ThreadTranscript::clip_to_viewport(action_rect, sidebar.scroll_viewport)
+            {
+                nodes.push(node(
+                    id,
+                    action_rect,
+                    Role::Button,
+                    "归档任务",
+                    Some(session.session_id.clone()),
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
+        }
     }
-    let footer = ProjectSidebar::footer_rect(layout.sidebar);
-    if visible_rect(footer) {
+
+    for control in &sidebar.controls {
+        if !control.actionable() {
+            continue;
+        }
+        let Some(rect) = ThreadTranscript::clip_to_viewport(control.rect, sidebar.scroll_viewport)
+        else {
+            continue;
+        };
+        let name = match &control.target {
+            SidebarControlTarget::ShowAllProjects => "显示全部项目",
+            SidebarControlTarget::ShowAllProjectSessions(_) => "显示项目中的全部任务",
+            SidebarControlTarget::ToggleTasks => control.label.as_str(),
+            SidebarControlTarget::NewProjectlessTask => "新建无项目任务",
+            SidebarControlTarget::MoreDecoration => continue,
+        };
         nodes.push(node(
-            SETTINGS_NAV_ID,
-            footer,
+            control.id,
+            rect,
             Role::Button,
-            ProjectSidebar::footer_item().label,
+            name,
             None,
             vec![Action::Click, Action::Focus],
             next_order(focus_order),
             CursorHint::Pointer,
         ));
+    }
+
+    if visible_rect(sidebar.profile) {
+        nodes.push(node(
+            SETTINGS_NAV_ID,
+            sidebar.profile,
+            Role::Button,
+            &format!("本地账户 {}", state.local_profile.display_name),
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        ));
+    }
+    if visible_rect(sidebar.help) {
+        nodes.push(node(
+            HELP_ID,
+            sidebar.help,
+            Role::Button,
+            "帮助",
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        ));
+    }
+}
+
+const fn navigation_id(index: usize) -> WidgetId {
+    match index {
+        0 => NEW_SESSION_ID,
+        1 => SCHEDULED_NAV_ID,
+        2 => PLUGINS_NAV_ID,
+        3 => SITES_NAV_ID,
+        4 => PULL_REQUESTS_NAV_ID,
+        5 => CHATS_NAV_ID,
+        _ => SIDEBAR_ID,
     }
 }

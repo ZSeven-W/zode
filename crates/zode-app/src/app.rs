@@ -39,11 +39,14 @@ use zode_core::{bootstrap::AppBootstrap, config::ConfigManager};
 use zode_node_protocol::{AgentEndpoint, NodeCapability, UserContent, WorkspaceUri};
 
 mod interaction;
+mod navigation_persistence;
+mod navigation_state;
 mod persistence;
 mod presentation;
 mod project_picker;
 mod queue;
 mod queue_focus;
+mod sidebar;
 mod terminal;
 mod window;
 
@@ -129,29 +132,9 @@ pub struct DesktopApp {
     window_geometry: Option<WindowGeometry>,
 }
 
-fn restore_last_session(state: &mut ZodeAppState, last_session: Option<&str>) {
-    let Some(last_session) = last_session else {
-        return;
-    };
-    let restored = state
-        .threads
-        .iter()
-        .find(|thread| {
-            thread.session.session_id == last_session
-                && (state.available_workspace(&thread.workspace_uri)
-                    || state.is_projectless_workspace(&thread.workspace_uri))
-        })
-        .map(|thread| (thread.session.clone(), thread.workspace_uri.clone()));
-    let Some((session, workspace_uri)) = restored else {
-        return;
-    };
-    state.current_session = Some(session);
-    state.active_workspace =
-        (!state.is_projectless_workspace(&workspace_uri)).then_some(workspace_uri);
-}
-
 impl DesktopApp {
     pub fn new(mut app_state: ZodeAppState, proxy: EventLoopProxy<AppWake>) -> Self {
+        app_state.local_profile.display_name = navigation_state::local_display_name_from_env();
         let app_state_store = match AppStateStore::from_default_config() {
             Ok(store) => Some(store),
             Err(error) => {
@@ -172,6 +155,7 @@ impl DesktopApp {
             });
         if let Some(persisted) = persisted.as_ref() {
             app_state.ui_preferences = persisted.ui_preferences.clone();
+            navigation_state::hydrate_session_navigation(&mut app_state, persisted);
             for project in &mut app_state.projects {
                 project.expanded = !persisted
                     .collapsed_workspaces
@@ -214,7 +198,10 @@ impl DesktopApp {
                     app_state.active_workspace = None;
                     app_state.presentation.integrations = zode_app_model::LoadState::Idle;
                 }
-                None => restore_last_session(&mut app_state, persisted.last_session.as_deref()),
+                None => navigation_state::restore_last_session(
+                    &mut app_state,
+                    persisted.last_session.as_deref(),
+                ),
             }
         }
         app_state.composer.focused = false;

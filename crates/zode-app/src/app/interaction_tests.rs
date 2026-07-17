@@ -140,6 +140,10 @@ fn static_sidebar_ids_map_to_typed_commands() {
             9,
             AppCommand::Navigate(ShellRoute::Settings(SettingsCategory::General)),
         ),
+        (
+            10,
+            AppCommand::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::Help)),
+        ),
     ];
 
     for (id, command) in expected {

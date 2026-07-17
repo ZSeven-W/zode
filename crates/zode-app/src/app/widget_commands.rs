@@ -52,6 +52,9 @@ fn static_sidebar_command(state: &ZodeAppState, id: WidgetId) -> Option<AppComma
                 .action
         }
         9 => ProjectSidebar::footer_item().action,
+        10 => SidebarAction::Navigate(zode_app_model::ShellRoute::ComingSoon(
+            zode_app_model::ComingSoonFeature::Help,
+        )),
         _ => return None,
     };
     match action {

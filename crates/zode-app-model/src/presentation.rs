@@ -55,6 +55,7 @@ pub enum ComingSoonFeature {
     Sites,
     PullRequests,
     Chats,
+    Help,
 }
 
 /// A single optional pane presented alongside the primary route.

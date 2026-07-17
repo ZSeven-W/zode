@@ -502,6 +502,9 @@ pub fn reduce_navigation_command(
     if let Some(outcome) = crate::task_navigation::reduce_task_navigation(state, &command) {
         return outcome;
     }
+    if let Some(outcome) = crate::sidebar_navigation::reduce_sidebar_navigation(state, &command) {
+        return outcome;
+    }
     match command {
         AppCommand::SelectSession(session) => {
             let Some(workspace_uri) = state
@@ -552,13 +555,6 @@ pub fn reduce_navigation_command(
             thread.title = title;
             NavigationOutcome::NeedsEffect
         }
-        AppCommand::SetSessionPinned { session, .. } => {
-            if state.threads.iter().any(|thread| thread.session == session) {
-                NavigationOutcome::NeedsEffect
-            } else {
-                NavigationOutcome::Ignored
-            }
-        }
         AppCommand::RequestDeleteSession(session) => {
             if !state.threads.iter().any(|thread| thread.session == session) {
                 return NavigationOutcome::Ignored;
@@ -576,6 +572,8 @@ pub fn reduce_navigation_command(
             }
             let deleting_current = state.current_session.as_ref() == Some(&session);
             state.threads.retain(|thread| thread.session != session);
+            state.pinned_sessions.remove(&session);
+            state.archived_sessions.remove(&session);
             state.transcripts.remove(&session);
             state.message_queues.remove(&session);
             state.tool_expanded.remove(&session);
@@ -604,9 +602,6 @@ pub fn reduce_navigation_command(
                 return NavigationOutcome::Ignored;
             };
             project.expanded = !project.expanded;
-            if project.available {
-                state.active_workspace = Some(workspace_uri);
-            }
             NavigationOutcome::NeedsEffect
         }
         _ => NavigationOutcome::Ignored,

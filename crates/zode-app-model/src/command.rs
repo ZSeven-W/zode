@@ -29,6 +29,18 @@ pub enum AppCommand {
         session: SessionLocator,
         pinned: bool,
     },
+    SetSessionArchived {
+        session: SessionLocator,
+        archived: bool,
+    },
+    SetSidebarScroll {
+        offset: f32,
+    },
+    ToggleSidebarTasks,
+    ShowAllProjects,
+    ShowAllProjectSessions {
+        workspace_uri: WorkspaceUri,
+    },
     SetTranscriptViewport {
         session: SessionLocator,
         scroll_offset: f32,

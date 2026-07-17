@@ -42,6 +42,7 @@ pub const BROWSER_NAV_ID: WidgetId = PULL_REQUESTS_NAV_ID;
 pub const CHATS_NAV_ID: WidgetId = WidgetId(7);
 pub const SETTINGS_ROOT_ID: WidgetId = WidgetId(8);
 pub const SETTINGS_NAV_ID: WidgetId = WidgetId(9);
+pub const HELP_ID: WidgetId = WidgetId(10);
 pub const COMPOSER_ID: WidgetId = WidgetId(20);
 pub const SEND_ID: WidgetId = WidgetId(21);
 pub const TERMINAL_ID: WidgetId = WidgetId(30);
@@ -632,6 +633,7 @@ const fn coming_soon_focus(feature: ComingSoonFeature) -> Option<WidgetId> {
         ComingSoonFeature::Sites => SITES_NAV_ID,
         ComingSoonFeature::PullRequests => PULL_REQUESTS_NAV_ID,
         ComingSoonFeature::Chats => CHATS_NAV_ID,
+        ComingSoonFeature::Help => HELP_ID,
     })
 }
 

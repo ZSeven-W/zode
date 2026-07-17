@@ -48,6 +48,7 @@ const fn feature_label(feature: ComingSoonFeature) -> &'static str {
         ComingSoonFeature::Sites => "站点",
         ComingSoonFeature::PullRequests => "拉取请求",
         ComingSoonFeature::Chats => "聊天",
+        ComingSoonFeature::Help => "帮助",
     }
 }
 

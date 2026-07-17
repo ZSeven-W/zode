@@ -1,6 +1,10 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
-use zode_app_model::{demo_state, IntegrationsTab, ProjectState, SettingsCategory, ShellRoute};
-use zode_app_ui::{group_sessions, ProjectSidebar, RectExt, ZodeTheme};
+use zode_app_model::{
+    demo_state, AppCommand, IntegrationsTab, ProjectState, SettingsCategory, ShellRoute,
+};
+use zode_app_ui::{
+    group_sessions, ProjectSidebar, RectExt, SidebarRowTarget, SidebarSection, ZodeTheme,
+};
 use zode_node_protocol::{NodeId, SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,7 +82,7 @@ fn empty_session_list_has_no_placeholder_group() {
 }
 
 #[test]
-fn local_settings_is_painted_in_the_bottom_footer() {
+fn local_profile_is_painted_in_the_fixed_bottom_footer() {
     let mut painter = CapturePainter::default();
 
     ProjectSidebar::paint(
@@ -88,13 +92,13 @@ fn local_settings_is_painted_in_the_bottom_footer() {
         &ZodeTheme::light(),
     );
 
-    let settings_origin = painter.operations.iter().find_map(|operation| {
+    let profile_origin = painter.operations.iter().find_map(|operation| {
         let PaintOp::Text(text, origin, _) = operation else {
             return None;
         };
-        (text == "本地设置").then_some(*origin)
+        (text == "本地").then_some(*origin)
     });
-    assert!(settings_origin.is_some_and(|origin| origin.y > 560.0));
+    assert!(profile_origin.is_some_and(|origin| origin.y > 560.0));
     assert!(!painter
         .operations
         .iter()
@@ -116,14 +120,14 @@ fn wide_sidebar_reserves_titlebar_space_and_uses_navigation_icons() {
             PaintOp::Text(text, origin, _) if text == "Zode" => Some(origin.y),
             _ => None,
         });
-    assert!(brand_y.is_some_and(|y| y >= 54.0));
+    assert!(brand_y.is_some_and(|y| y >= 48.0));
     assert_eq!(
         painter
             .operations
             .iter()
             .filter(|operation| matches!(operation, PaintOp::Svg(..)))
             .count(),
-        7
+        10
     );
     let new_task_x = painter
         .operations
@@ -153,7 +157,7 @@ fn settings_route_selects_the_footer_instead_of_new_session() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(selected_rects, vec![ProjectSidebar::footer_rect(rect)]);
+    assert_eq!(selected_rects, vec![ProjectSidebar::profile_rect(rect)]);
     assert!(!painter.operations.iter().any(|operation| matches!(
         operation,
         PaintOp::FillRound(selected, _) if *selected == ProjectSidebar::navigation_row_layout(rect)[0].rect
@@ -254,7 +258,7 @@ fn active_project_replaces_the_new_task_selection_when_no_session_is_open() {
 }
 
 #[test]
-fn dynamic_rows_stop_before_the_stable_footer() {
+fn overflow_rows_scroll_instead_of_disappearing() {
     let mut state = demo_state();
     for index in 0..20 {
         state.projects.push(ProjectState {
@@ -265,12 +269,11 @@ fn dynamic_rows_stop_before_the_stable_footer() {
         });
     }
     let rect = Rect::xywh(0.0, 0.0, 240.0, 480.0);
-    let footer = ProjectSidebar::footer_rect(rect);
+    let layout = ProjectSidebar::layout(rect, &state);
 
-    let rows = ProjectSidebar::dynamic_row_layout(rect, &state);
-
-    assert!(!rows.is_empty());
-    assert!(rows.iter().all(|row| row.rect.max_y() <= footer.origin.y));
+    assert!(!layout.rows.is_empty());
+    assert!(layout.content_height > layout.scroll_viewport.size.y);
+    assert!(layout.max_scroll > 0.0);
 }
 
 #[test]
@@ -334,7 +337,7 @@ fn compact_sidebar_keeps_navigation_and_settings_readable() {
 }
 
 #[test]
-fn coming_soon_navigation_is_muted_while_implemented_items_stay_foreground() {
+fn navigation_destinations_remain_enabled_before_their_pages_are_complete() {
     let theme = ZodeTheme::light();
     let mut painter = CapturePainter::default();
 
@@ -354,12 +357,141 @@ fn coming_soon_navigation_is_muted_while_implemented_items_stay_foreground() {
                 _ => None,
             })
     };
-    for label in ["新建任务", "插件"] {
+    for label in ["新建任务", "已安排", "插件", "站点", "拉取请求", "聊天"] {
         assert_eq!(text_color(label), Some(theme.sidebar_foreground));
     }
-    for label in ["已安排", "站点", "拉取请求", "聊天"] {
-        assert_eq!(text_color(label), Some(theme.tokens.muted_foreground));
+}
+
+#[test]
+fn sidebar_three_zones_keep_brand_scroll_content_and_profile_anchored() {
+    let rect = Rect::xywh(0.0, 0.0, 240.0, 837.0);
+    let state = demo_state();
+    let first = ProjectSidebar::layout(rect, &state);
+    let taller = ProjectSidebar::layout(Rect::xywh(0.0, 0.0, 240.0, 1_077.0), &state);
+
+    assert_eq!(
+        first.navigation_rows[0].rect,
+        taller.navigation_rows[0].rect
+    );
+    assert_eq!(
+        first.scroll_viewport.origin.y,
+        taller.scroll_viewport.origin.y
+    );
+    assert_eq!(first.footer.max_y(), rect.max_y());
+    assert_eq!(taller.footer.max_y(), 1_077.0);
+    assert_eq!(first.footer.size.y, 44.0);
+    assert!(first.scroll_viewport.max_y() <= first.footer.origin.y);
+}
+
+#[test]
+fn pinned_project_and_projectless_tasks_render_in_distinct_order() {
+    let mut state = demo_state();
+    let project = WorkspaceUri::new("file:///repo/zode").unwrap();
+    let scratch_root = WorkspaceUri::new("file:///tmp/zode-tasks").unwrap();
+    state.projectless_workspace_root = Some(scratch_root.clone());
+    state.projects.push(ProjectState {
+        workspace_uri: project.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 10,
+    });
+    let pinned = SessionLocator::new(state.host.node_id, "pinned");
+    let project_session = SessionLocator::new(state.host.node_id, "project");
+    let projectless = SessionLocator::new(state.host.node_id, "task");
+    state.threads.extend([
+        ThreadSummary {
+            session: pinned.clone(),
+            workspace_uri: project.clone(),
+            title: "Pinned".into(),
+            updated_at_ms: 30,
+            status: ThreadStatus::Running,
+        },
+        ThreadSummary {
+            session: project_session.clone(),
+            workspace_uri: project,
+            title: "Project".into(),
+            updated_at_ms: 20,
+            status: ThreadStatus::Idle,
+        },
+        ThreadSummary {
+            session: projectless.clone(),
+            workspace_uri: WorkspaceUri::new(format!("{}/task", scratch_root.as_str())).unwrap(),
+            title: "Task".into(),
+            updated_at_ms: 10,
+            status: ThreadStatus::Failed,
+        },
+    ]);
+    state.pinned_sessions.insert(pinned.clone());
+
+    let layout = ProjectSidebar::layout(Rect::xywh(0.0, 0.0, 240.0, 1_077.0), &state);
+    let sections = layout
+        .sections
+        .iter()
+        .map(|section| section.section)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sections,
+        vec![
+            SidebarSection::Pinned,
+            SidebarSection::Projects,
+            SidebarSection::Tasks
+        ]
+    );
+    let sessions = layout
+        .rows
+        .iter()
+        .filter_map(|row| row.session().cloned())
+        .collect::<Vec<_>>();
+    assert_eq!(sessions, vec![pinned.clone(), project_session, projectless]);
+    assert_eq!(ProjectSidebar::shortcut_session(&state, 1), Some(pinned));
+}
+
+#[test]
+fn session_actions_and_scroll_emit_typed_commands() {
+    let mut state = demo_state();
+    let scratch_root = WorkspaceUri::new("file:///tmp/zode-tasks").unwrap();
+    state.projectless_workspace_root = Some(scratch_root.clone());
+    let session = SessionLocator::new(state.host.node_id, "task-action");
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: WorkspaceUri::new(format!("{}/task-action", scratch_root.as_str())).unwrap(),
+        title: "Task".into(),
+        updated_at_ms: 1,
+        status: ThreadStatus::Idle,
+    });
+    let row = ProjectSidebar::dynamic_row_layout(Rect::xywh(0.0, 0.0, 240.0, 600.0), &state)
+        .into_iter()
+        .find(|row| matches!(row.target, SidebarRowTarget::Task(_)))
+        .unwrap();
+
+    assert_eq!(
+        ProjectSidebar::command_for_widget(&state, row.pin_id.unwrap()),
+        Some(AppCommand::SetSessionPinned {
+            session: session.clone(),
+            pinned: true,
+        })
+    );
+    assert_eq!(
+        ProjectSidebar::command_for_widget(&state, row.archive_id.unwrap()),
+        Some(AppCommand::SetSessionArchived {
+            session,
+            archived: true,
+        })
+    );
+
+    for index in 0..20 {
+        state.projects.push(ProjectState {
+            workspace_uri: WorkspaceUri::new(format!("file:///repo/project-{index}")).unwrap(),
+            expanded: false,
+            available: true,
+            last_opened_ms: index,
+        });
     }
+    let rect = Rect::xywh(0.0, 0.0, 240.0, 480.0);
+    assert!(matches!(
+        ProjectSidebar::scroll_command(rect, &state, 100.0),
+        Some(AppCommand::SetSidebarScroll { offset }) if offset > 0.0
+    ));
 }
 
 fn fixture_sessions() -> Vec<ThreadSummary> {

@@ -13,6 +13,7 @@ use zode_app_model::{
 use zode_app_ui::{
     Composer, Insets, RectExt, SettingsPanel, WorkspaceSnapshot, TRANSCRIPT_COMPOSER_GAP,
 };
+use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
 const WIDTH: u32 = 1800;
 const HEIGHT: u32 = 1080;
@@ -317,6 +318,9 @@ fn render_named_test_scene() {
         scene.state.active_workspace = None;
         scene.state.project_picker.open = false;
     }
+    if std::env::var_os("ZODE_RENDER_SIDEBAR_REFERENCE").is_some() {
+        populate_sidebar_reference(&mut scene.state);
+    }
     let bytes = render_snapshot(&scene.state, WIDTH, HEIGHT, SCALE)
         .unwrap_or_else(|error| panic!("could not render {name}: {error}"));
     if let Some(parent) = path
@@ -329,6 +333,70 @@ fn render_named_test_scene() {
     std::fs::write(&path, bytes)
         .unwrap_or_else(|error| panic!("could not write {}: {error}", path.display()));
     println!("rendered {name} to {}", path.display());
+}
+
+fn populate_sidebar_reference(state: &mut zode_app_model::ZodeAppState) {
+    let node = state.host.node_id;
+    let project = WorkspaceUri::new("file:///workspace/openpencil").unwrap();
+    if let Some(thread) = state
+        .threads
+        .iter()
+        .find(|thread| thread.title == "梳理桌面端实施计划")
+    {
+        state.archived_sessions.insert(thread.session.clone());
+    }
+    if let Some(project) = state
+        .projects
+        .iter_mut()
+        .find(|project| project.workspace_uri.as_str().ends_with("/codex"))
+    {
+        project.expanded = false;
+    }
+    for (index, title) in [
+        "电脑 我们的 RUST 版",
+        "梳理配色系统缺口",
+        "更新 Clash Verge 前置代理 IP",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let session = SessionLocator::new(node, format!("sidebar-pinned-{index}"));
+        state.threads.push(ThreadSummary {
+            session: session.clone(),
+            workspace_uri: project.clone(),
+            title: title.into(),
+            updated_at_ms: 1_800_000_000_000 - index as i64,
+            status: ThreadStatus::Idle,
+        });
+        state.pinned_sessions.insert(session);
+    }
+    for index in 0..6 {
+        state.threads.push(ThreadSummary {
+            session: SessionLocator::new(node, format!("sidebar-project-{index}")),
+            workspace_uri: project.clone(),
+            title: format!("OpenPencil 侧栏任务 {}", index + 1),
+            updated_at_ms: 1_720_580_000_000 + index,
+            status: ThreadStatus::Idle,
+        });
+    }
+    let task_root = WorkspaceUri::new("file:///workspace/task-workspaces").unwrap();
+    state.projectless_workspace_root = Some(task_root.clone());
+    for (index, title) in ["Add pika pet", "了解 Codex CLI 生图"]
+        .into_iter()
+        .enumerate()
+    {
+        state.threads.push(ThreadSummary {
+            session: SessionLocator::new(node, format!("sidebar-task-{index}")),
+            workspace_uri: WorkspaceUri::new(format!(
+                "{}/sidebar-task-{index}",
+                task_root.as_str().trim_end_matches('/')
+            ))
+            .unwrap(),
+            title: title.into(),
+            updated_at_ms: 1_780_000_000_000 + index as i64,
+            status: ThreadStatus::Idle,
+        });
+    }
 }
 
 /// Manual reference comparison entry used by compare-reference-snapshots.sh.

@@ -3,7 +3,7 @@ use crate::{
     TranscriptState,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use zode_node_protocol::{
     CapabilityManifest, NodeId, SessionLocator, ThreadSummary, TurnId, UsageSnapshot, WorkspaceUri,
 };
@@ -144,6 +144,40 @@ pub struct ProjectPickerState {
     pub active_index: usize,
 }
 
+/// Transient navigation state for the desktop sidebar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SidebarState {
+    pub scroll_offset: f32,
+    pub tasks_expanded: bool,
+    pub show_all_projects: bool,
+    pub show_all_project_sessions: BTreeSet<WorkspaceUri>,
+}
+
+impl Default for SidebarState {
+    fn default() -> Self {
+        Self {
+            scroll_offset: 0.0,
+            tasks_expanded: true,
+            show_all_projects: false,
+            show_all_project_sessions: BTreeSet::new(),
+        }
+    }
+}
+
+/// Display metadata for the local desktop profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalProfileState {
+    pub display_name: String,
+}
+
+impl Default for LocalProfileState {
+    fn default() -> Self {
+        Self {
+            display_name: "本地".into(),
+        }
+    }
+}
+
 /// Responsive shell state shared by all pages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellState {
@@ -156,6 +190,7 @@ pub struct ShellState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZodeAppState {
     pub host: HostState,
+    pub local_profile: LocalProfileState,
     pub projects: Vec<ProjectState>,
     pub active_workspace: Option<WorkspaceUri>,
     pub project_picker: ProjectPickerState,
@@ -164,6 +199,9 @@ pub struct ZodeAppState {
     pub current_session: Option<SessionLocator>,
     pub pending_session_delete: Option<SessionLocator>,
     pub threads: Vec<ThreadSummary>,
+    pub pinned_sessions: BTreeSet<SessionLocator>,
+    pub archived_sessions: BTreeSet<SessionLocator>,
+    pub sidebar: SidebarState,
     pub transcripts: BTreeMap<SessionLocator, TranscriptState>,
     pub message_queues: BTreeMap<SessionLocator, MessageQueueState>,
     pub active_turns: BTreeMap<SessionLocator, TurnId>,
@@ -267,6 +305,7 @@ pub fn demo_state() -> ZodeAppState {
             connection: ConnectionState::Local,
             system_theme: SystemTheme::Light,
         },
+        local_profile: LocalProfileState::default(),
         projects: Vec::new(),
         active_workspace: None,
         project_picker: ProjectPickerState::default(),
@@ -274,6 +313,9 @@ pub fn demo_state() -> ZodeAppState {
         current_session: None,
         pending_session_delete: None,
         threads: Vec::new(),
+        pinned_sessions: BTreeSet::new(),
+        archived_sessions: BTreeSet::new(),
+        sidebar: SidebarState::default(),
         transcripts: BTreeMap::new(),
         message_queues: BTreeMap::new(),
         active_turns: BTreeMap::new(),

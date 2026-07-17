@@ -4,7 +4,7 @@ use zode_app_model::{
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
 #[test]
-fn available_project_and_session_selection_update_the_active_workspace() {
+fn project_expansion_does_not_change_active_workspace_and_session_selection_does() {
     let mut state = demo_state();
     let first = WorkspaceUri::new("file:///repo/first").unwrap();
     let second = WorkspaceUri::new("file:///repo/second").unwrap();
@@ -29,7 +29,7 @@ fn available_project_and_session_selection_update_the_active_workspace() {
         reduce_navigation_command(&mut state, AppCommand::ToggleProject(first.clone())),
         NavigationOutcome::NeedsEffect
     );
-    assert_eq!(state.active_workspace, Some(first));
+    assert_eq!(state.active_workspace, None);
     assert_eq!(
         reduce_navigation_command(&mut state, AppCommand::SelectSession(session)),
         NavigationOutcome::Applied

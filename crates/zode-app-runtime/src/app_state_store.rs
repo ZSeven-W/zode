@@ -18,6 +18,8 @@ const APP_STATE_VERSION: u32 = 1;
 #[serde(rename_all = "camelCase")]
 pub struct SessionUiState {
     pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
     pub unread: bool,
     pub failed: bool,
 }

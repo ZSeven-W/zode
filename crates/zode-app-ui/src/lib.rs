@@ -39,8 +39,9 @@ pub use widgets::{
     ReviewLine, ReviewLineKind, ReviewPanel, ReviewPanelLayout, ReviewSelection, SandboxSelection,
     SettingControl, SettingControlLayout, SettingRowLayout, SettingsNavigationEntryLayout,
     SettingsNavigationGroupLayout, SettingsNavigationLayout, SettingsPanel, SettingsPanelLayout,
-    SidebarAction, SidebarItem, SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget,
-    TerminalCell, TerminalColor, TerminalGrid, TerminalLine, TerminalPanel,
+    SidebarAction, SidebarControlLayout, SidebarControlTarget, SidebarItem, SidebarLabelLayout,
+    SidebarLayout, SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget, SidebarSection,
+    SidebarSectionLayout, TerminalCell, TerminalColor, TerminalGrid, TerminalLine, TerminalPanel,
     TerminalPanelController, TerminalSelection, ThreadHeader, ThreadHeaderLayout, ThreadTranscript,
     ToolCard, ToolTone, TranscriptItemLayout, UsageChip, UsageDisplay, WelcomeTitleLayout,
     WindowChrome, WorkspaceShell, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
@@ -48,17 +49,18 @@ pub use widgets::{
     ENVIRONMENT_REVIEW_ID, INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
     PROJECT_DETACH_ID, PROJECT_PICKER_NEW_ID, PROJECT_PICKER_PROJECTLESS_ID,
     PROJECT_PICKER_SEARCH_ID, PROJECT_PICKER_SURFACE_ID, PROJECT_PICKER_TRIGGER_ID,
-    SETTINGS_BACK_ID,
+    SETTINGS_BACK_ID, SIDEBAR_SHOW_ALL_PROJECTS_ID, SIDEBAR_TASKS_MORE_ID, SIDEBAR_TASKS_NEW_ID,
+    SIDEBAR_TASKS_TOGGLE_ID,
 };
 
 pub const CRATE_READY: bool = true;
 pub(crate) use accessibility::stable_widget_id;
 pub use accessibility::{
     accessibility_tree, FocusDirection, InteractionNode, WidgetId, WorkspaceSnapshot,
-    BROWSER_NAV_ID, COMPOSER_ID, HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID, HIGH_CONTRAST_ID,
-    NEW_SESSION_ID, OPENPENCIL_NAV_ID, PLUGINS_NAV_ID, REDUCED_MOTION_ID, REVIEW_CLOSE_ID, SEND_ID,
-    SETTINGS_NAV_ID, SETTINGS_ROOT_ID, SIDEBAR_ID, TERMINAL_ID, THEME_DARK_ID, THEME_LIGHT_ID,
-    THEME_SYSTEM_ID, WORKFLOWS_NAV_ID,
+    BROWSER_NAV_ID, COMPOSER_ID, HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID, HELP_ID,
+    HIGH_CONTRAST_ID, NEW_SESSION_ID, OPENPENCIL_NAV_ID, PLUGINS_NAV_ID, REDUCED_MOTION_ID,
+    REVIEW_CLOSE_ID, SEND_ID, SETTINGS_NAV_ID, SETTINGS_ROOT_ID, SIDEBAR_ID, TERMINAL_ID,
+    THEME_DARK_ID, THEME_LIGHT_ID, THEME_SYSTEM_ID, WORKFLOWS_NAV_ID,
 };
 pub(crate) use brand::BrandMark;
 pub(crate) use text::paint_single_line;

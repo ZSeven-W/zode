@@ -214,7 +214,14 @@ impl WorkspaceShell {
         painter.begin_frame();
         WindowChrome::paint(painter, geometry.viewport, &geometry, theme);
         if !matches!(state.presentation.route, ShellRoute::Settings(_)) {
-            ProjectSidebar::paint(painter, geometry.sidebar, state, theme);
+            ProjectSidebar::paint_with_interaction(
+                painter,
+                geometry.sidebar,
+                state,
+                snapshot.focused,
+                hovered,
+                theme,
+            );
         }
         match state.presentation.route {
             ShellRoute::Conversation => {
@@ -291,6 +298,9 @@ impl WorkspaceShell {
                 )
                 | None => {}
             }
+        }
+        if !matches!(state.presentation.route, ShellRoute::Settings(_)) {
+            ProjectSidebar::paint_hover_overlay(painter, geometry.sidebar, state, hovered, theme);
         }
         painter.end_frame();
         geometry

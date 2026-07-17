@@ -9,6 +9,7 @@ fn reconcile_drops_ui_metadata_for_deleted_sessions() {
         "alive".into(),
         SessionUiState {
             pinned: true,
+            archived: false,
             unread: false,
             failed: false,
         },
@@ -17,6 +18,7 @@ fn reconcile_drops_ui_metadata_for_deleted_sessions() {
         "deleted".into(),
         SessionUiState {
             pinned: false,
+            archived: false,
             unread: true,
             failed: true,
         },
@@ -42,6 +44,7 @@ fn store_round_trips_versioned_state_atomically() {
         "session-1".into(),
         SessionUiState {
             pinned: true,
+            archived: true,
             unread: true,
             failed: false,
         },
@@ -92,7 +95,13 @@ fn legacy_v1_missing_appearance_and_window_fields_uses_defaults() {
         r#"{
             "version": 1,
             "lastSession": "legacy-session",
-            "sessions": {},
+            "sessions": {
+                "legacy-session": {
+                    "pinned": true,
+                    "unread": false,
+                    "failed": false
+                }
+            },
             "collapsedWorkspaces": []
         }"#,
     )
@@ -101,6 +110,7 @@ fn legacy_v1_missing_appearance_and_window_fields_uses_defaults() {
     let loaded = store.load().unwrap();
 
     assert_eq!(loaded.last_session.as_deref(), Some("legacy-session"));
+    assert!(!loaded.sessions["legacy-session"].archived);
     assert_eq!(loaded.ui_preferences, UiPreferences::default());
     assert_eq!(loaded.window_geometry, None);
     assert_eq!(loaded.task_context, None);
@@ -194,6 +204,7 @@ fn update_preserves_unrelated_state_fields() {
         "session-1".into(),
         SessionUiState {
             pinned: true,
+            archived: true,
             unread: false,
             failed: true,
         },
@@ -304,6 +315,7 @@ fn concurrent_reconcile_does_not_erase_preferences_or_window_geometry() {
         "alive".into(),
         SessionUiState {
             pinned: true,
+            archived: false,
             unread: false,
             failed: false,
         },
@@ -312,6 +324,7 @@ fn concurrent_reconcile_does_not_erase_preferences_or_window_geometry() {
         "deleted".into(),
         SessionUiState {
             pinned: false,
+            archived: false,
             unread: true,
             failed: false,
         },

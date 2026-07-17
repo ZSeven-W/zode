@@ -47,8 +47,11 @@ pub use project_picker::{
     PROJECT_PICKER_SEARCH_ID, PROJECT_PICKER_SURFACE_ID, PROJECT_PICKER_TRIGGER_ID,
 };
 pub use project_sidebar::{
-    group_sessions, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarItem,
-    SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget,
+    group_sessions, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarControlLayout,
+    SidebarControlTarget, SidebarItem, SidebarLabelLayout, SidebarLayout,
+    SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget, SidebarSection,
+    SidebarSectionLayout, SIDEBAR_SHOW_ALL_PROJECTS_ID, SIDEBAR_TASKS_MORE_ID,
+    SIDEBAR_TASKS_NEW_ID, SIDEBAR_TASKS_TOGGLE_ID,
 };
 pub use review_panel::{
     ReviewDraft, ReviewFileRowLayout, ReviewLine, ReviewLineKind, ReviewPanel, ReviewPanelLayout,
