@@ -39,9 +39,17 @@ impl Drop for LimiterPermit {
 mod tests {
     use super::*;
 
+    /// Reset the process-wide counter so a leaked/aborted permit from another
+    /// test can't skew these assertions (the static is shared within the test
+    /// binary).
+    fn reset() {
+        RUNNING.store(0, Ordering::SeqCst);
+    }
+
     #[test]
     #[serial_test::serial]
     fn limiter_is_process_wide_and_releases_on_drop() {
+        reset();
         let p1 = ExternalLimiter::acquire(2).unwrap();
         let _p2 = ExternalLimiter::acquire(2).unwrap();
         assert!(
@@ -55,6 +63,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn cap_is_read_per_acquire() {
+        reset();
         let _p1 = ExternalLimiter::acquire(1).unwrap();
         assert!(ExternalLimiter::acquire(1).is_none());
         // a raised cap admits immediately — no rebuild needed

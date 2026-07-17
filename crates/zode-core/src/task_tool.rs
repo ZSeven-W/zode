@@ -473,6 +473,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial_test::serial]
     async fn external_missing_grant_with_noninteractive_gate_fails_closed() {
         let reg = registry_with("fake-ext", "fake-claude.sh", false);
         let tool = tool_with(
@@ -489,6 +490,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial_test::serial]
     async fn external_trusted_profile_runs_under_bypass() {
         let reg = registry_with("fake-ext", "fake-claude.sh", true);
         let grants = Arc::new(GrantStore::default());
@@ -503,6 +505,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial_test::serial]
     async fn external_deny_is_an_error_and_gate_allow_session_grants() {
         let reg = registry_with("fake-ext", "fake-claude.sh", false);
         let grants = Arc::new(GrantStore::default());
@@ -528,6 +531,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn external_depth_guard_matches_upstream() {
         let reg = registry_with("fake-ext", "fake-claude.sh", true);
         let tool = tool_with(

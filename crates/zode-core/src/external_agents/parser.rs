@@ -251,6 +251,29 @@ mod tests {
         assert_eq!((r.usage_in, r.usage_out), (Some(80), Some(30)));
     }
 
+    /// Ground-truth: this fixture is verbatim stdout captured from a real
+    /// `codex exec --json` run (codex-cli 0.144.1). It exercises lines the
+    /// hand-written fixture omits — `turn.started`, the `item.completed`
+    /// shape with a nested `id`, and the richer `usage` object with extra
+    /// keys — proving the parser handles the actual CLI output, not just an
+    /// idealized shape.
+    #[test]
+    fn codex_real_cli_output_parses() {
+        let mut p = StreamParser::new(&OutputProtocol::JsonlCodex);
+        for line in include_str!("../../tests/fixtures/extagent/codex-real-stream.jsonl").lines() {
+            p.feed(line);
+        }
+        let r = p.finish().unwrap();
+        assert_eq!(r.text, "pong");
+        assert_eq!(
+            r.session_id.as_deref(),
+            Some("019f6ee6-5f5e-7873-a1be-2f5308cfb0a4")
+        );
+        // `turn.completed.usage` carries extra keys (cached_input_tokens,
+        // reasoning_output_tokens) — we take the two we need and ignore rest.
+        assert_eq!((r.usage_in, r.usage_out), (Some(14981), Some(5)));
+    }
+
     #[test]
     fn unknown_lines_degrade_to_log_and_missing_result_is_hard_error() {
         let mut p = StreamParser::new(&OutputProtocol::JsonlClaude);
