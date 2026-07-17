@@ -7,7 +7,7 @@ use zode_app_model::{
 };
 use zode_node_protocol::SessionLocator;
 
-use crate::{paint_single_line, stable_widget_id, RectExt, WidgetId, ZodeTheme};
+use crate::{paint_single_line, stable_widget_id, RectExt, SemanticIcon, WidgetId, ZodeTheme};
 
 pub use section::EnvironmentSectionLayout;
 
@@ -183,6 +183,17 @@ impl EnvironmentPanel {
         if layout.card.size.x <= 0.0 || layout.card.size.y <= 0.0 {
             return;
         }
+        painter.fill_drop_shadow(
+            Rect::xywh(
+                layout.card.origin.x,
+                layout.card.origin.y + 4.0,
+                layout.card.size.x,
+                layout.card.size.y,
+            ),
+            PANEL_RADIUS,
+            24.0,
+            theme.tokens.foreground.with_alpha(0.12),
+        );
         painter.fill_round_rect(layout.card, PANEL_RADIUS, theme.tokens.card);
         painter.stroke_round_rect(layout.card, PANEL_RADIUS, theme.tokens.border, 1.0);
         painter.save();
@@ -290,14 +301,16 @@ fn paint_header(painter: &mut dyn Painter, layout: &EnvironmentPanelLayout, them
         theme.tokens.foreground,
         HorizontalAlign::Start,
     );
-    paint_single_line(
-        painter,
-        "×",
-        layout.close_button,
-        15.0,
-        450,
+    let close_icon_size = 14.0_f32.min(layout.close_button.size.x.min(layout.close_button.size.y));
+    painter.stroke_svg_path(
+        SemanticIcon::Close.path(),
+        jian_widgets::Point2D::new(
+            layout.close_button.origin.x + (layout.close_button.size.x - close_icon_size) / 2.0,
+            layout.close_button.origin.y + (layout.close_button.size.y - close_icon_size) / 2.0,
+        ),
+        close_icon_size,
         theme.tokens.muted_foreground,
-        HorizontalAlign::Center,
+        SemanticIcon::Close.stroke_width(),
     );
     painter.stroke_line(
         jian_widgets::Point2D::new(layout.card.origin.x, layout.header.max_y()),

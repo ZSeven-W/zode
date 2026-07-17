@@ -19,6 +19,7 @@ struct PaintCapture {
     clips: Vec<Rect>,
     rounded_fills: Vec<Rect>,
     rounded_strokes: Vec<Rect>,
+    shadows: Vec<(Rect, f32, f32)>,
 }
 
 impl Painter for PaintCapture {
@@ -53,6 +54,9 @@ impl Painter for PaintCapture {
         _color: Color,
         _width: f32,
     ) {
+    }
+    fn fill_drop_shadow(&mut self, rect: Rect, radius: f32, blur: f32, _color: Color) {
+        self.shadows.push((rect, radius, blur));
     }
     fn save(&mut self) {}
     fn restore(&mut self) {}
@@ -168,6 +172,23 @@ fn wide_layout_is_a_300px_content_hug_card_with_stable_real_commands() {
         EnvironmentPanel::command_for_widget(&state, ENVIRONMENT_REVIEW_ID),
         Some(AppCommand::OpenReview),
     );
+}
+
+#[test]
+fn floating_panel_paints_one_soft_shadow_behind_the_card() {
+    let state = zode_app_model::demo_state();
+    let surface = Rect::xywh(1_484.0, 62.0, 300.0, 1_002.0);
+    let layout = EnvironmentPanel::layout(surface, &state);
+
+    let painter = paint(&state, surface);
+
+    assert_eq!(painter.shadows.len(), 1);
+    let (shadow, radius, blur) = painter.shadows[0];
+    assert_eq!(shadow.origin.x, layout.card.origin.x);
+    assert_eq!(shadow.origin.y, layout.card.origin.y + 4.0);
+    assert_eq!(shadow.size, layout.card.size);
+    assert_eq!(radius, 16.0);
+    assert_eq!(blur, 24.0);
 }
 
 #[test]
