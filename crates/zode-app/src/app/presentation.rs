@@ -205,7 +205,12 @@ impl DesktopApp {
             && self.app_state.presentation.secondary_pane == Some(SecondaryPane::Terminal)
             && !opens_terminal)
             || (toggles_retained_terminal && self.app_state.presentation.secondary_sidebar_open);
-        let persist_preferences = matches!(command, AppCommand::SetSecondarySidebarWidth(_));
+        let persist_preferences = matches!(
+            command,
+            AppCommand::TogglePrimarySidebar
+                | AppCommand::SetPrimarySidebarWidth(_)
+                | AppCommand::SetSecondarySidebarWidth(_)
+        );
         let Some(outcome) = reduce_local_presentation_command(&mut self.app_state, command) else {
             return false;
         };

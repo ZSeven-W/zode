@@ -4,7 +4,8 @@ use jian_widgets::{Color, ImageDrawMode, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{demo_state, SettingsCategory, ShellRoute};
 use zode_app_ui::{
     Composer, Insets, InteractionNode, RectExt, ThemeMode, WidgetId, WorkspaceLayout,
-    WorkspaceShell, WorkspaceSnapshot, ZodeTheme, CONTENT_W, SIDEBAR_W, TRANSCRIPT_COMPOSER_GAP,
+    WorkspaceShell, WorkspaceSnapshot, ZodeTheme, CONTENT_W, PRIMARY_SIDEBAR_DEFAULT_W,
+    TRANSCRIPT_COMPOSER_GAP,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -280,7 +281,7 @@ fn wide_shell_keeps_the_frosted_rail_white_canvas_and_floating_composer_contract
     WorkspaceShell::paint(&mut painter, viewport, Insets::ZERO, &state, &theme);
     let composer = Composer::layout(geometry.composer, &state.composer);
 
-    assert_eq!(geometry.sidebar.width(), SIDEBAR_W);
+    assert_eq!(geometry.sidebar.width(), PRIMARY_SIDEBAR_DEFAULT_W);
     assert_eq!(geometry.composer.width(), CONTENT_W);
     assert_eq!(geometry.composer.max_y(), 1066.0);
     assert!(painter

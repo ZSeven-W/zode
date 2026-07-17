@@ -1,6 +1,6 @@
 use jian_widgets::Rect;
 use zode_app_model::{IntegrationsTab, LayoutClass, SecondaryPane, SettingsCategory, ShellRoute};
-use zode_app_ui::{Insets, PinnedSummaryMode, RectExt, WorkspaceLayout};
+use zode_app_ui::{Insets, PinnedSummaryMode, RectExt, WorkspaceLayout, PRIMARY_SIDEBAR_DEFAULT_W};
 
 const EPSILON: f32 = 0.01;
 
@@ -14,11 +14,11 @@ fn conversation_matches_the_wide_reference_contract() {
         None,
     );
 
-    assert_eq!(layout.sidebar.width(), 240.0);
+    assert_eq!(layout.sidebar.width(), PRIMARY_SIDEBAR_DEFAULT_W);
     assert_eq!(layout.top_bar.height(), 46.0);
     assert_eq!(layout.transcript.width(), 736.0);
     assert_eq!(layout.composer.width(), 736.0);
-    assert!((layout.transcript.min_x() - 652.0).abs() <= EPSILON);
+    assert!((layout.transcript.min_x() - 678.5).abs() <= EPSILON);
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn full_page_routes_use_their_reference_content_widths() {
     assert_eq!(settings.page_content.width(), 768.0);
     assert!((settings.page_content.min_x() - 636.0).abs() <= EPSILON);
     assert_eq!(integrations.page_content.width(), 736.0);
-    assert!((integrations.page_content.min_x() - 652.0).abs() <= EPSILON);
+    assert!((integrations.page_content.min_x() - 678.5).abs() <= EPSILON);
 }
 
 #[test]

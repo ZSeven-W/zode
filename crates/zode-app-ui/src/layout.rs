@@ -2,7 +2,11 @@ use jian_widgets::Rect;
 use zode_app_model::{LayoutClass, SecondaryPane, ShellRoute};
 
 pub const SIDEBAR_W: f32 = 240.0;
+pub const PRIMARY_SIDEBAR_DEFAULT_W: f32 = zode_app_model::DEFAULT_PRIMARY_SIDEBAR_WIDTH as f32;
 pub const COMPACT_SIDEBAR_W: f32 = 64.0;
+pub const PRIMARY_SIDEBAR_MIN_W: f32 = 220.0;
+pub const PRIMARY_SIDEBAR_MAX_VIEWPORT_RATIO: f32 = 0.30;
+pub const PRIMARY_SIDEBAR_MIN_MAIN_W: f32 = 560.0;
 pub const TOP_BAR_H: f32 = 46.0;
 pub const CONTENT_W: f32 = 736.0;
 /// Full painted height of the composer context rail. Its lower edge tucks
@@ -105,6 +109,7 @@ pub struct WorkspaceLayout {
     pub class: LayoutClass,
     pub viewport: Rect,
     pub sidebar: Rect,
+    pub primary_sidebar_divider: Rect,
     pub top_bar: Rect,
     pub primary_surface: Rect,
     pub transcript: Rect,
@@ -119,6 +124,13 @@ pub struct WorkspaceLayout {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WorkspaceLayoutOptions {
     pub context_panel_width: f32,
+    pub primary_sidebar: PrimarySidebarLayoutOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PrimarySidebarLayoutOptions {
+    pub open: bool,
+    pub width: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -126,6 +138,12 @@ pub struct SecondarySidebarLayoutOptions {
     pub open: bool,
     pub width: f32,
     pub pinned_summary_overlay: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SidebarLayoutOptions {
+    pub primary: PrimarySidebarLayoutOptions,
+    pub secondary: SecondarySidebarLayoutOptions,
 }
 
 impl Default for SecondarySidebarLayoutOptions {
@@ -138,10 +156,20 @@ impl Default for SecondarySidebarLayoutOptions {
     }
 }
 
+impl Default for PrimarySidebarLayoutOptions {
+    fn default() -> Self {
+        Self {
+            open: true,
+            width: PRIMARY_SIDEBAR_DEFAULT_W,
+        }
+    }
+}
+
 impl Default for WorkspaceLayoutOptions {
     fn default() -> Self {
         Self {
             context_panel_width: 0.0,
+            primary_sidebar: PrimarySidebarLayoutOptions::default(),
         }
     }
 }
@@ -155,7 +183,7 @@ impl WorkspaceLayout {
             ShellRoute::Conversation,
             SecondaryLayout::None,
             COMPOSER_H,
-            SecondarySidebarLayoutOptions::default(),
+            SidebarLayoutOptions::default(),
         )
     }
 
@@ -178,7 +206,10 @@ impl WorkspaceLayout {
             ShellRoute::Conversation,
             secondary,
             COMPOSER_H,
-            SecondarySidebarLayoutOptions::default(),
+            SidebarLayoutOptions {
+                primary: options.primary_sidebar,
+                ..SidebarLayoutOptions::default()
+            },
         )
     }
 
@@ -198,7 +229,10 @@ impl WorkspaceLayout {
             route,
             secondary,
             COMPOSER_H,
-            secondary_sidebar_for_pane(secondary_pane),
+            SidebarLayoutOptions {
+                secondary: secondary_sidebar_for_pane(secondary_pane),
+                ..SidebarLayoutOptions::default()
+            },
         )
     }
 
@@ -226,7 +260,10 @@ impl WorkspaceLayout {
             route,
             secondary,
             composer_height,
-            secondary_sidebar_for_pane(secondary_pane),
+            SidebarLayoutOptions {
+                secondary: secondary_sidebar_for_pane(secondary_pane),
+                ..SidebarLayoutOptions::default()
+            },
         )
     }
 
@@ -248,7 +285,10 @@ impl WorkspaceLayout {
             route,
             secondary,
             composer_height,
-            secondary_sidebar_for_pane(secondary_pane),
+            SidebarLayoutOptions {
+                secondary: secondary_sidebar_for_pane(secondary_pane),
+                ..SidebarLayoutOptions::default()
+            },
         )
     }
 
@@ -268,7 +308,30 @@ impl WorkspaceLayout {
             route,
             secondary_layout(secondary_pane),
             composer_height,
-            secondary_sidebar,
+            SidebarLayoutOptions {
+                secondary: secondary_sidebar,
+                ..SidebarLayoutOptions::default()
+            },
+        )
+    }
+
+    pub fn compute_presentation_with_sidebar_options(
+        width: f32,
+        height: f32,
+        insets: Insets,
+        route: ShellRoute,
+        secondary_pane: Option<SecondaryPane>,
+        composer_height: f32,
+        sidebars: SidebarLayoutOptions,
+    ) -> Self {
+        Self::compute_internal(
+            width,
+            height,
+            insets,
+            route,
+            secondary_layout(secondary_pane),
+            composer_height,
+            sidebars,
         )
     }
 
@@ -279,8 +342,12 @@ impl WorkspaceLayout {
         route: ShellRoute,
         secondary: SecondaryLayout,
         desired_composer_h: f32,
-        secondary_sidebar: SecondarySidebarLayoutOptions,
+        sidebars: SidebarLayoutOptions,
     ) -> Self {
+        let SidebarLayoutOptions {
+            primary: primary_sidebar,
+            secondary: secondary_sidebar,
+        } = sidebars;
         let width = finite_non_negative(width);
         let height = finite_non_negative(height);
         let insets = normalized_insets(width, height, insets);
@@ -289,14 +356,26 @@ impl WorkspaceLayout {
         let available_h = (height - insets.top - insets.bottom).max(0.0);
         let safe_right = width - insets.right;
         let safe_bottom = height - insets.bottom;
-        let desired_sidebar = match class {
-            LayoutClass::Wide => SIDEBAR_W,
-            LayoutClass::Compact => COMPACT_SIDEBAR_W,
-            LayoutClass::Phone => 0.0,
+        let fixed_settings_sidebar = matches!(route, ShellRoute::Settings(_));
+        let primary_sidebar_open = fixed_settings_sidebar || primary_sidebar.open;
+        let desired_sidebar = match (class, primary_sidebar_open) {
+            (LayoutClass::Wide, true) if fixed_settings_sidebar => SIDEBAR_W,
+            (LayoutClass::Wide, true) => {
+                constrained_primary_sidebar_width(available_w, primary_sidebar.width)
+            }
+            (LayoutClass::Compact, true) => COMPACT_SIDEBAR_W,
+            (LayoutClass::Wide | LayoutClass::Compact | LayoutClass::Phone, false)
+            | (LayoutClass::Phone, true) => 0.0,
         };
         let sidebar_w = desired_sidebar.min(available_w);
         let main_x = insets.left + sidebar_w;
         let main_w = (available_w - sidebar_w).max(0.0);
+        let primary_sidebar_divider =
+            if class == LayoutClass::Wide && sidebar_w > 0.0 && !fixed_settings_sidebar {
+                Rect::xywh(main_x, insets.top, SPLIT_DIVIDER_W, available_h)
+            } else {
+                empty_rect(main_x, insets.top)
+            };
 
         let secondary_visible = width >= SECONDARY_PANE_BREAKPOINT && main_w > 0.0;
         let mut primary_right = safe_right;
@@ -394,6 +473,7 @@ impl WorkspaceLayout {
             class,
             viewport: Rect::xywh(0.0, 0.0, width, height),
             sidebar: Rect::xywh(insets.left, insets.top, sidebar_w, available_h),
+            primary_sidebar_divider,
             top_bar,
             primary_surface,
             transcript: Rect::xywh(
@@ -412,6 +492,17 @@ impl WorkspaceLayout {
     }
 }
 
+pub fn constrained_primary_sidebar_width(available_width: f32, requested_width: f32) -> f32 {
+    let available_width = finite_non_negative(available_width);
+    let maximum = (available_width * PRIMARY_SIDEBAR_MAX_VIEWPORT_RATIO)
+        .min((available_width - PRIMARY_SIDEBAR_MIN_MAIN_W).max(0.0));
+    if maximum <= 0.0 {
+        return 0.0;
+    }
+    let minimum = PRIMARY_SIDEBAR_MIN_W.min(maximum);
+    finite_non_negative(requested_width).clamp(minimum, maximum)
+}
+
 pub fn constrained_secondary_sidebar_width(
     available_width: f32,
     main_width: f32,
@@ -422,7 +513,7 @@ pub fn constrained_secondary_sidebar_width(
     let maximum = SECONDARY_SIDEBAR_MAX_W
         .min(available_width * SECONDARY_SIDEBAR_MAX_VIEWPORT_RATIO)
         .min(main_width * 0.45)
-        .min((main_width - SECONDARY_SIDEBAR_MIN_PRIMARY_W).max(0.0));
+        .min((main_width - SECONDARY_SIDEBAR_MIN_PRIMARY_W - SPLIT_DIVIDER_W).max(0.0));
     if maximum <= 0.0 {
         return 0.0;
     }

@@ -518,6 +518,9 @@ impl DesktopApp {
     }
 
     pub(super) fn sync_window_focus(&mut self, focused: bool) {
+        if !focused {
+            self.cancel_primary_sidebar_resize();
+        }
         self.window_focused = focused;
         self.app_state.composer.focused = focused && self.focused_widget == Some(COMPOSER_ID);
         let terminal_focused = focused
@@ -533,6 +536,9 @@ impl DesktopApp {
 
     fn handle_pointer_event(&mut self, event: PointerEvent) {
         self.window_state.cursor_logical = event.position;
+        if self.handle_primary_sidebar_resize_pointer(event) {
+            return;
+        }
         if self.handle_secondary_sidebar_resize_pointer(event) {
             return;
         }

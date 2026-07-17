@@ -21,19 +21,19 @@ const SCALE: f32 = 1.0;
 
 const EMPTY_TASK_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
-    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 652.0, 70.0, 736.0, 830.0),
-    GeometryExpectation::new(LayoutRect::Composer, 652.0, 928.0, 736.0, 138.0),
+    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 293.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::TopBar, 293.0, 0.0, 1507.0, 46.0),
+    GeometryExpectation::new(LayoutRect::PrimarySurface, 293.0, 0.0, 1507.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 678.5, 70.0, 736.0, 830.0),
+    GeometryExpectation::new(LayoutRect::Composer, 678.5, 928.0, 736.0, 138.0),
 ];
 
 const FULL_PAGE_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
-    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::PageContent, 652.0, 70.0, 736.0, 1010.0),
+    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 293.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::TopBar, 293.0, 0.0, 1507.0, 46.0),
+    GeometryExpectation::new(LayoutRect::PrimarySurface, 293.0, 0.0, 1507.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::PageContent, 678.5, 70.0, 736.0, 1010.0),
 ];
 
 const SETTINGS_GEOMETRY: &[GeometryExpectation] = &[
@@ -46,42 +46,42 @@ const SETTINGS_GEOMETRY: &[GeometryExpectation] = &[
 
 const DOCUMENT_PREVIEW_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 929.0, 46.0),
-    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 929.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 336.5, 70.0, 736.0, 830.0),
-    GeometryExpectation::new(LayoutRect::Composer, 336.5, 928.0, 736.0, 138.0),
+    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 293.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::TopBar, 293.0, 0.0, 876.0, 46.0),
+    GeometryExpectation::new(LayoutRect::PrimarySurface, 293.0, 0.0, 876.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 363.0, 70.0, 736.0, 830.0),
+    GeometryExpectation::new(LayoutRect::Composer, 363.0, 928.0, 736.0, 138.0),
     GeometryExpectation::new(LayoutRect::Divider, 1169.0, 0.0, 1.0, 1080.0),
     GeometryExpectation::new(LayoutRect::ReviewPanel, 1170.0, 0.0, 630.0, 1080.0),
 ];
 
 const ARTIFACTS_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
-    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 652.0, 70.0, 736.0, 778.0),
-    GeometryExpectation::new(LayoutRect::Composer, 652.0, 876.0, 736.0, 190.0),
+    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 293.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::TopBar, 293.0, 0.0, 1507.0, 46.0),
+    GeometryExpectation::new(LayoutRect::PrimarySurface, 293.0, 0.0, 1507.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 678.5, 70.0, 736.0, 778.0),
+    GeometryExpectation::new(LayoutRect::Composer, 678.5, 876.0, 736.0, 190.0),
     GeometryExpectation::new(LayoutRect::ContextPanel, 1484.0, 62.0, 300.0, 1002.0),
 ];
 
 const ENVIRONMENT_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
-    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 652.0, 70.0, 736.0, 830.0),
-    GeometryExpectation::new(LayoutRect::Composer, 652.0, 928.0, 736.0, 138.0),
+    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 293.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::TopBar, 293.0, 0.0, 1507.0, 46.0),
+    GeometryExpectation::new(LayoutRect::PrimarySurface, 293.0, 0.0, 1507.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 678.5, 70.0, 736.0, 830.0),
+    GeometryExpectation::new(LayoutRect::Composer, 678.5, 928.0, 736.0, 138.0),
     GeometryExpectation::new(LayoutRect::ContextPanel, 1484.0, 62.0, 300.0, 1002.0),
 ];
 
 const QUEUE_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
-    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 494.0, 70.0, 736.0, 704.0),
-    GeometryExpectation::new(LayoutRect::Composer, 494.0, 802.0, 736.0, 264.0),
+    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 293.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::TopBar, 293.0, 0.0, 1507.0, 46.0),
+    GeometryExpectation::new(LayoutRect::PrimarySurface, 293.0, 0.0, 1507.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 520.5, 70.0, 736.0, 704.0),
+    GeometryExpectation::new(LayoutRect::Composer, 520.5, 802.0, 736.0, 264.0),
     GeometryExpectation::new(LayoutRect::ContextPanel, 1484.0, 62.0, 300.0, 1002.0),
 ];
 

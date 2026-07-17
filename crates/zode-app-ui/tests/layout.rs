@@ -1,12 +1,14 @@
 use zode_app_model::LayoutClass;
-use zode_app_ui::{Insets, RectExt, WorkspaceLayout, CONTENT_W, SIDEBAR_W, TOP_BAR_H};
+use zode_app_ui::{
+    Insets, RectExt, WorkspaceLayout, CONTENT_W, PRIMARY_SIDEBAR_DEFAULT_W, TOP_BAR_H,
+};
 
 #[test]
 fn reference_layout_matches_codex_rhythm() {
     let geometry = WorkspaceLayout::compute(1221.0, 992.0, Insets::ZERO);
 
     assert_eq!(geometry.class, LayoutClass::Wide);
-    assert_eq!(geometry.sidebar.width(), SIDEBAR_W);
+    assert_eq!(geometry.sidebar.width(), PRIMARY_SIDEBAR_DEFAULT_W);
     assert_eq!(geometry.top_bar.height(), TOP_BAR_H);
     assert!((geometry.transcript.width() - CONTENT_W).abs() <= 2.0);
     assert!((geometry.composer.max_y() - 978.0).abs() <= 2.0);

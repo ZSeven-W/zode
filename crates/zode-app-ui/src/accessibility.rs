@@ -152,17 +152,23 @@ impl WorkspaceSnapshot {
         } else {
             None
         };
-        let layout = WorkspaceLayout::compute_presentation_with_secondary_sidebar(
+        let layout = WorkspaceLayout::compute_presentation_with_sidebar_options(
             width,
             height,
             insets,
             route,
             layout_secondary,
             composer_height,
-            SecondarySidebarLayoutOptions {
-                open: state.presentation.secondary_sidebar_open,
-                width: f32::from(state.ui_preferences.secondary_sidebar_width),
-                pinned_summary_overlay: explicit_pinned_summary,
+            crate::SidebarLayoutOptions {
+                primary: crate::PrimarySidebarLayoutOptions {
+                    open: state.shell.sidebar_open,
+                    width: f32::from(state.ui_preferences.primary_sidebar_width),
+                },
+                secondary: SecondarySidebarLayoutOptions {
+                    open: state.presentation.secondary_sidebar_open,
+                    width: f32::from(state.ui_preferences.secondary_sidebar_width),
+                    pinned_summary_overlay: explicit_pinned_summary,
+                },
             },
         );
         let mut nodes = Vec::new();

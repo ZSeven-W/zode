@@ -4,7 +4,7 @@ use zode_app_model::{
 };
 use zode_app_ui::{
     Composer, Insets, ProjectSidebar, RectExt, SidebarAction, TerminalGrid, WorkspaceLayout,
-    WorkspaceShell, ZodeTheme,
+    WorkspaceShell, ZodeTheme, PRIMARY_SIDEBAR_DEFAULT_W,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,7 +77,7 @@ fn workspace_shell_paints_the_shared_geometry_boundaries() {
     assert!(painter
         .operations
         .contains(&PaintOp::Fill(geometry.sidebar, theme.sidebar)));
-    assert_eq!(geometry.sidebar.size.x, 240.0);
+    assert_eq!(geometry.sidebar.size.x, PRIMARY_SIDEBAR_DEFAULT_W);
     assert!(painter
         .operations
         .contains(&PaintOp::Fill(geometry.top_bar, theme.tokens.background)));

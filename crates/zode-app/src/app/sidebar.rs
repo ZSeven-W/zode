@@ -41,6 +41,12 @@ impl DesktopApp {
             });
             return true;
         }
+        if is_toggle_primary_sidebar_shortcut(event)
+            && !matches!(self.app_state.presentation.route, ShellRoute::Settings(_))
+        {
+            self.enqueue_command(AppCommand::TogglePrimarySidebar);
+            return true;
+        }
         if matches!(self.app_state.presentation.route, ShellRoute::Settings(_)) {
             return false;
         }
@@ -158,6 +164,12 @@ fn is_new_task_shortcut(event: &KeyEvent) -> bool {
         && matches!(&event.key, Key::Character(value) if value.eq_ignore_ascii_case("n"))
 }
 
+fn is_toggle_primary_sidebar_shortcut(event: &KeyEvent) -> bool {
+    event.pressed
+        && event.modifiers.primary()
+        && matches!(&event.key, Key::Character(value) if value.eq_ignore_ascii_case("b"))
+}
+
 #[cfg(test)]
 mod tests {
     use jian_widgets::{Point2D, Rect};
@@ -168,8 +180,8 @@ mod tests {
     use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
     use super::{
-        is_new_task_shortcut, shortcut_number, sidebar_accepts_scroll,
-        sidebar_hover_environment_query,
+        is_new_task_shortcut, is_toggle_primary_sidebar_shortcut, shortcut_number,
+        sidebar_accepts_scroll, sidebar_hover_environment_query,
     };
     use crate::presentation_bridge::PresentationQuery;
 
@@ -221,6 +233,36 @@ mod tests {
         assert!(is_new_task_shortcut(&event("N", Modifiers::SUPER, true)));
         assert!(!is_new_task_shortcut(&event("n", Modifiers::NONE, true)));
         assert!(!is_new_task_shortcut(&event("n", Modifiers::SUPER, false)));
+    }
+
+    #[test]
+    fn command_b_is_the_primary_sidebar_toggle_shortcut() {
+        let event = |value: &str, modifiers: Modifiers, pressed: bool| KeyEvent {
+            key: Key::Character(value.into()),
+            modifiers,
+            pressed,
+        };
+
+        assert!(is_toggle_primary_sidebar_shortcut(&event(
+            "b",
+            Modifiers::SUPER,
+            true
+        )));
+        assert!(is_toggle_primary_sidebar_shortcut(&event(
+            "B",
+            Modifiers::SUPER,
+            true
+        )));
+        assert!(!is_toggle_primary_sidebar_shortcut(&event(
+            "b",
+            Modifiers::NONE,
+            true
+        )));
+        assert!(!is_toggle_primary_sidebar_shortcut(&event(
+            "b",
+            Modifiers::SUPER,
+            false
+        )));
     }
 
     #[test]

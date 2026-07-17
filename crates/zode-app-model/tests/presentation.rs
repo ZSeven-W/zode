@@ -733,6 +733,43 @@ fn secondary_sidebar_width_is_clamped_to_product_limits() {
 }
 
 #[test]
+fn primary_sidebar_visibility_and_width_are_reduced_independently() {
+    let mut state = demo_state();
+    assert!(state.shell.sidebar_open);
+    assert_eq!(state.ui_preferences.primary_sidebar_width, 293);
+
+    assert_eq!(
+        reduce_presentation_command(&mut state, AppCommand::SetPrimarySidebarWidth(293)),
+        PresentationCommandOutcome::Applied
+    );
+    assert_eq!(state.ui_preferences.primary_sidebar_width, 293);
+    reduce_presentation_command(&mut state, AppCommand::SetPrimarySidebarWidth(1));
+    assert_eq!(state.ui_preferences.primary_sidebar_width, 220);
+    reduce_presentation_command(&mut state, AppCommand::SetPrimarySidebarWidth(u16::MAX));
+    assert_eq!(state.ui_preferences.primary_sidebar_width, 720);
+
+    assert_eq!(
+        reduce_presentation_command(&mut state, AppCommand::TogglePrimarySidebar),
+        PresentationCommandOutcome::Applied
+    );
+    assert!(!state.shell.sidebar_open);
+    assert!(!state.ui_preferences.primary_sidebar_open);
+    assert!(state.presentation.secondary_sidebar_open);
+}
+
+#[test]
+fn settings_route_keeps_its_navigation_sidebar_visible() {
+    let mut state = demo_state();
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::General);
+
+    assert_eq!(
+        reduce_presentation_command(&mut state, AppCommand::TogglePrimarySidebar),
+        PresentationCommandOutcome::Ignored
+    );
+    assert!(state.shell.sidebar_open);
+}
+
+#[test]
 fn missing_desktop_contracts_have_distinct_typed_panes() {
     assert_ne!(SecondaryPane::Browser, SecondaryPane::Files);
     assert_ne!(SecondaryPane::Files, SecondaryPane::SideTask);

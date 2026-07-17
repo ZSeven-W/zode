@@ -181,6 +181,7 @@ fn page(state: &ZodeAppState, category: SettingsCategory) -> DetailPage {
                 "应用",
                 vec![
                     fact("打开终端", primary_shortcut("`")),
+                    fact("切换边栏", primary_shortcut("B")),
                     fact("切换侧栏任务", primary_shortcut("1…5")),
                     fact("切换位置", "Tab / Shift+Tab"),
                     fact("返回应用", "Esc"),

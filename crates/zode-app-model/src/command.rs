@@ -213,6 +213,8 @@ pub enum AppCommand {
         session: SessionLocator,
         relative_path: String,
     },
+    TogglePrimarySidebar,
+    SetPrimarySidebarWidth(u16),
     ToggleSidebar,
     SetSecondarySidebarWidth(u16),
     Navigate(ShellRoute),

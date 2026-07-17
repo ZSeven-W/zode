@@ -59,6 +59,8 @@ mod navigation_state;
 mod open_with;
 mod persistence;
 mod presentation;
+#[path = "app/primary-sidebar-resize.rs"]
+mod primary_sidebar_resize;
 #[path = "app/project-actions.rs"]
 mod project_actions;
 mod project_picker;
@@ -152,6 +154,7 @@ impl DesktopApp {
         if let Some(persisted) = persisted.as_ref() {
             app_state.ui_preferences = persisted.ui_preferences.clone();
             app_state.sidebar.tasks_expanded = app_state.ui_preferences.sidebar_tasks_expanded;
+            app_state.shell.sidebar_open = app_state.ui_preferences.primary_sidebar_open;
             navigation_state::hydrate_session_navigation(&mut app_state, persisted);
             match persisted.task_context.as_ref() {
                 Some(TaskContext::Project { workspace_uri })
@@ -619,6 +622,7 @@ impl ApplicationHandler<AppWake> for DesktopApp {
                 ));
             }
             WindowEvent::CursorLeft { .. } => {
+                self.cancel_primary_sidebar_resize();
                 self.hovered_widget = None;
                 self.request_redraw();
             }

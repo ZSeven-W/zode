@@ -228,6 +228,10 @@ pub struct UiPreferences {
     pub task_suggestions: bool,
     #[serde(default = "default_enabled")]
     pub sidebar_tasks_expanded: bool,
+    #[serde(default = "default_enabled")]
+    pub primary_sidebar_open: bool,
+    #[serde(default = "default_primary_sidebar_width")]
+    pub primary_sidebar_width: u16,
     #[serde(default = "default_secondary_sidebar_width")]
     pub secondary_sidebar_width: u16,
 }
@@ -240,6 +244,8 @@ impl Default for UiPreferences {
             high_contrast: false,
             task_suggestions: true,
             sidebar_tasks_expanded: true,
+            primary_sidebar_open: true,
+            primary_sidebar_width: DEFAULT_PRIMARY_SIDEBAR_WIDTH,
             secondary_sidebar_width: DEFAULT_SECONDARY_SIDEBAR_WIDTH,
         }
     }
@@ -252,6 +258,14 @@ const fn default_enabled() -> bool {
 pub const DEFAULT_SECONDARY_SIDEBAR_WIDTH: u16 = 700;
 pub const MIN_SECONDARY_SIDEBAR_WIDTH: u16 = 300;
 pub const MAX_SECONDARY_SIDEBAR_WIDTH: u16 = 700;
+pub const DEFAULT_PRIMARY_SIDEBAR_WIDTH: u16 = 293;
+pub const MIN_PRIMARY_SIDEBAR_WIDTH: u16 = 220;
+/// A persistence safety bound. Layout applies the tighter viewport-relative cap.
+pub const MAX_PRIMARY_SIDEBAR_WIDTH: u16 = 720;
+
+const fn default_primary_sidebar_width() -> u16 {
+    DEFAULT_PRIMARY_SIDEBAR_WIDTH
+}
 
 const fn default_secondary_sidebar_width() -> u16 {
     DEFAULT_SECONDARY_SIDEBAR_WIDTH

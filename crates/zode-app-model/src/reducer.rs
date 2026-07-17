@@ -74,6 +74,23 @@ pub fn reduce_presentation_command(
             state.presentation.integration_scope = scope;
             return PresentationCommandOutcome::Applied;
         }
+        AppCommand::TogglePrimarySidebar => {
+            if matches!(state.presentation.route, crate::ShellRoute::Settings(_)) {
+                return PresentationCommandOutcome::Ignored;
+            }
+            state.shell.sidebar_open = !state.shell.sidebar_open;
+            state.ui_preferences.primary_sidebar_open = state.shell.sidebar_open;
+            state.close_session_action_surfaces();
+            state.composer.queue_menu = None;
+            return PresentationCommandOutcome::Applied;
+        }
+        AppCommand::SetPrimarySidebarWidth(width) => {
+            state.ui_preferences.primary_sidebar_width = width.clamp(
+                crate::MIN_PRIMARY_SIDEBAR_WIDTH,
+                crate::MAX_PRIMARY_SIDEBAR_WIDTH,
+            );
+            return PresentationCommandOutcome::Applied;
+        }
         AppCommand::ToggleSidebar => {
             if state.presentation.route != crate::ShellRoute::Conversation {
                 return PresentationCommandOutcome::Ignored;
