@@ -1,4 +1,4 @@
-use std::{num::NonZeroU32, sync::Arc};
+use std::{collections::VecDeque, num::NonZeroU32, sync::Arc};
 
 use jian_widgets::Rect;
 use winit::{
@@ -6,16 +6,17 @@ use winit::{
     dpi::LogicalSize,
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
+    keyboard::ModifiersState,
     window::{Window, WindowId},
 };
-use zode_app_model::{SystemTheme, ZodeAppState};
-use zode_app_ui::{Insets, WorkspaceLayout, WorkspaceShell, ZodeTheme};
+use zode_app_model::{AppCommand, SystemTheme, ZodeAppState};
+use zode_app_ui::{ComposerController, Insets, WorkspaceLayout, WorkspaceShell, ZodeTheme};
 
 #[cfg(not(target_os = "macos"))]
 use crate::event_map::resize_direction;
 use crate::{
     event_bridge::AgentEventBridge,
-    event_map::is_drag_region,
+    event_map::{composer_outcome_command, is_drag_region, map_ime, map_key},
     render::{FramePainter, NativeBackend, RasterSurface},
     window_state::{AppWake, WindowState},
 };
@@ -39,10 +40,20 @@ pub struct DesktopApp {
     window_state: WindowState,
     proxy: EventLoopProxy<AppWake>,
     agent_events: Option<AgentEventBridge>,
+    composer: ComposerController,
+    modifiers: ModifiersState,
+    pending_commands: VecDeque<AppCommand>,
 }
 
 impl DesktopApp {
     pub fn new(app_state: ZodeAppState, proxy: EventLoopProxy<AppWake>) -> Self {
+        let mut composer = ComposerController::new(app_state.composer.draft.clone());
+        let busy = app_state
+            .current_session
+            .as_ref()
+            .and_then(|session| app_state.transcripts.get(session))
+            .is_some_and(|transcript| transcript.busy);
+        composer.set_busy(busy);
         Self {
             app_state,
             window: None,
@@ -52,7 +63,14 @@ impl DesktopApp {
             window_state: WindowState::new(1221, 992, 1.0),
             proxy,
             agent_events: None,
+            composer,
+            modifiers: ModifiersState::empty(),
+            pending_commands: VecDeque::new(),
         }
+    }
+
+    pub fn take_pending_commands(&mut self) -> Vec<AppCommand> {
+        self.pending_commands.drain(..).collect()
     }
 
     /// Connect a live endpoint stream to the winit wake path. Call while the
@@ -185,6 +203,27 @@ impl DesktopApp {
             let _ = window.drag_window();
         }
     }
+
+    fn sync_composer_busy(&mut self) {
+        let busy = self
+            .app_state
+            .current_session
+            .as_ref()
+            .and_then(|session| self.app_state.transcripts.get(session))
+            .is_some_and(|transcript| transcript.busy);
+        self.composer.set_busy(busy);
+    }
+
+    fn apply_composer_outcome(&mut self, outcome: zode_app_ui::ComposerOutcome) {
+        self.app_state.composer.draft = self.composer.text().to_owned();
+        if let Some(command) = composer_outcome_command(outcome) {
+            self.pending_commands.push_back(command);
+        }
+        self.window_state.dirty = true;
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
 }
 
 impl ApplicationHandler<AppWake> for DesktopApp {
@@ -201,6 +240,7 @@ impl ApplicationHandler<AppWake> for DesktopApp {
                 if let Some(events) = self.agent_events.as_mut() {
                     events.drain_into(&mut self.app_state);
                 }
+                self.sync_composer_busy();
                 self.window_state.dirty = true;
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
@@ -247,6 +287,33 @@ impl ApplicationHandler<AppWake> for DesktopApp {
                     _ => SystemTheme::Light,
                 };
                 let _ = self.proxy.send_event(AppWake::Redraw);
+            }
+            WindowEvent::Focused(focused) => {
+                self.app_state.composer.focused = focused;
+                self.window_state.dirty = true;
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let Some(event) = map_key(
+                    &event.logical_key,
+                    self.modifiers,
+                    event.state == ElementState::Pressed,
+                ) {
+                    if event.pressed {
+                        let outcome = self.composer.key(event.key, event.modifiers);
+                        self.apply_composer_outcome(outcome);
+                    }
+                }
+            }
+            WindowEvent::Ime(event) => {
+                let event = map_ime(&event);
+                let outcome = self.composer.ime(event);
+                self.apply_composer_outcome(outcome);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.window_state

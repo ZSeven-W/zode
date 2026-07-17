@@ -1,9 +1,85 @@
 use jian_widgets::Point2D;
-use winit::window::ResizeDirection;
-use zode_app_ui::WorkspaceLayout;
+use winit::{
+    event::Ime,
+    keyboard::{Key as WinitKey, ModifiersState, NamedKey},
+    window::ResizeDirection,
+};
+use zode_app_model::AppCommand;
+use zode_app_ui::{
+    ComposerOutcome, ImeEvent, Key, KeyEvent, Modifiers, SandboxSelection, WorkspaceLayout,
+};
 
 const RESIZE_RING: f32 = 6.0;
 const WINDOW_CONTROLS_WIDTH: f32 = 160.0;
+
+pub fn map_key(
+    logical_key: &WinitKey,
+    modifiers: ModifiersState,
+    pressed: bool,
+) -> Option<KeyEvent> {
+    let key = match logical_key {
+        WinitKey::Named(NamedKey::Enter) => Key::Enter,
+        WinitKey::Named(NamedKey::Backspace) => Key::Backspace,
+        WinitKey::Named(NamedKey::Delete) => Key::Delete,
+        WinitKey::Named(NamedKey::ArrowLeft) => Key::ArrowLeft,
+        WinitKey::Named(NamedKey::ArrowRight) => Key::ArrowRight,
+        WinitKey::Named(NamedKey::Home) => Key::Home,
+        WinitKey::Named(NamedKey::End) => Key::End,
+        WinitKey::Named(NamedKey::Tab) => Key::Tab,
+        WinitKey::Named(NamedKey::Escape) => Key::Escape,
+        WinitKey::Named(NamedKey::Space) => Key::Character(" ".into()),
+        WinitKey::Character(character) => Key::Character(character.to_string()),
+        _ => return None,
+    };
+    Some(KeyEvent {
+        key,
+        modifiers: map_modifiers(modifiers),
+        pressed,
+    })
+}
+
+pub fn map_modifiers(modifiers: ModifiersState) -> Modifiers {
+    let mut mapped = Modifiers::NONE;
+    if modifiers.shift_key() {
+        mapped = mapped | Modifiers::SHIFT;
+    }
+    if modifiers.control_key() {
+        mapped = mapped | Modifiers::CONTROL;
+    }
+    if modifiers.alt_key() {
+        mapped = mapped | Modifiers::ALT;
+    }
+    if modifiers.super_key() {
+        mapped = mapped | Modifiers::SUPER;
+    }
+    mapped
+}
+
+pub fn map_ime(event: &Ime) -> ImeEvent {
+    match event {
+        Ime::Enabled => ImeEvent::Start,
+        Ime::Preedit(text, cursor) => ImeEvent::Update {
+            text: text.clone(),
+            cursor: cursor.map(|(_, end)| end),
+        },
+        Ime::Commit(text) => ImeEvent::Commit(text.clone()),
+        Ime::Disabled => ImeEvent::End,
+    }
+}
+
+pub fn composer_outcome_command(outcome: ComposerOutcome) -> Option<AppCommand> {
+    match outcome {
+        ComposerOutcome::Ignored | ComposerOutcome::Edited => None,
+        ComposerOutcome::Send(submission) => Some(AppCommand::Submit(submission.content)),
+        ComposerOutcome::Steer(submission) => Some(AppCommand::Steer(submission.content)),
+        ComposerOutcome::Stop => Some(AppCommand::Interrupt),
+        ComposerOutcome::SetModel(model) => Some(AppCommand::SetModel(model)),
+        ComposerOutcome::SetEffort(effort) => Some(AppCommand::SetEffort(effort)),
+        ComposerOutcome::SetSandbox(SandboxSelection { mode, network }) => {
+            Some(AppCommand::SetSandbox { mode, network })
+        }
+    }
+}
 
 pub fn resize_direction(x: f32, y: f32, width: f32, height: f32) -> Option<ResizeDirection> {
     if ![x, y, width, height].iter().all(|value| value.is_finite())
