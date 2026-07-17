@@ -76,6 +76,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         usage: "/desktop [status|attach <port>]",
         action: CommandAction::Local,
     },
+    SlashCommand {
+        name: "team",
+        description: "Show the agent team roster (e.g. /team, /team board, /team dismiss <name>)",
+        usage: "/team [status|board|dismiss <name>]",
+        action: CommandAction::Engine,
+    },
     // Registered now, fully wired in later phases.
     SlashCommand {
         name: "theme",

@@ -23,6 +23,7 @@ sha2 = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
+hmac = { workspace = true }
 # Order-preserving map so the `providers` config keeps the user's file order
 # (the first entry is the default when no provider is explicitly selected).
 indexmap = { version = "2", features = ["serde"] }

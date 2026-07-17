@@ -126,6 +126,21 @@ pub const TOOL_GROUPS: &[(&str, &str, &[&str])] = &[
             "browser_upload",
         ],
     ),
+    (
+        "team",
+        "Hire and coordinate a team of agents (persistent teammates + board)",
+        &[
+            "team_hire",
+            "team_send",
+            "team_dismiss",
+            "team_list",
+            "team_board_read",
+            "team_board_update",
+            "team_board_append",
+            "team_claim",
+            "team_release",
+        ],
+    ),
 ];
 
 /// The tool group a tool belongs to, if any. `None` → always-on (Skill,

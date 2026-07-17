@@ -18,7 +18,7 @@ use agent::hook::HookRunner;
 use agent::permission::PermissionManager;
 use agent::provider::Provider;
 use agent::tool::ToolRegistry;
-use agent_tools_code::{TaskAgentConfig, TaskAgentFactory};
+use agent_tools_code::{TaskAgentConfig, TaskAgentFactory, ToolSearchTool};
 use async_trait::async_trait;
 
 /// Leave Task-spawned child loops unbounded unless the user explicitly opts
@@ -75,6 +75,47 @@ impl std::fmt::Debug for ModelRuntimeState {
     }
 }
 
+/// The team tool names an internal teammate may NOT hold (orchestration —
+/// hiring, sending, dismissing, listing). Collaboration tools
+/// (team_board_*, team_claim/release) are added back per-teammate,
+/// identity-bound. See [`shared_child_tools`].
+pub const TEAM_ORCHESTRATION_TOOLS: &[&str] =
+    &["team_hire", "team_send", "team_dismiss", "team_list"];
+
+/// The full exclusion set for a PLAIN Task sub-agent (no team role): Task
+/// plus every team_* tool.
+pub const TEAM_TOOL_NAMES_WITH_TASK: [&str; 10] = [
+    "Task",
+    "team_hire",
+    "team_send",
+    "team_dismiss",
+    "team_list",
+    "team_board_read",
+    "team_board_update",
+    "team_board_append",
+    "team_claim",
+    "team_release",
+];
+
+/// Build a child tool registry from the parent's final gated registry,
+/// excluding `exclude` by name and rebuilding ToolSearch over the FILTERED
+/// set (so an excluded tool can't leak back in through search).
+pub fn shared_child_tools(parent_tools: &ParentToolsCell, exclude: &[&str]) -> Arc<ToolRegistry> {
+    let mut reg = ToolRegistry::new();
+    if let Some(parent) = parent_tools.get() {
+        for tool in parent.list() {
+            let name = tool.name();
+            if name == "ToolSearch" || exclude.contains(&name) {
+                continue;
+            }
+            reg.register(tool);
+        }
+    }
+    let candidates = Arc::new(reg.clone());
+    reg.register(Arc::new(ToolSearchTool::new(candidates)));
+    Arc::new(reg)
+}
+
 #[derive(Debug)]
 pub struct ZodeTaskFactory {
     runtime: ModelRuntimeState,
@@ -123,15 +164,9 @@ impl ZodeTaskFactory {
     /// Child tool registry: the parent's gated+sandboxed tools minus "Task"
     /// (recursion guard). Empty until the engine has populated the cell.
     fn child_tools(&self) -> Arc<ToolRegistry> {
-        let mut reg = ToolRegistry::new();
-        if let Some(parent) = self.parent_tools.get() {
-            for tool in parent.list() {
-                if tool.name() != "Task" {
-                    reg.register(tool);
-                }
-            }
-        }
-        Arc::new(reg)
+        // A plain Task sub-agent gets none of the orchestration tools —
+        // Task (recursion) or any team_* (recursive hire / cross-team leak).
+        shared_child_tools(&self.parent_tools, &TEAM_TOOL_NAMES_WITH_TASK)
     }
 
     /// The sub-agent types the Task tool can spawn: (name, one-line summary).

@@ -120,6 +120,7 @@ fn tool_invalidates_verification(tool: &str) -> bool {
             | "GitStash"
             | "GitWorktree"
             | "Task"
+            | "team_send"
             | "define_agent"
             | "define_workflow"
             | "run_workflow"

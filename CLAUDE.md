@@ -537,3 +537,56 @@ Opt-in real-CLI integration test:
 ```bash
 ZODE_EXTAGENT_IT=1 cargo test -p zode-core --test extagent_it -- --ignored
 ```
+
+## Agent team (Phase B)
+
+Zode can build a persistent, collaborating team of agents on top of the
+external-agent layer. Design: `docs/superpowers/specs/2026-07-16-agent-team-design.md`.
+
+- **Teammates** are persistent sessions: `Internal` (an in-process QueryLoop
+  over a shared MessageStore, with its own provider/model) or `External` (a
+  resumable agent CLI). The leader is the root model.
+- **Tools** (group `team`, `tools:team` to disable): `team_hire`
+  (`{agent,name,role,provider?,model?,tools?}` — external hires need a
+  one-time TeamMemberSession trust approval; internal hires don't),
+  `team_send` (`{to,message,claims?}` — busy-check → atomic claim → dispatch,
+  returns the reply plus `@ask` relays), `team_dismiss`, `team_list`, and the
+  board/claim tools (`team_board_read/update/append`, `team_claim/release`).
+- **Board** is host-managed under `<cwd>/.zode/team/` (the `.zode` sandbox
+  carveout stays read-only for tools): `board.json` written atomically under a
+  stable `board.lock`, section updates CAS'd on a revision counter. Claims are
+  subtree-aware TTL leases, holder-identity injected by the host (never from
+  tool input), confined to the canonical cwd. A claim prevents double-claiming,
+  not out-of-bounds writes (detected after the fact via changed_files).
+- **Lifecycle**: one `Arc<TeamManager>` per tab, carried across engine
+  rebuilds in `CarryState`; `TeamManager::shutdown()` is explicit (Drop can't
+  await). The exclusive `team.lock` fs4 OS lock is the sole ownership
+  authority (dead process auto-releases; no heartbeat takeover); acquired
+  lazily on the first mutating op. team.json carries an HMAC — a mismatch
+  quarantines the file rather than auto-recovering.
+- **Collaboration** is leader-mediated (turn-end, not live): teammates end a
+  reply line with `@ask <name>: <question>`; the leader relays it. Plays
+  (pipeline / debate / swarm) are prompt guidance injected only when the team
+  group is active.
+- **Internal teammates** run an in-process QueryLoop that shares the leader's
+  permission gate / hooks / file cache (same sandbox + edit history), inherit
+  a role-filtered tool set (reviewer/researcher default read-only; a hire
+  `tools` list may only narrow), pull model/system from a matching AgentDef,
+  and report their token usage per teammate. Their history persists per
+  teammate under `~/.zode/agent/sessions/team/`.
+- **Persistence & recovery**: hire/dismiss/send write `team.json` (HMAC-signed,
+  §4.2); on the first mutating op after a restart the roster is recovered
+  (external teammates keep their resume session id but re-approve trust on the
+  next send; internal teammates rebuild their provider and reload history). An
+  HMAC mismatch quarantines the file. Claims are TTL-renewed while a send is
+  in flight so long tasks keep their reservation.
+- **`/team`** — bare `/team` opens a read-only roster + board panel (↑↓ scroll,
+  Esc close); `/team status` / `/team board` print text; `/team dismiss <name>`
+  removes a teammate. Plan/read-only mode keeps only `team_list` /
+  `team_board_read`.
+
+Opt-in real-CLI team test:
+
+```bash
+ZODE_EXTAGENT_IT=1 cargo test -p zode-core --test team_it -- --ignored
+```

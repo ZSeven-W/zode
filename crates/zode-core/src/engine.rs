@@ -370,6 +370,8 @@ pub struct CarryState {
     /// External-agent trust grants (fingerprints). Session-scoped by design:
     /// carried across engine rebuilds, never persisted to disk.
     pub external_grants: Option<Arc<crate::external_agents::GrantStore>>,
+    /// Per-tab agent team. Carried so hired teammates survive a hot rebuild.
+    pub team: Option<Arc<crate::team::TeamManager>>,
     pub file_cache: Option<Arc<FileStateCache>>,
     pub bg_shells_meta: Option<BackgroundShellTracker>,
     pub recent_files: Option<crate::compact_memory::RecentFiles>,
@@ -391,6 +393,7 @@ impl ZodeEngine {
             compact_state: Some(self.compact_state.clone()),
             subagents: Some(self.subagents.clone()),
             external_grants: Some(self.external_grants.clone()),
+            team: self.team.clone(),
             file_cache: Some(self.file_cache.clone()),
             bg_shells_meta: Some(self.bg_shells_meta.clone()),
             recent_files: Some(self.recent_files.clone()),
@@ -618,6 +621,8 @@ pub struct ZodeEngine {
     pub subagents: crate::subagents::SubAgentRegistry,
     /// External-agent trust grants (see [`CarryState::external_grants`]).
     pub external_grants: Arc<crate::external_agents::GrantStore>,
+    /// Per-tab agent team manager (None when the team tool group is disabled).
+    pub team: Option<Arc<crate::team::TeamManager>>,
     /// File-edit undo/redo history, fed by an EditHistoryHook on `hooks`.
     pub history: Arc<tokio::sync::Mutex<EditHistory>>,
     /// Host-side metadata for background shells (Phase 07 task panel).
@@ -1243,6 +1248,15 @@ impl ZodeEngine {
         // User-defined sub-agents (~/.zode/agents etc.), available alongside the
         // built-in types for the Task tool and listed by `/agents`.
         let agent_defs = crate::agents::load_agent_defs(&cwd);
+        // Snapshot for the team layer's AgentDef lookup (name → model?, system),
+        // taken before `agent_defs` is moved into the Task factory.
+        let team_agent_def_map: Arc<std::collections::HashMap<String, (Option<String>, String)>> =
+            Arc::new(
+                agent_defs
+                    .iter()
+                    .map(|d| (d.name.clone(), (d.model.clone(), d.system.clone())))
+                    .collect(),
+            );
         let task_factory = Arc::new(ZodeTaskFactory::new(
             model_runtime.clone(),
             permissions.clone(),
@@ -1307,6 +1321,93 @@ impl ZodeEngine {
             )));
         }
         let task_is_self_gated = !external_registry.is_empty();
+
+        // Agent team (Phase B). Per-tab TeamManager, carried across rebuilds.
+        // Read-only modes keep only team_list / team_board_read; the mutating
+        // team tools are self-gated (hire runs its own trust approval; the
+        // rest carry no per-call prompt) so they skip the outer wrapper.
+        let team_enabled = plugins.tool_enabled("team_hire");
+        let team_manager: Option<Arc<crate::team::TeamManager>> = if team_enabled {
+            Some(
+                carry
+                    .team
+                    .clone()
+                    .unwrap_or_else(|| crate::team::TeamManager::new(cwd.clone())),
+            )
+        } else {
+            None
+        };
+        if let Some(mgr) = &team_manager {
+            let ext_reg = external_registry.clone();
+            let ext_grants = external_grants.clone();
+            let obs = subagents.observer();
+            let fc = file_cache.clone();
+            let cfg_arc = Arc::new(cfg.clone());
+            let parent_provider = provider_cfg.clone();
+            let task_tools_for_team = task_tools.clone();
+            let mgr_for_deps = mgr.clone();
+            let parent_hooks = hooks.clone();
+            let parent_permissions = permissions.clone();
+            let agent_def_map = team_agent_def_map.clone();
+            let timeout = cfg.external_agents.timeout();
+            let deps_fn: Arc<dyn Fn() -> crate::team::TeamDeps + Send + Sync> =
+                Arc::new(move || {
+                    let ttc = task_tools_for_team.clone();
+                    let mgr = mgr_for_deps.clone();
+                    let adm = agent_def_map.clone();
+                    crate::team::TeamDeps {
+                        config: cfg_arc.clone(),
+                        parent_provider: parent_provider.clone(),
+                        external_registry: ext_reg.clone(),
+                        grants: ext_grants.clone(),
+                        observer: obs.clone(),
+                        file_cache: fc.clone(),
+                        runtime_spec: crate::team::internal::AgentRuntimeSpec::default(),
+                        build_internal_tools: Arc::new(
+                            move |name: &str, role: &str, allowed: Option<&[String]>| {
+                                // Parent tools minus orchestration, plus this
+                                // teammate's identity-bound collaboration tools,
+                                // then filtered by role / narrowing list.
+                                let mut reg = crate::task_factory::shared_child_tools(
+                                    &ttc,
+                                    &crate::task_factory::TEAM_TOOL_NAMES_WITH_TASK,
+                                );
+                                let base = Arc::make_mut(&mut reg);
+                                for t in crate::team::tools::teammate_collab_tools(&mgr, name) {
+                                    base.register(t);
+                                }
+                                crate::team::tools::filter_teammate_tools(base, role, allowed)
+                            },
+                        ),
+                        build_provider: Arc::new(|pc| {
+                            crate::provider::build_provider(pc).map_err(|e| e.to_string())
+                        }),
+                        agent_def: Arc::new(move |name: &str| adm.get(name).cloned()),
+                        permissions: parent_permissions.clone(),
+                        hooks: parent_hooks.clone(),
+                        timeout,
+                    }
+                });
+            let ctx = crate::team::tools::LeaderCtx {
+                mgr: mgr.clone(),
+                deps: deps_fn,
+                gate: gate.clone(),
+            };
+            if plan_mode || read_only_tools {
+                // Only the read-only team tools survive plan / read-only mode.
+                base.register(Arc::new(crate::team::tools::TeamListTool::new(ctx)));
+                base.register(Arc::new(crate::team::tools::TeamBoardReadTool::new(
+                    mgr.team_dir(),
+                )));
+            } else {
+                for tool in crate::team::tools::leader_tools(ctx) {
+                    base.register(tool);
+                }
+                // NOTE: do NOT set task_is_self_gated here — Task's self-gating
+                // is solely about the external ZodeTaskTool router. Team leader
+                // tools carry their own entries in `self_gated_names` below.
+            }
+        }
 
         // Autonomous orchestration: let the agent define new sub-agent types
         // and workflows. Default ON (unset → enabled); toggle off via Settings.
@@ -1396,7 +1497,23 @@ impl ZodeEngine {
         let scoped_ask = crate::permission_rules::scoped_ask_tools(&permission_rules);
         let pass_unmatched = compute_pass_unmatched(&base, &scoped_ask, &cfg.permissions.allow);
         rule_gate.set_pass_unmatched(pass_unmatched);
-        let self_gated: &[&str] = if task_is_self_gated { &["Task"] } else { &[] };
+        // Self-gated tools skip the outer permission wrapper (they run their
+        // own route-aware approval / carry no per-call prompt): Task (when
+        // external agents exist) and the mutating team leader tools.
+        let mut self_gated_names: Vec<&str> = Vec::new();
+        if task_is_self_gated {
+            self_gated_names.push("Task");
+        }
+        if team_manager.is_some() && !(plan_mode || read_only_tools) {
+            self_gated_names.extend_from_slice(&[
+                "team_hire",
+                "team_send",
+                "team_dismiss",
+                "team_board_update",
+                "team_board_append",
+            ]);
+        }
+        let self_gated: &[&str] = &self_gated_names;
         let mut gated =
             wrap_mutating_tools(base, &gate, &mutating_allow, &force_ask, self_gated);
 
@@ -1445,6 +1562,14 @@ impl ZodeEngine {
             &lsp.as_ref().map(|m| m.langs()).unwrap_or_default(),
             Some(git_branch),
         ));
+        // Team playbook: appended only when the team tool group is actually
+        // registered (not plan / read-only). Does not depend on lease state.
+        let system = if team_manager.is_some() && !(plan_mode || read_only_tools) {
+            let ext = external_registry.agent_types();
+            system.map(|s| format!("{s}{}", crate::team::playbook::render_playbook(&ext)))
+        } else {
+            system
+        };
         // Carry the accumulated cost across a reassembly so `/cost` doesn't
         // reset to $0 on a plugin/sandbox/provider toggle.
         let cost = carry
@@ -1527,6 +1652,7 @@ impl ZodeEngine {
             todo_state,
             subagents,
             external_grants,
+            team: team_manager,
             history,
             bg_shells_meta,
             skills,
@@ -3418,6 +3544,7 @@ mod tests {
             todo_state: TodoState::new(),
             subagents: crate::subagents::SubAgentRegistry::new(),
             external_grants: Arc::new(crate::external_agents::GrantStore::default()),
+            team: None,
             history: Arc::new(tokio::sync::Mutex::new(EditHistory::new(1))),
             bg_shells_meta: BackgroundShellTracker::new(),
             skills: Arc::new(SkillRegistry::new()),
@@ -4530,6 +4657,85 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("denied"), "{err}");
         assert_eq!(count.load(Ordering::SeqCst), before + 1);
+    }
+
+    #[tokio::test]
+    async fn team_tools_registered_and_plan_mode_keeps_only_readonly() {
+        let dir = tempfile::tempdir().unwrap();
+        // Normal mode: full team tool set present.
+        let eng = ZodeEngine::assemble(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-07-17",
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
+        assert!(names.contains(&"team_hire".to_string()), "{names:?}");
+        assert!(names.contains(&"team_send".to_string()));
+        assert!(names.contains(&"team_board_read".to_string()));
+        assert!(eng.team.is_some());
+
+        // Plan mode: only the read-only team tools survive.
+        let eng = ZodeEngine::assemble(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-07-17",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
+        assert!(names.contains(&"team_list".to_string()), "{names:?}");
+        assert!(names.contains(&"team_board_read".to_string()));
+        assert!(!names.contains(&"team_hire".to_string()), "{names:?}");
+        assert!(!names.contains(&"team_send".to_string()));
+    }
+
+    #[tokio::test]
+    async fn team_manager_survives_carry_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = ZodeEngine::assemble(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-07-17",
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let team1 = eng.team.clone().unwrap();
+        let carry = eng.carry_state();
+        let eng2 = ZodeEngine::assemble_with_carry(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-07-17",
+            None,
+            None,
+            false,
+            None,
+            carry,
+        )
+        .await
+        .unwrap();
+        assert!(Arc::ptr_eq(&team1, &eng2.team.clone().unwrap()));
     }
 
     #[test]

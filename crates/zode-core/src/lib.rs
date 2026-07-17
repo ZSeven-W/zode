@@ -52,6 +52,7 @@ pub mod skills;
 pub mod subagents;
 pub mod task_factory;
 pub mod task_tool;
+pub mod team;
 pub mod telemetry;
 pub mod tool_filter;
 pub mod tool_trace;

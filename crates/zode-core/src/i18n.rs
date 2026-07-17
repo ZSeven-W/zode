@@ -135,6 +135,7 @@ const ZH_ONLY: &[(&str, &str, &str)] = &[
     ("Drive OpenPencil (e.g. /op status, /op generate <prompt>)", "驱动 OpenPencil（例如 /op status、/op generate <prompt>）", "驅動 OpenPencil（例如 /op status、/op generate <prompt>）"),
     ("Browser control panel and commands (e.g. /browser, /browser status)", "浏览器控制面板和命令（例如 /browser、/browser status）", "瀏覽器控制面板和命令（例如 /browser、/browser status）"),
     ("Desktop control status and CDP attach (e.g. /desktop status)", "桌面控制状态与 CDP 附加（例如 /desktop status）", "桌面控制狀態與 CDP 附加（例如 /desktop status）"),
+    ("Show the agent team roster (e.g. /team, /team board, /team dismiss <name>)", "显示 agent 团队名册（例如 /team、/team board、/team dismiss <name>）", "顯示 agent 團隊名冊（例如 /team、/team board、/team dismiss <name>）"),
     ("Manage Noema long-term memory", "管理 Noema 长期记忆", "管理 Noema 長期記憶"),
     ("Open the sub-agent activity panel", "打开子代理活动面板", "開啟子代理活動面板"),
     ("(clear with /goal clear)", "（用 /goal clear 清除）", "（用 /goal clear 清除）"),
