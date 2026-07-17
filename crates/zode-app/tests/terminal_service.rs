@@ -265,15 +265,20 @@ async fn terminal_service_caps_output_when_the_subscriber_is_stalled() {
     let closer = thread::spawn(move || {
         let _ = close_tx.send(service.close(terminal));
     });
-    let close_result = close_rx.recv_timeout(Duration::from_secs(2));
-    if close_result.is_err() {
-        kill_process_group(shell_pid);
-    }
-    let _ = closer.join();
+    let close_result = match close_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(result) => result,
+        Err(error) => {
+            kill_process_group(shell_pid);
+            #[cfg(target_os = "macos")]
+            dump_process_sample();
+            let _ = std::fs::remove_file(shell_pid_file);
+            drop(closer);
+            panic!("terminal close timed out with a stalled output subscriber: {error}");
+        }
+    };
+    closer.join().unwrap();
     let _ = std::fs::remove_file(shell_pid_file);
-    close_result
-        .expect("terminal close timed out with a stalled output subscriber")
-        .unwrap();
+    close_result.unwrap();
 
     let buffered = tokio::time::timeout(Duration::from_secs(2), async {
         let mut bytes = 0;
@@ -358,4 +363,23 @@ fn kill_process_group(group: i32) {
     let _ = std::process::Command::new("kill")
         .args(["-KILL", &format!("-{group}")])
         .status();
+}
+
+#[cfg(target_os = "macos")]
+fn dump_process_sample() {
+    let output = std::process::Command::new("/usr/bin/sample")
+        .args([
+            &std::process::id().to_string(),
+            "1",
+            "10",
+            "-mayDie",
+            "-file",
+            "/dev/stdout",
+        ])
+        .output()
+        .expect("failed to sample stalled terminal test");
+    eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+    if !output.status.success() {
+        eprintln!("sample failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
 }
