@@ -9,7 +9,7 @@ fn offscreen_shell_is_reference_size_and_non_empty() {
     assert_eq!((image.width(), image.height()), (1221, 992));
     assert!(png.len() > 10_000, "shell PNG is suspiciously empty");
     assert_ne!(image.get_pixel(20, 400), image.get_pixel(500, 400));
-    assert_ne!(image.get_pixel(500, 900), image.get_pixel(500, 400));
+    assert_ne!(image.get_pixel(1070, 940), image.get_pixel(500, 400));
 }
 
 #[test]
