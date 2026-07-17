@@ -1,7 +1,11 @@
-use accesskit::Role;
+use accesskit::{Action, Role};
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
-use zode_app_model::{AppCommand, ProjectState};
-use zode_app_ui::{Insets, RectExt, SemanticIcon, ThreadHeader, WorkspaceSnapshot, ZodeTheme};
+use zode_app_model::{AppCommand, ProjectState, SessionRenameState};
+use zode_app_ui::{
+    Insets, RectExt, SemanticIcon, ThreadHeader, WorkspaceSnapshot, ZodeTheme,
+    HEADER_COPY_TITLE_ID, HEADER_MENU_COPY_ID, HEADER_MENU_NEW_WINDOW_ID, HEADER_MENU_RENAME_ID,
+    HEADER_RENAME_INPUT_ID, HEADER_RENAME_SAVE_ID,
+};
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
 #[derive(Default)]
@@ -157,4 +161,114 @@ fn task_menu_paints_native_icons_and_reflects_pinned_state() {
         .any(|path| path == SemanticIcon::Archive.path()));
     assert!(painter.rounded_fills.contains(&menu.rect));
     assert!(painter.rounded_fills.contains(&menu.pin.rect));
+}
+
+#[test]
+fn full_task_menu_maps_real_actions_and_keeps_future_rows_disabled() {
+    let (mut state, session) = state_with_session();
+    state.session_menu = Some(session.clone());
+    let rect = Rect::xywh(240.0, 0.0, 1_560.0, 46.0);
+    let menu = ThreadHeader::menu_layout(rect, &state).unwrap();
+
+    assert_eq!(menu.rename.id, HEADER_MENU_RENAME_ID);
+    assert_eq!(menu.copy.id, HEADER_MENU_COPY_ID);
+    assert_eq!(menu.new_window.id, HEADER_MENU_NEW_WINDOW_ID);
+    assert_eq!(
+        ThreadHeader::command_for_widget(&state, menu.rename.id),
+        Some(AppCommand::BeginRenameSession {
+            session: session.clone()
+        })
+    );
+    assert_eq!(
+        ThreadHeader::command_for_widget(&state, menu.copy.id),
+        Some(AppCommand::ToggleSessionCopyMenu {
+            session: session.clone()
+        })
+    );
+    assert_eq!(
+        ThreadHeader::command_for_widget(&state, menu.new_window.id),
+        Some(AppCommand::OpenSessionInNewWindow { session })
+    );
+    for disabled in [menu.side_task, menu.continue_in, menu.schedule] {
+        assert!(!disabled.enabled);
+        assert_eq!(ThreadHeader::command_for_widget(&state, disabled.id), None);
+    }
+}
+
+#[test]
+fn copy_submenu_exposes_title_details_and_id_commands() {
+    let (mut state, session) = state_with_session();
+    state.session_menu = Some(session.clone());
+    state.session_copy_menu = Some(session.clone());
+    let rect = Rect::xywh(240.0, 0.0, 1_560.0, 46.0);
+    let copy = ThreadHeader::menu_layout(rect, &state)
+        .unwrap()
+        .copy_menu
+        .unwrap();
+
+    assert_eq!(copy.title.id, HEADER_COPY_TITLE_ID);
+    assert_eq!(
+        ThreadHeader::command_for_widget(&state, copy.title.id),
+        Some(AppCommand::CopyText("zode 桌面端".into()))
+    );
+    let AppCommand::CopyText(details) =
+        ThreadHeader::command_for_widget(&state, copy.details.id).unwrap()
+    else {
+        panic!("copy details must be a clipboard command")
+    };
+    assert!(details.contains("项目：zode"));
+    assert!(details.contains(&session.session_id));
+    assert_eq!(
+        ThreadHeader::command_for_widget(&state, copy.session_id.id),
+        Some(AppCommand::CopyText(session.session_id))
+    );
+}
+
+#[test]
+fn disabled_rows_are_semantic_but_not_focusable_or_hittable() {
+    let (mut state, session) = state_with_session();
+    state.session_menu = Some(session);
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let menu = ThreadHeader::menu_layout(snapshot.layout.top_bar, &state).unwrap();
+
+    for disabled in [menu.side_task, menu.continue_in, menu.schedule] {
+        let node = snapshot.node(disabled.id).unwrap();
+        assert!(node.disabled);
+        assert!(node.actions.is_empty());
+        assert_eq!(node.focus_order, None);
+        assert_eq!(
+            snapshot.hit_test(Point2D::new(
+                disabled.rect.origin.x + disabled.rect.size.x / 2.0,
+                disabled.rect.origin.y + disabled.rect.size.y / 2.0,
+            )),
+            None
+        );
+    }
+}
+
+#[test]
+fn rename_dialog_focuses_an_editable_accessible_input_and_disables_blank_save() {
+    let (mut state, session) = state_with_session();
+    state.session_rename = Some(SessionRenameState {
+        session: session.clone(),
+        draft: "zode 桌面端".into(),
+    });
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    assert_eq!(snapshot.focused, Some(HEADER_RENAME_INPUT_ID));
+    let input = snapshot.node(HEADER_RENAME_INPUT_ID).unwrap();
+    assert_eq!(input.role, Role::TextInput);
+    assert_eq!(input.value.as_deref(), Some("zode 桌面端"));
+    assert!(input.actions.contains(&Action::SetValue));
+
+    state.session_rename = Some(SessionRenameState {
+        session,
+        draft: "   ".into(),
+    });
+    let blank = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    assert!(blank.node(HEADER_RENAME_SAVE_ID).unwrap().disabled);
+    assert!(blank
+        .node(HEADER_RENAME_SAVE_ID)
+        .unwrap()
+        .actions
+        .is_empty());
 }

@@ -1,6 +1,8 @@
 mod external_open;
 mod file;
 mod notification;
+#[path = "session-window.rs"]
+mod session_window;
 mod terminal;
 mod window;
 mod workspace;
@@ -12,6 +14,7 @@ use zode_node_protocol::{EndpointErrorKind, WorkspaceUri};
 pub use external_open::LocalExternalOpenService;
 pub use file::LocalFileService;
 pub use notification::LocalNotificationService;
+pub use session_window::{NativeSessionWindowService, SessionWindowService};
 pub use terminal::{LocalTerminalService, TerminalError, TerminalOutputStream, TerminalService};
 pub use window::NativeWindowService;
 pub use workspace::LocalWorkspaceService;

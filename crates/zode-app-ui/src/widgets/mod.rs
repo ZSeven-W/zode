@@ -9,12 +9,16 @@ mod panel_picker;
 mod project_picker;
 mod project_sidebar;
 mod review_panel;
+#[path = "session-rename.rs"]
+mod session_rename;
 mod settings;
 mod terminal_controller;
 mod terminal_grid;
 mod terminal_panel;
 mod terminal_secondary;
 mod thread_header;
+#[path = "thread-header-overlay.rs"]
+mod thread_header_overlay;
 mod tool_card;
 pub(crate) mod transcript;
 mod unavailable_secondary;
@@ -63,6 +67,7 @@ pub use review_panel::{
     ReviewDraft, ReviewFileRowLayout, ReviewLine, ReviewLineKind, ReviewPanel, ReviewPanelLayout,
     ReviewSelection,
 };
+pub use session_rename::{SessionRenameController, SessionRenameOutcome};
 pub use settings::{
     ArchivedTaskGroupLayout, ArchivedTaskRowLayout, ArchivedTasksLayout, GeneralSettingsLayout,
     PermissionPresetLayout, PermissionRow, PermissionRowLayout, SettingControl,
@@ -78,9 +83,14 @@ pub use terminal_panel::TerminalPanel;
 pub use terminal_secondary::{
     TerminalSecondaryLayout, TerminalSecondaryPanel, TERMINAL_SECONDARY_CLOSE_ID,
 };
-pub use thread_header::{HeaderActionLayout, ThreadHeader, ThreadHeaderLayout};
-pub(crate) use thread_header::{
-    HEADER_MENU_ARCHIVE_ID, HEADER_MENU_ID, HEADER_MENU_PIN_ID, HEADER_MORE_ID,
+pub use thread_header::{
+    HeaderActionLayout, ThreadCopyMenuLayout, ThreadHeader, ThreadHeaderLayout,
+    ThreadMenuActionLayout, ThreadMenuLayout, ThreadRenameLayout, HEADER_COPY_DETAILS_ID,
+    HEADER_COPY_MENU_ID, HEADER_COPY_SESSION_ID, HEADER_COPY_TITLE_ID, HEADER_MENU_ARCHIVE_ID,
+    HEADER_MENU_CONTINUE_ID, HEADER_MENU_COPY_ID, HEADER_MENU_ID, HEADER_MENU_NEW_WINDOW_ID,
+    HEADER_MENU_PIN_ID, HEADER_MENU_RENAME_ID, HEADER_MENU_SCHEDULE_ID, HEADER_MENU_SIDE_TASK_ID,
+    HEADER_MORE_ID, HEADER_RENAME_CANCEL_ID, HEADER_RENAME_DIALOG_ID, HEADER_RENAME_INPUT_ID,
+    HEADER_RENAME_SAVE_ID,
 };
 pub use tool_card::{ToolCard, ToolTone};
 pub use transcript::{ThreadTranscript, TranscriptItemLayout};

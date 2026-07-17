@@ -24,6 +24,27 @@ pub enum AppCommand {
     ToggleSessionMenu {
         session: SessionLocator,
     },
+    ToggleSessionCopyMenu {
+        session: SessionLocator,
+    },
+    BeginRenameSession {
+        session: SessionLocator,
+    },
+    SetSessionRenameDraft {
+        session: SessionLocator,
+        draft: String,
+    },
+    CancelRenameSession {
+        session: SessionLocator,
+    },
+    /// Contract reserved for the forthcoming side-task pane. The current UI
+    /// exposes this action as disabled until the pane has a real host.
+    OpenSessionInSidePane {
+        session: SessionLocator,
+    },
+    OpenSessionInNewWindow {
+        session: SessionLocator,
+    },
     RenameSession {
         session: SessionLocator,
         title: String,

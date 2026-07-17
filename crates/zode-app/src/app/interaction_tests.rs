@@ -15,10 +15,12 @@ use zode_node_protocol::{
     UserContent, WorkspaceUri,
 };
 
+use super::super::session_menu::{
+    session_menu_escape_command as close_session_menu_command, session_menu_outside_click_command,
+};
 use super::{
-    close_session_menu_command, consume_external_preview_command, normalize_conversation_route,
-    project_composer_outcome, reduce_local_settings_command, session_menu_outside_click_command,
-    settings_interaction_viewport, widget_command,
+    consume_external_preview_command, normalize_conversation_route, project_composer_outcome,
+    reduce_local_settings_command, settings_interaction_viewport, widget_command,
 };
 use crate::services::{ExternalOpenService, ServiceError};
 use crate::{command_bridge::prepare_dispatch, event_map::composer_outcome_command};
@@ -236,6 +238,66 @@ fn task_menu_closes_on_escape_or_outside_click_but_not_inside_click() {
 
     state.current_session = Some(SessionLocator::new(state.host.node_id, "other"));
     assert_eq!(close_session_menu_command(&state), None);
+}
+
+#[test]
+fn nested_copy_and_rename_surfaces_keep_inside_clicks_and_close_outside() {
+    let (mut state, session, _) = state_with_session();
+    state.session_menu = Some(session.clone());
+    state.session_copy_menu = Some(session.clone());
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let copy = ThreadHeader::menu_layout(snapshot.layout.top_bar, &state)
+        .unwrap()
+        .copy_menu
+        .unwrap();
+    let inside_copy = jian_widgets::Point2D::new(
+        copy.title.rect.origin.x + copy.title.rect.size.x / 2.0,
+        copy.title.rect.origin.y + copy.title.rect.size.y / 2.0,
+    );
+    assert_eq!(
+        session_menu_outside_click_command(&state, &snapshot, inside_copy),
+        None
+    );
+    assert_eq!(
+        session_menu_outside_click_command(
+            &state,
+            &snapshot,
+            jian_widgets::Point2D::new(
+                snapshot.layout.composer.origin.x,
+                snapshot.layout.composer.origin.y,
+            ),
+        ),
+        Some(AppCommand::ToggleSessionMenu {
+            session: session.clone()
+        })
+    );
+
+    state.close_session_action_surfaces();
+    state.session_rename = Some(zode_app_model::SessionRenameState {
+        session: session.clone(),
+        draft: "renamed".into(),
+    });
+    let rename_snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let rename = ThreadHeader::rename_layout(rename_snapshot.layout.top_bar, &state).unwrap();
+    assert_eq!(
+        session_menu_outside_click_command(
+            &state,
+            &rename_snapshot,
+            jian_widgets::Point2D::new(rename.input.origin.x + 4.0, rename.input.origin.y + 4.0),
+        ),
+        None
+    );
+    assert_eq!(
+        session_menu_outside_click_command(
+            &state,
+            &rename_snapshot,
+            jian_widgets::Point2D::new(
+                rename_snapshot.layout.composer.origin.x,
+                rename_snapshot.layout.composer.origin.y,
+            ),
+        ),
+        Some(AppCommand::CancelRenameSession { session })
+    );
 }
 
 #[test]

@@ -1,5 +1,7 @@
+use jian_core::text_input::TextInputState;
 use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect};
 use zode_app_model::{AppCommand, SecondaryPane, ZodeAppState};
+use zode_node_protocol::{SessionLocator, ThreadSummary};
 
 use crate::{
     paint_single_line, PanelPicker, RectExt, SemanticIcon, UsageChip, WidgetId, ZodeTheme,
@@ -11,14 +13,32 @@ const ACTION_GAP: f32 = 4.0;
 const ACTION_RIGHT: f32 = 12.0;
 const ENVIRONMENT_MIN_HEADER_WIDTH: f32 = 1_160.0;
 const TITLE_FONT_SIZE: f32 = 13.0;
-const MENU_WIDTH: f32 = 196.0;
+const MENU_WIDTH: f32 = 224.0;
 const MENU_PADDING: f32 = 4.0;
 const MENU_ROW_HEIGHT: f32 = 36.0;
+const MENU_SEPARATOR_HEIGHT: f32 = 1.0;
+const COPY_MENU_WIDTH: f32 = 190.0;
+const RENAME_WIDTH: f32 = 380.0;
+const RENAME_HEIGHT: f32 = 144.0;
 
-pub(crate) const HEADER_MORE_ID: WidgetId = WidgetId(62);
-pub(crate) const HEADER_MENU_ID: WidgetId = WidgetId(63);
-pub(crate) const HEADER_MENU_PIN_ID: WidgetId = WidgetId(64);
-pub(crate) const HEADER_MENU_ARCHIVE_ID: WidgetId = WidgetId(65);
+pub const HEADER_MORE_ID: WidgetId = WidgetId(62);
+pub const HEADER_MENU_ID: WidgetId = WidgetId(63);
+pub const HEADER_MENU_PIN_ID: WidgetId = WidgetId(64);
+pub const HEADER_MENU_ARCHIVE_ID: WidgetId = WidgetId(65);
+pub const HEADER_MENU_RENAME_ID: WidgetId = WidgetId(150);
+pub const HEADER_MENU_SIDE_TASK_ID: WidgetId = WidgetId(151);
+pub const HEADER_MENU_COPY_ID: WidgetId = WidgetId(152);
+pub const HEADER_MENU_CONTINUE_ID: WidgetId = WidgetId(153);
+pub const HEADER_MENU_SCHEDULE_ID: WidgetId = WidgetId(154);
+pub const HEADER_MENU_NEW_WINDOW_ID: WidgetId = WidgetId(155);
+pub const HEADER_COPY_MENU_ID: WidgetId = WidgetId(156);
+pub const HEADER_COPY_TITLE_ID: WidgetId = WidgetId(157);
+pub const HEADER_COPY_DETAILS_ID: WidgetId = WidgetId(158);
+pub const HEADER_COPY_SESSION_ID: WidgetId = WidgetId(159);
+pub const HEADER_RENAME_DIALOG_ID: WidgetId = WidgetId(160);
+pub const HEADER_RENAME_INPUT_ID: WidgetId = WidgetId(161);
+pub const HEADER_RENAME_CANCEL_ID: WidgetId = WidgetId(162);
+pub const HEADER_RENAME_SAVE_ID: WidgetId = WidgetId(163);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HeaderActionLayout {
@@ -40,6 +60,16 @@ pub struct ThreadHeaderLayout {
 pub struct ThreadMenuActionLayout {
     pub id: WidgetId,
     pub rect: Rect,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThreadCopyMenuLayout {
+    pub id: WidgetId,
+    pub rect: Rect,
+    pub title: ThreadMenuActionLayout,
+    pub details: ThreadMenuActionLayout,
+    pub session_id: ThreadMenuActionLayout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,7 +77,25 @@ pub struct ThreadMenuLayout {
     pub id: WidgetId,
     pub rect: Rect,
     pub pin: ThreadMenuActionLayout,
+    pub rename: ThreadMenuActionLayout,
     pub archive: ThreadMenuActionLayout,
+    pub side_task: ThreadMenuActionLayout,
+    pub copy: ThreadMenuActionLayout,
+    pub continue_in: ThreadMenuActionLayout,
+    pub schedule: ThreadMenuActionLayout,
+    pub new_window: ThreadMenuActionLayout,
+    pub separator_one: Rect,
+    pub separator_two: Rect,
+    pub copy_menu: Option<ThreadCopyMenuLayout>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThreadRenameLayout {
+    pub id: WidgetId,
+    pub rect: Rect,
+    pub input: Rect,
+    pub cancel: ThreadMenuActionLayout,
+    pub save: ThreadMenuActionLayout,
 }
 
 pub struct ThreadHeader;
@@ -137,7 +185,7 @@ impl ThreadHeader {
         }
         let more = Self::layout(rect, state).more?;
         let width = MENU_WIDTH.min(rect.size.x.max(0.0));
-        let height = MENU_PADDING * 2.0 + MENU_ROW_HEIGHT * 2.0;
+        let height = MENU_PADDING * 2.0 + MENU_ROW_HEIGHT * 8.0 + MENU_SEPARATOR_HEIGHT * 2.0;
         let min_x = rect.origin.x + 8.0;
         let max_x = (rect.max_x() - width - 8.0).max(min_x);
         let menu_rect = Rect::xywh(
@@ -146,26 +194,81 @@ impl ThreadHeader {
             width,
             height,
         );
+        let row_x = menu_rect.origin.x + MENU_PADDING;
+        let row_w = (menu_rect.size.x - MENU_PADDING * 2.0).max(0.0);
+        let mut y = menu_rect.origin.y + MENU_PADDING;
+        let pin = menu_row(row_x, row_w, &mut y, HEADER_MENU_PIN_ID, true);
+        let rename = menu_row(row_x, row_w, &mut y, HEADER_MENU_RENAME_ID, true);
+        let archive = menu_row(row_x, row_w, &mut y, HEADER_MENU_ARCHIVE_ID, true);
+        let separator_one = Rect::xywh(row_x, y, row_w, MENU_SEPARATOR_HEIGHT);
+        y += MENU_SEPARATOR_HEIGHT;
+        let side_task = menu_row(row_x, row_w, &mut y, HEADER_MENU_SIDE_TASK_ID, false);
+        let copy = menu_row(row_x, row_w, &mut y, HEADER_MENU_COPY_ID, true);
+        let continue_in = menu_row(row_x, row_w, &mut y, HEADER_MENU_CONTINUE_ID, false);
+        let schedule = menu_row(row_x, row_w, &mut y, HEADER_MENU_SCHEDULE_ID, false);
+        let separator_two = Rect::xywh(row_x, y, row_w, MENU_SEPARATOR_HEIGHT);
+        y += MENU_SEPARATOR_HEIGHT;
+        let new_window = menu_row(row_x, row_w, &mut y, HEADER_MENU_NEW_WINDOW_ID, true);
+        debug_assert!((y + MENU_PADDING - menu_rect.max_y()).abs() < 0.01);
+        let copy_menu = (state.session_copy_menu.as_ref() == Some(session))
+            .then(|| copy_menu_layout(rect, menu_rect, copy));
         Some(ThreadMenuLayout {
             id: HEADER_MENU_ID,
             rect: menu_rect,
-            pin: ThreadMenuActionLayout {
-                id: HEADER_MENU_PIN_ID,
+            pin,
+            rename,
+            archive,
+            side_task,
+            copy,
+            continue_in,
+            schedule,
+            new_window,
+            separator_one,
+            separator_two,
+            copy_menu,
+        })
+    }
+
+    pub fn rename_layout(rect: Rect, state: &ZodeAppState) -> Option<ThreadRenameLayout> {
+        let rename = state.session_rename.as_ref()?;
+        if state.current_session.as_ref() != Some(&rename.session) {
+            return None;
+        }
+        let width = RENAME_WIDTH.min((rect.size.x - 16.0).max(0.0));
+        if width < 220.0 {
+            return None;
+        }
+        let surface = Rect::xywh(
+            (rect.origin.x + 20.0).min((rect.max_x() - width - 8.0).max(rect.origin.x + 8.0)),
+            rect.max_y() + 8.0,
+            width,
+            RENAME_HEIGHT,
+        );
+        let button_w = 72.0;
+        let button_y = surface.max_y() - 44.0;
+        Some(ThreadRenameLayout {
+            id: HEADER_RENAME_DIALOG_ID,
+            rect: surface,
+            input: Rect::xywh(
+                surface.origin.x + 16.0,
+                surface.origin.y + 42.0,
+                (surface.size.x - 32.0).max(0.0),
+                34.0,
+            ),
+            cancel: ThreadMenuActionLayout {
+                id: HEADER_RENAME_CANCEL_ID,
                 rect: Rect::xywh(
-                    menu_rect.origin.x + MENU_PADDING,
-                    menu_rect.origin.y + MENU_PADDING,
-                    (menu_rect.size.x - MENU_PADDING * 2.0).max(0.0),
-                    MENU_ROW_HEIGHT,
+                    surface.max_x() - 16.0 - button_w * 2.0 - 8.0,
+                    button_y,
+                    button_w,
+                    30.0,
                 ),
+                enabled: true,
             },
-            archive: ThreadMenuActionLayout {
-                id: HEADER_MENU_ARCHIVE_ID,
-                rect: Rect::xywh(
-                    menu_rect.origin.x + MENU_PADDING,
-                    menu_rect.origin.y + MENU_PADDING + MENU_ROW_HEIGHT,
-                    (menu_rect.size.x - MENU_PADDING * 2.0).max(0.0),
-                    MENU_ROW_HEIGHT,
-                ),
+            save: ThreadMenuActionLayout {
+                id: HEADER_RENAME_SAVE_ID,
+                rect: Rect::xywh(surface.max_x() - 16.0 - button_w, button_y, button_w, 30.0),
+                enabled: !rename.draft.trim().is_empty(),
             },
         })
     }
@@ -185,16 +288,98 @@ impl ThreadHeader {
                     pinned: !state.pinned_sessions.contains(session),
                 })
             }
+            HEADER_MENU_RENAME_ID if state.session_menu.as_ref() == Some(session) => {
+                Some(AppCommand::BeginRenameSession {
+                    session: session.clone(),
+                })
+            }
             HEADER_MENU_ARCHIVE_ID if state.session_menu.as_ref() == Some(session) => {
                 Some(AppCommand::SetSessionArchived {
                     session: session.clone(),
                     archived: true,
                 })
             }
+            HEADER_MENU_COPY_ID if state.session_menu.as_ref() == Some(session) => {
+                Some(AppCommand::ToggleSessionCopyMenu {
+                    session: session.clone(),
+                })
+            }
+            HEADER_COPY_TITLE_ID if state.session_copy_menu.as_ref() == Some(session) => {
+                current_thread(state, session)
+                    .map(|thread| AppCommand::CopyText(thread.title.clone()))
+            }
+            HEADER_COPY_DETAILS_ID if state.session_copy_menu.as_ref() == Some(session) => {
+                current_thread(state, session).map(|thread| {
+                    AppCommand::CopyText(format!(
+                        "任务：{}\n项目：{}\n任务 ID：{}",
+                        thread.title,
+                        copy_workspace_label(state, session),
+                        session.session_id
+                    ))
+                })
+            }
+            HEADER_COPY_SESSION_ID if state.session_copy_menu.as_ref() == Some(session) => {
+                Some(AppCommand::CopyText(session.session_id.clone()))
+            }
+            HEADER_MENU_NEW_WINDOW_ID if state.session_menu.as_ref() == Some(session) => {
+                Some(AppCommand::OpenSessionInNewWindow {
+                    session: session.clone(),
+                })
+            }
+            HEADER_RENAME_CANCEL_ID
+                if state.session_rename.as_ref().map(|rename| &rename.session) == Some(session) =>
+            {
+                Some(AppCommand::CancelRenameSession {
+                    session: session.clone(),
+                })
+            }
+            HEADER_RENAME_SAVE_ID
+                if state.session_rename.as_ref().is_some_and(|rename| {
+                    &rename.session == session && !rename.draft.trim().is_empty()
+                }) =>
+            {
+                let rename = state.session_rename.as_ref().expect("rename checked above");
+                Some(AppCommand::RenameSession {
+                    session: session.clone(),
+                    title: rename.draft.trim().to_owned(),
+                })
+            }
             HEADER_ENVIRONMENT_ID => Some(AppCommand::OpenSecondary(SecondaryPane::Environment)),
             HEADER_REVIEW_ID => Some(AppCommand::OpenReview),
             _ => None,
         }
+    }
+
+    pub fn root_menu_focus_ids(state: &ZodeAppState) -> Vec<WidgetId> {
+        let Some(_) = state
+            .current_session
+            .as_ref()
+            .filter(|session| state.session_menu.as_ref() == Some(*session))
+        else {
+            return Vec::new();
+        };
+        vec![
+            HEADER_MENU_PIN_ID,
+            HEADER_MENU_RENAME_ID,
+            HEADER_MENU_ARCHIVE_ID,
+            HEADER_MENU_COPY_ID,
+            HEADER_MENU_NEW_WINDOW_ID,
+        ]
+    }
+
+    pub fn copy_menu_focus_ids(state: &ZodeAppState) -> Vec<WidgetId> {
+        state
+            .current_session
+            .as_ref()
+            .filter(|session| state.session_copy_menu.as_ref() == Some(*session))
+            .map(|_| {
+                vec![
+                    HEADER_COPY_TITLE_ID,
+                    HEADER_COPY_DETAILS_ID,
+                    HEADER_COPY_SESSION_ID,
+                ]
+            })
+            .unwrap_or_default()
     }
 
     pub fn paint(painter: &mut dyn Painter, rect: Rect, state: &ZodeAppState, theme: &ZodeTheme) {
@@ -310,88 +495,56 @@ impl ThreadHeader {
         hovered: Option<WidgetId>,
         theme: &ZodeTheme,
     ) {
+        let rename_input = TextInputState::with_text(
+            state
+                .session_rename
+                .as_ref()
+                .map(|rename| rename.draft.clone())
+                .unwrap_or_default(),
+        );
+        Self::paint_overlays_with_rename_input(
+            painter,
+            rect,
+            viewport,
+            state,
+            &rename_input,
+            focused,
+            hovered,
+            theme,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_overlays_with_rename_input(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        viewport: Rect,
+        state: &ZodeAppState,
+        rename_input: &TextInputState,
+        focused: Option<WidgetId>,
+        hovered: Option<WidgetId>,
+        theme: &ZodeTheme,
+    ) {
         if let Some(menu) = Self::menu_layout(rect, state) {
-            paint_task_menu(painter, &menu, state, focused, hovered, theme);
+            super::thread_header_overlay::paint_task_menu(
+                painter, &menu, state, focused, hovered, theme,
+            );
+        }
+        if let Some(rename) = Self::rename_layout(rect, state) {
+            super::thread_header_overlay::paint_rename_dialog(
+                painter,
+                &rename,
+                rename_input,
+                focused,
+                hovered,
+                theme,
+            );
         }
         if let Some(anchor) = Self::layout(rect, state).panel_picker {
             if let Some(menu) = PanelPicker::menu_layout(anchor.rect, viewport, state) {
                 PanelPicker::paint(painter, &menu, focused, hovered, theme);
             }
         }
-    }
-}
-
-fn paint_task_menu(
-    painter: &mut dyn Painter,
-    menu: &ThreadMenuLayout,
-    state: &ZodeAppState,
-    focused: Option<WidgetId>,
-    hovered: Option<WidgetId>,
-    theme: &ZodeTheme,
-) {
-    painter.fill_drop_shadow(
-        Rect::xywh(
-            menu.rect.origin.x,
-            menu.rect.origin.y + 2.0,
-            menu.rect.size.x,
-            menu.rect.size.y,
-        ),
-        10.0,
-        16.0,
-        theme.tokens.foreground.with_alpha(0.12),
-    );
-    painter.fill_round_rect(menu.rect, 10.0, theme.tokens.popover);
-    painter.stroke_round_rect(menu.rect, 10.0, theme.tokens.border, 1.0);
-
-    let pinned = state
-        .current_session
-        .as_ref()
-        .is_some_and(|session| state.pinned_sessions.contains(session));
-    for (action, icon, label) in [
-        (
-            menu.pin,
-            SemanticIcon::Pin,
-            if pinned {
-                "取消置顶"
-            } else {
-                "置顶任务"
-            },
-        ),
-        (menu.archive, SemanticIcon::Archive, "归档任务"),
-    ] {
-        if hovered == Some(action.id) {
-            painter.fill_round_rect(action.rect, 7.0, theme.tokens.accent);
-        }
-        if focused == Some(action.id) {
-            painter.stroke_round_rect(action.rect, 7.0, theme.tokens.ring, 1.5);
-        }
-        let icon_rect = Rect::xywh(
-            action.rect.origin.x + 10.0,
-            action.rect.origin.y + (action.rect.size.y - 16.0) / 2.0,
-            16.0,
-            16.0,
-        );
-        painter.stroke_svg_path(
-            icon.path(),
-            icon_rect.origin,
-            icon_rect.size.x,
-            theme.tokens.popover_foreground,
-            icon.stroke_width(),
-        );
-        paint_single_line(
-            painter,
-            label,
-            Rect::xywh(
-                icon_rect.max_x() + 9.0,
-                action.rect.origin.y,
-                (action.rect.max_x() - icon_rect.max_x() - 15.0).max(0.0),
-                action.rect.size.y,
-            ),
-            13.0,
-            400,
-            theme.tokens.popover_foreground,
-            HorizontalAlign::Start,
-        );
     }
 }
 
@@ -402,6 +555,76 @@ fn current_title(state: &ZodeAppState) -> Option<&str> {
         .iter()
         .find(|thread| &thread.session == session)
         .map(|thread| thread.title.as_str())
+}
+
+fn current_thread<'a>(
+    state: &'a ZodeAppState,
+    session: &SessionLocator,
+) -> Option<&'a ThreadSummary> {
+    state
+        .threads
+        .iter()
+        .find(|thread| &thread.session == session)
+}
+
+fn copy_workspace_label(state: &ZodeAppState, session: &SessionLocator) -> String {
+    let Some(workspace) = current_thread(state, session).map(|thread| &thread.workspace_uri) else {
+        return "未知项目".into();
+    };
+    if state.is_projectless_workspace(workspace) {
+        "不在项目中工作".into()
+    } else {
+        super::project_sidebar::workspace_label(workspace, state.available_workspace(workspace))
+    }
+}
+
+fn copy_menu_layout(
+    header: Rect,
+    root_menu: Rect,
+    copy: ThreadMenuActionLayout,
+) -> ThreadCopyMenuLayout {
+    let width = COPY_MENU_WIDTH.min(header.size.x.max(0.0));
+    let height = MENU_PADDING * 2.0 + MENU_ROW_HEIGHT * 3.0;
+    let right_x = root_menu.max_x() + 6.0;
+    let left_x = (root_menu.origin.x - width - 6.0).max(header.origin.x + 8.0);
+    let max_x = header.max_x() - width - 8.0;
+    let x = if right_x <= max_x { right_x } else { left_x };
+    let rect = Rect::xywh(x, copy.rect.origin.y, width, height);
+    let row_x = rect.origin.x + MENU_PADDING;
+    let row_w = (rect.size.x - MENU_PADDING * 2.0).max(0.0);
+    let action = |id, index| ThreadMenuActionLayout {
+        id,
+        rect: Rect::xywh(
+            row_x,
+            rect.origin.y + MENU_PADDING + MENU_ROW_HEIGHT * index as f32,
+            row_w,
+            MENU_ROW_HEIGHT,
+        ),
+        enabled: true,
+    };
+    ThreadCopyMenuLayout {
+        id: HEADER_COPY_MENU_ID,
+        rect,
+        title: action(HEADER_COPY_TITLE_ID, 0),
+        details: action(HEADER_COPY_DETAILS_ID, 1),
+        session_id: action(HEADER_COPY_SESSION_ID, 2),
+    }
+}
+
+fn menu_row(
+    x: f32,
+    width: f32,
+    y: &mut f32,
+    id: WidgetId,
+    enabled: bool,
+) -> ThreadMenuActionLayout {
+    let action = ThreadMenuActionLayout {
+        id,
+        rect: Rect::xywh(x, *y, width, MENU_ROW_HEIGHT),
+        enabled,
+    };
+    *y += MENU_ROW_HEIGHT;
+    action
 }
 
 fn estimated_title_width(title: &str) -> f32 {

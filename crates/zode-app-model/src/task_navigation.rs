@@ -31,7 +31,7 @@ pub(crate) fn reduce_task_navigation(
                 }
             }
             state.current_session = None;
-            state.session_menu = None;
+            state.close_session_action_surfaces();
             state.active_workspace.clone_from(workspace_uri);
             state.composer.queue_menu = None;
             state.composer.finish_queue_edit();

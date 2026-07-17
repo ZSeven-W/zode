@@ -126,7 +126,7 @@ pub fn reduce_presentation_command(
     if route != crate::ShellRoute::Conversation {
         close_secondary(state);
     }
-    state.session_menu = None;
+    state.close_session_action_surfaces();
     state.presentation.secondary_menu_open = false;
     state.presentation.route = route;
     state.shell.page = route.legacy_page();
@@ -134,7 +134,7 @@ pub fn reduce_presentation_command(
 }
 
 fn open_secondary(state: &mut ZodeAppState, pane: crate::SecondaryPane) {
-    state.session_menu = None;
+    state.close_session_action_surfaces();
     state.composer.queue_menu = None;
     state.presentation.secondary_menu_open = false;
     state.presentation.route = crate::ShellRoute::Conversation;
@@ -319,7 +319,7 @@ pub fn reduce_queue_command(state: &mut ZodeAppState, command: &AppCommand) -> Q
                 return QueueCommandOutcome::Ignored;
             }
             state.composer.queue_menu = (state.composer.queue_menu != Some(*id)).then_some(*id);
-            state.session_menu = None;
+            state.close_session_action_surfaces();
             QueueCommandOutcome::Applied
         }
         AppCommand::BeginEditQueuedMessage { session, id } => {
@@ -537,18 +537,10 @@ pub fn reduce_navigation_command(
     if let Some(outcome) = crate::sidebar_navigation::reduce_sidebar_navigation(state, &command) {
         return outcome;
     }
+    if let Some(outcome) = crate::session_navigation::reduce_session_navigation(state, &command) {
+        return outcome;
+    }
     match command {
-        AppCommand::ToggleSessionMenu { session } => {
-            if state.current_session.as_ref() != Some(&session)
-                || !state.threads.iter().any(|thread| thread.session == session)
-            {
-                return NavigationOutcome::Ignored;
-            }
-            state.session_menu = (state.session_menu.as_ref() != Some(&session)).then_some(session);
-            state.composer.queue_menu = None;
-            state.presentation.secondary_menu_open = false;
-            NavigationOutcome::Applied
-        }
         AppCommand::SelectSession(session) => {
             let Some(workspace_uri) = state
                 .threads
@@ -568,7 +560,7 @@ pub fn reduce_navigation_command(
                 state.composer.queue_menu = None;
                 state.composer.finish_queue_edit();
             }
-            state.session_menu = None;
+            state.close_session_action_surfaces();
             state.presentation.secondary_menu_open = false;
             state.project_picker = crate::ProjectPickerState::default();
             state.current_session = Some(session.clone());
@@ -588,17 +580,6 @@ pub fn reduce_navigation_command(
                 state.active_workspace = Some(workspace_uri);
             }
             NavigationOutcome::Applied
-        }
-        AppCommand::RenameSession { session, title } => {
-            let Some(thread) = state
-                .threads
-                .iter_mut()
-                .find(|thread| thread.session == session)
-            else {
-                return NavigationOutcome::Ignored;
-            };
-            thread.title = title;
-            NavigationOutcome::NeedsEffect
         }
         AppCommand::RequestDeleteSession(session) => {
             if !state.threads.iter().any(|thread| thread.session == session) {
@@ -630,7 +611,7 @@ pub fn reduce_navigation_command(
                 .retain(|_, approval_session| approval_session != &session);
             if deleting_current {
                 state.current_session = None;
-                state.session_menu = None;
+                state.close_session_action_surfaces();
                 state.composer.queue_menu = None;
                 state.composer.finish_queue_edit();
                 state.review = crate::ReviewState::default();

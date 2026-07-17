@@ -5,6 +5,8 @@ mod layout;
 mod message_queue;
 mod presentation;
 mod reducer;
+#[path = "session-navigation.rs"]
+mod session_navigation;
 mod sidebar_navigation;
 mod state;
 mod task_navigation;

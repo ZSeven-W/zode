@@ -38,6 +38,7 @@ impl WorkspaceShell {
             None,
             None,
             Some((&project_picker, &project_search)),
+            None,
             theme,
         )
     }
@@ -71,6 +72,7 @@ impl WorkspaceShell {
             None,
             None,
             None,
+            None,
             theme,
         )
     }
@@ -93,6 +95,7 @@ impl WorkspaceShell {
             &input,
             Some(terminal_grid),
             terminal_selection,
+            None,
             None,
             None,
             theme,
@@ -141,6 +144,7 @@ impl WorkspaceShell {
             terminal_selection,
             None,
             None,
+            None,
             theme,
         )
     }
@@ -165,6 +169,7 @@ impl WorkspaceShell {
             terminal_selection,
             hovered,
             None,
+            None,
             theme,
         )
     }
@@ -182,6 +187,7 @@ impl WorkspaceShell {
         terminal_selection: Option<TerminalSelection>,
         project_picker: &ProjectPickerViewState,
         project_search_input: &TextInputState,
+        session_rename_input: &TextInputState,
         hovered: Option<WidgetId>,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
@@ -194,6 +200,7 @@ impl WorkspaceShell {
             terminal_selection,
             hovered,
             Some((project_picker, project_search_input)),
+            Some(session_rename_input),
             theme,
         )
     }
@@ -208,6 +215,7 @@ impl WorkspaceShell {
         terminal_selection: Option<TerminalSelection>,
         hovered: Option<WidgetId>,
         project_picker: Option<(&ProjectPickerViewState, &TextInputState)>,
+        session_rename_input: Option<&TextInputState>,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
         let snapshot = snapshot.clone();
@@ -347,15 +355,28 @@ impl WorkspaceShell {
             ProjectSidebar::paint_hover_overlay(painter, geometry.sidebar, state, hovered, theme);
         }
         if state.presentation.route == ShellRoute::Conversation {
-            ThreadHeader::paint_overlays(
-                painter,
-                geometry.top_bar,
-                geometry.viewport,
-                state,
-                snapshot.focused,
-                hovered,
-                theme,
-            );
+            if let Some(rename_input) = session_rename_input {
+                ThreadHeader::paint_overlays_with_rename_input(
+                    painter,
+                    geometry.top_bar,
+                    geometry.viewport,
+                    state,
+                    rename_input,
+                    snapshot.focused,
+                    hovered,
+                    theme,
+                );
+            } else {
+                ThreadHeader::paint_overlays(
+                    painter,
+                    geometry.top_bar,
+                    geometry.viewport,
+                    state,
+                    snapshot.focused,
+                    hovered,
+                    theme,
+                );
+            }
         }
         painter.end_frame();
         geometry

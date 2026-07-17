@@ -1,8 +1,8 @@
 use accesskit::{Action, ActionData};
 use zode_app_model::{
     reduce_navigation_command, reduce_presentation_command, reduce_tool_command,
-    reduce_transcript_command, AppCommand, NavigationOutcome, PreviewState, PreviewTarget,
-    SettingsCommandOutcome, ShellRoute, ToolCommandOutcome, TranscriptCommandOutcome, ZodeAppState,
+    reduce_transcript_command, AppCommand, NavigationOutcome, SettingsCommandOutcome, ShellRoute,
+    ToolCommandOutcome, TranscriptCommandOutcome, ZodeAppState,
 };
 use zode_app_ui::{
     Composer, EmptyState, Key, KeyEvent, PointerButton, PointerEvent, PointerEventKind,
@@ -11,8 +11,9 @@ use zode_app_ui::{
 };
 
 use super::{
+    external_preview::consume_external_preview_command,
     panel_menu::close_panel_menu_command,
-    session_menu::{close_session_menu_command, session_menu_outside_click_command},
+    session_menu::{consume_session_window_command, session_menu_outside_click_command},
     settings::{reduce_local_settings_command, settings_interaction_viewport},
     DesktopApp,
 };
@@ -26,7 +27,6 @@ use crate::{
         dispatch_key, ime_allowed_for_focus, settings_scroll_delta_for_action,
         settings_scroll_delta_for_key, KeyDispatch, SettingsTouchOutcome,
     },
-    services::ExternalOpenService,
 };
 
 #[cfg(test)]
@@ -99,54 +99,17 @@ fn available_new_session_command(
     )
 }
 
-pub(super) fn consume_external_preview_command(
-    state: &mut zode_app_model::ZodeAppState,
-    external_open: &dyn ExternalOpenService,
-    command: &AppCommand,
-) -> bool {
-    let AppCommand::OpenPreviewExternally {
-        session,
-        relative_path,
-    } = command
-    else {
-        return false;
-    };
-    let valid_session = state.current_session.as_ref() == Some(session)
-        && !session.session_id.starts_with("local-error-")
-        && state.transcripts.contains_key(session);
-    let Some(workspace_uri) = valid_session
-        .then(|| state.available_workspace_for_session(session).cloned())
-        .flatten()
-        .filter(|workspace| workspace.as_str().starts_with("file://"))
-    else {
-        return true;
-    };
-    let target = PreviewTarget {
-        workspace_uri,
-        relative_path: relative_path.clone(),
-    };
-    let Some(preview) = state
-        .presentation
-        .sessions
-        .get_mut(session)
-        .map(|presentation| &mut presentation.preview)
-    else {
-        return true;
-    };
-    if preview.target() != Some(&target) {
-        return true;
-    }
-    if let Err(error) = external_open.open_file(&target.workspace_uri, &target.relative_path) {
-        *preview = PreviewState::Failed {
-            target,
-            message: error.to_string(),
-        };
-    }
-    true
-}
-
 impl DesktopApp {
     pub(super) fn enqueue_command(&mut self, command: AppCommand) {
+        if consume_session_window_command(
+            &mut self.app_state,
+            self.session_window.as_ref(),
+            &command,
+        ) {
+            self.rebuild_frame_snapshot();
+            self.request_redraw();
+            return;
+        }
         if consume_external_preview_command(
             &mut self.app_state,
             self.external_open.as_ref(),
@@ -163,6 +126,11 @@ impl DesktopApp {
                 }
             } else {
                 eprintln!("zode-app: clipboard is unavailable");
+            }
+            if self.app_state.session_copy_menu.is_some() {
+                self.app_state.close_session_action_surfaces();
+                self.rebuild_frame_snapshot();
+                self.request_redraw();
             }
             return;
         }
@@ -229,6 +197,9 @@ impl DesktopApp {
         match input {
             UnifiedInputEvent::Keyboard(event) => self.handle_key_event(event),
             UnifiedInputEvent::Ime(event) => {
+                if self.handle_session_rename_ime(event.clone()) {
+                    return;
+                }
                 if self.handle_settings_search_ime(&event) {
                     return;
                 }
@@ -338,6 +309,9 @@ impl DesktopApp {
         let Some(clipboard) = self.clipboard.clone() else {
             return;
         };
+        if self.paste_session_rename_from_clipboard(clipboard.as_ref()) {
+            return;
+        }
         if self.app_state.project_picker.open
             && self.focused_widget == Some(zode_app_ui::PROJECT_PICKER_SEARCH_ID)
         {
@@ -453,7 +427,8 @@ impl DesktopApp {
             COMPOSER_ID
             | TERMINAL_ID
             | SETTINGS_SEARCH_ID
-            | zode_app_ui::PROJECT_PICKER_SEARCH_ID => {}
+            | zode_app_ui::PROJECT_PICKER_SEARCH_ID
+            | zode_app_ui::HEADER_RENAME_INPUT_ID => {}
             _ => {
                 if let Some(command) = widget_command(&self.app_state, id) {
                     let focus_composer =
@@ -508,6 +483,11 @@ impl DesktopApp {
                 Action::SetValue if id == SETTINGS_SEARCH_ID => {
                     if let Some(ActionData::Value(value)) = request.data {
                         self.set_settings_search_value(value.into_string());
+                    }
+                }
+                Action::SetValue if id == zode_app_ui::HEADER_RENAME_INPUT_ID => {
+                    if let Some(ActionData::Value(value)) = request.data {
+                        self.set_session_rename_value(value.into_string());
                     }
                 }
                 Action::ScrollUp | Action::ScrollDown if id == zode_app_ui::SETTINGS_ROOT_ID => {
@@ -647,6 +627,9 @@ impl DesktopApp {
     }
 
     fn handle_key_event(&mut self, event: KeyEvent) {
+        if self.handle_session_action_key(&event) {
+            return;
+        }
         if self.handle_project_picker_key(&event) {
             return;
         }
@@ -668,10 +651,6 @@ impl DesktopApp {
         }
         if event.pressed && event.key == Key::Escape {
             if let Some(command) = close_panel_menu_command(&self.app_state) {
-                self.enqueue_command(command);
-                return;
-            }
-            if let Some(command) = close_session_menu_command(&self.app_state) {
                 self.enqueue_command(command);
                 return;
             }
@@ -747,6 +726,7 @@ impl DesktopApp {
         let previous_queue_edit = self.app_state.composer.editing_queued_message;
         let project_picker_was_open = self.app_state.project_picker.open;
         let outcome = reduce_navigation_command(&mut self.app_state, command.clone());
+        let session_focus = self.sync_session_action_after_navigation(command);
         self.sync_queue_editor_after_state_change(previous_session.clone(), previous_queue_edit);
         self.prune_queued_payloads();
         let handled = match outcome {
@@ -781,8 +761,9 @@ impl DesktopApp {
         ) {
             self.persist_ui_state();
         }
-        let focus_after =
-            self.sync_project_picker_after_navigation(command, project_picker_was_open);
+        let focus_after = session_focus.or_else(|| {
+            self.sync_project_picker_after_navigation(command, project_picker_was_open)
+        });
         self.refresh_if_session_changed(previous_session);
         self.sync_composer_busy();
         self.rebuild_frame_snapshot();

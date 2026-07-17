@@ -295,11 +295,14 @@ impl WorkspaceSnapshot {
                 }
             }
         };
-        if route == ShellRoute::Conversation {
-            append_header_menu_nodes(&mut nodes, &layout, &mut focus_order, state);
-            append_panel_picker_nodes(&mut nodes, &layout, &mut focus_order, state);
-        }
         append_secondary_nodes(&mut nodes, &layout, &mut focus_order, state);
+        let header_overlay_focus = if route == ShellRoute::Conversation {
+            let focus = append_header_menu_nodes(&mut nodes, &layout, &mut focus_order, state);
+            append_panel_picker_nodes(&mut nodes, &layout, &mut focus_order, state);
+            focus
+        } else {
+            None
+        };
         let mut focused = if split_fallback {
             let close_id = match state.presentation.secondary_pane {
                 Some(SecondaryPane::DocumentPreview) => DOCUMENT_PREVIEW_CLOSE_ID,
@@ -316,6 +319,9 @@ impl WorkspaceSnapshot {
         } else {
             focused
         };
+        if let Some(header_overlay_focus) = header_overlay_focus {
+            focused = Some(header_overlay_focus);
+        }
         if let Some(project_picker) = project_picker {
             if let Some(picker_focus) =
                 append_picker_overlay(&mut nodes, &layout, &mut focus_order, state, project_picker)

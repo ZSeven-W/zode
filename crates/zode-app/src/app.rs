@@ -3,20 +3,22 @@ use std::{collections::BTreeSet, sync::Arc};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
+    event_loop::{ActiveEventLoop, EventLoopProxy},
     keyboard::ModifiersState,
     window::{Window, WindowId},
 };
 use zode_app_model::{ProjectState, ZodeAppState};
 use zode_app_ui::{
-    ComposerController, Insets, ProjectPickerController, TerminalGrid, TerminalPanelController,
-    WidgetId, WorkspaceSnapshot,
+    ComposerController, Insets, ProjectPickerController, SessionRenameController, TerminalGrid,
+    TerminalPanelController, WidgetId, WorkspaceSnapshot,
 };
 
-use crate::services::{ExternalOpenService, LocalExternalOpenService, WorkspaceService};
+use crate::services::{
+    ExternalOpenService, LocalExternalOpenService, NativeSessionWindowService,
+    SessionWindowService, WorkspaceService,
+};
 use crate::{
     accessibility_host::{AccessibilityBridge, AccessibilityHost},
-    bootstrap_state::load_initial_state,
     clipboard::{ClipboardService, NativeClipboardService},
     command_bridge::CommandBridge,
     event_bridge::AgentEventBridge,
@@ -32,12 +34,11 @@ use crate::{
         AppWake, WindowGeometry, WindowState, DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH,
     },
 };
-use zode_app_runtime::{
-    path_to_workspace_uri, workspace_uri_to_path, AppStateStore, LocalAppRuntime, TaskContext,
-};
-use zode_core::{bootstrap::AppBootstrap, config::ConfigManager};
+use zode_app_runtime::{workspace_uri_to_path, AppStateStore, TaskContext};
 use zode_node_protocol::{AgentEndpoint, NodeCapability, UserContent, WorkspaceUri};
 
+#[path = "app/external-preview.rs"]
+mod external_preview;
 mod interaction;
 mod navigation_persistence;
 mod navigation_state;
@@ -50,51 +51,11 @@ mod queue_focus;
 mod session_menu;
 mod settings;
 mod sidebar;
+mod startup;
 mod terminal;
 mod window;
 
-pub fn run_demo() -> Result<(), Box<dyn std::error::Error>> {
-    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let cwd = std::env::current_dir()?;
-    let startup_workspace = path_to_workspace_uri(&cwd)?;
-    let bootstrap = tokio_runtime.block_on(AppBootstrap::new(cwd).resolve())?;
-    let config_dir = ConfigManager::config_dir()?;
-    let projectless_workspace = config_dir.join("task-workspaces");
-    ensure_private_task_root(&projectless_workspace)?;
-    let projectless_workspace_root = path_to_workspace_uri(&projectless_workspace)?;
-    let runtime = {
-        let _guard = tokio_runtime.enter();
-        LocalAppRuntime::new(config_dir, bootstrap, 256)?
-    };
-    let endpoint: Arc<dyn AgentEndpoint> = runtime.endpoint();
-    let state = tokio_runtime.block_on(load_initial_state(
-        endpoint.as_ref(),
-        runtime.capabilities().clone(),
-        startup_workspace,
-        projectless_workspace_root,
-    ))?;
-
-    let event_loop = EventLoop::<AppWake>::with_user_event().build()?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-    let proxy = event_loop.create_proxy();
-    let mut app = DesktopApp::new(state, proxy);
-    let _guard = tokio_runtime.enter();
-    app.attach_endpoint(endpoint);
-    event_loop.run_app(&mut app)?;
-    Ok(())
-}
-
-fn ensure_private_task_root(path: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
+pub use startup::{run_demo, run_demo_for_session};
 
 pub struct DesktopApp {
     app_state: ZodeAppState,
@@ -109,6 +70,7 @@ pub struct DesktopApp {
     agent_events: Option<AgentEventBridge>,
     composer: ComposerController,
     project_picker_controller: ProjectPickerController,
+    session_rename_controller: SessionRenameController,
     /// Full queued payloads stay controller-private so immutable UI snapshots
     /// never retain image base64. `ZodeAppState` stores only lightweight queue
     /// previews keyed by the same session-local message id.
@@ -133,6 +95,7 @@ pub struct DesktopApp {
     window_focused: bool,
     clipboard: Option<Arc<dyn ClipboardService>>,
     external_open: Arc<dyn ExternalOpenService>,
+    session_window: Arc<dyn SessionWindowService>,
     workspace_picker: project_picker::WorkspacePickerEffect,
     app_state_store: Option<AppStateStore>,
     window_geometry: Option<WindowGeometry>,
@@ -267,6 +230,7 @@ impl DesktopApp {
             agent_events: None,
             composer,
             project_picker_controller,
+            session_rename_controller: SessionRenameController::default(),
             queued_payloads: queue::QueuedPayloadStore::default(),
             provisional_sessions: BTreeSet::new(),
             terminal_grid: TerminalGrid::new(80, 24),
@@ -285,6 +249,7 @@ impl DesktopApp {
             window_focused: false,
             clipboard,
             external_open: Arc::new(LocalExternalOpenService),
+            session_window: Arc::new(NativeSessionWindowService),
             workspace_picker,
             app_state_store,
             window_geometry,
@@ -297,6 +262,10 @@ impl DesktopApp {
 
     pub fn set_external_open_service(&mut self, service: Arc<dyn ExternalOpenService>) {
         self.external_open = service;
+    }
+
+    pub fn set_session_window_service(&mut self, service: Arc<dyn SessionWindowService>) {
+        self.session_window = service;
     }
 
     pub fn set_workspace_service(&mut self, service: Arc<dyn WorkspaceService>) {

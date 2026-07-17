@@ -3,7 +3,7 @@ use jian_widgets::{Point2D, Rect};
 use zode_app_model::ShellPage;
 use zode_app_ui::{
     FocusDirection, Key, KeyEvent, TouchEvent, TouchPhase, WidgetId, WorkspaceSnapshot,
-    COMPOSER_ID, PROJECT_PICKER_SEARCH_ID, TERMINAL_ID,
+    COMPOSER_ID, HEADER_RENAME_INPUT_ID, PROJECT_PICKER_SEARCH_ID, TERMINAL_ID,
 };
 
 use crate::event_map::{route_key_event, InputRoute};
@@ -140,7 +140,36 @@ pub fn ime_allowed_for_focus(
         ShellPage::Terminal => focused == Some(TERMINAL_ID),
         ShellPage::Settings => focused == Some(zode_app_ui::SETTINGS_SEARCH_ID),
         ShellPage::Conversation | ShellPage::Review | ShellPage::ComingSoon => {
-            focused == Some(COMPOSER_ID) || focused == Some(PROJECT_PICKER_SEARCH_ID)
+            focused == Some(COMPOSER_ID)
+                || focused == Some(PROJECT_PICKER_SEARCH_ID)
+                || focused == Some(HEADER_RENAME_INPUT_ID)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zode_app_model::ShellPage;
+    use zode_app_ui::{WidgetId, HEADER_RENAME_INPUT_ID};
+
+    use super::ime_allowed_for_focus;
+
+    #[test]
+    fn task_rename_input_enables_ime_only_while_the_window_is_focused() {
+        assert!(ime_allowed_for_focus(
+            ShellPage::Conversation,
+            Some(HEADER_RENAME_INPUT_ID),
+            true,
+        ));
+        assert!(!ime_allowed_for_focus(
+            ShellPage::Conversation,
+            Some(HEADER_RENAME_INPUT_ID),
+            false,
+        ));
+        assert!(!ime_allowed_for_focus(
+            ShellPage::Settings,
+            Some(WidgetId(HEADER_RENAME_INPUT_ID.0)),
+            true,
+        ));
     }
 }

@@ -19,7 +19,7 @@ pub(crate) fn reduce_sidebar_navigation(
                 state.pinned_sessions.remove(session);
             }
             if state.session_menu.as_ref() == Some(session) {
-                state.session_menu = None;
+                state.close_session_action_surfaces();
             }
             NavigationOutcome::NeedsEffect
         }
@@ -37,7 +37,7 @@ pub(crate) fn reduce_sidebar_navigation(
                 state.archived_sessions.remove(session);
             }
             if state.session_menu.as_ref() == Some(session) {
-                state.session_menu = None;
+                state.close_session_action_surfaces();
             }
             if *archived && state.current_session.as_ref() == Some(session) {
                 state.current_session = None;

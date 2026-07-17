@@ -30,6 +30,13 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error:
             Ok(())
         }
         Some("--demo") => zode_app::app::run_demo(),
+        Some("--session") => {
+            let session_id = args.next().ok_or("--session requires a task id")?;
+            if args.next().is_some() {
+                return Err("unexpected arguments after task id".into());
+            }
+            zode_app::app::run_demo_for_session(session_id)
+        }
         Some(argument) => Err(format!("unknown argument: {argument}").into()),
         None => zode_app::app::run_demo(),
     }

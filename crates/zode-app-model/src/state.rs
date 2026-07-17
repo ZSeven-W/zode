@@ -49,6 +49,15 @@ pub struct ReviewState {
     pub dirty: bool,
 }
 
+/// Projected state for the task-title rename dialog. The native controller
+/// owns cursor/selection/IME details while this value keeps paint, hit testing,
+/// and accessibility on the same immutable snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRenameState {
+    pub session: SessionLocator,
+    pub draft: String,
+}
+
 /// Terminal panel availability and visibility.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TerminalState {
@@ -217,6 +226,10 @@ pub struct ZodeAppState {
     pub current_session: Option<SessionLocator>,
     /// Session whose task-actions menu is currently visible in the thread header.
     pub session_menu: Option<SessionLocator>,
+    /// Session whose copy-information submenu is open.
+    pub session_copy_menu: Option<SessionLocator>,
+    /// Active task-title rename dialog, if any.
+    pub session_rename: Option<SessionRenameState>,
     pub pending_session_delete: Option<SessionLocator>,
     pub threads: Vec<ThreadSummary>,
     pub pinned_sessions: BTreeSet<SessionLocator>,
@@ -241,6 +254,12 @@ pub struct ZodeAppState {
 }
 
 impl ZodeAppState {
+    pub fn close_session_action_surfaces(&mut self) {
+        self.session_menu = None;
+        self.session_copy_menu = None;
+        self.session_rename = None;
+    }
+
     pub fn available_workspace(&self, workspace_uri: &WorkspaceUri) -> bool {
         self.projects
             .iter()
@@ -340,6 +359,8 @@ pub fn demo_state() -> ZodeAppState {
         projectless_workspace_root: None,
         current_session: None,
         session_menu: None,
+        session_copy_menu: None,
+        session_rename: None,
         pending_session_delete: None,
         threads: Vec::new(),
         pinned_sessions: BTreeSet::new(),

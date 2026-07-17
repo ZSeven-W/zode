@@ -114,6 +114,7 @@ impl DesktopApp {
                 self.terminal_controller.selection(),
                 &project_picker,
                 self.project_picker_controller.input_state(),
+                self.session_rename_controller.input_state(),
                 self.hovered_widget,
                 &theme,
             );
