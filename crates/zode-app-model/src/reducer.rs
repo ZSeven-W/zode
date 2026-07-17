@@ -234,7 +234,7 @@ pub fn reduce_navigation_command(
                 return NavigationOutcome::Ignored;
             }
             state.pending_session_delete = Some(session);
-            NavigationOutcome::Applied
+            NavigationOutcome::NeedsEffect
         }
         AppCommand::CancelDeleteSession => {
             state.pending_session_delete = None;
