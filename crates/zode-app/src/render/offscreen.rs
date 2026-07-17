@@ -48,20 +48,21 @@ pub fn render_offscreen_with_fonts(
     canvas.clear(skia_safe::Color::WHITE);
     canvas.scale((scale, scale));
 
-    let mut backend = NativeBackend::new(scale);
-    let mut painter = FramePainter::new(&mut backend, canvas);
     let theme = match state.host.system_theme {
         SystemTheme::Light => ZodeTheme::light(),
         SystemTheme::Dark => ZodeTheme::dark(),
     };
-    WorkspaceShell::paint(
-        &mut painter,
-        Rect::xywh(0.0, 0.0, width as f32, height as f32),
-        Insets::ZERO,
-        state,
-        &theme,
-    );
-    drop(painter);
+    {
+        let mut backend = NativeBackend::new(scale);
+        let mut painter = FramePainter::new(&mut backend, canvas);
+        WorkspaceShell::paint(
+            &mut painter,
+            Rect::xywh(0.0, 0.0, width as f32, height as f32),
+            Insets::ZERO,
+            state,
+            &theme,
+        );
+    }
     surface.encode_png()
 }
 

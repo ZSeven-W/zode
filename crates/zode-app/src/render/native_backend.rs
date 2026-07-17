@@ -68,6 +68,7 @@ impl NativeBackend {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_image(
         &mut self,
         canvas: &skia_safe::Canvas,
