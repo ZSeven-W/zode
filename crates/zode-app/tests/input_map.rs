@@ -8,13 +8,14 @@ use winit::{
 use zode_app::event_map::{
     composer_outcome_command, is_paste_shortcut_for, map_ime, map_ime_input, map_ime_input_owned,
     map_key, map_keyboard, map_pointer_button, map_pointer_move, map_system_theme, map_touch,
-    map_wheel, route_key_event, terminal_shortcut_command, InputRoute, ShortcutPlatform,
+    map_wheel, route_key_event, terminal_shortcut_command, window_theme_override, InputRoute,
+    ShortcutPlatform,
 };
 use zode_app::input_dispatch::{
     ime_allowed_for_focus, settings_scroll_delta_for_action, settings_scroll_delta_for_key,
     ScrollTouchOutcome, ScrollTouchTracker,
 };
-use zode_app_model::{AppCommand, AttachmentMetadata, SystemTheme};
+use zode_app_model::{AppCommand, AttachmentMetadata, SystemTheme, ThemePreference};
 use zode_app_ui::{
     ComposerOutcome, ComposerSubmission, FocusDirection, ImeEvent, Key, KeyEvent, Modifiers,
     PointerButton, PointerEvent, PointerEventKind, TouchEvent, TouchPhase, UnifiedInputEvent,
@@ -347,6 +348,19 @@ fn startup_theme_mapping_preserves_the_os_observation() {
         SystemTheme::Light
     );
     assert_eq!(map_system_theme(None), SystemTheme::Light);
+}
+
+#[test]
+fn native_window_theme_follows_the_user_preference() {
+    assert_eq!(window_theme_override(ThemePreference::System), None);
+    assert_eq!(
+        window_theme_override(ThemePreference::Light),
+        Some(WinitTheme::Light)
+    );
+    assert_eq!(
+        window_theme_override(ThemePreference::Dark),
+        Some(WinitTheme::Dark)
+    );
 }
 
 #[test]

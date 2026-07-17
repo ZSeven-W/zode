@@ -94,6 +94,7 @@ pub(super) fn footer(section: EnvironmentSection, rect: Rect) -> EnvironmentSect
 pub(super) fn paint(
     painter: &mut dyn Painter,
     layout: &EnvironmentSectionLayout,
+    armed_stop_process_id: Option<&str>,
     theme: &ZodeTheme,
 ) {
     if layout.footer {
@@ -116,7 +117,7 @@ pub(super) fn paint(
         );
     }
     for row in &layout.rows {
-        row::paint(painter, row, theme);
+        row::paint(painter, row, armed_stop_process_id, theme);
     }
     if layout.separator {
         let separator_y = layout.rect.max_y() + SECTION_GAP / 2.0;

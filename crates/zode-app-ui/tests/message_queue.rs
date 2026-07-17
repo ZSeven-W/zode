@@ -170,6 +170,177 @@ fn queue_ids_include_session_identity() {
     assert_ne!(first.rows[0].more_id, second.rows[0].more_id);
 }
 
+#[test]
+fn reorder_menu_omits_boundary_actions_and_a_middle_row_shows_all_five() {
+    let rect = Rect::xywh(100.0, 200.0, 736.0, 400.0);
+
+    // First of three: 置顶/上移 are boundary no-ops and omitted, 下移 remains.
+    let (mut state, _) = queue_state(3);
+    state.composer.queue_menu = Some(QueuedMessageId::from_u64(1));
+    let menu = Composer::queue_layout(rect, &state).unwrap().menu.unwrap();
+    assert!(menu.front.is_none());
+    assert!(menu.up.is_none());
+    assert!(menu.down.is_some());
+
+    // Middle of three: every reorder action applies.
+    state.composer.queue_menu = Some(QueuedMessageId::from_u64(2));
+    let menu = Composer::queue_layout(rect, &state).unwrap().menu.unwrap();
+    assert!(menu.front.is_some());
+    assert!(menu.up.is_some());
+    assert!(menu.down.is_some());
+
+    // Last of three: 下移 is the boundary no-op and is omitted.
+    state.composer.queue_menu = Some(QueuedMessageId::from_u64(3));
+    let menu = Composer::queue_layout(rect, &state).unwrap().menu.unwrap();
+    assert!(menu.front.is_some());
+    assert!(menu.up.is_some());
+    assert!(menu.down.is_none());
+
+    // A single-item queue has no valid reorder target at all.
+    let (mut single_state, _) = queue_state(1);
+    single_state.composer.queue_menu = Some(QueuedMessageId::from_u64(1));
+    let menu = Composer::queue_layout(rect, &single_state)
+        .unwrap()
+        .menu
+        .unwrap();
+    assert!(menu.front.is_none());
+    assert!(menu.up.is_none());
+    assert!(menu.down.is_none());
+}
+
+#[test]
+fn reorder_menu_items_map_to_reorder_commands_only_when_shown() {
+    let rect = Rect::xywh(100.0, 200.0, 736.0, 400.0);
+    let (mut state, session) = queue_state(3);
+    let middle = QueuedMessageId::from_u64(2);
+    state.composer.queue_menu = Some(middle);
+    let menu = Composer::queue_layout(rect, &state).unwrap().menu.unwrap();
+
+    assert_eq!(
+        Composer::command_for_widget(&state, menu.front_id),
+        Some(AppCommand::ReorderQueuedMessage {
+            session: session.clone(),
+            id: middle,
+            op: zode_app_model::QueueReorderOp::Front,
+        })
+    );
+    assert_eq!(
+        Composer::command_for_widget(&state, menu.up_id),
+        Some(AppCommand::ReorderQueuedMessage {
+            session: session.clone(),
+            id: middle,
+            op: zode_app_model::QueueReorderOp::Up,
+        })
+    );
+    assert_eq!(
+        Composer::command_for_widget(&state, menu.down_id),
+        Some(AppCommand::ReorderQueuedMessage {
+            session: session.clone(),
+            id: middle,
+            op: zode_app_model::QueueReorderOp::Down,
+        })
+    );
+
+    // The first row still allocates a stable `front_id`/`up_id` (ids are
+    // always computed, see `menu_layout`), but front/up are boundary no-ops
+    // there: layout leaves their `Rect` unset, and `command_for_widget` must
+    // agree and refuse to synthesize a reorder command for either id.
+    let first = QueuedMessageId::from_u64(1);
+    state.composer.queue_menu = Some(first);
+    let first_menu = Composer::queue_layout(rect, &state).unwrap().menu.unwrap();
+    assert!(first_menu.front.is_none());
+    assert!(first_menu.up.is_none());
+    assert_eq!(
+        Composer::command_for_widget(&state, first_menu.front_id),
+        None
+    );
+    assert_eq!(Composer::command_for_widget(&state, first_menu.up_id), None);
+}
+
+#[test]
+fn menu_focus_order_lists_only_visible_items_top_to_bottom() {
+    let rect = Rect::xywh(100.0, 200.0, 736.0, 400.0);
+    let (mut state, _) = queue_state(3);
+
+    state.composer.queue_menu = Some(QueuedMessageId::from_u64(1));
+    let first_menu = Composer::queue_layout(rect, &state).unwrap().menu.unwrap();
+    assert_eq!(
+        first_menu.focus_order(),
+        vec![first_menu.down_id, first_menu.edit_id, first_menu.close_id]
+    );
+
+    state.composer.queue_menu = Some(QueuedMessageId::from_u64(2));
+    let middle_menu = Composer::queue_layout(rect, &state).unwrap().menu.unwrap();
+    assert_eq!(
+        middle_menu.focus_order(),
+        vec![
+            middle_menu.front_id,
+            middle_menu.up_id,
+            middle_menu.down_id,
+            middle_menu.edit_id,
+            middle_menu.close_id,
+        ]
+    );
+}
+
+#[test]
+fn front_of_queue_badge_paints_only_for_a_prioritized_head_message() {
+    let (mut state, session) = queue_state(2);
+    state
+        .message_queues
+        .get_mut(&session)
+        .unwrap()
+        .move_to_front(QueuedMessageId::from_u64(2));
+    assert!(state.message_queues[&session].items[0].prioritized);
+
+    let rect = Rect::xywh(0.0, 0.0, 736.0, 183.0);
+    let mut painter = CapturePainter::default();
+    Composer::paint_input_with_app_context(
+        &mut painter,
+        rect,
+        ComposerController::fixture("").input_state(),
+        &state,
+        None,
+        &ZodeTheme::light(),
+    );
+
+    let theme = ZodeTheme::light();
+    assert!(painter
+        .fills
+        .iter()
+        .any(|(_, _, color)| *color == theme.tokens.accent));
+    assert!(painter.texts.iter().any(|text| text == "置顶"));
+
+    let snapshot = WorkspaceSnapshot::build(&state, 1_440.0, 1_080.0, Insets::ZERO);
+    let layout = Composer::queue_layout(snapshot.layout.composer, &state).unwrap();
+    let head_node = snapshot.node(layout.rows[0].row_id).unwrap();
+    assert!(head_node
+        .value
+        .as_deref()
+        .is_some_and(|value| value.contains("已置顶")));
+}
+
+#[test]
+fn a_naturally_advanced_head_message_never_shows_the_priority_badge() {
+    // The first message reaches the front purely by FIFO order (nothing was
+    // ever reordered or priority-enqueued), so `prioritized` stays false and
+    // no badge should paint even though it is the head of the queue.
+    let (state, _) = queue_state(2);
+    let rect = Rect::xywh(0.0, 0.0, 736.0, 183.0);
+    let mut painter = CapturePainter::default();
+
+    Composer::paint_input_with_app_context(
+        &mut painter,
+        rect,
+        ComposerController::fixture("").input_state(),
+        &state,
+        None,
+        &ZodeTheme::light(),
+    );
+
+    assert!(!painter.texts.iter().any(|text| text == "置顶"));
+}
+
 #[derive(Default)]
 struct CapturePainter {
     texts: Vec<String>,

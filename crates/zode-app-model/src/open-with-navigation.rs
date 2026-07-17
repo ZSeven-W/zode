@@ -19,6 +19,7 @@ pub(crate) fn reduce_open_with_navigation(
                 )
             {
                 state.open_with.applications = LoadState::Loading;
+                state.open_with.icons.clear();
             }
             NavigationOutcome::Applied
         }
@@ -27,13 +28,23 @@ pub(crate) fn reduce_open_with_navigation(
                 return Some(NavigationOutcome::Ignored);
             }
             state.open_with.applications = LoadState::Loading;
+            state.open_with.icons.clear();
             NavigationOutcome::NeedsEffect
         }
-        AppCommand::ExternalApplicationsLoaded(applications) => {
+        AppCommand::ExternalApplicationsLoaded(catalog) => {
             if !matches!(state.open_with.applications, LoadState::Loading) {
                 return Some(NavigationOutcome::Ignored);
             }
-            state.open_with.applications = LoadState::Ready(applications.clone());
+            state.open_with.applications = LoadState::Ready(catalog.applications.clone());
+            state.open_with.icons = catalog
+                .icons
+                .iter()
+                .filter(|icon| {
+                    !icon.encoded_png().is_empty()
+                        && catalog.applications.contains(&icon.application)
+                })
+                .cloned()
+                .collect();
             NavigationOutcome::Applied
         }
         AppCommand::ExternalApplicationsFailed(message) => {
@@ -41,6 +52,23 @@ pub(crate) fn reduce_open_with_navigation(
                 return Some(NavigationOutcome::Ignored);
             }
             state.open_with.applications = LoadState::Failed(message.clone());
+            state.open_with.icons.clear();
+            NavigationOutcome::Applied
+        }
+        AppCommand::SelectExternalApplication { application } => {
+            if current_local_workspace(state).is_none() || !state.open_with.menu_open {
+                return Some(NavigationOutcome::Ignored);
+            }
+            let application_is_available = state
+                .open_with
+                .applications
+                .ready()
+                .is_some_and(|applications| applications.contains(application));
+            if !application_is_available {
+                return Some(NavigationOutcome::Ignored);
+            }
+            state.open_with.preferred = Some(*application);
+            state.close_session_action_surfaces();
             NavigationOutcome::Applied
         }
         AppCommand::OpenWorkspaceExternally {
@@ -127,21 +155,42 @@ mod tests {
     }
 
     #[test]
+    fn selecting_an_application_updates_the_primary_action_without_an_effect() {
+        let (mut state, _) = state_with_workspace();
+        state.open_with.menu_open = true;
+        state.open_with.applications =
+            LoadState::Ready(vec![ExternalApplication::Finder, ExternalApplication::Zed]);
+
+        assert_eq!(
+            reduce_open_with_navigation(
+                &mut state,
+                &AppCommand::SelectExternalApplication {
+                    application: ExternalApplication::Zed,
+                },
+            ),
+            Some(NavigationOutcome::Applied)
+        );
+        assert_eq!(state.open_with.preferred, Some(ExternalApplication::Zed));
+        assert!(!state.open_with.menu_open);
+    }
+
+    #[test]
     fn selection_is_rejected_when_the_scanned_application_is_absent() {
-        let (mut state, workspace) = state_with_workspace();
+        let (mut state, _) = state_with_workspace();
+        state.open_with.menu_open = true;
         state.open_with.applications = LoadState::Ready(vec![ExternalApplication::Finder]);
 
         assert_eq!(
             reduce_open_with_navigation(
                 &mut state,
-                &AppCommand::OpenWorkspaceExternally {
-                    workspace_uri: workspace,
+                &AppCommand::SelectExternalApplication {
                     application: ExternalApplication::Zed,
                 },
             ),
             Some(NavigationOutcome::Ignored)
         );
         assert_eq!(state.open_with.preferred, None);
+        assert!(state.open_with.menu_open);
     }
 
     #[test]

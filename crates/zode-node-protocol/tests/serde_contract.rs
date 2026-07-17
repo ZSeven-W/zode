@@ -2,8 +2,8 @@ use serde_json::{json, Value};
 use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentEvent, AgentEventKind, ApprovalDecision, ApprovalMode,
     EndpointError, EndpointErrorKind, NodeId, ProtocolError, RuntimeOptions, SandboxMode,
-    SessionLocator, TerminalId, ToolCall, ToolStatus, TurnId, UsageSnapshot, UserContent,
-    WorkspaceUri, PROTOCOL_VERSION,
+    SessionLocator, SubagentSnapshot, SubagentStatus, TerminalId, ToolCall, ToolStatus, TurnId,
+    UsageSnapshot, UserContent, WorkspaceUri, PROTOCOL_VERSION,
 };
 
 const NODE_ID: &str = "00000000-0000-0000-0000-000000000001";
@@ -67,6 +67,8 @@ fn all_command_variants_have_golden_camel_case_wire_shapes() {
             command(
                 AgentCommandKind::CreateSession {
                     workspace_uri: WorkspaceUri::new("file:///Users/fini/project").unwrap(),
+                    project_uri: None,
+                    projectless: false,
                     model: None,
                 },
                 None,
@@ -198,6 +200,14 @@ fn all_command_variants_have_golden_camel_case_wire_shapes() {
             }),
         ),
         (
+            command(AgentCommandKind::ReloadProviderConfiguration, None),
+            json!({
+                "version": 1,
+                "session": { "nodeId": NODE_ID, "sessionId": "session-1" },
+                "type": "reloadProviderConfiguration"
+            }),
+        ),
+        (
             command(
                 AgentCommandKind::SetEffort {
                     effort: "high".into(),
@@ -247,7 +257,7 @@ fn all_command_variants_have_golden_camel_case_wire_shapes() {
         ),
     ];
 
-    assert_eq!(cases.len(), 12);
+    assert_eq!(cases.len(), 13);
     for (command, expected) in cases {
         assert_eq!(serde_json::to_value(&command).unwrap(), expected);
         let decoded = AgentCommand::decode_json(&expected.to_string()).unwrap();
@@ -354,6 +364,72 @@ fn all_known_event_variants_have_golden_camel_case_wire_shapes() {
             }),
         ),
         (
+            event(AgentEventKind::SubagentUpdate {
+                subagent: SubagentSnapshot {
+                    id: "1".into(),
+                    agent_type: "researcher".into(),
+                    display_name: "researcher".into(),
+                    depth: 0,
+                    status: SubagentStatus::Running,
+                    tokens: 1_234,
+                    turn_id: turn_id(),
+                    completed_at_ms: None,
+                    result_summary: None,
+                },
+            }),
+            json!({
+                "version": 1,
+                "session": { "nodeId": NODE_ID, "sessionId": "session-1" },
+                "turnId": TURN_ID,
+                "sequence": 7,
+                "type": "subagentUpdate",
+                "subagent": {
+                    "id": "1",
+                    "agentType": "researcher",
+                    "displayName": "researcher",
+                    "depth": 0,
+                    "status": "running",
+                    "tokens": 1234,
+                    "turnId": TURN_ID,
+                    "completedAtMs": null,
+                    "resultSummary": null
+                }
+            }),
+        ),
+        (
+            event(AgentEventKind::SubagentUpdate {
+                subagent: SubagentSnapshot {
+                    id: "2".into(),
+                    agent_type: "general-purpose".into(),
+                    display_name: "Scan home large".into(),
+                    depth: 0,
+                    status: SubagentStatus::Completed,
+                    tokens: 9_001,
+                    turn_id: turn_id(),
+                    completed_at_ms: Some(1_752_700_000_000),
+                    result_summary: Some("Found 3 large directories under ~".into()),
+                },
+            }),
+            json!({
+                "version": 1,
+                "session": { "nodeId": NODE_ID, "sessionId": "session-1" },
+                "turnId": TURN_ID,
+                "sequence": 7,
+                "type": "subagentUpdate",
+                "subagent": {
+                    "id": "2",
+                    "agentType": "general-purpose",
+                    "displayName": "Scan home large",
+                    "depth": 0,
+                    "status": "completed",
+                    "tokens": 9001,
+                    "turnId": TURN_ID,
+                    "completedAtMs": 1752700000000i64,
+                    "resultSummary": "Found 3 large directories under ~"
+                }
+            }),
+        ),
+        (
             event(AgentEventKind::DiffInvalidated),
             json!({
                 "version": 1,
@@ -429,7 +505,7 @@ fn all_known_event_variants_have_golden_camel_case_wire_shapes() {
         ),
     ];
 
-    assert_eq!(cases.len(), 10);
+    assert_eq!(cases.len(), 12);
     for (event, expected) in cases {
         assert_eq!(serde_json::to_value(&event).unwrap(), expected);
         let decoded = AgentEvent::decode_json(&expected.to_string()).unwrap();
@@ -496,6 +572,8 @@ fn option_wire_policy_omits_command_turn_id_but_keeps_dto_nulls() {
     let command = command(
         AgentCommandKind::CreateSession {
             workspace_uri: WorkspaceUri::new("file:///tmp/project").unwrap(),
+            project_uri: None,
+            projectless: false,
             model: None,
         },
         None,
@@ -649,6 +727,40 @@ fn public_deserialize_enforces_command_and_event_validation() {
         .unwrap()
         .remove("turnId");
     assert!(serde_json::from_value::<AgentEvent>(missing_event_turn_id).is_err());
+}
+
+#[test]
+fn create_session_affiliation_is_optional_and_backward_compatible() {
+    let legacy = json!({
+        "version": 1,
+        "session": { "nodeId": NODE_ID, "sessionId": "session-1" },
+        "type": "createSession",
+        "workspaceUri": "file:///repo/worktree",
+        "model": null
+    });
+    let decoded = AgentCommand::decode_json(&legacy.to_string()).unwrap();
+    assert!(matches!(
+        decoded.kind,
+        AgentCommandKind::CreateSession {
+            project_uri: None,
+            projectless: false,
+            ..
+        }
+    ));
+
+    let affiliated = command(
+        AgentCommandKind::CreateSession {
+            workspace_uri: WorkspaceUri::new("file:///repo/worktree").unwrap(),
+            project_uri: Some(WorkspaceUri::new("file:///repo/project").unwrap()),
+            projectless: false,
+            model: None,
+        },
+        None,
+    );
+    let value = serde_json::to_value(affiliated).unwrap();
+    assert_eq!(value["workspaceUri"], "file:///repo/worktree");
+    assert_eq!(value["projectUri"], "file:///repo/project");
+    assert!(value.get("projectless").is_none());
 }
 
 #[test]

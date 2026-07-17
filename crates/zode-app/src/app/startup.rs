@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use winit::event_loop::{ControlFlow, EventLoop};
 use zode_app_model::{reduce_navigation_command, AppCommand, NavigationOutcome};
-use zode_app_runtime::{path_to_workspace_uri, LocalAppRuntime};
+use zode_app_runtime::{path_to_workspace_uri, AppStateStore, LocalAppRuntime};
 use zode_core::{bootstrap::AppBootstrap, config::ConfigManager};
 use zode_node_protocol::AgentEndpoint;
 
@@ -29,16 +29,25 @@ fn run_demo_with_session(session_id: Option<String>) -> Result<(), Box<dyn std::
     let projectless_workspace = config_dir.join("task-workspaces");
     ensure_private_task_root(&projectless_workspace)?;
     let projectless_workspace_root = path_to_workspace_uri(&projectless_workspace)?;
+    let persisted = match AppStateStore::new(&config_dir).load() {
+        Ok(state) => Some(state),
+        Err(error) => {
+            eprintln!("zode-app: task ownership state could not be loaded: {error}");
+            None
+        }
+    };
     let runtime = {
         let _guard = tokio_runtime.enter();
         LocalAppRuntime::new(config_dir, bootstrap, 256)?
     };
     let endpoint: Arc<dyn AgentEndpoint> = runtime.endpoint();
+    let browser_session = runtime.browser_session();
     let mut state = tokio_runtime.block_on(load_initial_state(
         endpoint.as_ref(),
         runtime.capabilities().clone(),
         startup_workspace,
         projectless_workspace_root,
+        persisted.as_ref(),
     ))?;
     state.provider_setup_required = provider_setup_required;
 
@@ -63,6 +72,7 @@ fn run_demo_with_session(session_id: Option<String>) -> Result<(), Box<dyn std::
     }
     let _guard = tokio_runtime.enter();
     app.attach_endpoint(endpoint);
+    app.attach_browser_session(browser_session);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

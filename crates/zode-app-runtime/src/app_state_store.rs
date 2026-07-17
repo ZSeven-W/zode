@@ -56,6 +56,11 @@ pub struct AppStateFile {
     pub version: u32,
     pub last_session: Option<String>,
     pub sessions: BTreeMap<String, SessionUiState>,
+    /// Maps a task to the project that owns it in navigation. The execution
+    /// cwd remains in session metadata and may point at an isolated worktree.
+    pub thread_workspace_root_hints: BTreeMap<String, WorkspaceUri>,
+    /// Tasks deliberately created without an owning project.
+    pub projectless_session_ids: BTreeSet<String>,
     pub collapsed_workspaces: BTreeSet<String>,
     pub pinned_workspaces: BTreeSet<WorkspaceUri>,
     pub project_display_mode: ProjectDisplayMode,
@@ -73,6 +78,8 @@ impl Default for AppStateFile {
             version: APP_STATE_VERSION,
             last_session: None,
             sessions: BTreeMap::new(),
+            thread_workspace_root_hints: BTreeMap::new(),
+            projectless_session_ids: BTreeSet::new(),
             collapsed_workspaces: BTreeSet::new(),
             pinned_workspaces: BTreeSet::new(),
             project_display_mode: ProjectDisplayMode::default(),
@@ -140,12 +147,36 @@ impl AppStateFile {
             .map(|id| id.as_ref().to_owned())
             .collect();
         self.sessions.retain(|id, _| existing.contains(id));
+        self.thread_workspace_root_hints
+            .retain(|id, _| existing.contains(id));
+        self.projectless_session_ids
+            .retain(|id| existing.contains(id));
         if self
             .last_session
             .as_ref()
             .is_some_and(|id| !existing.contains(id))
         {
             self.last_session = None;
+        }
+    }
+
+    pub fn set_session_affiliation(
+        &mut self,
+        session_id: &str,
+        project_uri: Option<WorkspaceUri>,
+        projectless: bool,
+    ) {
+        if projectless {
+            self.projectless_session_ids.insert(session_id.to_owned());
+            self.thread_workspace_root_hints.remove(session_id);
+        } else {
+            self.projectless_session_ids.remove(session_id);
+            if let Some(project_uri) = project_uri {
+                self.thread_workspace_root_hints
+                    .insert(session_id.to_owned(), project_uri);
+            } else {
+                self.thread_workspace_root_hints.remove(session_id);
+            }
         }
     }
 }

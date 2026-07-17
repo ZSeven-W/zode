@@ -2,7 +2,10 @@ use jian_widgets::{components::popover::Popover, HorizontalAlign, Painter, Point
 use zode_app_model::{AppCommand, ComposerFooterMenu, SettingsCategory, ShellRoute, ZodeAppState};
 use zode_node_protocol::{ApprovalMode, SandboxMode};
 
-use crate::{paint_single_line, stable_widget_id, RectExt, SemanticIcon, WidgetId, ZodeTheme};
+use crate::{
+    paint_elevated_surface, paint_single_line, stable_widget_id, RectExt, SemanticIcon, WidgetId,
+    ZodeTheme,
+};
 
 #[path = "footer-entries.rs"]
 mod footer_entries;
@@ -31,6 +34,7 @@ pub const COMPOSER_MODEL_MODELS_ID: WidgetId = WidgetId(8_637);
 pub const COMPOSER_MODEL_EFFORTS_ID: WidgetId = WidgetId(8_638);
 pub const COMPOSER_MODEL_SPEEDS_ID: WidgetId = WidgetId(8_639);
 pub const COMPOSER_MODEL_BACK_ID: WidgetId = WidgetId(8_640);
+pub const COMPOSER_MODEL_ADD_ID: WidgetId = WidgetId(8_641);
 
 const MODEL_NAMESPACE: u8 = 0x7d;
 const CONTROL_H: f32 = 28.0;
@@ -261,7 +265,12 @@ impl ComposerFooterMenuWidget {
             && state.provider_setup_required
         {
             return Some(AppCommand::Navigate(ShellRoute::Settings(
-                SettingsCategory::Configuration,
+                SettingsCategory::ProviderModels,
+            )));
+        }
+        if menu == ComposerFooterMenu::ModelModels && id == COMPOSER_MODEL_ADD_ID {
+            return Some(AppCommand::Navigate(ShellRoute::Settings(
+                SettingsCategory::ProviderModels,
             )));
         }
         if runtime_controls_locked(state) {
@@ -336,6 +345,7 @@ impl ComposerFooterMenuWidget {
             hovered,
             theme,
         );
+        let (permission_semantic, permission_color) = permission_visual(state, theme);
         let permission_icon = Rect::xywh(
             layout.permission.origin.x + 8.0,
             layout.permission.origin.y + 6.0,
@@ -343,11 +353,11 @@ impl ComposerFooterMenuWidget {
             16.0,
         );
         painter.stroke_svg_path(
-            SemanticIcon::ShieldAlert.path(),
+            permission_semantic.path(),
             permission_icon.origin,
             permission_icon.size.x,
-            theme.composer_permission,
-            SemanticIcon::ShieldAlert.stroke_width(),
+            permission_color,
+            permission_semantic.stroke_width(),
         );
         paint_single_line(
             painter,
@@ -359,8 +369,8 @@ impl ComposerFooterMenuWidget {
                 layout.permission.size.y,
             ),
             FOOTER_LABEL_SIZE,
-            500,
-            theme.composer_permission,
+            400,
+            permission_color,
             HorizontalAlign::Start,
         );
 
@@ -448,17 +458,11 @@ impl ComposerFooterMenuWidget {
         hovered: Option<WidgetId>,
         theme: &ZodeTheme,
     ) {
-        painter.fill_drop_shadow(
-            Rect::xywh(
-                layout.surface.origin.x,
-                layout.surface.origin.y + 2.0,
-                layout.surface.size.x,
-                layout.surface.size.y,
-            ),
-            12.0,
-            18.0,
-            theme.tokens.foreground.with_alpha(0.11),
-        );
+        // `Popover::paint` fills/strokes at its own fixed 6.0 radius
+        // (`jian_widgets::components::popover`, which equals `tokens.radius`
+        // here) - the shadow now matches that instead of the previous ad hoc
+        // 12.0.
+        paint_elevated_surface(painter, layout.surface, theme.tokens.radius, theme);
         Popover.paint(painter, layout.surface, &theme.tokens);
         painter.save();
         painter.clip_rect(layout.surface);
@@ -567,6 +571,28 @@ impl ComposerFooterMenuWidget {
             }
         }
         painter.restore();
+    }
+}
+
+fn permission_visual(
+    state: &ZodeAppState,
+    theme: &ZodeTheme,
+) -> (SemanticIcon, jian_widgets::Color) {
+    match (
+        state.composer.approval_mode,
+        state.composer.sandbox_mode,
+        state.composer.sandbox_network,
+    ) {
+        (ApprovalMode::Request, SandboxMode::WorkspaceWrite, false) => {
+            (SemanticIcon::Host, theme.tokens.muted_foreground)
+        }
+        (ApprovalMode::Auto, SandboxMode::WorkspaceWrite, true) => {
+            (SemanticIcon::Refresh, theme.tokens.muted_foreground)
+        }
+        (ApprovalMode::Full, SandboxMode::Off, _) => {
+            (SemanticIcon::ShieldAlert, theme.composer_permission)
+        }
+        _ => (SemanticIcon::Settings, theme.tokens.muted_foreground),
     }
 }
 

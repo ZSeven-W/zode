@@ -1,6 +1,9 @@
+use zode_node_protocol::SessionLocator;
+
 use crate::{
-    AppCommand, BranchCatalogState, LoadState, NavigationOutcome, ProjectPickerAnchor,
-    ProjectPickerState, ShellPage, ShellRoute, TaskLaunchMode, ZodeAppState,
+    AppCommand, BranchCatalogState, GlobalSearchState, LightboxState, LoadState, NavigationOutcome,
+    ProjectPickerAnchor, ProjectPickerState, ShellPage, ShellRoute, TaskLaunchMode, TranscriptItem,
+    ZodeAppState,
 };
 
 /// Applies new-task and project-picker commands without touching live sessions.
@@ -74,7 +77,31 @@ pub(crate) fn reduce_task_navigation(
             state.project_picker.active_index = *index;
             Some(NavigationOutcome::Applied)
         }
+        AppCommand::ToggleGlobalSearch => {
+            if state.global_search.open {
+                close_global_search(state);
+            } else {
+                close_project_picker(state);
+                state.close_session_action_surfaces();
+                state.global_search.open = true;
+            }
+            Some(NavigationOutcome::Applied)
+        }
+        AppCommand::CloseGlobalSearch => {
+            close_global_search(state);
+            Some(NavigationOutcome::Applied)
+        }
+        AppCommand::SetGlobalSearchQuery(query) => {
+            state.global_search.query.clone_from(query);
+            state.global_search.active_index = 0;
+            Some(NavigationOutcome::Applied)
+        }
+        AppCommand::SetGlobalSearchActive(index) => {
+            state.global_search.active_index = *index;
+            Some(NavigationOutcome::Applied)
+        }
         AppCommand::ToggleComposerContextMenu(menu) => {
+            close_global_search(state);
             close_project_picker(state);
             state.composer.footer_menu = None;
             state.composer.context_menu =
@@ -86,6 +113,7 @@ pub(crate) fn reduce_task_navigation(
             Some(NavigationOutcome::Applied)
         }
         AppCommand::ToggleComposerFooterMenu(menu) => {
+            close_global_search(state);
             close_project_picker(state);
             state.composer.context_menu = None;
             state.composer.footer_menu =
@@ -269,11 +297,45 @@ pub(crate) fn reduce_task_navigation(
             Some(NavigationOutcome::NeedsEffect)
         }
         AppCommand::CreateProject => {
+            close_global_search(state);
             close_project_picker(state);
             Some(NavigationOutcome::NeedsEffect)
         }
+        AppCommand::OpenLightbox { session, item_id } => {
+            if !session_has_image_item(state, session, item_id) {
+                return Some(NavigationOutcome::Ignored);
+            }
+            state.lightbox = Some(LightboxState::new(session.clone(), item_id.clone()));
+            Some(NavigationOutcome::Applied)
+        }
+        AppCommand::CloseLightbox => {
+            if state.lightbox.take().is_none() {
+                return Some(NavigationOutcome::Ignored);
+            }
+            Some(NavigationOutcome::Applied)
+        }
+        AppCommand::StepLightboxZoom { increase } => {
+            let Some(lightbox) = state.lightbox.as_mut() else {
+                return Some(NavigationOutcome::Ignored);
+            };
+            lightbox.step_zoom(*increase);
+            Some(NavigationOutcome::Applied)
+        }
         _ => None,
     }
+}
+
+/// Whether `session`'s transcript still contains the `Image` item addressed
+/// by `item_id` - guards both opening a lightbox and (defensively) keeping
+/// one open, since the referenced item can never disappear out from under a
+/// transcript that only ever appends.
+fn session_has_image_item(state: &ZodeAppState, session: &SessionLocator, item_id: &str) -> bool {
+    state.transcripts.get(session).is_some_and(|transcript| {
+        transcript
+            .items
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::Image(image) if image.id == item_id))
+    })
 }
 
 fn toggle_project_picker(state: &mut ZodeAppState, anchor: ProjectPickerAnchor) {
@@ -281,6 +343,7 @@ fn toggle_project_picker(state: &mut ZodeAppState, anchor: ProjectPickerAnchor) 
         close_project_picker(state);
         return;
     }
+    close_global_search(state);
     state.project_picker = ProjectPickerState {
         open: true,
         anchor,
@@ -293,6 +356,10 @@ fn toggle_project_picker(state: &mut ZodeAppState, anchor: ProjectPickerAnchor) 
 
 fn close_project_picker(state: &mut ZodeAppState) {
     state.project_picker = ProjectPickerState::default();
+}
+
+fn close_global_search(state: &mut ZodeAppState) {
+    state.global_search = GlobalSearchState::default();
 }
 
 fn reset_composer_task_context(state: &mut ZodeAppState) {
@@ -317,5 +384,93 @@ fn approval_label(mode: zode_node_protocol::ApprovalMode) -> &'static str {
         zode_node_protocol::ApprovalMode::Request => "请求批准",
         zode_node_protocol::ApprovalMode::Auto => "替我审批",
         zode_node_protocol::ApprovalMode::Full => "完全访问",
+    }
+}
+
+#[cfg(test)]
+mod lightbox_tests {
+    use super::*;
+    use crate::{demo_state, ImageItem, NavigationOutcome};
+
+    fn state_with_image() -> (ZodeAppState, SessionLocator) {
+        let mut state = demo_state();
+        let session = SessionLocator::new(state.host.node_id, "lightbox-nav");
+        state
+            .transcripts
+            .entry(session.clone())
+            .or_default()
+            .items
+            .push(TranscriptItem::Image(ImageItem {
+                id: "image:1".into(),
+                path: "/tmp/shot.png".into(),
+                media_type: "image/png".into(),
+                width: None,
+                height: None,
+            }));
+        (state, session)
+    }
+
+    #[test]
+    fn opening_a_lightbox_for_a_missing_item_is_ignored() {
+        let (mut state, session) = state_with_image();
+        let outcome = reduce_task_navigation(
+            &mut state,
+            &AppCommand::OpenLightbox {
+                session,
+                item_id: "image:does-not-exist".into(),
+            },
+        );
+        assert_eq!(outcome, Some(NavigationOutcome::Ignored));
+        assert!(state.lightbox.is_none());
+    }
+
+    #[test]
+    fn opening_and_closing_a_lightbox_round_trips_through_state() {
+        let (mut state, session) = state_with_image();
+        let outcome = reduce_task_navigation(
+            &mut state,
+            &AppCommand::OpenLightbox {
+                session: session.clone(),
+                item_id: "image:1".into(),
+            },
+        );
+        assert_eq!(outcome, Some(NavigationOutcome::Applied));
+        let lightbox = state.lightbox.as_ref().expect("lightbox should be open");
+        assert_eq!(lightbox.session, session);
+        assert_eq!(lightbox.item_id, "image:1");
+
+        let outcome = reduce_task_navigation(&mut state, &AppCommand::CloseLightbox);
+        assert_eq!(outcome, Some(NavigationOutcome::Applied));
+        assert!(state.lightbox.is_none());
+
+        assert_eq!(
+            reduce_task_navigation(&mut state, &AppCommand::CloseLightbox),
+            Some(NavigationOutcome::Ignored),
+            "closing an already-closed lightbox is a no-op, not a silent success"
+        );
+    }
+
+    #[test]
+    fn stepping_zoom_without_an_open_lightbox_is_ignored() {
+        let (mut state, _session) = state_with_image();
+        let outcome =
+            reduce_task_navigation(&mut state, &AppCommand::StepLightboxZoom { increase: true });
+        assert_eq!(outcome, Some(NavigationOutcome::Ignored));
+    }
+
+    #[test]
+    fn stepping_zoom_moves_the_open_lightboxs_zoom_index() {
+        let (mut state, session) = state_with_image();
+        reduce_task_navigation(
+            &mut state,
+            &AppCommand::OpenLightbox {
+                session,
+                item_id: "image:1".into(),
+            },
+        );
+        let before = state.lightbox.as_ref().unwrap().zoom_percent();
+        reduce_task_navigation(&mut state, &AppCommand::StepLightboxZoom { increase: true });
+        let after = state.lightbox.as_ref().unwrap().zoom_percent();
+        assert!(after > before);
     }
 }

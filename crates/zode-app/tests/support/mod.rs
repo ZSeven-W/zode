@@ -131,6 +131,8 @@ impl FixtureApp {
                 None,
                 AgentCommandKind::CreateSession {
                     workspace_uri: self.workspace_uri(),
+                    project_uri: None,
+                    projectless: false,
                     model: Some(MODEL.into()),
                 },
             ))
@@ -567,6 +569,18 @@ fn event_kind(kind: &AgentEventKind) -> String {
             format!("tool_completed:{}:{}:{:?}", tool.name, tool.id, tool.status)
         }
         AgentEventKind::ApprovalRequested { tool, .. } => format!("approval_requested:{tool}"),
+        AgentEventKind::SubagentUpdate { subagent } => {
+            format!(
+                "subagent_update:{}:{:?}",
+                subagent.agent_type, subagent.status
+            )
+        }
+        AgentEventKind::BackgroundProcessUpdate { process } => {
+            format!(
+                "background_process_update:{}:{:?}",
+                process.id, process.status
+            )
+        }
         AgentEventKind::DiffInvalidated => "diff_invalidated".into(),
         AgentEventKind::Usage { .. } => "usage".into(),
         AgentEventKind::StatusNotice { code, .. } => format!("status_notice:{code}"),

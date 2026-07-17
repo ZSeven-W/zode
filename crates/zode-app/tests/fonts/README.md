@@ -77,8 +77,8 @@ python3 crates/zode-app/tests/fonts/augment-symbols.py \
 Expected SHA-256 values:
 
 ```text
-110f403dde342982626151f36bbba7cc61372a87f69efc0af9761be7c960798c  NotoSansSC-Regular.subset.ttf
-42eaf6d9ce4635ef0f9fc8fe57dc2e55ab20f4d3935ef50a6062c253c4c7ce75  NotoSansSC-SemiBold.subset.ttf
+d3ab43f842e2e767cb725be66a7d4b6ca3471ac9a224d0d945416c1878fbb8ea  NotoSansSC-Regular.subset.ttf
+2e76b234fc752bb51843f661fb12c2ed9a76129a0a9b820ce6a31db6ccdf0fb9  NotoSansSC-SemiBold.subset.ttf
 ```
 
 When visible copy changes, update `glyphs.txt`, rebuild both subsets, and run

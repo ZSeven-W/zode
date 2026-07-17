@@ -1,12 +1,15 @@
 use jian_core::text_input::TextInputState;
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
-use zode_app_ui::{Composer, WidgetId, ZodeTheme, PROJECT_DETACH_ID};
+use zode_app_ui::{
+    Composer, SemanticIcon, WidgetId, ZodeTheme, COMPOSER_PROJECT_ID, PROJECT_DETACH_ID,
+};
 
 #[derive(Default)]
 struct PaintCapture {
     texts: Vec<String>,
     round_fills: Vec<(Rect, f32, Color)>,
     round_strokes: Vec<Rect>,
+    svg_paths: Vec<String>,
 }
 
 impl Painter for PaintCapture {
@@ -33,12 +36,13 @@ impl Painter for PaintCapture {
     }
     fn stroke_svg_path(
         &mut self,
-        _d: &str,
+        d: &str,
         _top_left: Point2D,
         _size: f32,
         _color: Color,
         _width: f32,
     ) {
+        self.svg_paths.push(d.to_owned());
     }
     fn save(&mut self) {}
     fn restore(&mut self) {}
@@ -88,6 +92,65 @@ fn new_task_context_has_distinct_chip_and_detach_targets() {
     for (index, id) in ids.iter().copied().enumerate() {
         assert!(!ids[..index].contains(&id), "context targets stay unique");
     }
+}
+
+#[test]
+fn projectless_new_task_exposes_a_select_project_chip_without_detach() {
+    let mut state = zode_app_model::demo_state();
+    state.current_session = None;
+    state.active_workspace = None;
+    let rect = Rect::xywh(0.0, 0.0, 736.0, 138.0);
+    let layout = Composer::context_interaction_layout(rect, &state, None, Some("本地"), None);
+
+    let project = layout.project.expect("select-project chip");
+    assert_eq!(project.id, COMPOSER_PROJECT_ID);
+    assert_eq!(
+        layout.hit_test(center(project.action_rect)),
+        Some(COMPOSER_PROJECT_ID)
+    );
+    assert!(layout.detach.is_none());
+
+    let mut painter = PaintCapture::default();
+    Composer::paint_input_with_workspace_app_context_interactions(
+        &mut painter,
+        rect,
+        &TextInputState::default(),
+        &state,
+        None,
+        Some("本地"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        &ZodeTheme::light(),
+    );
+    assert!(
+        painter.texts.iter().any(|text| text == "选择项目"),
+        "painted texts: {:?}",
+        painter.texts
+    );
+
+    let mut tooltip_painter = PaintCapture::default();
+    Composer::paint_input_with_workspace_app_context_interactions(
+        &mut tooltip_painter,
+        rect,
+        &TextInputState::default(),
+        &state,
+        None,
+        Some("本地"),
+        None,
+        None,
+        None,
+        Some(COMPOSER_PROJECT_ID),
+        None,
+        &ZodeTheme::light(),
+    );
+    assert!(tooltip_painter.texts.iter().any(|text| text == "选择项目"));
+    assert!(!tooltip_painter
+        .texts
+        .iter()
+        .any(|text| text == "更改此任务的项目"));
 }
 
 #[test]
@@ -164,4 +227,94 @@ fn chips_use_borderless_pill_states_and_product_tooltips() {
         assert!(!painter.round_strokes.contains(&chip.rect));
         assert!(painter.texts.iter().any(|text| text == tooltip));
     }
+}
+
+#[test]
+fn project_chip_swaps_folder_for_close_only_while_hovered() {
+    let state = zode_app_model::demo_state();
+    let rect = Rect::xywh(0.0, 0.0, 736.0, 138.0);
+    let project = layout(736.0).project.expect("project chip");
+    let theme = ZodeTheme::light();
+
+    let mut idle = PaintCapture::default();
+    Composer::paint_input_with_workspace_app_context_interactions(
+        &mut idle,
+        rect,
+        &TextInputState::default(),
+        &state,
+        Some("zode"),
+        Some("本地"),
+        Some("main"),
+        None,
+        None,
+        None,
+        None,
+        &theme,
+    );
+    assert!(idle
+        .svg_paths
+        .iter()
+        .any(|path| path == SemanticIcon::Folder.path()));
+    assert!(!idle
+        .svg_paths
+        .iter()
+        .any(|path| path == SemanticIcon::Close.path()));
+    assert!(!idle
+        .round_fills
+        .iter()
+        .any(|(rect, _, _)| *rect == project.rect));
+
+    let mut hovered = PaintCapture::default();
+    Composer::paint_input_with_workspace_app_context_interactions(
+        &mut hovered,
+        rect,
+        &TextInputState::default(),
+        &state,
+        Some("zode"),
+        Some("本地"),
+        Some("main"),
+        None,
+        None,
+        Some(COMPOSER_PROJECT_ID),
+        None,
+        &theme,
+    );
+    assert!(hovered
+        .svg_paths
+        .iter()
+        .any(|path| path == SemanticIcon::Close.path()));
+    assert!(!hovered
+        .svg_paths
+        .iter()
+        .any(|path| path == SemanticIcon::Folder.path()));
+    assert!(hovered
+        .round_fills
+        .iter()
+        .any(|(rect, radius, color)| *rect == project.rect
+            && *radius == 14.0
+            && *color == theme.tokens.accent));
+
+    let mut detach_hovered = PaintCapture::default();
+    Composer::paint_input_with_workspace_app_context_interactions(
+        &mut detach_hovered,
+        rect,
+        &TextInputState::default(),
+        &state,
+        Some("zode"),
+        Some("本地"),
+        Some("main"),
+        None,
+        None,
+        Some(PROJECT_DETACH_ID),
+        None,
+        &theme,
+    );
+    assert!(detach_hovered
+        .svg_paths
+        .iter()
+        .any(|path| path == SemanticIcon::Close.path()));
+    assert!(detach_hovered
+        .round_fills
+        .iter()
+        .any(|(rect, _, color)| *rect == project.rect && *color == theme.tokens.accent));
 }

@@ -143,6 +143,79 @@ pub struct IntegrationRegistrySnapshot {
     pub directory_error: Option<String>,
 }
 
+/// Kind of capability a plugin declares, mirroring
+/// `zode_core::plugin_market::manifest::Capability` without this
+/// backend-agnostic crate depending on `zode-core`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginCapabilityKind {
+    Skill,
+    Mcp,
+    Hook,
+}
+
+/// One capability declared by an installed plugin, projected for display on
+/// its detail page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCapabilitySummary {
+    /// Stable trust-review key (core's `Capability::trust_key`) - matched
+    /// against `PluginTrustState`'s pending key lists to decide whether this
+    /// row is gated.
+    pub key: String,
+    pub kind: PluginCapabilityKind,
+    pub label: String,
+    /// The `skill:<name>` / `mcp:<name>` id already understood by
+    /// `SetIntegrationEnabled`. `None` for hooks, which have no independent
+    /// enable/disable id today.
+    pub toggle_source_id: Option<String>,
+}
+
+/// Trust-review status for one installed plugin's reviewable capabilities.
+/// Carries only the pending capability keys - the exact command/script text
+/// to review is fetched on demand via `AgentQuery::PluginTrustReview` so a
+/// routine plugin-list refresh never has to re-read every hook script from
+/// disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginTrustState {
+    Trusted,
+    NeedsReview(Vec<String>),
+    Drifted(Vec<String>),
+}
+
+/// One installed plugin, listed on the Integrations page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledPluginSummary {
+    pub id: String,
+    pub repo: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub installed_at_ms: u64,
+    pub capabilities: Vec<PluginCapabilitySummary>,
+    pub trust: PluginTrustState,
+}
+
+/// One reviewable capability's exact, unsummarized text - the command line
+/// or script source a trust-review screen must render in full.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginTrustItem {
+    pub key: String,
+    pub content: String,
+}
+
+/// Full trust-review payload fetched on demand right before a review screen
+/// opens - see `PluginTrustState`'s doc comment for why this is a separate
+/// query rather than embedded in every plugin list refresh.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginTrustReview {
+    pub plugin_id: String,
+    pub items: Vec<PluginTrustItem>,
+}
+
 /// A versioned command sent to a Zode node.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -229,7 +302,15 @@ impl<'de> Deserialize<'de> for AgentCommand {
 pub enum AgentCommandKind {
     /// Creates a session using the caller-allocated outer `SessionLocator`.
     CreateSession {
+        /// Execution directory used by the agent runtime.
         workspace_uri: WorkspaceUri,
+        /// Owning project shown in project-grouped navigation. This may differ
+        /// from `workspace_uri` when a task runs in an isolated worktree.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_uri: Option<WorkspaceUri>,
+        /// Explicitly records that the task is not attached to any project.
+        #[serde(default, skip_serializing_if = "is_false")]
+        projectless: bool,
         model: Option<String>,
     },
     RenameSession {
@@ -265,6 +346,9 @@ pub enum AgentCommandKind {
     SetModel {
         model: String,
     },
+    /// Reloads provider credentials, model groups, and the active provider from
+    /// the node's global configuration without resetting session state.
+    ReloadProviderConfiguration,
     SetEffort {
         effort: String,
     },
@@ -277,6 +361,28 @@ pub enum AgentCommandKind {
         sandbox_mode: SandboxMode,
         network: bool,
     },
+    /// Clones a plugin from git and scans its capabilities. Slow (network
+    /// I/O) - callers must run this off the UI thread; the desktop command
+    /// bridge already dispatches every command on a background task.
+    InstallPlugin {
+        spec: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+    },
+    UninstallPlugin {
+        plugin_id: String,
+    },
+    /// Grants trust to the named capabilities (`Some`), or to every currently
+    /// reviewable capability (`None`, "全部信任").
+    GrantPluginTrust {
+        plugin_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<String>>,
+    },
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A decision for one tool approval request.
@@ -491,6 +597,77 @@ pub struct ToolCall {
     pub detail: Option<String>,
 }
 
+/// Lifecycle status for one `Task`-spawned sub-agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SubagentStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+/// A point-in-time view of one `Task`-spawned sub-agent, carried by
+/// `AgentEventKind::SubagentUpdate`. `id` is the host registry's stable
+/// identity for this sub-agent (not the `Task` tool call's own id — the two
+/// are allocated independently).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentSnapshot {
+    pub id: String,
+    pub agent_type: String,
+    /// Human-readable task label for the M2 sub-agent panel row title — the
+    /// `Task` tool call's own `description` argument, falling back to
+    /// `agent_type` when the model didn't supply one.
+    pub display_name: String,
+    pub depth: u8,
+    pub status: SubagentStatus,
+    pub tokens: u64,
+    pub turn_id: TurnId,
+    /// Wall-clock stamp of the terminal status transition (`Completed` or
+    /// `Failed`), in epoch milliseconds. `None` while `status == Running`.
+    pub completed_at_ms: Option<i64>,
+    /// First line of the agent's final answer, truncated for display
+    /// (~120 chars). Extracted once at the terminal transition, never
+    /// streamed mid-run. `None` while running or after a failure.
+    pub result_summary: Option<String>,
+}
+
+/// Lifecycle status for one host-tracked background process (a shell
+/// launched by the `BashRun` tool). `Starting` and `Stopping` are transient
+/// states this wire type can represent for Codex parity, but the current
+/// desktop producer (`zode_core::bg_shells::BackgroundShellTracker`) only
+/// ever observes a shell after it has started and after a kill has already
+/// completed, so it never emits those two variants — see
+/// `EventNormalizer::diff_background_processes` in zode-app-runtime for the
+/// exact mapping and the seam left for a richer host-side tracker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BackgroundProcessStatus {
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+    NotFound,
+}
+
+/// A point-in-time view of one background process, carried by
+/// `AgentEventKind::BackgroundProcessUpdate`. `id` is the host's stable
+/// shell identity (`BashRun`'s `shell_id`), independent from any tool
+/// call's own id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundProcessSnapshot {
+    pub id: String,
+    pub command: String,
+    pub status: BackgroundProcessStatus,
+    pub started_at_ms: i64,
+    /// The transcript `ToolCall.id` for the `BashRun` card that launched
+    /// this shell, when the normalizer could associate the two. `None`
+    /// when the launch predates this session's normalizer (e.g. restored
+    /// history), so "view output" has nothing to jump to.
+    pub tool_call_id: Option<String>,
+}
+
 /// Token, context, and optional cost measurements for a turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -589,6 +766,18 @@ pub enum AgentEventKind {
         approval_id: String,
         tool: String,
         summary: String,
+    },
+    /// A `Task`-spawned sub-agent changed state (started, made progress, or
+    /// reached a terminal status). Kept independent from `ToolStarted`/
+    /// `ToolCompleted` so existing tool-card consumers are unaffected.
+    SubagentUpdate {
+        subagent: SubagentSnapshot,
+    },
+    /// A background shell (started by the `BashRun` tool) changed state.
+    /// Kept independent from `ToolStarted`/`ToolCompleted` for the same
+    /// reason as `SubagentUpdate`.
+    BackgroundProcessUpdate {
+        process: BackgroundProcessSnapshot,
     },
     DiffInvalidated,
     Usage {

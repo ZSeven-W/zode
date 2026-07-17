@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 use crate::config::BrowserConfig;
 
-use super::backend::{BrowserBackend, BrowserError, BrowserTarget};
+use super::backend::{BrowserBackend, BrowserError, BrowserTarget, ScreencastFrame};
 use super::bridge::{BridgeBackend, BridgeServer, PairingHandle, TaskReceiver, TaskServerFrame};
 
 #[async_trait]
@@ -176,6 +176,50 @@ impl BrowserSession {
         let backend = guard.as_ref()?.clone();
         drop(guard);
         backend.current_url().await.ok()
+    }
+
+    /// Non-blocking accessor for the spectator panel's redraw tick: never
+    /// waits behind a running agent tool call (`try_lock`), never launches
+    /// a browser, and returns `None` before a backend exists, before a
+    /// stream is started, or once one has been torn down (e.g. by a tab
+    /// swap — see `ManagedBackend::replace_listeners`).
+    pub fn latest_frame_hint(&self) -> Option<ScreencastFrame> {
+        let guard = self.slot.try_lock().ok()?;
+        guard.as_ref()?.latest_frame()
+    }
+
+    /// Best-effort capability check for the panel: whether the *current*
+    /// backend (if one is already running) supports frame streaming. Falls
+    /// back to the target alone (bridge never supports it in M1; managed
+    /// always will once launched) so the panel can show the right
+    /// "unsupported" copy before any backend has booted.
+    pub fn supports_frame_stream(&self) -> bool {
+        if let Ok(guard) = self.slot.try_lock() {
+            if let Some(backend) = guard.as_ref() {
+                return backend.supports_frame_stream();
+            }
+        }
+        matches!(self.target(), BrowserTarget::Managed)
+    }
+
+    /// Starts (or restarts at a new width) the live frame stream on the
+    /// current backend, launching one first if needed. Takes the lease —
+    /// callers should only invoke this on a visibility/resize edge, not
+    /// every tick (see `latest_frame_hint` for the hot poll path).
+    pub async fn start_frame_stream(&self, max_width: u32) -> Result<(), BrowserError> {
+        let lease = self.lease().await?;
+        lease.backend().start_frame_stream(max_width).await
+    }
+
+    /// Stops the live frame stream. Best-effort no-op if no backend has
+    /// ever been booted.
+    pub async fn stop_frame_stream(&self) -> Result<(), BrowserError> {
+        let guard = self.slot.lock().await;
+        let Some(backend) = guard.as_ref().cloned() else {
+            return Ok(());
+        };
+        drop(guard);
+        backend.stop_frame_stream().await
     }
 
     pub async fn status(&self) -> String {
@@ -356,5 +400,62 @@ mod tests {
         let session = BrowserSession::new(BrowserConfig::default(), MockFactory::new());
 
         assert!(!session.is_extension_task_connection_active(1));
+    }
+
+    #[test]
+    fn supports_frame_stream_falls_back_to_target_before_boot() {
+        let s = BrowserSession::new(BrowserConfig::default(), MockFactory::new());
+        assert!(s.supports_frame_stream(), "managed target defaults to true");
+        s.set_target(BrowserTarget::Bridge).unwrap();
+        assert!(
+            !s.supports_frame_stream(),
+            "bridge has no M1 screencast story"
+        );
+    }
+
+    #[test]
+    fn latest_frame_hint_is_none_before_any_backend_exists() {
+        let s = BrowserSession::new(BrowserConfig::default(), MockFactory::new());
+        assert!(s.latest_frame_hint().is_none());
+    }
+
+    #[tokio::test]
+    async fn frame_stream_lifecycle_newest_frame_wins() {
+        let f = MockFactory::new();
+        let s = BrowserSession::new(BrowserConfig::default(), f.clone());
+        {
+            s.lease().await.unwrap();
+        } // boot backend
+        let backend = f.current.lock().unwrap().clone().unwrap();
+        backend.frame_stream_supported.store(true, Ordering::SeqCst);
+        assert!(s.supports_frame_stream());
+
+        s.start_frame_stream(800).await.unwrap();
+        assert!(
+            s.latest_frame_hint().is_none(),
+            "stream started but no frame pushed yet"
+        );
+
+        backend.push_frame(vec![1, 2, 3]);
+        let frame = s.latest_frame_hint().expect("frame available");
+        assert_eq!(frame.data.as_slice(), &[1, 2, 3]);
+        assert_eq!(frame.sequence, 1);
+
+        backend.push_frame(vec![4, 5]);
+        let frame = s.latest_frame_hint().expect("newer frame available");
+        assert_eq!(frame.data.as_slice(), &[4, 5]);
+        assert_eq!(frame.sequence, 2, "sequence advances, never resets");
+
+        s.stop_frame_stream().await.unwrap();
+        assert!(
+            s.latest_frame_hint().is_none(),
+            "stopped stream reports no frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_frame_stream_before_any_lease_is_a_no_op() {
+        let s = BrowserSession::new(BrowserConfig::default(), MockFactory::new());
+        s.stop_frame_stream().await.unwrap();
     }
 }

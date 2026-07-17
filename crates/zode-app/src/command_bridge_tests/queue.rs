@@ -41,7 +41,7 @@ fn queued_start_targets_its_owner_after_the_current_session_changes() {
     assert!(!state.active_turns.contains_key(&session_b));
     assert!(matches!(
         state.transcripts[&session_a].items.last(),
-        Some(TranscriptItem::UserText(text)) if text == "queued for A"
+        Some(TranscriptItem::UserText { text, .. }) if text == "queued for A"
     ));
     let turn = &state.transcripts[&session_a].turns[0];
     assert_eq!(turn.turn_id, dispatch.commands[0].turn_id);
@@ -85,7 +85,7 @@ fn active_turn_rejects_duplicate_queued_and_regular_submits() {
         state.transcripts[&session]
             .items
             .iter()
-            .filter(|item| matches!(item, TranscriptItem::UserText(_)))
+            .filter(|item| matches!(item, TranscriptItem::UserText { .. }))
             .count(),
         1,
     );
@@ -101,6 +101,7 @@ fn accepted_queued_start_claims_the_session_before_a_repeated_dispatch_attempt()
             text: "first queued message".into(),
         }],
         attachments: Vec::new(),
+        front: false,
     };
     let second = AppCommand::EnqueueMessage {
         session: session.clone(),
@@ -108,6 +109,7 @@ fn accepted_queued_start_claims_the_session_before_a_repeated_dispatch_attempt()
             text: "second queued message".into(),
         }],
         attachments: Vec::new(),
+        front: false,
     };
     let QueueCommandOutcome::Enqueued(first_id) = reduce_queue_command(&mut state, &first) else {
         panic!("first message should enter the queue");
@@ -154,7 +156,7 @@ fn accepted_queued_start_claims_the_session_before_a_repeated_dispatch_attempt()
         state.transcripts[&session]
             .items
             .iter()
-            .filter(|item| matches!(item, TranscriptItem::UserText(_)))
+            .filter(|item| matches!(item, TranscriptItem::UserText { .. }))
             .count(),
         1,
     );
@@ -204,7 +206,7 @@ fn queued_steer_uses_the_owner_active_turn_after_session_switch() {
     ));
     assert!(matches!(
         state.transcripts[&session_a].items.last(),
-        Some(TranscriptItem::UserText(text)) if text == "guide A"
+        Some(TranscriptItem::UserText { text, .. }) if text == "guide A"
     ));
     assert!(state.transcripts[&session_b].items.is_empty());
 }

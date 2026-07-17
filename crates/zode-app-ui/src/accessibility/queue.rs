@@ -33,15 +33,24 @@ pub(super) fn append_queue_nodes(
         None,
         CursorHint::Default,
     ));
-    for (row, message) in queue.rows.iter().zip(&messages.items) {
+    for (index, (row, message)) in queue.rows.iter().zip(&messages.items).enumerate() {
         let preview = accessibility_preview(message);
+        let is_prioritized_head = index == 0 && message.prioritized;
+        let value = match (is_prioritized_head, !message.attachments.is_empty()) {
+            (true, true) => Some(format!(
+                "已置顶，将优先发送；包含 {} 个附件",
+                message.attachments.len()
+            )),
+            (true, false) => Some("已置顶，将优先发送".into()),
+            (false, true) => Some(format!("包含 {} 个附件", message.attachments.len())),
+            (false, false) => None,
+        };
         nodes.push(node(
             row.row_id,
             row.rect,
             Role::ListItem,
             &preview,
-            (!message.attachments.is_empty())
-                .then(|| format!("包含 {} 个附件", message.attachments.len())),
+            value,
             Vec::new(),
             None,
             CursorHint::Default,
@@ -103,16 +112,30 @@ pub(super) fn append_queue_menu_nodes(
         None,
         CursorHint::Default,
     ));
-    for (id, rect, name) in [
-        (menu.edit_id, menu.edit, "编辑消息"),
-        (menu.close_id, menu.close, "关闭排队并清空全部消息"),
-    ] {
+    let mut items: Vec<(_, _, &str, Option<&str>)> = Vec::with_capacity(5);
+    if let Some(front) = menu.front {
+        items.push((
+            menu.front_id,
+            front,
+            "置顶排队消息",
+            Some("移到队首，下一轮优先发送"),
+        ));
+    }
+    if let Some(up) = menu.up {
+        items.push((menu.up_id, up, "上移排队消息", None));
+    }
+    if let Some(down) = menu.down {
+        items.push((menu.down_id, down, "下移排队消息", None));
+    }
+    items.push((menu.edit_id, menu.edit, "编辑消息", None));
+    items.push((menu.close_id, menu.close, "关闭排队并清空全部消息", None));
+    for (id, rect, name, value) in items {
         nodes.push(node(
             id,
             rect,
             Role::MenuItem,
             name,
-            None,
+            value.map(str::to_owned),
             vec![Action::Click, Action::Focus],
             next_order(focus_order),
             CursorHint::Pointer,

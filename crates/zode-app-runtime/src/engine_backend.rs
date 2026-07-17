@@ -3,15 +3,19 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use agent::abort::AbortController;
 use agent::error::AgentError;
 use agent::stream::Event;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
+use zode_core::{SubAgent, SubAgentStatus};
 use zode_node_protocol::{
-    AgentCommand, AgentCommandKind, AgentEventKind, AgentQuery, AgentSnapshot, EndpointError,
-    EndpointErrorKind, NodeId, SessionLocator, ToolCall, ToolStatus, TurnId, UsageSnapshot,
+    AgentCommand, AgentCommandKind, AgentEventKind, AgentQuery, AgentSnapshot,
+    BackgroundProcessSnapshot, BackgroundProcessStatus, EndpointError, EndpointErrorKind, NodeId,
+    SessionLocator, SubagentSnapshot, SubagentStatus as WireSubagentStatus, ToolCall, ToolStatus,
+    TurnId, UsageSnapshot,
 };
 
 use crate::{EventSink, NodeBackend};
@@ -38,11 +42,63 @@ const UNKNOWN_EVENT_MESSAGE: &str = "Ignored an unsupported agent runtime event"
 const UNKNOWN_TOOL_NAME: &str = "unknown";
 const UNKNOWN_TOOL_SUMMARY: &str = "Tool result";
 const MAX_SUMMARY_CHARS: usize = 160;
+/// Cap for `SubagentSnapshot::result_summary` — the M2 panel row shows this
+/// as a one-line muted preview, not a full transcript entry.
+const RESULT_SUMMARY_MAX_CHARS: usize = 120;
+
+/// The `agent-tools-code` `Task` tool's stable name — the only tool whose
+/// lifecycle triggers a sub-agent registry diff.
+const TASK_TOOL_NAME: &str = "Task";
+
+/// The `agent-tools-code` background-shell tools' stable names — see
+/// `vendor/agent/crates/agent-tools-code/src/bash_async.rs`. Their
+/// lifecycle triggers a `BackgroundShellTracker` diff, mirroring how
+/// `TASK_TOOL_NAME` triggers a sub-agent registry diff.
+const BASH_RUN_TOOL_NAME: &str = "BashRun";
+const BASH_OUTPUT_TOOL_NAME: &str = "BashOutput";
+const KILL_SHELL_TOOL_NAME: &str = "KillShell";
+
+/// The `zode-core` `computer` tool group's stable names — see
+/// `zode_core::computer::tools`. Both get a structured summary (built from
+/// `action` + target, not a generic `path=`/`url=` guess) and, on a
+/// `permission_pending` result, an actionable detail hint.
+const COMPUTER_READ_TOOL_NAME: &str = "computer_read";
+const COMPUTER_ACT_TOOL_NAME: &str = "computer_act";
+
+/// Surfaces the computer-use "permission_pending" retry hint (see
+/// docs/proposals/computer-use.md §2) as tool-call detail text, so the
+/// desktop transcript can render an actionable "需要授予权限" affordance
+/// instead of a silently completed card. Every other tool's detail stays
+/// `None`, matching prior behavior.
+const PERMISSION_PENDING_DETAIL: &str =
+    "需要授予权限：请在设置 → 电脑操控中打开系统设置完成授权，然后重试。";
+
+fn permission_pending_detail(name: &str, output: &serde_json::Value) -> Option<String> {
+    if name != COMPUTER_READ_TOOL_NAME && name != COMPUTER_ACT_TOOL_NAME {
+        return None;
+    }
+    let is_pending =
+        output.get("status").and_then(serde_json::Value::as_str) == Some("permission_pending");
+    is_pending.then(|| PERMISSION_PENDING_DETAIL.to_owned())
+}
+
+/// Token-only changes to the same sub-agent are coalesced so a busy child
+/// loop doesn't flood the event stream with per-delta updates.
+const SUBAGENT_TOKEN_THROTTLE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 struct CachedTool {
     name: String,
     summary: String,
+}
+
+/// Last-emitted state for one sub-agent, used to decide whether a fresh
+/// registry snapshot warrants a new `SubagentUpdate` event.
+#[derive(Debug, Clone, Copy)]
+struct EmittedSubagent {
+    status: SubAgentStatus,
+    tokens: u64,
+    emitted_at: Instant,
 }
 
 /// Converts agent-runtime stream events into the stable node protocol.
@@ -53,11 +109,117 @@ struct CachedTool {
 #[derive(Debug, Default)]
 pub struct EventNormalizer {
     tools: HashMap<String, CachedTool>,
+    subagents: HashMap<u64, EmittedSubagent>,
+    /// Maps a `BashRun`-allocated `shell_id` back to the transcript
+    /// `ToolCall.id` that launched it, captured from the `BashRun`
+    /// `ToolResult` output. Powers the background-process row's "view
+    /// output" jump — see `AgentEventKind::BackgroundProcessUpdate`.
+    bash_shell_tool_calls: HashMap<String, String>,
+    /// Last-emitted `killed` flag per shell id, so a shell already reported
+    /// as `Stopped` is not re-emitted on every subsequent bash-tool event.
+    background_processes: HashMap<String, bool>,
 }
 
 impl EventNormalizer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Diffs a fresh sub-agent registry snapshot against what was last
+    /// emitted, returning zero or more `SubagentUpdate` events. Call this
+    /// after a `Task` tool `ToolStarted`/`ToolCompleted` event, and once more
+    /// right before `TurnFinished` so a turn that ends (normally or via
+    /// interruption) while a child is still `Running` gets a final,
+    /// authoritative correction from the registry.
+    ///
+    /// Throttle: a sub-agent whose status is unchanged from the last emission
+    /// is not re-emitted; a status change is always emitted immediately;
+    /// a token-count-only change is coalesced to at most one emission per
+    /// [`SUBAGENT_TOKEN_THROTTLE`] interval.
+    pub fn diff_subagents(
+        &mut self,
+        snapshot: &[SubAgent],
+        turn_id: TurnId,
+        now: Instant,
+    ) -> Vec<AgentEventKind> {
+        let mut updates = Vec::new();
+        for agent in snapshot {
+            let tokens = u64::from(agent.input_tokens) + u64::from(agent.output_tokens);
+            let should_emit = match self.subagents.get(&agent.id) {
+                None => true,
+                Some(last) => {
+                    last.status != agent.status
+                        || (last.tokens != tokens
+                            && now.saturating_duration_since(last.emitted_at)
+                                >= SUBAGENT_TOKEN_THROTTLE)
+                }
+            };
+            if !should_emit {
+                continue;
+            }
+            self.subagents.insert(
+                agent.id,
+                EmittedSubagent {
+                    status: agent.status,
+                    tokens,
+                    emitted_at: now,
+                },
+            );
+            updates.push(AgentEventKind::SubagentUpdate {
+                subagent: to_wire_subagent(agent, tokens, turn_id),
+            });
+        }
+        updates
+    }
+
+    /// Diffs a fresh `BackgroundShellTracker` snapshot against what was last
+    /// emitted, returning zero or more `BackgroundProcessUpdate` events. Call
+    /// this after a `BashRun`/`BashOutput`/`KillShell` tool event, mirroring
+    /// `diff_subagents`.
+    ///
+    /// `zode_core::bg_shells::BgShell` only models two states — a shell is
+    /// either tracked-and-alive or `killed` — so this can only ever produce
+    /// `Running` (first sighting or still alive) and `Stopped` (killed).
+    /// `Starting` and `Stopping` are real states in the wire type for Codex
+    /// parity, but nothing in the desktop stack observes those transients
+    /// today: `BgShellHook` only records a shell after `BashRun`'s
+    /// `ToolResult` already carries a `shell_id`, and only marks it killed
+    /// after `KillShell`'s `ToolResult` already succeeded. Producing them
+    /// for real would need `BackgroundShellTracker` itself to gain an
+    /// in-flight-launch and in-flight-kill state, which is out of this
+    /// crate's scope — see `docs/proposals/right-panel-parity.md` section 1.2.
+    pub fn diff_background_processes(
+        &mut self,
+        snapshot: &[zode_core::bg_shells::BgShell],
+    ) -> Vec<AgentEventKind> {
+        let mut updates = Vec::new();
+        for shell in snapshot {
+            let should_emit = self
+                .background_processes
+                .get(&shell.shell_id)
+                .is_none_or(|&last_killed| last_killed != shell.killed);
+            if !should_emit {
+                continue;
+            }
+            self.background_processes
+                .insert(shell.shell_id.clone(), shell.killed);
+            updates.push(AgentEventKind::BackgroundProcessUpdate {
+                process: BackgroundProcessSnapshot {
+                    id: shell.shell_id.clone(),
+                    command: shell.command.clone(),
+                    status: if shell.killed {
+                        BackgroundProcessStatus::Stopped
+                    } else {
+                        BackgroundProcessStatus::Running
+                    },
+                    started_at_ms: i64::try_from(shell.started_at)
+                        .unwrap_or(i64::MAX)
+                        .saturating_mul(1000),
+                    tool_call_id: self.bash_shell_tool_calls.get(&shell.shell_id).cloned(),
+                },
+            });
+        }
+        updates
     }
 
     pub fn normalize(&mut self, event: Event) -> Option<AgentEventKind> {
@@ -84,11 +246,17 @@ impl EventNormalizer {
                     },
                 })
             }
-            Event::ToolResult { id, ok, .. } => {
+            Event::ToolResult { id, ok, output } => {
                 let cached = self.tools.remove(&id).unwrap_or_else(|| CachedTool {
                     name: UNKNOWN_TOOL_NAME.to_owned(),
                     summary: UNKNOWN_TOOL_SUMMARY.to_owned(),
                 });
+                let detail = permission_pending_detail(&cached.name, &output);
+                if ok && cached.name == BASH_RUN_TOOL_NAME {
+                    if let Some(shell_id) = bash_shell_id(&output) {
+                        self.bash_shell_tool_calls.insert(shell_id, id.clone());
+                    }
+                }
 
                 Some(AgentEventKind::ToolCompleted {
                     tool: ToolCall {
@@ -100,7 +268,7 @@ impl EventNormalizer {
                             ToolStatus::Failed
                         },
                         summary: cached.summary,
-                        detail: None,
+                        detail,
                     },
                 })
             }
@@ -133,7 +301,17 @@ fn safe_tool_summary(name: &str, input: &serde_json::Value) -> String {
         return name.to_owned();
     };
 
-    for key in ["path", "url", "query"] {
+    if name == TASK_TOOL_NAME {
+        return task_tool_summary(input).unwrap_or_else(|| name.to_owned());
+    }
+
+    if name == COMPUTER_READ_TOOL_NAME || name == COMPUTER_ACT_TOOL_NAME {
+        if let Some(summary) = computer_tool_summary(input) {
+            return summary;
+        }
+    }
+
+    for key in ["path", "url", "query", "command", "shell_id"] {
         if let Some(value) = input.get(key).and_then(serde_json::Value::as_str) {
             let value = sanitize_summary_value(value);
             if !value.is_empty() {
@@ -143,6 +321,123 @@ fn safe_tool_summary(name: &str, input: &serde_json::Value) -> String {
     }
 
     name.to_owned()
+}
+
+/// Builds a `computer_read`/`computer_act` summary from the tool's own
+/// `action` field plus whatever target it carries (`element`, `x`/`y`,
+/// `text`, `key`), instead of the generic `path=`/`url=`/`query=` guess —
+/// see `zode_core::computer::tools::{ComputerReadTool, ComputerActTool}`'s
+/// input schemas. `tool_card::action_presentation` parses the first
+/// whitespace-separated token back out as the action for its human label.
+fn computer_tool_summary(input: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let action = input.get("action")?.as_str()?;
+    let mut parts = vec![action.to_owned()];
+    if let Some(app) = input
+        .get("app")
+        .and_then(serde_json::Value::as_str)
+        .map(sanitize_summary_value)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("app={app}"));
+    }
+    if let Some(element) = input.get("element").and_then(serde_json::Value::as_u64) {
+        parts.push(format!("element={element}"));
+    } else if let (Some(x), Some(y)) = (
+        input.get("x").and_then(serde_json::Value::as_f64),
+        input.get("y").and_then(serde_json::Value::as_f64),
+    ) {
+        parts.push(format!("at=({x:.0},{y:.0})"));
+    }
+    if let Some(text) = input
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .map(sanitize_summary_value)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("text={text}"));
+    }
+    if let Some(key) = input
+        .get("key")
+        .and_then(serde_json::Value::as_str)
+        .map(sanitize_summary_value)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("key={key}"));
+    }
+    Some(parts.join(" "))
+}
+
+/// Builds a real (not name-guessed) summary for a `Task` tool call from its
+/// own input, which always carries the model-chosen `agent_type` and an
+/// optional one-line `description` — see `agent-tools-code::task::TaskInput`.
+fn task_tool_summary(input: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let agent_type = input
+        .get("agent_type")
+        .and_then(serde_json::Value::as_str)
+        .map(sanitize_summary_value)
+        .filter(|value| !value.is_empty())?;
+    let description = input
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .map(sanitize_summary_value)
+        .filter(|value| !value.is_empty());
+    Some(match description {
+        Some(description) => format!("{agent_type}: {description}"),
+        None => agent_type,
+    })
+}
+
+/// Converts a core registry snapshot entry into the wire representation,
+/// stamped with the turn during which the diff was observed.
+fn to_wire_subagent(agent: &SubAgent, tokens: u64, turn_id: TurnId) -> SubagentSnapshot {
+    let display_name = agent
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+        .map(sanitize_summary_value)
+        .unwrap_or_else(|| agent.agent_type.clone());
+    SubagentSnapshot {
+        id: agent.id.to_string(),
+        agent_type: agent.agent_type.clone(),
+        display_name,
+        depth: u8::try_from(agent.depth).unwrap_or(u8::MAX),
+        status: match agent.status {
+            SubAgentStatus::Running => WireSubagentStatus::Running,
+            SubAgentStatus::Done => WireSubagentStatus::Completed,
+            SubAgentStatus::Failed => WireSubagentStatus::Failed,
+        },
+        tokens,
+        turn_id,
+        // The registry's wall clock is second-precision (`now_secs()`); that
+        // is plenty for the relative-time display this stamp drives ("1
+        // 小时", "2 天"), so no registry change was needed for millisecond
+        // precision here.
+        completed_at_ms: agent.finished_at.map(|secs| {
+            i64::try_from(secs)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(1_000)
+        }),
+        result_summary: agent.final_output.as_deref().map(summarize_result),
+    }
+}
+
+/// First line of a sub-agent's final answer, truncated for display. Applied
+/// once at the terminal transition, never to streamed deltas.
+fn summarize_result(text: &str) -> String {
+    let first_line = text.lines().next().unwrap_or("").trim();
+    let sanitized = sanitize_summary_value(first_line);
+    if sanitized.chars().count() <= RESULT_SUMMARY_MAX_CHARS {
+        sanitized
+    } else {
+        format!(
+            "{}…",
+            sanitized
+                .chars()
+                .take(RESULT_SUMMARY_MAX_CHARS)
+                .collect::<String>()
+        )
+    }
 }
 
 fn sanitize_summary_value(value: &str) -> String {
@@ -207,8 +502,24 @@ pub trait EngineDriver: Send + Sync + 'static {
         None
     }
 
-    /// Clear per-turn cumulative-usage baselines after every terminal path.
+    /// Clear per-turn cumulative-baselines after every terminal path.
     fn finish_turn_usage(&self, _session: &SessionLocator, _turn_id: TurnId) {}
+
+    /// Snapshot the session's live `Task`-spawned sub-agent registry.
+    /// Default empty — drivers with no session engine loaded (or none of
+    /// their own) simply report no sub-agents.
+    fn subagents_snapshot(&self, _session: &SessionLocator) -> Vec<SubAgent> {
+        Vec::new()
+    }
+
+    /// Snapshot the session's tracked background shells (`BashRun`
+    /// sessions). Default empty for drivers with no session engine loaded.
+    async fn background_processes_snapshot(
+        &self,
+        _session: &SessionLocator,
+    ) -> Vec<zode_core::bg_shells::BgShell> {
+        Vec::new()
+    }
 
     async fn query(&self, query: AgentQuery) -> Result<AgentSnapshot, EndpointError>;
 }
@@ -275,6 +586,17 @@ impl EngineBackend {
             ))
         } else {
             Ok(())
+        }
+    }
+
+    fn ensure_all_idle(&self) -> Result<(), EndpointError> {
+        if lock_active(&self.active).is_empty() {
+            Ok(())
+        } else {
+            Err(endpoint_error(
+                EndpointErrorKind::Busy,
+                "provider configuration cannot reload while a turn is active",
+            ))
         }
     }
 
@@ -376,7 +698,9 @@ impl NodeBackend for EngineBackend {
                 ));
             }
         }
-        if matches!(
+        if matches!(&command.kind, AgentCommandKind::ReloadProviderConfiguration) {
+            self.ensure_all_idle()?;
+        } else if matches!(
             &command.kind,
             AgentCommandKind::DeleteSession
                 | AgentCommandKind::SetModel { .. }
@@ -426,7 +750,7 @@ async fn drive_turn(
     let mut model = None;
     let mut interrupted = false;
 
-    while let Some(event) = stream.next().await {
+    'turn: while let Some(event) = stream.next().await {
         if abort.is_aborted() {
             interrupted = true;
             break;
@@ -444,10 +768,31 @@ async fn drive_turn(
                     {
                         *usage = cumulative;
                     }
+                    let mut registry_updates = if is_task_tool_event(&kind) {
+                        normalizer.diff_subagents(
+                            &driver.subagents_snapshot(&session),
+                            turn_id,
+                            Instant::now(),
+                        )
+                    } else {
+                        Vec::new()
+                    };
+                    if is_background_shell_tool_event(&kind) {
+                        registry_updates.extend(normalizer.diff_background_processes(
+                            &driver.background_processes_snapshot(&session).await,
+                        ));
+                    }
                     if events.send(session.clone(), turn_id, kind).await.is_err() {
                         abort.abort();
                         interrupted = true;
                         break;
+                    }
+                    for update in registry_updates {
+                        if events.send(session.clone(), turn_id, update).await.is_err() {
+                            abort.abort();
+                            interrupted = true;
+                            break 'turn;
+                        }
                     }
                 }
             }
@@ -471,6 +816,22 @@ async fn drive_turn(
         }
     }
     interrupted |= abort.is_aborted();
+
+    // One last authoritative diff so a turn that ends (normally or via
+    // interruption) while a child was still `Running` gets corrected to the
+    // registry's terminal state before `TurnFinished` reaches consumers.
+    for update in normalizer.diff_subagents(
+        &driver.subagents_snapshot(&session),
+        turn_id,
+        Instant::now(),
+    ) {
+        let _ = events.send(session.clone(), turn_id, update).await;
+    }
+    for update in
+        normalizer.diff_background_processes(&driver.background_processes_snapshot(&session).await)
+    {
+        let _ = events.send(session.clone(), turn_id, update).await;
+    }
     driver.finish_turn_usage(&session, turn_id);
 
     if let Err(error) = driver
@@ -513,6 +874,38 @@ async fn drive_turn(
             AgentEventKind::TurnFinished { interrupted },
         )
         .await;
+}
+
+/// True when a normalized event is a `Task` tool's `ToolStarted`/
+/// `ToolCompleted`, the only trigger for a sub-agent registry diff.
+fn is_task_tool_event(kind: &AgentEventKind) -> bool {
+    match kind {
+        AgentEventKind::ToolStarted { tool } | AgentEventKind::ToolCompleted { tool } => {
+            tool.name == TASK_TOOL_NAME
+        }
+        _ => false,
+    }
+}
+
+/// True when a normalized event is a background-shell tool's
+/// `ToolStarted`/`ToolCompleted`, the trigger for a `BackgroundShellTracker`
+/// diff (see `EventNormalizer::diff_background_processes`).
+fn is_background_shell_tool_event(kind: &AgentEventKind) -> bool {
+    match kind {
+        AgentEventKind::ToolStarted { tool } | AgentEventKind::ToolCompleted { tool } => matches!(
+            tool.name.as_str(),
+            BASH_RUN_TOOL_NAME | BASH_OUTPUT_TOOL_NAME | KILL_SHELL_TOOL_NAME
+        ),
+        _ => false,
+    }
+}
+
+/// Pulls `shell_id` out of `BashRun`'s `ToolResult` output JSON.
+fn bash_shell_id(output: &serde_json::Value) -> Option<String> {
+    output
+        .get("shell_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
 }
 
 fn lock_active(

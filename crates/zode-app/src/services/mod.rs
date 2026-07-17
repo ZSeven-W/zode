@@ -98,7 +98,7 @@ pub trait NotificationService: Send + Sync {
 pub trait ExternalApplicationService: Send + Sync {
     fn installed_applications(
         &self,
-    ) -> Result<Vec<zode_app_model::ExternalApplication>, ServiceError>;
+    ) -> Result<zode_app_model::ExternalApplicationCatalog, ServiceError>;
     fn open_workspace(
         &self,
         workspace: &WorkspaceUri,
@@ -109,6 +109,15 @@ pub trait ExternalApplicationService: Send + Sync {
 pub trait ExternalOpenService: Send + Sync {
     fn open_file(&self, workspace: &WorkspaceUri, relative: &str) -> Result<(), ServiceError>;
     fn open_url(&self, url: &str) -> Result<(), ServiceError>;
+    /// Opens the named System Settings privacy pane. A dedicated method
+    /// (rather than a caller-supplied string through `open_url`, whose
+    /// contract is `http(s)://` only) because the `x-apple.systempreferences:`
+    /// scheme is only ever launched with these two known-good, hardcoded
+    /// URLs - never with agent- or user-supplied text.
+    fn open_system_settings_pane(
+        &self,
+        pane: zode_app_model::ComputerPermissionKind,
+    ) -> Result<(), ServiceError>;
 }
 
 /// Safe local repository-adjacent platform actions.

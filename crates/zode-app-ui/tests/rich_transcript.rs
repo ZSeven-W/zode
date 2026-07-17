@@ -53,7 +53,7 @@ fn rich_state() -> zode_app_model::ZodeAppState {
         session,
         TranscriptState {
             items: vec![
-                TranscriptItem::AssistantText("## Result\n\nReady".into()),
+                TranscriptItem::assistant_text("## Result\n\nReady"),
                 TranscriptItem::ActivityGroup(vec![ActivityEntry {
                     id: "activity-1".into(),
                     title: "Ran tests".into(),
@@ -173,7 +173,7 @@ fn rich_artifact_accessibility_ids_survive_earlier_transcript_insertions() {
         .get_mut(&session)
         .unwrap()
         .items
-        .insert(0, TranscriptItem::UserText("prepended".into()));
+        .insert(0, TranscriptItem::user_text("prepended"));
     let after = WorkspaceSnapshot::build(&state, 1_440.0, 1_080.0, Insets::ZERO);
 
     for (prefix, before_id) in ids {

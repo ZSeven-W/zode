@@ -62,7 +62,7 @@ impl OpenWithEffect {
             let result =
                 tokio::task::spawn_blocking(move || service.installed_applications()).await;
             let command = match result {
-                Ok(Ok(applications)) => AppCommand::ExternalApplicationsLoaded(applications),
+                Ok(Ok(catalog)) => AppCommand::ExternalApplicationsLoaded(catalog),
                 Ok(Err(error)) => AppCommand::ExternalApplicationsFailed(error.to_string()),
                 Err(error) => AppCommand::ExternalApplicationsFailed(format!(
                     "application discovery worker failed: {error}"
@@ -217,7 +217,8 @@ impl DesktopApp {
                         .unwrap_or(OPEN_WITH_DROPDOWN_ID)
                 })
             }
-            AppCommand::OpenWorkspaceExternally { .. } => Some(OPEN_WITH_PRIMARY_ID),
+            AppCommand::SelectExternalApplication { .. }
+            | AppCommand::OpenWorkspaceExternally { .. } => Some(OPEN_WITH_PRIMARY_ID),
             _ => None,
         }
     }
@@ -256,7 +257,10 @@ mod tests {
         OpenWithEffect,
     };
     use crate::services::{ExternalApplicationService, ServiceError};
-    use zode_app_model::{demo_state, AppCommand, ExternalApplication, LoadState, ProjectState};
+    use zode_app_model::{
+        demo_state, AppCommand, ExternalApplication, ExternalApplicationCatalog, LoadState,
+        ProjectState,
+    };
     use zode_app_ui::{Insets, OpenWithMenu, ThreadHeader, WorkspaceSnapshot};
     use zode_node_protocol::WorkspaceUri;
 
@@ -264,8 +268,8 @@ mod tests {
     struct RecordingService(Mutex<Vec<(WorkspaceUri, ExternalApplication)>>);
 
     impl ExternalApplicationService for RecordingService {
-        fn installed_applications(&self) -> Result<Vec<ExternalApplication>, ServiceError> {
-            Ok(vec![ExternalApplication::Finder])
+        fn installed_applications(&self) -> Result<ExternalApplicationCatalog, ServiceError> {
+            Ok(vec![ExternalApplication::Finder].into())
         }
 
         fn open_workspace(
@@ -316,6 +320,22 @@ mod tests {
             *service.0.lock().unwrap(),
             vec![(current, ExternalApplication::Finder)]
         );
+    }
+
+    #[test]
+    fn selecting_an_application_never_reaches_the_open_effect() {
+        let service = Arc::new(RecordingService::default());
+        let effect = OpenWithEffect::with_wake(service.clone(), || {});
+        let state = demo_state();
+
+        assert!(!consume_open_with_command(
+            &state,
+            &effect,
+            &AppCommand::SelectExternalApplication {
+                application: ExternalApplication::Finder,
+            },
+        ));
+        assert!(service.0.lock().unwrap().is_empty());
     }
 
     #[test]

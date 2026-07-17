@@ -4,15 +4,20 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
 use chromiumoxide::cdp::browser_protocol::input::{DispatchKeyEventParams, DispatchKeyEventType};
 use chromiumoxide::cdp::browser_protocol::network::{
     EventRequestWillBeSent, EventResponseReceived, RequestId,
+};
+use chromiumoxide::cdp::browser_protocol::page::{
+    EventScreencastFrame, ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams,
+    StopScreencastParams,
 };
 use chromiumoxide::cdp::js_protocol::runtime::EventConsoleApiCalled;
 use chromiumoxide::cdp::js_protocol::runtime::{EvaluateParams, ReleaseObjectParams};
@@ -34,6 +39,10 @@ const NAV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Cap for the console/network ring buffers and the request-correlation
 /// pending queue; oldest entries are evicted once exceeded.
 const LOG_BUFFER_CAP: usize = 500;
+/// JPEG quality for the spectator screencast (M1 route A) — a compromise
+/// between panel legibility and bandwidth/CPU; matches the proposal's
+/// suggested value.
+const SCREENCAST_QUALITY: i64 = 60;
 
 /// Expand a leading `~/` against the home directory; anything else is
 /// returned unchanged (mirrors `hooks_config::expand_tilde`, which is
@@ -110,6 +119,23 @@ pub struct ManagedBackend {
     // this, a backgrounded tab's listeners keep running and cross-
     // contaminate `console_buf`/`network_buf` with the wrong tab's output.
     listener_handles: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
+    // Single-slot "newest frame wins" spectator stream state (M1 route A).
+    // `screencast_frame` is written by the screencast listener task and
+    // read by `latest_frame` without ever touching the session lease —
+    // panels poll it every redraw tick and must never contend with an
+    // in-flight agent tool call. `screencast_sequence` lets pollers detect
+    // a new frame without comparing bytes.
+    screencast_frame: Arc<StdMutex<Option<ScreencastFrame>>>,
+    screencast_sequence: Arc<AtomicU64>,
+    // Listener task bound to whichever page the stream was started on;
+    // aborted (not restarted) on tab swap — see `replace_listeners`. M1
+    // only follows the current tab, so a swap simply ends the stream and
+    // the panel shows an idle state until the caller starts it again.
+    screencast_listener: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    screencast_active: AtomicBool,
+    // Last `max_width` requested, so a future restart (after a tab swap)
+    // can reuse it without the caller having to remember the panel size.
+    screencast_max_width: AtomicU32,
 }
 
 /// Builds [`ManagedBackend`] instances for [`BrowserSession`](super::session::BrowserSession).
@@ -192,6 +218,11 @@ impl ManagedBackend {
             downloads,
             snapshot_refs: StdMutex::new(0),
             listener_handles: StdMutex::new(Vec::new()),
+            screencast_frame: Arc::new(StdMutex::new(None)),
+            screencast_sequence: Arc::new(AtomicU64::new(0)),
+            screencast_listener: StdMutex::new(None),
+            screencast_active: AtomicBool::new(false),
+            screencast_max_width: AtomicU32::new(800),
         });
         {
             let page = backend.page.lock().await;
@@ -216,7 +247,83 @@ impl ManagedBackend {
         for h in old {
             h.abort();
         }
+        // A screencast is bound to the page it was started on (CDP scopes
+        // `Page.startScreencast` to one target); a tab swap leaves it
+        // pointed at a now-backgrounded page. M1 only follows the current
+        // tab, so rather than silently keep streaming the wrong tab (or
+        // freeze on its last frame), end the stream here and clear the
+        // slot — `latest_frame` honestly reports "no frame" until the
+        // caller (the desktop panel) notices and calls `start_frame_stream`
+        // again.
+        self.abort_screencast_listener();
+        if self.screencast_active.swap(false, Ordering::SeqCst) {
+            *self.screencast_frame.lock().unwrap() = None;
+        }
     }
+
+    fn abort_screencast_listener(&self) {
+        if let Some(handle) = self.screencast_listener.lock().unwrap().take() {
+            handle.abort();
+        }
+    }
+
+    /// Issues `Page.startScreencast` against `page` and attaches the frame
+    /// listener. Idempotent: aborts any previously running listener first,
+    /// so it doubles as "restart at a new width" for resize handling.
+    async fn begin_screencast(&self, page: &Page, max_width: u32) -> Result<(), BrowserError> {
+        self.abort_screencast_listener();
+        let params = StartScreencastParams::builder()
+            .format(StartScreencastFormat::Jpeg)
+            .quality(SCREENCAST_QUALITY)
+            .max_width(i64::from(max_width.max(1)))
+            .build();
+        page.execute(params)
+            .await
+            .map_err(|e| BrowserError::Protocol(e.to_string()))?;
+        let handle = attach_screencast_listener(
+            page.clone(),
+            self.screencast_frame.clone(),
+            self.screencast_sequence.clone(),
+        );
+        *self.screencast_listener.lock().unwrap() = Some(handle);
+        self.screencast_active.store(true, Ordering::SeqCst);
+        self.screencast_max_width.store(max_width, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Spawns the screencast frame listener task for `page`: decodes each
+/// base64 JPEG frame, stores it in the single-slot `frame` cell (overwrite,
+/// never queue — a slow consumer sees only the newest frame), bumps
+/// `sequence`, and acks the frame so Chrome keeps streaming (CDP pauses
+/// screencast delivery until each frame is acknowledged). A frame that
+/// fails to base64-decode is skipped but still acked, so one malformed
+/// frame can't stall the stream. Returns the task handle so the caller can
+/// abort it on stop / tab swap / restart.
+fn attach_screencast_listener(
+    page: Page,
+    frame: Arc<StdMutex<Option<ScreencastFrame>>>,
+    sequence: Arc<AtomicU64>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Ok(mut events) = page.event_listener::<EventScreencastFrame>().await else {
+            return;
+        };
+        while let Some(event) = events.next().await {
+            let raw: &[u8] = event.data.as_ref();
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(raw) {
+                let next = sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                *frame.lock().unwrap() = Some(ScreencastFrame {
+                    data: Arc::new(bytes),
+                    sequence: next,
+                });
+            }
+            let ack = ScreencastFrameAckParams::new(event.session_id);
+            if page.execute(ack).await.is_err() {
+                break;
+            }
+        }
+    })
 }
 
 /// Push `item` onto the back of a ring buffer, evicting the oldest entry
@@ -689,6 +796,30 @@ impl BrowserBackend for ManagedBackend {
         // stream ends as a side effect of the connection closing.
         let _ = browser.wait().await;
         Ok(())
+    }
+
+    fn supports_frame_stream(&self) -> bool {
+        true
+    }
+
+    async fn start_frame_stream(&self, max_width: u32) -> Result<(), BrowserError> {
+        let page = self.page.lock().await;
+        self.begin_screencast(&page, max_width).await
+    }
+
+    async fn stop_frame_stream(&self) -> Result<(), BrowserError> {
+        self.abort_screencast_listener();
+        self.screencast_active.store(false, Ordering::SeqCst);
+        *self.screencast_frame.lock().unwrap() = None;
+        let page = self.page.lock().await;
+        // Best-effort: if the page/target is already gone there is nothing
+        // left to tell Chrome to stop streaming.
+        let _ = page.execute(StopScreencastParams {}).await;
+        Ok(())
+    }
+
+    fn latest_frame(&self) -> Option<ScreencastFrame> {
+        self.screencast_frame.lock().unwrap().clone()
     }
 }
 

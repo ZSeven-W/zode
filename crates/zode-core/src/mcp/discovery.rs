@@ -133,7 +133,10 @@ pub fn discover_mcp_config(cwd: &Path) -> Option<McpConfig> {
 /// Scan a plugin tree (depth ≤6) for MCP declarations — `plugin.json`,
 /// `.mcp.json`, or `mcp.json` — and merge any servers into `out`. Best-effort:
 /// unreadable/unparseable files are skipped. Lets plugins ship MCP servers.
-fn collect_plugin_mcp(root: &Path, out: &mut serde_json::Map<String, Value>) {
+///
+/// `pub(crate)` so `plugin_market::scan` can reuse it for a single installed
+/// plugin's tree instead of re-implementing the same walk + parse.
+pub(crate) fn collect_plugin_mcp(root: &Path, out: &mut serde_json::Map<String, Value>) {
     fn walk(dir: &Path, depth: usize, out: &mut serde_json::Map<String, Value>) {
         if depth > 6 {
             return;

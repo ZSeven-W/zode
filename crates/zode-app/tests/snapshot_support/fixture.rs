@@ -107,7 +107,7 @@ pub(crate) fn base_scene_state(theme: ThemePreference, viewport_width: u32) -> Z
     set_transcript(
         &mut state,
         vec![
-            TranscriptItem::UserText("照着参考界面完善 Zode 桌面端，并补齐截图回归。".into()),
+            TranscriptItem::user_text("照着参考界面完善 Zode 桌面端，并补齐截图回归。"),
             TranscriptItem::Thinking("已读取桌面端实施计划，正在核对真实状态与布局。".into()),
             TranscriptItem::Tool(ToolCall {
                 id: "read-desktop-plan".into(),
@@ -119,10 +119,8 @@ pub(crate) fn base_scene_state(theme: ThemePreference, viewport_width: u32) -> Z
                         .into(),
                 ),
             }),
-            TranscriptItem::AssistantText(
-                "截图回归现在覆盖真实的本地状态：\n\n- 项目与任务来自会话索引\n- 环境信息展示当前分支与变更\n- 插件页只列出节点实际声明的能力"
-                    .into(),
-            ),
+            TranscriptItem::assistant_text(
+                "截图回归现在覆盖真实的本地状态：\n\n- 项目与任务来自会话索引\n- 环境信息展示当前分支与变更\n- 插件页只列出节点实际声明的能力",),
         ],
         false,
     );
@@ -186,13 +184,12 @@ pub(crate) fn base_scene_state(theme: ThemePreference, viewport_width: u32) -> Z
             context: LoadState::Ready(EnvironmentSnapshot {
                 workspace_uri: workspace,
                 branch: Some("codex/zode-jian-desktop".into()),
-                subagents: Vec::new(),
                 background_processes: Vec::new(),
-                sources: vec![EnvironmentEntry {
-                    id: "desktop-plan".into(),
-                    label: "Zode 桌面端实施计划".into(),
-                    value: None,
-                }],
+                sources: vec![EnvironmentEntry::new(
+                    "desktop-plan",
+                    "Zode 桌面端实施计划",
+                    None,
+                )],
             }),
             preview: zode_app_model::PreviewState::Idle,
             runtime_options: LoadState::Ready(RuntimeOptions {
@@ -203,6 +200,8 @@ pub(crate) fn base_scene_state(theme: ThemePreference, viewport_width: u32) -> Z
                 sandbox_mode: SandboxMode::Off,
                 sandbox_network: false,
             }),
+            subagents: Vec::new(),
+            ..SessionPresentationState::default()
         },
     );
     state
@@ -216,7 +215,9 @@ pub(crate) fn set_transcript(state: &mut ZodeAppState, items: Vec<TranscriptItem
     let user_starts = items
         .iter()
         .enumerate()
-        .filter_map(|(index, item)| matches!(item, TranscriptItem::UserText(_)).then_some(index))
+        .filter_map(|(index, item)| {
+            matches!(item, TranscriptItem::UserText { .. }).then_some(index)
+        })
         .collect::<Vec<_>>();
     let mut transcript = TranscriptState {
         last_sequence: items.len() as u64,
@@ -226,6 +227,7 @@ pub(crate) fn set_transcript(state: &mut ZodeAppState, items: Vec<TranscriptItem
         scroll_offset: 0.0,
         follow_tail: true,
         item_heights: Vec::new(),
+        ..TranscriptState::default()
     };
     for (group_index, start) in user_starts.iter().copied().enumerate() {
         let turn_id = TurnId::parse(&format!("00000000-0000-0000-0000-{:012}", group_index + 1))

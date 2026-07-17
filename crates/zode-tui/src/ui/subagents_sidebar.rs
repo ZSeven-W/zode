@@ -138,6 +138,7 @@ mod tests {
             committed_output: 0,
             turn_input: 0,
             turn_output: 0,
+            final_output: None,
         }
     }
 

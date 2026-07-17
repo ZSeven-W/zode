@@ -162,15 +162,51 @@ fn artifact_card_hierarchy_aligns_text_and_uses_semantic_change_colors() {
         })
         .collect::<Vec<_>>();
     assert_eq!(icon_paths.len(), 4);
+    // "crates/zode-app-ui/src/lib.rs" is a recognized code extension and
+    // gets the dedicated code-file icon; "assets/reference.bin" has no
+    // recognized extension and falls back to the generic document icon.
     assert_eq!(
         icon_paths
             .iter()
             .filter(|path| **path == SemanticIcon::FileText.path())
             .count(),
-        2
+        1
+    );
+    assert_eq!(
+        icon_paths
+            .iter()
+            .filter(|path| **path == SemanticIcon::FileCode.path())
+            .count(),
+        1
     );
     assert!(icon_paths.contains(&SemanticIcon::Snapshot.path()));
     assert!(icon_paths.contains(&SemanticIcon::Sparkles.path()));
+}
+
+#[test]
+fn file_card_shows_a_type_badge_and_an_open_with_affordance() {
+    let theme = ZodeTheme::light();
+    let painter = paint_artifacts(&theme);
+
+    let (subtitle, ..) = painter
+        .operations
+        .iter()
+        .find_map(|operation| match operation {
+            PaintOp::Text(text, origin, color) if text.starts_with("代码 · RS") => {
+                Some((text.clone(), *origin, *color))
+            }
+            _ => None,
+        })
+        .expect("code file card shows its type badge");
+    assert!(subtitle.contains("crates/zode-app-ui/src/lib.rs"));
+
+    assert_text_color(&painter, "打开方式", theme.tokens.muted_foreground);
+    let chevrons = painter
+        .operations
+        .iter()
+        .filter(|operation| matches!(operation, PaintOp::Svg(path, 10.0) if *path == SemanticIcon::ChevronDown.path()))
+        .count();
+    assert_eq!(chevrons, 2, "both file cards show the open-with chevron");
 }
 
 fn paint_artifacts(theme: &ZodeTheme) -> CapturePainter {

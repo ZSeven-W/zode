@@ -12,10 +12,10 @@ impl DesktopApp {
     /// Scrolls only the sidebar content beneath the fixed new-task row. A
     /// wheel gesture over the sidebar never leaks through to the transcript.
     pub(super) fn handle_sidebar_scroll_delta(&mut self, delta: f32) -> bool {
-        let sidebar = self.frame_snapshot.layout.sidebar;
+        let sidebar = self.active_primary_sidebar_rect();
         if !sidebar_accepts_scroll(
             self.app_state.presentation.route,
-            self.app_state.shell.sidebar_open,
+            self.app_state.shell.sidebar_open || self.primary_sidebar_preview_is_visible(),
             ProjectSidebar::scroll_viewport(sidebar),
             self.window_state.cursor_logical,
         ) {
@@ -61,17 +61,14 @@ impl DesktopApp {
     }
 
     pub(super) fn handle_sidebar_accessibility_scroll(&mut self, action: Action) -> bool {
-        let viewport = ProjectSidebar::scroll_viewport(self.frame_snapshot.layout.sidebar);
+        let sidebar = self.active_primary_sidebar_rect();
+        let viewport = ProjectSidebar::scroll_viewport(sidebar);
         let delta = match action {
             Action::ScrollUp => -viewport.size.y * 0.8,
             Action::ScrollDown => viewport.size.y * 0.8,
             _ => return false,
         };
-        if let Some(command) = ProjectSidebar::scroll_command(
-            self.frame_snapshot.layout.sidebar,
-            &self.app_state,
-            delta,
-        ) {
+        if let Some(command) = ProjectSidebar::scroll_command(sidebar, &self.app_state, delta) {
             if reduce_navigation_command(&mut self.app_state, command) == NavigationOutcome::Applied
             {
                 self.invalidate_frame_snapshot_for_scroll();
@@ -85,11 +82,8 @@ impl DesktopApp {
     /// stays side-effect free; pointer movement requests the context once and
     /// the presentation bridge wakes the window when it is ready.
     pub(super) fn request_sidebar_hover_context(&mut self, hovered: Option<WidgetId>) {
-        let Some(query) = sidebar_hover_environment_query(
-            &self.app_state,
-            self.frame_snapshot.layout.sidebar,
-            hovered,
-        ) else {
+        let sidebar = self.active_primary_sidebar_rect();
+        let Some(query) = sidebar_hover_environment_query(&self.app_state, sidebar, hovered) else {
             return;
         };
         if let Some(bridge) = self.presentation_queries.as_mut() {
@@ -305,7 +299,6 @@ mod tests {
             .context = LoadState::Ready(EnvironmentSnapshot {
             workspace_uri: workspace,
             branch: Some("v0.8.1".into()),
-            subagents: Vec::new(),
             background_processes: Vec::new(),
             sources: Vec::new(),
         });

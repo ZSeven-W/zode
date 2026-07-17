@@ -135,6 +135,13 @@ impl ExternalOpenService for FakeExternalOpen {
     fn open_url(&self, _url: &str) -> Result<(), ServiceError> {
         Err(ServiceError::Platform("unexpected url".into()))
     }
+
+    fn open_system_settings_pane(
+        &self,
+        _pane: zode_app_model::ComputerPermissionKind,
+    ) -> Result<(), ServiceError> {
+        Err(ServiceError::Platform("unexpected settings pane".into()))
+    }
 }
 
 fn state_with_session() -> (zode_app_model::ZodeAppState, SessionLocator, WorkspaceUri) {
@@ -228,7 +235,6 @@ fn page_and_pane_widget_ids_map_through_component_commands() {
     presentation.context = LoadState::Ready(EnvironmentSnapshot {
         workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
         branch: Some("codex/test".into()),
-        subagents: Vec::new(),
         background_processes: Vec::new(),
         sources: Vec::new(),
     });

@@ -1,7 +1,12 @@
 use jian_widgets::{components::switch::Switch, HorizontalAlign, Painter, Point2D, Rect};
 use zode_app_model::AppCommand;
 
-use crate::{paint_single_line, RectExt, WidgetId, ZodeTheme};
+use crate::{paint_single_line, Card, RectExt, WidgetId, ZodeTheme};
+
+/// Radius this settings page's cards were already painted at before the
+/// shared `components::Card` migration - kept as an explicit constant so
+/// adopting the shared component doesn't silently resize these corners.
+const CARD_RADIUS: f32 = 12.0;
 
 pub(super) const CONTENT_WIDTH: f32 = 768.0;
 pub(super) const CONTENT_TOP: f32 = 70.0;
@@ -149,8 +154,7 @@ pub(super) fn paint_section_label(
 }
 
 pub(super) fn paint_card(painter: &mut dyn Painter, rect: Rect, theme: &ZodeTheme) {
-    painter.fill_round_rect(rect, 12.0, theme.tokens.card);
-    painter.stroke_round_rect(rect, 12.0, theme.tokens.border, 1.0);
+    Card::paint(painter, rect, CARD_RADIUS, false, theme);
 }
 
 pub(super) fn paint_divider(

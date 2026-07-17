@@ -1,9 +1,13 @@
 use jian_widgets::{Color, HorizontalAlign, Painter, Point2D, Rect, TextLayout};
 
 use crate::{
-    paint_single_line, BrandMark, ProjectPicker, RectExt, SemanticIcon, WelcomeTitleLayout,
+    paint_single_line, BrandMark, Card, ProjectPicker, RectExt, SemanticIcon, WelcomeTitleLayout,
     WidgetId, ZodeTheme,
 };
+
+/// Radius these suggestion cards were already painted at, kept explicit so
+/// the `components::Card` migration does not silently resize their corners.
+const SUGGESTION_CARD_RADIUS: f32 = 12.0;
 
 pub const EMPTY_SUGGESTION_IDS: [WidgetId; 4] =
     [WidgetId(180), WidgetId(181), WidgetId(182), WidgetId(183)];
@@ -22,6 +26,7 @@ pub struct EmptySuggestionLayout {
     pub label: &'static str,
 }
 
+const REFERENCE_WIDTH: f32 = 736.0;
 const REFERENCE_HEIGHT: f32 = 868.0;
 const MARK_TOP: f32 = 348.0;
 const TITLE_TOP: f32 = 428.0;
@@ -30,7 +35,10 @@ const TITLE_HEIGHT: f32 = 33.0;
 const CARD_INSET: f32 = 12.0;
 const CARD_GAP: f32 = 10.0;
 const CARD_HEIGHT: f32 = 106.0;
+const CARD_REFERENCE_WIDTH: f32 = (REFERENCE_WIDTH - CARD_INSET * 2.0 - CARD_GAP * 3.0) / 4.0;
+const WIDE_CONTENT_HEIGHT: f32 = CARDS_TOP + CARD_HEIGHT - MARK_TOP;
 const COMPACT_BREAKPOINT: f32 = 600.0;
+const WIDE_MIN_HEIGHT: f32 = 540.0;
 const COMPACT_MIN_WIDTH: f32 = 160.0;
 const COMPACT_MIN_HEIGHT: f32 = 180.0;
 const COMPACT_INSET: f32 = 8.0;
@@ -42,8 +50,6 @@ const WIDE_SINGLE_LINE_BLOCK_HEIGHT: f32 = 14.0;
 const WIDE_TEXT_LINE_HEIGHT: f32 = 18.0;
 const WELCOME_TEXT_WEIGHT: u16 = 400;
 const SUGGESTION_TEXT_WEIGHT: u16 = 400;
-const CARD_SHADOW_OFFSET_Y: f32 = 2.0;
-const CARD_SHADOW_BLUR: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmptyStateMode {
@@ -66,7 +72,7 @@ impl EmptyStateLayout {
         if rect.width() < COMPACT_MIN_WIDTH || rect.height() < COMPACT_MIN_HEIGHT {
             return Self::omitted(rect);
         }
-        if rect.width() < COMPACT_BREAKPOINT || rect.height() < COMPACT_BREAKPOINT {
+        if rect.width() < COMPACT_BREAKPOINT || rect.height() < WIDE_MIN_HEIGHT {
             return Self::compact(rect);
         }
 
@@ -74,10 +80,14 @@ impl EmptyStateLayout {
     }
 
     fn wide(rect: Rect) -> Self {
+        // Treat the reference empty state as one fixed-rhythm vertical group.
+        // A shorter but still wide window moves the whole group upward instead
+        // of collapsing its gaps or switching to the two-column compact grid.
+        let content_top = anchored_y(rect, MARK_TOP / REFERENCE_HEIGHT, WIDE_CONTENT_HEIGHT);
         let mark_size = BrandMark::SIZE.min(rect.width()).min(rect.height());
         let mark = Rect::xywh(
             rect.min_x() + (rect.width() - mark_size) / 2.0,
-            anchored_y(rect, MARK_TOP / REFERENCE_HEIGHT, mark_size),
+            content_top,
             mark_size,
             mark_size,
         );
@@ -85,7 +95,7 @@ impl EmptyStateLayout {
         let title_height = TITLE_HEIGHT.min(rect.height());
         let title = Rect::xywh(
             rect.min_x(),
-            anchored_y(rect, TITLE_TOP / REFERENCE_HEIGHT, title_height),
+            content_top + TITLE_TOP - MARK_TOP,
             rect.width(),
             title_height,
         );
@@ -95,7 +105,7 @@ impl EmptyStateLayout {
         let gap = CARD_GAP.min(cards_width / 3.0);
         let card_width = ((cards_width - gap * 3.0) / 4.0).max(0.0);
         let card_height = CARD_HEIGHT.min(rect.height());
-        let card_y = anchored_y(rect, CARDS_TOP / REFERENCE_HEIGHT, card_height);
+        let card_y = content_top + CARDS_TOP - MARK_TOP;
         let cards = std::array::from_fn(|index| {
             Rect::xywh(
                 rect.min_x() + inset + index as f32 * (card_width + gap),
@@ -115,8 +125,16 @@ impl EmptyStateLayout {
 
     fn compact(rect: Rect) -> Self {
         let mark = Rect::xywh(rect.min_x() + rect.width() / 2.0, rect.min_y(), 0.0, 0.0);
-        let title_top = COMPACT_TITLE_TOP.min(rect.height());
-        let title_height = COMPACT_TITLE_HEIGHT.min((rect.height() - title_top).max(0.0));
+        let inset = COMPACT_INSET.min(rect.width() / 2.0);
+        let title_height = COMPACT_TITLE_HEIGHT.min((rect.height() - inset * 2.0).max(0.0));
+        let available_grid_height =
+            (rect.height() - inset * 2.0 - title_height - COMPACT_TITLE_GAP).max(0.0);
+        let card_height = ((available_grid_height - CARD_GAP) / 2.0).clamp(0.0, CARD_HEIGHT);
+        let grid_height = card_height * 2.0 + CARD_GAP;
+        let content_height = title_height + COMPACT_TITLE_GAP + grid_height;
+        let title_top = ((rect.height() - content_height) / 2.0)
+            .max(COMPACT_TITLE_TOP)
+            .min((rect.height() - content_height).max(0.0));
         let title = Rect::xywh(
             rect.min_x(),
             rect.min_y() + title_top,
@@ -124,18 +142,16 @@ impl EmptyStateLayout {
             title_height,
         );
 
-        let inset = COMPACT_INSET.min(rect.width() / 2.0);
-        let grid_width = (rect.width() - inset * 2.0).max(0.0);
-        let card_width = ((grid_width - CARD_GAP) / 2.0).max(0.0);
+        let available_grid_width = (rect.width() - inset * 2.0).max(0.0);
+        let card_width = ((available_grid_width - CARD_GAP) / 2.0).clamp(0.0, CARD_REFERENCE_WIDTH);
+        let grid_width = card_width * 2.0 + CARD_GAP;
+        let grid_x = rect.min_x() + (rect.width() - grid_width) / 2.0;
         let cards_y = title.max_y() + COMPACT_TITLE_GAP;
-        let cards_bottom = (rect.max_y() - inset).max(cards_y);
-        let grid_height = cards_bottom - cards_y;
-        let card_height = ((grid_height - CARD_GAP) / 2.0).max(0.0);
         let cards = std::array::from_fn(|index| {
             let column = index % 2;
             let row = index / 2;
             Rect::xywh(
-                rect.min_x() + inset + column as f32 * (card_width + CARD_GAP),
+                grid_x + column as f32 * (card_width + CARD_GAP),
                 cards_y + row as f32 * (card_height + CARD_GAP),
                 card_width,
                 card_height,
@@ -271,19 +287,7 @@ impl EmptyState {
             if card.width() <= 0.0 || card.height() <= 0.0 {
                 continue;
             }
-            painter.fill_drop_shadow(
-                Rect::xywh(
-                    card.origin.x,
-                    card.origin.y + CARD_SHADOW_OFFSET_Y,
-                    card.size.x,
-                    card.size.y,
-                ),
-                12.0,
-                CARD_SHADOW_BLUR,
-                theme.tokens.foreground.with_alpha(0.045),
-            );
-            painter.fill_round_rect(card, 12.0, theme.tokens.card);
-            painter.stroke_round_rect(card, 12.0, theme.tokens.border, 1.0);
+            Card::paint(painter, card, SUGGESTION_CARD_RADIUS, true, theme);
             painter.save();
             painter.clip_rect(card);
             let horizontal_inset = 14.0_f32.min(card.width() / 2.0);
@@ -601,6 +605,27 @@ mod tests {
             for right in (left + 1)..layout.cards.len() {
                 assert!(!overlaps(layout.cards[left], layout.cards[right]));
             }
+        }
+    }
+
+    #[test]
+    fn short_wide_layout_keeps_the_brand_and_four_card_row() {
+        let bounds = Rect::xywh(10.0, 20.0, 736.0, 560.0);
+        let layout = EmptyStateLayout::compute(bounds);
+
+        assert_eq!(layout.mode, EmptyStateMode::Wide);
+        assert_eq!(
+            layout.mark.size,
+            Point2D::new(BrandMark::SIZE, BrandMark::SIZE)
+        );
+        assert!(layout
+            .cards
+            .iter()
+            .all(|card| (card.min_y() - layout.cards[0].min_y()).abs() <= 0.1));
+        assert!(!overlaps(layout.mark, layout.title));
+        assert!(!overlaps(layout.title, layout.cards[0]));
+        for (index, card) in layout.cards.iter().enumerate() {
+            assert_contained(*card, bounds, &format!("card {index}"));
         }
     }
 

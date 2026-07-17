@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use zode_core::approval::{Approval, ApprovalReceiver, ApprovalRequest};
 use zode_core::bootstrap::ResolvedBootstrap;
+use zode_core::browser::BrowserSession;
 use zode_core::question::QuestionReceiver;
 use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentEventKind, AgentQuery, AgentSnapshot, ApprovalDecision,
@@ -26,6 +27,12 @@ pub struct LocalAppRuntime {
     endpoint: Arc<LocalAgentEndpoint>,
     node_id: NodeId,
     capabilities: CapabilityManifest,
+    /// The `EngineTemplate`'s process-wide browser session — the SAME
+    /// `Arc` the assembled `ZodeEngine`s hand to `browser_read`/`browser_act`
+    /// etc. Exposed so the desktop spectator panel (M1 route A) observes
+    /// the actual browser the agent is driving instead of standing up a
+    /// second, unrelated Chrome instance.
+    browser: Arc<BrowserSession>,
 }
 
 impl LocalAppRuntime {
@@ -39,6 +46,7 @@ impl LocalAppRuntime {
         let node_id = load_node_id(&config_dir)?;
         let capabilities = capability_manifest(node_id, bootstrap.cfg.browser.enabled());
         let repository = LocalSessionRepository::new(&config_dir, node_id);
+        let browser = bootstrap.template.browser.clone();
         let driver: Arc<dyn EngineDriver> = Arc::new(ZodeEngineDriver::new(
             node_id,
             bootstrap.template.clone(),
@@ -46,7 +54,14 @@ impl LocalAppRuntime {
             capabilities.clone(),
             config_dir.clone(),
         ));
-        Self::compose(bootstrap, driver, event_capacity, node_id, capabilities)
+        Self::compose(
+            bootstrap,
+            driver,
+            event_capacity,
+            node_id,
+            capabilities,
+            browser,
+        )
     }
 
     /// Injection seam used by lifecycle and composition contract tests.
@@ -59,15 +74,25 @@ impl LocalAppRuntime {
         let config_dir = config_dir.as_ref().to_path_buf();
         let node_id = load_node_id(&config_dir)?;
         let capabilities = capability_manifest(node_id, bootstrap.cfg.browser.enabled());
-        Self::compose(bootstrap, driver, event_capacity, node_id, capabilities)
+        let browser = bootstrap.template.browser.clone();
+        Self::compose(
+            bootstrap,
+            driver,
+            event_capacity,
+            node_id,
+            capabilities,
+            browser,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compose(
         bootstrap: ResolvedBootstrap,
         driver: Arc<dyn EngineDriver>,
         event_capacity: usize,
         node_id: NodeId,
         capabilities: CapabilityManifest,
+        browser: Arc<BrowserSession>,
     ) -> Result<Self, EndpointError> {
         let engine = Arc::new(EngineBackend::new(node_id, driver));
         let active = Arc::new(Mutex::new(HashMap::new()));
@@ -85,6 +110,7 @@ impl LocalAppRuntime {
             endpoint,
             node_id,
             capabilities,
+            browser,
         })
     }
 
@@ -94,6 +120,12 @@ impl LocalAppRuntime {
 
     pub fn node_id(&self) -> NodeId {
         self.node_id
+    }
+
+    /// The process-wide browser session shared with the agent's
+    /// `browser_*` tools — see the `browser` field doc.
+    pub fn browser_session(&self) -> Arc<BrowserSession> {
+        self.browser.clone()
     }
 
     pub fn capabilities(&self) -> &CapabilityManifest {

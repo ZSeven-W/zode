@@ -15,7 +15,7 @@ pub fn conversation_document_preview_scene(
     set_transcript(
         &mut state,
         vec![
-            TranscriptItem::UserText("把文档中心整理方案打开在右侧，我要边看边推进。".into()),
+            TranscriptItem::user_text("把文档中心整理方案打开在右侧，我要边看边推进。"),
             TranscriptItem::Thinking("正在核对工作区文件路径和当前会话归属。".into()),
             TranscriptItem::Tool(ToolCall {
                 id: "preview-list-docs".into(),
@@ -24,9 +24,8 @@ pub fn conversation_document_preview_scene(
                 summary: "列出 Zode Desktop 文档".into(),
                 detail: Some("openpencil-docs/zode/desktop".into()),
             }),
-            TranscriptItem::AssistantText(
-                "文档按 specs、plans、reports 与 references 归类，根目录索引已经指向当前实施计划。"
-                    .into(),
+            TranscriptItem::assistant_text(
+                "文档按 specs、plans、reports 与 references 归类，根目录索引已经指向当前实施计划。",
             ),
             TranscriptItem::FileArtifact(FileArtifact {
                 id: "preview-plan".into(),
@@ -34,7 +33,7 @@ pub fn conversation_document_preview_scene(
                 summary: "Zode Desktop Reference-First 实施计划".into(),
                 change_summary: Some("已更新".into()),
             }),
-            TranscriptItem::UserText("右侧预览需要独立 tab、breadcrumb 和外部打开。".into()),
+            TranscriptItem::user_text("右侧预览需要独立 tab、breadcrumb 和外部打开。"),
             TranscriptItem::Thinking("正在验证 Markdown 与纯文本的确定性换行。".into()),
             TranscriptItem::ActivityGroup(vec![ActivityEntry {
                 id: "preview-file-service".into(),
@@ -49,8 +48,8 @@ pub fn conversation_document_preview_scene(
                 summary: "运行文档预览测试".into(),
                 detail: Some("document_preview · file_service · presentation".into()),
             }),
-            TranscriptItem::AssistantText(
-                "预览只读取当前会话绑定工作区；切换或重定向工作区后不会展示旧缓存。".into(),
+            TranscriptItem::assistant_text(
+                "预览只读取当前会话绑定工作区；切换或重定向工作区后不会展示旧缓存。",
             ),
             TranscriptItem::FileArtifact(FileArtifact {
                 id: "preview-widget".into(),
@@ -58,7 +57,7 @@ pub fn conversation_document_preview_scene(
                 summary: "右侧 700px 文档预览与选中 tab".into(),
                 change_summary: Some("+401 -0".into()),
             }),
-            TranscriptItem::AssistantText("预览已经打开；可以继续在左侧会话中提出修改。".into()),
+            TranscriptItem::assistant_text("预览已经打开；可以继续在左侧会话中提出修改。"),
         ],
         false,
     );

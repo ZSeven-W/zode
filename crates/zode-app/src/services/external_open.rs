@@ -37,6 +37,21 @@ impl ExternalOpenService for LocalExternalOpenService {
         }
         open::that(url).map_err(ServiceError::Io)
     }
+
+    fn open_system_settings_pane(
+        &self,
+        pane: zode_app_model::ComputerPermissionKind,
+    ) -> Result<(), ServiceError> {
+        let url = match pane {
+            zode_app_model::ComputerPermissionKind::Accessibility => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            }
+            zode_app_model::ComputerPermissionKind::ScreenRecording => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            }
+        };
+        open::that(url).map_err(ServiceError::Io)
+    }
 }
 
 fn ensure_inside(root: &std::path::Path, path: &std::path::Path) -> Result<(), ServiceError> {

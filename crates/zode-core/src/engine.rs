@@ -36,6 +36,7 @@ use crate::browser::{
     BrowserActTool, BrowserEvalTool, BrowserReadTool, BrowserSession, BrowserTabsTool,
     BrowserTarget, BrowserToolDeps, BrowserUploadTool, ManagedFactory,
 };
+use crate::computer::{ComputerActTool, ComputerReadTool, ComputerSession, ComputerToolDeps};
 use crate::config::ZodeConfig;
 use crate::cost::CostState;
 use crate::error::CoreError;
@@ -381,6 +382,8 @@ pub struct CarryState {
     pub tool_trace: Option<crate::tool_trace::ToolTrace>,
     pub reminders: Option<crate::reminders::ReminderTracker>,
     pub checkpoints: Option<crate::sessions::checkpoint::CheckpointTracker>,
+    /// Computer-use session, carried across reassembly (see `ZodeEngine::computer`).
+    pub computer: Option<Arc<ComputerSession>>,
 }
 
 impl ZodeEngine {
@@ -403,6 +406,7 @@ impl ZodeEngine {
             tool_trace: Some(self.tool_trace.clone()),
             reminders: Some(self.reminders.clone()),
             checkpoints: Some(self.checkpoints.clone()),
+            computer: Some(self.computer.clone()),
         }
     }
 }
@@ -666,6 +670,11 @@ pub struct ZodeEngine {
     /// tools at assembly (extension task engines pin `Bridge`). `None` means
     /// the tools follow the session-wide `/browser target` selection.
     pub browser_target_override: Option<BrowserTarget>,
+    /// Built-in computer-use control session (shared by both `computer_*`
+    /// tools). Unlike `browser`, there is no cross-tab process to share —
+    /// each engine gets its own backend handle, carried across reassembly
+    /// via `CarryState` like `cost`/`history` (see `CarryState::computer`).
+    pub computer: Arc<ComputerSession>,
     /// Shared completion signal for the autonomous goal loop. The registered
     /// `goal_complete` tool flips this; the TUI polls it after each turn to
     /// decide whether to stop looping. Created fresh in `assemble` so a rebuilt
@@ -868,6 +877,14 @@ impl ZodeEngine {
         // chromium lazily, on the first `lease()`.
         let browser_session = browser
             .unwrap_or_else(|| BrowserSession::new(cfg.browser.clone(), Arc::new(ManagedFactory)));
+        // Computer-use has no cross-tab process to share (the backend talks
+        // directly to OS APIs in-process), so it rides `CarryState` like
+        // `cost`/`history` rather than a template-level parameter like
+        // `browser`.
+        let computer_session = carry
+            .computer
+            .clone()
+            .unwrap_or_else(|| ComputerSession::new(crate::computer::default_backend()));
         let active_provider_key = selected_provider_key.or_else(|| cfg.active_provider_key());
         let provider_cfg =
             resolve_provider_capabilities(&cfg.provider, active_provider_key, cached_catalog());
@@ -1109,6 +1126,29 @@ impl ZodeEngine {
                 desktop_mutating_names.push(gated.name().to_string());
                 base.register(gated);
             }
+        }
+
+        // Built-in computer-use control (computer_*). Disable via
+        // `tools:computer`. computer_read is ReadOnly and registered
+        // un-gated, like browser_read/op_read. computer_act is wrapped in
+        // `computer_gated` HERE, before `wrap_mutating_tools` runs below, so
+        // its approval prompts carry the resolved app/element (state the
+        // model's input cannot be trusted to report) — mirrors the browser
+        // block above.
+        if cfg.computer.enabled() {
+            let shots_dir = crate::config::ConfigManager::config_dir()
+                .unwrap_or_else(|_| PathBuf::from(".zode"))
+                .join("screenshots");
+            let deps = ComputerToolDeps {
+                session: computer_session.clone(),
+                shots_dir,
+            };
+            base.register(Arc::new(ComputerReadTool::new(deps.clone())));
+            base.register(crate::computer::computer_gated(
+                Arc::new(ComputerActTool::new(deps)),
+                gate.clone(),
+                computer_session.clone(),
+            ));
         }
 
         // Skills: load the three-level SKILL.md tree. Disabled skills are
@@ -1474,6 +1514,11 @@ impl ZodeEngine {
                 mutating_allow.push(name.to_string());
             }
         }
+        // computer_act is pre-wrapped via computer_gated() above; allow-list it
+        // so `wrap_mutating_tools` does not gate it a second time.
+        if cfg.computer.enabled() {
+            mutating_allow.push("computer_act".to_string());
+        }
         // desktop_* mutating tools are pre-wrapped via desktop_gated() above.
         // Derive the allow set from the ACTUAL registered wrapper names so it
         // can never drift from what was registered (spec §注册不变量).
@@ -1679,6 +1724,7 @@ impl ZodeEngine {
             browser: browser_session,
             desktop: desktop_session,
             browser_target_override,
+            computer: computer_session,
         })
     }
 
@@ -2638,7 +2684,7 @@ impl EngineTemplate {
     pub fn tool_access(&self) -> ToolAccessMode {
         if self.read_only_tools {
             ToolAccessMode::ReadOnly
-        } else if self.yolo {
+        } else if self.yolo() {
             ToolAccessMode::Auto
         } else {
             ToolAccessMode::Prompt
@@ -2651,7 +2697,11 @@ impl EngineTemplate {
     pub fn with_tool_access(&self, access: ToolAccessMode) -> Self {
         let mut t = self.clone();
         t.read_only_tools = matches!(access, ToolAccessMode::ReadOnly);
-        t.yolo = matches!(access, ToolAccessMode::Auto);
+        t.approval_policy = if matches!(access, ToolAccessMode::Auto) {
+            ApprovalPolicy::Full
+        } else {
+            ApprovalPolicy::Request
+        };
         t
     }
 
@@ -2715,7 +2765,6 @@ impl EngineTemplate {
     /// Clone with yolo toggled (for `/yolo` and the settings mode switch).
     pub fn with_yolo(&self, yolo: bool) -> Self {
         let mut t = self.clone();
-        t.yolo = yolo;
         // `/yolo` is the legacy normal-tool access switch. Clear a previous
         // task-local read-only override so the result remains one of the three
         // explicit access modes instead of an unrepresentable read-only+yolo
@@ -3637,6 +3686,7 @@ mod tests {
                 crate::config::DesktopConfig::default(),
                 crate::desktop::platform_factory(&crate::config::DesktopConfig::default()),
             ),
+            computer: ComputerSession::new(crate::computer::default_backend()),
         }
     }
 
@@ -5302,6 +5352,61 @@ mod tests {
         let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
         assert!(
             !names.iter().any(|n| n.starts_with("browser_")),
+            "{names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn computer_tools_registered_when_enabled() {
+        // ComputerConfig.enabled() defaults true (test_cfg() leaves it unset).
+        let dir = tempfile::tempdir().unwrap();
+        let eng = ZodeEngine::assemble(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-06-13",
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
+        for t in ["computer_read", "computer_act"] {
+            assert!(names.iter().any(|n| n == t), "missing {t}: {names:?}");
+        }
+        // computer_read stays ReadOnly and un-gated; computer_act is
+        // pre-wrapped via computer_gated (not double-wrapped by
+        // wrap_mutating_tools).
+        let read = eng.tools.get("computer_read").expect("computer_read");
+        assert_eq!(read.safety_class(), SafetyClass::ReadOnly);
+        let act = eng.tools.get("computer_act").expect("computer_act");
+        assert_eq!(act.safety_class(), SafetyClass::Mutating);
+    }
+
+    #[tokio::test]
+    async fn computer_tools_absent_when_group_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_cfg();
+        cfg.plugins.disabled.push("tools:computer".into());
+        let eng = ZodeEngine::assemble(
+            &cfg,
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-06-13",
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
+        assert!(
+            !names.iter().any(|n| n.starts_with("computer_")),
             "{names:?}"
         );
     }

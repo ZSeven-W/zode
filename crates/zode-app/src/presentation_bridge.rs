@@ -2,13 +2,16 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use tokio::sync::mpsc;
 use zode_app_model::{
-    integration_catalog, EnvironmentSnapshot, LoadState, PreviewKind, PreviewState, PreviewTarget,
-    ZodeAppState,
+    integration_catalog, EnvironmentSnapshot, LoadState, PluginDetailMode, PreviewKind,
+    PreviewState, PreviewTarget, PullRequestStatus, ZodeAppState,
 };
-use zode_app_runtime::workspace_uri_to_path;
+use zode_app_runtime::{
+    git_status::{fetch_pull_request_status, SystemCommandRunner},
+    workspace_uri_to_path,
+};
 use zode_node_protocol::{
-    AgentEndpoint, AgentQuery, AgentSnapshot, DiffSnapshot, IntegrationRegistrySnapshot,
-    SessionLocator, WorkspaceUri,
+    AgentEndpoint, AgentQuery, AgentSnapshot, DiffSnapshot, InstalledPluginSummary,
+    IntegrationRegistrySnapshot, PluginTrustReview, SessionLocator, WorkspaceUri,
 };
 
 use crate::{
@@ -35,6 +38,14 @@ pub enum PresentationQuery {
     Integrations {
         workspace_uri: WorkspaceUri,
     },
+    InstalledPlugins,
+    PluginTrustReview {
+        plugin_id: String,
+    },
+    PullRequest {
+        session: SessionLocator,
+        workspace_uri: WorkspaceUri,
+    },
 }
 
 impl PresentationQuery {
@@ -44,6 +55,9 @@ impl PresentationQuery {
             Self::Diff { session } => QueryKey::Diff(session.clone()),
             Self::DocumentPreview { session, .. } => QueryKey::DocumentPreview(session.clone()),
             Self::Integrations { .. } => QueryKey::Integrations,
+            Self::InstalledPlugins => QueryKey::InstalledPlugins,
+            Self::PluginTrustReview { .. } => QueryKey::PluginTrustReview,
+            Self::PullRequest { session, .. } => QueryKey::PullRequest(session.clone()),
         }
     }
 }
@@ -54,6 +68,9 @@ enum QueryKey {
     Diff(SessionLocator),
     DocumentPreview(SessionLocator),
     Integrations,
+    InstalledPlugins,
+    PluginTrustReview,
+    PullRequest(SessionLocator),
 }
 
 struct PendingQuery {
@@ -89,6 +106,20 @@ enum BridgeItem {
         workspace_uri: WorkspaceUri,
         result: Result<IntegrationRegistrySnapshot, String>,
     },
+    InstalledPlugins {
+        generation: u64,
+        result: Result<Vec<InstalledPluginSummary>, String>,
+    },
+    PluginTrustReview {
+        generation: u64,
+        plugin_id: String,
+        result: Result<PluginTrustReview, String>,
+    },
+    PullRequest {
+        generation: u64,
+        session: SessionLocator,
+        status: PullRequestStatus,
+    },
 }
 
 struct LoadedPreview {
@@ -104,6 +135,9 @@ impl BridgeItem {
             Self::Diff { session, .. } => QueryKey::Diff(session.clone()),
             Self::DocumentPreview { session, .. } => QueryKey::DocumentPreview(session.clone()),
             Self::Integrations { .. } => QueryKey::Integrations,
+            Self::InstalledPlugins { .. } => QueryKey::InstalledPlugins,
+            Self::PluginTrustReview { .. } => QueryKey::PluginTrustReview,
+            Self::PullRequest { session, .. } => QueryKey::PullRequest(session.clone()),
         }
     }
 
@@ -112,7 +146,10 @@ impl BridgeItem {
             Self::Environment { generation, .. }
             | Self::Diff { generation, .. }
             | Self::DocumentPreview { generation, .. }
-            | Self::Integrations { generation, .. } => *generation,
+            | Self::Integrations { generation, .. }
+            | Self::InstalledPlugins { generation, .. }
+            | Self::PluginTrustReview { generation, .. }
+            | Self::PullRequest { generation, .. } => *generation,
         }
     }
 }
@@ -322,6 +359,43 @@ impl PresentationQueryBridge {
                     };
                     applied += 1;
                 }
+                BridgeItem::InstalledPlugins { result, .. } => {
+                    state.presentation.installed_plugins = match result {
+                        Ok(plugins) => LoadState::Ready(plugins),
+                        Err(message) => LoadState::Failed(message),
+                    };
+                    applied += 1;
+                }
+                BridgeItem::PluginTrustReview {
+                    plugin_id, result, ..
+                } => {
+                    let showing_review = state
+                        .presentation
+                        .plugin_detail
+                        .as_mut()
+                        .filter(|detail| detail.plugin_id == plugin_id)
+                        .and_then(|detail| match &mut detail.mode {
+                            PluginDetailMode::TrustReview { review, .. } => Some(review),
+                            _ => None,
+                        });
+                    if let Some(review) = showing_review {
+                        *review = match result {
+                            Ok(payload) => LoadState::Ready(payload),
+                            Err(message) => LoadState::Failed(message),
+                        };
+                        applied += 1;
+                    }
+                }
+                BridgeItem::PullRequest {
+                    session, status, ..
+                } => {
+                    let Some(presentation) = state.presentation.sessions.get_mut(&session) else {
+                        continue;
+                    };
+                    presentation.pull_request.dirty = false;
+                    presentation.pull_request.load = LoadState::Ready(status);
+                    applied += 1;
+                }
             }
         }
         applied
@@ -393,7 +467,57 @@ async fn execute_work(
                 result,
             }
         }
+        PresentationQuery::InstalledPlugins => {
+            let result = match endpoint.query(AgentQuery::InstalledPlugins).await {
+                Ok(AgentSnapshot::InstalledPlugins(plugins)) => Ok(plugins),
+                Ok(_) => Err("the endpoint returned the wrong installed-plugins snapshot".into()),
+                Err(error) => Err(error.to_string()),
+            };
+            BridgeItem::InstalledPlugins { generation, result }
+        }
+        PresentationQuery::PluginTrustReview { plugin_id } => {
+            let result = match endpoint
+                .query(AgentQuery::PluginTrustReview {
+                    plugin_id: plugin_id.clone(),
+                })
+                .await
+            {
+                Ok(AgentSnapshot::PluginTrustReview(review)) => Ok(review),
+                Ok(_) => Err("the endpoint returned the wrong trust-review snapshot".into()),
+                Err(error) => Err(error.to_string()),
+            };
+            BridgeItem::PluginTrustReview {
+                generation,
+                plugin_id,
+                result,
+            }
+        }
+        PresentationQuery::PullRequest {
+            session,
+            workspace_uri,
+        } => {
+            let status = fetch_pull_request_status_for(workspace_uri).await;
+            BridgeItem::PullRequest {
+                generation,
+                session,
+                status,
+            }
+        }
     }
+}
+
+/// Resolves `workspace_uri` to a local path and runs the `gh`/`git`-backed
+/// PR status provider against it - see `zode_app_runtime::git_status`.
+/// Non-local workspaces (no `file://` scheme) have no local repository to
+/// inspect a remote for, so they read as `NoRemote` without shelling out.
+async fn fetch_pull_request_status_for(workspace_uri: WorkspaceUri) -> PullRequestStatus {
+    if !workspace_uri.as_str().starts_with("file://") {
+        return PullRequestStatus::NoRemote;
+    }
+    let Ok(path) = workspace_uri_to_path(&workspace_uri) else {
+        return PullRequestStatus::NoRemote;
+    };
+    fetch_pull_request_status(&SystemCommandRunner, &path).await
 }
 
 fn mark_loading(state: &mut ZodeAppState, request: PresentationQuery) {
@@ -425,6 +549,30 @@ fn mark_loading(state: &mut ZodeAppState, request: PresentationQuery) {
         }
         PresentationQuery::Integrations { .. } => {
             state.presentation.integrations = LoadState::Loading;
+        }
+        PresentationQuery::InstalledPlugins => {
+            state.presentation.installed_plugins = LoadState::Loading;
+        }
+        PresentationQuery::PluginTrustReview { plugin_id } => {
+            if let Some(detail) = state
+                .presentation
+                .plugin_detail
+                .as_mut()
+                .filter(|detail| detail.plugin_id == plugin_id)
+            {
+                if let PluginDetailMode::TrustReview { review, .. } = &mut detail.mode {
+                    *review = LoadState::Loading;
+                }
+            }
+        }
+        PresentationQuery::PullRequest { session, .. } => {
+            state
+                .presentation
+                .sessions
+                .entry(session)
+                .or_default()
+                .pull_request
+                .load = LoadState::Loading;
         }
     }
 }
@@ -480,7 +628,6 @@ async fn load_environment(workspace_uri: WorkspaceUri) -> Result<EnvironmentSnap
     Ok(EnvironmentSnapshot {
         workspace_uri,
         branch,
-        subagents: Vec::new(),
         background_processes: Vec::new(),
         sources: Vec::new(),
     })

@@ -10,7 +10,10 @@ use zode_app_model::{
 use zode_node_protocol::WorkspaceUri;
 
 use super::ComposerContextLayout;
-use crate::{paint_single_line, stable_widget_id, RectExt, SemanticIcon, WidgetId, ZodeTheme};
+use crate::{
+    paint_elevated_surface, paint_single_line, stable_widget_id, MenuRow, RectExt, SemanticIcon,
+    WidgetId, ZodeTheme,
+};
 
 pub const COMPOSER_CONTEXT_MENU_SURFACE_ID: WidgetId = WidgetId(8_500);
 pub const COMPOSER_LOCATION_LOCAL_ID: WidgetId = WidgetId(8_501);
@@ -216,17 +219,11 @@ impl ComposerContextMenu {
         hovered: Option<WidgetId>,
         theme: &ZodeTheme,
     ) {
-        painter.fill_drop_shadow(
-            Rect::xywh(
-                layout.surface.origin.x,
-                layout.surface.origin.y + 2.0,
-                layout.surface.size.x,
-                layout.surface.size.y,
-            ),
-            11.0,
-            18.0,
-            theme.tokens.foreground.with_alpha(0.11),
-        );
+        // `Popover::paint` fills/strokes at its own fixed 6.0 radius
+        // (`jian_widgets::components::popover`, which equals `tokens.radius`
+        // here) - the shadow now matches that instead of the previous ad hoc
+        // 11.0.
+        paint_elevated_surface(painter, layout.surface, theme.tokens.radius, theme);
         Popover.paint(painter, layout.surface, &theme.tokens);
         painter.save();
         painter.clip_rect(layout.surface);
@@ -609,9 +606,8 @@ fn paint_row(
     hovered: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
-    if row.enabled && (focused == Some(row.id) || hovered == Some(row.id)) {
-        painter.fill_round_rect(row.rect, 7.0, theme.tokens.accent);
-    }
+    let active = row.enabled && (focused == Some(row.id) || hovered == Some(row.id));
+    MenuRow::paint_background(painter, row.rect, active, &theme.tokens);
     let foreground = if row.enabled {
         theme.tokens.popover_foreground
     } else {

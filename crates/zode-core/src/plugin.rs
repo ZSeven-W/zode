@@ -141,6 +141,12 @@ pub const TOOL_GROUPS: &[(&str, &str, &[&str])] = &[
             "team_release",
         ],
     ),
+    (
+        "computer",
+        "Built-in computer-use control (macOS: read the accessibility tree, screenshot, \
+         click, type, key, scroll, drag)",
+        &["computer_read", "computer_act"],
+    ),
 ];
 
 /// The tool group a tool belongs to, if any. `None` → always-on (Skill,
@@ -315,6 +321,12 @@ mod tests {
         assert_eq!(group_of("browser_eval"), Some("browser"));
         assert_eq!(group_of("browser_tabs"), Some("browser"));
         assert_eq!(group_of("browser_upload"), Some("browser"));
+    }
+
+    #[test]
+    fn computer_tools_are_grouped() {
+        assert_eq!(group_of("computer_read"), Some("computer"));
+        assert_eq!(group_of("computer_act"), Some("computer"));
     }
 
     #[test]

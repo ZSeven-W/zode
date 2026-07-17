@@ -13,6 +13,7 @@ pub mod browser;
 pub mod clipboard;
 pub mod commands;
 pub mod compact_memory;
+pub mod computer;
 pub mod config;
 pub mod cost;
 pub mod currency;
@@ -43,6 +44,7 @@ pub mod noema_extract;
 pub mod openpencil;
 pub mod permission_rules;
 pub mod plugin;
+pub mod plugin_market;
 pub mod plugin_package;
 pub mod portability;
 #[path = "process-supervision.rs"]

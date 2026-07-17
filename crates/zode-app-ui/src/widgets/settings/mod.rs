@@ -1,8 +1,10 @@
 mod archived;
+mod computer_use;
 mod details;
 mod general;
 mod navigation;
 mod permissions;
+mod provider_models;
 mod row;
 
 use jian_widgets::{
@@ -23,12 +25,24 @@ pub use archived::{
     ArchivedTaskGroupLayout, ArchivedTaskRowLayout, ArchivedTasksLayout, ARCHIVED_TASK_FILTER_ID,
     ARCHIVED_TASK_SEARCH_ID,
 };
+pub use computer_use::{
+    AllowedAppRowLayout, ComputerUseLayout, PermissionStatusRowLayout, COMPUTER_ALLOWED_APP_ADD_ID,
+    COMPUTER_ALLOWED_APP_INPUT_ID,
+};
 pub use general::GeneralSettingsLayout;
 pub use navigation::{
     SettingsNavigationEntryLayout, SettingsNavigationGroupLayout, SettingsNavigationLayout,
     SETTINGS_BACK_ID, SETTINGS_SEARCH_ID,
 };
 pub use permissions::{PermissionPresetLayout, PermissionRow, PermissionRowLayout};
+pub use provider_models::{
+    provider_model_widget_id, provider_remove_widget_id, provider_widget_id, ProviderEditorLayout,
+    ProviderFieldLayout, ProviderKindLayout, ProviderModelLayout, ProviderModelsLayout,
+    ProviderRowLayout, PROVIDER_ADD_ID, PROVIDER_API_KEY_INPUT_ID, PROVIDER_BASE_URL_INPUT_ID,
+    PROVIDER_CANCEL_ID, PROVIDER_DEFAULT_MODEL_INPUT_ID, PROVIDER_ID_INPUT_ID,
+    PROVIDER_KIND_ANTHROPIC_ID, PROVIDER_KIND_OLLAMA_ID, PROVIDER_KIND_OPENAI_ID,
+    PROVIDER_MODEL_IDS_INPUT_ID, PROVIDER_SAVE_ID,
+};
 pub use row::SettingRowLayout;
 
 use row::{
@@ -61,6 +75,8 @@ pub struct SettingsPanelLayout {
     pub navigation: SettingsNavigationLayout,
     pub archived: ArchivedTasksLayout,
     pub general: GeneralSettingsLayout,
+    pub provider_models: ProviderModelsLayout,
+    pub computer_use: ComputerUseLayout,
 }
 
 pub struct SettingsPanel;
@@ -80,6 +96,8 @@ impl SettingsPanel {
             navigation: navigation::layout(sidebar, state),
             archived: archived::layout(content, state, scroll_offset),
             general: general::layout(content, state, scroll_offset),
+            provider_models: provider_models::layout(content, state, scroll_offset),
+            computer_use: computer_use::layout(content, state, scroll_offset),
         }
     }
 
@@ -263,6 +281,12 @@ impl SettingsPanel {
             .or_else(|| general::command_for_widget(state, id))
             .or_else(|| archived::command_for_widget(state, id))
             .or_else(|| {
+                (Self::active_category(state) == SettingsCategory::ProviderModels)
+                    .then(|| provider_models::command_for_widget(state, id))
+                    .flatten()
+            })
+            .or_else(|| computer_use::command_for_widget(state, id))
+            .or_else(|| {
                 (Self::active_category(state) == SettingsCategory::Appearance).then_some(())?;
                 [
                     THEME_SYSTEM_ID,
@@ -361,6 +385,23 @@ impl SettingsPanel {
                 layout.scroll_offset,
                 theme,
             ),
+            SettingsCategory::ProviderModels => provider_models::paint(
+                painter,
+                layout.content,
+                state,
+                layout.scroll_offset,
+                snapshot.focused,
+                theme,
+            ),
+            SettingsCategory::ComputerUse => computer_use::paint(
+                painter,
+                layout.content,
+                &layout.computer_use,
+                state,
+                layout.scroll_offset,
+                snapshot.focused,
+                theme,
+            ),
             SettingsCategory::Profile
             | SettingsCategory::Voice
             | SettingsCategory::Configuration
@@ -371,7 +412,6 @@ impl SettingsPanel {
             | SettingsCategory::Account
             | SettingsCategory::AppSnapshots
             | SettingsCategory::Browser
-            | SettingsCategory::ComputerUse
             | SettingsCategory::Hooks
             | SettingsCategory::Connectors
             | SettingsCategory::Git
@@ -470,6 +510,8 @@ fn settings_content_height(state: &ZodeAppState) -> f32 {
                     .max(104.0)
                 + 24.0
         }
+        SettingsCategory::ProviderModels => provider_models::content_height(state),
+        SettingsCategory::ComputerUse => computer_use::content_height(state),
         SettingsCategory::Profile
         | SettingsCategory::Voice
         | SettingsCategory::Configuration
@@ -480,7 +522,6 @@ fn settings_content_height(state: &ZodeAppState) -> f32 {
         | SettingsCategory::Account
         | SettingsCategory::AppSnapshots
         | SettingsCategory::Browser
-        | SettingsCategory::ComputerUse
         | SettingsCategory::Hooks
         | SettingsCategory::Connectors
         | SettingsCategory::Git

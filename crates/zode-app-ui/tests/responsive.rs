@@ -83,7 +83,7 @@ fn optional_context_panel_preserves_width_and_recenters_the_wide_conversation() 
     );
 
     assert_eq!(without_panel.sidebar.width(), PRIMARY_SIDEBAR_DEFAULT_W);
-    assert_eq!(without_panel.transcript.width(), 736.0);
+    assert_eq!(without_panel.transcript.width(), CONTENT_W);
     assert_eq!(
         with_panel.transcript.width(),
         without_panel.transcript.width()
@@ -92,7 +92,7 @@ fn optional_context_panel_preserves_width_and_recenters_the_wide_conversation() 
     assert_eq!(with_panel.context_panel.width(), 300.0);
     let remaining_width = with_panel.context_panel.min_x() - with_panel.primary_surface.min_x();
     let expected_x = with_panel.primary_surface.min_x()
-        + (remaining_width - with_panel.transcript.width()) / 2.0;
+        + ((remaining_width - with_panel.transcript.width()) / 2.0).round();
     assert_eq!(with_panel.transcript.min_x(), expected_x);
     assert_eq!(with_panel.composer.min_x(), expected_x);
     assert!(with_panel.context_panel.min_x() >= with_panel.composer.max_x());
@@ -112,12 +112,44 @@ fn primary_sidebar_supports_the_reference_width_and_viewport_clamps() {
             primary_sidebar: PrimarySidebarLayoutOptions {
                 open: true,
                 width: 293.0,
+                visibility: 1.0,
             },
             ..WorkspaceLayoutOptions::default()
         },
     );
     assert_eq!(geometry.sidebar.width(), 293.0);
     assert_eq!(geometry.primary_surface.min_x(), 293.0);
+}
+
+#[test]
+fn primary_sidebar_transition_reflows_without_scaling_content_during_resize() {
+    let options = WorkspaceLayoutOptions {
+        primary_sidebar: PrimarySidebarLayoutOptions {
+            open: true,
+            width: 293.0,
+            visibility: 0.5,
+        },
+        ..WorkspaceLayoutOptions::default()
+    };
+    let wide = WorkspaceLayout::compute_with_options(1_800.0, 1_080.0, Insets::ZERO, options);
+    let narrow = WorkspaceLayout::compute_with_options(800.0, 700.0, Insets::ZERO, options);
+
+    assert_eq!(wide.primary_sidebar_content.width(), 293.0);
+    // 293.0 * 0.5 == 146.5, snapped to the nearest whole logical pixel so the
+    // main content pane keeps a stable device-pixel phase during the
+    // animation (see `snap_animated_width` in `zode-app-ui/src/layout.rs`).
+    assert_eq!(wide.sidebar.width(), 147.0);
+    assert!((wide.primary_sidebar_visibility() - 0.5).abs() < 0.01);
+    assert_eq!(wide.primary_sidebar_content.max_x(), wide.sidebar.max_x());
+    assert_eq!(wide.primary_surface.min_x(), wide.sidebar.max_x());
+    assert_eq!(narrow.primary_sidebar_content.width(), 64.0);
+    assert_eq!(narrow.sidebar.width(), 32.0);
+    assert_eq!(narrow.primary_sidebar_visibility(), 0.5);
+    assert_eq!(
+        narrow.primary_sidebar_content.max_x(),
+        narrow.sidebar.max_x()
+    );
+    assert_eq!(narrow.primary_surface.min_x(), narrow.sidebar.max_x());
 }
 
 #[test]
@@ -130,6 +162,7 @@ fn primary_sidebar_can_hide_without_changing_settings_navigation() {
             primary_sidebar: PrimarySidebarLayoutOptions {
                 open: false,
                 width: 293.0,
+                visibility: 1.0,
             },
             ..WorkspaceLayoutOptions::default()
         },
@@ -149,6 +182,7 @@ fn primary_sidebar_can_hide_without_changing_settings_navigation() {
             primary: PrimarySidebarLayoutOptions {
                 open: false,
                 width: 293.0,
+                visibility: 1.0,
             },
             secondary: SecondarySidebarLayoutOptions::default(),
         },
@@ -184,6 +218,8 @@ fn resized_primary_preserves_the_open_secondary_panel_and_main_minimum() {
                 open: true,
                 width: 700.0,
                 pinned_summary_overlay: false,
+                visibility: 1.0,
+                pinned_summary_visibility: 1.0,
             },
         },
     );
@@ -198,11 +234,14 @@ fn resized_primary_preserves_the_open_secondary_panel_and_main_minimum() {
             primary: PrimarySidebarLayoutOptions {
                 open: true,
                 width: 420.0,
+                visibility: 1.0,
             },
             secondary: SecondarySidebarLayoutOptions {
                 open: true,
                 width: 700.0,
                 pinned_summary_overlay: false,
+                visibility: 1.0,
+                pinned_summary_visibility: 1.0,
             },
         },
     );
@@ -226,6 +265,7 @@ fn resized_primary_preserves_the_docked_pinned_summary() {
             primary: PrimarySidebarLayoutOptions {
                 open: true,
                 width: 293.0,
+                visibility: 1.0,
             },
             secondary: SecondarySidebarLayoutOptions::default(),
         },
@@ -250,11 +290,14 @@ fn narrow_window_hides_secondary_split_and_overlays_the_pinned_summary() {
             primary: PrimarySidebarLayoutOptions {
                 open: true,
                 width: 293.0,
+                visibility: 1.0,
             },
             secondary: SecondarySidebarLayoutOptions {
                 open: true,
                 width: 700.0,
                 pinned_summary_overlay: false,
+                visibility: 1.0,
+                pinned_summary_visibility: 1.0,
             },
         },
     );
@@ -264,4 +307,78 @@ fn narrow_window_hides_secondary_split_and_overlays_the_pinned_summary() {
     assert_eq!(narrow.divider.width(), 0.0);
     assert_eq!(narrow.pinned_summary, PinnedSummaryMode::Overlay);
     assert_eq!(narrow.context_panel.width(), 300.0);
+}
+
+#[test]
+fn secondary_transition_keeps_full_width_content_behind_the_visible_clip() {
+    let layout = WorkspaceLayout::compute_presentation_with_sidebar_options(
+        1_800.0,
+        1_080.0,
+        Insets::ZERO,
+        ShellRoute::Conversation,
+        None,
+        COMPOSER_H,
+        SidebarLayoutOptions {
+            primary: PrimarySidebarLayoutOptions::default(),
+            secondary: SecondarySidebarLayoutOptions {
+                open: true,
+                width: 700.0,
+                pinned_summary_overlay: false,
+                visibility: 0.25,
+                pinned_summary_visibility: 0.0,
+            },
+        },
+    );
+
+    assert!(layout.review_panel.width() > 0.0);
+    assert_eq!(
+        layout.review_panel.width(),
+        (layout.secondary_sidebar_content.width() * 0.25).round()
+    );
+    assert_eq!(
+        layout.review_panel.min_x(),
+        layout.secondary_sidebar_content.min_x()
+    );
+    assert!(layout.secondary_sidebar_content.max_x() > layout.review_panel.max_x());
+}
+
+#[test]
+fn pinned_summary_transition_keeps_full_width_content_and_zero_really_hidden() {
+    let options = |visibility| SidebarLayoutOptions {
+        primary: PrimarySidebarLayoutOptions::default(),
+        secondary: SecondarySidebarLayoutOptions {
+            open: false,
+            width: 700.0,
+            pinned_summary_overlay: true,
+            visibility: 0.0,
+            pinned_summary_visibility: visibility,
+        },
+    };
+    let hidden = WorkspaceLayout::compute_presentation_with_sidebar_options(
+        1_200.0,
+        900.0,
+        Insets::ZERO,
+        ShellRoute::Conversation,
+        Some(zode_app_model::SecondaryPane::Environment),
+        COMPOSER_H,
+        options(0.0),
+    );
+    let partial = WorkspaceLayout::compute_presentation_with_sidebar_options(
+        1_200.0,
+        900.0,
+        Insets::ZERO,
+        ShellRoute::Conversation,
+        Some(zode_app_model::SecondaryPane::Environment),
+        COMPOSER_H,
+        options(0.25),
+    );
+
+    assert_eq!(hidden.context_panel.width(), 0.0);
+    assert_eq!(partial.context_panel.width(), 75.0);
+    assert_eq!(partial.pinned_summary_content.width(), 300.0);
+    assert_eq!(
+        partial.context_panel.min_x(),
+        partial.pinned_summary_content.min_x()
+    );
+    assert!(partial.pinned_summary_content.max_x() > partial.context_panel.max_x());
 }

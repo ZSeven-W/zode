@@ -56,7 +56,7 @@ impl LivePresenter {
         #[cfg(target_os = "macos")]
         {
             let native = macos::MacMaterialPresenter::new(window.clone()).map(Self::MacMaterial);
-            return fallback_on_error(
+            fallback_on_error(
                 native,
                 || softbuffer::SoftbufferPresenter::new(window).map(Self::Softbuffer),
                 |error| {
@@ -64,7 +64,7 @@ impl LivePresenter {
                         "zode-app: native macOS material presenter is unavailable; using softbuffer: {error}"
                     );
                 },
-            );
+            )
         }
         #[cfg(not(target_os = "macos"))]
         {

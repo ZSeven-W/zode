@@ -13,7 +13,7 @@ pub(super) fn scoped_decision(
         .threads
         .iter()
         .find(|thread| &thread.session == session)
-        .is_some_and(|thread| state.is_projectless_workspace(&thread.workspace_uri));
+        .is_some_and(|thread| state.is_projectless_thread(thread));
     if !projectless {
         return decision;
     }

@@ -6,11 +6,13 @@ use zode_app_model::{
 };
 use zode_app_runtime::workspace_uri_to_path;
 use zode_app_ui::{
-    Key, KeyEvent, Modifiers, SettingsPanel, WidgetId, ARCHIVED_TASK_SEARCH_ID, SETTINGS_SEARCH_ID,
+    Key, KeyEvent, Modifiers, SettingsPanel, WidgetId, ARCHIVED_TASK_SEARCH_ID,
+    COMPUTER_ALLOWED_APP_INPUT_ID, PROVIDER_API_KEY_INPUT_ID, PROVIDER_BASE_URL_INPUT_ID,
+    PROVIDER_ID_INPUT_ID, PROVIDER_MODEL_IDS_INPUT_ID, SETTINGS_SEARCH_ID,
 };
 use zode_core::config::{ConfigManager, ZodeConfig};
 
-use super::DesktopApp;
+use super::{provider_input::ProviderInputOutcome, DesktopApp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchKeyOutcome {
@@ -66,6 +68,13 @@ impl DesktopApp {
             SettingsCategory::Worktree => {
                 self.app_state.local_settings.worktrees = load_worktree_facts(cwd.as_deref());
             }
+            SettingsCategory::ComputerUse => {
+                self.app_state.local_settings.computer =
+                    super::computer_use::load_computer_use_snapshot();
+            }
+            SettingsCategory::ProviderModels => {
+                self.provider_models_controller.refresh(&mut self.app_state);
+            }
             _ => {}
         }
     }
@@ -73,6 +82,10 @@ impl DesktopApp {
     pub(super) fn handle_settings_search_key(&mut self, event: &KeyEvent) -> bool {
         if !event.pressed {
             return false;
+        }
+        if let Some(id) = self.focused_provider_input_id() {
+            let outcome = self.provider_models_controller.edit_input_key(id, event);
+            return self.apply_provider_input_outcome(id, outcome);
         }
         let Some((id, mut query)) = self.focused_settings_input() else {
             return false;
@@ -86,6 +99,10 @@ impl DesktopApp {
     }
 
     pub(super) fn handle_settings_search_ime(&mut self, event: &zode_app_ui::ImeEvent) -> bool {
+        if let Some(id) = self.focused_provider_input_id() {
+            let outcome = self.provider_models_controller.edit_input_ime(id, event);
+            return self.apply_provider_input_outcome(id, outcome);
+        }
         let Some((id, mut query)) = self.focused_settings_input() else {
             return false;
         };
@@ -96,6 +113,10 @@ impl DesktopApp {
     }
 
     pub(super) fn paste_settings_search_text(&mut self, text: &str) -> bool {
+        if let Some(id) = self.focused_provider_input_id() {
+            let outcome = self.provider_models_controller.paste_input(id, text);
+            return self.apply_provider_input_outcome(id, outcome);
+        }
         let Some((id, mut query)) = self.focused_settings_input() else {
             return false;
         };
@@ -116,11 +137,68 @@ impl DesktopApp {
                 ARCHIVED_TASK_SEARCH_ID,
                 self.app_state.archived_tasks.search.clone(),
             )),
+            (
+                ShellRoute::Settings(SettingsCategory::ComputerUse),
+                Some(COMPUTER_ALLOWED_APP_INPUT_ID),
+            ) => Some((
+                COMPUTER_ALLOWED_APP_INPUT_ID,
+                self.app_state.computer_use.allowed_app_input.clone(),
+            )),
             _ => None,
         }
     }
 
+    fn focused_provider_input_id(&self) -> Option<WidgetId> {
+        match (self.app_state.presentation.route, self.focused_widget) {
+            (ShellRoute::Settings(SettingsCategory::ProviderModels), Some(id))
+                if is_provider_models_input(id) =>
+            {
+                Some(id)
+            }
+            _ => None,
+        }
+    }
+
+    fn apply_provider_input_outcome(
+        &mut self,
+        id: WidgetId,
+        outcome: ProviderInputOutcome,
+    ) -> bool {
+        match outcome {
+            ProviderInputOutcome::Ignored => false,
+            ProviderInputOutcome::Consumed => {
+                self.rebuild_frame_snapshot();
+                self.request_redraw();
+                true
+            }
+            ProviderInputOutcome::TextChanged => {
+                let Some(value) = self
+                    .provider_models_controller
+                    .input_value(id)
+                    .map(ToOwned::to_owned)
+                else {
+                    return false;
+                };
+                self.project_provider_input_value(id, value);
+                true
+            }
+        }
+    }
+
     pub(super) fn set_settings_input_value(&mut self, id: WidgetId, value: String) {
+        if matches!(
+            self.app_state.presentation.route,
+            ShellRoute::Settings(SettingsCategory::ProviderModels)
+        ) && is_provider_models_input(id)
+        {
+            if self
+                .provider_models_controller
+                .set_input_value(id, value.clone())
+            {
+                self.project_provider_input_value(id, value);
+            }
+            return;
+        }
         let command = match id {
             SETTINGS_SEARCH_ID => AppCommand::SetSettingsSearch(value),
             ARCHIVED_TASK_SEARCH_ID
@@ -131,9 +209,65 @@ impl DesktopApp {
             {
                 AppCommand::SetArchivedTaskSearch(value)
             }
+            COMPUTER_ALLOWED_APP_INPUT_ID
+                if matches!(
+                    self.app_state.presentation.route,
+                    ShellRoute::Settings(SettingsCategory::ComputerUse)
+                ) =>
+            {
+                AppCommand::SetComputerAllowedAppInput(value)
+            }
             _ => return,
         };
+        // `SetComputerAllowedAppInput` needs real I/O-free state mutation
+        // that `reduce_settings_command` (the pure `zode-app-model` reducer)
+        // cannot own - see `computer_use::consume_computer_use_command`.
+        // Every other command here falls through unchanged.
+        if super::computer_use::consume_computer_use_command(
+            &mut self.app_state,
+            self.external_open.as_ref(),
+            &command,
+        ) {
+            self.rebuild_frame_snapshot();
+            self.request_redraw();
+            return;
+        }
         if reduce_settings_command(&mut self.app_state, command) == SettingsCommandOutcome::Applied
+        {
+            self.rebuild_frame_snapshot();
+            self.request_redraw();
+        }
+    }
+
+    fn project_provider_input_value(&mut self, id: WidgetId, value: String) {
+        if id == PROVIDER_API_KEY_INPUT_ID {
+            let kind = self
+                .app_state
+                .provider_models
+                .editor
+                .as_ref()
+                .map(|draft| draft.kind)
+                .unwrap_or_default();
+            self.app_state.provider_models.credential_configured = self
+                .provider_models_controller
+                .credential_configured_for(kind);
+            self.app_state.provider_models.pending_secret_len =
+                self.provider_models_controller.pending_secret_len();
+            self.rebuild_frame_snapshot();
+            self.request_redraw();
+            return;
+        }
+        let Some(mut draft) = self.app_state.provider_models.editor.clone() else {
+            return;
+        };
+        match id {
+            PROVIDER_ID_INPUT_ID => draft.provider_id = value,
+            PROVIDER_BASE_URL_INPUT_ID => draft.base_url = Some(value),
+            PROVIDER_MODEL_IDS_INPUT_ID => draft.model_ids = parse_model_ids(&value),
+            _ => return,
+        }
+        if reduce_settings_command(&mut self.app_state, AppCommand::UpdateProviderDraft(draft))
+            == SettingsCommandOutcome::Applied
         {
             self.rebuild_frame_snapshot();
             self.request_redraw();
@@ -152,6 +286,29 @@ impl DesktopApp {
             self.request_redraw();
         }
     }
+}
+
+pub(super) const fn is_provider_models_input(id: WidgetId) -> bool {
+    matches!(
+        id,
+        PROVIDER_ID_INPUT_ID
+            | PROVIDER_BASE_URL_INPUT_ID
+            | PROVIDER_API_KEY_INPUT_ID
+            | PROVIDER_MODEL_IDS_INPUT_ID
+    )
+}
+
+fn parse_model_ids(value: &str) -> Vec<String> {
+    value
+        .split([',', '\n', '\r'])
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .fold(Vec::new(), |mut models, model| {
+            if !models.iter().any(|existing| existing == model) {
+                models.push(model.to_owned());
+            }
+            models
+        })
 }
 
 fn edit_search_query(query: &mut String, event: &KeyEvent) -> SearchKeyOutcome {
@@ -407,7 +564,9 @@ fn fact(label: impl Into<String>, value: impl ToString) -> LocalSettingFact {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_ime_commit, edit_search_query, parse_worktrees, SearchKeyOutcome};
+    use super::{
+        append_ime_commit, edit_search_query, parse_model_ids, parse_worktrees, SearchKeyOutcome,
+    };
     use zode_app_ui::{ImeEvent, Key, KeyEvent, Modifiers};
 
     #[test]
@@ -449,5 +608,13 @@ mod tests {
             },
         ));
         assert_eq!(query, "归任务");
+    }
+
+    #[test]
+    fn provider_model_input_preserves_order_and_removes_duplicates() {
+        assert_eq!(
+            parse_model_ids("gpt-5.6, claude-opus\ngpt-5.6\r\nqwen3"),
+            vec!["gpt-5.6", "claude-opus", "qwen3"]
+        );
     }
 }

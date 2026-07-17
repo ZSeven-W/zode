@@ -81,6 +81,7 @@ fn idle_send_joins_an_existing_session_queue_instead_of_bypassing_its_head() {
                 text: "new tail".into(),
             }],
             attachments: Vec::new(),
+            front: false,
         },
     );
     assert_eq!(

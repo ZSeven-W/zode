@@ -74,10 +74,14 @@ impl UnavailableSecondaryPanel {
             SecondaryPane::Browser => "浏览器",
             SecondaryPane::Files => "文件",
             SecondaryPane::SideTask => "侧边任务",
+            // `Subagents` never actually reaches this widget - it paints via
+            // `SubagentsPanel` instead (see `workspace_shell.rs`) - this arm
+            // exists only to keep the match exhaustive.
             SecondaryPane::Environment
             | SecondaryPane::Review
             | SecondaryPane::DocumentPreview
-            | SecondaryPane::Terminal => "侧边面板",
+            | SecondaryPane::Terminal
+            | SecondaryPane::Subagents => "侧边面板",
         }
     }
 
@@ -89,7 +93,8 @@ impl UnavailableSecondaryPanel {
             SecondaryPane::Environment
             | SecondaryPane::Review
             | SecondaryPane::DocumentPreview
-            | SecondaryPane::Terminal => "该面板当前不可用。",
+            | SecondaryPane::Terminal
+            | SecondaryPane::Subagents => "该面板当前不可用。",
         }
     }
 

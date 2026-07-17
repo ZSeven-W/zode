@@ -406,7 +406,7 @@ impl RawContent {
     ) {
         self.shortcut += 1;
         let shortcut = (self.shortcut <= 5).then_some(self.shortcut);
-        let projectless = state.is_projectless_workspace(&thread.workspace_uri);
+        let projectless = state.is_projectless_thread(&thread);
         let session = thread.session;
         self.rows.push(SidebarRowLayout {
             id: ProjectSidebar::session_widget_id(&session),

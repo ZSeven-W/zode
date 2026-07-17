@@ -24,12 +24,47 @@ fn reconcile_drops_ui_metadata_for_deleted_sessions() {
         },
     );
     app.last_session = Some("deleted".into());
+    let alive_project = WorkspaceUri::new("file:///repo/alive").unwrap();
+    app.thread_workspace_root_hints
+        .insert("alive".into(), alive_project.clone());
+    app.thread_workspace_root_hints.insert(
+        "deleted".into(),
+        WorkspaceUri::new("file:///repo/deleted").unwrap(),
+    );
+    app.projectless_session_ids.insert("deleted".into());
 
     app.reconcile(["alive"]);
 
     assert!(app.sessions.contains_key("alive"));
     assert!(!app.sessions.contains_key("deleted"));
+    assert_eq!(
+        app.thread_workspace_root_hints.get("alive"),
+        Some(&alive_project)
+    );
+    assert!(!app.thread_workspace_root_hints.contains_key("deleted"));
+    assert!(!app.projectless_session_ids.contains("deleted"));
     assert_eq!(app.last_session, None);
+}
+
+#[test]
+fn session_affiliation_keeps_project_and_projectless_mutually_exclusive() {
+    let mut app = AppStateFile::default();
+    let project = WorkspaceUri::new("file:///repo/zode").unwrap();
+
+    app.set_session_affiliation("session-1", Some(project.clone()), false);
+    assert_eq!(
+        app.thread_workspace_root_hints.get("session-1"),
+        Some(&project)
+    );
+    assert!(!app.projectless_session_ids.contains("session-1"));
+
+    app.set_session_affiliation("session-1", Some(project), true);
+    assert!(!app.thread_workspace_root_hints.contains_key("session-1"));
+    assert!(app.projectless_session_ids.contains("session-1"));
+
+    app.set_session_affiliation("session-1", None, false);
+    assert!(!app.thread_workspace_root_hints.contains_key("session-1"));
+    assert!(!app.projectless_session_ids.contains("session-1"));
 }
 
 #[test]
@@ -95,6 +130,8 @@ fn missing_state_file_loads_default_version() {
     assert_eq!(loaded.window_geometry, None);
     assert_eq!(loaded.task_context, None);
     assert!(loaded.pinned_workspaces.is_empty());
+    assert!(loaded.thread_workspace_root_hints.is_empty());
+    assert!(loaded.projectless_session_ids.is_empty());
     assert_eq!(loaded.project_display_mode, ProjectDisplayMode::Grouped);
     assert_eq!(loaded.project_sort_mode, ProjectSortMode::Priority);
 }

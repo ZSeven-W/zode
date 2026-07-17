@@ -173,6 +173,26 @@ fn settings_route_selects_the_footer_instead_of_new_session() {
 }
 
 #[test]
+fn projectless_new_task_surface_does_not_select_the_new_task_action() {
+    let mut state = demo_state();
+    state.presentation.route = ShellRoute::Conversation;
+    state.current_session = None;
+    state.active_workspace = None;
+    let theme = ZodeTheme::light();
+    let rect = Rect::xywh(0.0, 0.0, 240.0, 600.0);
+    let new_task = ProjectSidebar::navigation_row_layout(rect)[0];
+    let mut painter = CapturePainter::default();
+
+    ProjectSidebar::paint(&mut painter, rect, &state, &theme);
+
+    assert!(!painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::FillRound(selected, color)
+            if *selected == new_task.rect && *color == theme.sidebar_row_selected
+    )));
+}
+
+#[test]
 fn every_integrations_tab_selects_the_plugins_navigation_item() {
     let mut state = demo_state();
     state.presentation.route = ShellRoute::Integrations(IntegrationsTab::Skills);
@@ -643,7 +663,6 @@ fn action_hover_keeps_row_active_and_matches_the_reference_preview_card() {
         .context = LoadState::Ready(EnvironmentSnapshot {
         workspace_uri: workspace,
         branch: Some("v0.8.1".into()),
-        subagents: Vec::new(),
         background_processes: Vec::new(),
         sources: Vec::new(),
     });
@@ -772,7 +791,6 @@ fn hover_card_never_leaks_a_branch_from_another_workspace() {
         .context = LoadState::Ready(EnvironmentSnapshot {
         workspace_uri: WorkspaceUri::new("file:///repo/other").unwrap(),
         branch: Some("secret-branch".into()),
-        subagents: Vec::new(),
         background_processes: Vec::new(),
         sources: Vec::new(),
     });

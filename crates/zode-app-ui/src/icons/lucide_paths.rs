@@ -70,6 +70,8 @@ pub(super) const PENCIL: &str = concat!(
 
 pub(super) const CHEVRON_RIGHT: &str = "M9 18L15 12L9 6";
 pub(super) const CHEVRON_DOWN: &str = "M6 9L12 15L18 9";
+pub(super) const ARROW_UP: &str = "M12 19V5 M5 12L12 5L19 12";
+pub(super) const ARROW_DOWN: &str = "M12 5V19 M5 12L12 19L19 12";
 pub(super) const X: &str = "M18 6L6 18 M6 6L18 18";
 pub(super) const CHECK: &str = "M20 6L9 17L4 12";
 
@@ -98,4 +100,26 @@ pub(super) const PLUS: &str = "M5 12H19 M12 5V19";
 pub(super) const SHIELD_ALERT: &str = concat!(
     "M20 13C20 18 16.5 20.5 12.34 21.95A1 1 0 0 1 11.67 21.94C7.5 20.5 4 18 4 13V6A1 1 0 0 1 5 5C7 5 9.5 3.8 11.24 2.28A1.17 1.17 0 0 1 12.76 2.28C14.51 3.81 17 5 19 5A1 1 0 0 1 20 6Z ",
     "M12 8V12 M12 16H12.01"
+);
+
+pub(super) const COPY: &str = concat!(
+    "M10 8H20A2 2 0 0 1 22 10V20A2 2 0 0 1 20 22H10A2 2 0 0 1 8 20V10A2 2 0 0 1 10 8Z ",
+    "M4 16A2 2 0 0 1 2 14V4A2 2 0 0 1 4 2H14A2 2 0 0 1 16 4"
+);
+
+pub(super) const THUMBS_UP: &str = concat!(
+    "M7 22V10 ",
+    "M15 6L14 10H20A2 2 0 0 1 22 12.5L20 20A2 2 0 0 1 18 22H4A2 2 0 0 1 2 20V12A2 2 0 0 1 4 10H7A2 2 0 0 0 9 9L12 2A3 3 0 0 1 15 6Z"
+);
+
+pub(super) const THUMBS_DOWN: &str = concat!(
+    "M17 2V14 ",
+    "M9 18L10 14H4A2 2 0 0 1 2 11.5L4 4A2 2 0 0 1 6 2H20A2 2 0 0 1 22 4V12A2 2 0 0 1 20 14H17A2 2 0 0 0 15 15L12 22A3 3 0 0 1 9 18Z"
+);
+
+pub(super) const SHARE_2: &str = concat!(
+    "M21 5A3 3 0 1 1 15 5A3 3 0 1 1 21 5Z ",
+    "M9 12A3 3 0 1 1 3 12A3 3 0 1 1 9 12Z ",
+    "M21 19A3 3 0 1 1 15 19A3 3 0 1 1 21 19Z ",
+    "M8.59 13.51L15.42 17.49 M15.41 6.51L8.59 10.49"
 );

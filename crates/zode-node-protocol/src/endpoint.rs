@@ -1,7 +1,7 @@
 use crate::{
     AgentCommand, AgentEvent, CapabilityManifest, DiffSnapshot, EndpointError,
-    IntegrationRegistrySnapshot, RuntimeOptions, SessionLocator, ThreadHistory, ThreadSummary,
-    WorkspaceUri,
+    InstalledPluginSummary, IntegrationRegistrySnapshot, PluginTrustReview, RuntimeOptions,
+    SessionLocator, ThreadHistory, ThreadSummary, WorkspaceUri,
 };
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -19,6 +19,8 @@ pub enum AgentQuery {
     SessionRuntimeOptions { session: SessionLocator },
     ProjectPermissions { workspace_uri: WorkspaceUri },
     Integrations { workspace_uri: WorkspaceUri },
+    InstalledPlugins,
+    PluginTrustReview { plugin_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +36,8 @@ pub enum AgentSnapshot {
     },
     ProjectPermissions(Vec<String>),
     Integrations(IntegrationRegistrySnapshot),
+    InstalledPlugins(Vec<InstalledPluginSummary>),
+    PluginTrustReview(PluginTrustReview),
 }
 
 #[async_trait]

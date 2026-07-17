@@ -6,7 +6,7 @@ pub(crate) fn project_composer_outcome(state: &mut ZodeAppState, outcome: &Compo
         ComposerOutcome::AttachmentsChanged(attachments) => {
             state.composer.attachments.clone_from(attachments);
         }
-        ComposerOutcome::Queue(_) => {
+        ComposerOutcome::Queue(_) | ComposerOutcome::QueueFront(_) => {
             state.composer.attachments.clear();
         }
         ComposerOutcome::Send(submission) => {

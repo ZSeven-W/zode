@@ -93,6 +93,7 @@ async fn selected_project_submit_uses_exact_active_workspace_before_starting_tur
         AgentCommandKind::CreateSession {
             ref workspace_uri,
             model: Some(ref model),
+            ..
         } if workspace_uri == &selected && model == "model-b"
     ));
     assert!(matches!(
@@ -209,6 +210,7 @@ async fn first_command_failure_rolls_back_uncreated_session_and_retry_recreates_
                     text: "queued behind create".into(),
                 }],
                 attachments: Vec::new(),
+                front: false,
             },
         ),
         QueueCommandOutcome::Enqueued(_)

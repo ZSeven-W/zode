@@ -3,8 +3,9 @@ use jian_widgets::{Point2D, Rect};
 use zode_app_model::ShellPage;
 use zode_app_ui::{
     FocusDirection, Key, KeyEvent, TouchEvent, TouchPhase, WidgetId, WorkspaceSnapshot,
-    ARCHIVED_TASK_SEARCH_ID, COMPOSER_BRANCH_SEARCH_ID, COMPOSER_ID, HEADER_RENAME_INPUT_ID,
-    INTEGRATIONS_SEARCH_ID, PROJECT_PICKER_SEARCH_ID, SETTINGS_SEARCH_ID, TERMINAL_ID,
+    ARCHIVED_TASK_SEARCH_ID, COMPOSER_BRANCH_SEARCH_ID, COMPOSER_ID, GLOBAL_SEARCH_INPUT_ID,
+    HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID, PLUGIN_ADD_REFERENCE_INPUT_ID,
+    PLUGIN_ADD_SPEC_INPUT_ID, PROJECT_PICKER_SEARCH_ID, SETTINGS_SEARCH_ID, TERMINAL_ID,
 };
 
 use crate::event_map::{route_key_event, InputRoute};
@@ -141,7 +142,9 @@ pub fn ime_allowed_for_focus(
         return false;
     }
     match page {
-        ShellPage::Terminal => focused == Some(TERMINAL_ID),
+        ShellPage::Terminal => {
+            matches!(focused, Some(TERMINAL_ID | GLOBAL_SEARCH_INPUT_ID))
+        }
         ShellPage::Settings => {
             matches!(focused, Some(SETTINGS_SEARCH_ID | ARCHIVED_TASK_SEARCH_ID))
         }
@@ -151,6 +154,9 @@ pub fn ime_allowed_for_focus(
                 || focused == Some(PROJECT_PICKER_SEARCH_ID)
                 || focused == Some(HEADER_RENAME_INPUT_ID)
                 || focused == Some(INTEGRATIONS_SEARCH_ID)
+                || focused == Some(PLUGIN_ADD_SPEC_INPUT_ID)
+                || focused == Some(PLUGIN_ADD_REFERENCE_INPUT_ID)
+                || focused == Some(GLOBAL_SEARCH_INPUT_ID)
         }
     }
 }
@@ -159,8 +165,8 @@ pub fn ime_allowed_for_focus(
 mod tests {
     use zode_app_model::ShellPage;
     use zode_app_ui::{
-        WidgetId, ARCHIVED_TASK_SEARCH_ID, COMPOSER_BRANCH_SEARCH_ID, HEADER_RENAME_INPUT_ID,
-        INTEGRATIONS_SEARCH_ID, SETTINGS_SEARCH_ID,
+        WidgetId, ARCHIVED_TASK_SEARCH_ID, COMPOSER_BRANCH_SEARCH_ID, GLOBAL_SEARCH_INPUT_ID,
+        HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID, SETTINGS_SEARCH_ID,
     };
 
     use super::ime_allowed_for_focus;
@@ -194,6 +200,37 @@ mod tests {
         assert!(!ime_allowed_for_focus(
             ShellPage::ComingSoon,
             Some(INTEGRATIONS_SEARCH_ID),
+            false,
+        ));
+    }
+
+    #[test]
+    fn global_search_enables_ime_on_every_searchable_surface() {
+        for page in [
+            ShellPage::Conversation,
+            ShellPage::Review,
+            ShellPage::Terminal,
+            ShellPage::ComingSoon,
+        ] {
+            assert!(ime_allowed_for_focus(
+                page,
+                Some(GLOBAL_SEARCH_INPUT_ID),
+                true,
+            ));
+        }
+        assert!(!ime_allowed_for_focus(
+            ShellPage::Settings,
+            Some(GLOBAL_SEARCH_INPUT_ID),
+            true,
+        ));
+        assert!(!ime_allowed_for_focus(
+            ShellPage::Terminal,
+            Some(COMPOSER_BRANCH_SEARCH_ID),
+            true,
+        ));
+        assert!(!ime_allowed_for_focus(
+            ShellPage::Conversation,
+            Some(GLOBAL_SEARCH_INPUT_ID),
             false,
         ));
     }

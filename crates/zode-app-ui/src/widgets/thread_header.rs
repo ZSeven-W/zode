@@ -108,6 +108,27 @@ pub struct ThreadRenameLayout {
 pub struct ThreadHeader;
 
 impl ThreadHeader {
+    pub fn content_rect(rect: Rect, state: &ZodeAppState) -> Rect {
+        Self::content_rect_with_sidebar_visibility(
+            rect,
+            if state.shell.sidebar_open { 1.0 } else { 0.0 },
+        )
+    }
+
+    pub fn content_rect_with_sidebar_visibility(rect: Rect, sidebar_visibility: f32) -> Rect {
+        let collapsed_visibility = 1.0 - sidebar_visibility.clamp(0.0, 1.0);
+        let leading = (rect.origin.x
+            + super::collapsed_sidebar_chrome::COLLAPSED_SIDEBAR_CHROME_TRAILING_EDGE
+                * collapsed_visibility)
+            .min(rect.origin.x + rect.size.x.max(0.0));
+        Rect::xywh(
+            leading,
+            rect.origin.y,
+            (rect.origin.x + rect.size.x - leading).max(0.0),
+            rect.size.y.max(0.0),
+        )
+    }
+
     pub fn layout(rect: Rect, state: &ZodeAppState) -> ThreadHeaderLayout {
         let pinned_summary = if state.presentation.pinned_summary_overlay_open {
             PinnedSummaryMode::Overlay
@@ -122,6 +143,21 @@ impl ThreadHeader {
         state: &ZodeAppState,
         pinned_summary: PinnedSummaryMode,
     ) -> ThreadHeaderLayout {
+        Self::layout_with_pinned_summary_and_sidebar_visibility(
+            rect,
+            state,
+            pinned_summary,
+            if state.shell.sidebar_open { 1.0 } else { 0.0 },
+        )
+    }
+
+    pub fn layout_with_pinned_summary_and_sidebar_visibility(
+        rect: Rect,
+        state: &ZodeAppState,
+        pinned_summary: PinnedSummaryMode,
+        sidebar_visibility: f32,
+    ) -> ThreadHeaderLayout {
+        let rect = Self::content_rect_with_sidebar_visibility(rect, sidebar_visibility);
         let panel_picker = (rect.size.x > ACTION_RIGHT && rect.size.y > 0.0)
             .then(|| {
                 let action_size = ACTION_SIZE
@@ -426,7 +462,15 @@ impl ThreadHeader {
         } else {
             PinnedSummaryMode::Hidden
         };
-        Self::paint_internal(painter, rect, state, true, pinned_summary, theme);
+        Self::paint_internal(
+            painter,
+            rect,
+            state,
+            true,
+            pinned_summary,
+            if state.shell.sidebar_open { 1.0 } else { 0.0 },
+            theme,
+        );
     }
 
     pub fn paint_with_pinned_summary(
@@ -436,7 +480,34 @@ impl ThreadHeader {
         pinned_summary: PinnedSummaryMode,
         theme: &ZodeTheme,
     ) {
-        Self::paint_internal(painter, rect, state, true, pinned_summary, theme);
+        Self::paint_internal(
+            painter,
+            rect,
+            state,
+            true,
+            pinned_summary,
+            if state.shell.sidebar_open { 1.0 } else { 0.0 },
+            theme,
+        );
+    }
+
+    pub fn paint_with_pinned_summary_and_sidebar_visibility(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        state: &ZodeAppState,
+        pinned_summary: PinnedSummaryMode,
+        sidebar_visibility: f32,
+        theme: &ZodeTheme,
+    ) {
+        Self::paint_internal(
+            painter,
+            rect,
+            state,
+            true,
+            pinned_summary,
+            sidebar_visibility,
+            theme,
+        );
     }
 
     pub fn paint_title_only(
@@ -451,6 +522,25 @@ impl ThreadHeader {
             state,
             false,
             PinnedSummaryMode::Hidden,
+            if state.shell.sidebar_open { 1.0 } else { 0.0 },
+            theme,
+        );
+    }
+
+    pub fn paint_title_only_with_sidebar_visibility(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        state: &ZodeAppState,
+        sidebar_visibility: f32,
+        theme: &ZodeTheme,
+    ) {
+        Self::paint_internal(
+            painter,
+            rect,
+            state,
+            false,
+            PinnedSummaryMode::Hidden,
+            sidebar_visibility,
             theme,
         );
     }
@@ -461,15 +551,22 @@ impl ThreadHeader {
         state: &ZodeAppState,
         show_actions: bool,
         pinned_summary: PinnedSummaryMode,
+        sidebar_visibility: f32,
         theme: &ZodeTheme,
     ) {
-        let mut header = Self::layout_with_pinned_summary(rect, state, pinned_summary);
+        let content_rect = Self::content_rect_with_sidebar_visibility(rect, sidebar_visibility);
+        let mut header = Self::layout_with_pinned_summary_and_sidebar_visibility(
+            rect,
+            state,
+            pinned_summary,
+            sidebar_visibility,
+        );
         if !show_actions {
             header.title = Rect::xywh(
-                rect.origin.x + TITLE_TEXT_X,
-                rect.origin.y,
-                (rect.size.x - TITLE_TEXT_X - 20.0).max(0.0),
-                rect.size.y.max(0.0),
+                content_rect.origin.x + TITLE_TEXT_X,
+                content_rect.origin.y,
+                (content_rect.size.x - TITLE_TEXT_X - 20.0).max(0.0),
+                content_rect.size.y.max(0.0),
             );
             header.more = None;
             header.open_with = None;
@@ -482,8 +579,8 @@ impl ThreadHeader {
             painter.stroke_svg_path(
                 SemanticIcon::Folder.path(),
                 Point2D::new(
-                    rect.origin.x + TITLE_ICON_X,
-                    rect.origin.y + (rect.size.y - TITLE_ICON_SIZE).max(0.0) / 2.0,
+                    content_rect.origin.x + TITLE_ICON_X,
+                    content_rect.origin.y + (content_rect.size.y - TITLE_ICON_SIZE).max(0.0) / 2.0,
                 ),
                 TITLE_ICON_SIZE,
                 theme.tokens.foreground,
@@ -547,12 +644,12 @@ impl ThreadHeader {
                         .map(|action| action.rect.origin.x - 12.0)
                 })
                 .unwrap_or(rect.origin.x + rect.size.x - 20.0);
-            let width = 260.0_f32.min((right - rect.origin.x - 180.0).max(0.0));
+            let width = 260.0_f32.min((right - content_rect.origin.x - 180.0).max(0.0));
             UsageChip::paint(
                 painter,
                 Rect::xywh(
-                    (right - width).max(rect.origin.x + 160.0),
-                    rect.origin.y + 11.0,
+                    (right - width).max(content_rect.origin.x + 160.0),
+                    content_rect.origin.y + 11.0,
                     width,
                     24.0,
                 ),

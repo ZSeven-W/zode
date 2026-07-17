@@ -4,10 +4,11 @@ mod section;
 
 use jian_widgets::{HorizontalAlign, Painter, Rect};
 use zode_app_model::{
-    environment_actions, environment_sections, AppCommand, EnvironmentActionKind, EnvironmentEntry,
-    EnvironmentSection, EnvironmentSectionKind, LoadState, ZodeAppState,
+    current_pull_request_status, environment_actions, environment_sections, AppCommand,
+    EnvironmentActionKind, EnvironmentEntry, EnvironmentSection, EnvironmentSectionKind, LoadState,
+    PullRequestStatus, ZodeAppState,
 };
-use zode_node_protocol::SessionLocator;
+use zode_node_protocol::{BackgroundProcessStatus, SessionLocator};
 
 use crate::{
     paint_single_line, stable_widget_id, PinnedSummaryMode, RectExt, SemanticIcon, WidgetId,
@@ -15,6 +16,7 @@ use crate::{
 };
 
 pub use action::EnvironmentActionLayout;
+pub use row::EnvironmentRowLayout;
 pub use section::EnvironmentSectionLayout;
 
 pub const ENVIRONMENT_PANEL_ID: WidgetId = WidgetId(203);
@@ -23,6 +25,10 @@ pub const ENVIRONMENT_REVIEW_ID: WidgetId = WidgetId(101);
 pub const ENVIRONMENT_REFRESH_ID: WidgetId = WidgetId(200);
 pub const ENVIRONMENT_OPEN_WORKSPACE_ID: WidgetId = WidgetId(201);
 pub const ENVIRONMENT_COMMIT_PUSH_ID: WidgetId = WidgetId(202);
+/// Shared by `CreatePullRequest` and `FixMergeConflicts` - only one is ever
+/// active for a given session's [`PullRequestStatus`], so they can safely
+/// share one fixed rect/id like the other repository actions do.
+pub const ENVIRONMENT_PR_ACTION_ID: WidgetId = WidgetId(205);
 
 const PANEL_WIDTH: f32 = 300.0;
 const PANEL_MIN_HEIGHT: f32 = 320.0;
@@ -50,6 +56,13 @@ pub struct EnvironmentPanelLayout {
     pub repository_action_header: Option<Rect>,
     pub repository_actions: Vec<EnvironmentActionLayout>,
     pub review_button: Option<Rect>,
+    /// The single pull-request status row (see `docs/proposals/right-panel-parity.md`
+    /// section 1.1) - present whenever `current_pull_request_status` has data to
+    /// show. `painted_by_action` is set when the row's rect is also the
+    /// `CreatePullRequest`/`FixMergeConflicts` action's rect (see
+    /// `repository_actions`); `row::paint` then skips it so the action
+    /// layer owns that pixel instead of both drawing on top of each other.
+    pub pull_request_row: Option<EnvironmentRowLayout>,
     pub last_row: Option<Rect>,
     pub environment_group_end: f32,
 }
@@ -64,6 +77,7 @@ impl EnvironmentPanel {
         projected.sort_by_key(|section| section_order(section.kind));
         append_sources_view_all(&mut projected);
         let projected_actions = environment_actions(state);
+        let pull_request_status = current_pull_request_status(state);
         let status_messages = status_messages(state);
         let top_entry_count = projected
             .iter()
@@ -84,9 +98,14 @@ impl EnvironmentPanel {
             .map(|section| section::height(section, true))
             .sum::<f32>()
             + section::SECTION_GAP * secondary_sections.len() as f32;
+        let pr_rows = if pull_request_status.is_some() {
+            1.0
+        } else {
+            0.0
+        };
         let environment_height = section::SECTION_HEADER_HEIGHT
             + top_entry_count as f32 * row::ROW_HEIGHT
-            + action::ACTION_ROW_HEIGHT * 2.0
+            + action::ACTION_ROW_HEIGHT * (2.0 + pr_rows)
             + section::SECTION_GAP;
         let status_height = status_messages.len() as f32 * STATUS_HEIGHT;
         let desired_height =
@@ -199,6 +218,32 @@ impl EnvironmentPanel {
                 None,
             ));
         }
+        // The PR status row is laid out separately from the
+        // RepositoryActions/Comparisons footer pair above: unlike
+        // "review"/"workspace-head", it carries real, always-different
+        // content (issue number, checks, or a fallback reason) that must
+        // actually be painted, not just fed to accessibility - see
+        // `pull_request_row` on `EnvironmentPanelLayout`.
+        let pr_rect = pull_request_status.map(|status| {
+            let rect = Rect::xywh(
+                content_rect.origin.x,
+                y,
+                content_rect.size.x,
+                action::ACTION_ROW_HEIGHT,
+            );
+            y = rect.max_y();
+            (status, rect)
+        });
+        if let (true, Some((status, rect))) = (shows_actions, pr_rect) {
+            if let Some(action_kind) = pull_request_action_kind(status) {
+                action_rects.push((
+                    action_kind,
+                    rect,
+                    action_kind.label().into(),
+                    status.value(),
+                ));
+            }
+        }
         for (kind, rect) in [
             (EnvironmentSectionKind::RepositoryActions, commit_rect),
             (EnvironmentSectionKind::Comparisons, compare_rect),
@@ -229,6 +274,17 @@ impl EnvironmentPanel {
                     && layout.action.enabled()
             })
             .map(|layout| layout.rect);
+        let pull_request_row = pr_rect.map(|(status, rect)| {
+            let painted_by_action = repository_actions
+                .iter()
+                .any(|layout| layout.rect == rect && layout.action.enabled());
+            row::EnvironmentRowLayout {
+                entry: EnvironmentEntry::new("pull-request", status.label(), status.value()),
+                kind: EnvironmentSectionKind::RepositoryActions,
+                rect,
+                painted_by_action,
+            }
+        });
         let environment_group_end = y;
         y += section::SECTION_GAP;
         for projected_section in projected
@@ -254,6 +310,7 @@ impl EnvironmentPanel {
                 .rev()
                 .find(|section| !section.footer)
                 .and_then(|section| section.last_row())
+                .or_else(|| pr_rect.map(|(_, rect)| rect))
                 .or(Some(compare_rect))
         });
 
@@ -267,6 +324,7 @@ impl EnvironmentPanel {
             repository_action_header: None,
             repository_actions,
             review_button,
+            pull_request_row,
             last_row,
             environment_group_end,
         }
@@ -290,7 +348,7 @@ impl EnvironmentPanel {
         painter.fill_drop_shadow(
             Rect::xywh(
                 layout.card.origin.x,
-                layout.card.origin.y + 8.0,
+                layout.card.origin.y + 2.0,
                 layout.card.size.x,
                 layout.card.size.y,
             ),
@@ -313,8 +371,14 @@ impl EnvironmentPanel {
             theme.tokens.muted_foreground,
             HorizontalAlign::Start,
         );
+        let armed_stop_process_id = state
+            .current_session_presentation()
+            .and_then(|presentation| presentation.armed_stop_process_id.as_deref());
         for section in &layout.sections {
-            section::paint(painter, section, theme);
+            section::paint(painter, section, armed_stop_process_id, theme);
+        }
+        if let Some(row) = &layout.pull_request_row {
+            row::paint(painter, row, None, theme);
         }
         action::paint(painter, &layout.repository_actions, theme);
         let separator_y = layout.environment_group_end + section::SECTION_GAP / 2.0;
@@ -346,6 +410,12 @@ impl EnvironmentPanel {
         if id == ENVIRONMENT_CLOSE_ID {
             return Some(AppCommand::SetPinnedSummaryOverlayOpen(false));
         }
+        if let Some(command) = Self::subagents_row_command_for_widget(state, id) {
+            return Some(command);
+        }
+        if let Some(command) = Self::background_process_command_for_widget(state, id) {
+            return Some(command);
+        }
         let action = environment_actions(state)
             .into_iter()
             .find(|action| action_widget_id(action.kind) == id && action.enabled())?;
@@ -356,12 +426,102 @@ impl EnvironmentPanel {
         })
     }
 
+    /// Resolves a click on the Subagents section's compact summary row
+    /// (`environment_sections`'s single row for that kind - see
+    /// `docs/proposals/subagent-panel-m2.md`) into opening the M2 dedicated
+    /// panel. Only fires when the section is actually present, i.e. the
+    /// current session has at least one live sub-agent - an empty session
+    /// never renders this row (see `subagent_entries`), so there is nothing
+    /// to click through to.
+    fn subagents_row_command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+        let session = state.current_session.as_ref()?;
+        if Self::section_widget_id(session, EnvironmentSectionKind::Subagents) != id {
+            return None;
+        }
+        let presentation = state.current_session_presentation()?;
+        (!presentation.subagents.is_empty()).then_some(AppCommand::OpenSecondary(
+            zode_app_model::SecondaryPane::Subagents,
+        ))
+    }
+
+    /// Resolves a click on a BackgroundProcesses row's stop or view-output
+    /// target against the live process list, rather than baking enabled
+    /// state into paint. Stop is a two-tap gated confirm: the first tap on
+    /// an unarmed `Running` process arms it (`ArmBackgroundProcessStop`),
+    /// the second tap on the same already-armed process actually stops it.
+    /// View-output only fires when the launching tool call is known.
+    fn background_process_command_for_widget(
+        state: &ZodeAppState,
+        id: WidgetId,
+    ) -> Option<AppCommand> {
+        let session = state.current_session.as_ref()?.clone();
+        let presentation = state.current_session_presentation()?;
+        let process = presentation.background_processes.iter().find(|process| {
+            Self::background_process_stop_widget_id(&session, &process.id) == id
+                || Self::background_process_view_output_widget_id(&session, &process.id) == id
+        })?;
+        if Self::background_process_stop_widget_id(&session, &process.id) == id {
+            if process.status != BackgroundProcessStatus::Running {
+                return None;
+            }
+            return Some(
+                if presentation.armed_stop_process_id.as_deref() == Some(process.id.as_str()) {
+                    AppCommand::StopBackgroundProcess {
+                        session,
+                        process_id: process.id.clone(),
+                    }
+                } else {
+                    AppCommand::ArmBackgroundProcessStop {
+                        session,
+                        process_id: process.id.clone(),
+                    }
+                },
+            );
+        }
+        let tool_call_id = process.tool_call_id.clone()?;
+        Some(AppCommand::ViewBackgroundProcessOutput {
+            session,
+            tool_call_id,
+        })
+    }
+
+    pub fn background_process_stop_widget_id(
+        session: &SessionLocator,
+        process_id: &str,
+    ) -> WidgetId {
+        stable_widget_id(0x64, &(session, process_id))
+    }
+
+    pub fn background_process_view_output_widget_id(
+        session: &SessionLocator,
+        process_id: &str,
+    ) -> WidgetId {
+        stable_widget_id(0x65, &(session, process_id))
+    }
+
     pub fn section_widget_id(session: &SessionLocator, kind: EnvironmentSectionKind) -> WidgetId {
         stable_widget_id(0x62, &(session, kind))
     }
 
+    /// Distinct from `section_widget_id(session, RepositoryActions)`, which
+    /// already keys the RepositoryActions footer node at `commit_rect` -
+    /// this is the informational-only pull-request row's own accessible
+    /// group when it carries no action (see `pull_request_row`).
+    pub fn pull_request_widget_id(session: &SessionLocator) -> WidgetId {
+        stable_widget_id(0x66, session)
+    }
+
     pub fn section_accessibility_name(layout: &EnvironmentSectionLayout) -> String {
         section::accessibility_name(layout)
+    }
+}
+
+/// Which repository action, if any, a pull-request status offers.
+fn pull_request_action_kind(status: PullRequestStatus) -> Option<EnvironmentActionKind> {
+    match status {
+        PullRequestStatus::NoPr => Some(EnvironmentActionKind::CreatePullRequest),
+        PullRequestStatus::MergeConflicts { .. } => Some(EnvironmentActionKind::FixMergeConflicts),
+        _ => None,
     }
 }
 
@@ -372,11 +532,11 @@ fn append_sources_view_all(sections: &mut [EnvironmentSection]) {
     else {
         return;
     };
-    sources.entries.push(EnvironmentEntry {
-        id: row::SOURCES_VIEW_ALL_ID.into(),
-        label: "查看全部".into(),
-        value: None,
-    });
+    sources.entries.push(EnvironmentEntry::new(
+        row::SOURCES_VIEW_ALL_ID,
+        "查看全部",
+        None,
+    ));
 }
 
 fn take_section(
@@ -389,6 +549,10 @@ fn take_section(
         .map(|index| sections.remove(index))
 }
 
+/// Only ever called for the Changes/Host first-row overlay (see `layout`'s
+/// top-group loop) - `CreatePullRequest`/`FixMergeConflicts` get their own
+/// literal label pushed directly where the PR row is built, and never reach
+/// this function. Their arms exist only to keep the match exhaustive.
 fn action_row_label(kind: EnvironmentActionKind, entry: &EnvironmentEntry) -> String {
     match kind {
         EnvironmentActionKind::RefreshStatus => "变更".into(),
@@ -397,6 +561,9 @@ fn action_row_label(kind: EnvironmentActionKind, entry: &EnvironmentEntry) -> St
         }
         EnvironmentActionKind::CompareWorkspaceToHead => "比较分支".into(),
         EnvironmentActionKind::CommitOrPush => "提交或推送".into(),
+        EnvironmentActionKind::CreatePullRequest | EnvironmentActionKind::FixMergeConflicts => {
+            kind.label().into()
+        }
     }
 }
 
@@ -412,6 +579,9 @@ pub const fn action_widget_id(kind: EnvironmentActionKind) -> WidgetId {
         EnvironmentActionKind::CompareWorkspaceToHead => ENVIRONMENT_REVIEW_ID,
         EnvironmentActionKind::OpenWorkspace => ENVIRONMENT_OPEN_WORKSPACE_ID,
         EnvironmentActionKind::CommitOrPush => ENVIRONMENT_COMMIT_PUSH_ID,
+        EnvironmentActionKind::CreatePullRequest | EnvironmentActionKind::FixMergeConflicts => {
+            ENVIRONMENT_PR_ACTION_ID
+        }
     }
 }
 
@@ -457,8 +627,9 @@ const fn section_order(kind: EnvironmentSectionKind) -> u8 {
         EnvironmentSectionKind::RepositoryActions => 3,
         EnvironmentSectionKind::Comparisons => 4,
         EnvironmentSectionKind::Subagents => 5,
-        EnvironmentSectionKind::BackgroundProcesses => 6,
-        EnvironmentSectionKind::Sources => 7,
+        EnvironmentSectionKind::ComputerUse => 6,
+        EnvironmentSectionKind::BackgroundProcesses => 7,
+        EnvironmentSectionKind::Sources => 8,
     }
 }
 
@@ -475,6 +646,7 @@ const fn is_secondary_group(kind: EnvironmentSectionKind) -> bool {
     matches!(
         kind,
         EnvironmentSectionKind::Subagents
+            | EnvironmentSectionKind::ComputerUse
             | EnvironmentSectionKind::BackgroundProcesses
             | EnvironmentSectionKind::Sources
     )

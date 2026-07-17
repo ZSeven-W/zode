@@ -1,24 +1,26 @@
 use accesskit::{Action, ActionData};
-use zode_app_model::{
-    reduce_tool_command, reduce_transcript_command, AppCommand, SettingsCommandOutcome, ShellRoute,
-    ToolCommandOutcome, TranscriptCommandOutcome,
-};
+use zode_app_model::{reduce_transcript_command, AppCommand, ShellRoute, TranscriptCommandOutcome};
 use zode_app_ui::{
     Composer, EmptyState, Key, KeyEvent, PointerButton, PointerEvent, PointerEventKind,
     ThreadHeader, ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId,
-    ARCHIVED_TASK_SEARCH_ID, COMPOSER_BRANCH_SEARCH_ID, COMPOSER_ID, INTEGRATIONS_SEARCH_ID,
-    SEND_ID, SETTINGS_SEARCH_ID, TERMINAL_ID,
+    ARCHIVED_TASK_SEARCH_ID, COMPOSER_BRANCH_SEARCH_ID, COMPOSER_ID, GLOBAL_SEARCH_INPUT_ID,
+    INTEGRATIONS_SEARCH_ID, PROVIDER_API_KEY_INPUT_ID, PROVIDER_BASE_URL_INPUT_ID,
+    PROVIDER_ID_INPUT_ID, PROVIDER_MODEL_IDS_INPUT_ID, SEND_ID, SETTINGS_SEARCH_ID,
+    SIDEBAR_TOGGLE_ID, TERMINAL_ID,
 };
 
+#[cfg(test)]
 use super::{
-    external_preview::consume_external_preview_command,
-    session_menu::{consume_session_window_command, session_menu_outside_click_command},
-    settings::{reduce_local_settings_command, settings_interaction_viewport},
+    external_preview::consume_external_preview_command, settings::reduce_local_settings_command,
+};
+use super::{
+    session_menu::session_menu_outside_click_command,
+    settings::{is_provider_models_input, settings_interaction_viewport},
     DesktopApp,
 };
 use crate::{
     accessibility_host::AccessibilityBridge,
-    clipboard::{execute_clipboard_command, paste_from_clipboard},
+    clipboard::paste_from_clipboard,
     cursor::cursor_hint_for_hit,
     event_map::{is_paste_shortcut, terminal_shortcut_command},
     input_dispatch::{
@@ -46,103 +48,10 @@ pub(super) use routing::normalize_conversation_route;
 mod composer_outcome;
 pub(super) use composer_outcome::{project_composer_outcome, sync_draft};
 
-impl DesktopApp {
-    pub(super) fn enqueue_command(&mut self, command: AppCommand) {
-        if self.apply_environment_action_command(&command) {
-            return;
-        }
-        if consume_session_window_command(
-            &mut self.app_state,
-            self.session_window.as_ref(),
-            &command,
-        ) {
-            self.rebuild_frame_snapshot();
-            self.request_redraw();
-            return;
-        }
-        if consume_external_preview_command(
-            &mut self.app_state,
-            self.external_open.as_ref(),
-            &command,
-        ) {
-            self.rebuild_frame_snapshot();
-            self.request_redraw();
-            return;
-        }
-        if matches!(command, AppCommand::CopyText(_)) {
-            if let Some(clipboard) = self.clipboard.as_ref() {
-                if let Err(error) = execute_clipboard_command(&command, clipboard.as_ref()) {
-                    eprintln!("zode-app: clipboard write failed: {error}");
-                }
-            } else {
-                eprintln!("zode-app: clipboard is unavailable");
-            }
-            if self.app_state.session_copy_menu.is_some() {
-                self.app_state.close_session_action_surfaces();
-                self.rebuild_frame_snapshot();
-                self.request_redraw();
-            }
-            return;
-        }
-        let command = match self.apply_queue_intent(command) {
-            super::queue::QueueIntentResult::Handled => return,
-            super::queue::QueueIntentResult::Continue(command) => command,
-        };
-        if self.apply_presentation_command(command.clone()) {
-            return;
-        }
-        if reduce_local_settings_command(&mut self.app_state, command.clone())
-            == SettingsCommandOutcome::Applied
-        {
-            self.persist_ui_state();
-            self.rebuild_frame_snapshot();
-            self.request_redraw();
-            return;
-        }
-        if reduce_tool_command(&mut self.app_state, command.clone()) == ToolCommandOutcome::Applied
-        {
-            self.rebuild_frame_snapshot();
-            self.request_redraw();
-            return;
-        }
-        if self.apply_local_navigation_command(&command) {
-            return;
-        }
-        let normalized = available_new_session_command(&self.app_state, &command)
-            && normalize_conversation_route(&mut self.app_state, &command);
-        if self.command_bridge.is_none() {
-            eprintln!("zode-app: endpoint command ignored because no endpoint is attached");
-            if normalized {
-                self.rebuild_frame_snapshot();
-                self.request_redraw();
-            }
-            return;
-        }
-        let previous_session = self.app_state.current_session.clone();
-        match crate::command_bridge::prepare_dispatch(&mut self.app_state, command) {
-            Ok(Some(dispatch)) => {
-                if let Some(bridge) = self.command_bridge.as_ref() {
-                    if let Err(dispatch) = bridge.dispatch(dispatch) {
-                        crate::command_bridge::reject_dispatch(
-                            &mut self.app_state,
-                            dispatch,
-                            "the endpoint command pump is unavailable".into(),
-                        );
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(error) => crate::command_bridge::project_command_error(
-                &mut self.app_state,
-                format!("invalid endpoint command: {error}"),
-            ),
-        }
-        self.refresh_if_session_changed(previous_session);
-        self.sync_composer_busy();
-        self.rebuild_frame_snapshot();
-        self.request_redraw();
-    }
+#[path = "interaction/enqueue.rs"]
+mod enqueue;
 
+impl DesktopApp {
     pub(super) fn handle_unified_input(&mut self, input: UnifiedInputEvent) {
         match input {
             UnifiedInputEvent::Keyboard(event) => self.handle_key_event(event),
@@ -150,7 +59,13 @@ impl DesktopApp {
                 if self.handle_session_rename_ime(event.clone()) {
                     return;
                 }
+                if self.handle_global_search_ime(event.clone()) {
+                    return;
+                }
                 if self.handle_integration_search_ime(&event) {
+                    return;
+                }
+                if self.handle_plugin_add_ime(&event) {
                     return;
                 }
                 if self.handle_settings_search_ime(&event) {
@@ -181,6 +96,9 @@ impl DesktopApp {
             UnifiedInputEvent::Pointer(event) => self.handle_pointer_event(event),
             UnifiedInputEvent::Wheel(event) => {
                 self.ensure_scroll_geometry_snapshot();
+                if self.app_state.global_search.open {
+                    return;
+                }
                 let multiplier = match event.mode {
                     WheelDeltaMode::Line => 20.0,
                     WheelDeltaMode::Pixel => 1.0,
@@ -232,6 +150,16 @@ impl DesktopApp {
             }
             UnifiedInputEvent::Touch(event) => {
                 self.ensure_scroll_geometry_snapshot();
+                if self.app_state.global_search.open {
+                    if event.phase == TouchPhase::Ended {
+                        self.handle_pointer_event(PointerEvent {
+                            position: event.position,
+                            kind: PointerEventKind::Press,
+                            button: Some(PointerButton::Primary),
+                        });
+                    }
+                    return;
+                }
                 if self.handle_integrations_touch(event) {
                     return;
                 }
@@ -275,6 +203,17 @@ impl DesktopApp {
         if self.paste_session_rename_from_clipboard(clipboard.as_ref()) {
             return;
         }
+        if self.app_state.global_search.open && self.focused_widget == Some(GLOBAL_SEARCH_INPUT_ID)
+        {
+            match clipboard.read_text() {
+                Ok(Some(text)) if !text.is_empty() => {
+                    let _ = self.paste_global_search_text(&text);
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("zode-app: clipboard read failed: {error}"),
+            }
+            return;
+        }
         if self.app_state.project_picker.open
             && self.focused_widget == Some(zode_app_ui::PROJECT_PICKER_SEARCH_ID)
         {
@@ -292,7 +231,14 @@ impl DesktopApp {
         }
         if matches!(
             self.focused_widget,
-            Some(SETTINGS_SEARCH_ID | ARCHIVED_TASK_SEARCH_ID)
+            Some(
+                SETTINGS_SEARCH_ID
+                    | ARCHIVED_TASK_SEARCH_ID
+                    | PROVIDER_ID_INPUT_ID
+                    | PROVIDER_BASE_URL_INPUT_ID
+                    | PROVIDER_API_KEY_INPUT_ID
+                    | PROVIDER_MODEL_IDS_INPUT_ID
+            )
         ) {
             match clipboard.read_text() {
                 Ok(Some(text)) if !text.is_empty() => {
@@ -307,6 +253,21 @@ impl DesktopApp {
             match clipboard.read_text() {
                 Ok(Some(text)) if !text.is_empty() => {
                     let _ = self.paste_integration_search_text(&text);
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("zode-app: clipboard read failed: {error}"),
+            }
+            return;
+        }
+        if matches!(
+            self.focused_widget,
+            Some(
+                zode_app_ui::PLUGIN_ADD_SPEC_INPUT_ID | zode_app_ui::PLUGIN_ADD_REFERENCE_INPUT_ID
+            )
+        ) {
+            match clipboard.read_text() {
+                Ok(Some(text)) if !text.is_empty() => {
+                    let _ = self.paste_plugin_add_text(&text);
                 }
                 Ok(_) => {}
                 Err(error) => eprintln!("zode-app: clipboard read failed: {error}"),
@@ -376,7 +337,8 @@ impl DesktopApp {
         } else {
             self.app_state.presentation.route.legacy_page()
         };
-        let allowed = ime_allowed_for_focus(ime_page, focused, window_focused);
+        let allowed = ime_allowed_for_focus(ime_page, focused, window_focused)
+            || (window_focused && focused.is_some_and(is_provider_models_input));
         if allowed {
             let area = if focused == Some(COMPOSER_ID) {
                 (!self.ime.needs_area_measurement())
@@ -402,6 +364,9 @@ impl DesktopApp {
     }
 
     pub(super) fn activate_widget(&mut self, id: WidgetId) {
+        if id == SIDEBAR_TOGGLE_ID {
+            self.dismiss_primary_sidebar_preview();
+        }
         if let Some(prompt) = EmptyState::suggestion_prompt(id) {
             self.composer.set_text(prompt);
             self.set_focused_widget(Some(COMPOSER_ID));
@@ -429,8 +394,15 @@ impl DesktopApp {
             COMPOSER_ID
             | TERMINAL_ID
             | INTEGRATIONS_SEARCH_ID
+            | zode_app_ui::PLUGIN_ADD_SPEC_INPUT_ID
+            | zode_app_ui::PLUGIN_ADD_REFERENCE_INPUT_ID
             | SETTINGS_SEARCH_ID
             | ARCHIVED_TASK_SEARCH_ID
+            | PROVIDER_ID_INPUT_ID
+            | PROVIDER_BASE_URL_INPUT_ID
+            | PROVIDER_API_KEY_INPUT_ID
+            | PROVIDER_MODEL_IDS_INPUT_ID
+            | GLOBAL_SEARCH_INPUT_ID
             | zode_app_ui::PROJECT_PICKER_SEARCH_ID
             | COMPOSER_BRANCH_SEARCH_ID
             | zode_app_ui::HEADER_RENAME_INPUT_ID => {}
@@ -471,6 +443,9 @@ impl DesktopApp {
             if self.frame_snapshot.node(id).is_none() {
                 continue;
             }
+            if !self.global_search_allows_accessibility_action(id) {
+                continue;
+            }
             if !self.project_picker_allows_accessibility_action(id) {
                 continue;
             }
@@ -481,12 +456,20 @@ impl DesktopApp {
                 continue;
             }
             match request.action {
+                Action::Focus if id == zode_app_ui::GLOBAL_SEARCH_SURFACE_ID => {
+                    self.set_focused_widget(Some(GLOBAL_SEARCH_INPUT_ID));
+                }
                 Action::Focus => self.set_focused_widget(Some(id)),
                 Action::Click => self.activate_widget(id),
                 Action::SetValue if id == COMPOSER_ID => {
                     if let Some(ActionData::Value(value)) = request.data {
                         self.composer.set_text(value.into_string());
                         self.apply_composer_outcome(zode_app_ui::ComposerOutcome::Edited);
+                    }
+                }
+                Action::SetValue if id == GLOBAL_SEARCH_INPUT_ID => {
+                    if let Some(ActionData::Value(value)) = request.data {
+                        self.set_global_search_value(value.into_string());
                     }
                 }
                 Action::SetValue if id == zode_app_ui::PROJECT_PICKER_SEARCH_ID => {
@@ -499,7 +482,17 @@ impl DesktopApp {
                         self.set_branch_search_value(value.into_string());
                     }
                 }
-                Action::SetValue if matches!(id, SETTINGS_SEARCH_ID | ARCHIVED_TASK_SEARCH_ID) => {
+                Action::SetValue
+                    if matches!(
+                        id,
+                        SETTINGS_SEARCH_ID
+                            | ARCHIVED_TASK_SEARCH_ID
+                            | PROVIDER_ID_INPUT_ID
+                            | PROVIDER_BASE_URL_INPUT_ID
+                            | PROVIDER_API_KEY_INPUT_ID
+                            | PROVIDER_MODEL_IDS_INPUT_ID
+                    ) =>
+                {
                     if let Some(ActionData::Value(value)) = request.data {
                         self.set_settings_input_value(id, value.into_string());
                     }
@@ -507,6 +500,17 @@ impl DesktopApp {
                 Action::SetValue if id == INTEGRATIONS_SEARCH_ID => {
                     if let Some(ActionData::Value(value)) = request.data {
                         self.set_integration_search_value(value.into_string());
+                    }
+                }
+                Action::SetValue
+                    if matches!(
+                        id,
+                        zode_app_ui::PLUGIN_ADD_SPEC_INPUT_ID
+                            | zode_app_ui::PLUGIN_ADD_REFERENCE_INPUT_ID
+                    ) =>
+                {
+                    if let Some(ActionData::Value(value)) = request.data {
+                        self.set_plugin_add_field_value(id, value.into_string());
                     }
                 }
                 Action::SetValue if id == zode_app_ui::HEADER_RENAME_INPUT_ID => {
@@ -540,6 +544,7 @@ impl DesktopApp {
         if !focused {
             self.cancel_primary_sidebar_resize();
             self.cancel_secondary_sidebar_resize();
+            self.dismiss_primary_sidebar_preview();
         }
         if self.window_focused != focused {
             self.ime.invalidate_native();
@@ -560,6 +565,22 @@ impl DesktopApp {
     pub(super) fn handle_pointer_event(&mut self, event: PointerEvent) {
         self.window_state.cursor_logical = event.position;
         self.ensure_frame_snapshot();
+        if self.app_state.global_search.open
+            && event.kind == PointerEventKind::Press
+            && event.button == Some(PointerButton::Primary)
+        {
+            if !self.global_search_contains_point(event.position) {
+                self.close_global_search_from_outside();
+                return;
+            }
+            match self.frame_snapshot.hit_test(event.position) {
+                None | Some(zode_app_ui::GLOBAL_SEARCH_SURFACE_ID) => {
+                    self.set_focused_widget(Some(GLOBAL_SEARCH_INPUT_ID));
+                    return;
+                }
+                Some(_) => {}
+            }
+        }
         if self.handle_primary_sidebar_resize_pointer(event) {
             return;
         }
@@ -567,15 +588,27 @@ impl DesktopApp {
             return;
         }
         if event.kind == PointerEventKind::Move {
-            let hovered = self.frame_snapshot.hit_test(event.position);
-            let cursor = cursor_hint_for_hit(&self.frame_snapshot, hovered);
+            let preview_changed = self.update_primary_sidebar_preview_hover(Some(event.position));
+            let preview_hit = self.primary_sidebar_preview_hit(event.position);
+            let hovered = self.primary_sidebar_aware_hover(event.position);
+            let cursor = if preview_hit.is_some() {
+                crate::cursor::CursorHint::Pointer
+            } else if self.primary_sidebar_preview_contains(event.position) {
+                crate::cursor::CursorHint::Default
+            } else {
+                cursor_hint_for_hit(&self.frame_snapshot, hovered)
+            };
             if self.hovered_widget != hovered {
                 self.hovered_widget = hovered;
                 self.request_sidebar_hover_context(hovered);
                 self.request_redraw();
             }
+            if preview_changed {
+                self.request_redraw();
+            }
             self.update_native_cursor(cursor);
-            if self.app_state.terminal_surface_visible()
+            if !self.app_state.global_search.open
+                && self.app_state.terminal_surface_visible()
                 && self.terminal_controller.pointer_move(
                     self.terminal_rect(),
                     event.position,
@@ -623,6 +656,13 @@ impl DesktopApp {
             return;
         }
         if self.handle_sidebar_menu_pointer(event.position) {
+            return;
+        }
+        if let Some(id) = self.primary_sidebar_preview_hit(event.position) {
+            self.activate_widget(id);
+            return;
+        }
+        if self.primary_sidebar_preview_contains(event.position) {
             return;
         }
         if self.app_state.session_menu.is_some() {
@@ -677,6 +717,12 @@ impl DesktopApp {
 
     fn handle_key_event(&mut self, event: KeyEvent) {
         self.ensure_frame_snapshot();
+        if self.handle_lightbox_key(&event) {
+            return;
+        }
+        if self.handle_global_search_key(&event) {
+            return;
+        }
         if self.handle_open_with_key(&event) {
             return;
         }
@@ -699,6 +745,9 @@ impl DesktopApp {
             return;
         }
         if self.handle_integration_search_key(&event) {
+            return;
+        }
+        if self.handle_plugin_add_key(&event) {
             return;
         }
         if self.handle_settings_search_key(&event) {

@@ -1,6 +1,6 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::demo_state;
-use zode_app_ui::{ComposerFooterMenuWidget, EmptyState, TypographyRole, ZodeTheme};
+use zode_app_ui::{ComposerFooterMenuWidget, Elevation, EmptyState, TypographyRole, ZodeTheme};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ShadowCall {
@@ -104,14 +104,27 @@ fn wide_empty_state_keeps_reference_typography_and_card_depth() {
         assert_eq!(call.weight, 400);
     }
 
-    assert_eq!(painter.shadows.len(), 4);
-    for (shadow, card) in painter.shadows.iter().zip(cards) {
-        assert_eq!(shadow.rect.origin.x, card.rect.origin.x);
-        assert_eq!(shadow.rect.origin.y, card.rect.origin.y + 2.0);
-        assert_eq!(shadow.rect.size, card.rect.size);
-        assert_eq!(shadow.radius, 12.0);
-        assert_eq!(shadow.blur, 8.0);
-        assert!(shadow.color.a > 0.0 && shadow.color.a < 0.05);
+    // Each card now paints the shared two-layer `Elevation::prominent`
+    // shadow (`paint_elevated_surface`) instead of a single hand-rolled
+    // drop shadow with its own offset/blur/alpha — the rect is the card's
+    // true position (no manual +2px offset baked into the call site
+    // anymore) and the two layers match the shared token exactly.
+    let elevation = Elevation::prominent();
+    assert_eq!(painter.shadows.len(), cards.len() * 2);
+    for (layers, card) in painter.shadows.chunks_exact(2).zip(cards) {
+        let [shadow, glow] = layers else {
+            unreachable!("chunks_exact(2) always yields two elements")
+        };
+        for layer in [shadow, glow] {
+            assert_eq!(layer.rect.origin.x, card.rect.origin.x);
+            assert_eq!(layer.rect.origin.y, card.rect.origin.y);
+            assert_eq!(layer.rect.size, card.rect.size);
+            assert_eq!(layer.radius, 12.0);
+        }
+        assert_eq!(shadow.blur, elevation.shadow.blur);
+        assert_eq!(shadow.color, elevation.shadow.color);
+        assert_eq!(glow.blur, elevation.glow.blur);
+        assert_eq!(glow.color, elevation.glow.color);
     }
 }
 
@@ -142,6 +155,7 @@ fn composer_footer_and_transcript_status_use_reference_typography() {
             .find(|call| call.content == label)
             .unwrap_or_else(|| panic!("missing composer footer label: {label}"));
         assert_eq!(call.size, 14.0);
+        assert_eq!(call.weight, 400);
     }
     assert!(layout.permission.size.x >= 94.0);
     assert_eq!(TypographyRole::UiLabel.style().weight, 400);

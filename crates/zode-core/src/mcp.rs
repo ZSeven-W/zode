@@ -40,6 +40,7 @@ pub fn prefixed_tool_name(server: &str, tool: &str) -> String {
 
 mod discovery;
 
+pub(crate) use discovery::collect_plugin_mcp;
 pub use discovery::discover_mcp_config;
 
 /// Per-server connect timeout — a hung/unreachable server must never block

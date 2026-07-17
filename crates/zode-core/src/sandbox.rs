@@ -50,6 +50,7 @@ pub use fs::{
 };
 #[cfg(all(test, unix))]
 use tool::looks_like_sandbox_denial;
+pub(crate) use tool::wants_escape;
 pub use tool::{
     apply_sandbox, SandboxedBashTool, ESCAPE_FLAG, JUSTIFICATION_FLAG, SANDBOX_PERMISSIONS_FLAG,
 };

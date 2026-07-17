@@ -28,6 +28,10 @@ fn normalize_display_name(value: &str) -> Option<String> {
 }
 
 pub(super) fn hydrate_session_navigation(state: &mut ZodeAppState, persisted: &AppStateFile) {
+    state.hydrate_thread_affiliations(
+        &persisted.thread_workspace_root_hints,
+        &persisted.projectless_session_ids,
+    );
     state.pinned_sessions.clear();
     state.archived_sessions.clear();
     for thread in &state.threads {
@@ -71,16 +75,18 @@ pub(super) fn restore_last_session(state: &mut ZodeAppState, last_session: Optio
         .find(|thread| {
             thread.session.session_id == last_session
                 && !state.archived_sessions.contains(&thread.session)
-                && (state.available_workspace(&thread.workspace_uri)
-                    || state.is_projectless_workspace(&thread.workspace_uri))
+                && state
+                    .available_workspace_for_session(&thread.session)
+                    .is_some()
         })
-        .map(|thread| (thread.session.clone(), thread.workspace_uri.clone()));
-    let Some((session, workspace_uri)) = restored else {
+        .map(|thread| thread.session.clone());
+    let Some(session) = restored else {
         return;
     };
+    let project_workspace = state.project_workspace_for_session(&session).cloned();
     state.current_session = Some(session);
     state.active_workspace =
-        (!state.is_projectless_workspace(&workspace_uri)).then_some(workspace_uri);
+        project_workspace.filter(|workspace| state.available_workspace(workspace));
 }
 
 #[cfg(test)]

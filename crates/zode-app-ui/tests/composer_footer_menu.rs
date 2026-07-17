@@ -1,14 +1,16 @@
-use jian_widgets::Rect;
+use accesskit::{Action, Role};
+use jian_widgets::{Point2D, Rect};
 use zode_app_model::{
     demo_state, AppCommand, ComposerFooterMenu, SettingsCategory, ShellRoute, ZodeAppState,
 };
 use zode_app_ui::{
     Composer, ComposerFooterMenuWidget, Insets, RectExt, WorkspaceSnapshot, COMPOSER_ADD_FILE_ID,
     COMPOSER_ADD_GOAL_ID, COMPOSER_ADD_ID, COMPOSER_ADD_PLAN_ID, COMPOSER_ADD_WECHAT_ID,
-    COMPOSER_MODEL_CONFIGURE_ID, COMPOSER_MODEL_EFFORTS_ID, COMPOSER_MODEL_EFFORT_HIGH_ID,
-    COMPOSER_MODEL_ID, COMPOSER_MODEL_MODELS_ID, COMPOSER_MODEL_RESET_ID, COMPOSER_MODEL_SPEEDS_ID,
-    COMPOSER_MODEL_SPEED_ID, COMPOSER_PERMISSION_CUSTOM_ID, COMPOSER_PERMISSION_FULL_ID,
-    COMPOSER_PERMISSION_ID, COMPOSER_PERMISSION_REQUEST_ID,
+    COMPOSER_MODEL_ADD_ID, COMPOSER_MODEL_CONFIGURE_ID, COMPOSER_MODEL_EFFORTS_ID,
+    COMPOSER_MODEL_EFFORT_HIGH_ID, COMPOSER_MODEL_ID, COMPOSER_MODEL_MODELS_ID,
+    COMPOSER_MODEL_RESET_ID, COMPOSER_MODEL_SPEEDS_ID, COMPOSER_MODEL_SPEED_ID,
+    COMPOSER_PERMISSION_CUSTOM_ID, COMPOSER_PERMISSION_FULL_ID, COMPOSER_PERMISSION_ID,
+    COMPOSER_PERMISSION_REQUEST_ID,
 };
 use zode_node_protocol::{ApprovalMode, RuntimeOptions, SandboxMode, SessionLocator, TurnId};
 
@@ -19,6 +21,13 @@ fn input(state: &ZodeAppState) -> Rect {
 fn menu(state: &ZodeAppState) -> zode_app_ui::ComposerFooterMenuLayout {
     ComposerFooterMenuWidget::layout(Rect::xywh(0.0, 0.0, 1_200.0, 900.0), input(state), state)
         .expect("footer menu is open")
+}
+
+fn center(rect: Rect) -> Point2D {
+    Point2D::new(
+        rect.origin.x + rect.size.x / 2.0,
+        rect.origin.y + rect.size.y / 2.0,
+    )
 }
 
 #[test]
@@ -133,7 +142,7 @@ fn unconfigured_builtin_codex_stays_actionable_and_runtime_gaps_are_explicit() {
     assert_eq!(
         ComposerFooterMenuWidget::command_for_widget(&state, configure.id),
         Some(AppCommand::Navigate(ShellRoute::Settings(
-            SettingsCategory::Configuration,
+            SettingsCategory::ProviderModels,
         )))
     );
 
@@ -155,6 +164,39 @@ fn unconfigured_builtin_codex_stays_actionable_and_runtime_gaps_are_explicit() {
     assert_eq!(
         ComposerFooterMenuWidget::command_for_widget(&state, COMPOSER_MODEL_RESET_ID),
         Some(AppCommand::ResetComposerRuntime)
+    );
+}
+
+#[test]
+fn configured_model_menu_always_exposes_add_model_route_at_the_bottom() {
+    let mut state = demo_state();
+    state.provider_setup_required = false;
+    state.composer.available_models = vec!["gpt-5.6-sol".into(), "gpt-5.6-codex".into()];
+    state.composer.model = Some("gpt-5.6-sol".into());
+    state.composer.footer_menu = Some(ComposerFooterMenu::ModelModels);
+
+    let layout = menu(&state);
+    let add = layout.rows.last().expect("add-model row");
+    assert_eq!(add.id, COMPOSER_MODEL_ADD_ID);
+    assert_eq!(add.label, "添加模型");
+    assert!(add.enabled);
+    assert_eq!(
+        ComposerFooterMenuWidget::command_for_widget(&state, add.id),
+        Some(AppCommand::Navigate(ShellRoute::Settings(
+            SettingsCategory::ProviderModels,
+        )))
+    );
+
+    let snapshot = WorkspaceSnapshot::build(&state, 1_200.0, 900.0, Insets::ZERO);
+    let add_node = snapshot
+        .node(COMPOSER_MODEL_ADD_ID)
+        .expect("accessible add-model row");
+    assert_eq!(add_node.role, Role::MenuItem);
+    assert!(add_node.actions.contains(&Action::Click));
+    assert!(add_node.actions.contains(&Action::Focus));
+    assert_eq!(
+        snapshot.hit_test(center(add_node.rect)),
+        Some(COMPOSER_MODEL_ADD_ID)
     );
 }
 
@@ -205,7 +247,8 @@ fn composer_accessibility_has_three_footer_buttons_and_no_microphone() {
     let snapshot = WorkspaceSnapshot::build(&demo_state(), 1_200.0, 900.0, Insets::ZERO);
 
     for id in [COMPOSER_ADD_ID, COMPOSER_PERMISSION_ID, COMPOSER_MODEL_ID] {
-        assert!(snapshot.node(id).is_some());
+        let trigger = snapshot.node(id).expect("footer trigger");
+        assert_eq!(snapshot.hit_test(center(trigger.rect)), Some(id));
     }
     assert!(snapshot
         .nodes

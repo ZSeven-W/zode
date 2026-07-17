@@ -1,5 +1,5 @@
 use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect};
-use zode_app_model::{ProjectPickerAnchor, ZodeAppState};
+use zode_app_model::ZodeAppState;
 
 use super::{paint::paint_icon_button, SidebarLayout, SIDEBAR_SEARCH_ID, SIDEBAR_TOGGLE_ID};
 use crate::{paint_single_line, SemanticIcon, WidgetId, ZodeTheme};
@@ -35,8 +35,7 @@ pub(super) fn paint(
         theme,
     );
 
-    let search_active =
-        state.project_picker.open && state.project_picker.anchor == ProjectPickerAnchor::Sidebar;
+    let search_active = state.global_search.open;
     if search_active {
         painter.fill_round_rect(layout.brand_search, 6.0, theme.sidebar_row_selected);
     } else if focused == Some(SIDEBAR_SEARCH_ID) || hovered == Some(SIDEBAR_SEARCH_ID) {

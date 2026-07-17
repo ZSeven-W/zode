@@ -24,8 +24,8 @@ const EMPTY_TASK_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 293.0, 1080.0),
     GeometryExpectation::new(LayoutRect::TopBar, 293.0, 0.0, 1507.0, 46.0),
     GeometryExpectation::new(LayoutRect::PrimarySurface, 293.0, 0.0, 1507.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 678.5, 70.0, 736.0, 830.0),
-    GeometryExpectation::new(LayoutRect::Composer, 678.5, 928.0, 736.0, 138.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 663.0, 70.0, 768.0, 830.0),
+    GeometryExpectation::new(LayoutRect::Composer, 663.0, 928.0, 768.0, 138.0),
 ];
 
 const FULL_PAGE_GEOMETRY: &[GeometryExpectation] = &[
@@ -33,7 +33,7 @@ const FULL_PAGE_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 293.0, 1080.0),
     GeometryExpectation::new(LayoutRect::TopBar, 293.0, 0.0, 1507.0, 46.0),
     GeometryExpectation::new(LayoutRect::PrimarySurface, 293.0, 0.0, 1507.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::PageContent, 678.5, 70.0, 736.0, 1010.0),
+    GeometryExpectation::new(LayoutRect::PageContent, 662.5, 70.0, 768.0, 1010.0),
 ];
 
 const SETTINGS_GEOMETRY: &[GeometryExpectation] = &[
@@ -49,8 +49,11 @@ const DOCUMENT_PREVIEW_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 293.0, 1080.0),
     GeometryExpectation::new(LayoutRect::TopBar, 293.0, 0.0, 876.0, 46.0),
     GeometryExpectation::new(LayoutRect::PrimarySurface, 293.0, 0.0, 876.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 363.0, 70.0, 736.0, 830.0),
-    GeometryExpectation::new(LayoutRect::Composer, 363.0, 928.0, 736.0, 138.0),
+    // This scene's transcript already has messages and no live goal-progress
+    // pill, so the composer context bar collapses: transcript reclaims its
+    // 38px and the composer moves down by the same amount.
+    GeometryExpectation::new(LayoutRect::Transcript, 347.0, 70.0, 768.0, 868.0),
+    GeometryExpectation::new(LayoutRect::Composer, 347.0, 966.0, 768.0, 100.0),
     GeometryExpectation::new(LayoutRect::Divider, 1169.0, 0.0, 1.0, 1080.0),
     GeometryExpectation::new(LayoutRect::ReviewPanel, 1170.0, 0.0, 630.0, 1080.0),
 ];
@@ -60,8 +63,8 @@ const ARTIFACTS_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 293.0, 1080.0),
     GeometryExpectation::new(LayoutRect::TopBar, 293.0, 0.0, 1507.0, 46.0),
     GeometryExpectation::new(LayoutRect::PrimarySurface, 293.0, 0.0, 1507.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 678.5, 70.0, 736.0, 778.0),
-    GeometryExpectation::new(LayoutRect::Composer, 678.5, 876.0, 736.0, 190.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 663.0, 70.0, 768.0, 778.0),
+    GeometryExpectation::new(LayoutRect::Composer, 663.0, 876.0, 768.0, 190.0),
     GeometryExpectation::new(LayoutRect::ContextPanel, 1484.0, 62.0, 300.0, 1002.0),
 ];
 
@@ -70,8 +73,8 @@ const ENVIRONMENT_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 293.0, 1080.0),
     GeometryExpectation::new(LayoutRect::TopBar, 293.0, 0.0, 1507.0, 46.0),
     GeometryExpectation::new(LayoutRect::PrimarySurface, 293.0, 0.0, 1507.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 678.5, 70.0, 736.0, 830.0),
-    GeometryExpectation::new(LayoutRect::Composer, 678.5, 928.0, 736.0, 138.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 663.0, 70.0, 768.0, 830.0),
+    GeometryExpectation::new(LayoutRect::Composer, 663.0, 928.0, 768.0, 138.0),
     GeometryExpectation::new(LayoutRect::ContextPanel, 1484.0, 62.0, 300.0, 1002.0),
 ];
 
@@ -80,8 +83,18 @@ const QUEUE_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 293.0, 1080.0),
     GeometryExpectation::new(LayoutRect::TopBar, 293.0, 0.0, 1507.0, 46.0),
     GeometryExpectation::new(LayoutRect::PrimarySurface, 293.0, 0.0, 1507.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 520.5, 70.0, 736.0, 704.0),
-    GeometryExpectation::new(LayoutRect::Composer, 520.5, 802.0, 736.0, 264.0),
+    // Busy but with no live goal-progress item, so the context bar collapses
+    // like any other started conversation: transcript reclaims its 38px.
+    //
+    // NOTE(codex-tokens): this scene docks the pinned summary (no
+    // `pinned_summary_overlay_open`), so its content column recenters into
+    // the narrower remaining space instead of matching the no-panel
+    // baseline. 504.5 is extrapolated from the pre-existing 520.5 baseline
+    // shifted by the same -16.0 the CONTENT_W 736->768 bump produces
+    // elsewhere; re-verify against the real failure diff once
+    // zode-app-model's `subagents` field lands and this test can run again.
+    GeometryExpectation::new(LayoutRect::Transcript, 504.5, 70.0, 768.0, 742.0),
+    GeometryExpectation::new(LayoutRect::Composer, 504.5, 840.0, 768.0, 226.0),
     GeometryExpectation::new(LayoutRect::ContextPanel, 1484.0, 62.0, 300.0, 1002.0),
 ];
 
@@ -183,7 +196,7 @@ fn assert_scene_landmarks(scene: &ReferenceScene) {
             assert_eq!(suggestion_cards.len(), 4);
             assert!(suggestion_cards
                 .iter()
-                .all(|width| (*width - 172.0).abs() <= 4.0));
+                .all(|width| (*width - 178.5).abs() <= 4.0));
             assert!((10.0..=12.0).contains(&gap));
         }
         "integrations-catalog" => {

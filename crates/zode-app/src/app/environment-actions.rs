@@ -3,12 +3,21 @@ use zode_app_model::{environment_actions, AppCommand, EnvironmentActionKind, Zod
 use super::{presentation::PresentationRefresh, DesktopApp};
 use crate::services::RepositoryService;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Seeded into the composer by the pull-request "修复" action (see
+/// `docs/proposals/right-panel-parity.md` section 1.1) - a preset prompt the user
+/// can edit before sending, handing the merge-conflict fix to the agent
+/// rather than mutating the repository directly.
+const FIX_MERGE_CONFLICTS_PROMPT: &str = "当前拉取请求无法合并，请合并或变基最新目标分支后重试。";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum EnvironmentActionOutcome {
     Ignored,
     Consumed,
     Refresh,
     OpenReview,
+    /// Seeds the given text into the composer draft for the user to review
+    /// and send (`EnvironmentActionKind::FixMergeConflicts`).
+    SeedComposerPrompt(String),
 }
 
 pub(super) fn consume_environment_action_command(
@@ -41,7 +50,12 @@ pub(super) fn consume_environment_action_command(
             }
             EnvironmentActionOutcome::Consumed
         }
-        EnvironmentActionKind::CommitOrPush => EnvironmentActionOutcome::Consumed,
+        EnvironmentActionKind::CommitOrPush | EnvironmentActionKind::CreatePullRequest => {
+            EnvironmentActionOutcome::Consumed
+        }
+        EnvironmentActionKind::FixMergeConflicts => {
+            EnvironmentActionOutcome::SeedComposerPrompt(FIX_MERGE_CONFLICTS_PROMPT.into())
+        }
     }
 }
 
@@ -66,6 +80,10 @@ impl DesktopApp {
             }
             EnvironmentActionOutcome::OpenReview => {
                 self.apply_presentation_command(AppCommand::OpenReview);
+                true
+            }
+            EnvironmentActionOutcome::SeedComposerPrompt(prompt) => {
+                self.seed_composer_prompt(prompt);
                 true
             }
         }
@@ -124,7 +142,6 @@ mod tests {
                 context: LoadState::Ready(EnvironmentSnapshot {
                     workspace_uri: workspace.clone(),
                     branch: Some("codex/environment-actions".into()),
-                    subagents: Vec::new(),
                     background_processes: Vec::new(),
                     sources: Vec::new(),
                 }),

@@ -214,11 +214,27 @@ fn repository_asset(filename: &str) -> Vec<u8> {
 fn estimated_text_width(text: &str, font_size: f32) -> f32 {
     text.chars()
         .map(|character| {
-            if character.is_ascii() {
-                font_size * 0.55
-            } else {
-                font_size
-            }
+            let advance = match character {
+                ' ' | '\t' => 0.22,
+                'i' | 'j' | 'l' | 'I' | '!' | '|' | '.' | ',' | ';' | '\'' | '`' => 0.22,
+                ':' => 0.225,
+                'f' | 'r' | 't' | '(' | ')' | '[' | ']' | '{' | '}' => 0.32,
+                '-' | '+' | '=' | '/' | '\\' => 0.44,
+                'm' => 0.82,
+                'w' => 0.73,
+                'M' => 0.84,
+                'W' => 0.94,
+                '0'..='9' => 0.62,
+                'A'..='Z' => 0.65,
+                'a' | 'e' | 'h' | 'n' | 'u' => 0.525,
+                'c' | 'k' | 's' | 'v' | 'x' | 'y' | 'z' => 0.50,
+                'b' | 'd' | 'g' | 'o' | 'p' | 'q' => 0.56,
+                '?' => 0.50,
+                '？' | '，' | '。' | '：' | '；' | '！' => 1.0,
+                character if character.is_ascii() => 0.55,
+                _ => 1.0,
+            };
+            font_size * advance
         })
         .sum()
 }
@@ -422,9 +438,9 @@ fn empty_conversation_paints_four_distinct_suggestion_cards() {
     assert_eq!(cards.len(), 4);
     for (index, (card, _)) in cards.iter().enumerate() {
         let expected = Rect::xywh(
-            geometry.transcript.min_x() + 12.0 + index as f32 * 180.5,
+            geometry.transcript.min_x() + 12.0 + index as f32 * 188.5,
             563.0,
-            170.5,
+            178.5,
             106.0,
         );
         assert_rect_close(*card, expected, 2.0, &format!("suggestion card {index}"));
@@ -481,6 +497,47 @@ fn empty_conversation_uses_the_theme_specific_repository_brand_mark() {
 }
 
 #[test]
+fn current_short_wide_shell_preserves_the_brand_and_single_card_row() {
+    let viewport = Rect::xywh(0.0, 0.0, 1455.0, 804.0);
+    let geometry = WorkspaceLayout::compute(1455.0, 804.0, Insets::ZERO);
+    let mut painter = CapturePainter::default();
+
+    WorkspaceShell::paint(
+        &mut painter,
+        viewport,
+        Insets::ZERO,
+        &demo_state(),
+        &ZodeTheme::light(),
+    );
+
+    let images = painter
+        .images()
+        .filter(|(rect, _, _, _)| contained_by(*rect, geometry.transcript))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        images.len(),
+        1,
+        "wide short window keeps the Zode brand mark"
+    );
+    assert_eq!(images[0].0.size, Point2D::new(48.0, 48.0));
+
+    let cards = painter
+        .rounded_rects()
+        .filter(|(rect, radius)| {
+            contained_by(*rect, geometry.transcript)
+                && (150.0..=190.0).contains(&rect.width())
+                && (90.0..=120.0).contains(&rect.height())
+                && (10.0..=16.0).contains(radius)
+        })
+        .map(|(rect, _)| rect)
+        .collect::<Vec<_>>();
+    assert_eq!(cards.len(), 4);
+    assert!(cards
+        .iter()
+        .all(|card| (card.min_y() - cards[0].min_y()).abs() <= 0.1));
+}
+
+#[test]
 fn empty_conversation_only_uses_svg_paths_for_the_four_suggestions() {
     let (painter, geometry) = paint_empty_wide();
     let suggestion_glyphs = painter
@@ -498,7 +555,11 @@ fn empty_conversation_only_uses_svg_paths_for_the_four_suggestions() {
 }
 
 #[test]
-fn wide_suggestion_copy_wraps_without_shrinking_below_the_reference_size() {
+fn wide_suggestion_copy_stays_single_line_without_shrinking_at_the_reference_width() {
+    // The Codex-reference content column (768px, up from 736px) gives each
+    // card ~8px more width, which is enough for every suggestion label to
+    // fit on one line at the reference font size — previously the two
+    // longer labels wrapped to two lines at the narrower 736px column.
     let (painter, geometry) = paint_empty_wide();
     let cards = painter
         .rounded_rects()
@@ -513,8 +574,8 @@ fn wide_suggestion_copy_wraps_without_shrinking_below_the_reference_size() {
 
     for (index, (expected, expected_y)) in [
         ("探索并理解代码", &[641.0][..]),
-        ("构建新功能、应用或工具", &[619.0, 637.0][..]),
-        ("审查代码并提出修改建议", &[619.0, 637.0][..]),
+        ("构建新功能、应用或工具", &[641.0][..]),
+        ("审查代码并提出修改建议", &[641.0][..]),
         ("修复问题和失败", &[641.0][..]),
     ]
     .into_iter()

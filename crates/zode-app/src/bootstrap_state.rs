@@ -4,7 +4,7 @@ use zode_app_model::{
     apply_session_runtime_options, integration_catalog, LoadState, ProjectState, TranscriptItem,
     TranscriptState, ZodeAppState,
 };
-use zode_app_runtime::workspace_uri_to_path;
+use zode_app_runtime::{workspace_uri_to_path, AppStateFile};
 use zode_node_protocol::{
     AgentEndpoint, AgentQuery, AgentSnapshot, CapabilityManifest, HistoryItem, SessionLocator,
     ThreadHistory, ThreadSummary, WorkspaceUri,
@@ -15,6 +15,7 @@ pub(super) async fn load_initial_state(
     capabilities: CapabilityManifest,
     startup_workspace: WorkspaceUri,
     projectless_workspace_root: WorkspaceUri,
+    persisted: Option<&AppStateFile>,
 ) -> Result<ZodeAppState, Box<dyn std::error::Error>> {
     let threads = match endpoint.query(AgentQuery::Threads).await? {
         AgentSnapshot::Threads(threads) => threads,
@@ -48,6 +49,12 @@ pub(super) async fn load_initial_state(
     .into();
     state.composer_defaults = Some(runtime_options);
     state.threads = threads;
+    if let Some(persisted) = persisted {
+        state.hydrate_thread_affiliations(
+            &persisted.thread_workspace_root_hints,
+            &persisted.projectless_session_ids,
+        );
+    }
     restore_projectless_workspaces(&state);
     state.transcripts = load_transcripts(endpoint, &state.threads).await;
     state.projects = projects_from_threads(&state, &startup_workspace);
@@ -67,11 +74,7 @@ pub(super) async fn load_initial_state(
     state.current_session = newest_available_session(&state);
     state.active_workspace = match state.current_session.as_ref() {
         Some(session) => state
-            .threads
-            .iter()
-            .find(|thread| &thread.session == session)
-            .map(|thread| &thread.workspace_uri)
-            .filter(|workspace_uri| !state.is_projectless_workspace(workspace_uri))
+            .project_workspace_for_session(session)
             .filter(|workspace_uri| state.available_workspace(workspace_uri))
             .cloned(),
         None => state
@@ -129,7 +132,7 @@ fn restore_projectless_workspaces(state: &ZodeAppState) {
         return;
     };
     for thread in &state.threads {
-        if !state.is_projectless_workspace(&thread.workspace_uri) {
+        if !state.is_projectless_thread(thread) {
             continue;
         }
         let Ok(workspace) = workspace_uri_to_path(&thread.workspace_uri) else {
@@ -242,10 +245,10 @@ fn newest_available_session(state: &ZodeAppState) -> Option<SessionLocator> {
         .threads
         .iter()
         .filter(|thread| {
-            state.is_projectless_workspace(&thread.workspace_uri)
-                || state.projects.iter().any(|project| {
-                    project.available && project.workspace_uri == thread.workspace_uri
-                })
+            state.is_projectless_thread(thread)
+                || state
+                    .project_workspace_for_thread(thread)
+                    .is_some_and(|workspace| state.available_workspace(workspace))
         })
         .max_by_key(|thread| thread.updated_at_ms)
         .map(|thread| thread.session.clone())
@@ -293,8 +296,11 @@ fn transcript_from_history(history: ThreadHistory) -> TranscriptState {
         .items
         .into_iter()
         .map(|item| match item {
-            HistoryItem::UserText { text } => TranscriptItem::UserText(text),
-            HistoryItem::AssistantText { text } => TranscriptItem::AssistantText(text),
+            // History does not persist a per-message send time or a stored
+            // reaction, so restored items start at the same "unknown" state
+            // a fresh message would use before either is set.
+            HistoryItem::UserText { text } => TranscriptItem::user_text(text),
+            HistoryItem::AssistantText { text } => TranscriptItem::assistant_text(text),
             HistoryItem::Thinking { text } => TranscriptItem::Thinking(text),
             HistoryItem::Tool { tool } => TranscriptItem::Tool(tool),
             HistoryItem::Status { code, message } => TranscriptItem::Status { code, message },
@@ -317,11 +323,11 @@ fn projects_from_threads(
 ) -> Vec<ProjectState> {
     let mut projects = BTreeMap::<WorkspaceUri, i64>::new();
     for thread in &state.threads {
-        if state.is_projectless_workspace(&thread.workspace_uri) {
+        let Some(project_workspace) = state.project_workspace_for_thread(thread) else {
             continue;
-        }
+        };
         projects
-            .entry(thread.workspace_uri.clone())
+            .entry(project_workspace.clone())
             .and_modify(|updated| *updated = (*updated).max(thread.updated_at_ms))
             .or_insert(thread.updated_at_ms);
     }
@@ -398,7 +404,10 @@ mod tests {
                         directory_error: Some("directory unavailable".into()),
                     },
                 )),
-                AgentQuery::Capabilities | AgentQuery::Diff { .. } => unreachable!(),
+                AgentQuery::Capabilities
+                | AgentQuery::Diff { .. }
+                | AgentQuery::InstalledPlugins
+                | AgentQuery::PluginTrustReview { .. } => unreachable!(),
             }
         }
 
@@ -449,10 +458,13 @@ mod tests {
             ],
         });
 
-        assert!(matches!(&transcript.items[0], TranscriptItem::UserText(text) if text == "user"));
         assert!(
-            matches!(&transcript.items[1], TranscriptItem::AssistantText(text) if text == "assistant")
+            matches!(&transcript.items[0], TranscriptItem::UserText { text, .. } if text == "user")
         );
+        assert!(matches!(
+            &transcript.items[1],
+            TranscriptItem::AssistantText { text, .. } if text == "assistant"
+        ));
         assert!(
             matches!(&transcript.items[2], TranscriptItem::Thinking(text) if text == "thinking")
         );
@@ -634,6 +646,7 @@ mod tests {
             },
             workspace.clone(),
             WorkspaceUri::new("file:///tmp/zode-bootstrap-task-workspaces").unwrap(),
+            None,
         )
         .await
         .unwrap();
@@ -692,6 +705,7 @@ mod tests {
             },
             startup.clone(),
             projectless_root.clone(),
+            None,
         )
         .await
         .unwrap();
@@ -769,6 +783,7 @@ mod tests {
             },
             workspace,
             WorkspaceUri::new("file:///tmp/zode-bootstrap-task-workspaces").unwrap(),
+            None,
         )
         .await
         .unwrap();

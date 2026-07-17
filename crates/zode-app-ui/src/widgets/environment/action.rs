@@ -111,6 +111,8 @@ fn icon_for(kind: zode_app_model::EnvironmentActionKind) -> SemanticIcon {
         zode_app_model::EnvironmentActionKind::CompareWorkspaceToHead => SemanticIcon::Compare,
         zode_app_model::EnvironmentActionKind::OpenWorkspace => SemanticIcon::Host,
         zode_app_model::EnvironmentActionKind::CommitOrPush => SemanticIcon::Git,
+        zode_app_model::EnvironmentActionKind::CreatePullRequest => SemanticIcon::PullRequest,
+        zode_app_model::EnvironmentActionKind::FixMergeConflicts => SemanticIcon::FixIssue,
     }
 }
 
@@ -121,6 +123,8 @@ fn trailing_icon(kind: zode_app_model::EnvironmentActionKind) -> Option<Semantic
             Some(SemanticIcon::ExternalOpen)
         }
         zode_app_model::EnvironmentActionKind::RefreshStatus
-        | zode_app_model::EnvironmentActionKind::CommitOrPush => None,
+        | zode_app_model::EnvironmentActionKind::CommitOrPush
+        | zode_app_model::EnvironmentActionKind::CreatePullRequest
+        | zode_app_model::EnvironmentActionKind::FixMergeConflicts => None,
     }
 }

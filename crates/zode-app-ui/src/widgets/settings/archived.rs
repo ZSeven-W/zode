@@ -6,7 +6,13 @@ use zode_app_model::{AppCommand, SettingsCategory, ShellRoute, ZodeAppState};
 use zode_node_protocol::{SessionLocator, ThreadSummary, WorkspaceUri};
 
 use super::row::{clip_to_viewport, paint_card, paint_divider, paint_heading, SECTION_TOP};
-use crate::{paint_single_line, stable_widget_id, RectExt, SemanticIcon, WidgetId, ZodeTheme};
+use crate::{
+    paint_single_line, stable_widget_id, Card, RectExt, SemanticIcon, WidgetId, ZodeTheme,
+};
+
+/// Radius the workspace filter chrome was already painted at, kept explicit
+/// so the `components::Card` migration does not silently resize its corners.
+const FILTER_RADIUS: f32 = 9.0;
 
 const GROUP_HEADING_HEIGHT: f32 = 24.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
@@ -231,8 +237,7 @@ pub(super) fn paint(
         icon_d: Some(SemanticIcon::Search.path()),
     }
     .paint(painter, layout.search_rect, &theme.tokens);
-    painter.fill_round_rect(layout.filter_rect, 9.0, theme.tokens.card);
-    painter.stroke_round_rect(layout.filter_rect, 9.0, theme.tokens.border, 1.0);
+    Card::paint(painter, layout.filter_rect, FILTER_RADIUS, false, theme);
     painter.stroke_svg_path(
         SemanticIcon::Folder.path(),
         jian_widgets::Point2D::new(

@@ -1,18 +1,35 @@
+mod add_form;
 mod catalog;
 mod installed;
+mod plugin_detail;
+mod plugin_rows;
 mod row;
 
 use jian_core::text_input::TextInputState;
 use jian_widgets::{components::input::Input, HorizontalAlign, Painter, Rect};
 use zode_app_model::{
     AppCommand, Availability, IntegrationEntry, IntegrationInstallState, IntegrationScope,
-    IntegrationsTab, LoadState, ShellRoute, ZodeAppState,
+    IntegrationsTab, LoadState, PluginDetailMode, ShellRoute, ZodeAppState,
 };
 
-use crate::{paint_single_line, SemanticIcon, WidgetId, ZodeTheme};
+use crate::{
+    layout::CONTENT_W, paint_single_line, Button, ButtonVariant, SemanticIcon, WidgetId, ZodeTheme,
+};
 
+pub use add_form::{
+    PluginAddFormLayout, PLUGIN_ADD_CANCEL_ID, PLUGIN_ADD_REFERENCE_INPUT_ID,
+    PLUGIN_ADD_SPEC_INPUT_ID, PLUGIN_ADD_SUBMIT_ID,
+};
 pub use catalog::CatalogSectionLayout;
 pub use installed::InstalledIconLayout;
+pub use plugin_detail::{
+    CapabilityRowLayout, PluginDetailBody, PluginDetailOverlayLayout, TrustItemRowLayout,
+    PLUGIN_DETAIL_CHECK_UPDATE_ID, PLUGIN_DETAIL_CLOSE_ID, PLUGIN_DETAIL_TRUST_ALL_ID,
+    PLUGIN_DETAIL_TRUST_CANCEL_ID, PLUGIN_DETAIL_TRUST_GRANT_SELECTED_ID,
+    PLUGIN_DETAIL_UNINSTALL_CANCEL_ID, PLUGIN_DETAIL_UNINSTALL_CONFIRM_ID,
+    PLUGIN_DETAIL_UNINSTALL_ID,
+};
+pub use plugin_rows::PluginRowLayout;
 pub use row::IntegrationRowLayout;
 
 pub const INTEGRATIONS_PLUGINS_TAB_ID: WidgetId = WidgetId(70);
@@ -20,8 +37,8 @@ pub const INTEGRATIONS_SKILLS_TAB_ID: WidgetId = WidgetId(71);
 pub const INTEGRATIONS_SEARCH_ID: WidgetId = WidgetId(190);
 pub const INTEGRATIONS_PUBLIC_SCOPE_ID: WidgetId = WidgetId(191);
 pub const INTEGRATIONS_PERSONAL_SCOPE_ID: WidgetId = WidgetId(192);
+pub const INTEGRATIONS_ADD_PLUGIN_ID: WidgetId = WidgetId(300);
 
-const CONTENT_WIDTH: f32 = 736.0;
 const CONTENT_TOP: f32 = 46.0;
 const TAB_TOP: f32 = 6.0;
 const TAB_WIDTH: f32 = 48.0;
@@ -52,10 +69,16 @@ pub struct IntegrationsPageLayout {
     pub title: Rect,
     pub subtitle: Rect,
     pub search: Rect,
+    /// Only non-empty on the Plugins tab - the git-install entry point.
+    pub add_plugin_button: Rect,
     pub scopes: [IntegrationScopeLayout; 2],
     pub installed_title: Rect,
     pub installed_strip: Rect,
     pub directory_status: Rect,
+    /// Reserved strip for [`plugin_rows`] above the catalog. Zero height
+    /// (and thus no layout shift at all) unless the Plugins tab has at
+    /// least one installed plugin bundle.
+    pub plugins_section: Rect,
     pub catalog: Rect,
     pub tabs: [IntegrationTabLayout; 2],
 }
@@ -94,11 +117,21 @@ impl IntegrationsPage {
             LoadState::Loading => paint_load_state(painter, &layout, "正在读取本机集成…", theme),
             LoadState::Failed(message) => paint_load_state(painter, &layout, message, theme),
         }
+        paint_plugin_rows(painter, &layout, state, theme);
         painter.restore();
+
+        if state.presentation.plugin_add.open {
+            if let Some(form) = Self::plugin_add_form_layout(rect, state) {
+                add_form::paint(painter, rect, &form, state, focused, theme);
+            }
+        }
+        if let Some(detail) = Self::plugin_detail_layout(rect, state) {
+            plugin_detail::paint(painter, rect, &detail, theme);
+        }
     }
 
     pub fn layout(rect: Rect, state: &ZodeAppState) -> IntegrationsPageLayout {
-        let content_width = rect.size.x.clamp(0.0, CONTENT_WIDTH);
+        let content_width = rect.size.x.clamp(0.0, CONTENT_W);
         let content = Rect::xywh(
             rect.origin.x + (rect.size.x - content_width).max(0.0) / 2.0,
             rect.origin.y + CONTENT_TOP,
@@ -149,6 +182,58 @@ impl IntegrationsPage {
             },
         ];
 
+        let show_add_button = selected == IntegrationsTab::Plugins;
+        const ADD_BUTTON_W: f32 = 96.0;
+        let search = if show_add_button {
+            Rect::xywh(
+                content.origin.x,
+                content.origin.y + 100.0,
+                (content.size.x - ADD_BUTTON_W - 8.0).max(0.0),
+                34.0,
+            )
+        } else {
+            Rect::xywh(
+                content.origin.x,
+                content.origin.y + 100.0,
+                content.size.x,
+                34.0,
+            )
+        };
+        let add_plugin_button = if show_add_button {
+            Rect::xywh(
+                content.origin.x + content.size.x - ADD_BUTTON_W,
+                content.origin.y + 100.0,
+                ADD_BUTTON_W,
+                34.0,
+            )
+        } else {
+            Rect::xywh(content.origin.x, content.origin.y + 100.0, 0.0, 0.0)
+        };
+
+        let plugin_count = if show_add_button {
+            state
+                .presentation
+                .installed_plugins
+                .ready()
+                .map(Vec::len)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let directory_status_bottom = content.origin.y + 278.0 + 22.0;
+        let plugins_section_h = if plugin_count > 0 {
+            22.0 + 8.0 + plugin_rows::strip_height(plugin_count) + 12.0
+        } else {
+            0.0
+        };
+        let plugins_section = Rect::xywh(
+            content.origin.x,
+            directory_status_bottom + 8.0,
+            content.size.x,
+            (plugins_section_h - 8.0).max(0.0),
+        );
+        let catalog_top = directory_status_bottom + 8.0 + plugins_section_h;
+
         IntegrationsPageLayout {
             title: Rect::xywh(
                 content.origin.x,
@@ -162,12 +247,8 @@ impl IntegrationsPage {
                 content.size.x,
                 24.0,
             ),
-            search: Rect::xywh(
-                content.origin.x,
-                content.origin.y + 100.0,
-                content.size.x,
-                34.0,
-            ),
+            search,
+            add_plugin_button,
             installed_title: Rect::xywh(
                 content.origin.x,
                 content.origin.y + 190.0,
@@ -186,11 +267,12 @@ impl IntegrationsPage {
                 content.size.x,
                 22.0,
             ),
+            plugins_section,
             catalog: Rect::xywh(
                 content.origin.x,
-                content.origin.y + 314.0,
+                catalog_top,
                 content.size.x,
-                (content.size.y - 314.0).max(0.0),
+                (content.size.y - (catalog_top - content.origin.y)).max(0.0),
             ),
             content,
             scopes,
@@ -245,7 +327,53 @@ impl IntegrationsPage {
         row::action_widget_id(source_id)
     }
 
+    /// Rows for the compact "已安装插件" strip - empty unless the Plugins
+    /// tab has at least one git-installed plugin bundle.
+    pub fn plugin_row_layout(rect: Rect, state: &ZodeAppState) -> Vec<PluginRowLayout> {
+        if !matches!(
+            state.presentation.route,
+            ShellRoute::Integrations(IntegrationsTab::Plugins)
+        ) {
+            return Vec::new();
+        }
+        let Some(plugins) = state.presentation.installed_plugins.ready() else {
+            return Vec::new();
+        };
+        if plugins.is_empty() {
+            return Vec::new();
+        }
+        let layout = Self::layout(rect, state);
+        plugin_rows::layout(
+            layout.plugins_section.origin.x,
+            layout.plugins_section.origin.y + 22.0 + 8.0,
+            layout.plugins_section.size.x,
+            plugins,
+        )
+    }
+
+    /// `Some` only while `presentation.plugin_add.open` is true.
+    pub fn plugin_add_form_layout(rect: Rect, state: &ZodeAppState) -> Option<PluginAddFormLayout> {
+        if !state.presentation.plugin_add.open {
+            return None;
+        }
+        let content = Self::layout(rect, state).content;
+        Some(PluginAddFormLayout::new(content, state))
+    }
+
+    /// `Some` only while `presentation.plugin_detail` names a plugin that is
+    /// still present in the loaded installed-plugins catalog.
+    pub fn plugin_detail_layout(
+        rect: Rect,
+        state: &ZodeAppState,
+    ) -> Option<PluginDetailOverlayLayout> {
+        let content = Self::layout(rect, state).content;
+        PluginDetailOverlayLayout::new(content, state)
+    }
+
     pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+        if let Some(command) = plugin_market_command_for_widget(state, id) {
+            return Some(command);
+        }
         match id {
             INTEGRATIONS_PLUGINS_TAB_ID => {
                 return Some(AppCommand::SelectIntegrationsTab(IntegrationsTab::Plugins));
@@ -259,7 +387,9 @@ impl IntegrationsPage {
             INTEGRATIONS_PERSONAL_SCOPE_ID => {
                 return Some(AppCommand::SetIntegrationScope(IntegrationScope::Personal));
             }
-            INTEGRATIONS_SEARCH_ID => return None,
+            INTEGRATIONS_SEARCH_ID | PLUGIN_ADD_SPEC_INPUT_ID | PLUGIN_ADD_REFERENCE_INPUT_ID => {
+                return None
+            }
             _ => {}
         }
         let LoadState::Ready(catalog) = &state.presentation.integrations else {
@@ -284,6 +414,145 @@ impl IntegrationsPage {
             enabled: entry.availability == Availability::Disabled,
         })
     }
+}
+
+/// Dispatches every plugin-market-specific widget id: the add-plugin form,
+/// the installed-plugin strip's rows, and the detail/trust-review overlay.
+/// Kept as one function (rather than folded into `command_for_widget`'s own
+/// body) so its many small `if id == ...` checks don't have to interleave
+/// with the pre-existing catalog-row dispatch above.
+fn plugin_market_command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+    if id == INTEGRATIONS_ADD_PLUGIN_ID {
+        return Some(AppCommand::SetPluginAddOpen(true));
+    }
+    if state.presentation.plugin_add.open {
+        if id == PLUGIN_ADD_CANCEL_ID {
+            return Some(AppCommand::SetPluginAddOpen(false));
+        }
+        if id == PLUGIN_ADD_SUBMIT_ID {
+            let can_submit = !state.presentation.plugin_add.spec.trim().is_empty()
+                && state.presentation.plugin_add.status
+                    != zode_app_model::PluginAddStatus::Installing;
+            return can_submit.then_some(AppCommand::InstallPlugin);
+        }
+    }
+    if matches!(
+        state.presentation.route,
+        ShellRoute::Integrations(IntegrationsTab::Plugins)
+    ) {
+        if let Some(plugins) = state.presentation.installed_plugins.ready() {
+            if let Some(plugin) = plugins
+                .iter()
+                .find(|plugin| plugin_rows::plugin_row_widget_id(&plugin.id) == id)
+            {
+                return Some(AppCommand::OpenPluginDetail(plugin.id.clone()));
+            }
+        }
+    }
+    let detail = state.presentation.plugin_detail.as_ref()?;
+    let plugins = state.presentation.installed_plugins.ready()?;
+    let plugin = plugins
+        .iter()
+        .find(|plugin| plugin.id == detail.plugin_id)?;
+    if id == PLUGIN_DETAIL_CLOSE_ID {
+        return Some(AppCommand::ClosePluginDetail);
+    }
+    match &detail.mode {
+        PluginDetailMode::Overview => {
+            if id == PLUGIN_DETAIL_UNINSTALL_ID {
+                return Some(AppCommand::RequestUninstallPlugin);
+            }
+            if id == PLUGIN_DETAIL_CHECK_UPDATE_ID {
+                return Some(AppCommand::CheckPluginUpdate);
+            }
+            let pending_keys = match &plugin.trust {
+                zode_node_protocol::PluginTrustState::Trusted => &[][..],
+                zode_node_protocol::PluginTrustState::NeedsReview(keys)
+                | zode_node_protocol::PluginTrustState::Drifted(keys) => keys.as_slice(),
+            };
+            plugin.capabilities.iter().find_map(|capability| {
+                let source_id = capability.toggle_source_id.as_ref()?;
+                if plugin_detail::capability_toggle_widget_id(&detail.plugin_id, source_id) != id {
+                    return None;
+                }
+                if pending_keys.contains(&capability.key) {
+                    return Some(AppCommand::RequestPluginTrustReview);
+                }
+                let catalog = state.presentation.integrations.ready()?;
+                let entry = catalog
+                    .all_entries()
+                    .find(|entry| entry.source_id.as_deref() == Some(source_id.as_str()))?;
+                Some(AppCommand::SetIntegrationEnabled {
+                    workspace_uri: catalog.workspace_uri.clone(),
+                    source_id: source_id.clone(),
+                    enabled: entry.availability == Availability::Disabled,
+                })
+            })
+        }
+        PluginDetailMode::ConfirmUninstall => {
+            if id == PLUGIN_DETAIL_UNINSTALL_CONFIRM_ID {
+                return Some(AppCommand::ConfirmUninstallPlugin);
+            }
+            if id == PLUGIN_DETAIL_UNINSTALL_CANCEL_ID {
+                return Some(AppCommand::CancelUninstallPlugin);
+            }
+            None
+        }
+        PluginDetailMode::Uninstalling => None,
+        PluginDetailMode::TrustReview { review, selected } => {
+            if id == PLUGIN_DETAIL_TRUST_CANCEL_ID {
+                return Some(AppCommand::CancelPluginTrustReview);
+            }
+            if id == PLUGIN_DETAIL_TRUST_ALL_ID {
+                return Some(AppCommand::GrantPluginTrust { keys: None });
+            }
+            if id == PLUGIN_DETAIL_TRUST_GRANT_SELECTED_ID && !selected.is_empty() {
+                return Some(AppCommand::GrantPluginTrust {
+                    keys: Some(selected.iter().cloned().collect()),
+                });
+            }
+            let items = review.ready()?;
+            items.items.iter().find_map(|item| {
+                (plugin_detail::trust_item_checkbox_widget_id(&detail.plugin_id, &item.key) == id)
+                    .then(|| AppCommand::ToggleTrustItemSelected(item.key.clone()))
+            })
+        }
+    }
+}
+
+fn paint_plugin_rows(
+    painter: &mut dyn Painter,
+    layout: &IntegrationsPageLayout,
+    state: &ZodeAppState,
+    theme: &ZodeTheme,
+) {
+    if layout.plugins_section.size.y <= 0.0 {
+        return;
+    }
+    let Some(plugins) = state.presentation.installed_plugins.ready() else {
+        return;
+    };
+    paint_single_line(
+        painter,
+        "已安装插件",
+        Rect::xywh(
+            layout.plugins_section.origin.x,
+            layout.plugins_section.origin.y,
+            layout.plugins_section.size.x,
+            20.0,
+        ),
+        13.0,
+        600,
+        theme.tokens.muted_foreground,
+        HorizontalAlign::Start,
+    );
+    let rows = plugin_rows::layout(
+        layout.plugins_section.origin.x,
+        layout.plugins_section.origin.y + 22.0 + 8.0,
+        layout.plugins_section.size.x,
+        plugins,
+    );
+    plugin_rows::paint(painter, &rows, plugins.len(), theme);
 }
 
 pub(super) fn entry_visible(state: &ZodeAppState, entry: &IntegrationEntry) -> bool {
@@ -384,6 +653,18 @@ fn paint_header(
         icon_d: Some(SemanticIcon::Search.path()),
     }
     .paint(painter, layout.search, &theme.tokens);
+    if layout.add_plugin_button.size.x > 0.0 {
+        Button::paint(
+            painter,
+            layout.add_plugin_button,
+            8.0,
+            "添加插件",
+            None,
+            ButtonVariant::Secondary,
+            false,
+            &theme.tokens,
+        );
+    }
     for scope in layout.scopes {
         if scope.selected {
             painter.fill_round_rect(scope.rect, 9.0, theme.tokens.row_selected);

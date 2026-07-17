@@ -19,9 +19,12 @@ fn conversation_matches_the_wide_reference_contract() {
 
     assert_eq!(layout.sidebar.width(), PRIMARY_SIDEBAR_DEFAULT_W);
     assert_eq!(layout.top_bar.height(), 46.0);
-    assert_eq!(layout.transcript.width(), 736.0);
-    assert_eq!(layout.composer.width(), 736.0);
-    assert!((layout.transcript.min_x() - 678.5).abs() <= EPSILON);
+    assert_eq!(layout.transcript.width(), 768.0);
+    assert_eq!(layout.composer.width(), 768.0);
+    // The unrounded centering offset here is 369.5 (293 + 739 / 2); the main
+    // content pane snaps that to a whole logical pixel (663.0) so its paint
+    // origin keeps a stable device-pixel phase.
+    assert!((layout.transcript.min_x() - 663.0).abs() <= EPSILON);
 }
 
 #[test]
@@ -43,7 +46,7 @@ fn environment_panel_recenters_the_conversation_in_the_remaining_column() {
 
     let remaining_width = environment.context_panel.min_x() - environment.primary_surface.min_x();
     let expected_x = environment.primary_surface.min_x()
-        + (remaining_width - environment.transcript.width()) / 2.0;
+        + ((remaining_width - environment.transcript.width()) / 2.0).round();
     assert_eq!(
         environment.transcript.width(),
         conversation.transcript.width()
@@ -91,9 +94,9 @@ fn review_panel_creates_the_reference_split() {
     assert!((layout.divider.min_x() - (panel_x - 1.0)).abs() <= EPSILON);
     assert_eq!(layout.divider.width(), 1.0);
     let expected_content_x = layout.primary_surface.min_x()
-        + (layout.primary_surface.width() - layout.transcript.width()) / 2.0;
+        + ((layout.primary_surface.width() - layout.transcript.width()) / 2.0).round();
     assert!((layout.transcript.min_x() - expected_content_x).abs() <= EPSILON);
-    assert_eq!(layout.transcript.width(), 736.0);
+    assert_eq!(layout.transcript.width(), 768.0);
     assert_eq!(layout.primary_surface.max_x(), layout.divider.min_x());
 }
 
@@ -116,8 +119,8 @@ fn full_page_routes_use_their_reference_content_widths() {
 
     assert_eq!(settings.page_content.width(), 768.0);
     assert!((settings.page_content.min_x() - 636.0).abs() <= EPSILON);
-    assert_eq!(integrations.page_content.width(), 736.0);
-    assert!((integrations.page_content.min_x() - 678.5).abs() <= EPSILON);
+    assert_eq!(integrations.page_content.width(), 768.0);
+    assert!((integrations.page_content.min_x() - 662.5).abs() <= EPSILON);
 }
 
 #[test]
@@ -175,11 +178,11 @@ fn docked_summary_recenters_the_conversation_in_the_remaining_column() {
         Rect::xywh(1_484.0, 62.0, 300.0, 1_002.0)
     );
     let remaining_width = layout.context_panel.min_x() - layout.primary_surface.min_x();
-    let expected_x =
-        layout.primary_surface.min_x() + (remaining_width - layout.composer.width()) / 2.0;
+    let expected_x = layout.primary_surface.min_x()
+        + ((remaining_width - layout.composer.width()) / 2.0).round();
     assert_eq!(layout.composer.origin.x, expected_x);
     assert_eq!(layout.transcript.origin.x, expected_x);
-    assert_eq!(layout.composer.size.x, 736.0);
+    assert_eq!(layout.composer.size.x, 768.0);
 }
 
 #[test]

@@ -15,6 +15,7 @@ pub const SETTINGS_SEARCH_ID: WidgetId = WidgetId(86);
 const SETTINGS_PROFILE_ID: WidgetId = WidgetId(8_101);
 const SETTINGS_VOICE_ID: WidgetId = WidgetId(8_102);
 const SETTINGS_CONFIGURATION_ID: WidgetId = WidgetId(8_103);
+const SETTINGS_PROVIDER_MODELS_ID: WidgetId = WidgetId(8_117);
 const SETTINGS_PERSONALIZATION_ID: WidgetId = WidgetId(8_104);
 const SETTINGS_PETS_ID: WidgetId = WidgetId(8_105);
 const SETTINGS_USAGE_ID: WidgetId = WidgetId(8_106);
@@ -67,7 +68,7 @@ impl NavigationTarget {
     }
 }
 
-const NAVIGATION: [NavigationDescriptor; 20] = [
+const NAVIGATION: [NavigationDescriptor; 21] = [
     descriptor(
         SETTINGS_GENERAL_CATEGORY_ID,
         "个人",
@@ -102,6 +103,13 @@ const NAVIGATION: [NavigationDescriptor; 20] = [
         "配置",
         SemanticIcon::Configuration,
         Some(NavigationTarget::Settings(SettingsCategory::Configuration)),
+    ),
+    descriptor(
+        SETTINGS_PROVIDER_MODELS_ID,
+        "个人",
+        "模型",
+        SemanticIcon::Sparkles,
+        Some(NavigationTarget::Settings(SettingsCategory::ProviderModels)),
     ),
     descriptor(
         SETTINGS_PERSONALIZATION_ID,
@@ -477,6 +485,7 @@ pub(super) const fn category_widget_id(category: SettingsCategory) -> WidgetId {
         SettingsCategory::Appearance => SETTINGS_APPEARANCE_CATEGORY_ID,
         SettingsCategory::Voice => SETTINGS_VOICE_ID,
         SettingsCategory::Configuration => SETTINGS_CONFIGURATION_ID,
+        SettingsCategory::ProviderModels => SETTINGS_PROVIDER_MODELS_ID,
         SettingsCategory::Personalization => SETTINGS_PERSONALIZATION_ID,
         SettingsCategory::Pets => SETTINGS_PETS_ID,
         SettingsCategory::Permissions => SETTINGS_PERMISSIONS_CATEGORY_ID,

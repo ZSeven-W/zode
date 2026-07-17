@@ -89,7 +89,6 @@ fn state_with_ready_session() -> (zode_app_model::ZodeAppState, SessionLocator) 
             context: LoadState::Ready(EnvironmentSnapshot {
                 workspace_uri,
                 branch: Some("codex/typed-shell".into()),
-                subagents: Vec::new(),
                 background_processes: Vec::new(),
                 sources: Vec::new(),
             }),
@@ -99,6 +98,8 @@ fn state_with_ready_session() -> (zode_app_model::ZodeAppState, SessionLocator) 
             },
             preview: PreviewState::Idle,
             runtime_options: LoadState::Idle,
+            subagents: Vec::new(),
+            ..SessionPresentationState::default()
         },
     );
     (state, session)
@@ -255,7 +256,6 @@ fn new_task_composer_projects_the_latest_verified_active_workspace_branch() {
         .context = LoadState::Ready(EnvironmentSnapshot {
         workspace_uri: WorkspaceUri::new("file:///repo/other").unwrap(),
         branch: Some("other-secret-branch".into()),
-        subagents: Vec::new(),
         background_processes: Vec::new(),
         sources: Vec::new(),
     });

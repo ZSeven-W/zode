@@ -1,11 +1,16 @@
 use jian_widgets::{components::tooltip::Tooltip, HorizontalAlign, Painter, Rect};
-use zode_app_model::{AppCommand, QueuedMessage, QueuedMessageId, ZodeAppState};
+use zode_app_model::{AppCommand, QueueReorderOp, QueuedMessage, QueuedMessageId, ZodeAppState};
 use zode_node_protocol::SessionLocator;
 
 use crate::{
-    paint_single_line, stable_widget_id, RectExt, SemanticIcon, WidgetId, ZodeTheme,
-    COMPOSER_QUEUE_INSET_X, COMPOSER_QUEUE_OVERLAP, COMPOSER_QUEUE_PAD_Y, COMPOSER_QUEUE_ROW_H,
+    paint_elevated_surface, paint_single_line, stable_widget_id, Card, RectExt, SemanticIcon,
+    WidgetId, ZodeTheme, COMPOSER_QUEUE_INSET_X, COMPOSER_QUEUE_OVERLAP, COMPOSER_QUEUE_PAD_Y,
+    COMPOSER_QUEUE_ROW_H,
 };
+
+/// Radius the queue surface was already painted at, kept explicit so the
+/// `components::Card` migration does not silently resize its corners.
+const QUEUE_SURFACE_RADIUS: f32 = 16.0;
 
 const ACTION_ICON_SIZE: f32 = 14.0;
 const MORE_VISUAL_SIZE: f32 = 24.0;
@@ -17,7 +22,6 @@ const MIN_COMPACT_ACTION_W: f32 = 8.0;
 const MIN_MORE_HIT_W: f32 = 24.0;
 const MIN_ROW_W: f32 = MIN_COMPACT_ACTION_W * 2.0 + MIN_MORE_HIT_W;
 const MENU_W: f32 = 112.0;
-const MENU_H: f32 = 80.0;
 const MENU_PAD: f32 = 4.0;
 const MENU_ROW_H: f32 = 36.0;
 const MIN_MENU_W: f32 = 72.0;
@@ -27,6 +31,7 @@ const TOOLTIP_H: f32 = 30.0;
 const TOOLTIP_GAP: f32 = 5.0;
 const PREVIEW_MAX_CHARS: usize = 512;
 const PREVIEW_SCAN_MAX_CHARS: usize = PREVIEW_MAX_CHARS * 4;
+const PRIORITY_BADGE_W: f32 = 34.0;
 
 const LIST_NAMESPACE: u8 = 0x50;
 const ROW_NAMESPACE: u8 = 0x51;
@@ -36,6 +41,9 @@ const MORE_NAMESPACE: u8 = 0x54;
 const MENU_NAMESPACE: u8 = 0x55;
 const MENU_EDIT_NAMESPACE: u8 = 0x56;
 const MENU_CLOSE_NAMESPACE: u8 = 0x57;
+const MENU_FRONT_NAMESPACE: u8 = 0x58;
+const MENU_UP_NAMESPACE: u8 = 0x59;
+const MENU_DOWN_NAMESPACE: u8 = 0x5A;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposerQueueRowLayout {
@@ -55,10 +63,40 @@ pub struct ComposerQueueMenuLayout {
     pub id: WidgetId,
     pub message_id: QueuedMessageId,
     pub rect: Rect,
+    /// 置顶 (move to front). `None` when the message is already at the front,
+    /// since the row menu omits actions that would be boundary no-ops.
+    pub front_id: WidgetId,
+    pub front: Option<Rect>,
+    /// 上移 (move up). `None` at the front, for the same reason.
+    pub up_id: WidgetId,
+    pub up: Option<Rect>,
+    /// 下移 (move down). `None` when the message is already at the back.
+    pub down_id: WidgetId,
+    pub down: Option<Rect>,
     pub edit_id: WidgetId,
     pub edit: Rect,
     pub close_id: WidgetId,
     pub close: Rect,
+}
+
+impl ComposerQueueMenuLayout {
+    /// Visible menu items in on-screen top-to-bottom order, for keyboard
+    /// focus traversal. Boundary actions omitted from layout are omitted here.
+    pub fn focus_order(&self) -> Vec<WidgetId> {
+        let mut ids = Vec::with_capacity(5);
+        if self.front.is_some() {
+            ids.push(self.front_id);
+        }
+        if self.up.is_some() {
+            ids.push(self.up_id);
+        }
+        if self.down.is_some() {
+            ids.push(self.down_id);
+        }
+        ids.push(self.edit_id);
+        ids.push(self.close_id);
+        ids
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -115,11 +153,19 @@ pub(super) fn layout(
     if rows.is_empty() {
         return None;
     }
-    let menu = state
-        .composer
-        .queue_menu
-        .and_then(|id| rows.iter().find(|row| row.message_id == id))
-        .and_then(|row| menu_layout(session, row, menu_bounds));
+    let menu = state.composer.queue_menu.and_then(|id| {
+        let row = rows.iter().find(|row| row.message_id == id)?;
+        // Boundary state is defined by the full queue order, not by the
+        // window of rows currently rendered above the composer.
+        let index = messages.iter().position(|message| message.id == id)?;
+        menu_layout(
+            session,
+            row,
+            menu_bounds,
+            index == 0,
+            index + 1 == messages.len(),
+        )
+    });
     Some(ComposerQueueLayout {
         list_id: scoped_id(LIST_NAMESPACE, session, None),
         surface,
@@ -192,11 +238,25 @@ fn menu_layout(
     session: &SessionLocator,
     row: &ComposerQueueRowLayout,
     surface: Rect,
+    is_first: bool,
+    is_last: bool,
 ) -> Option<ComposerQueueMenuLayout> {
+    // 置顶/上移 are boundary no-ops at the front; 下移 is a boundary no-op at
+    // the back. The row menu has no disabled-item rendering, so those
+    // actions are omitted outright rather than shown inert.
+    let show_front = !is_first;
+    let show_up = !is_first;
+    let show_down = !is_last;
+    let action_count = 2 + [show_front, show_up, show_down]
+        .into_iter()
+        .filter(|shown| *shown)
+        .count();
+
     let width = MENU_W
         .min(surface.size.x.max(0.0))
         .min(row.rect.size.x.max(0.0));
-    let height = MENU_H.min(surface.size.y.max(0.0));
+    let desired_height = MENU_PAD * 2.0 + action_count as f32 * MENU_ROW_H;
+    let height = desired_height.min(surface.size.y.max(0.0));
     if width < MIN_MENU_W || height < MENU_PAD * 2.0 + MIN_MENU_ROW_H * 2.0 {
         return None;
     }
@@ -212,18 +272,38 @@ fn menu_layout(
     }
     .clamp(surface.origin.y, (bottom - height).max(surface.origin.y));
     let rect = Rect::xywh(x, y, width, height);
-    let action_height = MENU_ROW_H.min((rect.size.y - MENU_PAD * 2.0) / 2.0);
-    let edit = Rect::xywh(
-        rect.origin.x + MENU_PAD,
-        rect.origin.y + MENU_PAD,
-        (rect.size.x - MENU_PAD * 2.0).max(0.0),
-        action_height,
-    );
-    let close = Rect::xywh(edit.origin.x, edit.max_y(), edit.size.x, action_height);
+    let action_height = MENU_ROW_H.min((rect.size.y - MENU_PAD * 2.0) / action_count as f32);
+
+    let mut allocated = 0.0f32;
+    let mut alloc = |show: bool| -> Option<Rect> {
+        if !show {
+            return None;
+        }
+        let item = Rect::xywh(
+            rect.origin.x + MENU_PAD,
+            rect.origin.y + MENU_PAD + allocated,
+            (rect.size.x - MENU_PAD * 2.0).max(0.0),
+            action_height,
+        );
+        allocated += action_height;
+        Some(item)
+    };
+    let front = alloc(show_front);
+    let up = alloc(show_up);
+    let down = alloc(show_down);
+    let edit = alloc(true).expect("the edit action is always shown");
+    let close = alloc(true).expect("the close action is always shown");
+
     Some(ComposerQueueMenuLayout {
         id: scoped_id(MENU_NAMESPACE, session, Some(row.message_id)),
         message_id: row.message_id,
         rect,
+        front_id: scoped_id(MENU_FRONT_NAMESPACE, session, Some(row.message_id)),
+        front,
+        up_id: scoped_id(MENU_UP_NAMESPACE, session, Some(row.message_id)),
+        up,
+        down_id: scoped_id(MENU_DOWN_NAMESPACE, session, Some(row.message_id)),
+        down,
         edit_id: scoped_id(MENU_EDIT_NAMESPACE, session, Some(row.message_id)),
         edit,
         close_id: scoped_id(MENU_CLOSE_NAMESPACE, session, Some(row.message_id)),
@@ -269,6 +349,30 @@ pub(super) fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<A
         }
     }
     let open = state.composer.queue_menu?;
+    let index = messages.iter().position(|message| message.id == open)?;
+    let is_first = index == 0;
+    let is_last = index + 1 == messages.len();
+    if !is_first && id == scoped_id(MENU_FRONT_NAMESPACE, session, Some(open)) {
+        return Some(AppCommand::ReorderQueuedMessage {
+            session: session.clone(),
+            id: open,
+            op: QueueReorderOp::Front,
+        });
+    }
+    if !is_first && id == scoped_id(MENU_UP_NAMESPACE, session, Some(open)) {
+        return Some(AppCommand::ReorderQueuedMessage {
+            session: session.clone(),
+            id: open,
+            op: QueueReorderOp::Up,
+        });
+    }
+    if !is_last && id == scoped_id(MENU_DOWN_NAMESPACE, session, Some(open)) {
+        return Some(AppCommand::ReorderQueuedMessage {
+            session: session.clone(),
+            id: open,
+            op: QueueReorderOp::Down,
+        });
+    }
     if id == scoped_id(MENU_EDIT_NAMESPACE, session, Some(open)) {
         return Some(AppCommand::BeginEditQueuedMessage {
             session: session.clone(),
@@ -290,11 +394,10 @@ pub(super) fn paint_rows(
     hovered: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
-    painter.fill_round_rect(layout.surface, 16.0, theme.tokens.card);
-    painter.stroke_round_rect(layout.surface, 16.0, theme.tokens.border, 1.0);
+    Card::paint(painter, layout.surface, QUEUE_SURFACE_RADIUS, false, theme);
     painter.save();
     painter.clip_rect(layout.surface);
-    for (row, message) in layout.rows.iter().zip(messages) {
+    for (index, (row, message)) in layout.rows.iter().zip(messages).enumerate() {
         let content_width = (row.guide.origin.x - row.rect.origin.x).max(0.0);
         if content_width >= ACTION_ICON_SIZE + 2.0 {
             let icon = Rect::xywh(
@@ -310,10 +413,37 @@ pub(super) fn paint_rows(
                 theme.tokens.muted_foreground,
                 SemanticIcon::Queue.stroke_width(),
             );
+            // Only the head of the queue can badge, and only when it got
+            // there through an explicit priority action (see `prioritized`).
+            let show_badge = index == 0
+                && message.prioritized
+                && content_width >= ACTION_ICON_SIZE + PRIORITY_BADGE_W + 44.0;
+            let text_start_x = if show_badge {
+                let badge_h = (row.rect.size.y - 8.0).clamp(0.0, 20.0);
+                let badge = Rect::xywh(
+                    icon.max_x() + 8.0,
+                    row.rect.origin.y + (row.rect.size.y - badge_h) / 2.0,
+                    PRIORITY_BADGE_W,
+                    badge_h,
+                );
+                painter.fill_round_rect(badge, badge_h / 2.0, theme.tokens.accent);
+                paint_single_line(
+                    painter,
+                    "置顶",
+                    badge,
+                    11.0,
+                    600,
+                    theme.tokens.accent_foreground,
+                    HorizontalAlign::Center,
+                );
+                badge.max_x() + 8.0
+            } else {
+                icon.max_x() + 8.0
+            };
             let text_rect = Rect::xywh(
-                icon.max_x() + 8.0,
+                text_start_x,
                 row.rect.origin.y,
-                (row.guide.origin.x - icon.max_x() - 14.0).max(0.0),
+                (row.guide.origin.x - text_start_x - 14.0).max(0.0),
                 row.rect.size.y,
             );
             if text_rect.size.x > 0.0 {
@@ -401,28 +531,27 @@ pub(super) fn paint_overlays(
     let Some(menu) = layout.menu.as_ref() else {
         return;
     };
-    painter.fill_drop_shadow(
-        Rect::xywh(
-            menu.rect.origin.x,
-            menu.rect.origin.y + 2.0,
-            menu.rect.size.x,
-            menu.rect.size.y,
-        ),
-        10.0,
-        16.0,
-        theme.tokens.foreground.with_alpha(0.12),
-    );
+    paint_elevated_surface(painter, menu.rect, 10.0, theme);
     painter.fill_round_rect(menu.rect, 10.0, theme.tokens.popover);
     painter.stroke_round_rect(menu.rect, 10.0, theme.tokens.border, 1.0);
-    for (rect, id, icon, label) in [
-        (menu.edit, menu.edit_id, SemanticIcon::Edit, "编辑消息"),
-        (
-            menu.close,
-            menu.close_id,
-            SemanticIcon::CloseQueue,
-            "关闭排队",
-        ),
-    ] {
+    let mut items = Vec::with_capacity(5);
+    if let Some(front) = menu.front {
+        items.push((front, menu.front_id, SemanticIcon::Pin, "置顶"));
+    }
+    if let Some(up) = menu.up {
+        items.push((up, menu.up_id, SemanticIcon::MoveUp, "上移"));
+    }
+    if let Some(down) = menu.down {
+        items.push((down, menu.down_id, SemanticIcon::MoveDown, "下移"));
+    }
+    items.push((menu.edit, menu.edit_id, SemanticIcon::Edit, "编辑消息"));
+    items.push((
+        menu.close,
+        menu.close_id,
+        SemanticIcon::CloseQueue,
+        "关闭排队",
+    ));
+    for (rect, id, icon, label) in items {
         paint_action_state(
             painter,
             rect,

@@ -235,6 +235,7 @@ mod tests {
                     summary: "ok".into(),
                 },
             ],
+            final_output: None,
         }
     }
 

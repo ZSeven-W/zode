@@ -467,6 +467,38 @@ pub struct ExternalAgentEntry {
     pub trusted: Option<bool>,
 }
 
+/// Built-in computer-use control (`computer_*` tools). macOS-only in M1 —
+/// on other platforms the tools still register but every call reports
+/// [`crate::computer::ComputerError::Unsupported`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ComputerConfig {
+    pub enabled: Option<bool>,
+    /// App names the agent may operate on without a per-call approval
+    /// prompt (Codex parity). Only consulted once the gate wires this in —
+    /// see `any_app`'s doc comment for the current M1 scope.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allowed_apps: Vec<String>,
+    /// When true, `allowed_apps` is a blanket bypass — any app is allowed
+    /// without a per-call approval prompt. Config + desktop UI only in M1
+    /// (see docs/proposals/computer-use.md §1); `computer_act`'s
+    /// `PermissionGatedTool` does not yet consult either field, so today's
+    /// actual behavior is "always ask", regardless of this value. Defaults
+    /// to `true` so the config's stated intent matches that real behavior
+    /// until the gate consult lands.
+    pub any_app: Option<bool>,
+}
+
+impl ComputerConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    pub fn any_app(&self) -> bool {
+        self.any_app.unwrap_or(true)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NoemaSettings {
@@ -850,6 +882,9 @@ pub struct ZodeConfig {
     /// Built-in desktop control configuration (the `desktop_*` tools).
     #[serde(skip_serializing_if = "is_default")]
     pub desktop: DesktopConfig,
+    /// Built-in computer-use control configuration (the `computer_*` tools).
+    #[serde(skip_serializing_if = "is_default")]
+    pub computer: ComputerConfig,
     /// External agent CLIs exposed as Task `agent_type`s.
     #[serde(skip_serializing_if = "ExternalAgentsConfig::is_default")]
     pub external_agents: ExternalAgentsConfig,
@@ -1752,6 +1787,8 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
 fn project_allowed_tools_from_state(
     state: &serde_json::Map<String, serde_json::Value>,
 ) -> Vec<String> {

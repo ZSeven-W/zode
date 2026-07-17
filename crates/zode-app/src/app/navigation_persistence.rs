@@ -61,7 +61,9 @@ fn persist_navigation_effect(
             let session_ids = app_state
                 .threads
                 .iter()
-                .filter(|thread| &thread.workspace_uri == workspace_uri)
+                .filter(|thread| {
+                    app_state.project_workspace_for_thread(thread) == Some(workspace_uri)
+                })
                 .map(|thread| thread.session.session_id.clone())
                 .collect::<Vec<_>>();
             store.update(move |state| {

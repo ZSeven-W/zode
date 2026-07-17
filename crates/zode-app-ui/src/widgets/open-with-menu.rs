@@ -1,7 +1,9 @@
-use jian_widgets::{Color, HorizontalAlign, Painter, Point2D, Rect};
+use jian_widgets::{Color, HorizontalAlign, ImageDrawMode, Painter, Point2D, Rect};
 use zode_app_model::{AppCommand, ExternalApplication, LoadState, ZodeAppState};
 
-use crate::{paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme};
+use crate::{
+    paint_elevated_surface, paint_single_line, MenuRow, RectExt, SemanticIcon, WidgetId, ZodeTheme,
+};
 
 pub const OPEN_WITH_PRIMARY_ID: WidgetId = WidgetId(210);
 pub const OPEN_WITH_DROPDOWN_ID: WidgetId = WidgetId(211);
@@ -118,11 +120,8 @@ impl OpenWithMenu {
         }
         let application = state.open_with.applications.ready()?.get(index).copied()?;
         current_local_workspace(state)
-            .cloned()
-            .map(|workspace_uri| AppCommand::OpenWorkspaceExternally {
-                workspace_uri,
-                application,
-            })
+            .is_some()
+            .then_some(AppCommand::SelectExternalApplication { application })
     }
 
     pub fn paint_trigger(
@@ -139,15 +138,19 @@ impl OpenWithMenu {
             theme.tokens.border,
             1.0,
         );
-        let (icon, color) = application_visual(state.open_with.primary_application());
-        let icon_rect = centered_square(layout.primary, 16.0);
-        painter.stroke_svg_path(
-            icon.path(),
-            icon_rect.origin,
-            icon_rect.size.x,
-            color,
-            icon.stroke_width(),
-        );
+        let application = state.open_with.primary_application();
+        let icon_rect = centered_square(layout.primary, 18.0);
+        if !paint_native_application_icon(painter, icon_rect, state, application) {
+            let (icon, color) = application_visual(application);
+            let fallback_rect = centered_square(layout.primary, 16.0);
+            painter.stroke_svg_path(
+                icon.path(),
+                fallback_rect.origin,
+                fallback_rect.size.x,
+                color,
+                icon.stroke_width(),
+            );
+        }
         let chevron = centered_square(layout.dropdown, 14.0);
         painter.stroke_svg_path(
             SemanticIcon::ChevronDown.path(),
@@ -166,17 +169,7 @@ impl OpenWithMenu {
         hovered: Option<WidgetId>,
         theme: &ZodeTheme,
     ) {
-        painter.fill_drop_shadow(
-            Rect::xywh(
-                layout.rect.origin.x,
-                layout.rect.origin.y + 2.0,
-                layout.rect.size.x,
-                layout.rect.size.y,
-            ),
-            10.0,
-            18.0,
-            theme.tokens.foreground.with_alpha(0.12),
-        );
+        paint_elevated_surface(painter, layout.rect, 11.0, theme);
         painter.fill_round_rect(layout.rect, 11.0, theme.tokens.popover);
         painter.stroke_round_rect(layout.rect, 11.0, theme.tokens.border, 1.0);
         if let Some(status) = layout.status {
@@ -196,30 +189,31 @@ impl OpenWithMenu {
             );
         }
         for item in &layout.items {
-            if hovered == Some(item.id) || focused == Some(item.id) {
-                painter.fill_round_rect(item.rect, 7.0, theme.tokens.accent);
-            }
-            let (icon, color) = application_visual(item.application);
-            let icon_background = Rect::xywh(
+            let active = hovered == Some(item.id) || focused == Some(item.id);
+            MenuRow::paint_background(painter, item.rect, active, &theme.tokens);
+            let icon_rect = Rect::xywh(
                 item.rect.origin.x + 8.0,
                 item.rect.origin.y + (item.rect.size.y - 20.0) / 2.0,
                 20.0,
                 20.0,
             );
-            painter.fill_round_rect(icon_background, 5.0, color.with_alpha(0.13));
-            let icon_rect = centered_square(icon_background, 14.0);
-            painter.stroke_svg_path(
-                icon.path(),
-                icon_rect.origin,
-                icon_rect.size.x,
-                color,
-                icon.stroke_width(),
-            );
+            if !paint_native_application_icon(painter, icon_rect, state, item.application) {
+                let (icon, color) = application_visual(item.application);
+                painter.fill_round_rect(icon_rect, 5.0, color.with_alpha(0.13));
+                let fallback_rect = centered_square(icon_rect, 14.0);
+                painter.stroke_svg_path(
+                    icon.path(),
+                    fallback_rect.origin,
+                    fallback_rect.size.x,
+                    color,
+                    icon.stroke_width(),
+                );
+            }
             paint_single_line(
                 painter,
                 item.application.label(),
                 Rect::xywh(
-                    icon_background.max_x() + 9.0,
+                    icon_rect.max_x() + 9.0,
                     item.rect.origin.y,
                     item.rect.size.x - 64.0,
                     item.rect.size.y,
@@ -287,6 +281,24 @@ fn centered_square(rect: Rect, size: f32) -> Rect {
     )
 }
 
+fn paint_native_application_icon(
+    painter: &mut dyn Painter,
+    rect: Rect,
+    state: &ZodeAppState,
+    application: ExternalApplication,
+) -> bool {
+    let Some(icon) = state.open_with.icon(application) else {
+        return false;
+    };
+    painter.draw_image_with_mode(
+        rect,
+        icon.image_id(),
+        icon.encoded_png(),
+        ImageDrawMode::Fit,
+    );
+    true
+}
+
 fn application_visual(application: ExternalApplication) -> (SemanticIcon, Color) {
     match application {
         ExternalApplication::VisualStudioCode => {
@@ -308,9 +320,57 @@ fn application_visual(application: ExternalApplication) -> (SemanticIcon, Color)
 #[cfg(test)]
 mod tests {
     use super::{OpenWithMenu, OPEN_WITH_DROPDOWN_ID, OPEN_WITH_PRIMARY_ID};
-    use crate::{Insets, RectExt};
-    use zode_app_model::{demo_state, AppCommand, ExternalApplication, LoadState, ProjectState};
+    use crate::{Insets, RectExt, ZodeTheme};
+    use jian_widgets::{Color, ImageDrawMode, Painter, Point2D, Rect, TextLayout};
+    use zode_app_model::{
+        demo_state, AppCommand, ExternalApplication, ExternalApplicationIcon, LoadState,
+        ProjectState,
+    };
     use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
+
+    #[derive(Default)]
+    struct ImageCapture {
+        images: Vec<(u64, Vec<u8>, ImageDrawMode)>,
+        svg_count: usize,
+    }
+
+    impl Painter for ImageCapture {
+        fn begin_frame(&mut self) {}
+        fn end_frame(&mut self) {}
+        fn fill_rect(&mut self, _rect: Rect, _color: Color) {}
+        fn stroke_rect(&mut self, _rect: Rect, _color: Color, _width: f32) {}
+        fn draw_text(&mut self, _layout: &TextLayout, _origin: Point2D) {}
+        fn clip_rect(&mut self, _rect: Rect) {}
+        fn stroke_line(&mut self, _from: Point2D, _to: Point2D, _color: Color, _width: f32) {}
+        fn fill_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color) {}
+        fn stroke_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color, _width: f32) {}
+        fn stroke_svg_path(
+            &mut self,
+            _path: &str,
+            _top_left: Point2D,
+            _size: f32,
+            _color: Color,
+            _width: f32,
+        ) {
+            self.svg_count += 1;
+        }
+        fn draw_image_with_mode(
+            &mut self,
+            _rect: Rect,
+            image_id: u64,
+            encoded: &[u8],
+            mode: ImageDrawMode,
+        ) {
+            self.images.push((image_id, encoded.to_vec(), mode));
+        }
+        fn save(&mut self) {}
+        fn restore(&mut self) {}
+        fn translate(&mut self, _offset: Point2D) {}
+        fn resize(&mut self, _width: u32, _height: u32) {}
+        fn dpi_scale(&self) -> f32 {
+            1.0
+        }
+    }
 
     fn state_with_workspace() -> zode_app_model::ZodeAppState {
         let mut state = demo_state();
@@ -373,6 +433,12 @@ mod tests {
             ExternalApplication::VisualStudioCode
         );
         assert_eq!(menu.items[1].application, ExternalApplication::Finder);
+        assert_eq!(
+            OpenWithMenu::command_for_widget(&state, menu.items[0].id),
+            Some(AppCommand::SelectExternalApplication {
+                application: ExternalApplication::VisualStudioCode,
+            })
+        );
     }
 
     #[test]
@@ -388,6 +454,44 @@ mod tests {
         assert_eq!(selected(&state), ExternalApplication::Finder);
         state.open_with.preferred = Some(ExternalApplication::VisualStudioCode);
         assert_eq!(selected(&state), ExternalApplication::VisualStudioCode);
+    }
+
+    #[test]
+    fn native_application_icon_uses_its_content_id_and_fit_mode() {
+        let mut state = demo_state();
+        let icon = ExternalApplicationIcon::new(ExternalApplication::Zed, vec![137, 80, 78, 71, 1]);
+        let expected_id = icon.image_id();
+        let expected_png = icon.encoded_png().to_vec();
+        state.open_with.applications = LoadState::Ready(vec![ExternalApplication::Zed]);
+        state.open_with.preferred = Some(ExternalApplication::Zed);
+        state.open_with.icons.push(icon);
+        let layout = OpenWithMenu::split_layout(Rect::xywh(0.0, 0.0, 48.0, 32.0));
+        let mut painter = ImageCapture::default();
+
+        OpenWithMenu::paint_trigger(&mut painter, layout, &state, &ZodeTheme::light());
+
+        assert_eq!(
+            painter.images,
+            vec![(expected_id, expected_png, ImageDrawMode::Fit)]
+        );
+        assert_eq!(painter.svg_count, 1, "only the chevron remains an SVG");
+    }
+
+    #[test]
+    fn fallback_application_icon_never_draws_an_image() {
+        let mut state = demo_state();
+        state.open_with.applications = LoadState::Ready(vec![ExternalApplication::Zed]);
+        state.open_with.preferred = Some(ExternalApplication::Zed);
+        let layout = OpenWithMenu::split_layout(Rect::xywh(0.0, 0.0, 48.0, 32.0));
+        let mut painter = ImageCapture::default();
+
+        OpenWithMenu::paint_trigger(&mut painter, layout, &state, &ZodeTheme::light());
+
+        assert!(painter.images.is_empty());
+        assert_eq!(
+            painter.svg_count, 2,
+            "fallback application icon and chevron are SVGs"
+        );
     }
 
     #[test]

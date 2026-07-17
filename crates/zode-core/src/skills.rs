@@ -53,7 +53,10 @@ pub fn skills_dirs(cwd: &Path) -> Vec<PathBuf> {
 /// tree), bounded in depth so a deep/cyclic layout can't run away. Each found
 /// dir is one `load_dir` target (its subdirs hold `SKILL.md`). A `skills` dir
 /// is not descended into. No-op if `root` doesn't exist.
-fn collect_plugin_skill_dirs(root: &Path, out: &mut Vec<PathBuf>) {
+///
+/// `pub(crate)` so `plugin_market::scan` can reuse it verbatim for a single
+/// installed plugin's tree instead of re-implementing the same walk.
+pub(crate) fn collect_plugin_skill_dirs(root: &Path, out: &mut Vec<PathBuf>) {
     fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         if depth > 6 {
             return;

@@ -1,7 +1,7 @@
 use agent::message::{ContentBlock, Header, Message, MessageStore, ToolResultContent};
 use tempfile::TempDir;
-use zode_app_runtime::{path_to_workspace_uri, LocalSessionRepository};
 use zode_app_runtime::session_store::{SessionSaveOutcome, SessionWriteMode};
+use zode_app_runtime::{path_to_workspace_uri, LocalSessionRepository};
 use zode_node_protocol::{HistoryItem, NodeId, SessionLocator, ThreadHistory, ToolStatus};
 
 fn persisted_store() -> MessageStore {

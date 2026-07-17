@@ -82,10 +82,8 @@ fn state_with_transcript(transcript: TranscriptState) -> zode_app_model::ZodeApp
 fn transcript_parses_agent_markdown_and_right_aligns_user_bubble() {
     let state = state_with_transcript(TranscriptState {
         items: vec![
-            TranscriptItem::AssistantText(
-                "### Result\n\nUse **bold** and `code` in the answer.".into(),
-            ),
-            TranscriptItem::UserText("ship it".into()),
+            TranscriptItem::assistant_text("### Result\n\nUse **bold** and `code` in the answer."),
+            TranscriptItem::user_text("ship it"),
         ],
         ..TranscriptState::default()
     });
@@ -112,9 +110,9 @@ fn transcript_parses_agent_markdown_and_right_aligns_user_bubble() {
 #[test]
 fn transcript_only_paints_the_tail_when_scrolled_beyond_long_history() {
     let mut items = (0..32)
-        .map(|index| TranscriptItem::UserText(format!("hidden-{index}")))
+        .map(|index| TranscriptItem::user_text(format!("hidden-{index}")))
         .collect::<Vec<_>>();
-    items.push(TranscriptItem::UserText("tail-visible".into()));
+    items.push(TranscriptItem::user_text("tail-visible"));
     let state = state_with_transcript(TranscriptState {
         items,
         scroll_offset: 10_000.0,
@@ -140,8 +138,8 @@ fn completed_turn_places_a_summary_divider_between_user_and_assistant() {
     let turn_id = TurnId::parse("00000000-0000-0000-0000-000000000151").unwrap();
     let mut transcript = TranscriptState {
         items: vec![
-            TranscriptItem::UserText("请继续实现".into()),
-            TranscriptItem::AssistantText("已经完成。".into()),
+            TranscriptItem::user_text("请继续实现"),
+            TranscriptItem::assistant_text("已经完成。"),
         ],
         busy: false,
         ..TranscriptState::default()
@@ -198,10 +196,10 @@ fn one_runtime_turn_paints_one_divider_after_its_last_initial_user_block() {
     let turn_id = TurnId::parse("00000000-0000-0000-0000-000000000152").unwrap();
     let mut transcript = TranscriptState {
         items: vec![
-            TranscriptItem::UserText("第一段输入".into()),
-            TranscriptItem::UserText("第二段输入".into()),
-            TranscriptItem::AssistantText("处理中。".into()),
-            TranscriptItem::UserText("运行中追加的引导".into()),
+            TranscriptItem::user_text("第一段输入"),
+            TranscriptItem::user_text("第二段输入"),
+            TranscriptItem::assistant_text("处理中。"),
+            TranscriptItem::user_text("运行中追加的引导"),
         ],
         ..TranscriptState::default()
     };
@@ -265,9 +263,9 @@ fn turn_divider_follows_text_and_attachment_as_one_user_submission() {
     };
     let mut transcript = TranscriptState {
         items: vec![
-            TranscriptItem::UserText("请对照这张图".into()),
+            TranscriptItem::user_text("请对照这张图"),
             TranscriptItem::Attachment(attachment),
-            TranscriptItem::AssistantText("收到。".into()),
+            TranscriptItem::assistant_text("收到。"),
         ],
         ..TranscriptState::default()
     };
@@ -313,7 +311,7 @@ fn attachment_only_submission_still_owns_a_turn_divider() {
                 height: Some(360),
                 byte_len: 1_024,
             }),
-            TranscriptItem::AssistantText("已查看。".into()),
+            TranscriptItem::assistant_text("已查看。"),
         ],
         ..TranscriptState::default()
     };
@@ -337,8 +335,8 @@ fn attachment_only_submission_still_owns_a_turn_divider() {
 #[test]
 fn assistant_markdown_uses_body_type_inline_pills_and_monospace_code_blocks() {
     let state = state_with_transcript(TranscriptState {
-        items: vec![TranscriptItem::AssistantText(
-            "正文包含 `cargo test`。\n\n```bash\ncargo test --workspace\n```".into(),
+        items: vec![TranscriptItem::assistant_text(
+            "正文包含 `cargo test`。\n\n```bash\ncargo test --workspace\n```",
         )],
         ..TranscriptState::default()
     });
@@ -357,13 +355,25 @@ fn assistant_markdown_uses_body_type_inline_pills_and_monospace_code_blocks() {
         .find(|text| text.text.contains("正文包含"))
         .unwrap();
     assert_eq!(body.size, 14.0);
-    let code = painter
+    // The fenced code line is now syntax-highlighted, so it paints as
+    // several colored spans rather than one `draw_text` call - reconstruct
+    // it from every monospace/12px span (excluding the unrelated inline
+    // `` `cargo test` `` code span from the paragraph above) and confirm
+    // both the full text and every span's font metrics are unchanged.
+    let code_spans = painter
         .texts
         .iter()
-        .find(|text| text.text == "cargo test --workspace")
-        .unwrap();
-    assert_eq!(code.family, "monospace");
-    assert_eq!(code.size, 12.0);
+        .filter(|text| text.family == "monospace" && text.size == 12.0 && text.text != "cargo test")
+        .collect::<Vec<_>>();
+    assert!(
+        !code_spans.is_empty(),
+        "fenced code line should paint at least one span"
+    );
+    let code_line = code_spans
+        .iter()
+        .map(|text| text.text.as_str())
+        .collect::<String>();
+    assert_eq!(code_line, "cargo test --workspace");
     assert!(
         painter.round_fills.len() >= 2,
         "inline code and fenced code both need muted surfaces"

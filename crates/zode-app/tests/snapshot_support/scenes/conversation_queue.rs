@@ -11,7 +11,7 @@ pub fn conversation_queue_scene(theme: ThemePreference, viewport_width: u32) -> 
     set_transcript(
         &mut state,
         vec![
-            TranscriptItem::UserText("支持任务运行中的消息排队，并保持当前响应不中断。".into()),
+            TranscriptItem::user_text("支持任务运行中的消息排队，并保持当前响应不中断。"),
             TranscriptItem::Thinking("正在梳理会话级 FIFO 队列与显式引导语义。".into()),
             TranscriptItem::Tool(ToolCall {
                 id: "queue-model-audit".into(),
@@ -20,8 +20,8 @@ pub fn conversation_queue_scene(theme: ThemePreference, viewport_width: u32) -> 
                 summary: "已核对消息队列模型与会话归属".into(),
                 detail: Some("队列内容按会话隔离，运行结束后逐条提交".into()),
             }),
-            TranscriptItem::AssistantText(
-                "当前任务仍在运行。新消息会进入队列；只有点击“引导”才会提交到当前轮次。".into(),
+            TranscriptItem::assistant_text(
+                "当前任务仍在运行。新消息会进入队列；只有点击“引导”才会提交到当前轮次。",
             ),
             TranscriptItem::ActivityGroup(vec![
                 ActivityEntry {

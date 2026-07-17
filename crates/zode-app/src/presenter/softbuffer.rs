@@ -44,7 +44,7 @@ impl SoftbufferPresenter {
             .surface
             .buffer_mut()
             .map_err(|error| error.to_string())?;
-        if !raster.copy_rgb_to(&mut buffer) {
+        if !raster.copy_rgb_to(&mut buffer, frame.physical_width, frame.physical_height) {
             return Err("Skia framebuffer copy failed".into());
         }
         self.window.pre_present_notify();

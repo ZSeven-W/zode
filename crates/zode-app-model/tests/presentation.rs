@@ -1,6 +1,7 @@
 use zode_app_model::{
     apply_session_runtime_options, demo_state, environment_actions, environment_sections,
-    reduce_agent_event, reduce_navigation_command, reduce_presentation_command, AppCommand,
+    is_subagents_summary_entry, reduce_agent_event, reduce_navigation_command,
+    reduce_presentation_command, subagent_entry, subagents_summary_avatar_ids, AppCommand,
     AttachmentMetadata, ComingSoonFeature, EnvironmentActionKind,
     EnvironmentActionUnavailableReason, EnvironmentSectionKind, EnvironmentSnapshot, FileArtifact,
     IntegrationScope, IntegrationsTab, LoadState, NavigationOutcome, PresentationCommandOutcome,
@@ -9,8 +10,8 @@ use zode_app_model::{
 };
 use zode_node_protocol::{
     AgentEvent, AgentEventKind, DiffFile, DiffFileStatus, DiffSnapshot, RuntimeOptions,
-    SandboxMode, SessionLocator, ThreadStatus, ThreadSummary, TurnId, WorkspaceUri,
-    PROTOCOL_VERSION,
+    SandboxMode, SessionLocator, SubagentSnapshot, SubagentStatus, ThreadStatus, ThreadSummary,
+    TurnId, WorkspaceUri, PROTOCOL_VERSION,
 };
 
 fn add_session(
@@ -56,12 +57,13 @@ fn ready_presentation(
         context: LoadState::Ready(EnvironmentSnapshot {
             workspace_uri: WorkspaceUri::new(workspace).unwrap(),
             branch: Some(branch.into()),
-            subagents: Vec::new(),
             background_processes: Vec::new(),
             sources: Vec::new(),
         }),
         preview: PreviewState::Idle,
         runtime_options: LoadState::Idle,
+        subagents: Vec::new(),
+        ..SessionPresentationState::default()
     }
 }
 
@@ -360,7 +362,6 @@ fn environment_sections_project_only_real_current_session_facts() {
             context: LoadState::Ready(EnvironmentSnapshot {
                 workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
                 branch: Some("codex/zode-jian-desktop".into()),
-                subagents: Vec::new(),
                 background_processes: Vec::new(),
                 sources: Vec::new(),
             }),
@@ -387,6 +388,8 @@ fn environment_sections_project_only_real_current_session_facts() {
             },
             preview: PreviewState::Idle,
             runtime_options: LoadState::Idle,
+            subagents: Vec::new(),
+            ..SessionPresentationState::default()
         },
     );
     state.transcripts.get_mut(&session).unwrap().items = vec![
@@ -461,7 +464,6 @@ fn environment_sections_omit_empty_diff_branch_and_sources() {
             context: LoadState::Ready(EnvironmentSnapshot {
                 workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
                 branch: None,
-                subagents: Vec::new(),
                 background_processes: Vec::new(),
                 sources: Vec::new(),
             }),
@@ -475,6 +477,8 @@ fn environment_sections_omit_empty_diff_branch_and_sources() {
             },
             preview: PreviewState::Idle,
             runtime_options: LoadState::Idle,
+            subagents: Vec::new(),
+            ..SessionPresentationState::default()
         },
     );
 
@@ -482,6 +486,153 @@ fn environment_sections_omit_empty_diff_branch_and_sources() {
     assert_eq!(sections.len(), 1);
     assert_eq!(sections[0].kind, EnvironmentSectionKind::Host);
     assert!(sections.iter().all(|section| !section.entries.is_empty()));
+}
+
+#[test]
+fn environment_sections_render_one_compact_avatar_and_count_row_for_subagents() {
+    let mut state = demo_state();
+    let session = add_session(&mut state, "subagents", "file:///repo/zode");
+    state.current_session = Some(session.clone());
+    let turn = TurnId::new();
+    state.presentation.sessions.insert(
+        session,
+        SessionPresentationState {
+            subagents: vec![
+                SubagentSnapshot {
+                    id: "1".into(),
+                    agent_type: "Explore".into(),
+                    display_name: "Explore".into(),
+                    depth: 0,
+                    status: SubagentStatus::Running,
+                    tokens: 512,
+                    turn_id: turn,
+                    completed_at_ms: None,
+                    result_summary: None,
+                },
+                SubagentSnapshot {
+                    id: "2".into(),
+                    agent_type: "researcher".into(),
+                    display_name: "Scan home large".into(),
+                    depth: 0,
+                    status: SubagentStatus::Completed,
+                    tokens: 9_001,
+                    turn_id: turn,
+                    completed_at_ms: Some(1_752_700_000_000),
+                    result_summary: Some("Found 3 large directories".into()),
+                },
+            ],
+            ..SessionPresentationState::default()
+        },
+    );
+
+    let sections = environment_sections(&state);
+    let subagents = sections
+        .iter()
+        .find(|section| section.kind == EnvironmentSectionKind::Subagents)
+        .expect("a non-empty live subagent map always projects a section");
+
+    assert_eq!(
+        subagents.entries.len(),
+        1,
+        "M1's env card shows exactly one compact row, not a per-agent list"
+    );
+    let row = &subagents.entries[0];
+    assert!(is_subagents_summary_entry(&row.id));
+    assert_eq!(
+        subagents_summary_avatar_ids(&row.id),
+        vec!["1", "2"],
+        "avatar ids are encoded in first-seen order for the UI to hash into colors"
+    );
+    assert_eq!(row.value.as_deref(), Some("1 运行中 · 1 完成"));
+}
+
+#[test]
+fn environment_sections_subagent_count_omits_running_when_all_are_done() {
+    let mut state = demo_state();
+    let session = add_session(&mut state, "subagents-done", "file:///repo/zode");
+    state.current_session = Some(session.clone());
+    let turn = TurnId::new();
+    state.presentation.sessions.insert(
+        session,
+        SessionPresentationState {
+            subagents: vec![SubagentSnapshot {
+                id: "1".into(),
+                agent_type: "researcher".into(),
+                display_name: "researcher".into(),
+                depth: 0,
+                status: SubagentStatus::Completed,
+                tokens: 1,
+                turn_id: turn,
+                completed_at_ms: Some(1),
+                result_summary: None,
+            }],
+            ..SessionPresentationState::default()
+        },
+    );
+
+    let sections = environment_sections(&state);
+    let subagents = sections
+        .iter()
+        .find(|section| section.kind == EnvironmentSectionKind::Subagents)
+        .unwrap();
+
+    assert_eq!(
+        subagents.entries[0].value.as_deref(),
+        Some("1 完成"),
+        "Codex's reference shows a bare count once nothing is running"
+    );
+}
+
+#[test]
+fn subagents_summary_avatar_ids_caps_at_the_max_and_ignores_non_summary_ids() {
+    assert_eq!(
+        subagents_summary_avatar_ids("subagents-summary:1,2,3,4"),
+        vec!["1", "2", "3", "4"]
+    );
+    assert_eq!(
+        subagents_summary_avatar_ids("subagents-summary:"),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        subagents_summary_avatar_ids("subagents-summary"),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        subagents_summary_avatar_ids("subagent:1"),
+        Vec::<&str>::new()
+    );
+    assert!(is_subagents_summary_entry("subagents-summary"));
+    assert!(is_subagents_summary_entry("subagents-summary:1,2"));
+    assert!(!is_subagents_summary_entry("subagent:1"));
+}
+
+#[test]
+fn subagent_entry_labels_by_display_name_and_demotes_agent_type_to_the_value() {
+    let subagent = SubagentSnapshot {
+        id: "1".into(),
+        agent_type: "general-purpose".into(),
+        display_name: "Scan home large".into(),
+        depth: 0,
+        status: SubagentStatus::Completed,
+        tokens: 9_001,
+        turn_id: TurnId::new(),
+        completed_at_ms: Some(1_752_700_000_000),
+        result_summary: Some("Found 3 large directories".into()),
+    };
+
+    let entry = subagent_entry(&subagent);
+
+    assert_eq!(
+        entry.label, "Scan home large",
+        "the human-readable task name is the label, not the raw agent_type"
+    );
+    let value = entry.value.expect("a status value is always present");
+    assert!(
+        value.contains("general-purpose"),
+        "agent_type is demoted to the value, not dropped: {value}"
+    );
+    assert!(value.contains("已完成"));
+    assert!(value.contains("9001"));
 }
 
 #[test]

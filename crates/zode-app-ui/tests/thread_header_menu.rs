@@ -1,10 +1,14 @@
 use accesskit::{Action, Role};
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
-use zode_app_model::{AppCommand, ProjectState, SessionRenameState};
+use zode_app_model::{
+    reduce_navigation_command, AppCommand, ExternalApplication, LoadState, NavigationOutcome,
+    ProjectState, SessionRenameState,
+};
 use zode_app_ui::{
-    Insets, RectExt, SemanticIcon, ThreadHeader, WorkspaceSnapshot, ZodeTheme,
+    Insets, OpenWithMenu, RectExt, SemanticIcon, ThreadHeader, WorkspaceSnapshot, ZodeTheme,
     HEADER_COPY_TITLE_ID, HEADER_ENVIRONMENT_ID, HEADER_MENU_COPY_ID, HEADER_MENU_NEW_WINDOW_ID,
-    HEADER_MENU_RENAME_ID, HEADER_RENAME_INPUT_ID, HEADER_RENAME_SAVE_ID,
+    HEADER_MENU_RENAME_ID, HEADER_RENAME_INPUT_ID, HEADER_RENAME_SAVE_ID, OPEN_WITH_DROPDOWN_ID,
+    OPEN_WITH_PRIMARY_ID,
 };
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
@@ -76,6 +80,94 @@ fn state_with_session() -> (zode_app_model::ZodeAppState, SessionLocator) {
     });
     state.current_session = Some(session.clone());
     (state, session)
+}
+
+fn center(rect: Rect) -> Point2D {
+    Point2D::new(
+        rect.origin.x + rect.size.x / 2.0,
+        rect.origin.y + rect.size.y / 2.0,
+    )
+}
+
+#[test]
+fn open_with_split_button_selects_before_the_primary_action_opens() {
+    let (mut state, _) = state_with_session();
+    state.open_with.applications =
+        LoadState::Ready(vec![ExternalApplication::Finder, ExternalApplication::Zed]);
+
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let split = ThreadHeader::layout(snapshot.layout.top_bar, &state)
+        .open_with
+        .expect("local task exposes the open-with split button");
+    let chevron = snapshot
+        .hit_test(center(split.dropdown))
+        .expect("chevron is hittable");
+    assert_eq!(chevron, OPEN_WITH_DROPDOWN_ID);
+    let toggle = ThreadHeader::command_for_widget(&state, chevron).expect("chevron command");
+    assert_eq!(toggle, AppCommand::ToggleOpenWithMenu);
+    assert_eq!(
+        reduce_navigation_command(&mut state, toggle),
+        NavigationOutcome::Applied
+    );
+    assert!(state.open_with.menu_open);
+
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let split = ThreadHeader::layout(snapshot.layout.top_bar, &state)
+        .open_with
+        .unwrap();
+    let menu = OpenWithMenu::menu_layout(split.rect, snapshot.layout.viewport, &state).unwrap();
+    let zed = menu
+        .items
+        .iter()
+        .find(|item| item.application == ExternalApplication::Zed)
+        .expect("Zed row");
+    let row = snapshot
+        .hit_test(center(zed.rect))
+        .expect("Zed row is hittable");
+    assert_eq!(row, zed.id);
+    let select = ThreadHeader::command_for_widget(&state, row).expect("row selection command");
+    assert_eq!(
+        select,
+        AppCommand::SelectExternalApplication {
+            application: ExternalApplication::Zed,
+        }
+    );
+    assert!(!matches!(
+        select,
+        AppCommand::OpenWorkspaceExternally { .. }
+    ));
+    assert_eq!(
+        reduce_navigation_command(&mut state, select),
+        NavigationOutcome::Applied,
+        "selection must stay a local state update instead of requesting the open effect"
+    );
+    assert_eq!(
+        state.open_with.primary_application(),
+        ExternalApplication::Zed
+    );
+    assert!(!state.open_with.menu_open);
+
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let split = ThreadHeader::layout(snapshot.layout.top_bar, &state)
+        .open_with
+        .unwrap();
+    let primary = snapshot
+        .hit_test(center(split.primary))
+        .expect("primary side is hittable");
+    assert_eq!(primary, OPEN_WITH_PRIMARY_ID);
+    let open = ThreadHeader::command_for_widget(&state, primary).expect("primary open command");
+    assert!(matches!(
+        &open,
+        AppCommand::OpenWorkspaceExternally {
+            application: ExternalApplication::Zed,
+            ..
+        }
+    ));
+    assert_eq!(
+        reduce_navigation_command(&mut state, open),
+        NavigationOutcome::NeedsEffect,
+        "only the primary half may request the external-open effect"
+    );
 }
 
 #[test]

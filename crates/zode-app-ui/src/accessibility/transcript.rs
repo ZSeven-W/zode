@@ -1,12 +1,36 @@
 use accesskit::{Action, Role, Toggled};
 use jian_core::CursorHint;
+use jian_widgets::Rect;
 use std::collections::BTreeMap;
-use zode_app_model::{TranscriptItem, ZodeAppState};
+use zode_app_model::{MessageFeedback, TranscriptItem, ZodeAppState};
 
-use crate::widgets::transcript::{item_has_turn_divider, preview_available, turn_label};
-use crate::{ApprovalCard, ThreadTranscript, ToolCard, WorkspaceLayout};
+use crate::widgets::transcript::{
+    item_has_turn_divider, preview_available, turn_label, TRANSCRIPT_BACK_TO_BOTTOM_ID,
+};
+use crate::{AnchorRail, ApprovalCard, ThreadTranscript, ToolCard, WorkspaceLayout};
 
 use super::{next_order, node, InteractionNode};
+
+/// Copy/reaction/share buttons are always exposed in the accessibility tree
+/// (an accesskit consumer can still reach them structurally without
+/// sequential Tab order) but deliberately kept out of `focus_order`: they
+/// only ever *paint* visibly on hover or (for the newest assistant message)
+/// persistently, and giving one to every transcript message would multiply
+/// the app's Tab stop count many times over for a cosmetic reveal action.
+/// Contrast the 3 `ApprovalCard` buttons below, which do take `focus_order`
+/// - those are rare (one pending approval at a time) and load-bearing.
+fn action_button_node(id: crate::WidgetId, rect: Rect, label: String) -> InteractionNode {
+    node(
+        id,
+        rect,
+        Role::Button,
+        &label,
+        None,
+        vec![Action::Click, Action::Focus],
+        None,
+        CursorHint::Pointer,
+    )
+}
 
 pub(super) fn append_transcript_nodes(
     nodes: &mut Vec<InteractionNode>,
@@ -29,33 +53,114 @@ pub(super) fn append_transcript_nodes(
     ) {
         let item = &transcript.items[item_layout.index];
         match item {
-            TranscriptItem::UserText(text) => {
+            TranscriptItem::UserText { text, .. } => {
                 let label = if item_has_turn_divider(transcript, item_layout.index) {
                     format!("你：{text}；{}", turn_label(transcript, item_layout.index))
                 } else {
                     format!("你：{text}")
                 };
+                // `Action::Focus` (no `focus_order`) makes this whole bubble
+                // a hover/hit-test target - see `ThreadTranscript::paint_with_hovered`
+                // - without adding a Tab stop for every message in the
+                // transcript. The copy button below is the same rect
+                // `paint_item` paints it into.
                 nodes.push(node(
                     ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
                     item_layout.visible_rect,
                     Role::Paragraph,
                     &label,
                     None,
-                    Vec::new(),
+                    vec![Action::Focus],
                     None,
                     CursorHint::Default,
                 ));
+                let content_rect = ThreadTranscript::content_rect_for_item(
+                    item_layout.rect,
+                    transcript,
+                    item_layout.index,
+                );
+                let button_rect = ThreadTranscript::user_copy_button_rect(content_rect, text);
+                if let Some(visible) =
+                    ThreadTranscript::clip_to_viewport(button_rect, layout.transcript)
+                {
+                    nodes.push(action_button_node(
+                        ThreadTranscript::user_copy_button_id(session, item_layout.index),
+                        visible,
+                        "复制消息".to_string(),
+                    ));
+                }
             }
-            TranscriptItem::AssistantText(text) => nodes.push(node(
-                ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
-                item_layout.visible_rect,
-                Role::Paragraph,
-                text,
-                None,
-                Vec::new(),
-                None,
-                CursorHint::Default,
-            )),
+            TranscriptItem::AssistantText { text, feedback, .. } => {
+                nodes.push(node(
+                    ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
+                    item_layout.visible_rect,
+                    Role::Paragraph,
+                    text,
+                    None,
+                    vec![Action::Focus],
+                    None,
+                    CursorHint::Default,
+                ));
+                let content_rect = ThreadTranscript::content_rect_for_item(
+                    item_layout.rect,
+                    transcript,
+                    item_layout.index,
+                );
+                let buttons = ThreadTranscript::assistant_button_rects(content_rect, text);
+                for button in buttons {
+                    let Some(visible) =
+                        ThreadTranscript::clip_to_viewport(button.rect, layout.transcript)
+                    else {
+                        continue;
+                    };
+                    let id = ThreadTranscript::assistant_button_id(
+                        session,
+                        item_layout.index,
+                        button.action,
+                    );
+                    let label = match button.action {
+                        crate::widgets::transcript::message_actions::MessageAction::Copy => {
+                            "复制消息".to_string()
+                        }
+                        crate::widgets::transcript::message_actions::MessageAction::ThumbsUp => {
+                            if *feedback == MessageFeedback::Up {
+                                "取消赞".to_string()
+                            } else {
+                                "赞".to_string()
+                            }
+                        }
+                        crate::widgets::transcript::message_actions::MessageAction::ThumbsDown => {
+                            if *feedback == MessageFeedback::Down {
+                                "取消踩".to_string()
+                            } else {
+                                "踩".to_string()
+                            }
+                        }
+                        crate::widgets::transcript::message_actions::MessageAction::Share => {
+                            "分享消息".to_string()
+                        }
+                    };
+                    let mut button_node = action_button_node(id, visible, label);
+                    if matches!(
+                        button.action,
+                        crate::widgets::transcript::message_actions::MessageAction::ThumbsUp
+                            | crate::widgets::transcript::message_actions::MessageAction::ThumbsDown
+                    ) {
+                        let active = matches!(
+                            (button.action, feedback),
+                            (
+                                crate::widgets::transcript::message_actions::MessageAction::ThumbsUp,
+                                MessageFeedback::Up
+                            ) | (
+                                crate::widgets::transcript::message_actions::MessageAction::ThumbsDown,
+                                MessageFeedback::Down
+                            )
+                        );
+                        button_node.toggled = Some(Toggled::from(active));
+                    }
+                    nodes.push(button_node);
+                }
+            }
             TranscriptItem::Thinking(text) => nodes.push(node(
                 ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
                 item_layout.visible_rect,
@@ -206,6 +311,22 @@ pub(super) fn append_transcript_nodes(
                     },
                 ));
             }
+            TranscriptItem::Image(image) => {
+                let mut label = format!("图片：{}", image.path);
+                if let (Some(width), Some(height)) = (image.width, image.height) {
+                    label.push_str(&format!("，{width}×{height}"));
+                }
+                nodes.push(node(
+                    ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
+                    item_layout.visible_rect,
+                    Role::Button,
+                    &label,
+                    None,
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
             TranscriptItem::GoalProgress(goal) => nodes.push(node(
                 ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
                 item_layout.visible_rect,
@@ -237,5 +358,49 @@ pub(super) fn append_transcript_nodes(
                 CursorHint::Default,
             )),
         }
+    }
+
+    // Unlike the per-message action-row buttons above, this is at most one
+    // node total, so it takes a real `focus_order` like any other standalone
+    // control (e.g. `ApprovalCard`'s buttons).
+    if let Some(button_rect) =
+        ThreadTranscript::back_to_bottom_layout(layout.transcript, transcript, tool_expanded)
+    {
+        nodes.push(node(
+            TRANSCRIPT_BACK_TO_BOTTOM_ID,
+            button_rect,
+            Role::Button,
+            "回到底部",
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        ));
+    }
+
+    // Turn anchors, like the ticks/hover-card AnchorRail paints, come from
+    // `AnchorRail::layout`, which already applies the same hide rule (not
+    // enough gutter between `layout.primary_surface` and `layout.transcript`)
+    // - hidden means an empty list, so nothing below registers. Each anchor
+    // is a real jump target (not a hover-only reveal control like the
+    // per-message action-row buttons above), so unlike those it takes a
+    // real `focus_order`.
+    for tick in AnchorRail::layout(
+        layout.transcript,
+        layout.primary_surface,
+        transcript,
+        session,
+        tool_expanded,
+    ) {
+        nodes.push(node(
+            tick.widget_id,
+            tick.hit_rect,
+            Role::Button,
+            &format!("前往：{}", tick.anchor.user_excerpt),
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        ));
     }
 }

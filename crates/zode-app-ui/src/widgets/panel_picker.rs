@@ -200,7 +200,13 @@ const fn home_item_id(pane: SecondaryPane) -> WidgetId {
         SecondaryPane::Browser => SECONDARY_HOME_BROWSER_ID,
         SecondaryPane::Files => SECONDARY_HOME_FILES_ID,
         SecondaryPane::SideTask => SECONDARY_HOME_SIDE_TASK_ID,
-        SecondaryPane::Environment | SecondaryPane::DocumentPreview => WidgetId(0),
+        // `Subagents` is opened only from the environment card's compact
+        // Subagents row (see `EnvironmentPanel::command_for_widget`), never
+        // from this home grid - like `Environment`/`DocumentPreview`, it has
+        // no tile here.
+        SecondaryPane::Environment | SecondaryPane::DocumentPreview | SecondaryPane::Subagents => {
+            WidgetId(0)
+        }
     }
 }
 
@@ -251,9 +257,23 @@ fn availability(state: &ZodeAppState, pane: SecondaryPane) -> (bool, Option<&'st
                 .is_some();
             (enabled, (!enabled).then_some("尚未打开文档"))
         }
-        SecondaryPane::Browser => (false, Some("浏览器会话尚未接入桌面端")),
+        SecondaryPane::Browser => {
+            // Mirrors `Terminal`: the row-level gate is the host capability
+            // manifest, not the (possibly per-launch, dynamic) reason text
+            // in `state.browser` - that field carries the specific message
+            // `BrowserPanel` shows once the panel is actually open.
+            let enabled = state
+                .host
+                .capabilities
+                .capabilities
+                .contains(&NodeCapability::Browser);
+            (enabled, (!enabled).then_some("当前节点不支持浏览器"))
+        }
         SecondaryPane::Files => (false, Some("文件树查询尚未接入桌面端")),
         SecondaryPane::SideTask => (false, Some("侧边任务尚未接入桌面端")),
+        // Never rendered as a picker row (see `home_item_id`'s doc comment);
+        // this arm exists only to keep the match exhaustive.
+        SecondaryPane::Subagents => (false, None),
     }
 }
 

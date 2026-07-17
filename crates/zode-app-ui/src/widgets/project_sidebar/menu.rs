@@ -5,7 +5,9 @@ use zode_app_model::{
 use zode_node_protocol::WorkspaceUri;
 
 use super::{ProjectSidebar, SidebarControlTarget, SidebarRowTarget};
-use crate::{paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme};
+use crate::{
+    paint_elevated_surface, paint_single_line, MenuRow, RectExt, SemanticIcon, WidgetId, ZodeTheme,
+};
 
 const MENU_W: f32 = 220.0;
 const MENU_PAD: f32 = 5.0;
@@ -368,17 +370,11 @@ pub(super) fn paint(
     hovered: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
-    painter.fill_drop_shadow(
-        Rect::xywh(
-            menu.rect.origin.x,
-            menu.rect.origin.y + 2.0,
-            menu.rect.size.x,
-            menu.rect.size.y,
-        ),
-        10.0,
-        16.0,
-        theme.tokens.foreground.with_alpha(0.12),
-    );
+    // `Popover::paint` fills/strokes at its own fixed 6.0 radius
+    // (`jian_widgets::components::popover`, which equals `tokens.radius`
+    // here) - the shadow now matches that instead of the previous ad hoc
+    // 10.0.
+    paint_elevated_surface(painter, menu.rect, theme.tokens.radius, theme);
     Popover.paint(painter, menu.rect, &theme.tokens);
     if menu.kind == SidebarMenuKind::Projects {
         paint_heading(
@@ -418,9 +414,8 @@ fn paint_item(
     hovered: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
-    if item.enabled && (hovered == Some(item.id) || focused == Some(item.id)) {
-        painter.fill_round_rect(item.rect, 7.0, theme.tokens.accent);
-    }
+    let active = item.enabled && (hovered == Some(item.id) || focused == Some(item.id));
+    MenuRow::paint_background(painter, item.rect, active, &theme.tokens);
     let foreground = if item.enabled {
         theme.tokens.popover_foreground
     } else {

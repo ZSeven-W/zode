@@ -43,6 +43,47 @@ fn compact_suggestion_layout_keeps_four_non_overlapping_hit_targets() {
 }
 
 #[test]
+fn narrow_suggestion_grid_keeps_the_reference_card_size_cap() {
+    let wide = EmptyState::suggestion_layouts(Rect::xywh(0.0, 0.0, 736.0, 868.0));
+    let narrow = EmptyState::suggestion_layouts(Rect::xywh(0.0, 0.0, 520.0, 868.0));
+    let short = EmptyState::suggestion_layouts(Rect::xywh(0.0, 0.0, 736.0, 520.0));
+    let reference_width = wide[0].rect.width();
+    let reference_height = wide[0].rect.height();
+
+    assert!(reference_width <= 170.6);
+    assert!(reference_height <= 106.1);
+    assert!(wide
+        .iter()
+        .all(|layout| (layout.rect.height() - reference_height).abs() <= 0.1));
+    assert!(wide
+        .iter()
+        .all(|layout| layout.rect.min_y() == wide[0].rect.min_y()));
+    assert!(
+        narrow
+            .iter()
+            .all(|layout| (layout.rect.width() - reference_width).abs() <= 0.1),
+        "narrow widths {:?} must preserve the {reference_width}px reference-card cap",
+        narrow.map(|layout| layout.rect.width()),
+    );
+    assert!(
+        narrow
+            .iter()
+            .all(|layout| (layout.rect.height() - reference_height).abs() <= 0.1),
+        "narrow heights {:?} must preserve the {reference_height}px wide-card cap",
+        narrow.map(|layout| layout.rect.height()),
+    );
+    assert_eq!(narrow[0].rect.min_y(), narrow[1].rect.min_y());
+    assert_eq!(narrow[2].rect.min_y(), narrow[3].rect.min_y());
+    assert!(narrow[2].rect.min_y() > narrow[0].rect.max_y());
+    assert!(short.iter().all(|layout| {
+        (layout.rect.width() - reference_width).abs() <= 0.1
+            && (layout.rect.height() - reference_height).abs() <= 0.1
+    }));
+    assert_eq!(short[0].rect.min_y(), short[1].rect.min_y());
+    assert_eq!(short[2].rect.min_y(), short[3].rect.min_y());
+}
+
+#[test]
 fn disabled_task_suggestions_leave_no_hidden_actions() {
     let mut state = demo_state();
     state.current_session = None;

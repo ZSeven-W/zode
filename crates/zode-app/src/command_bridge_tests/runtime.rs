@@ -50,3 +50,17 @@ fn permission_preset_dispatch_is_atomic_and_rejected_during_an_active_turn() {
     state.active_turns.insert(session, TurnId::new());
     assert!(prepare_dispatch(&mut state, command).is_err());
 }
+
+#[test]
+fn new_task_model_selection_is_local_until_session_creation() {
+    let mut state = fixture();
+    state.current_session = None;
+    state.composer.available_models = vec!["model-a".into(), "model-b".into()];
+    state.composer.model = Some("model-a".into());
+
+    let dispatch = prepare_dispatch(&mut state, AppCommand::SetModel("model-b".into())).unwrap();
+
+    assert!(dispatch.is_none());
+    assert_eq!(state.composer.model.as_deref(), Some("model-b"));
+    assert!(prepare_dispatch(&mut state, AppCommand::SetModel("unknown".into())).is_err());
+}

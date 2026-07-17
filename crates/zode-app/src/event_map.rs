@@ -5,7 +5,7 @@ use winit::{
     keyboard::{Key as WinitKey, ModifiersState, NamedKey},
     window::{ResizeDirection, Theme as WinitTheme},
 };
-use zode_app_model::{AppCommand, SystemTheme};
+use zode_app_model::{AppCommand, SystemTheme, ThemePreference};
 use zode_app_ui::{
     ComposerOutcome, FocusDirection, ImeEvent, Key, KeyEvent, Modifiers, PointerButton,
     PointerEvent, PointerEventKind, SandboxSelection, TouchEvent, TouchPhase, UnifiedInputEvent,
@@ -132,6 +132,15 @@ pub fn map_system_theme(theme: Option<WinitTheme>) -> SystemTheme {
     }
 }
 
+/// Keep AppKit's native materials aligned with the app-level appearance choice.
+pub fn window_theme_override(preference: ThemePreference) -> Option<WinitTheme> {
+    match preference {
+        ThemePreference::System => None,
+        ThemePreference::Light => Some(WinitTheme::Light),
+        ThemePreference::Dark => Some(WinitTheme::Dark),
+    }
+}
+
 pub fn map_key(
     logical_key: &WinitKey,
     modifiers: ModifiersState,
@@ -196,7 +205,8 @@ pub fn composer_outcome_command(outcome: &mut ComposerOutcome) -> Option<AppComm
         ComposerOutcome::Ignored
         | ComposerOutcome::Edited
         | ComposerOutcome::AttachmentsChanged(_)
-        | ComposerOutcome::Queue(_) => None,
+        | ComposerOutcome::Queue(_)
+        | ComposerOutcome::QueueFront(_) => None,
         ComposerOutcome::Send(submission) => {
             Some(AppCommand::Submit(std::mem::take(&mut submission.content)))
         }

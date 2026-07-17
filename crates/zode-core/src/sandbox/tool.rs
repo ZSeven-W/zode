@@ -125,7 +125,7 @@ pub const ESCAPE_FLAG: &str = "dangerouslyDisableSandbox";
 
 /// True if `sandbox_permissions` (or the legacy boolean) asks to leave the
 /// sandbox. `use_default` / absent → false.
-fn wants_escape(input: &serde_json::Value) -> bool {
+pub(crate) fn wants_escape(input: &serde_json::Value) -> bool {
     if let Some(p) = input.get(SANDBOX_PERMISSIONS_FLAG).and_then(|v| v.as_str()) {
         return matches!(
             p.trim().to_ascii_lowercase().as_str(),

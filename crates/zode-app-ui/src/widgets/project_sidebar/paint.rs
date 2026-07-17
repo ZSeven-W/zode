@@ -11,7 +11,9 @@ use super::{
     SIDEBAR_PROJECTS_NEW_ID, SIDEBAR_PROJECTS_SECTION_ID, SIDEBAR_TASKS_MORE_ID,
     SIDEBAR_TASKS_NEW_ID, SIDEBAR_TASKS_SECTION_ID, SIDEBAR_TASKS_TOGGLE_ID,
 };
-use crate::{paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme};
+use crate::{
+    paint_elevated_surface, paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme,
+};
 
 pub(super) fn paint(
     painter: &mut dyn Painter,
@@ -508,12 +510,7 @@ pub(super) fn paint_hover_overlay(
         226.0,
         card_h,
     );
-    painter.fill_drop_shadow(
-        Rect::xywh(card.origin.x, card.origin.y + 2.0, card.size.x, card.size.y),
-        12.0,
-        16.0,
-        theme.tokens.foreground.with_alpha(0.10),
-    );
+    paint_elevated_surface(painter, card, 12.0, theme);
     painter.fill_round_rect(card, 12.0, theme.tokens.popover);
     painter.stroke_round_rect(card, 12.0, theme.tokens.border, 1.0);
 
@@ -670,17 +667,7 @@ fn paint_session_action_tooltip(
         width,
         height,
     );
-    painter.fill_drop_shadow(
-        Rect::xywh(
-            tooltip.origin.x,
-            tooltip.origin.y + 1.0,
-            tooltip.size.x,
-            tooltip.size.y,
-        ),
-        6.0,
-        8.0,
-        theme.tokens.foreground.with_alpha(0.10),
-    );
+    paint_elevated_surface(painter, tooltip, 6.0, theme);
     Tooltip { label }.paint(painter, tooltip, &theme.tokens);
 }
 

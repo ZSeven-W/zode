@@ -21,16 +21,42 @@ use text_picture_cache::TextPictureCache;
 
 const TEXT_PICTURE_CULL_EXTENT: f32 = 1_048_576.0;
 
+/// Upper bound on cached parsed SVG icon paths before the cache is cleared.
+/// Icon sets are small (well under a hundred distinct `d` strings per app),
+/// so this is a generous ceiling that only exists to bound memory if callers
+/// ever feed pathologically many distinct path strings through; re-parsing
+/// on the next call is always a safe fallback.
+const SVG_PATH_CACHE_CAP: usize = 256;
+
+/// Upper bound on distinct `image_id`s cached before least-recently-used
+/// eviction kicks in. Static assets (icons, logos) reuse one id forever and
+/// stay hot under this cap. A live frame stream (the browser spectator
+/// panel - see `browser_panel`) mints a fresh id per decoded frame, since
+/// re-using one id would leave the (content-addressed) skia image cache
+/// permanently stuck on the first frame; without a cap that would grow this
+/// map's raw-byte entries without bound over a long streaming session. Each
+/// entry only holds encoded bytes (the decoded bitmap itself is bounded
+/// separately by jian-skia's own 128 MB `ImageCache`), so the cap just
+/// needs to comfortably exceed the app's static-asset count, which is a
+/// small constant.
+const IMAGE_SOURCE_CACHE_CAP: usize = 256;
+
 struct CachedImageSource {
     key: Arc<str>,
     bytes: Arc<Vec<u8>>,
+    /// Monotonically increasing access tick - bumped on every lookup (hit
+    /// or insert) and used to find the least-recently-used entry once the
+    /// cache is over `IMAGE_SOURCE_CACHE_CAP`. Mirrors jian-skia's own
+    /// `ImageCache` eviction strategy (see `jian-skia/src/image.rs`).
+    last_used: u64,
 }
 
 impl CachedImageSource {
-    fn new(image_id: u64, encoded: &[u8]) -> Self {
+    fn new(image_id: u64, encoded: &[u8], last_used: u64) -> Self {
         Self {
             key: Arc::from(format!("zode-image:{image_id:016x}")),
             bytes: Arc::new(encoded.to_vec()),
+            last_used,
         }
     }
 
@@ -46,9 +72,19 @@ impl CachedImageSource {
 pub struct NativeBackend {
     skia: jian_skia::SkiaBackend,
     image_sources: HashMap<u64, CachedImageSource>,
+    /// Next access tick handed to `CachedImageSource::last_used`; see
+    /// `IMAGE_SOURCE_CACHE_CAP`.
+    image_tick: u64,
     dpi: f32,
     text_metrics: TextMetricsEngine,
     text_pictures: TextPictureCache,
+    /// Parsed (untransformed) icon paths keyed by their raw SVG `d` string.
+    /// `skia_safe::utils::parse_path::from_svg` is a string parse that ran
+    /// on every icon draw every frame; the per-call rect/viewbox only affect
+    /// a cheap `with_transform` applied after cache retrieval, so caching
+    /// just the parsed path (shared by both `svg_path` and
+    /// `svg_path_with_viewbox`) captures effectively all of the savings.
+    svg_paths: HashMap<String, skia_safe::Path>,
     font_family_override: Option<String>,
 }
 
@@ -61,9 +97,11 @@ impl NativeBackend {
         Self {
             skia: jian_skia::SkiaBackend::new(),
             image_sources: HashMap::new(),
+            image_tick: 0,
             dpi,
             text_metrics: TextMetricsEngine::new(),
             text_pictures: TextPictureCache::new(),
+            svg_paths: HashMap::new(),
             font_family_override,
         }
     }
@@ -354,8 +392,8 @@ impl NativeBackend {
         );
     }
 
-    pub fn svg_path(&self, d: &str, rect: Rect) -> Option<skia_safe::Path> {
-        let path = skia_safe::utils::parse_path::from_svg(d)?;
+    pub fn svg_path(&mut self, d: &str, rect: Rect) -> Option<skia_safe::Path> {
+        let path = self.parsed_svg_path(d)?;
         let bounds = path.compute_tight_bounds();
         if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
             return None;
@@ -372,7 +410,7 @@ impl NativeBackend {
     }
 
     pub fn svg_path_with_viewbox(
-        &self,
+        &mut self,
         d: &str,
         rect: Rect,
         viewbox: f32,
@@ -380,7 +418,7 @@ impl NativeBackend {
         if viewbox <= 0.0 || rect.size.x <= 0.0 || rect.size.y <= 0.0 {
             return None;
         }
-        let path = skia_safe::utils::parse_path::from_svg(d)?;
+        let path = self.parsed_svg_path(d)?;
         let scale = (rect.size.x / viewbox).min(rect.size.y / viewbox);
         let scaled_viewbox = viewbox * scale;
         let mut matrix = skia_safe::Matrix::new_identity();
@@ -392,6 +430,22 @@ impl NativeBackend {
             ),
         );
         Some(path.with_transform(&matrix))
+    }
+
+    /// Returns the parsed, untransformed path for `d`, reusing a cached
+    /// parse when available. Cloning a `skia_safe::Path` is cheap (it is
+    /// ref-counted internally), so cache hits avoid the string parse
+    /// entirely while still letting each caller apply its own transform.
+    fn parsed_svg_path(&mut self, d: &str) -> Option<skia_safe::Path> {
+        if let Some(cached) = self.svg_paths.get(d) {
+            return Some(cached.clone());
+        }
+        let path = skia_safe::utils::parse_path::from_svg(d)?;
+        if self.svg_paths.len() >= SVG_PATH_CACHE_CAP {
+            self.svg_paths.clear();
+        }
+        self.svg_paths.insert(d.to_owned(), path.clone());
+        Some(path)
     }
 
     pub fn fill_inner_shadow_svg_path(
@@ -469,13 +523,42 @@ impl NativeBackend {
     /// The first ID-to-bytes binding wins. Later lookups clone the cached Arc
     /// without reading or comparing `encoded`, so every cache hit stays O(1).
     fn image_source(&mut self, image_id: u64, encoded: &[u8]) -> ImageSource {
-        let source = match self.image_sources.entry(image_id) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(CachedImageSource::new(image_id, encoded))
+        self.image_tick = self.image_tick.wrapping_add(1);
+        let tick = self.image_tick;
+        match self.image_sources.entry(image_id) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                let cached = entry.into_mut();
+                cached.last_used = tick;
+                cached.to_image_source()
             }
-        };
-        source.to_image_source()
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let source = entry
+                    .insert(CachedImageSource::new(image_id, encoded, tick))
+                    .to_image_source();
+                self.evict_image_sources_if_over_cap();
+                source
+            }
+        }
+    }
+
+    /// Drops the least-recently-used `image_sources` entries once the cache
+    /// exceeds `IMAGE_SOURCE_CACHE_CAP`. A static asset that gets evicted
+    /// this way isn't lost - its caller re-supplies the same `encoded`
+    /// bytes on its next draw, which simply re-inserts it - so this only
+    /// trades a little decode/alloc churn under sustained pressure (a live
+    /// frame stream) for a bounded memory footprint.
+    fn evict_image_sources_if_over_cap(&mut self) {
+        while self.image_sources.len() > IMAGE_SOURCE_CACHE_CAP {
+            let Some(victim) = self
+                .image_sources
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(id, _)| *id)
+            else {
+                break;
+            };
+            self.image_sources.remove(&victim);
+        }
     }
 }
 
@@ -552,7 +635,7 @@ mod tests {
     fn svg_path_with_viewbox_preserves_icon_aspect_ratio_and_padding() {
         const FOLDER_ICON: &str = "M3 5H10L12 7H21V19H3Z";
 
-        let backend = NativeBackend::new(1.0);
+        let mut backend = NativeBackend::new(1.0);
         let target = Rect::xywh(10.0, 20.0, 16.0, 16.0);
         let path = backend
             .svg_path_with_viewbox(FOLDER_ICON, target, 24.0)
@@ -568,6 +651,72 @@ mod tests {
         assert!(bounds.bottom <= target.origin.y + target.size.y);
         assert!((bounds.center_x() - (target.origin.x + target.size.x / 2.0)).abs() < 0.001);
         assert!((bounds.center_y() - (target.origin.y + target.size.y / 2.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn repeated_svg_path_reuses_the_cached_parse_across_different_rects() {
+        const FOLDER_ICON: &str = "M3 5H10L12 7H21V19H3Z";
+        let mut backend = NativeBackend::new(1.0);
+
+        let first = backend
+            .svg_path(FOLDER_ICON, Rect::xywh(0.0, 0.0, 16.0, 16.0))
+            .expect("folder icon should parse");
+        assert_eq!(backend.svg_paths.len(), 1);
+
+        let second = backend
+            .svg_path(FOLDER_ICON, Rect::xywh(40.0, 12.0, 20.0, 20.0))
+            .expect("cached parse should still transform for a different rect");
+        assert_eq!(
+            backend.svg_paths.len(),
+            1,
+            "second call with the same `d` must reuse the cached parse"
+        );
+
+        // Different target rects must still produce independently transformed paths.
+        assert_ne!(first.compute_tight_bounds(), second.compute_tight_bounds());
+    }
+
+    #[test]
+    fn svg_path_and_viewbox_variant_share_the_same_cache_entry() {
+        const ICON: &str = "M3 5H10L12 7H21V19H3Z";
+        let mut backend = NativeBackend::new(1.0);
+        let rect = Rect::xywh(0.0, 0.0, 24.0, 24.0);
+
+        backend
+            .svg_path(ICON, rect)
+            .expect("plain path should parse");
+        assert_eq!(backend.svg_paths.len(), 1);
+
+        backend
+            .svg_path_with_viewbox(ICON, rect, 24.0)
+            .expect("viewbox path should parse");
+        assert_eq!(
+            backend.svg_paths.len(),
+            1,
+            "the viewbox variant should hit the same cache entry as `svg_path`"
+        );
+    }
+
+    #[test]
+    fn svg_path_cache_clears_once_over_capacity() {
+        let mut backend = NativeBackend::new(1.0);
+        let rect = Rect::xywh(0.0, 0.0, 16.0, 16.0);
+
+        for i in 0..super::SVG_PATH_CACHE_CAP {
+            let d = format!("M0 0H10V{}H0Z", 15 + i);
+            assert!(
+                backend.svg_path(&d, rect).is_some(),
+                "distinct rectangle path should parse"
+            );
+        }
+        assert_eq!(backend.svg_paths.len(), super::SVG_PATH_CACHE_CAP);
+
+        assert!(backend.svg_path("M0 0H10V1000H0Z", rect).is_some());
+        assert_eq!(
+            backend.svg_paths.len(),
+            1,
+            "cache should clear before inserting past capacity"
+        );
     }
 
     #[test]
@@ -593,6 +742,65 @@ mod tests {
         assert_eq!(first_key.as_ref(), "zode-image:0000000000000007");
         assert!(Arc::ptr_eq(&first_key, &second_key));
         assert!(Arc::ptr_eq(&first_bytes, &second_bytes));
+    }
+
+    #[test]
+    fn image_source_cache_stays_bounded_under_sustained_fresh_ids() {
+        // Simulates a live frame stream (the browser spectator panel): a
+        // fresh `image_id` per decoded frame, well past the cache cap.
+        let mut backend = NativeBackend::new(1.0);
+        for id in 0..(super::IMAGE_SOURCE_CACHE_CAP as u64 + 50) {
+            backend.image_source(id, b"frame bytes");
+        }
+        assert_eq!(backend.image_sources.len(), super::IMAGE_SOURCE_CACHE_CAP);
+    }
+
+    #[test]
+    fn image_source_cache_evicts_the_least_recently_used_entry_first() {
+        let mut backend = NativeBackend::new(1.0);
+        for id in 0..super::IMAGE_SOURCE_CACHE_CAP as u64 {
+            backend.image_source(id, b"static asset bytes");
+        }
+        assert_eq!(backend.image_sources.len(), super::IMAGE_SOURCE_CACHE_CAP);
+
+        // id 1 is untouched since insertion; id 0 is "hot" (re-drawn every
+        // tick, like a chrome icon) and gets touched again right before the
+        // cache tips over capacity.
+        backend.image_source(0, b"static asset bytes");
+        backend.image_source(super::IMAGE_SOURCE_CACHE_CAP as u64, b"new entry");
+
+        assert!(
+            backend
+                .image_sources
+                .contains_key(&(super::IMAGE_SOURCE_CACHE_CAP as u64)),
+            "the newly inserted entry must survive its own insertion"
+        );
+        assert!(
+            backend.image_sources.contains_key(&0),
+            "a recently re-touched entry must not be evicted"
+        );
+        assert!(
+            !backend.image_sources.contains_key(&1),
+            "the least-recently-used entry should be evicted, not an arbitrary one"
+        );
+    }
+
+    #[test]
+    fn evicted_static_asset_id_is_transparently_recreated_on_next_draw() {
+        // An evicted static asset isn't lost - the caller always re-supplies
+        // its own encoded bytes on the next draw, so eviction only costs a
+        // re-insert, never stale/missing content.
+        let mut backend = NativeBackend::new(1.0);
+        for id in 0..(super::IMAGE_SOURCE_CACHE_CAP as u64 + 1) {
+            backend.image_source(id, b"static asset bytes");
+        }
+        assert!(!backend.image_sources.contains_key(&0), "id 0 was evicted");
+
+        let ImageSource::KeyedBytes { key, .. } = backend.image_source(0, b"static asset bytes")
+        else {
+            panic!("native images should use keyed encoded bytes");
+        };
+        assert_eq!(key.as_ref(), "zode-image:0000000000000000");
     }
 
     #[test]

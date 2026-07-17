@@ -4,9 +4,9 @@ use accesskit::{Action, NodeId, Role, Toggled};
 use jian_core::CursorHint;
 use jian_widgets::{Point2D, Rect};
 use zode_app_model::{
-    AppCommand, ComingSoonFeature, EnvironmentEntry, EnvironmentSectionKind, EnvironmentSnapshot,
-    IntegrationsTab, LoadState, ProjectState, SecondaryPane, SessionDiffState,
-    SessionPresentationState, SettingsCategory, ShellRoute, TranscriptItem, TranscriptState,
+    AppCommand, ComingSoonFeature, EnvironmentSectionKind, EnvironmentSnapshot, IntegrationsTab,
+    LoadState, ProjectState, SecondaryPane, SessionDiffState, SessionPresentationState,
+    SettingsCategory, ShellRoute, TranscriptItem, TranscriptState,
 };
 use zode_app_ui::{
     accessibility_tree, ApprovalCard, Composer, EnvironmentPanel, FocusDirection, Insets,
@@ -14,8 +14,9 @@ use zode_app_ui::{
     WorkspaceLayout, WorkspaceSnapshot, ENVIRONMENT_PANEL_ID, HEADER_REVIEW_ID, PANEL_PICKER_ID,
 };
 use zode_node_protocol::{
-    DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary, ToolCall,
-    ToolStatus, WorkspaceUri,
+    BackgroundProcessSnapshot, BackgroundProcessStatus, DiffFile, DiffFileStatus, DiffSnapshot,
+    SessionLocator, SubagentSnapshot, SubagentStatus, ThreadStatus, ThreadSummary, ToolCall,
+    ToolStatus, TurnId, WorkspaceUri,
 };
 
 const NAVIGATION_ID: WidgetId = WidgetId(10);
@@ -152,7 +153,6 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
             context: LoadState::Ready(EnvironmentSnapshot {
                 workspace_uri: workspace,
                 branch: Some("codex/a11y".into()),
-                subagents: Vec::new(),
                 background_processes: Vec::new(),
                 sources: Vec::new(),
             }),
@@ -278,24 +278,43 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
             .is_none());
     }
 
-    state
-        .presentation
-        .sessions
-        .get_mut(&session)
-        .expect("current presentation")
-        .context = LoadState::Ready(EnvironmentSnapshot {
-        workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
-        branch: Some("codex/a11y".into()),
-        subagents: (0..20)
-            .map(|index| EnvironmentEntry {
-                id: format!("agent-{index}"),
-                label: format!("agent {index}"),
-                value: None,
+    {
+        let presentation = state
+            .presentation
+            .sessions
+            .get_mut(&session)
+            .expect("current presentation");
+        // The Subagents row is a fixed-height compact summary regardless of
+        // how many real sub-agents exist (Codex's "avatar strip + N 完成",
+        // not a per-agent list), so background processes — which still
+        // render one row per entry — drive the overflow scenario instead.
+        presentation.context = LoadState::Ready(EnvironmentSnapshot {
+            workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+            branch: Some("codex/a11y".into()),
+            background_processes: Vec::new(),
+            sources: Vec::new(),
+        });
+        presentation.background_processes = (0..20)
+            .map(|index| BackgroundProcessSnapshot {
+                id: format!("overflow-process-{index}"),
+                command: format!("overflow process {index}"),
+                status: BackgroundProcessStatus::Running,
+                started_at_ms: 0,
+                tool_call_id: None,
             })
-            .collect(),
-        background_processes: Vec::new(),
-        sources: Vec::new(),
-    });
+            .collect();
+        presentation.subagents = vec![SubagentSnapshot {
+            id: "agent-0".into(),
+            agent_type: "agent 0".into(),
+            display_name: "agent 0".into(),
+            depth: 0,
+            status: SubagentStatus::Running,
+            tokens: 0,
+            turn_id: TurnId::new(),
+            completed_at_ms: None,
+            result_summary: None,
+        }];
+    }
     let overflow = WorkspaceSnapshot::build(&state, 1800.0, 1080.0, Insets::ZERO);
     let overflow_panel = EnvironmentPanel::layout(overflow.layout.context_panel, &state);
     let review = overflow_panel
@@ -502,7 +521,7 @@ fn markdown_height_and_follow_tail_share_one_virtual_layout() {
     let (mut state, session) = transcript_fixture();
     let transcript = state.transcripts.get_mut(&session).unwrap();
     transcript.items = vec![
-        TranscriptItem::AssistantText(
+        TranscriptItem::assistant_text(
             (0..20)
                 .map(|index| format!("paragraph {index} with enough words to wrap"))
                 .collect::<Vec<_>>()
@@ -548,6 +567,12 @@ fn visible_transcript_semantics_share_painted_item_rects_without_entering_tab_or
     let transcript = state.transcripts.get(&session).unwrap();
     let rows = ThreadTranscript::visible_item_layout(snapshot.layout.transcript, transcript);
 
+    // "question"/"answer" (a UserText/AssistantText bubble) are hover/hit-test
+    // targets for their message-actions reveal row - see
+    // `ThreadTranscript::paint_with_hovered` - so unlike the other three
+    // (Thinking/Status/Error, never interactive), they carry `Action::Focus`
+    // and do resolve from `hit_test`. None of the five gets a `focus_order`,
+    // so none of them enters Tab order either way.
     for (index, expected_label) in ["question", "answer", "working", "ready", "failed"]
         .into_iter()
         .enumerate()
@@ -558,9 +583,14 @@ fn visible_transcript_semantics_share_painted_item_rects_without_entering_tab_or
             .find(|node| node.name.contains(expected_label))
             .expect("each visible readable item has a semantic node");
         assert_eq!(node.rect, rows[index].visible_rect);
-        assert!(node.actions.is_empty());
         assert_eq!(node.focus_order, None);
-        assert_eq!(snapshot.hit_test(rect_center(node.rect)), None);
+        if matches!(expected_label, "question" | "answer") {
+            assert_eq!(node.actions, vec![Action::Focus]);
+            assert_eq!(snapshot.hit_test(rect_center(node.rect)), Some(node.id));
+        } else {
+            assert!(node.actions.is_empty());
+            assert_eq!(snapshot.hit_test(rect_center(node.rect)), None);
+        }
     }
 }
 
@@ -763,8 +793,8 @@ fn transcript_fixture() -> (zode_app_model::ZodeAppState, SessionLocator) {
         session.clone(),
         TranscriptState {
             items: vec![
-                TranscriptItem::UserText("question".into()),
-                TranscriptItem::AssistantText("answer".into()),
+                TranscriptItem::user_text("question"),
+                TranscriptItem::assistant_text("answer"),
                 TranscriptItem::Thinking("working".into()),
                 TranscriptItem::Status {
                     code: "ready".into(),

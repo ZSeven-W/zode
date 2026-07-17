@@ -41,7 +41,7 @@ pub(super) fn append_composer_context_nodes(
     focus_order: &mut u32,
     state: &ZodeAppState,
 ) {
-    if state.current_session.is_some() {
+    if state.current_session_has_conversation() {
         return;
     }
     let label = ProjectPicker::active_workspace_label(state);
@@ -58,12 +58,20 @@ pub(super) fn append_composer_context_nodes(
         .project
         .filter(|chip| visible_rect(chip.action_rect))
     {
+        let project_label = Composer::context_project_label(state, label.as_deref());
         nodes.push(node(
             COMPOSER_PROJECT_ID,
             project.action_rect,
             Role::Button,
-            "更改此任务的项目",
-            label.clone(),
+            if label.is_some() {
+                "更改此任务的项目"
+            } else {
+                "选择项目"
+            },
+            label
+                .is_some()
+                .then(|| project_label.map(str::to_owned))
+                .flatten(),
             vec![Action::Click, Action::Focus],
             next_order(focus_order),
             CursorHint::Pointer,
@@ -120,7 +128,9 @@ pub(super) fn append_picker_overlay(
     let trigger = match state.project_picker.anchor {
         ProjectPickerAnchor::Welcome => welcome_project_trigger(layout, state)?.1,
         ProjectPickerAnchor::Composer => composer_project_trigger(layout, state)?,
-        ProjectPickerAnchor::Sidebar => ProjectSidebar::brand_search_rect(layout.sidebar),
+        ProjectPickerAnchor::Sidebar => {
+            ProjectSidebar::brand_search_rect(layout.primary_sidebar_content)
+        }
     };
     let picker_layout = ProjectPicker::layout(layout.viewport, trigger, state, picker)?;
     nodes.push(node(
@@ -157,7 +167,7 @@ pub(super) fn append_picker_overlay(
         row_node.toggled = Some(Toggled::from(row.selected));
         nodes.push(row_node);
     }
-    for row in [picker_layout.new_project, picker_layout.projectless] {
+    for row in std::iter::once(picker_layout.new_project).chain(picker_layout.projectless) {
         let mut row_node = node(
             row.id,
             row.rect,
@@ -257,13 +267,13 @@ fn composer_project_trigger(layout: &WorkspaceLayout, state: &ZodeAppState) -> O
     if state.presentation.route != ShellRoute::Conversation || state.current_session.is_some() {
         return None;
     }
-    let label = ProjectPicker::active_workspace_label(state)?;
+    let label = ProjectPicker::active_workspace_label(state);
     let connection = composer_connection_label(state);
     let branch = composer_branch_label(state);
     Composer::context_interaction_layout(
         layout.composer,
         state,
-        Some(&label),
+        label.as_deref(),
         Some(connection),
         branch,
     )
@@ -295,7 +305,7 @@ fn composer_branch_label(state: &ZodeAppState) -> Option<&str> {
     state
         .threads
         .iter()
-        .filter(|thread| &thread.workspace_uri == workspace)
+        .filter(|thread| state.project_workspace_for_thread(thread) == Some(workspace))
         .filter_map(|thread| {
             let context = state
                 .presentation

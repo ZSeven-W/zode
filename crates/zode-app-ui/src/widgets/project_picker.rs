@@ -1,6 +1,6 @@
 use jian_core::text_input::{prev_char_boundary, TextInputState};
 use jian_widgets::{
-    components::{input::Input, popover::Popover},
+    components::{popover::Popover, text_input::TextInputView},
     HorizontalAlign, Painter, Point2D, Rect,
 };
 use zode_app_model::ZodeAppState;
@@ -8,8 +8,8 @@ use zode_node_protocol::WorkspaceUri;
 
 use super::project_sidebar::workspace_label;
 use crate::{
-    paint_single_line, stable_widget_id, ImeEvent, Key, Modifiers, RectExt, SemanticIcon, WidgetId,
-    ZodeTheme,
+    paint_elevated_surface, paint_single_line, stable_widget_id, ImeEvent, Key, Modifiers, RectExt,
+    SemanticIcon, WidgetId, ZodeTheme,
 };
 
 pub const PROJECT_PICKER_TRIGGER_ID: WidgetId = WidgetId(120);
@@ -25,6 +25,10 @@ const POPOVER_GAP: f32 = 6.0;
 const POPOVER_PAD: f32 = 6.0;
 const SEARCH_SECTION_H: f32 = 36.0;
 const SEARCH_INPUT_H: f32 = 28.0;
+const SEARCH_PAD_X: f32 = 8.0;
+const SEARCH_ICON_SIZE: f32 = 14.0;
+const SEARCH_ICON_GAP: f32 = 6.0;
+const SEARCH_FONT_SIZE: f32 = 13.0;
 const PROJECT_ROW_H: f32 = 29.0;
 const MAX_VISIBLE_PROJECTS: usize = 5;
 const SEPARATOR_H: f32 = 1.0;
@@ -207,7 +211,7 @@ pub struct ProjectPickerLayout {
     pub empty_results: Option<Rect>,
     pub separator: Rect,
     pub new_project: ProjectPickerRowLayout,
-    pub projectless: ProjectPickerRowLayout,
+    pub projectless: Option<ProjectPickerRowLayout>,
 }
 
 pub struct ProjectPicker;
@@ -227,6 +231,9 @@ impl ProjectPicker {
 
     pub fn active_workspace_label(state: &ZodeAppState) -> Option<String> {
         let workspace = state.active_available_workspace()?;
+        if state.is_projectless_workspace(workspace) {
+            return None;
+        }
         Some(workspace_label(workspace, true))
     }
 
@@ -290,7 +297,9 @@ impl ProjectPicker {
                 let newest_thread = state
                     .threads
                     .iter()
-                    .filter(|thread| thread.workspace_uri == project.workspace_uri)
+                    .filter(|thread| {
+                        state.project_workspace_for_thread(thread) == Some(&project.workspace_uri)
+                    })
                     .map(|thread| thread.updated_at_ms)
                     .max()
                     .unwrap_or(i64::MIN);
@@ -334,11 +343,13 @@ impl ProjectPicker {
         let choices = Self::choices(state, &picker.query);
         let visible = choices.len().min(MAX_VISIBLE_PROJECTS);
         let project_rows = visible.max(1);
+        let show_projectless = Self::active_workspace_label(state).is_some();
+        let action_rows = 1 + usize::from(show_projectless);
         let height = POPOVER_PAD * 2.0
             + SEARCH_SECTION_H
             + project_rows as f32 * PROJECT_ROW_H
             + SEPARATOR_H
-            + ACTION_ROW_H * 2.0;
+            + ACTION_ROW_H * action_rows as f32;
         let surface = centered_placement(trigger, Point2D::new(POPOVER_W, height), viewport);
         if surface.size.x < 120.0 || surface.size.y + f32::EPSILON < height {
             return None;
@@ -388,13 +399,13 @@ impl ProjectPicker {
             target: ProjectPickerTarget::NewProject,
             selected: false,
         };
-        let projectless = ProjectPickerRowLayout {
+        let projectless = show_projectless.then(|| ProjectPickerRowLayout {
             id: PROJECT_PICKER_PROJECTLESS_ID,
             rect: Rect::xywh(action_x, new_project.rect.max_y(), action_w, ACTION_ROW_H),
             label: "不在项目中工作".into(),
             target: ProjectPickerTarget::Projectless,
-            selected: state.active_workspace.is_none(),
-        };
+            selected: false,
+        });
         Some(ProjectPickerLayout {
             trigger,
             surface,
@@ -417,29 +428,17 @@ impl ProjectPicker {
         hovered: Option<WidgetId>,
         theme: &ZodeTheme,
     ) {
-        painter.fill_drop_shadow(
-            Rect::xywh(
-                layout.surface.origin.x,
-                layout.surface.origin.y + 2.0,
-                layout.surface.size.x,
-                layout.surface.size.y,
-            ),
-            theme.tokens.radius,
-            18.0,
-            theme.tokens.foreground.with_alpha(0.10),
-        );
+        paint_elevated_surface(painter, layout.surface, theme.tokens.radius, theme);
         Popover.paint(painter, layout.surface, &theme.tokens);
         painter.save();
         painter.clip_rect(layout.surface);
-        Input {
-            state: search_input,
-            placeholder: "搜索项目",
-            focused: focused == Some(PROJECT_PICKER_SEARCH_ID),
-            font_size: 13.0,
-            now_ms: 0,
-            icon_d: Some(SemanticIcon::Search.path()),
-        }
-        .paint(painter, layout.search, &theme.tokens);
+        paint_search_input(
+            painter,
+            layout.search,
+            search_input,
+            focused == Some(PROJECT_PICKER_SEARCH_ID),
+            theme,
+        );
         for row in &layout.rows {
             paint_row(painter, row, focused, hovered, theme);
         }
@@ -456,9 +455,47 @@ impl ProjectPicker {
         }
         painter.fill_rect(layout.separator, theme.tokens.border);
         paint_row(painter, &layout.new_project, focused, hovered, theme);
-        paint_row(painter, &layout.projectless, focused, hovered, theme);
+        if let Some(projectless) = &layout.projectless {
+            paint_row(painter, projectless, focused, hovered, theme);
+        }
         painter.restore();
     }
+}
+
+fn paint_search_input(
+    painter: &mut dyn Painter,
+    rect: Rect,
+    state: &TextInputState,
+    focused: bool,
+    theme: &ZodeTheme,
+) {
+    painter.fill_round_rect(rect, theme.tokens.radius, theme.tokens.background);
+    // Keyboard focus remains owned by TextInputView, but this compact picker
+    // field intentionally keeps the neutral border instead of a visible ring.
+    painter.stroke_round_rect(rect, theme.tokens.radius, theme.tokens.input, 1.0);
+
+    let icon = SemanticIcon::Search;
+    painter.stroke_svg_path(
+        icon.path(),
+        Point2D::new(
+            rect.origin.x + SEARCH_PAD_X,
+            rect.origin.y + (rect.size.y - SEARCH_ICON_SIZE) / 2.0,
+        ),
+        SEARCH_ICON_SIZE,
+        theme.tokens.muted_foreground,
+        icon.stroke_width(),
+    );
+    TextInputView {
+        state,
+        placeholder: "搜索项目",
+        focused,
+        font_size: SEARCH_FONT_SIZE,
+        now_ms: 0,
+        pad_x: SEARCH_PAD_X + SEARCH_ICON_SIZE + SEARCH_ICON_GAP,
+        baseline_delta_y: 0.0,
+        mask: None,
+    }
+    .paint(painter, rect, &theme.tokens);
 }
 
 fn centered_placement(anchor: Rect, requested: Point2D, viewport: Rect) -> Rect {
@@ -558,16 +595,31 @@ fn paint_row(
 
 fn estimated_text_width(text: &str, font_size: f32) -> f32 {
     text.chars()
-        .map(|character| {
-            if character.is_ascii_whitespace() {
-                font_size * 0.35
-            } else if character.is_ascii() {
-                font_size * 0.56
-            } else {
-                font_size
-            }
-        })
+        .map(|character| font_size * estimated_system_ui_advance(character))
         .sum()
+}
+
+fn estimated_system_ui_advance(character: char) -> f32 {
+    match character {
+        ' ' | '\t' => 0.22,
+        'i' | 'j' | 'l' | 'I' | '!' | '|' | '.' | ',' | ';' | '\'' | '`' => 0.22,
+        ':' => 0.225,
+        'f' | 'r' | 't' | '(' | ')' | '[' | ']' | '{' | '}' => 0.32,
+        '-' | '+' | '=' | '/' | '\\' => 0.44,
+        'm' => 0.82,
+        'w' => 0.73,
+        'M' => 0.84,
+        'W' => 0.94,
+        '0'..='9' => 0.62,
+        'A'..='Z' => 0.65,
+        'a' | 'e' | 'h' | 'n' | 'u' => 0.525,
+        'c' | 'k' | 's' | 'v' | 'x' | 'y' | 'z' => 0.50,
+        'b' | 'd' | 'g' | 'o' | 'p' | 'q' => 0.56,
+        '?' => 0.50,
+        '？' | '，' | '。' | '：' | '；' | '！' => 1.0,
+        character if character.is_ascii() => 0.55,
+        _ => 1.0,
+    }
 }
 
 #[cfg(test)]
@@ -593,6 +645,42 @@ mod tests {
             project.origin.x + project.size.x / 2.0,
             project.origin.y + project.size.y / 2.0,
         )));
+    }
+
+    #[test]
+    fn title_layout_hugs_narrow_ascii_project_labels() {
+        let layout = ProjectPicker::welcome_title_layout(
+            Rect::xywh(100.0, 200.0, 700.0, 33.0),
+            Some("file:"),
+            27.0,
+        );
+        let project = layout.project.expect("project trigger");
+
+        assert!((layout.prefix.size.x - 140.94).abs() < 0.1);
+        assert!((project.size.x - 40.77).abs() < 0.1);
+        assert!((layout.suffix.size.x - 167.94).abs() < 0.1);
+        assert!((layout.suffix.min_x() - project.max_x()).abs() < 0.01);
+    }
+
+    #[test]
+    fn full_width_punctuation_reserves_a_cjk_glyph_advance() {
+        assert_eq!(estimated_system_ui_advance('?'), 0.50);
+        for character in ['？', '，', '。', '：', '；', '！'] {
+            assert_eq!(estimated_system_ui_advance(character), 1.0);
+        }
+        assert_eq!(estimated_system_ui_advance('中'), 1.0);
+    }
+
+    #[test]
+    fn long_project_label_yields_space_to_the_fixed_suffix() {
+        let bounds = Rect::xywh(100.0, 200.0, 420.0, 33.0);
+        let layout =
+            ProjectPicker::welcome_title_layout(bounds, Some("zode-jian-desktop"), TITLE_WIDE_SIZE);
+        let project = layout.project.expect("project trigger");
+
+        assert!(project.size.x < estimated_text_width("zode-jian-desktop", TITLE_WIDE_SIZE));
+        assert!((layout.suffix.size.x - 167.94).abs() < 0.1);
+        assert!(layout.suffix.max_x() <= bounds.max_x() + 0.01);
     }
 
     #[test]
@@ -636,6 +724,7 @@ mod tests {
                 last_opened_ms: index,
             })
             .collect();
+        state.active_workspace = Some(workspace("file:///repo/project-0"));
         let trigger = Rect::xywh(390.0, 330.0, 54.0, 33.0);
         let layout = ProjectPicker::layout(
             Rect::xywh(0.0, 0.0, 864.0, 566.0),

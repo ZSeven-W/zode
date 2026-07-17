@@ -1,19 +1,19 @@
 //! Concrete session driver backed by `zode_core::ZodeEngine`.
+mod provider_reload;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::session_store::{SessionSaveOutcome, SessionWriteMode};
 use agent::abort::AbortController;
 use agent::message::{ContentBlock, ImageSource, MessageStore};
 use agent::stream::Event;
 use async_trait::async_trait;
 use futures::stream;
-use zode_core::config::ConfigManager;
-use zode_core::engine::CarryState;
 use zode_core::session_meta::title_from_prompt;
-use crate::session_store::{SessionSaveOutcome, SessionWriteMode};
+use zode_core::{config::ConfigManager, engine::CarryState};
 use zode_core::{EngineTemplate, ZodeEngine};
 use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentQuery, AgentSnapshot, CapabilityManifest, DiffFile,
@@ -52,6 +52,18 @@ pub trait SessionEngine: Send + Sync + 'static {
     async fn flush_turn_usage(&self) {}
 
     fn steer(&self, input: Vec<ContentBlock>) -> Result<(), EndpointError>;
+
+    /// Snapshot the engine's live `Task`-spawned sub-agent registry. Default
+    /// empty for test doubles that don't model sub-agents.
+    fn subagents_snapshot(&self) -> Vec<zode_core::SubAgent> {
+        Vec::new()
+    }
+
+    /// Snapshot the engine's tracked background shells (`BashRun` sessions).
+    /// Default empty for test doubles that don't model background shells.
+    async fn background_processes_snapshot(&self) -> Vec<zode_core::bg_shells::BgShell> {
+        Vec::new()
+    }
 }
 
 /// Creates real or fake session engines while keeping driver lifecycle tests
@@ -179,6 +191,14 @@ impl SessionEngine for RealSessionEngine {
             .then_some(())
             .ok_or_else(|| unavailable("session steering channel is unavailable"))
     }
+
+    fn subagents_snapshot(&self) -> Vec<zode_core::SubAgent> {
+        self.engine.subagents.snapshot()
+    }
+
+    async fn background_processes_snapshot(&self) -> Vec<zode_core::bg_shells::BgShell> {
+        self.engine.bg_shells_meta.list().await
+    }
 }
 
 struct RuntimeSession {
@@ -196,7 +216,7 @@ struct SessionSlot {
 /// Owns lazy, isolated `ZodeEngine` instances for every local session.
 pub struct ZodeEngineDriver {
     node_id: NodeId,
-    template: EngineTemplate,
+    template: Mutex<EngineTemplate>,
     config_dir: Option<PathBuf>,
     repository: LocalSessionRepository,
     capabilities: CapabilityManifest,
@@ -231,7 +251,7 @@ impl ZodeEngineDriver {
     ) -> Self {
         Self {
             node_id,
-            template,
+            template: Mutex::new(template),
             config_dir: None,
             repository,
             capabilities,
@@ -250,7 +270,7 @@ impl ZodeEngineDriver {
     ) -> Self {
         Self {
             node_id,
-            template,
+            template: Mutex::new(template),
             config_dir: Some(config_dir),
             repository,
             capabilities,
@@ -290,7 +310,8 @@ impl ZodeEngineDriver {
     }
 
     fn session_template(&self, cwd: &Path, model: String) -> Result<EngineTemplate, EndpointError> {
-        self.apply_workspace_policy(&self.template.with_model(model), cwd)
+        let template = lock(&self.template).clone();
+        self.apply_workspace_policy(&template.with_model(model), cwd)
     }
 
     async fn ensure_engine(
@@ -554,13 +575,22 @@ impl EngineDriver for ZodeEngineDriver {
         match command.kind {
             AgentCommandKind::CreateSession {
                 workspace_uri,
+                project_uri,
+                projectless,
                 model,
             } => {
+                let base_model = lock(&self.template).model().map(str::to_string);
                 let model = model
-                    .or_else(|| self.template.model().map(str::to_string))
+                    .or(base_model)
                     .unwrap_or_else(|| "unconfigured".to_string());
                 self.repository
-                    .create(&command.session, &workspace_uri, model)
+                    .create_with_affiliation(
+                        &command.session,
+                        &workspace_uri,
+                        project_uri.as_ref(),
+                        projectless,
+                        model,
+                    )
                     .await?;
                 Ok(())
             }
@@ -591,6 +621,9 @@ impl EngineDriver for ZodeEngineDriver {
                     .await
             }
             AgentCommandKind::SetModel { model } => self.set_model(&command.session, model).await,
+            AgentCommandKind::ReloadProviderConfiguration => {
+                self.reload_provider_configuration().await
+            }
             AgentCommandKind::SetEffort { effort } => {
                 self.set_effort(&command.session, effort).await
             }
@@ -604,6 +637,27 @@ impl EngineDriver for ZodeEngineDriver {
             } => {
                 self.set_permission_preset(&command.session, approval_mode, sandbox_mode, network)
                     .await
+            }
+            AgentCommandKind::InstallPlugin { spec, reference } => {
+                crate::plugin_market::install_plugin(
+                    &spec,
+                    reference.as_deref(),
+                    self.config_dir.as_deref(),
+                )
+                .await
+                .map_err(map_internal)
+            }
+            AgentCommandKind::UninstallPlugin { plugin_id } => {
+                crate::plugin_market::uninstall_plugin(&plugin_id, self.config_dir.as_deref())
+                    .map_err(map_internal)
+            }
+            AgentCommandKind::GrantPluginTrust { plugin_id, keys } => {
+                crate::plugin_market::grant_plugin_trust(
+                    &plugin_id,
+                    keys,
+                    self.config_dir.as_deref(),
+                )
+                .map_err(map_internal)
             }
             AgentCommandKind::Approve { .. }
             | AgentCommandKind::StartTurn { .. }
@@ -699,6 +753,22 @@ impl EngineDriver for ZodeEngineDriver {
         }
     }
 
+    fn subagents_snapshot(&self, session: &SessionLocator) -> Vec<zode_core::SubAgent> {
+        self.runtime_engine(session)
+            .map(|engine| engine.subagents_snapshot())
+            .unwrap_or_default()
+    }
+
+    async fn background_processes_snapshot(
+        &self,
+        session: &SessionLocator,
+    ) -> Vec<zode_core::bg_shells::BgShell> {
+        let Some(engine) = self.runtime_engine(session) else {
+            return Vec::new();
+        };
+        engine.background_processes_snapshot().await
+    }
+
     async fn query(&self, query: AgentQuery) -> Result<AgentSnapshot, EndpointError> {
         match query {
             AgentQuery::Capabilities => Ok(AgentSnapshot::Capabilities(self.capabilities.clone())),
@@ -708,7 +778,7 @@ impl EngineDriver for ZodeEngineDriver {
             )),
             AgentQuery::Diff { session } => Ok(AgentSnapshot::Diff(self.diff(session).await?)),
             AgentQuery::RuntimeOptions => Ok(AgentSnapshot::RuntimeOptions(
-                runtime_policy::runtime_options(&self.template),
+                runtime_policy::runtime_options(&lock(&self.template)),
             )),
             AgentQuery::SessionRuntimeOptions { session } => {
                 let options = self.session_runtime_options(&session).await?;
@@ -727,6 +797,20 @@ impl EngineDriver for ZodeEngineDriver {
                 )
                 .map_err(map_internal)?;
                 Ok(AgentSnapshot::Integrations(snapshot))
+            }
+            AgentQuery::InstalledPlugins => {
+                let plugins =
+                    crate::plugin_market::list_installed_plugins(self.config_dir.as_deref())
+                        .map_err(map_internal)?;
+                Ok(AgentSnapshot::InstalledPlugins(plugins))
+            }
+            AgentQuery::PluginTrustReview { plugin_id } => {
+                let review = crate::plugin_market::plugin_trust_review(
+                    &plugin_id,
+                    self.config_dir.as_deref(),
+                )
+                .map_err(map_internal)?;
+                Ok(AgentSnapshot::PluginTrustReview(review))
             }
         }
     }

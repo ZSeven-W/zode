@@ -5,17 +5,71 @@ use async_trait::async_trait;
 use futures::{stream, StreamExt};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::time::timeout;
 use zode_app_runtime::{
     DriverEventStream, EngineBackend, EngineDriver, EventNormalizer, EventSink, NodeBackend,
 };
+use zode_core::{SubAgent, SubAgentStatus};
 use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentEvent, AgentEventKind, AgentQuery, AgentSnapshot,
-    EndpointError, EndpointErrorKind, NodeId, RuntimeOptions, SandboxMode, SessionLocator,
-    ToolStatus, TurnId, UserContent, WorkspaceUri, PROTOCOL_VERSION,
+    BackgroundProcessStatus, EndpointError, EndpointErrorKind, NodeId, RuntimeOptions, SandboxMode,
+    SessionLocator, SubagentStatus as WireSubagentStatus, ToolStatus, TurnId, UserContent,
+    WorkspaceUri, PROTOCOL_VERSION,
 };
+
+/// A scripted `SubAgent` registry entry for exercising `diff_subagents`
+/// without spinning up a real `Task` tool call.
+fn scripted_subagent(
+    id: u64,
+    status: SubAgentStatus,
+    input_tokens: u32,
+    output_tokens: u32,
+) -> SubAgent {
+    SubAgent {
+        id,
+        agent_type: "researcher".into(),
+        description: None,
+        depth: 0,
+        status,
+        started_at: 0,
+        finished_at: None,
+        input_tokens,
+        output_tokens,
+        transcript: Vec::new(),
+        final_output: None,
+    }
+}
+
+/// Like [`scripted_subagent`] but with the description/finished-at/final-
+/// output fields a real terminal `Task` finish would carry, for exercising
+/// `display_name`/`completed_at_ms`/`result_summary` wire mapping.
+#[allow(clippy::too_many_arguments)]
+fn scripted_finished_subagent(
+    id: u64,
+    status: SubAgentStatus,
+    description: Option<&str>,
+    finished_at_secs: Option<u64>,
+    final_output: Option<&str>,
+) -> SubAgent {
+    SubAgent {
+        id,
+        agent_type: "researcher".into(),
+        description: description.map(str::to_owned),
+        depth: 0,
+        status,
+        started_at: 0,
+        finished_at: finished_at_secs,
+        input_tokens: 1,
+        output_tokens: 1,
+        transcript: Vec::new(),
+        final_output: final_output.map(str::to_owned),
+    }
+}
+
+#[path = "engine_backend/stream_termination.rs"]
+mod stream_termination;
 
 fn normalize(normalizer: &mut EventNormalizer, event: Event) -> Option<AgentEventKind> {
     normalizer.normalize(event)
@@ -239,6 +293,288 @@ fn unknown_event_becomes_a_diagnostic_notice() {
 }
 
 #[test]
+fn task_tool_use_summary_carries_the_real_agent_type_and_description() {
+    let mut normalizer = EventNormalizer::new();
+
+    let event = normalize(
+        &mut normalizer,
+        Event::ToolUse {
+            id: "task-1".into(),
+            name: "Task".into(),
+            input: serde_json::json!({
+                "agent_type": "researcher",
+                "description": "dig into the bug",
+                "prompt": "investigate the crash",
+            }),
+        },
+    )
+    .unwrap();
+
+    let AgentEventKind::ToolStarted { tool } = event else {
+        panic!("expected ToolStarted");
+    };
+    assert_eq!(tool.summary, "researcher: dig into the bug");
+    assert!(
+        !tool.summary.contains("investigate the crash"),
+        "the raw prompt must not leak into the summary"
+    );
+}
+
+#[test]
+fn task_tool_use_summary_falls_back_to_just_the_agent_type_without_a_description() {
+    let mut normalizer = EventNormalizer::new();
+
+    let event = normalize(
+        &mut normalizer,
+        Event::ToolUse {
+            id: "task-2".into(),
+            name: "Task".into(),
+            input: serde_json::json!({
+                "agent_type": "Explore",
+                "prompt": "find the config loader",
+            }),
+        },
+    )
+    .unwrap();
+
+    let AgentEventKind::ToolStarted { tool } = event else {
+        panic!("expected ToolStarted");
+    };
+    assert_eq!(tool.summary, "Explore");
+}
+
+#[test]
+fn diff_subagents_emits_a_new_running_agent_on_first_sight() {
+    let mut normalizer = EventNormalizer::new();
+    let turn_id = TurnId::new();
+    let snapshot = vec![scripted_subagent(1, SubAgentStatus::Running, 10, 5)];
+
+    let updates = normalizer.diff_subagents(&snapshot, turn_id, Instant::now());
+
+    assert_eq!(updates.len(), 1);
+    let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
+        panic!("expected SubagentUpdate");
+    };
+    assert_eq!(subagent.id, "1");
+    assert_eq!(subagent.agent_type, "researcher");
+    assert_eq!(subagent.status, WireSubagentStatus::Running);
+    assert_eq!(subagent.tokens, 15);
+    assert_eq!(subagent.turn_id, turn_id);
+}
+
+#[test]
+fn diff_subagents_does_not_re_emit_when_nothing_changed() {
+    let mut normalizer = EventNormalizer::new();
+    let turn_id = TurnId::new();
+    let snapshot = vec![scripted_subagent(1, SubAgentStatus::Running, 10, 5)];
+    let now = Instant::now();
+
+    assert_eq!(normalizer.diff_subagents(&snapshot, turn_id, now).len(), 1);
+    assert_eq!(normalizer.diff_subagents(&snapshot, turn_id, now).len(), 0);
+}
+
+#[test]
+fn diff_subagents_throttles_token_only_changes_within_the_coalescing_window() {
+    let mut normalizer = EventNormalizer::new();
+    let turn_id = TurnId::new();
+    let start = Instant::now();
+    let first = vec![scripted_subagent(1, SubAgentStatus::Running, 10, 5)];
+    assert_eq!(normalizer.diff_subagents(&first, turn_id, start).len(), 1);
+
+    // Tokens changed but under a second elapsed: throttled, no re-emit.
+    let more_tokens = vec![scripted_subagent(1, SubAgentStatus::Running, 40, 5)];
+    let soon = start + Duration::from_millis(200);
+    assert_eq!(
+        normalizer.diff_subagents(&more_tokens, turn_id, soon).len(),
+        0,
+        "a token-only change inside the throttle window must be coalesced"
+    );
+
+    // Same token change, now past the throttle window: emitted.
+    let later = start + Duration::from_secs(2);
+    let updates = normalizer.diff_subagents(&more_tokens, turn_id, later);
+    assert_eq!(updates.len(), 1);
+    let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
+        panic!("expected SubagentUpdate");
+    };
+    assert_eq!(subagent.tokens, 45);
+}
+
+#[test]
+fn diff_subagents_always_emits_immediately_on_a_status_change() {
+    let mut normalizer = EventNormalizer::new();
+    let turn_id = TurnId::new();
+    let now = Instant::now();
+    let running = vec![scripted_subagent(1, SubAgentStatus::Running, 10, 5)];
+    assert_eq!(normalizer.diff_subagents(&running, turn_id, now).len(), 1);
+
+    // Status flips to Done a moment later — well inside the token throttle
+    // window, but a status change always bypasses it.
+    let done = vec![scripted_subagent(1, SubAgentStatus::Done, 10, 5)];
+    let updates = normalizer.diff_subagents(&done, turn_id, now + Duration::from_millis(50));
+    assert_eq!(updates.len(), 1);
+    let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
+        panic!("expected SubagentUpdate");
+    };
+    assert_eq!(subagent.status, WireSubagentStatus::Completed);
+}
+
+#[test]
+fn diff_subagents_maps_failed_and_caps_depth_at_u8_max() {
+    let mut normalizer = EventNormalizer::new();
+    let turn_id = TurnId::new();
+    let mut failed = scripted_subagent(1, SubAgentStatus::Failed, 1, 1);
+    failed.depth = 9_000; // far past u8::MAX, must saturate rather than panic/wrap.
+
+    let updates = normalizer.diff_subagents(&[failed], turn_id, Instant::now());
+
+    let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
+        panic!("expected SubagentUpdate");
+    };
+    assert_eq!(subagent.status, WireSubagentStatus::Failed);
+    assert_eq!(subagent.depth, u8::MAX);
+}
+
+#[test]
+fn diff_subagents_maps_display_name_completed_at_and_result_summary() {
+    let mut normalizer = EventNormalizer::new();
+    let turn_id = TurnId::new();
+    let agent = scripted_finished_subagent(
+        1,
+        SubAgentStatus::Done,
+        Some("Scan home large"),
+        Some(1_752_700_000),
+        Some("Found 3 large directories under ~\nSecond line is ignored."),
+    );
+
+    let updates = normalizer.diff_subagents(&[agent], turn_id, Instant::now());
+
+    let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
+        panic!("expected SubagentUpdate");
+    };
+    assert_eq!(subagent.display_name, "Scan home large");
+    assert_eq!(subagent.completed_at_ms, Some(1_752_700_000_000));
+    assert_eq!(
+        subagent.result_summary.as_deref(),
+        Some("Found 3 large directories under ~"),
+        "only the first line of the final answer is kept"
+    );
+}
+
+#[test]
+fn diff_subagents_falls_back_display_name_to_agent_type_without_a_description() {
+    let mut normalizer = EventNormalizer::new();
+    let turn_id = TurnId::new();
+    let agent = scripted_finished_subagent(1, SubAgentStatus::Running, None, None, None);
+
+    let updates = normalizer.diff_subagents(&[agent], turn_id, Instant::now());
+
+    let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
+        panic!("expected SubagentUpdate");
+    };
+    assert_eq!(subagent.display_name, "researcher");
+    assert_eq!(subagent.completed_at_ms, None);
+    assert_eq!(subagent.result_summary, None);
+}
+
+fn scripted_shell(shell_id: &str, command: &str, killed: bool) -> zode_core::bg_shells::BgShell {
+    zode_core::bg_shells::BgShell {
+        shell_id: shell_id.into(),
+        command: command.into(),
+        started_at: 0,
+        killed,
+    }
+}
+
+#[test]
+fn bash_run_summary_carries_the_command() {
+    let mut normalizer = EventNormalizer::new();
+    let event = normalize(
+        &mut normalizer,
+        Event::ToolUse {
+            id: "call-1".into(),
+            name: "BashRun".into(),
+            input: serde_json::json!({"command": "cargo test -p zode-app-ui"}),
+        },
+    );
+    let Some(AgentEventKind::ToolStarted { tool }) = event else {
+        panic!("expected ToolStarted");
+    };
+    assert_eq!(tool.summary, "BashRun command=cargo test -p zode-app-ui");
+}
+
+#[test]
+fn diff_background_processes_emits_a_new_running_shell_on_first_sight() {
+    let mut normalizer = EventNormalizer::new();
+    let snapshot = vec![scripted_shell("shell-1", "npm run dev", false)];
+
+    let updates = normalizer.diff_background_processes(&snapshot);
+
+    assert_eq!(updates.len(), 1);
+    let AgentEventKind::BackgroundProcessUpdate { process } = &updates[0] else {
+        panic!("expected BackgroundProcessUpdate");
+    };
+    assert_eq!(process.id, "shell-1");
+    assert_eq!(process.command, "npm run dev");
+    assert_eq!(process.status, BackgroundProcessStatus::Running);
+    assert_eq!(process.tool_call_id, None);
+}
+
+#[test]
+fn diff_background_processes_does_not_re_emit_when_nothing_changed() {
+    let mut normalizer = EventNormalizer::new();
+    let snapshot = vec![scripted_shell("shell-1", "npm run dev", false)];
+
+    assert_eq!(normalizer.diff_background_processes(&snapshot).len(), 1);
+    assert_eq!(normalizer.diff_background_processes(&snapshot).len(), 0);
+}
+
+#[test]
+fn diff_background_processes_emits_stopped_once_killed_flips_true() {
+    let mut normalizer = EventNormalizer::new();
+    let running = vec![scripted_shell("shell-1", "npm run dev", false)];
+    assert_eq!(normalizer.diff_background_processes(&running).len(), 1);
+
+    let stopped = vec![scripted_shell("shell-1", "npm run dev", true)];
+    let updates = normalizer.diff_background_processes(&stopped);
+
+    assert_eq!(updates.len(), 1);
+    let AgentEventKind::BackgroundProcessUpdate { process } = &updates[0] else {
+        panic!("expected BackgroundProcessUpdate");
+    };
+    assert_eq!(process.status, BackgroundProcessStatus::Stopped);
+}
+
+#[test]
+fn diff_background_processes_associates_the_launching_tool_call_id() {
+    let mut normalizer = EventNormalizer::new();
+    normalize(
+        &mut normalizer,
+        Event::ToolUse {
+            id: "call-1".into(),
+            name: "BashRun".into(),
+            input: serde_json::json!({"command": "npm run dev"}),
+        },
+    );
+    normalize(
+        &mut normalizer,
+        Event::ToolResult {
+            id: "call-1".into(),
+            ok: true,
+            output: serde_json::json!({"shell_id": "shell-1", "command": "npm run dev"}),
+        },
+    );
+
+    let updates =
+        normalizer.diff_background_processes(&[scripted_shell("shell-1", "npm run dev", false)]);
+
+    let AgentEventKind::BackgroundProcessUpdate { process } = &updates[0] else {
+        panic!("expected BackgroundProcessUpdate");
+    };
+    assert_eq!(process.tool_call_id.as_deref(), Some("call-1"));
+}
+
+#[test]
 fn result_metadata_does_not_finish_the_turn_early() {
     let mut normalizer = EventNormalizer::new();
 
@@ -275,6 +611,8 @@ struct FakeDriver {
     start_seen: Semaphore,
     finish_seen: Semaphore,
     finish_gate: Option<Arc<Semaphore>>,
+    subagents: Mutex<Vec<SubAgent>>,
+    background_processes: Mutex<Vec<zode_core::bg_shells::BgShell>>,
 }
 
 impl FakeDriver {
@@ -295,6 +633,8 @@ impl FakeDriver {
             start_seen: Semaphore::new(0),
             finish_seen: Semaphore::new(0),
             finish_gate,
+            subagents: Mutex::new(Vec::new()),
+            background_processes: Mutex::new(Vec::new()),
         }
     }
 
@@ -309,6 +649,19 @@ impl FakeDriver {
             .expect("turn abort controller was recorded")
             .2
             .clone()
+    }
+
+    /// Replaces the registry snapshot the fake driver reports for every
+    /// session, simulating a live `SubAgentRegistry` mutation between turn
+    /// events.
+    fn set_subagents(&self, agents: Vec<SubAgent>) {
+        *self.subagents.lock().unwrap() = agents;
+    }
+
+    /// Replaces the `BackgroundShellTracker` snapshot the fake driver
+    /// reports, mirroring `set_subagents`.
+    fn set_background_processes(&self, shells: Vec<zode_core::bg_shells::BgShell>) {
+        *self.background_processes.lock().unwrap() = shells;
     }
 }
 
@@ -367,6 +720,17 @@ impl EngineDriver for FakeDriver {
             sandbox_network: false,
         }))
     }
+
+    fn subagents_snapshot(&self, _session: &SessionLocator) -> Vec<SubAgent> {
+        self.subagents.lock().unwrap().clone()
+    }
+
+    async fn background_processes_snapshot(
+        &self,
+        _session: &SessionLocator,
+    ) -> Vec<zode_core::bg_shells::BgShell> {
+        self.background_processes.lock().unwrap().clone()
+    }
 }
 
 fn test_session(node_id: NodeId, name: &str) -> SessionLocator {
@@ -413,6 +777,8 @@ fn create_command(session: SessionLocator) -> AgentCommand {
         turn_id: None,
         kind: AgentCommandKind::CreateSession {
             workspace_uri: WorkspaceUri::new("file:///tmp/zode-lifecycle").unwrap(),
+            project_uri: None,
+            projectless: false,
             model: Some("test-model".into()),
         },
     }
@@ -646,6 +1012,43 @@ async fn one_session_is_busy_while_another_session_can_start() {
 }
 
 #[tokio::test]
+async fn provider_reload_requires_every_session_to_be_idle() {
+    let node_id = NodeId::new();
+    let active_session = test_session(node_id, "active");
+    let command_session = test_session(node_id, "settings");
+    let turn_id = TurnId::new();
+    let (sender, stream) = driver_stream();
+    let driver = Arc::new(FakeDriver::new(vec![stream]));
+    let backend = EngineBackend::new(node_id, driver.clone());
+    let (events, _receiver) = event_sink();
+
+    backend
+        .command(start_command(active_session, turn_id), events.clone())
+        .await
+        .unwrap();
+    consume_permit(&driver.start_seen, "active provider turn").await;
+
+    let error = backend
+        .command(
+            AgentCommand {
+                version: PROTOCOL_VERSION,
+                session: command_session,
+                turn_id: None,
+                kind: AgentCommandKind::ReloadProviderConfiguration,
+            },
+            events,
+        )
+        .await
+        .expect_err("provider reload must not replace any active session engine");
+
+    assert_eq!(error.kind, EndpointErrorKind::Busy);
+    assert!(driver.commands.lock().unwrap().is_empty());
+    sender
+        .send(Err(AgentError::Aborted("cleanup".into())))
+        .unwrap();
+}
+
+#[tokio::test]
 async fn only_matching_interrupt_aborts_and_late_text_is_dropped() {
     let node_id = NodeId::new();
     let session = test_session(node_id, "interrupt");
@@ -696,6 +1099,178 @@ async fn only_matching_interrupt_aborts_and_late_text_is_dropped() {
 }
 
 #[tokio::test]
+async fn task_tool_lifecycle_emits_subagent_updates_alongside_tool_events() {
+    let node_id = NodeId::new();
+    let session = test_session(node_id, "task-subagents");
+    let turn_id = TurnId::new();
+    let (stream_sender, stream) = driver_stream();
+    let driver = Arc::new(FakeDriver::new(vec![stream]));
+    let backend = EngineBackend::new(node_id, driver.clone());
+    let (events, mut receiver) = event_sink();
+
+    backend
+        .command(start_command(session.clone(), turn_id), events)
+        .await
+        .unwrap();
+    consume_permit(&driver.start_seen, "turn start").await;
+
+    driver.set_subagents(vec![scripted_subagent(1, SubAgentStatus::Running, 5, 2)]);
+    stream_sender
+        .send(Ok(Event::ToolUse {
+            id: "task-1".into(),
+            name: "Task".into(),
+            input: serde_json::json!({"agent_type": "researcher", "prompt": "go"}),
+        }))
+        .unwrap();
+
+    let tool_started = receive_event(&mut receiver).await;
+    assert!(matches!(
+        tool_started.kind,
+        AgentEventKind::ToolStarted { .. }
+    ));
+    let running_update = receive_event(&mut receiver).await;
+    let AgentEventKind::SubagentUpdate { subagent } = running_update.kind else {
+        panic!("expected a SubagentUpdate right after the Task ToolStarted event");
+    };
+    assert_eq!(subagent.status, WireSubagentStatus::Running);
+    assert_eq!(subagent.agent_type, "researcher");
+
+    driver.set_subagents(vec![scripted_subagent(1, SubAgentStatus::Done, 5, 2)]);
+    stream_sender
+        .send(Ok(Event::ToolResult {
+            id: "task-1".into(),
+            ok: true,
+            output: serde_json::json!({"output": "done"}),
+        }))
+        .unwrap();
+
+    let tool_completed = receive_event(&mut receiver).await;
+    assert!(matches!(
+        tool_completed.kind,
+        AgentEventKind::ToolCompleted { .. }
+    ));
+    let done_update = receive_event(&mut receiver).await;
+    let AgentEventKind::SubagentUpdate { subagent } = done_update.kind else {
+        panic!("expected a SubagentUpdate right after the Task ToolCompleted event");
+    };
+    assert_eq!(subagent.status, WireSubagentStatus::Completed);
+
+    drop(stream_sender);
+    let _ = collect_until_finished(&mut receiver).await;
+}
+
+#[tokio::test]
+async fn bash_run_lifecycle_emits_a_background_process_update_alongside_tool_events() {
+    let node_id = NodeId::new();
+    let session = test_session(node_id, "bash-run-background");
+    let turn_id = TurnId::new();
+    let (stream_sender, stream) = driver_stream();
+    let driver = Arc::new(FakeDriver::new(vec![stream]));
+    let backend = EngineBackend::new(node_id, driver.clone());
+    let (events, mut receiver) = event_sink();
+
+    backend
+        .command(start_command(session.clone(), turn_id), events)
+        .await
+        .unwrap();
+    consume_permit(&driver.start_seen, "turn start").await;
+
+    stream_sender
+        .send(Ok(Event::ToolUse {
+            id: "call-1".into(),
+            name: "BashRun".into(),
+            input: serde_json::json!({"command": "npm run dev"}),
+        }))
+        .unwrap();
+    let tool_started = receive_event(&mut receiver).await;
+    assert!(matches!(
+        tool_started.kind,
+        AgentEventKind::ToolStarted { .. }
+    ));
+
+    driver.set_background_processes(vec![scripted_shell("shell-1", "npm run dev", false)]);
+    stream_sender
+        .send(Ok(Event::ToolResult {
+            id: "call-1".into(),
+            ok: true,
+            output: serde_json::json!({"shell_id": "shell-1"}),
+        }))
+        .unwrap();
+
+    let tool_completed = receive_event(&mut receiver).await;
+    assert!(matches!(
+        tool_completed.kind,
+        AgentEventKind::ToolCompleted { .. }
+    ));
+    let process_update = receive_event(&mut receiver).await;
+    let AgentEventKind::BackgroundProcessUpdate { process } = process_update.kind else {
+        panic!("expected a BackgroundProcessUpdate right after the BashRun ToolCompleted event");
+    };
+    assert_eq!(process.id, "shell-1");
+    assert_eq!(process.status, BackgroundProcessStatus::Running);
+    assert_eq!(process.tool_call_id.as_deref(), Some("call-1"));
+
+    drop(stream_sender);
+    let _ = collect_until_finished(&mut receiver).await;
+}
+
+#[tokio::test]
+async fn a_final_diff_corrects_a_still_running_subagent_when_the_turn_is_interrupted() {
+    let node_id = NodeId::new();
+    let session = test_session(node_id, "task-abort");
+    let turn_id = TurnId::new();
+    let (stream_sender, stream) = driver_stream();
+    let driver = Arc::new(FakeDriver::new(vec![stream]));
+    let backend = EngineBackend::new(node_id, driver.clone());
+    let (events, mut receiver) = event_sink();
+
+    backend
+        .command(start_command(session.clone(), turn_id), events)
+        .await
+        .unwrap();
+    consume_permit(&driver.start_seen, "turn start").await;
+
+    driver.set_subagents(vec![scripted_subagent(1, SubAgentStatus::Running, 1, 1)]);
+    stream_sender
+        .send(Ok(Event::ToolUse {
+            id: "task-1".into(),
+            name: "Task".into(),
+            input: serde_json::json!({"agent_type": "researcher", "prompt": "go"}),
+        }))
+        .unwrap();
+    let _tool_started = receive_event(&mut receiver).await;
+    let _running_update = receive_event(&mut receiver).await;
+
+    // The registry observes the child's abort-triggered failure, but the
+    // parent turn's own stream is cut short before a Task `ToolResult` ever
+    // arrives — the only chance to correct the dangling `Running` row is the
+    // unconditional final diff right before `TurnFinished`.
+    driver.set_subagents(vec![scripted_subagent(1, SubAgentStatus::Failed, 1, 1)]);
+    stream_sender
+        .send(Err(AgentError::Aborted("cleanup".into())))
+        .unwrap();
+    drop(stream_sender);
+
+    let tail = collect_until_finished(&mut receiver).await;
+    let corrected_index = tail
+        .iter()
+        .position(|event| matches!(event.kind, AgentEventKind::SubagentUpdate { .. }))
+        .expect("the final diff emits a correcting SubagentUpdate");
+    let AgentEventKind::SubagentUpdate { subagent } = &tail[corrected_index].kind else {
+        unreachable!()
+    };
+    assert_eq!(subagent.status, WireSubagentStatus::Failed);
+    let finished_index = tail
+        .iter()
+        .position(|event| matches!(event.kind, AgentEventKind::TurnFinished { .. }))
+        .expect("the turn eventually finishes");
+    assert!(
+        corrected_index < finished_index,
+        "the correction must land before TurnFinished"
+    );
+}
+
+#[tokio::test]
 async fn create_session_preserves_the_caller_locator_and_query_delegates() {
     let node_id = NodeId::new();
     let session = test_session(node_id, "caller-owned");
@@ -725,72 +1300,4 @@ async fn session_runtime_options_query_rejects_a_remote_session_before_delegatin
         .unwrap_err();
 
     assert_eq!(error.kind, EndpointErrorKind::CapabilityDenied);
-}
-
-#[tokio::test]
-async fn aborted_stream_finishes_as_interrupted_without_an_error_event() {
-    let node_id = NodeId::new();
-    let session = test_session(node_id, "aborted-stream");
-    let turn_id = TurnId::new();
-    let (sender, stream) = driver_stream();
-    let driver = Arc::new(FakeDriver::new(vec![stream]));
-    let backend = EngineBackend::new(node_id, driver.clone());
-    let (events, mut receiver) = event_sink();
-
-    backend
-        .command(start_command(session, turn_id), events)
-        .await
-        .unwrap();
-    consume_permit(&driver.start_seen, "aborted turn start").await;
-    sender
-        .send(Err(AgentError::Aborted("user cancelled".into())))
-        .unwrap();
-    drop(sender);
-
-    let emitted = collect_until_finished(&mut receiver).await;
-    assert!(!emitted
-        .iter()
-        .any(|event| matches!(event.kind, AgentEventKind::Error { .. })));
-    assert!(matches!(
-        emitted.last().map(|event| &event.kind),
-        Some(AgentEventKind::TurnFinished { interrupted: true })
-    ));
-    assert_eq!(driver.finishes.lock().unwrap().len(), 1);
-    assert!(driver.finishes.lock().unwrap()[0].interrupted);
-}
-
-#[tokio::test]
-async fn fatal_stream_error_is_terminal_and_still_finishes_exactly_once() {
-    let node_id = NodeId::new();
-    let session = test_session(node_id, "fatal-stream");
-    let turn_id = TurnId::new();
-    let (sender, stream) = driver_stream();
-    let driver = Arc::new(FakeDriver::new(vec![stream]));
-    let backend = EngineBackend::new(node_id, driver.clone());
-    let (events, mut receiver) = event_sink();
-
-    backend
-        .command(start_command(session, turn_id), events)
-        .await
-        .unwrap();
-    consume_permit(&driver.start_seen, "fatal turn start").await;
-    sender
-        .send(Err(AgentError::other("safe provider failure")))
-        .unwrap();
-    drop(sender);
-
-    let emitted = collect_until_finished(&mut receiver).await;
-    assert_eq!(emitted.len(), 3);
-    assert!(matches!(
-        &emitted[0].kind,
-        AgentEventKind::Error { message, retryable: false }
-            if message.contains("safe provider failure")
-    ));
-    assert!(matches!(emitted[1].kind, AgentEventKind::DiffInvalidated));
-    assert!(matches!(
-        emitted[2].kind,
-        AgentEventKind::TurnFinished { interrupted: false }
-    ));
-    assert_eq!(driver.finishes.lock().unwrap().len(), 1);
-    assert!(!driver.finishes.lock().unwrap()[0].interrupted);
 }

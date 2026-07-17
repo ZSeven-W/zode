@@ -1,24 +1,25 @@
 use accesskit::{Action, Role, Toggled};
 use jian_core::CursorHint;
 use jian_widgets::{Point2D, Rect};
-use zode_app_model::{
-    ComingSoonFeature, IntegrationsTab, PreviewState, SecondaryPane, ShellRoute, ZodeAppState,
-};
+use zode_app_model::{IntegrationsTab, PreviewState, SecondaryPane, ShellRoute, ZodeAppState};
 
 use crate::{
-    composer_queue_reserved_height, Composer, DocumentPreview, Insets, PanelPicker,
-    PinnedSummaryMode, ProjectPickerViewState, RectExt, ReviewPanel, SecondarySidebarLayoutOptions,
-    SettingsPanel, TerminalSecondaryPanel, ThreadTranscript, UnavailableSecondaryPanel,
-    WorkspaceLayout, COMPOSER_ATTACHMENT_H, COMPOSER_H, DOCUMENT_PREVIEW_CLOSE_ID,
-    DOCUMENT_PREVIEW_CONTENT_ID, DOCUMENT_PREVIEW_EXTERNAL_ID, DOCUMENT_PREVIEW_RETRY_ID,
-    INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID, SECONDARY_PANE_BREAKPOINT,
-    TERMINAL_SECONDARY_CLOSE_ID, UNAVAILABLE_SECONDARY_CLOSE_ID,
+    composer_queue_reserved_height, Composer, DocumentPreview, GlobalSearchViewState, Insets,
+    PanelPicker, PinnedSummaryMode, ProjectPickerViewState, RectExt, ReviewPanel,
+    SecondarySidebarLayoutOptions, SettingsPanel, SubagentsPanel, TerminalSecondaryPanel,
+    ThreadTranscript, UnavailableSecondaryPanel, WorkspaceLayout, COMPOSER_ATTACHMENT_H,
+    COMPOSER_H, COMPOSER_INPUT_H, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
+    DOCUMENT_PREVIEW_EXTERNAL_ID, DOCUMENT_PREVIEW_RETRY_ID, INTEGRATIONS_PLUGINS_TAB_ID,
+    INTEGRATIONS_SKILLS_TAB_ID, SECONDARY_PANE_BREAKPOINT, SUBAGENTS_PANEL_CLOSE_ID,
+    SUBAGENTS_PANEL_SHOW_MORE_ID, TERMINAL_SECONDARY_CLOSE_ID, UNAVAILABLE_SECONDARY_CLOSE_ID,
 };
 
 mod composer_footer;
 mod empty_state;
 mod environment;
+mod global_search;
 mod header;
+mod helpers;
 mod ids;
 mod integrations;
 mod project_picker;
@@ -31,7 +32,9 @@ mod tree;
 use composer_footer::{append_composer_footer_nodes, append_composer_footer_overlay};
 use empty_state::append_empty_suggestion_nodes;
 use environment::append_environment_nodes;
+use global_search::append_global_search_overlay;
 use header::{append_header_menu_nodes, append_header_nodes, append_open_with_menu_nodes};
+use helpers::{coming_soon_focus, preview_accessibility_excerpt};
 pub(crate) use ids::stable_widget_id;
 use integrations::append_integration_nodes;
 use project_picker::{
@@ -40,7 +43,7 @@ use project_picker::{
 };
 use queue::{append_queue_menu_nodes, append_queue_nodes};
 use settings::append_settings_nodes;
-use sidebar::{append_sidebar_menu_nodes, append_sidebar_nodes};
+use sidebar::{append_collapsed_sidebar_nodes, append_sidebar_menu_nodes, append_sidebar_nodes};
 use transcript::append_transcript_nodes;
 pub use tree::accessibility_tree;
 
@@ -107,7 +110,20 @@ impl WorkspaceSnapshot {
             open: state.project_picker.open,
             query: state.project_picker.search.clone(),
         };
-        Self::build_internal(state, width, height, insets, Some(&picker))
+        let global_search = GlobalSearchViewState {
+            open: state.global_search.open,
+            query: state.global_search.query.clone(),
+            active_index: state.global_search.active_index,
+        };
+        Self::build_internal(
+            state,
+            width,
+            height,
+            insets,
+            Some(&picker),
+            Some(&global_search),
+            None,
+        )
     }
 
     pub fn build_with_project_picker(
@@ -117,7 +133,63 @@ impl WorkspaceSnapshot {
         insets: Insets,
         project_picker: &ProjectPickerViewState,
     ) -> Self {
-        Self::build_internal(state, width, height, insets, Some(project_picker))
+        let global_search = GlobalSearchViewState {
+            open: state.global_search.open,
+            query: state.global_search.query.clone(),
+            active_index: state.global_search.active_index,
+        };
+        Self::build_internal(
+            state,
+            width,
+            height,
+            insets,
+            Some(project_picker),
+            Some(&global_search),
+            None,
+        )
+    }
+
+    pub fn build_with_overlays(
+        state: &ZodeAppState,
+        width: f32,
+        height: f32,
+        insets: Insets,
+        project_picker: &ProjectPickerViewState,
+        global_search: &GlobalSearchViewState,
+    ) -> Self {
+        Self::build_internal(
+            state,
+            width,
+            height,
+            insets,
+            Some(project_picker),
+            Some(global_search),
+            None,
+        )
+    }
+
+    /// Builds a snapshot with host-supplied sidebar geometry. This keeps
+    /// paint, hit testing and accessibility on the same interpolated layout
+    /// while a persistent sidebar transition is active.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_with_overlays_and_sidebar_options(
+        state: &ZodeAppState,
+        width: f32,
+        height: f32,
+        insets: Insets,
+        project_picker: &ProjectPickerViewState,
+        global_search: &GlobalSearchViewState,
+        sidebars: crate::SidebarLayoutOptions,
+    ) -> Self {
+        Self::build_internal(
+            state,
+            width,
+            height,
+            insets,
+            Some(project_picker),
+            Some(global_search),
+            Some(sidebars),
+        )
     }
 
     fn build_internal(
@@ -126,6 +198,8 @@ impl WorkspaceSnapshot {
         height: f32,
         insets: Insets,
         project_picker: Option<&ProjectPickerViewState>,
+        global_search: Option<&GlobalSearchViewState>,
+        sidebar_options: Option<crate::SidebarLayoutOptions>,
     ) -> Self {
         let route = state.presentation.route;
         let queue_count = state
@@ -133,28 +207,53 @@ impl WorkspaceSnapshot {
             .as_ref()
             .and_then(|session| state.message_queues.get(session))
             .map_or(0, |queue| queue.items.len());
-        let composer_height = COMPOSER_H
-            + if route == ShellRoute::Conversation && !state.composer.attachments.is_empty() {
+        let show_composer_context_bar = state.composer_context_bar_visible();
+        let composer_height =
+            (if route == ShellRoute::Conversation && !show_composer_context_bar {
+                COMPOSER_INPUT_H
+            } else {
+                COMPOSER_H
+            }) + if route == ShellRoute::Conversation && !state.composer.attachments.is_empty() {
                 COMPOSER_ATTACHMENT_H
             } else {
                 0.0
-            }
-            + if route == ShellRoute::Conversation {
+            } + if route == ShellRoute::Conversation {
                 composer_queue_reserved_height(queue_count)
             } else {
                 0.0
             };
+        let sidebars = sidebar_options.unwrap_or(crate::SidebarLayoutOptions {
+            primary: crate::PrimarySidebarLayoutOptions {
+                open: state.shell.sidebar_open,
+                width: f32::from(state.ui_preferences.primary_sidebar_width),
+                visibility: 1.0,
+            },
+            secondary: SecondarySidebarLayoutOptions {
+                open: state.presentation.secondary_sidebar_open,
+                width: f32::from(state.ui_preferences.secondary_sidebar_width),
+                pinned_summary_overlay: state.presentation.pinned_summary_overlay_open,
+                visibility: 1.0,
+                pinned_summary_visibility: 1.0,
+            },
+        });
+        let animated_summary_present =
+            sidebar_options.is_some() && sidebars.secondary.pinned_summary_visibility > 0.0;
         let auto_pinned_summary = route == ShellRoute::Conversation
             && state.current_session.is_some()
             && !state.presentation.pinned_summary_auto_hidden
             && !state.presentation.secondary_sidebar_open
             && width >= SECONDARY_PANE_BREAKPOINT;
-        let explicit_pinned_summary = state.presentation.pinned_summary_overlay_open;
-        let layout_secondary = if auto_pinned_summary || explicit_pinned_summary {
-            Some(SecondaryPane::Environment)
+        let explicit_pinned_summary = if sidebar_options.is_some() {
+            sidebars.secondary.pinned_summary_overlay && animated_summary_present
         } else {
-            None
+            state.presentation.pinned_summary_overlay_open
         };
+        let layout_secondary =
+            if auto_pinned_summary || explicit_pinned_summary || animated_summary_present {
+                Some(SecondaryPane::Environment)
+            } else {
+                None
+            };
         let layout = WorkspaceLayout::compute_presentation_with_sidebar_options(
             width,
             height,
@@ -162,27 +261,22 @@ impl WorkspaceSnapshot {
             route,
             layout_secondary,
             composer_height,
-            crate::SidebarLayoutOptions {
-                primary: crate::PrimarySidebarLayoutOptions {
-                    open: state.shell.sidebar_open,
-                    width: f32::from(state.ui_preferences.primary_sidebar_width),
-                },
-                secondary: SecondarySidebarLayoutOptions {
-                    open: state.presentation.secondary_sidebar_open,
-                    width: f32::from(state.ui_preferences.secondary_sidebar_width),
-                    pinned_summary_overlay: explicit_pinned_summary,
-                },
-            },
+            sidebars,
         );
         let mut nodes = Vec::new();
         let mut focus_order = 0;
         let split_fallback = route == ShellRoute::Conversation
             && state.presentation.secondary_sidebar_open
             && !visible_rect(layout.review_panel)
+            && !visible_rect(layout.secondary_sidebar_content)
             && visible_rect(layout.primary_surface);
 
-        if visible_rect(layout.sidebar) && !matches!(route, ShellRoute::Settings(_)) {
-            append_sidebar_nodes(&mut nodes, &layout, &mut focus_order, state);
+        if !matches!(route, ShellRoute::Settings(_)) {
+            if state.shell.sidebar_open && visible_rect(layout.sidebar) {
+                append_sidebar_nodes(&mut nodes, &layout, &mut focus_order, state);
+            } else if !state.shell.sidebar_open && visible_rect(layout.top_bar) {
+                append_collapsed_sidebar_nodes(&mut nodes, &layout, &mut focus_order);
+            }
         }
 
         let focused = match route {
@@ -274,7 +368,6 @@ impl WorkspaceSnapshot {
                         }
                     }
                     append_composer_context_nodes(&mut nodes, &layout, &mut focus_order, state);
-                    append_composer_footer_nodes(&mut nodes, &layout, &mut focus_order, state);
                     if visible_rect(composer_layout.input) {
                         nodes.push(node(
                             COMPOSER_ID,
@@ -286,6 +379,10 @@ impl WorkspaceSnapshot {
                             next_order(&mut focus_order),
                             CursorHint::Text,
                         ));
+                        // Footer controls live inside the text-input surface. Append their
+                        // interaction nodes after the input so reverse-order hit testing
+                        // reaches the visible controls instead of the enclosing editor.
+                        append_composer_footer_nodes(&mut nodes, &layout, &mut focus_order, state);
                         let send_rect = Rect::xywh(
                             composer_layout.input.max_x() - 42.0,
                             composer_layout.input.max_y() - 38.0,
@@ -330,7 +427,13 @@ impl WorkspaceSnapshot {
                 }
             }
         };
-        append_secondary_nodes(&mut nodes, &layout, &mut focus_order, state);
+        append_secondary_nodes(
+            &mut nodes,
+            &layout,
+            &mut focus_order,
+            state,
+            sidebars.secondary.open,
+        );
         if visible_rect(layout.sidebar) && !matches!(route, ShellRoute::Settings(_)) {
             append_sidebar_menu_nodes(&mut nodes, &layout, &mut focus_order, state);
         }
@@ -349,6 +452,7 @@ impl WorkspaceSnapshot {
                 Some(SecondaryPane::Browser | SecondaryPane::Files | SecondaryPane::SideTask) => {
                     Some(UNAVAILABLE_SECONDARY_CLOSE_ID)
                 }
+                Some(SecondaryPane::Subagents) => Some(SUBAGENTS_PANEL_CLOSE_ID),
                 Some(SecondaryPane::Review) => Some(REVIEW_CLOSE_ID),
                 Some(SecondaryPane::Environment) | None => None,
             }
@@ -396,6 +500,17 @@ impl WorkspaceSnapshot {
         {
             focused = Some(footer_focus);
         }
+        if let Some(global_search) = global_search {
+            if let Some(search_focus) = append_global_search_overlay(
+                &mut nodes,
+                &layout,
+                &mut focus_order,
+                state,
+                global_search,
+            ) {
+                focused = Some(search_focus);
+            }
+        }
 
         Self {
             layout,
@@ -417,8 +532,14 @@ impl WorkspaceSnapshot {
     }
 
     pub fn focusable_ids(&self) -> Vec<WidgetId> {
-        let mut ordered = self
+        let nodes = self
             .nodes
+            .iter()
+            .position(|node| node.id == crate::GLOBAL_SEARCH_SURFACE_ID)
+            .map_or(self.nodes.as_slice(), |overlay_start| {
+                &self.nodes[overlay_start..]
+            });
+        let mut ordered = nodes
             .iter()
             .filter_map(|node| node.focus_order.map(|order| (order, node.id)))
             .collect::<Vec<_>>();
@@ -461,6 +582,7 @@ fn append_secondary_nodes(
     layout: &WorkspaceLayout,
     focus_order: &mut u32,
     state: &ZodeAppState,
+    secondary_sidebar_open: bool,
 ) {
     if state.presentation.route != ShellRoute::Conversation {
         return;
@@ -470,19 +592,29 @@ fn append_secondary_nodes(
     if has_pinned_summary && layout.pinned_summary != PinnedSummaryMode::Overlay {
         append_environment_nodes(nodes, layout, focus_order, state);
     }
-    if !state.presentation.secondary_sidebar_open {
+    if !secondary_sidebar_open {
         if has_pinned_summary && layout.pinned_summary == PinnedSummaryMode::Overlay {
             append_environment_nodes(nodes, layout, focus_order, state);
         }
         return;
     }
+    let split_visible = visible_rect(layout.review_panel);
+    if !split_visible && !state.presentation.secondary_sidebar_open {
+        return;
+    }
+    let panel_rect = if split_visible {
+        layout.secondary_sidebar_content
+    } else {
+        layout.primary_surface
+    };
+    let panel_clip = if split_visible {
+        layout.review_panel
+    } else {
+        layout.primary_surface
+    };
+    let panel_nodes_start = nodes.len();
     match state.presentation.secondary_pane {
         Some(SecondaryPane::Review) => {
-            let panel_rect = if visible_rect(layout.review_panel) {
-                layout.review_panel
-            } else {
-                layout.primary_surface
-            };
             let rect = ReviewPanel::layout(panel_rect).close_button;
             if visible_rect(rect) {
                 nodes.push(node(
@@ -513,11 +645,6 @@ fn append_secondary_nodes(
             }
         }
         Some(SecondaryPane::DocumentPreview) => {
-            let panel_rect = if visible_rect(layout.review_panel) {
-                layout.review_panel
-            } else {
-                layout.primary_surface
-            };
             let preview = DocumentPreview::layout(panel_rect, state);
             if visible_rect(preview.close_button) {
                 nodes.push(node(
@@ -593,11 +720,6 @@ fn append_secondary_nodes(
             }
         }
         Some(SecondaryPane::Terminal) => {
-            let panel_rect = if visible_rect(layout.review_panel) {
-                layout.review_panel
-            } else {
-                layout.primary_surface
-            };
             let panel = TerminalSecondaryPanel::layout(panel_rect);
             if visible_rect(panel.close_button) {
                 nodes.push(node(
@@ -624,12 +746,69 @@ fn append_secondary_nodes(
                 ));
             }
         }
+        Some(SecondaryPane::Subagents) => {
+            let panel_layout = SubagentsPanel::layout(panel_rect, state);
+            if visible_rect(panel_layout.close_button) {
+                nodes.push(node(
+                    SUBAGENTS_PANEL_CLOSE_ID,
+                    panel_layout.close_button,
+                    Role::Button,
+                    "关闭子智能体面板",
+                    None,
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
+            nodes.push(node(
+                WidgetId(262),
+                panel_rect,
+                Role::Group,
+                "子智能体",
+                None,
+                Vec::new(),
+                None,
+                CursorHint::Default,
+            ));
+            let now = SubagentsPanel::now_ms();
+            let session = state.current_session.clone();
+            for row in panel_layout
+                .running_rows
+                .iter()
+                .chain(panel_layout.completed_rows.iter())
+            {
+                let Some(rect) = ThreadTranscript::clip_to_viewport(row.rect, panel_rect) else {
+                    continue;
+                };
+                let id = session
+                    .as_ref()
+                    .map(|session| stable_widget_id(0x67, &(session, row.subagent.id.as_str())))
+                    .unwrap_or(WidgetId(0));
+                nodes.push(node(
+                    id,
+                    rect,
+                    Role::Group,
+                    &SubagentsPanel::row_label(&row.subagent, now),
+                    None,
+                    Vec::new(),
+                    None,
+                    CursorHint::Default,
+                ));
+            }
+            if let Some(show_more) = panel_layout.show_more.filter(|rect| visible_rect(*rect)) {
+                nodes.push(node(
+                    SUBAGENTS_PANEL_SHOW_MORE_ID,
+                    show_more,
+                    Role::Button,
+                    &panel_layout.show_more_label,
+                    None,
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
+        }
         Some(pane @ (SecondaryPane::Browser | SecondaryPane::Files | SecondaryPane::SideTask)) => {
-            let panel_rect = if visible_rect(layout.review_panel) {
-                layout.review_panel
-            } else {
-                layout.primary_surface
-            };
             let close = UnavailableSecondaryPanel::close_button(panel_rect);
             nodes.push(node(
                 UNAVAILABLE_SECONDARY_CLOSE_ID,
@@ -653,11 +832,6 @@ fn append_secondary_nodes(
             ));
         }
         Some(SecondaryPane::Environment) | None => {
-            let panel_rect = if visible_rect(layout.review_panel) {
-                layout.review_panel
-            } else {
-                layout.primary_surface
-            };
             if let Some(home) = PanelPicker::home_layout(panel_rect, state) {
                 for item in home.items {
                     let mut interaction = node(
@@ -686,34 +860,22 @@ fn append_secondary_nodes(
             }
         }
     }
+    clip_nodes_since(nodes, panel_nodes_start, panel_clip);
     if has_pinned_summary && layout.pinned_summary == PinnedSummaryMode::Overlay {
         append_environment_nodes(nodes, layout, focus_order, state);
     }
 }
 
-const fn coming_soon_focus(feature: ComingSoonFeature) -> Option<WidgetId> {
-    Some(match feature {
-        ComingSoonFeature::ScheduledTasks => SCHEDULED_NAV_ID,
-        ComingSoonFeature::Sites => SITES_NAV_ID,
-        ComingSoonFeature::PullRequests => PULL_REQUESTS_NAV_ID,
-        ComingSoonFeature::Chats => CHATS_NAV_ID,
-        ComingSoonFeature::Help => HELP_ID,
-    })
+fn clip_nodes_since(nodes: &mut Vec<InteractionNode>, start: usize, clip: Rect) {
+    let tail = nodes.split_off(start);
+    nodes.extend(tail.into_iter().filter_map(|mut interaction| {
+        interaction.rect = ThreadTranscript::clip_to_viewport(interaction.rect, clip)?;
+        Some(interaction)
+    }));
 }
 
 fn visible_rect(rect: Rect) -> bool {
     rect.size.x > 0.0 && rect.size.y > 0.0
-}
-
-fn preview_accessibility_excerpt(content: &str) -> String {
-    const LIMIT: usize = 2_000;
-    let mut chars = content.chars();
-    let excerpt = chars.by_ref().take(LIMIT).collect::<String>();
-    if chars.next().is_some() {
-        format!("{excerpt}…")
-    } else {
-        excerpt
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -18,10 +18,10 @@ pub use footer::{
     ComposerFooterLayout, ComposerFooterMenuLayout, ComposerFooterMenuWidget,
     ComposerFooterRowLayout, ComposerFooterSectionLayout, COMPOSER_ADD_FILE_ID,
     COMPOSER_ADD_GOAL_ID, COMPOSER_ADD_ID, COMPOSER_ADD_PLAN_ID, COMPOSER_ADD_WECHAT_ID,
-    COMPOSER_FOOTER_MENU_SURFACE_ID, COMPOSER_MODEL_BACK_ID, COMPOSER_MODEL_CONFIGURE_ID,
-    COMPOSER_MODEL_EFFORTS_ID, COMPOSER_MODEL_EFFORT_HIGH_ID, COMPOSER_MODEL_EFFORT_LOW_ID,
-    COMPOSER_MODEL_EFFORT_MEDIUM_ID, COMPOSER_MODEL_EFFORT_XHIGH_ID, COMPOSER_MODEL_ID,
-    COMPOSER_MODEL_MODELS_ID, COMPOSER_MODEL_RESET_ID, COMPOSER_MODEL_SPEEDS_ID,
+    COMPOSER_FOOTER_MENU_SURFACE_ID, COMPOSER_MODEL_ADD_ID, COMPOSER_MODEL_BACK_ID,
+    COMPOSER_MODEL_CONFIGURE_ID, COMPOSER_MODEL_EFFORTS_ID, COMPOSER_MODEL_EFFORT_HIGH_ID,
+    COMPOSER_MODEL_EFFORT_LOW_ID, COMPOSER_MODEL_EFFORT_MEDIUM_ID, COMPOSER_MODEL_EFFORT_XHIGH_ID,
+    COMPOSER_MODEL_ID, COMPOSER_MODEL_MODELS_ID, COMPOSER_MODEL_RESET_ID, COMPOSER_MODEL_SPEEDS_ID,
     COMPOSER_MODEL_SPEED_ID, COMPOSER_PERMISSION_AUTO_ID, COMPOSER_PERMISSION_CUSTOM_ID,
     COMPOSER_PERMISSION_FULL_ID, COMPOSER_PERMISSION_ID, COMPOSER_PERMISSION_REQUEST_ID,
 };
@@ -32,6 +32,8 @@ pub const PROJECT_DETACH_ID: WidgetId = WidgetId(125);
 pub const COMPOSER_PROJECT_ID: WidgetId = WidgetId(126);
 pub const COMPOSER_LOCATION_ID: WidgetId = WidgetId(127);
 pub const COMPOSER_BRANCH_ID: WidgetId = WidgetId(128);
+
+const SELECT_PROJECT_LABEL: &str = "选择项目";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposerSubmission {
@@ -68,6 +70,9 @@ pub enum ComposerOutcome {
     AttachmentsChanged(Vec<AttachmentMetadata>),
     Send(ComposerSubmission),
     Queue(ComposerSubmission),
+    /// Priority send (Cmd/Ctrl+Enter) issued while a turn is running: the
+    /// submission should join the head of the queue instead of the tail.
+    QueueFront(ComposerSubmission),
     Steer(ComposerSubmission),
     Stop,
     SetModel(String),
@@ -192,6 +197,10 @@ impl ComposerController {
                 self.input.insert_str("\n", self.now_ms);
                 ComposerOutcome::Edited
             }
+            // Priority send: joins the head of the queue instead of the tail
+            // while a turn is running. With no turn running there is nothing
+            // to jump ahead of, so it behaves like a plain Enter.
+            Key::Enter if modifiers.primary() => self.submit_with_priority(true),
             Key::Enter => self.submit(),
             Key::Backspace => {
                 self.input.backspace(self.now_ms);
@@ -348,6 +357,13 @@ impl ComposerController {
     }
 
     fn submit(&mut self) -> ComposerOutcome {
+        self.submit_with_priority(false)
+    }
+
+    /// `front` requests priority send (join the queue head). It only changes
+    /// behavior while busy; an idle submit always sends directly regardless
+    /// of `front`, since there is no running turn's queue to jump ahead of.
+    fn submit_with_priority(&mut self, front: bool) -> ComposerOutcome {
         let queued_attachments_remain = self
             .queue_edit_backup
             .as_ref()
@@ -371,10 +387,12 @@ impl ComposerController {
             content,
             attachments,
         };
-        if self.busy {
-            ComposerOutcome::Queue(submission)
-        } else {
+        if !self.busy {
             ComposerOutcome::Send(submission)
+        } else if front {
+            ComposerOutcome::QueueFront(submission)
+        } else {
+            ComposerOutcome::Queue(submission)
         }
     }
 }
@@ -483,14 +501,27 @@ impl Composer {
         branch: Option<&str>,
     ) -> ComposerContextLayout {
         let context = Self::layout_for_state(rect, state).context;
+        let project_label = Self::context_project_label(state, workspace_label);
         context::layout(
             context,
-            workspace_label,
+            project_label,
             connection_label,
             branch,
             state.current_session.is_none(),
             state.current_session.is_none() && workspace_label.is_some(),
         )
+    }
+
+    pub(crate) fn context_project_label<'a>(
+        state: &ZodeAppState,
+        workspace_label: Option<&'a str>,
+    ) -> Option<&'a str> {
+        workspace_label.or_else(|| {
+            state
+                .current_session
+                .is_none()
+                .then_some(SELECT_PROJECT_LABEL)
+        })
     }
 
     pub(crate) fn attachment_layouts(
@@ -723,10 +754,11 @@ impl Composer {
         theme: &ZodeTheme,
     ) {
         let layout = Self::layout_for_state(rect, state);
+        let project_label = Self::context_project_label(state, workspace_label);
         context::paint_interactive(
             painter,
             layout.context,
-            workspace_label,
+            project_label,
             connection_label,
             branch,
             goal,

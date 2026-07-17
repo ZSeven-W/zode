@@ -1,9 +1,14 @@
 use crate::{default_tool_expanded, AppCommand, TranscriptItem, TranscriptState, ZodeAppState};
-use std::time::Instant;
-use zode_node_protocol::{AgentEvent, AgentEventKind, RuntimeOptions, SessionLocator, ToolCall};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use zode_node_protocol::{
+    AgentEvent, AgentEventKind, BackgroundProcessSnapshot, RuntimeOptions, SessionLocator,
+    SubagentSnapshot, SubagentStatus, ToolCall,
+};
 
 #[path = "reducer/presentation-integrations.rs"]
 mod presentation_integrations;
+#[path = "reducer/presentation-plugin-market.rs"]
+mod presentation_plugin_market;
 
 const UNKNOWN_EVENT_CODE: &str = "agent.event.unknown";
 const UNKNOWN_EVENT_MESSAGE: &str = "Ignored an unknown agent event";
@@ -61,6 +66,11 @@ pub fn reduce_presentation_command(
 ) -> PresentationCommandOutcome {
     if let Some(outcome) =
         presentation_integrations::reduce_integration_presentation_command(state, &command)
+    {
+        return outcome;
+    }
+    if let Some(outcome) =
+        presentation_plugin_market::reduce_plugin_market_presentation_command(state, &command)
     {
         return outcome;
     }
@@ -162,6 +172,12 @@ pub fn reduce_presentation_command(
                 },
             };
             open_secondary(state, crate::SecondaryPane::DocumentPreview);
+            return PresentationCommandOutcome::Applied;
+        }
+        AppCommand::ShowMoreCompletedSubagents { session } => {
+            let presentation = state.presentation.sessions.entry(session).or_default();
+            presentation.subagents_shown =
+                crate::subagents_visible_count(presentation) + crate::SUBAGENTS_PAGE_SIZE;
             return PresentationCommandOutcome::Applied;
         }
         _ => None,
@@ -271,6 +287,10 @@ pub fn reduce_tool_command(state: &mut ZodeAppState, command: AppCommand) -> Too
     if !exists {
         return ToolCommandOutcome::Ignored;
     }
+    // The toggle changes how an unmeasured item's height is *estimated*
+    // (expanded vs. collapsed), even when the cached height above was
+    // already 0.0, so cached layout must be invalidated unconditionally.
+    transcript.touch_layout();
     state
         .tool_expanded
         .entry(session)
@@ -290,6 +310,7 @@ pub fn reduce_queue_command(state: &mut ZodeAppState, command: &AppCommand) -> Q
         | AppCommand::ToggleQueuedMessageMenu { session, .. }
         | AppCommand::BeginEditQueuedMessage { session, .. }
         | AppCommand::CancelQueuedMessageEdit { session }
+        | AppCommand::ReorderQueuedMessage { session, .. }
         | AppCommand::GuideQueuedMessage { session, .. }
         | AppCommand::DispatchNextQueuedMessage { session } => session,
         _ => return QueueCommandOutcome::Ignored,
@@ -308,6 +329,7 @@ pub fn reduce_queue_command(state: &mut ZodeAppState, command: &AppCommand) -> Q
             session,
             content,
             attachments,
+            front,
         } => {
             let text = content
                 .iter()
@@ -320,12 +342,13 @@ pub fn reduce_queue_command(state: &mut ZodeAppState, command: &AppCommand) -> Q
             if text.trim().is_empty() && attachments.is_empty() {
                 return QueueCommandOutcome::Ignored;
             }
-            state
-                .message_queues
-                .entry(session.clone())
-                .or_default()
-                .enqueue(text, attachments.clone())
-                .map_or(QueueCommandOutcome::Ignored, QueueCommandOutcome::Enqueued)
+            let queue = state.message_queues.entry(session.clone()).or_default();
+            let enqueued = if *front {
+                queue.enqueue_front(text, attachments.clone())
+            } else {
+                queue.enqueue(text, attachments.clone())
+            };
+            enqueued.map_or(QueueCommandOutcome::Ignored, QueueCommandOutcome::Enqueued)
         }
         AppCommand::EditQueuedMessageText { session, id, text } => {
             let edited = state
@@ -399,6 +422,22 @@ pub fn reduce_queue_command(state: &mut ZodeAppState, command: &AppCommand) -> Q
                 return QueueCommandOutcome::Ignored;
             }
             state.composer.finish_queue_edit();
+            QueueCommandOutcome::Applied
+        }
+        // The message being edited is tracked by id (`composer.editing_queued_message`),
+        // never by position, so reordering never needs to touch composer ephemeral state.
+        AppCommand::ReorderQueuedMessage { session, id, op } => {
+            let applied = state
+                .message_queues
+                .get_mut(session)
+                .is_some_and(|queue| match op {
+                    crate::QueueReorderOp::Front => queue.move_to_front(*id),
+                    crate::QueueReorderOp::Up => queue.move_up(*id),
+                    crate::QueueReorderOp::Down => queue.move_down(*id),
+                });
+            if !applied {
+                return QueueCommandOutcome::Ignored;
+            }
             QueueCommandOutcome::Applied
         }
         AppCommand::GuideQueuedMessage { .. } | AppCommand::DispatchNextQueuedMessage { .. } => {
@@ -516,6 +555,50 @@ pub fn reduce_transcript_command(
             }
             transcript.item_heights.resize(transcript.items.len(), 0.0);
             transcript.item_heights[index] = height;
+            transcript.touch_layout();
+            TranscriptCommandOutcome::Applied
+        }
+        AppCommand::SetTranscriptImageDimensions {
+            session,
+            item_id,
+            width,
+            height,
+        } if width > 0 && height > 0 => {
+            let Some(transcript) = state.transcripts.get_mut(&session) else {
+                return TranscriptCommandOutcome::Ignored;
+            };
+            let Some(TranscriptItem::Image(image)) = transcript
+                .items
+                .iter_mut()
+                .find(|item| matches!(item, TranscriptItem::Image(image) if image.id == item_id))
+            else {
+                return TranscriptCommandOutcome::Ignored;
+            };
+            if image.width == Some(width) && image.height == Some(height) {
+                return TranscriptCommandOutcome::Ignored;
+            }
+            image.width = Some(width);
+            image.height = Some(height);
+            transcript.touch_layout();
+            TranscriptCommandOutcome::Applied
+        }
+        AppCommand::SetMessageFeedback {
+            session,
+            index,
+            feedback,
+        } => {
+            let Some(transcript) = state.transcripts.get_mut(&session) else {
+                return TranscriptCommandOutcome::Ignored;
+            };
+            let Some(TranscriptItem::AssistantText { feedback: slot, .. }) =
+                transcript.items.get_mut(index)
+            else {
+                return TranscriptCommandOutcome::Ignored;
+            };
+            // A reaction toggle never changes measured content, so it does
+            // not need `touch_layout()` - unlike `SetToolExpanded`, which
+            // changes how an unmeasured item's height is estimated.
+            *slot = feedback;
             TranscriptCommandOutcome::Applied
         }
         _ => TranscriptCommandOutcome::Ignored,
@@ -543,14 +626,14 @@ pub fn reduce_navigation_command(
     }
     match command {
         AppCommand::SelectSession(session) => {
-            let Some(workspace_uri) = state
+            let Some(_) = state
                 .threads
                 .iter()
                 .find(|thread| thread.session == session)
-                .map(|thread| thread.workspace_uri.clone())
             else {
                 return NavigationOutcome::Ignored;
             };
+            let project_workspace = state.project_workspace_for_session(&session).cloned();
             state
                 .presentation
                 .sessions
@@ -574,11 +657,8 @@ pub fn reduce_navigation_command(
             state.review.dirty = state.presentation.sessions[&session].diff.dirty;
             state.review.open =
                 state.presentation.secondary_pane == Some(crate::SecondaryPane::Review);
-            if state.is_projectless_workspace(&workspace_uri) {
-                state.active_workspace = None;
-            } else if state.available_workspace(&workspace_uri) {
-                state.active_workspace = Some(workspace_uri);
-            }
+            state.active_workspace =
+                project_workspace.filter(|workspace_uri| state.available_workspace(workspace_uri));
             NavigationOutcome::Applied
         }
         AppCommand::RequestDeleteSession(session) => {
@@ -598,6 +678,8 @@ pub fn reduce_navigation_command(
             }
             let deleting_current = state.current_session.as_ref() == Some(&session);
             state.threads.retain(|thread| thread.session != session);
+            state.thread_workspace_root_hints.remove(&session);
+            state.projectless_sessions.remove(&session);
             state.pinned_sessions.remove(&session);
             state.archived_sessions.remove(&session);
             state.transcripts.remove(&session);
@@ -689,7 +771,18 @@ pub fn reduce_agent_event_at(
                 .entry(id)
                 .or_insert(expanded);
         }
-        AgentEventKind::ToolCompleted { tool } => complete_existing_tool(transcript, tool),
+        AgentEventKind::ToolCompleted { tool } => {
+            // Captured before `complete_existing_tool` consumes `tool`, so a
+            // completed `FileRead`/`FileWrite`/`FileEdit` on a recognized
+            // image path also surfaces as an inline `Image` item right after
+            // its tool card - see `TranscriptItem::image_from_completed_tool`.
+            let image = TranscriptItem::image_from_completed_tool(&tool);
+            complete_existing_tool(transcript, tool);
+            if let Some(image) = image {
+                transcript.items.push(image);
+                transcript.touch_layout();
+            }
+        }
         AgentEventKind::ApprovalRequested {
             approval_id,
             tool,
@@ -699,7 +792,30 @@ pub fn reduce_agent_event_at(
                 id: approval_id.clone(),
                 tool,
             });
+            transcript.touch_layout();
             state.approvals.insert(approval_id, session);
+        }
+        AgentEventKind::SubagentUpdate { subagent } => {
+            upsert_subagent(
+                &mut state
+                    .presentation
+                    .sessions
+                    .entry(session.clone())
+                    .or_default()
+                    .subagents,
+                subagent,
+            );
+        }
+        AgentEventKind::BackgroundProcessUpdate { process } => {
+            upsert_background_process(
+                &mut state
+                    .presentation
+                    .sessions
+                    .entry(session.clone())
+                    .or_default()
+                    .background_processes,
+                process,
+            );
         }
         AgentEventKind::DiffInvalidated => {
             state
@@ -720,11 +836,19 @@ pub fn reduce_agent_event_at(
             transcript
                 .items
                 .push(TranscriptItem::Status { code, message });
+            transcript.touch_layout();
         }
         AgentEventKind::TurnFinished { interrupted } => {
             let _ = transcript.finish_turn_at(turn_id, interrupted, received_at);
             transcript.busy = false;
             state.active_turns.remove(&session);
+            // Safety net: the runtime already emits an authoritative final
+            // `SubagentUpdate` from the registry before `TurnFinished`, but a
+            // dangling `Running` row must never linger if that diff was
+            // missed (e.g. the registry itself hadn't observed the abort yet).
+            if let Some(presentation) = state.presentation.sessions.get_mut(&session) {
+                finalize_running_subagents(&mut presentation.subagents, interrupted);
+            }
         }
         AgentEventKind::Error { message, retryable } => {
             if !retryable {
@@ -733,26 +857,91 @@ pub fn reduce_agent_event_at(
             transcript
                 .items
                 .push(TranscriptItem::Error { message, retryable });
+            transcript.touch_layout();
         }
         AgentEventKind::Unknown => {
             transcript.items.push(TranscriptItem::Status {
                 code: UNKNOWN_EVENT_CODE.to_owned(),
                 message: UNKNOWN_EVENT_MESSAGE.to_owned(),
             });
+            transcript.touch_layout();
         }
     }
 
     ReduceOutcome::Applied
 }
 
+/// Inserts or replaces a sub-agent entry by id, preserving first-appearance
+/// order (registry ids are not lexicographically stable, so a `BTreeMap`
+/// would reorder rows as new agents spawn).
+fn upsert_subagent(subagents: &mut Vec<SubagentSnapshot>, subagent: SubagentSnapshot) {
+    match subagents
+        .iter_mut()
+        .find(|existing| existing.id == subagent.id)
+    {
+        Some(existing) => *existing = subagent,
+        None => subagents.push(subagent),
+    }
+}
+
+/// Inserts or replaces a background-process entry by id, mirroring
+/// `upsert_subagent`'s first-appearance ordering.
+fn upsert_background_process(
+    processes: &mut Vec<BackgroundProcessSnapshot>,
+    process: BackgroundProcessSnapshot,
+) {
+    match processes
+        .iter_mut()
+        .find(|existing| existing.id == process.id)
+    {
+        Some(existing) => *existing = process,
+        None => processes.push(process),
+    }
+}
+
+/// Corrects any entry still `Running` to a terminal status once its turn has
+/// ended, so the UI never shows a sub-agent as running forever. Also stamps
+/// `completed_at_ms` when the runtime's own authoritative diff never arrived
+/// (this is a safety net, not the primary source of that timestamp - see
+/// `EventNormalizer::diff_subagents` in zode-app-runtime).
+fn finalize_running_subagents(subagents: &mut [SubagentSnapshot], interrupted: bool) {
+    let terminal = if interrupted {
+        SubagentStatus::Failed
+    } else {
+        SubagentStatus::Completed
+    };
+    for subagent in subagents.iter_mut() {
+        if subagent.status == SubagentStatus::Running {
+            subagent.status = terminal;
+            subagent.completed_at_ms.get_or_insert_with(now_epoch_ms);
+        }
+    }
+}
+
 fn append_assistant_text(transcript: &mut TranscriptState, delta: String) {
     match transcript.items.last_mut() {
-        Some(TranscriptItem::AssistantText(text)) => {
+        Some(TranscriptItem::AssistantText { text, .. }) => {
             text.push_str(&delta);
             invalidate_item_height(transcript, transcript.items.len().saturating_sub(1));
         }
-        _ => transcript.items.push(TranscriptItem::AssistantText(delta)),
+        _ => transcript
+            .items
+            .push(TranscriptItem::assistant_text_at(delta, now_epoch_ms())),
     }
+    transcript.touch_layout();
+}
+
+/// Wall-clock read for `TranscriptItem::timestamp_ms`, taken directly at the
+/// point a message is first created - this crate has no injected clock for
+/// calendar time (only `Instant`, used for turn *durations*), so this
+/// mirrors how the desktop app already reads wall time elsewhere (e.g.
+/// `command_projection::now_ms` in the `zode-app` crate).
+fn now_epoch_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 fn append_thinking(transcript: &mut TranscriptState, delta: String) {
@@ -763,6 +952,7 @@ fn append_thinking(transcript: &mut TranscriptState, delta: String) {
         }
         _ => transcript.items.push(TranscriptItem::Thinking(delta)),
     }
+    transcript.touch_layout();
 }
 
 fn upsert_started_tool(transcript: &mut TranscriptState, tool: ToolCall) {
@@ -770,6 +960,7 @@ fn upsert_started_tool(transcript: &mut TranscriptState, tool: ToolCall) {
         let _ = transcript.replace_item(index, TranscriptItem::Tool(tool));
     } else {
         transcript.items.push(TranscriptItem::Tool(tool));
+        transcript.touch_layout();
     }
 }
 

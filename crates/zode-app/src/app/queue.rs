@@ -92,11 +92,13 @@ impl DesktopApp {
                 session,
                 content,
                 attachments,
+                front,
             } => {
                 let command = AppCommand::EnqueueMessage {
                     session: session.clone(),
                     content,
                     attachments,
+                    front,
                 };
                 if let QueueCommandOutcome::Enqueued(id) =
                     reduce_queue_command(&mut self.app_state, &command)
@@ -727,7 +729,7 @@ mod tests {
     fn rejected_queued_start_rolls_back_its_user_items_and_turn_boundary() {
         let turn_id = TurnId::parse("00000000-0000-0000-0000-000000000333").unwrap();
         let mut transcript = TranscriptState {
-            items: vec![zode_app_model::TranscriptItem::UserText("queued".into())],
+            items: vec![zode_app_model::TranscriptItem::user_text("queued")],
             item_heights: vec![40.0],
             ..TranscriptState::default()
         };
@@ -745,7 +747,7 @@ mod tests {
     fn rejected_queued_guide_keeps_the_live_turn_and_rolls_back_only_guide_items() {
         let turn_id = TurnId::parse("00000000-0000-0000-0000-000000000334").unwrap();
         let mut transcript = TranscriptState {
-            items: vec![zode_app_model::TranscriptItem::UserText("original".into())],
+            items: vec![zode_app_model::TranscriptItem::user_text("original")],
             item_heights: vec![40.0],
             ..TranscriptState::default()
         };
@@ -753,7 +755,7 @@ mod tests {
         let transcript_len = transcript.items.len();
         transcript
             .items
-            .push(zode_app_model::TranscriptItem::UserText("guide".into()));
+            .push(zode_app_model::TranscriptItem::user_text("guide"));
         transcript.item_heights.push(40.0);
 
         rollback_queued_transcript(&mut transcript, transcript_len, None);

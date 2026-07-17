@@ -4,14 +4,14 @@ use super::{TranscriptItem, TranscriptState};
 fn removing_an_approval_keeps_item_heights_and_turn_boundaries_aligned() {
     let mut transcript = TranscriptState {
         items: vec![
-            TranscriptItem::UserText("first".into()),
+            TranscriptItem::user_text("first"),
             TranscriptItem::Approval {
                 id: "approval-1".into(),
                 tool: "shell".into(),
             },
-            TranscriptItem::AssistantText("done".into()),
-            TranscriptItem::UserText("second".into()),
-            TranscriptItem::AssistantText("done again".into()),
+            TranscriptItem::assistant_text("done"),
+            TranscriptItem::user_text("second"),
+            TranscriptItem::assistant_text("done again"),
         ],
         item_heights: vec![1.0, 2.0, 3.0, 4.0, 5.0],
         ..TranscriptState::default()

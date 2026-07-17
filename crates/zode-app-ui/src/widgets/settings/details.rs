@@ -166,6 +166,7 @@ fn page(state: &ZodeAppState, category: SettingsCategory) -> DetailPage {
             unavailable("语音", "语音输入", "当前节点没有提供可配置的语音输入设备。")
         }
         SettingsCategory::Configuration => configuration_page(state),
+        SettingsCategory::ProviderModels => unreachable!("handled by provider/model settings"),
         SettingsCategory::Personalization => unavailable(
             "个性化",
             "自定义指令与记忆",
@@ -211,11 +212,6 @@ fn page(state: &ZodeAppState, category: SettingsCategory) -> DetailPage {
             &state.local_settings.browser,
             "尚未读取浏览器配置。",
         ),
-        SettingsCategory::ComputerUse => unavailable(
-            "电脑操控",
-            "本机能力",
-            "当前节点未提供独立的电脑操控设置数据。",
-        ),
         SettingsCategory::Hooks => loaded_page(
             "钩子",
             "全局与项目 hooks.json",
@@ -242,6 +238,7 @@ fn page(state: &ZodeAppState, category: SettingsCategory) -> DetailPage {
         SettingsCategory::General
         | SettingsCategory::Appearance
         | SettingsCategory::Permissions
+        | SettingsCategory::ComputerUse
         | SettingsCategory::ArchivedTasks => unreachable!("handled by dedicated settings pages"),
     }
 }

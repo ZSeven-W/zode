@@ -1,6 +1,6 @@
 use zode_app_model::{
     demo_state, reduce_navigation_command, reduce_queue_command, AppCommand, AttachmentMetadata,
-    MessageQueueState, NavigationOutcome, QueueCommandOutcome, TranscriptState,
+    MessageQueueState, NavigationOutcome, QueueCommandOutcome, QueueReorderOp, TranscriptState,
 };
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, UserContent, WorkspaceUri};
 
@@ -56,6 +56,7 @@ fn enqueue_preserves_content_and_allocates_stable_session_local_ids() {
                 session: first.clone(),
                 content: vec![text("one"), image("one.png")],
                 attachments: vec![attachment("one.png")],
+                front: false,
             },
         ),
         QueueCommandOutcome::Enqueued(state.message_queues[&first].items.first().unwrap().id),
@@ -67,6 +68,7 @@ fn enqueue_preserves_content_and_allocates_stable_session_local_ids() {
                 session: first.clone(),
                 content: vec![text("two")],
                 attachments: Vec::new(),
+                front: false,
             },
         ),
         QueueCommandOutcome::Enqueued(state.message_queues[&first].items[1].id),
@@ -78,6 +80,7 @@ fn enqueue_preserves_content_and_allocates_stable_session_local_ids() {
                 session: second.clone(),
                 content: vec![text("other")],
                 attachments: Vec::new(),
+                front: false,
             },
         ),
         QueueCommandOutcome::Enqueued(state.message_queues[&second].items[0].id),
@@ -208,6 +211,7 @@ fn unknown_or_empty_queue_commands_are_ignored_without_creating_state() {
                 session: missing.clone(),
                 content: vec![text("never")],
                 attachments: Vec::new(),
+                front: false,
             },
         ),
         QueueCommandOutcome::Ignored,
@@ -219,6 +223,7 @@ fn unknown_or_empty_queue_commands_are_ignored_without_creating_state() {
                 session: missing.clone(),
                 content: Vec::new(),
                 attachments: Vec::new(),
+                front: false,
             },
         ),
         QueueCommandOutcome::Ignored,
@@ -408,4 +413,116 @@ fn retargeting_queue_edit_keeps_the_original_draft_backup() {
         QueueCommandOutcome::Applied,
     );
     assert_eq!(state.composer.draft, "original draft");
+}
+
+#[test]
+fn reorder_command_moves_messages_and_is_ignored_for_unknown_sessions_or_boundaries() {
+    let mut state = demo_state();
+    let session = add_session(&mut state, "reorder");
+    let mut queue = MessageQueueState::default();
+    let first = queue.enqueue("first".into(), Vec::new()).unwrap();
+    let second = queue.enqueue("second".into(), Vec::new()).unwrap();
+    let third = queue.enqueue("third".into(), Vec::new()).unwrap();
+    state.message_queues.insert(session.clone(), queue);
+
+    assert_eq!(
+        reduce_queue_command(
+            &mut state,
+            &AppCommand::ReorderQueuedMessage {
+                session: session.clone(),
+                id: third,
+                op: QueueReorderOp::Front,
+            },
+        ),
+        QueueCommandOutcome::Applied,
+    );
+    assert_eq!(
+        state.message_queues[&session]
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![third, first, second]
+    );
+    assert!(state.message_queues[&session].items[0].prioritized);
+
+    assert_eq!(
+        reduce_queue_command(
+            &mut state,
+            &AppCommand::ReorderQueuedMessage {
+                session: session.clone(),
+                id: third,
+                op: QueueReorderOp::Front,
+            },
+        ),
+        QueueCommandOutcome::Ignored,
+        "already at the front is a boundary no-op",
+    );
+
+    assert_eq!(
+        reduce_queue_command(
+            &mut state,
+            &AppCommand::ReorderQueuedMessage {
+                session: session.clone(),
+                id: second,
+                op: QueueReorderOp::Down,
+            },
+        ),
+        QueueCommandOutcome::Ignored,
+        "already at the back is a boundary no-op",
+    );
+
+    let missing = SessionLocator::new(state.host.node_id, "missing");
+    assert_eq!(
+        reduce_queue_command(
+            &mut state,
+            &AppCommand::ReorderQueuedMessage {
+                session: missing,
+                id: third,
+                op: QueueReorderOp::Up,
+            },
+        ),
+        QueueCommandOutcome::Ignored,
+    );
+}
+
+#[test]
+fn reordering_the_message_under_edit_keeps_editing_state_attached_to_its_id_not_position() {
+    let mut state = demo_state();
+    let session = add_session(&mut state, "current");
+    state.current_session = Some(session.clone());
+    let mut queue = MessageQueueState::default();
+    let first = queue.enqueue("first".into(), Vec::new()).unwrap();
+    let second = queue.enqueue("second".into(), Vec::new()).unwrap();
+    state.message_queues.insert(session.clone(), queue);
+
+    assert_eq!(
+        reduce_queue_command(
+            &mut state,
+            &AppCommand::BeginEditQueuedMessage {
+                session: session.clone(),
+                id: second,
+            },
+        ),
+        QueueCommandOutcome::Applied,
+    );
+    assert_eq!(state.composer.editing_queued_message, Some(second));
+
+    // Reordering does not care which message is being edited, and editing
+    // state is keyed by id, so it stays attached to `second` even though its
+    // position in the queue changes.
+    assert_eq!(
+        reduce_queue_command(
+            &mut state,
+            &AppCommand::ReorderQueuedMessage {
+                session: session.clone(),
+                id: second,
+                op: QueueReorderOp::Front,
+            },
+        ),
+        QueueCommandOutcome::Applied,
+    );
+    assert_eq!(state.composer.editing_queued_message, Some(second));
+    assert_eq!(state.message_queues[&session].items[0].id, second);
+    assert_eq!(state.message_queues[&session].items[1].id, first);
 }

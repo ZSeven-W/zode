@@ -73,8 +73,8 @@ struct ProviderBuffer {
 }
 
 impl ProviderBuffer {
-    fn recycle(self: Box<Self>) {
-        let Self { pool, pixels } = *self;
+    fn recycle(self) {
+        let Self { pool, pixels } = self;
         pool.recycle(pixels);
     }
 }
@@ -206,7 +206,11 @@ impl MacMaterialPresenter {
             .and_then(|pixels| pixels.checked_mul(4))
             .ok_or_else(|| "macOS presentation dimensions are too large".to_owned())?;
         let mut pixels = self.pixel_pool.take(pixel_bytes);
-        if !raster.copy_bgra_premultiplied_to(pixels.as_mut()) {
+        if !raster.copy_bgra_premultiplied_to(
+            pixels.as_mut(),
+            frame.physical_width,
+            frame.physical_height,
+        ) {
             self.pixel_pool.recycle(pixels);
             return Err("Skia BGRA framebuffer copy failed".into());
         }
@@ -364,7 +368,7 @@ mod tests {
             .canvas()
             .clear(skia_safe::Color::from_argb(255, 0x12, 0x34, 0x56));
 
-        assert!(surface.copy_bgra_premultiplied_to(reused.as_mut()));
+        assert!(surface.copy_bgra_premultiplied_to(reused.as_mut(), 2, 1));
         assert_eq!(
             reused.as_ref(),
             [0x56, 0x34, 0x12, 0xff, 0x56, 0x34, 0x12, 0xff]

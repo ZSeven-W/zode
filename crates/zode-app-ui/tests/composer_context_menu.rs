@@ -5,8 +5,10 @@ use zode_app_model::{
     ComposerContextMenu as ContextMenuKind, ProjectState, TaskLaunchMode,
 };
 use zode_app_ui::{
-    Composer, ComposerContextMenu, ZodeTheme, COMPOSER_BRANCH_CREATE_ID, COMPOSER_BRANCH_SEARCH_ID,
-    COMPOSER_CONTEXT_MENU_SURFACE_ID, COMPOSER_LOCATION_LOCAL_ID, COMPOSER_LOCATION_WORKTREE_ID,
+    Composer, ComposerContextMenu, Insets, WorkspaceSnapshot, ZodeTheme, COMPOSER_BRANCH_CREATE_ID,
+    COMPOSER_BRANCH_ID, COMPOSER_BRANCH_SEARCH_ID, COMPOSER_CONTEXT_MENU_SURFACE_ID,
+    COMPOSER_LOCATION_ID, COMPOSER_LOCATION_LOCAL_ID, COMPOSER_LOCATION_WORKTREE_ID,
+    COMPOSER_PROJECT_ID, PROJECT_DETACH_ID,
 };
 use zode_node_protocol::WorkspaceUri;
 
@@ -90,6 +92,23 @@ fn center(rect: Rect) -> Point2D {
         rect.origin.x + rect.size.x / 2.0,
         rect.origin.y + rect.size.y / 2.0,
     )
+}
+
+#[test]
+fn attached_context_controls_are_real_hit_targets() {
+    let mut state = state();
+    state.composer.selected_branch = Some("main".into());
+    let snapshot = WorkspaceSnapshot::build(&state, 1_200.0, 900.0, Insets::ZERO);
+
+    for id in [
+        PROJECT_DETACH_ID,
+        COMPOSER_PROJECT_ID,
+        COMPOSER_LOCATION_ID,
+        COMPOSER_BRANCH_ID,
+    ] {
+        let trigger = snapshot.node(id).expect("composer context trigger");
+        assert_eq!(snapshot.hit_test(center(trigger.rect)), Some(id));
+    }
 }
 
 #[test]

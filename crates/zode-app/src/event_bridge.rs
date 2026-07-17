@@ -17,7 +17,10 @@ use zode_node_protocol::{AgentEndpoint, AgentEvent, AgentEventKind, SessionLocat
 use crate::window_state::AppWake;
 
 enum BridgeItem {
-    Event(AgentEvent),
+    // Boxed: `AgentEvent` grew past clippy's large-enum-variant threshold
+    // once `SubagentSnapshot` picked up `display_name`/`completed_at_ms`/
+    // `result_summary`, and `Unavailable` carries no data at all.
+    Event(Box<AgentEvent>),
     Unavailable,
 }
 
@@ -66,7 +69,9 @@ impl AgentEventBridge {
             };
             while let Some(event) = events.next().await {
                 match event {
-                    Ok(event) => enqueue(&sender, &producer_wake, BridgeItem::Event(event)),
+                    Ok(event) => {
+                        enqueue(&sender, &producer_wake, BridgeItem::Event(Box::new(event)))
+                    }
                     Err(_) => {
                         enqueue(&sender, &producer_wake, BridgeItem::Unavailable);
                         return;
@@ -102,7 +107,7 @@ fn apply_item(state: &mut ZodeAppState, summary: &mut AgentEventDrain, item: Bri
                 .then(|| event.session.clone());
             let finished_session = matches!(event.kind, AgentEventKind::TurnFinished { .. })
                 .then(|| event.session.clone());
-            if reduce_agent_event(state, event) == ReduceOutcome::Applied {
+            if reduce_agent_event(state, *event) == ReduceOutcome::Applied {
                 summary.applied += 1;
                 summary.changed = true;
                 if let Some(session) = diff_session {
@@ -325,22 +330,22 @@ mod tests {
         state.active_turns.insert(session.clone(), turn_id);
         let (sender, receiver) = mpsc::unbounded_channel();
         sender
-            .send(BridgeItem::Event(AgentEvent {
+            .send(BridgeItem::Event(Box::new(AgentEvent {
                 version: PROTOCOL_VERSION,
                 session: session.clone(),
                 turn_id,
                 sequence: 1,
                 kind: AgentEventKind::DiffInvalidated,
-            }))
+            })))
             .unwrap();
         sender
-            .send(BridgeItem::Event(AgentEvent {
+            .send(BridgeItem::Event(Box::new(AgentEvent {
                 version: PROTOCOL_VERSION,
                 session: session.clone(),
                 turn_id,
                 sequence: 1,
                 kind: AgentEventKind::DiffInvalidated,
-            }))
+            })))
             .unwrap();
         let mut bridge = test_bridge(receiver);
 
@@ -381,8 +386,10 @@ mod tests {
             sequence: 1,
             kind: AgentEventKind::TurnFinished { interrupted: false },
         };
-        sender.send(BridgeItem::Event(finished.clone())).unwrap();
-        sender.send(BridgeItem::Event(finished)).unwrap();
+        sender
+            .send(BridgeItem::Event(Box::new(finished.clone())))
+            .unwrap();
+        sender.send(BridgeItem::Event(Box::new(finished))).unwrap();
         let mut bridge = test_bridge(receiver);
 
         let summary = bridge.drain_into(&mut state);
@@ -442,8 +449,10 @@ mod tests {
                 sequence: 1,
                 kind: AgentEventKind::TurnFinished { interrupted: false },
             };
-            sender.send(BridgeItem::Event(finished.clone())).unwrap();
-            sender.send(BridgeItem::Event(finished)).unwrap();
+            sender
+                .send(BridgeItem::Event(Box::new(finished.clone())))
+                .unwrap();
+            sender.send(BridgeItem::Event(Box::new(finished))).unwrap();
         }
         let mut bridge = test_bridge(receiver);
 
@@ -474,7 +483,7 @@ mod tests {
             assert!(state.active_turns.contains_key(&session));
             assert!(matches!(
                 state.transcripts[&session].items.last(),
-                Some(TranscriptItem::UserText(text)) if text == &head
+                Some(TranscriptItem::UserText { text, .. }) if text == &head
             ));
         }
 

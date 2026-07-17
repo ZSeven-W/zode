@@ -23,8 +23,12 @@ pub(super) fn append_header_nodes(
     focus_order: &mut u32,
     state: &ZodeAppState,
 ) {
-    let header =
-        ThreadHeader::layout_with_pinned_summary(layout.top_bar, state, layout.pinned_summary);
+    let header = ThreadHeader::layout_with_pinned_summary_and_sidebar_visibility(
+        layout.top_bar,
+        state,
+        layout.pinned_summary,
+        layout.primary_sidebar_visibility(),
+    );
     append_header_action(nodes, focus_order, header.more, HEADER_MORE_ID, "任务操作");
     if let Some(open_with) = header.open_with {
         let open_label = format!(

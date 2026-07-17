@@ -8,13 +8,17 @@ use zode_app_ui::{
     Composer, ComposerController, ImeEvent, Insets, Key, RectExt, WorkspaceShell,
     WorkspaceSnapshot, ZodeTheme, COMPOSER_ID, PROJECT_DETACH_ID, SEND_ID,
 };
-use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
+use zode_node_protocol::{
+    ApprovalMode, SandboxMode, SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri,
+};
 
 #[derive(Default)]
 struct TextCapture {
     texts: Vec<String>,
     text_lines: Vec<(String, Point2D, f32)>,
+    text_colors: Vec<(String, Color)>,
     icons: Vec<(&'static str, Point2D, f32)>,
+    icon_colors: Vec<(&'static str, Color)>,
     fill_rects: Vec<Rect>,
     rect_fills: Vec<(Rect, Color)>,
     round_fills: Vec<(Rect, Color)>,
@@ -37,6 +41,15 @@ impl Painter for TextCapture {
             .collect();
         if let Some(run) = layout.runs().first() {
             self.text_lines.push((text.clone(), origin, run.font_size));
+            self.text_colors.push((
+                text.clone(),
+                Color::rgba_u8(
+                    run.color.r(),
+                    run.color.g(),
+                    run.color.b(),
+                    f32::from(run.color.a()) / 255.0,
+                ),
+            ));
         }
         self.texts.push(text);
     }
@@ -52,7 +65,7 @@ impl Painter for TextCapture {
         d: &str,
         top_left: Point2D,
         size: f32,
-        _color: Color,
+        color: Color,
         _width: f32,
     ) {
         let semantic = zode_app_ui::SemanticIcon::ALL
@@ -60,6 +73,7 @@ impl Painter for TextCapture {
             .find(|icon| icon.path() == d)
             .expect("composer uses a registered semantic icon");
         self.icons.push((semantic.path(), top_left, size));
+        self.icon_colors.push((semantic.path(), color));
     }
     fn save(&mut self) {}
     fn restore(&mut self) {}
@@ -266,7 +280,79 @@ fn composer_paints_only_explicit_runtime_context_and_permission() {
     assert!(painter
         .icons
         .iter()
-        .any(|(path, _, _)| *path == zode_app_ui::SemanticIcon::ShieldAlert.path()));
+        .any(|(path, _, _)| *path == zode_app_ui::SemanticIcon::Host.path()));
+}
+
+#[test]
+fn composer_permission_trigger_matches_each_approval_level() {
+    let theme = ZodeTheme::light();
+    let cases = [
+        (
+            ApprovalMode::Request,
+            SandboxMode::WorkspaceWrite,
+            false,
+            "请求批准",
+            zode_app_ui::SemanticIcon::Host,
+            theme.tokens.muted_foreground,
+        ),
+        (
+            ApprovalMode::Auto,
+            SandboxMode::WorkspaceWrite,
+            true,
+            "替我审批",
+            zode_app_ui::SemanticIcon::Refresh,
+            theme.tokens.muted_foreground,
+        ),
+        (
+            ApprovalMode::Full,
+            SandboxMode::Off,
+            false,
+            "完全访问",
+            zode_app_ui::SemanticIcon::ShieldAlert,
+            theme.composer_permission,
+        ),
+        (
+            ApprovalMode::Request,
+            SandboxMode::ReadOnly,
+            false,
+            "自定义",
+            zode_app_ui::SemanticIcon::Settings,
+            theme.tokens.muted_foreground,
+        ),
+    ];
+
+    for (approval, sandbox, network, label, expected_icon, expected_color) in cases {
+        let state = ComposerState {
+            sandbox_label: label.into(),
+            approval_mode: approval,
+            sandbox_mode: sandbox,
+            sandbox_network: network,
+            ..ComposerState::default()
+        };
+        let mut painter = TextCapture::default();
+
+        Composer::paint(
+            &mut painter,
+            Rect::xywh(0.0, 0.0, 500.0, 120.0),
+            &state,
+            &theme,
+        );
+
+        assert!(
+            painter
+                .icon_colors
+                .iter()
+                .any(|(path, color)| *path == expected_icon.path() && *color == expected_color),
+            "wrong icon or icon color for {label}"
+        );
+        assert!(
+            painter
+                .text_colors
+                .iter()
+                .any(|(text, color)| text == label && *color == expected_color),
+            "wrong text color for {label}"
+        );
+    }
 }
 
 #[test]
@@ -395,6 +481,129 @@ fn workspace_snapshot_drives_the_full_composer_stack_geometry() {
     let with_input = with.node(COMPOSER_ID).expect("composer input node").rect;
     assert_eq!(with_input, with_layout.input);
     assert!((with_input.height() - 100.0).abs() <= f32::EPSILON);
+}
+
+/// The context rail (project/location/branch migration chips) only makes
+/// sense before a conversation exists. Once the active session's transcript
+/// holds a message, the rail must vanish entirely and its 38px collapses
+/// back into the transcript, not just stop being interactive.
+#[test]
+fn context_bar_collapses_once_the_active_transcript_has_a_message() {
+    let new_task = zode_app_model::demo_state();
+    let new_task_snapshot = WorkspaceSnapshot::build(&new_task, 1_440.0, 1_080.0, Insets::ZERO);
+
+    let mut started = zode_app_model::demo_state();
+    let session = SessionLocator::new(started.host.node_id, "just-started");
+    started.current_session = Some(session.clone());
+    started.transcripts.insert(
+        session,
+        TranscriptState {
+            items: vec![TranscriptItem::user_text("build the renderer")],
+            ..TranscriptState::default()
+        },
+    );
+    let started_snapshot = WorkspaceSnapshot::build(&started, 1_440.0, 1_080.0, Insets::ZERO);
+
+    let bar_height = 38.0;
+    assert!(
+        (new_task_snapshot.layout.composer.height()
+            - started_snapshot.layout.composer.height()
+            - bar_height)
+            .abs()
+            <= f32::EPSILON,
+        "hiding the bar must shrink the reserved composer height by exactly its own height"
+    );
+    assert!(
+        (started_snapshot.layout.composer.origin.y
+            - new_task_snapshot.layout.composer.origin.y
+            - bar_height)
+            .abs()
+            <= f32::EPSILON,
+        "the composer, being bottom anchored, must move down by the reclaimed height"
+    );
+    assert!(
+        (started_snapshot.layout.transcript.height()
+            - new_task_snapshot.layout.transcript.height()
+            - bar_height)
+            .abs()
+            <= f32::EPSILON,
+        "the transcript must grow into exactly the space the bar gave up"
+    );
+
+    // With a zero-height context rect, `context::paint_interactive` early-returns
+    // (it bails on `rect.size.y <= 0.0` before painting the background pill or
+    // any chip), so proving the layout collapsed is enough to prove nothing
+    // paints there; a whole-shell text search would be unreliable here since
+    // both the workspace label and the connection label ("本地") legitimately
+    // recur elsewhere in the shell (sidebar project list, account name, etc).
+    let started_layout = Composer::layout_for_state(started_snapshot.layout.composer, &started);
+    assert_eq!(started_layout.context.height(), 0.0);
+    let context = Composer::context_interaction_layout(
+        started_snapshot.layout.composer,
+        &started,
+        Some("zode"),
+        Some("本地"),
+        Some("main"),
+    );
+    assert!(context.project.is_none());
+    assert!(context.location.is_none());
+    assert!(context.branch.is_none());
+}
+
+/// A restored historical session (transcript already populated before the
+/// composer ever paints) must start with the bar already collapsed, same as
+/// the moment right after sending the first message.
+#[test]
+fn restored_session_with_history_never_shows_the_context_bar() {
+    let mut state = zode_app_model::demo_state();
+    let session = SessionLocator::new(state.host.node_id, "restored");
+    state.current_session = Some(session.clone());
+    state.transcripts.insert(
+        session,
+        TranscriptState {
+            items: vec![
+                TranscriptItem::user_text("earlier question"),
+                TranscriptItem::assistant_text("earlier answer"),
+            ],
+            ..TranscriptState::default()
+        },
+    );
+    let snapshot = WorkspaceSnapshot::build(&state, 1_440.0, 1_080.0, Insets::ZERO);
+    let layout = Composer::layout_for_state(snapshot.layout.composer, &state);
+    assert_eq!(layout.context.height(), 0.0);
+}
+
+/// A live goal-progress pill has no analog in the environment panel, so it
+/// keeps reserving the rail's height even once the conversation is busy.
+#[test]
+fn goal_progress_keeps_the_context_rail_reserved_mid_conversation() {
+    let new_task = zode_app_model::demo_state();
+    let new_task_snapshot = WorkspaceSnapshot::build(&new_task, 1_440.0, 1_080.0, Insets::ZERO);
+
+    let mut with_goal = zode_app_model::demo_state();
+    let session = SessionLocator::new(with_goal.host.node_id, "goal-context");
+    with_goal.current_session = Some(session.clone());
+    with_goal.transcripts.insert(
+        session,
+        TranscriptState {
+            items: vec![TranscriptItem::GoalProgress(GoalProgress {
+                id: "goal-1".into(),
+                title: "Visual rebuild".into(),
+                completed: 3,
+                total: 7,
+            })],
+            busy: true,
+            ..TranscriptState::default()
+        },
+    );
+    let with_goal_snapshot = WorkspaceSnapshot::build(&with_goal, 1_440.0, 1_080.0, Insets::ZERO);
+
+    assert_eq!(
+        with_goal_snapshot.layout.composer.height(),
+        new_task_snapshot.layout.composer.height()
+    );
+    let layout = Composer::layout_for_state(with_goal_snapshot.layout.composer, &with_goal);
+    assert!((layout.context.height() - 38.0).abs() <= f32::EPSILON);
 }
 
 #[test]
@@ -648,7 +857,6 @@ fn projectless_session_hides_scratch_workspace_and_branch_from_composer() {
             context: LoadState::Ready(EnvironmentSnapshot {
                 workspace_uri: scratch_child,
                 branch: Some("main".into()),
-                subagents: Vec::new(),
                 background_processes: Vec::new(),
                 sources: Vec::new(),
             }),
@@ -679,7 +887,7 @@ fn projectless_session_hides_scratch_workspace_and_branch_from_composer() {
 }
 
 #[test]
-fn projectless_new_task_starts_without_a_project_chip_or_detach_action() {
+fn projectless_new_task_starts_with_a_select_project_chip_and_no_detach_action() {
     let mut state = zode_app_model::demo_state();
     state.current_session = None;
     state.active_workspace = None;
@@ -710,6 +918,7 @@ fn projectless_new_task_starts_without_a_project_chip_or_detach_action() {
         .filter(|(_, origin, _)| snapshot.layout.composer.contains(*origin))
         .map(|(text, _, _)| text.as_str())
         .collect::<Vec<_>>();
+    assert!(composer_texts.contains(&"选择项目"));
     assert!(composer_texts.contains(&"本地"));
     assert!(!composer_texts
         .iter()

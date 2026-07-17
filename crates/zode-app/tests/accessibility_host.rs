@@ -88,3 +88,14 @@ fn native_sidebar_material_does_not_capture_winit_pointer_events() {
     assert!(presenter.contains("fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>>"));
     assert!(presenter.contains("PassthroughVisualEffectView::new(mtm, zero_frame).into_super()"));
 }
+
+#[test]
+fn native_sidebar_material_follows_the_app_window_appearance() {
+    let window = include_str!("../src/app/window.rs");
+    let interaction = include_str!("../src/app/interaction.rs");
+    let interaction_enqueue = include_str!("../src/app/interaction/enqueue.rs");
+
+    assert!(window.contains("window.set_theme(window_theme_override("));
+    assert!(interaction.contains("mod enqueue;"));
+    assert!(interaction_enqueue.contains("self.sync_window_theme();"));
+}

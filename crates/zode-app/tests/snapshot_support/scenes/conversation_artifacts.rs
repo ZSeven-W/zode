@@ -1,8 +1,11 @@
 use zode_app_model::{
-    ActivityEntry, AttachmentMetadata, EnvironmentEntry, FileArtifact, GoalProgress, LoadState,
-    ShellRoute, ThemePreference, TranscriptItem,
+    ActivityEntry, AttachmentMetadata, FileArtifact, GoalProgress, ShellRoute, ThemePreference,
+    TranscriptItem,
 };
-use zode_node_protocol::{ToolCall, ToolStatus};
+use zode_node_protocol::{
+    BackgroundProcessSnapshot, BackgroundProcessStatus, SubagentSnapshot, SubagentStatus, ToolCall,
+    ToolStatus, TurnId,
+};
 
 use super::ReferenceScene;
 use crate::snapshot_support::fixture::{base_scene_state, set_transcript};
@@ -21,9 +24,7 @@ pub fn conversation_artifacts_scene(theme: ThemePreference, viewport_width: u32)
     set_transcript(
         &mut state,
         vec![
-            TranscriptItem::UserText(
-                "照着参考界面完成视觉重构，并保留真实 runtime 数据边界。".into(),
-            ),
+            TranscriptItem::user_text("照着参考界面完成视觉重构，并保留真实 runtime 数据边界。"),
             TranscriptItem::Thinking("正在读取设计规格和当前组件树。".into()),
             TranscriptItem::ActivityGroup(vec![
                 ActivityEntry {
@@ -49,8 +50,8 @@ pub fn conversation_artifacts_scene(theme: ThemePreference, viewport_width: u32)
                         .into(),
                 ),
             }),
-            TranscriptItem::AssistantText(
-                "已确认顶层骨架保持不变，接下来补齐富会话、文件卡、目标进度与附件层。".into(),
+            TranscriptItem::assistant_text(
+                "已确认顶层骨架保持不变，接下来补齐富会话、文件卡、目标进度与附件层。",
             ),
             TranscriptItem::FileArtifact(FileArtifact {
                 id: "artifact-transcript".into(),
@@ -76,8 +77,8 @@ pub fn conversation_artifacts_scene(theme: ThemePreference, viewport_width: u32)
                 completed: 5,
                 total: 6,
             }),
-            TranscriptItem::AssistantText(
-                "第一轮实现已经通过自动门禁。现在保留实际输出供整幅画布人工检查。".into(),
+            TranscriptItem::assistant_text(
+                "第一轮实现已经通过自动门禁。现在保留实际输出供整幅画布人工检查。",
             ),
             TranscriptItem::FileArtifact(FileArtifact {
                 id: "artifact-snapshots".into(),
@@ -107,19 +108,23 @@ pub fn conversation_artifacts_scene(theme: ThemePreference, viewport_width: u32)
         .sessions
         .get_mut(&session)
         .expect("artifact scene has presentation state");
-    let context = match &mut presentation.context {
-        LoadState::Ready(context) => context,
-        _ => panic!("artifact scene starts with loaded context"),
-    };
-    context.subagents = vec![EnvironmentEntry {
+    presentation.subagents = vec![SubagentSnapshot {
         id: "artifact-visual-audit".into(),
-        label: "视觉完成度审查".into(),
-        value: Some("已完成".into()),
+        agent_type: "视觉完成度审查".into(),
+        display_name: "视觉完成度审查".into(),
+        depth: 0,
+        status: SubagentStatus::Completed,
+        tokens: 5_100,
+        turn_id: TurnId::new(),
+        completed_at_ms: Some(1_752_700_000_000),
+        result_summary: Some("未发现 Codex 品牌资源残留".into()),
     }];
-    context.background_processes = vec![EnvironmentEntry {
+    presentation.background_processes = vec![BackgroundProcessSnapshot {
         id: "artifact-snapshot-render".into(),
-        label: "参考场景渲染".into(),
-        value: Some("进行中".into()),
+        command: "参考场景渲染".into(),
+        status: BackgroundProcessStatus::Running,
+        started_at_ms: 0,
+        tool_call_id: None,
     }];
     state.composer.attachments = vec![composer_attachment];
     state.composer.draft = "继续检查六张完整画布的文字对齐和视觉密度".into();

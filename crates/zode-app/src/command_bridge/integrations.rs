@@ -64,7 +64,7 @@ fn command_session(
     if let Some(session) = state
         .current_session
         .as_ref()
-        .filter(|session| state.available_workspace_for_session(session) == Some(workspace_uri))
+        .filter(|session| state.project_workspace_for_session(session) == Some(workspace_uri))
     {
         if state.active_turns.contains_key(session)
             || state
@@ -79,7 +79,7 @@ fn command_session(
     if let Some(session) = state
         .threads
         .iter()
-        .filter(|thread| &thread.workspace_uri == workspace_uri)
+        .filter(|thread| state.project_workspace_for_thread(thread) == Some(workspace_uri))
         .map(|thread| &thread.session)
         .find(|session| {
             !state.active_turns.contains_key(*session)

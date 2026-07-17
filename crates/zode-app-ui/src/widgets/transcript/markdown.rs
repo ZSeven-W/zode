@@ -5,6 +5,10 @@ use jian_widgets::{
 
 use crate::{RectExt, TypographyRole, ZodeTheme};
 
+#[path = "code-syntax.rs"]
+mod code_syntax;
+use code_syntax::TokenClass;
+
 const MARKDOWN_LIMIT: usize = 50_000;
 const BODY_LINE_HEIGHT: f32 = 22.0;
 const BLOCK_GAP: f32 = 8.0;
@@ -14,6 +18,15 @@ const USER_VERTICAL_PADDING: f32 = 9.0;
 const USER_MIN_HEIGHT: f32 = 40.0;
 const USER_MAX_WIDTH_FRACTION: f32 = 0.77;
 const USER_MEASURE_SLOP: f32 = 8.0;
+
+/// Vertical space reserved below every user bubble and every assistant
+/// message, whether or not its hover-revealed (or, for the newest assistant
+/// message, persistent) action row is currently painted. Reserving this
+/// unconditionally - as part of the item's own measured height rather than
+/// the inter-item gap - is what makes hover a paint-only concern: it never
+/// changes `estimated_item_height`, so it never invalidates
+/// `TranscriptState`'s layout cache. See `message_actions::ROW_HEIGHT`.
+pub(super) const ACTION_ROW_RESERVED: f32 = super::message_actions::ROW_HEIGHT;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConversationBlock {
@@ -47,20 +60,15 @@ pub(super) fn paint_assistant(
 }
 
 pub(super) fn paint_user(painter: &mut dyn Painter, rect: Rect, markdown: &str, theme: &ZodeTheme) {
-    let max_width = (rect.size.x * USER_MAX_WIDTH_FRACTION).max(64.0);
-    let natural_width =
-        natural_markdown_width(markdown) + USER_HORIZONTAL_PADDING * 2.0 + USER_MEASURE_SLOP;
-    let bubble_width = natural_width.clamp(64.0, max_width);
-    let x = rect.max_x() - bubble_width;
-    let content_width = (bubble_width - USER_HORIZONTAL_PADDING * 2.0).max(1.0);
-    let bubble = Rect::xywh(x, rect.origin.y, bubble_width, rect.size.y);
+    let bubble = user_bubble_rect(rect, markdown);
+    let content_width = (bubble.size.x - USER_HORIZONTAL_PADDING * 2.0).max(1.0);
     painter.fill_round_rect(bubble, 16.0, theme.user_bubble);
     painter.save();
     painter.clip_round_rect(bubble, 16.0);
     paint_markdown_at(
         painter,
         Point2D::new(
-            x + USER_HORIZONTAL_PADDING,
+            bubble.origin.x + USER_HORIZONTAL_PADDING,
             bubble.origin.y + USER_VERTICAL_PADDING,
         ),
         content_width,
@@ -70,7 +78,32 @@ pub(super) fn paint_user(painter: &mut dyn Painter, rect: Rect, markdown: &str, 
     painter.restore();
 }
 
+/// The bubble's own rect within an item's full (content-plus-reserved-row)
+/// rect. Top-aligned; the hover reveal row occupies the reserved strip below
+/// it. Shared by `paint_user` and the transcript module, which right-aligns
+/// the reveal row under this same rect so it never drifts from the bubble.
+pub(super) fn user_bubble_rect(rect: Rect, markdown: &str) -> Rect {
+    let max_width = (rect.size.x * USER_MAX_WIDTH_FRACTION).max(64.0);
+    let natural_width =
+        natural_markdown_width(markdown) + USER_HORIZONTAL_PADDING * 2.0 + USER_MEASURE_SLOP;
+    let bubble_width = natural_width.clamp(64.0, max_width);
+    let bubble_height = (rect.size.y - ACTION_ROW_RESERVED).max(USER_MIN_HEIGHT);
+    Rect::xywh(
+        rect.max_x() - bubble_width,
+        rect.origin.y,
+        bubble_width,
+        bubble_height,
+    )
+}
+
 pub(super) fn assistant_height(markdown: &str, width: f32) -> f32 {
+    assistant_content_height(markdown, width) + ACTION_ROW_RESERVED
+}
+
+/// Height of the assistant text block alone, excluding the reserved action
+/// row - i.e. where `paint_assistant` actually stops drawing. The transcript
+/// module uses this to anchor the action row directly under the text.
+pub(super) fn assistant_content_height(markdown: &str, width: f32) -> f32 {
     (markdown_content_height(markdown, width) + 10.0).max(BODY_LINE_HEIGHT + 10.0)
 }
 
@@ -82,7 +115,7 @@ pub(super) fn user_height(markdown: &str, width: f32) -> f32 {
     user_bubble_height(
         markdown,
         (bubble_width - USER_HORIZONTAL_PADDING * 2.0).max(1.0),
-    )
+    ) + ACTION_ROW_RESERVED
 }
 
 fn user_bubble_height(markdown: &str, width: f32) -> f32 {
@@ -179,19 +212,59 @@ fn paint_code_block(
     }
     let code = TypographyRole::Code.style();
     for line in code_lines(source) {
-        draw_text(
+        paint_code_line(
             painter,
+            language,
             line,
             Point2D::new(rect.origin.x + 12.0, y),
-            code.family,
-            code.size,
-            code.weight,
-            theme.tokens.foreground,
+            &code,
+            theme,
         );
         y += code.line_height;
     }
     painter.restore();
     rect.size.y
+}
+
+/// Paints one already-wrapped-free code line as a sequence of colored spans
+/// (see `code_syntax::tokenize_line`) instead of one plain-colored string.
+/// Each span is measured and advanced with the exact same font/size/weight
+/// used to draw it, so concatenating the spans lands every glyph at the
+/// same x-position a single `draw_text` call would have - highlighting only
+/// recolors glyphs, it never changes line height or where the line wraps.
+fn paint_code_line(
+    painter: &mut dyn Painter,
+    language: &str,
+    line: &str,
+    origin: Point2D,
+    style: &crate::TypographyStyle,
+    theme: &ZodeTheme,
+) {
+    let mut x = origin.x;
+    for (class, text) in code_syntax::tokenize_line(language, line) {
+        let color = code_token_color(class, theme);
+        draw_text(
+            painter,
+            &text,
+            Point2D::new(x, origin.y),
+            style.family,
+            style.size,
+            style.weight,
+            color,
+        );
+        x += painter.measure_text_weighted(&text, style.size, style.weight);
+    }
+}
+
+fn code_token_color(class: TokenClass, theme: &ZodeTheme) -> Color {
+    match class {
+        TokenClass::Keyword => theme.code_syntax.keyword,
+        TokenClass::String => theme.code_syntax.string,
+        TokenClass::Comment => theme.code_syntax.comment,
+        TokenClass::Number => theme.code_syntax.number,
+        TokenClass::Punctuation => theme.code_syntax.punctuation,
+        TokenClass::Plain => theme.tokens.foreground,
+    }
 }
 
 fn markdown_content_height(markdown: &str, width: f32) -> f32 {
@@ -580,6 +653,9 @@ mod tests {
 
     #[test]
     fn short_user_messages_keep_the_reference_compact_height() {
-        assert_eq!(user_height("继续", 736.0), USER_MIN_HEIGHT);
+        assert_eq!(
+            user_height("继续", 736.0),
+            USER_MIN_HEIGHT + ACTION_ROW_RESERVED
+        );
     }
 }

@@ -139,6 +139,42 @@ fn busy_composer_queues_and_exposes_stop() {
 }
 
 #[test]
+fn priority_send_while_busy_joins_the_queue_head_instead_of_the_tail() {
+    let mut composer = ComposerController::fixture("jump the line");
+    composer.set_busy(true);
+
+    assert_eq!(
+        composer.key(Key::Enter, Modifiers::SUPER),
+        ComposerOutcome::QueueFront("jump the line".into()),
+    );
+    assert_eq!(composer.text(), "");
+}
+
+#[test]
+fn priority_send_with_no_turn_running_behaves_like_a_plain_send() {
+    let mut composer = ComposerController::fixture("nothing to jump ahead of");
+
+    assert_eq!(
+        composer.key(Key::Enter, Modifiers::SUPER),
+        ComposerOutcome::Send("nothing to jump ahead of".into()),
+    );
+}
+
+#[test]
+fn priority_send_modifier_yields_to_shift_enters_newline() {
+    let mut composer = ComposerController::fixture("hello");
+    composer.set_busy(true);
+
+    // Shift+Cmd+Enter still inserts a newline: Shift wins over the priority
+    // modifier, matching how Shift+Enter always wins over a plain Enter.
+    assert_eq!(
+        composer.key(Key::Enter, Modifiers::SUPER | Modifiers::SHIFT),
+        ComposerOutcome::Edited,
+    );
+    assert_eq!(composer.text(), "hello\n");
+}
+
+#[test]
 fn queue_edit_restores_the_unsubmitted_draft_and_attachments() {
     let mut composer = ComposerController::fixture("unsubmitted draft");
     assert!(matches!(

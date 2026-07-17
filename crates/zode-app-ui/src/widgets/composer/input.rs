@@ -2,7 +2,7 @@ use jian_core::text_input::TextInputState;
 use jian_widgets::{components::text_area::TextArea, Painter, Rect};
 use zode_app_model::ComposerState;
 
-use crate::ZodeTheme;
+use crate::{Card, ZodeTheme};
 
 const TEXT_AREA_INSET_X: f32 = 8.0;
 const TEXT_AREA_INSET_TOP: f32 = 6.0;
@@ -22,14 +22,7 @@ pub(super) fn paint_surface(
     if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
         return;
     }
-    painter.fill_drop_shadow(
-        Rect::xywh(rect.origin.x, rect.origin.y + 2.0, rect.size.x, rect.size.y),
-        INPUT_RADIUS,
-        22.0,
-        theme.tokens.foreground.with_alpha(0.06),
-    );
-    painter.fill_round_rect(rect, INPUT_RADIUS, theme.tokens.card);
-    painter.stroke_round_rect(rect, INPUT_RADIUS, theme.tokens.border, 1.0);
+    Card::paint(painter, rect, INPUT_RADIUS, true, theme);
 
     text_area(input, state.focused).paint(painter, text_area_rect(rect), &theme.tokens);
 }

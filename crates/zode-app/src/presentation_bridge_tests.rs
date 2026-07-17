@@ -507,7 +507,6 @@ async fn local_environment_without_git_is_ready_with_empty_real_context() {
         LoadState::Ready(EnvironmentSnapshot {
             workspace_uri,
             branch: None,
-            subagents: Vec::new(),
             background_processes: Vec::new(),
             sources: Vec::new(),
         })

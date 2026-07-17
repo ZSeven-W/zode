@@ -102,7 +102,7 @@ pub(crate) fn reduce_sidebar_navigation(
             let sessions = state
                 .threads
                 .iter()
-                .filter(|thread| &thread.workspace_uri == workspace_uri)
+                .filter(|thread| state.project_workspace_for_thread(thread) == Some(workspace_uri))
                 .map(|thread| thread.session.clone())
                 .collect::<Vec<_>>();
             if sessions.is_empty() {

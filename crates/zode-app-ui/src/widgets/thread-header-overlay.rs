@@ -9,7 +9,9 @@ use super::thread_header::{
     ThreadCopyMenuLayout, ThreadMenuActionLayout, ThreadMenuLayout, ThreadRenameLayout,
     HEADER_RENAME_INPUT_ID,
 };
-use crate::{paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme};
+use crate::{
+    paint_elevated_surface, paint_single_line, MenuRow, RectExt, SemanticIcon, WidgetId, ZodeTheme,
+};
 
 pub(super) fn paint_task_menu(
     painter: &mut dyn Painter,
@@ -146,12 +148,11 @@ fn paint_copy_menu(
 }
 
 fn paint_popover_surface(painter: &mut dyn Painter, rect: Rect, theme: &ZodeTheme) {
-    painter.fill_drop_shadow(
-        Rect::xywh(rect.origin.x, rect.origin.y + 2.0, rect.size.x, rect.size.y),
-        10.0,
-        16.0,
-        theme.tokens.foreground.with_alpha(0.12),
-    );
+    // `Popover::paint` fills/strokes at its own fixed 6.0 radius
+    // (`jian_widgets::components::popover`, which equals `tokens.radius`
+    // here) - the shadow now matches that instead of the previous ad hoc
+    // 10.0.
+    paint_elevated_surface(painter, rect, theme.tokens.radius, theme);
     Popover.paint(painter, rect, &theme.tokens);
 }
 
@@ -166,9 +167,8 @@ fn paint_menu_action(
     hovered: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
-    if action.enabled && (hovered == Some(action.id) || focused == Some(action.id)) {
-        painter.fill_round_rect(action.rect, 7.0, theme.tokens.accent);
-    }
+    let active = action.enabled && (hovered == Some(action.id) || focused == Some(action.id));
+    MenuRow::paint_background(painter, action.rect, active, &theme.tokens);
     let foreground = if action.enabled {
         theme.tokens.popover_foreground
     } else {

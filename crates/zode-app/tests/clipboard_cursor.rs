@@ -173,6 +173,7 @@ fn terminal_copy_uses_the_local_clipboard_command_gateway() {
     let app = include_str!("../src/app.rs");
     let terminal = include_str!("../src/app/terminal.rs");
     let interaction = include_str!("../src/app/interaction.rs");
+    let interaction_enqueue = include_str!("../src/app/interaction/enqueue.rs");
     let copy_branch = terminal
         .split("TerminalPanelController::is_copy_shortcut")
         .nth(1)
@@ -182,9 +183,11 @@ fn terminal_copy_uses_the_local_clipboard_command_gateway() {
     assert!(!app.contains("pending_commands.push_back"));
     assert!(!terminal.contains("pending_commands.push_back"));
     assert!(!interaction.contains("pending_commands.push_back"));
-    assert!(interaction.contains("prepare_dispatch"));
+    assert!(!interaction_enqueue.contains("pending_commands.push_back"));
+    assert!(interaction.contains("mod enqueue;"));
+    assert!(interaction_enqueue.contains("prepare_dispatch"));
     assert!(app.contains("CommandBridge::spawn"));
-    assert!(interaction.contains("matches!(command, AppCommand::CopyText(_))"));
+    assert!(interaction_enqueue.contains("matches!(command, AppCommand::CopyText(_))"));
 }
 
 #[test]

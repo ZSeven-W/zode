@@ -1,5 +1,5 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
-use zode_app_model::{demo_state, AppCommand, ProjectPickerAnchor, ProjectState, ShellRoute};
+use zode_app_model::{demo_state, AppCommand, ProjectState, ShellRoute};
 use zode_app_ui::{
     ProjectSidebar, SemanticIcon, SidebarRowTarget, ZodeTheme, SIDEBAR_SEARCH_ID, SIDEBAR_TOGGLE_ID,
 };
@@ -102,7 +102,7 @@ fn sidebar_chrome_uses_real_commands_and_reference_icon_geometry() {
     );
     assert_eq!(
         ProjectSidebar::command_for_widget(&state, SIDEBAR_SEARCH_ID),
-        Some(AppCommand::ToggleSidebarProjectPicker)
+        Some(AppCommand::ToggleGlobalSearch)
     );
 
     let mut painter = CapturePainter::default();
@@ -149,8 +149,7 @@ fn sidebar_chrome_uses_real_commands_and_reference_icon_geometry() {
             if *hovered == layout.brand_search && *color == theme.sidebar_row_hover
     )));
 
-    state.project_picker.open = true;
-    state.project_picker.anchor = ProjectPickerAnchor::Sidebar;
+    state.global_search.open = true;
     let mut active = CapturePainter::default();
     ProjectSidebar::paint(&mut active, rect, &state, &theme);
     assert!(active.operations.iter().any(|operation| matches!(

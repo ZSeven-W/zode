@@ -1,12 +1,12 @@
 use accesskit::{Action, Role, Toggled};
 use jian_widgets::Point2D;
 use std::collections::BTreeSet;
-use zode_app_model::{demo_state, AppCommand, ProjectState, SettingsCategory};
+use zode_app_model::{demo_state, AppCommand, ProjectPickerAnchor, ProjectState, SettingsCategory};
 use zode_app_ui::{
     Composer, Insets, ProjectPicker, ProjectPickerViewState, ProjectSidebar, RectExt,
-    SettingsPanel, WorkspaceSnapshot, PROJECT_DETACH_ID, PROJECT_PICKER_NEW_ID,
-    PROJECT_PICKER_PROJECTLESS_ID, PROJECT_PICKER_SEARCH_ID, PROJECT_PICKER_SURFACE_ID,
-    PROJECT_PICKER_TRIGGER_ID,
+    SettingsPanel, WorkspaceSnapshot, COMPOSER_PROJECT_ID, PROJECT_DETACH_ID,
+    PROJECT_PICKER_NEW_ID, PROJECT_PICKER_PROJECTLESS_ID, PROJECT_PICKER_SEARCH_ID,
+    PROJECT_PICKER_SURFACE_ID, PROJECT_PICKER_TRIGGER_ID,
 };
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
@@ -130,12 +130,34 @@ fn open_picker_overlay_is_last_in_hit_order_and_exposes_search_and_actions() {
 }
 
 #[test]
-fn projectless_state_removes_project_trigger_and_detach_control() {
+fn projectless_state_exposes_composer_project_picker_without_detach_control() {
     let mut state = state_with_projects();
     state.active_workspace = None;
     let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
     assert!(snapshot.node(PROJECT_PICKER_TRIGGER_ID).is_none());
+    let trigger = snapshot
+        .node(COMPOSER_PROJECT_ID)
+        .expect("projectless composer select-project trigger");
+    assert_eq!(trigger.name, "选择项目");
+    assert_eq!(trigger.value, None);
     assert!(snapshot.node(PROJECT_DETACH_ID).is_none());
+
+    state.project_picker.open = true;
+    state.project_picker.anchor = ProjectPickerAnchor::Composer;
+    let picker = WorkspaceSnapshot::build_with_project_picker(
+        &state,
+        1_800.0,
+        1_080.0,
+        Insets::ZERO,
+        &ProjectPickerViewState {
+            open: true,
+            query: String::new(),
+        },
+    );
+    assert!(picker.node(PROJECT_PICKER_SURFACE_ID).is_some());
+    assert!(picker.node(PROJECT_PICKER_SEARCH_ID).is_some());
+    assert!(picker.node(PROJECT_PICKER_NEW_ID).is_some());
+    assert!(picker.node(PROJECT_PICKER_PROJECTLESS_ID).is_none());
 }
 
 #[test]

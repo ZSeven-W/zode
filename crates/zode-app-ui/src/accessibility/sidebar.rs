@@ -1,16 +1,78 @@
 use accesskit::{Action, Role, Toggled};
 use jian_core::CursorHint;
+use jian_widgets::Rect;
 use zode_app_model::ZodeAppState;
 
 use super::{
-    next_order, node, visible_rect, InteractionNode, CHATS_NAV_ID, HELP_ID, NEW_SESSION_ID,
-    PLUGINS_NAV_ID, PULL_REQUESTS_NAV_ID, SCHEDULED_NAV_ID, SETTINGS_NAV_ID, SIDEBAR_ID,
-    SITES_NAV_ID,
+    next_order, node, InteractionNode, CHATS_NAV_ID, HELP_ID, NEW_SESSION_ID, PLUGINS_NAV_ID,
+    PULL_REQUESTS_NAV_ID, SCHEDULED_NAV_ID, SETTINGS_NAV_ID, SIDEBAR_ID, SITES_NAV_ID,
 };
 use crate::{
-    ProjectSidebar, SidebarControlTarget, SidebarRowTarget, SidebarSection, ThreadTranscript,
-    WidgetId, WorkspaceLayout, SIDEBAR_SEARCH_ID, SIDEBAR_TOGGLE_ID,
+    CollapsedSidebarChrome, ProjectSidebar, SidebarControlTarget, SidebarRowTarget, SidebarSection,
+    ThreadTranscript, WidgetId, WorkspaceLayout, COLLAPSED_SIDEBAR_BACK_ID,
+    COLLAPSED_SIDEBAR_FORWARD_ID, SIDEBAR_SEARCH_ID, SIDEBAR_TOGGLE_ID,
 };
+
+pub(super) fn append_collapsed_sidebar_nodes(
+    nodes: &mut Vec<InteractionNode>,
+    layout: &WorkspaceLayout,
+    focus_order: &mut u32,
+) {
+    let top_bar = Rect::xywh(
+        layout.viewport.origin.x,
+        layout.top_bar.origin.y,
+        layout.viewport.size.x,
+        layout.top_bar.size.y,
+    );
+    let chrome = CollapsedSidebarChrome::layout(top_bar);
+    nodes.push(node(
+        SIDEBAR_TOGGLE_ID,
+        chrome.toggle,
+        Role::Button,
+        "显示侧边栏",
+        None,
+        vec![Action::Click, Action::Focus],
+        next_order(focus_order),
+        CursorHint::Pointer,
+    ));
+
+    let mut back = node(
+        COLLAPSED_SIDEBAR_BACK_ID,
+        chrome.back,
+        Role::Button,
+        "返回",
+        None,
+        Vec::new(),
+        None,
+        CursorHint::Default,
+    );
+    back.disabled = true;
+    nodes.push(back);
+
+    let mut forward = node(
+        COLLAPSED_SIDEBAR_FORWARD_ID,
+        chrome.forward,
+        Role::Button,
+        "前进",
+        None,
+        Vec::new(),
+        None,
+        CursorHint::Default,
+    );
+    forward.disabled = true;
+    nodes.push(forward);
+
+    nodes.push(node(
+        NEW_SESSION_ID,
+        chrome.new_task,
+        Role::Button,
+        "新建任务",
+        None,
+        vec![Action::Click, Action::Focus],
+        next_order(focus_order),
+        CursorHint::Pointer,
+    ));
+}
 
 pub(super) fn append_sidebar_nodes(
     nodes: &mut Vec<InteractionNode>,
@@ -18,7 +80,8 @@ pub(super) fn append_sidebar_nodes(
     focus_order: &mut u32,
     state: &ZodeAppState,
 ) {
-    let sidebar = ProjectSidebar::layout(layout.sidebar, state);
+    let sidebar = ProjectSidebar::layout(layout.primary_sidebar_content, state);
+    let visible_sidebar = layout.sidebar;
     let mut scroll_actions = Vec::new();
     if sidebar.scroll_offset > 0.0 {
         scroll_actions.push(Action::ScrollUp);
@@ -26,9 +89,13 @@ pub(super) fn append_sidebar_nodes(
     if sidebar.scroll_offset < sidebar.max_scroll {
         scroll_actions.push(Action::ScrollDown);
     }
+    let Some(scroll_viewport) = visible_sidebar_rect(sidebar.scroll_viewport, visible_sidebar)
+    else {
+        return;
+    };
     nodes.push(node(
         SIDEBAR_ID,
-        sidebar.scroll_viewport,
+        scroll_viewport,
         Role::Navigation,
         "侧边栏",
         None,
@@ -38,36 +105,34 @@ pub(super) fn append_sidebar_nodes(
     ));
 
     if !sidebar.compact {
-        nodes.push(node(
-            SIDEBAR_TOGGLE_ID,
-            sidebar.titlebar_toggle,
-            Role::Button,
-            "隐藏侧边栏",
-            None,
-            vec![Action::Click, Action::Focus],
-            next_order(focus_order),
-            CursorHint::Pointer,
-        ));
-        nodes.push(node(
-            SIDEBAR_SEARCH_ID,
-            sidebar.brand_search,
-            Role::Button,
-            "搜索项目",
-            None,
-            vec![Action::Click, Action::Focus],
-            next_order(focus_order),
-            CursorHint::Pointer,
-        ));
+        for (id, rect, name) in [
+            (SIDEBAR_TOGGLE_ID, sidebar.titlebar_toggle, "隐藏侧边栏"),
+            (SIDEBAR_SEARCH_ID, sidebar.brand_search, "搜索项目"),
+        ] {
+            if let Some(rect) = visible_sidebar_rect(rect, visible_sidebar) {
+                nodes.push(node(
+                    id,
+                    rect,
+                    Role::Button,
+                    name,
+                    None,
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
+        }
     }
 
     for row in &sidebar.navigation_rows {
-        let Some(rect) = ThreadTranscript::clip_to_viewport(
+        let Some(rect) = sidebar_interaction_rect(
             row.rect,
             if row.index == 0 {
                 layout.sidebar
             } else {
                 sidebar.scroll_viewport
             },
+            visible_sidebar,
         ) else {
             continue;
         };
@@ -84,7 +149,8 @@ pub(super) fn append_sidebar_nodes(
     }
 
     for section in &sidebar.sections {
-        let Some(rect) = ThreadTranscript::clip_to_viewport(section.rect, sidebar.scroll_viewport)
+        let Some(rect) =
+            sidebar_interaction_rect(section.rect, sidebar.scroll_viewport, visible_sidebar)
         else {
             continue;
         };
@@ -117,7 +183,8 @@ pub(super) fn append_sidebar_nodes(
     }
 
     for row in &sidebar.rows {
-        let Some(rect) = ThreadTranscript::clip_to_viewport(row.rect, sidebar.scroll_viewport)
+        let Some(rect) =
+            sidebar_interaction_rect(row.rect, sidebar.scroll_viewport, visible_sidebar)
         else {
             continue;
         };
@@ -164,9 +231,11 @@ pub(super) fn append_sidebar_nodes(
                 ),
             ] {
                 if let (Some(id), Some(action_rect)) = (id, action_rect) {
-                    let Some(action_rect) =
-                        ThreadTranscript::clip_to_viewport(action_rect, sidebar.scroll_viewport)
-                    else {
+                    let Some(action_rect) = sidebar_interaction_rect(
+                        action_rect,
+                        sidebar.scroll_viewport,
+                        visible_sidebar,
+                    ) else {
                         continue;
                     };
                     nodes.push(node(
@@ -188,7 +257,7 @@ pub(super) fn append_sidebar_nodes(
         };
         if let (Some(id), Some(action_rect)) = (row.pin_id, ProjectSidebar::session_pin_rect(row)) {
             if let Some(action_rect) =
-                ThreadTranscript::clip_to_viewport(action_rect, sidebar.scroll_viewport)
+                sidebar_interaction_rect(action_rect, sidebar.scroll_viewport, visible_sidebar)
             {
                 nodes.push(node(
                     id,
@@ -210,7 +279,7 @@ pub(super) fn append_sidebar_nodes(
             (row.archive_id, ProjectSidebar::session_archive_rect(row))
         {
             if let Some(action_rect) =
-                ThreadTranscript::clip_to_viewport(action_rect, sidebar.scroll_viewport)
+                sidebar_interaction_rect(action_rect, sidebar.scroll_viewport, visible_sidebar)
             {
                 nodes.push(node(
                     id,
@@ -230,7 +299,8 @@ pub(super) fn append_sidebar_nodes(
         if !control.actionable() {
             continue;
         }
-        let Some(rect) = ThreadTranscript::clip_to_viewport(control.rect, sidebar.scroll_viewport)
+        let Some(rect) =
+            sidebar_interaction_rect(control.rect, sidebar.scroll_viewport, visible_sidebar)
         else {
             continue;
         };
@@ -255,10 +325,10 @@ pub(super) fn append_sidebar_nodes(
         ));
     }
 
-    if visible_rect(sidebar.profile) {
+    if let Some(profile) = visible_sidebar_rect(sidebar.profile, visible_sidebar) {
         nodes.push(node(
             SETTINGS_NAV_ID,
-            sidebar.profile,
+            profile,
             Role::Button,
             &format!("本地账户 {}", state.local_profile.display_name),
             None,
@@ -267,10 +337,10 @@ pub(super) fn append_sidebar_nodes(
             CursorHint::Pointer,
         ));
     }
-    if visible_rect(sidebar.help) {
+    if let Some(help) = visible_sidebar_rect(sidebar.help, visible_sidebar) {
         nodes.push(node(
             HELP_ID,
-            sidebar.help,
+            help,
             Role::Button,
             "帮助",
             None,
@@ -287,7 +357,10 @@ pub(super) fn append_sidebar_menu_nodes(
     focus_order: &mut u32,
     state: &ZodeAppState,
 ) {
-    let Some(menu) = ProjectSidebar::menu_layout(layout.sidebar, state) else {
+    if layout.sidebar.size.x + f32::EPSILON < layout.primary_sidebar_content.size.x {
+        return;
+    }
+    let Some(menu) = ProjectSidebar::menu_layout(layout.primary_sidebar_content, state) else {
         return;
     };
     nodes.push(node(
@@ -323,6 +396,22 @@ pub(super) fn append_sidebar_menu_nodes(
         item_node.disabled = !item.enabled;
         nodes.push(item_node);
     }
+}
+
+fn sidebar_interaction_rect(
+    rect: jian_widgets::Rect,
+    viewport: jian_widgets::Rect,
+    visible: jian_widgets::Rect,
+) -> Option<jian_widgets::Rect> {
+    ThreadTranscript::clip_to_viewport(rect, viewport)
+        .and_then(|rect| visible_sidebar_rect(rect, visible))
+}
+
+fn visible_sidebar_rect(
+    rect: jian_widgets::Rect,
+    visible: jian_widgets::Rect,
+) -> Option<jian_widgets::Rect> {
+    ThreadTranscript::clip_to_viewport(rect, visible)
 }
 
 const fn navigation_id(index: usize) -> WidgetId {

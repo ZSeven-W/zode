@@ -61,12 +61,60 @@ windows = { version = "0.62", features = [
 ] }
 png = "0.17"
 
+# Two macOS-native subsystems share this table:
+#   * Desktop control (`desktop_*` tools) — AX tree read/write plus CGEvent
+#     input and CoreGraphics capture, via the accessibility-sys/cocoa/
+#     core-graphics family.
+#   * Computer-use (`computer_*` tools) — AX read/write, CGEvent injection and
+#     ScreenCaptureKit capture, via the objc2 crate family (0.3.x-generation
+#     bindings) already pinned in the workspace for the desktop app
+#     (jian/casement), whose license/advisory surface cargo-deny has cleared.
+# Everything here is scoped to `cfg(target_os = "macos")`, so none of it is
+# resolved — let alone compiled — on other platforms. Computer-use M1 is
+# macOS-only (see docs/proposals/computer-use.md).
 [target.'cfg(target_os = "macos")'.dependencies]
 accessibility-sys = "0.1"
 cocoa = "0.26"
 core-foundation = "0.10"
 core-graphics = { version = "0.24", features = ["elcapitan", "highsierra"] }
 png = "0.17"
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = ["NSWorkspace", "NSRunningApplication", "libc"] }
+objc2-application-services = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "libc",
+  "HIServices",
+  "AXError",
+  "AXUIElement",
+  "AXValue",
+] }
+objc2-core-foundation = { workspace = true, features = [
+  "CFArray",
+  "CFDictionary",
+  "CFString",
+  "CFRunLoop",
+] }
+objc2-core-graphics = { workspace = true, features = [
+  "CGDirectDisplay",
+  "CGEvent",
+  "CGEventSource",
+  "CGEventTypes",
+  "CGRemoteOperation",
+  "CGWindow",
+] }
+objc2-foundation = { workspace = true, features = ["NSArray"] }
+objc2-image-io = { version = "0.3.2", default-features = false, features = [
+  "CGImageDestination",
+  "objc2",
+  "objc2-core-graphics",
+] }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = [
+  "SCScreenshotManager",
+  "block2",
+  "objc2-core-foundation",
+  "objc2-core-graphics",
+] }
+block2 = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Desktop control (AT-SPI2 backend). async D-Bus accessibility bus.

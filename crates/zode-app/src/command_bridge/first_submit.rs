@@ -18,6 +18,8 @@ pub(super) fn prepare_first_submit(
     }
     let session = SessionLocator::new(state.host.node_id, uuid::Uuid::new_v4().to_string());
     let workspace_uri = first_session_workspace(state, &session)?;
+    let project_uri = state.active_workspace.clone();
+    let projectless = project_uri.is_none();
     let turn_id = TurnId::new();
     let create = AgentCommand {
         version: PROTOCOL_VERSION,
@@ -25,6 +27,8 @@ pub(super) fn prepare_first_submit(
         turn_id: None,
         kind: AgentCommandKind::CreateSession {
             workspace_uri: workspace_uri.clone(),
+            project_uri: project_uri.clone(),
+            projectless,
             model: state.composer.model.clone(),
         },
     };
@@ -52,6 +56,13 @@ pub(super) fn prepare_first_submit(
             status: ThreadStatus::Running,
         },
     );
+    if projectless {
+        state.projectless_sessions.insert(session.clone());
+    } else if let Some(project_uri) = project_uri {
+        state
+            .thread_workspace_root_hints
+            .insert(session.clone(), project_uri);
+    }
     state.transcripts.insert(session.clone(), transcript);
     state.active_turns.insert(session.clone(), turn_id);
     state.current_session = Some(session.clone());

@@ -78,6 +78,27 @@ pub struct Screenshot {
     pub media_type: &'static str,
 }
 
+/// One decoded-ready frame from a live browser frame stream (M1: JPEG only,
+/// via CDP `Page.startScreencast`). `sequence` increases by one per frame
+/// so callers (the desktop spectator panel) can detect a new frame arrived
+/// without content-comparing bytes, and can mint a fresh cache key per
+/// frame — reusing one key across frames would leave image caches keyed by
+/// content identity permanently stuck on the first frame.
+#[derive(Clone)]
+pub struct ScreencastFrame {
+    pub data: std::sync::Arc<Vec<u8>>,
+    pub sequence: u64,
+}
+
+impl fmt::Debug for ScreencastFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScreencastFrame")
+            .field("bytes", &self.data.len())
+            .field("sequence", &self.sequence)
+            .finish()
+    }
+}
+
 /// Browser operation errors.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BrowserError {
@@ -170,6 +191,40 @@ pub trait BrowserBackend: Send + Sync + std::fmt::Debug {
         false
     }
 
+    /// Whether this backend can stream live frames (see `latest_frame`). The
+    /// bridge backend has no screencast story in M1 — callers must check
+    /// this before `start_frame_stream` and show an "unsupported" state
+    /// instead of a permanently-idle one.
+    fn supports_frame_stream(&self) -> bool {
+        false
+    }
+
+    /// Starts (or restarts, e.g. after a panel resize) a live JPEG frame
+    /// stream capped to `max_width` physical pixels. Backends that don't
+    /// support streaming (see `supports_frame_stream`) return an error.
+    async fn start_frame_stream(&self, max_width: u32) -> Result<(), BrowserError> {
+        let _ = max_width;
+        Err(BrowserError::Protocol(
+            "frame streaming not supported by this backend".into(),
+        ))
+    }
+
+    /// Stops a live frame stream started by `start_frame_stream`. Safe to
+    /// call when no stream is active.
+    async fn stop_frame_stream(&self) -> Result<(), BrowserError> {
+        Ok(())
+    }
+
+    /// Non-blocking accessor for the most recently decoded-ready frame.
+    /// `None` before the first frame arrives, after `stop_frame_stream`, or
+    /// on a backend that doesn't support streaming. Unlike the other
+    /// browser operations this never requires the session lease: the
+    /// spectator panel polls it on every redraw tick and must never
+    /// contend with an in-flight agent tool call.
+    fn latest_frame(&self) -> Option<ScreencastFrame> {
+        None
+    }
+
     /// Close the browser instance.
     async fn close(&self) -> Result<(), BrowserError>;
 }
@@ -187,6 +242,25 @@ pub(crate) mod mock {
         pub dead: AtomicBool,
         pub in_flight: AtomicUsize,
         pub overlap_seen: AtomicBool,
+        /// Set to make `supports_frame_stream` / `start_frame_stream` behave
+        /// like `ManagedBackend`, so session-layer frame plumbing can be
+        /// tested without a real browser.
+        pub frame_stream_supported: AtomicBool,
+        pub frame_stream_started: AtomicBool,
+        pub frame: std::sync::Mutex<Option<ScreencastFrame>>,
+    }
+
+    impl MockBackend {
+        /// Injects a frame as if a live stream produced it, incrementing
+        /// `sequence` past whatever was there before.
+        pub fn push_frame(&self, bytes: Vec<u8>) {
+            let mut slot = self.frame.lock().unwrap();
+            let sequence = slot.as_ref().map_or(0, |f| f.sequence) + 1;
+            *slot = Some(ScreencastFrame {
+                data: Arc::new(bytes),
+                sequence,
+            });
+        }
     }
 
     impl MockBackend {
@@ -294,6 +368,28 @@ pub(crate) mod mock {
         }
         async fn close(&self) -> Result<(), BrowserError> {
             Ok(())
+        }
+        fn supports_frame_stream(&self) -> bool {
+            self.frame_stream_supported.load(Ordering::SeqCst)
+        }
+        async fn start_frame_stream(&self, _max_width: u32) -> Result<(), BrowserError> {
+            if !self.supports_frame_stream() {
+                return Err(BrowserError::Protocol(
+                    "frame streaming not supported by this backend".into(),
+                ));
+            }
+            self.frame_stream_started.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn stop_frame_stream(&self) -> Result<(), BrowserError> {
+            self.frame_stream_started.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+        fn latest_frame(&self) -> Option<ScreencastFrame> {
+            if !self.frame_stream_started.load(Ordering::SeqCst) {
+                return None;
+            }
+            self.frame.lock().unwrap().clone()
         }
     }
 

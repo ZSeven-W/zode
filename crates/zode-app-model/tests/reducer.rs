@@ -6,8 +6,8 @@ use zode_app_model::{
     ToolCommandOutcome, TranscriptItem, TranscriptState, TranscriptTurnStatus, ZodeAppState,
 };
 use zode_node_protocol::{
-    AgentEvent, AgentEventKind, SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus,
-    TurnId, UsageSnapshot, WorkspaceUri, PROTOCOL_VERSION,
+    AgentEvent, AgentEventKind, SessionLocator, SubagentSnapshot, SubagentStatus, ThreadStatus,
+    ThreadSummary, ToolCall, ToolStatus, TurnId, UsageSnapshot, WorkspaceUri, PROTOCOL_VERSION,
 };
 
 fn active_state() -> (ZodeAppState, SessionLocator, TurnId) {
@@ -54,6 +54,20 @@ fn tool(id: &str, status: ToolStatus, summary: &str) -> ToolCall {
         status,
         summary: summary.into(),
         detail: None,
+    }
+}
+
+fn subagent(id: &str, status: SubagentStatus, tokens: u64, turn_id: TurnId) -> SubagentSnapshot {
+    SubagentSnapshot {
+        id: id.into(),
+        agent_type: "researcher".into(),
+        display_name: "researcher".into(),
+        depth: 0,
+        status,
+        tokens,
+        turn_id,
+        completed_at_ms: None,
+        result_summary: None,
     }
 }
 
@@ -184,10 +198,15 @@ fn adjacent_text_deltas_extend_one_assistant_item() {
         ReduceOutcome::Applied,
     );
 
-    assert_eq!(
-        state.transcripts[&session].items,
-        vec![TranscriptItem::AssistantText("你好".into())],
-    );
+    // Not `assert_eq!` against `TranscriptItem::assistant_text("你好")`: a
+    // freshly-created assistant item is now stamped with a real wall-clock
+    // `timestamp_ms` (see `reducer::now_epoch_ms`), which the no-timestamp
+    // test constructor deliberately leaves `None`.
+    assert!(matches!(
+        state.transcripts[&session].items.as_slice(),
+        [TranscriptItem::AssistantText { text, timestamp_ms: Some(_), feedback }]
+            if text == "你好" && *feedback == zode_app_model::MessageFeedback::None
+    ));
 }
 
 #[test]
@@ -310,17 +329,23 @@ fn separated_text_deltas_remain_separate_items() {
         ),
     );
 
-    assert_eq!(
-        state.transcripts[&session].items,
-        vec![
-            TranscriptItem::AssistantText("a".into()),
-            TranscriptItem::Status {
-                code: "separator".into(),
-                message: "separator".into(),
-            },
-            TranscriptItem::AssistantText("b".into()),
-        ],
-    );
+    // See the comment on `adjacent_text_deltas_extend_one_assistant_item`:
+    // each new assistant item gets a real wall-clock `timestamp_ms`, so this
+    // checks text/feedback per item instead of equality against the
+    // no-timestamp test constructor.
+    assert!(matches!(
+        state.transcripts[&session].items.as_slice(),
+        [
+            TranscriptItem::AssistantText { text: a, timestamp_ms: Some(_), feedback: fa },
+            TranscriptItem::Status { code, message },
+            TranscriptItem::AssistantText { text: b, timestamp_ms: Some(_), feedback: fb },
+        ] if a == "a"
+            && b == "b"
+            && code == "separator"
+            && message == "separator"
+            && *fa == zode_app_model::MessageFeedback::None
+            && *fb == zode_app_model::MessageFeedback::None
+    ));
 }
 
 #[test]
@@ -621,7 +646,7 @@ fn diff_invalidated_only_marks_review_dirty() {
 fn turn_finished_clears_busy_and_active_turn_but_keeps_items() {
     let (mut state, session, turn_id) = active_state();
     state.transcripts.get_mut(&session).unwrap().items =
-        vec![TranscriptItem::AssistantText("partial".into())];
+        vec![TranscriptItem::assistant_text("partial")];
 
     reduce_agent_event(
         &mut state,
@@ -637,7 +662,7 @@ fn turn_finished_clears_busy_and_active_turn_but_keeps_items() {
     assert!(!state.active_turns.contains_key(&session));
     assert_eq!(
         state.transcripts[&session].items,
-        vec![TranscriptItem::AssistantText("partial".into())],
+        vec![TranscriptItem::assistant_text("partial")],
     );
     assert_eq!(
         state.transcripts[&session].turns[0].status,
@@ -648,11 +673,179 @@ fn turn_finished_clears_busy_and_active_turn_but_keeps_items() {
 }
 
 #[test]
+fn subagent_update_inserts_new_agents_in_first_seen_order() {
+    let (mut state, session, turn_id) = active_state();
+
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            1,
+            AgentEventKind::SubagentUpdate {
+                subagent: subagent("2", SubagentStatus::Running, 0, turn_id),
+            },
+        ),
+    );
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            2,
+            AgentEventKind::SubagentUpdate {
+                subagent: subagent("1", SubagentStatus::Running, 0, turn_id),
+            },
+        ),
+    );
+
+    let subagents = &state.presentation.sessions[&session].subagents;
+    assert_eq!(
+        subagents.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        vec!["2", "1"],
+        "insertion order is preserved, not sorted by id",
+    );
+}
+
+#[test]
+fn subagent_update_replaces_the_same_id_in_place() {
+    let (mut state, session, turn_id) = active_state();
+
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            1,
+            AgentEventKind::SubagentUpdate {
+                subagent: subagent("1", SubagentStatus::Running, 10, turn_id),
+            },
+        ),
+    );
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            2,
+            AgentEventKind::SubagentUpdate {
+                subagent: subagent("1", SubagentStatus::Completed, 42, turn_id),
+            },
+        ),
+    );
+
+    let subagents = &state.presentation.sessions[&session].subagents;
+    assert_eq!(subagents.len(), 1);
+    assert_eq!(subagents[0].status, SubagentStatus::Completed);
+    assert_eq!(subagents[0].tokens, 42);
+}
+
+#[test]
+fn turn_finished_completes_still_running_subagents_on_a_clean_finish() {
+    let (mut state, session, turn_id) = active_state();
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            1,
+            AgentEventKind::SubagentUpdate {
+                subagent: subagent("1", SubagentStatus::Running, 5, turn_id),
+            },
+        ),
+    );
+
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            2,
+            AgentEventKind::TurnFinished { interrupted: false },
+        ),
+    );
+
+    assert_eq!(
+        state.presentation.sessions[&session].subagents[0].status,
+        SubagentStatus::Completed
+    );
+    assert!(
+        state.presentation.sessions[&session].subagents[0]
+            .completed_at_ms
+            .is_some(),
+        "the safety net stamps a completion time when the runtime's own diff never arrived",
+    );
+}
+
+#[test]
+fn turn_finished_fails_still_running_subagents_when_interrupted() {
+    let (mut state, session, turn_id) = active_state();
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            1,
+            AgentEventKind::SubagentUpdate {
+                subagent: subagent("1", SubagentStatus::Running, 5, turn_id),
+            },
+        ),
+    );
+
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            2,
+            AgentEventKind::TurnFinished { interrupted: true },
+        ),
+    );
+
+    assert_eq!(
+        state.presentation.sessions[&session].subagents[0].status,
+        SubagentStatus::Failed
+    );
+}
+
+#[test]
+fn turn_finished_does_not_touch_already_terminal_subagents() {
+    let (mut state, session, turn_id) = active_state();
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            1,
+            AgentEventKind::SubagentUpdate {
+                subagent: subagent("1", SubagentStatus::Failed, 5, turn_id),
+            },
+        ),
+    );
+
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            2,
+            AgentEventKind::TurnFinished { interrupted: false },
+        ),
+    );
+
+    assert_eq!(
+        state.presentation.sessions[&session].subagents[0].status,
+        SubagentStatus::Failed,
+        "a clean finish must not resurrect an already-failed subagent as completed",
+    );
+}
+
+#[test]
 fn turn_finished_records_deterministic_monotonic_elapsed() {
     let started_at = Instant::now();
     let (mut state, session, turn_id) = active_state_at(started_at);
     state.transcripts.get_mut(&session).unwrap().items =
-        vec![TranscriptItem::AssistantText("done".into())];
+        vec![TranscriptItem::assistant_text("done")];
 
     reduce_agent_event_at(
         &mut state,

@@ -55,6 +55,12 @@ pub struct SubAgent {
     pub committed_output: u32,
     pub turn_input: u32,
     pub turn_output: u32,
+    /// The child loop's raw final answer text, captured unconditionally at a
+    /// successful `finish()` (unlike `transcript`, which only gets the
+    /// result text appended when the transcript was otherwise empty). `None`
+    /// on error and until the agent finishes. Hosts truncate/sanitize this
+    /// for display; it is not itself display-safe.
+    pub final_output: Option<String>,
 }
 
 #[derive(Debug)]
@@ -122,6 +128,7 @@ impl SubAgentRegistry {
                 committed_output: 0,
                 turn_input: 0,
                 turn_output: 0,
+                final_output: None,
             });
             let cap = s.cap;
             while s.agents.len() > cap {
@@ -162,6 +169,9 @@ impl SubAgentRegistry {
                     a.status = SubAgentStatus::Done;
                     if a.transcript.is_empty() && !result.is_empty() {
                         a.transcript.push(SubAgentLine::Text(result.to_string()));
+                    }
+                    if !result.is_empty() {
+                        a.final_output = Some(result.to_string());
                     }
                 }
             }
@@ -328,6 +338,23 @@ mod tests {
         // Text deltas coalesce into ONE Text line.
         assert_eq!(a.transcript[0], SubAgentLine::Text("hello world".into()));
         assert!(matches!(&a.transcript[1], SubAgentLine::ToolUse { name, .. } if name == "Read"));
+        // `final_output` is captured even though the transcript already had
+        // entries at finish time (so the conditional transcript-append above
+        // did NOT run) — this is the exact case the field exists to cover.
+        assert_eq!(a.final_output.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn final_output_is_none_until_a_successful_finish() {
+        let reg = SubAgentRegistry::new();
+        let obs = reg.observer();
+        let id = obs.on_start("researcher", None, 0);
+        assert_eq!(reg.snapshot()[0].final_output, None);
+        obs.on_finish(id, "the answer", None);
+        assert_eq!(
+            reg.snapshot()[0].final_output.as_deref(),
+            Some("the answer")
+        );
     }
 
     #[test]
@@ -339,6 +366,10 @@ mod tests {
         let snap = reg.snapshot();
         assert_eq!(snap[0].status, SubAgentStatus::Failed);
         assert_eq!(snap[0].depth, 1);
+        assert_eq!(
+            snap[0].final_output, None,
+            "a failed run has no final answer"
+        );
         assert_eq!(
             snap[0].transcript.last(),
             Some(&SubAgentLine::Error("boom".into()))

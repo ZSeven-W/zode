@@ -1,6 +1,6 @@
 use crate::{
-    AttachmentMetadata, LayoutClass, LoadState, MessageQueueState, PresentationState,
-    TranscriptState,
+    AttachmentMetadata, GoalProgress, LayoutClass, LightboxState, LoadState, MessageQueueState,
+    PresentationState, TranscriptItem, TranscriptState,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -181,6 +181,34 @@ impl Default for TerminalState {
     }
 }
 
+/// Browser spectator panel (M1 route A - read-only, see
+/// `docs/proposals/builtin-browser.md`) availability and toolbar state.
+/// The live frame bitmap itself is deliberately NOT here: it is
+/// high-frequency streamed data (up to the screencast frame rate) owned
+/// directly by the desktop app shell and threaded into the paint call -
+/// mirroring how `TerminalGrid` lives outside `ZodeAppState` while
+/// `TerminalState` stays here for the panel chrome. Keeping raw frame
+/// bytes out of this struct also matters for correctness elsewhere:
+/// `ZodeAppState`/`WorkspaceSnapshot` equality drives dirty-checking for
+/// the accessibility tree and persistence - a field that changes on every
+/// decoded frame would make that comparison spuriously "dirty" every tick.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowserPanelState {
+    /// `None` while the panel can stream; set when the browser capability
+    /// is disabled/absent, or the active target has no M1 screencast story
+    /// (the extension bridge - see `ScreencastFrame`/`supports_frame_stream`
+    /// in `zode-core`).
+    pub unavailable_reason: Option<String>,
+    /// Best-effort current-tab URL for the read-only toolbar.
+    pub current_url: Option<String>,
+    /// Whether the active target is the extension bridge (unsupported for
+    /// streaming in M1) rather than the managed Chrome instance.
+    pub is_bridge_target: bool,
+    /// Whether at least one frame has ever been decoded - drives the
+    /// "暂无画面" idle placeholder vs. the live canvas.
+    pub has_frame: bool,
+}
+
 /// Top-level shell destinations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ShellPage {
@@ -307,6 +335,14 @@ pub struct ProjectPickerState {
     pub active_index: usize,
 }
 
+/// Transient state for the application-wide project and task search surface.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GlobalSearchState {
+    pub open: bool,
+    pub query: String,
+    pub active_index: usize,
+}
+
 /// Sidebar section whose overflow menu is currently visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarSectionMenu {
@@ -393,6 +429,155 @@ pub struct LocalSettingsState {
     pub hooks: crate::LoadState<Vec<LocalSettingFact>>,
     pub git: crate::LoadState<Vec<LocalSettingFact>>,
     pub worktrees: crate::LoadState<Vec<LocalSettingFact>>,
+    pub computer: crate::LoadState<ComputerUseSnapshot>,
+}
+
+/// One TCC permission's live grant state, mirrored from
+/// `zode_app_runtime::ComputerPermissionState` - this crate stays
+/// backend-agnostic (see the crate-level dependency direction note), so the
+/// app crate maps the runtime's enum into this one when it refreshes
+/// [`LocalSettingsState::computer`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ComputerPermissionState {
+    Granted,
+    NotGranted,
+    #[default]
+    Unsupported,
+}
+
+/// Which system TCC permission a settings-page "打开系统设置" action targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputerPermissionKind {
+    Accessibility,
+    ScreenRecording,
+}
+
+/// Live, truthful snapshot backing `SettingsCategory::ComputerUse`: TCC
+/// grant state plus the config-backed tool-group toggle and allowlist.
+/// Enforcing the allowlist in the approval gate is a follow-up (see
+/// `zode_core::config::ComputerConfig::any_app`'s doc comment) - this
+/// snapshot only reads/writes the config, it does not imply the gate
+/// consults it yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComputerUseSnapshot {
+    pub accessibility: ComputerPermissionState,
+    pub screen_recording: ComputerPermissionState,
+    pub tool_group_enabled: bool,
+    pub allowed_apps: Vec<String>,
+    pub any_app: bool,
+}
+
+/// Transient (not config-backed) UI state for the Computer Use settings
+/// page's "allowed app" add row - separate from
+/// [`LocalSettingsState::computer`], which holds the persisted snapshot,
+/// the same way `ArchivedTasksState::search` stays separate from the
+/// archived task list itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComputerUseUiState {
+    pub allowed_app_input: String,
+}
+
+/// Provider families that can be configured by the desktop application.
+///
+/// This application-facing choice deliberately carries no runtime provider or
+/// credential object. The controller translates it at the persistence boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProviderKindChoice {
+    #[default]
+    Anthropic,
+    OpenAi,
+    Ollama,
+}
+
+/// One model exposed by a configured provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderModelEntry {
+    pub model_id: String,
+}
+
+/// Non-sensitive provider data safe to project into application state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSummary {
+    pub provider_id: String,
+    pub kind: ProviderKindChoice,
+    pub base_url: Option<String>,
+    pub models: Vec<ProviderModelEntry>,
+    pub default_model: Option<String>,
+    pub credential_configured: bool,
+}
+
+/// Editable provider fields.
+///
+/// Credentials must remain in the controller-owned secure input and credential
+/// store. Adding an API-key or token field here would leak it into snapshots,
+/// debug output, accessibility projections, and reducer tests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderDraft {
+    pub provider_id: String,
+    pub kind: ProviderKindChoice,
+    pub base_url: Option<String>,
+    pub model_ids: Vec<String>,
+    pub default_model: Option<String>,
+}
+
+impl From<&ProviderSummary> for ProviderDraft {
+    fn from(summary: &ProviderSummary) -> Self {
+        Self {
+            provider_id: summary.provider_id.clone(),
+            kind: summary.kind,
+            base_url: summary.base_url.clone(),
+            model_ids: summary
+                .models
+                .iter()
+                .map(|model| model.model_id.clone())
+                .collect(),
+            default_model: summary.default_model.clone(),
+        }
+    }
+}
+
+/// Last provider-editor operation visible to the settings surface.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ProviderModelsStatus {
+    #[default]
+    Idle,
+    Saving {
+        provider_id: String,
+    },
+    Saved {
+        provider_id: String,
+    },
+    Removing {
+        provider_id: String,
+    },
+    Removed {
+        provider_id: String,
+    },
+    Failed {
+        provider_id: Option<String>,
+        message: String,
+    },
+}
+
+impl ProviderModelsStatus {
+    pub const fn is_busy(&self) -> bool {
+        matches!(self, Self::Saving { .. } | Self::Removing { .. })
+    }
+}
+
+/// Provider/model settings state containing only safe display and edit data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderModelsState {
+    pub load: crate::LoadState<Vec<ProviderSummary>>,
+    pub editor: Option<ProviderDraft>,
+    pub status: ProviderModelsStatus,
+    /// Whether the provider currently open in `editor` has a credential in the
+    /// controller-owned secure store. The credential value never enters state.
+    pub credential_configured: bool,
+    /// Character count of the API-key input buffer currently being typed.
+    /// A non-sensitive length projection only; the secret text itself never
+    /// enters state. Zero when the field is empty or no provider is being edited.
+    pub pending_secret_len: usize,
 }
 
 /// Transient controls for the local archived-task browser.
@@ -418,6 +603,9 @@ pub struct ZodeAppState {
     pub projects: Vec<ProjectState>,
     pub active_workspace: Option<WorkspaceUri>,
     pub project_picker: ProjectPickerState,
+    pub global_search: GlobalSearchState,
+    /// The one open image-preview overlay, if any. See `LightboxState`.
+    pub lightbox: Option<LightboxState>,
     /// Hidden local cwd used by sessions that are not attached to a user project.
     pub projectless_workspace_root: Option<WorkspaceUri>,
     pub current_session: Option<SessionLocator>,
@@ -431,6 +619,10 @@ pub struct ZodeAppState {
     pub open_with: crate::OpenWithState,
     pub pending_session_delete: Option<SessionLocator>,
     pub threads: Vec<ThreadSummary>,
+    /// UI ownership hints are independent from each thread's execution cwd.
+    pub thread_workspace_root_hints: BTreeMap<SessionLocator, WorkspaceUri>,
+    /// Threads explicitly created without an owning project.
+    pub projectless_sessions: BTreeSet<SessionLocator>,
     pub pinned_sessions: BTreeSet<SessionLocator>,
     pub archived_sessions: BTreeSet<SessionLocator>,
     pub sidebar: SidebarState,
@@ -444,6 +636,8 @@ pub struct ZodeAppState {
     pub settings_scroll_offset: f32,
     pub integration_scroll_offset: f32,
     pub local_settings: LocalSettingsState,
+    pub computer_use: ComputerUseUiState,
+    pub provider_models: ProviderModelsState,
     pub archived_tasks: ArchivedTasksState,
     pub composer: ComposerState,
     /// Global runtime defaults used by new tasks and the composer reset action.
@@ -454,12 +648,34 @@ pub struct ZodeAppState {
     pub presentation: PresentationState,
     pub review: ReviewState,
     pub terminal: TerminalState,
+    pub browser: BrowserPanelState,
     pub ui_preferences: UiPreferences,
     pub shell: ShellState,
 }
 
 impl ZodeAppState {
+    pub fn hydrate_thread_affiliations(
+        &mut self,
+        workspace_root_hints: &BTreeMap<String, WorkspaceUri>,
+        projectless_session_ids: &BTreeSet<String>,
+    ) {
+        self.thread_workspace_root_hints.clear();
+        self.projectless_sessions.clear();
+        for thread in &self.threads {
+            let id = &thread.session.session_id;
+            if let Some(workspace) = workspace_root_hints.get(id) {
+                self.thread_workspace_root_hints
+                    .insert(thread.session.clone(), workspace.clone());
+            }
+            if projectless_session_ids.contains(id) {
+                self.projectless_sessions.insert(thread.session.clone());
+            }
+        }
+    }
+
     pub fn close_session_action_surfaces(&mut self) {
+        self.global_search = GlobalSearchState::default();
+        self.lightbox = None;
         self.session_menu = None;
         self.session_copy_menu = None;
         self.session_rename = None;
@@ -480,14 +696,42 @@ impl ZodeAppState {
         &self,
         session: &SessionLocator,
     ) -> Option<&WorkspaceUri> {
+        let thread = self
+            .threads
+            .iter()
+            .find(|thread| &thread.session == session)?;
+        (self.is_projectless_thread(thread)
+            || self
+                .project_workspace_for_thread(thread)
+                .is_some_and(|workspace| self.available_workspace(workspace)))
+        .then_some(&thread.workspace_uri)
+    }
+
+    /// Owning project used for navigation. `workspace_uri` on the summary is
+    /// intentionally left as the execution cwd for terminal/runtime actions.
+    pub fn project_workspace_for_thread<'a>(
+        &'a self,
+        thread: &'a ThreadSummary,
+    ) -> Option<&'a WorkspaceUri> {
+        if self.is_projectless_thread(thread) {
+            None
+        } else {
+            self.thread_workspace_root_hints
+                .get(&thread.session)
+                .or(Some(&thread.workspace_uri))
+        }
+    }
+
+    pub fn project_workspace_for_session(&self, session: &SessionLocator) -> Option<&WorkspaceUri> {
         self.threads
             .iter()
             .find(|thread| &thread.session == session)
-            .map(|thread| &thread.workspace_uri)
-            .filter(|workspace_uri| {
-                self.available_workspace(workspace_uri)
-                    || self.is_projectless_workspace(workspace_uri)
-            })
+            .and_then(|thread| self.project_workspace_for_thread(thread))
+    }
+
+    pub fn is_projectless_thread(&self, thread: &ThreadSummary) -> bool {
+        self.projectless_sessions.contains(&thread.session)
+            || self.is_projectless_workspace(&thread.workspace_uri)
     }
 
     pub fn is_projectless_workspace(&self, workspace_uri: &WorkspaceUri) -> bool {
@@ -506,6 +750,42 @@ impl ZodeAppState {
         self.current_session
             .as_ref()
             .and_then(|session| self.presentation.sessions.get(session))
+    }
+
+    /// True once the active session's transcript holds at least one item
+    /// (user or assistant). A missing transcript (no session yet, or a
+    /// session with nothing recorded) counts as no conversation. Composer
+    /// chrome that only makes sense before a conversation starts, e.g. the
+    /// context bar, gates its visibility on this.
+    pub fn current_session_has_conversation(&self) -> bool {
+        self.current_session
+            .as_ref()
+            .and_then(|session| self.transcripts.get(session))
+            .is_some_and(|transcript| !transcript.items.is_empty())
+    }
+
+    /// The most recent goal-progress update for the active, busy session.
+    /// Surfaced in the composer context rail even once a conversation has
+    /// started. Unlike the migration chips, this pill has no analog in the
+    /// environment panel.
+    pub fn current_goal_progress(&self) -> Option<&GoalProgress> {
+        let session = self.current_session.as_ref()?;
+        let transcript = self.transcripts.get(session)?;
+        if !transcript.busy {
+            return None;
+        }
+        transcript.items.iter().rev().find_map(|item| match item {
+            TranscriptItem::GoalProgress(goal) => Some(goal),
+            _ => None,
+        })
+    }
+
+    /// Whether the composer context rail should reserve visible space.
+    /// It shows before a conversation starts (new-task migration chips) and,
+    /// separately, whenever the active session has a goal-progress update to
+    /// display, even mid-conversation.
+    pub fn composer_context_bar_visible(&self) -> bool {
+        !self.current_session_has_conversation() || self.current_goal_progress().is_some()
     }
 
     pub fn terminal_surface_visible(&self) -> bool {
@@ -567,6 +847,8 @@ pub fn demo_state() -> ZodeAppState {
         projects: Vec::new(),
         active_workspace: None,
         project_picker: ProjectPickerState::default(),
+        global_search: GlobalSearchState::default(),
+        lightbox: None,
         projectless_workspace_root: None,
         current_session: None,
         session_menu: None,
@@ -575,6 +857,8 @@ pub fn demo_state() -> ZodeAppState {
         open_with: crate::OpenWithState::default(),
         pending_session_delete: None,
         threads: Vec::new(),
+        thread_workspace_root_hints: BTreeMap::new(),
+        projectless_sessions: BTreeSet::new(),
         pinned_sessions: BTreeSet::new(),
         archived_sessions: BTreeSet::new(),
         sidebar: SidebarState::default(),
@@ -588,6 +872,8 @@ pub fn demo_state() -> ZodeAppState {
         settings_scroll_offset: 0.0,
         integration_scroll_offset: 0.0,
         local_settings: LocalSettingsState::default(),
+        computer_use: ComputerUseUiState::default(),
+        provider_models: ProviderModelsState::default(),
         archived_tasks: ArchivedTasksState::default(),
         composer: ComposerState::default(),
         composer_defaults: None,
@@ -596,6 +882,7 @@ pub fn demo_state() -> ZodeAppState {
         presentation: PresentationState::default(),
         review: ReviewState::default(),
         terminal: TerminalState::default(),
+        browser: BrowserPanelState::default(),
         ui_preferences: UiPreferences::default(),
         shell: ShellState {
             layout: LayoutClass::Wide,

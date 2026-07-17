@@ -6,14 +6,17 @@ mod paint;
 
 use std::collections::BTreeMap;
 
-use jian_widgets::{Painter, Rect};
+use jian_widgets::{Painter, Point2D, Rect};
 use zode_app_model::{
     AppCommand, ComingSoonFeature, IntegrationsTab, ProjectSortMode, SettingsCategory, ShellRoute,
     SidebarSectionMenu, ZodeAppState,
 };
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
-use crate::{stable_widget_id, RectExt, SemanticIcon, WidgetId, ZodeTheme};
+use crate::{
+    stable_widget_id, RectExt, SemanticIcon, WidgetId, ZodeTheme, HELP_ID, NEW_SESSION_ID,
+    SETTINGS_NAV_ID,
+};
 
 pub use layout::{
     SidebarControlLayout, SidebarControlTarget, SidebarLabelLayout, SidebarLayout,
@@ -194,6 +197,45 @@ pub fn group_sessions(sessions: Vec<ThreadSummary>) -> Vec<ProjectSessionGroup> 
     groups
 }
 
+/// Groups task rows by their persisted owning project while leaving each
+/// summary's execution workspace untouched.
+pub(super) fn group_sessions_by_project(
+    state: &ZodeAppState,
+    sessions: Vec<ThreadSummary>,
+) -> Vec<ProjectSessionGroup> {
+    let mut by_workspace: BTreeMap<WorkspaceUri, Vec<ThreadSummary>> = BTreeMap::new();
+    for session in sessions {
+        let Some(workspace) = state.project_workspace_for_thread(&session).cloned() else {
+            continue;
+        };
+        by_workspace.entry(workspace).or_default().push(session);
+    }
+    let mut groups = by_workspace
+        .into_iter()
+        .map(|(workspace_uri, mut sessions)| {
+            sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at_ms));
+            ProjectSessionGroup {
+                workspace_uri,
+                sessions,
+            }
+        })
+        .collect::<Vec<_>>();
+    groups.sort_by(|left, right| {
+        let left_newest = left
+            .sessions
+            .first()
+            .map_or(i64::MIN, |session| session.updated_at_ms);
+        let right_newest = right
+            .sessions
+            .first()
+            .map_or(i64::MIN, |session| session.updated_at_ms);
+        right_newest
+            .cmp(&left_newest)
+            .then_with(|| left.workspace_uri.cmp(&right.workspace_uri))
+    });
+    groups
+}
+
 impl ProjectSidebar {
     pub const fn navigation_items() -> &'static [SidebarItem] {
         &NAVIGATION
@@ -205,6 +247,106 @@ impl ProjectSidebar {
 
     pub fn layout(rect: Rect, state: &ZodeAppState) -> SidebarLayout {
         layout::build(rect, state)
+    }
+
+    /// Final, fixed hit geometry for the transient sidebar shown while the
+    /// persistent sidebar is collapsed. Animation only translates paint; it
+    /// never moves this rectangle, so a pointer can cross into the surface
+    /// without racing a moving hit target.
+    pub fn transient_rect(viewport: Rect, state: &ZodeAppState) -> Rect {
+        let available = viewport.size.x.max(0.0);
+        let minimum = crate::PRIMARY_SIDEBAR_MIN_W.min(available);
+        let requested = f32::from(state.ui_preferences.primary_sidebar_width);
+        let width = requested.clamp(minimum, available);
+        Rect::xywh(
+            viewport.origin.x,
+            viewport.origin.y,
+            width,
+            viewport.size.y.max(0.0),
+        )
+    }
+
+    pub const fn navigation_widget_id(index: usize) -> WidgetId {
+        WidgetId(NEW_SESSION_ID.0 + index as u64)
+    }
+
+    /// Hit tests the complete transient sidebar against its final geometry.
+    /// Padding remains non-actionable so the host can capture it without
+    /// manufacturing commands, while every real row reuses the persistent
+    /// sidebar's stable widget id.
+    pub fn transient_hit_test(
+        rect: Rect,
+        state: &ZodeAppState,
+        point: Point2D,
+    ) -> Option<WidgetId> {
+        if !rect.contains(point)
+            && !Self::menu_layout(rect, state).is_some_and(|menu| menu.rect.contains(point))
+        {
+            return None;
+        }
+        if let Some(menu) = Self::menu_layout(rect, state) {
+            if let Some(item) = menu
+                .items
+                .iter()
+                .rev()
+                .find(|item| item.enabled && item.rect.contains(point))
+            {
+                return Some(item.id);
+            }
+            if menu.rect.contains(point) {
+                return None;
+            }
+        }
+
+        let layout = Self::layout(rect, state);
+        if layout.help.contains(point) {
+            return Some(HELP_ID);
+        }
+        if layout.profile.contains(point) {
+            return Some(SETTINGS_NAV_ID);
+        }
+        for control in layout.controls.iter().rev() {
+            if control.actionable() && control.rect.contains(point) {
+                return Some(control.id);
+            }
+        }
+        for row in layout.rows.iter().rev() {
+            for (id, action_rect) in [
+                (row.pin_id, Self::session_pin_rect(row)),
+                (row.archive_id, Self::session_archive_rect(row)),
+                (row.more_id, Self::project_more_rect(row)),
+                (row.new_id, Self::project_new_rect(row)),
+            ] {
+                if let (Some(id), Some(action_rect)) = (id, action_rect) {
+                    if action_rect.contains(point) {
+                        return Some(id);
+                    }
+                }
+            }
+            if row.actionable && row.rect.contains(point) {
+                return Some(row.id);
+            }
+        }
+        if let Some(section) = layout.sections.iter().rev().find(|section| {
+            section.section == SidebarSection::Tasks && section.rect.contains(point)
+        }) {
+            return Some(section.id);
+        }
+        if let Some(row) = layout
+            .navigation_rows
+            .iter()
+            .rev()
+            .find(|row| row.rect.contains(point))
+        {
+            return Some(Self::navigation_widget_id(row.index));
+        }
+        if layout.brand_search.contains(point) {
+            return Some(SIDEBAR_SEARCH_ID);
+        }
+        layout
+            .titlebar_toggle
+            .contains(point)
+            .then_some(SIDEBAR_TOGGLE_ID)
     }
 
     pub fn footer_rect(rect: Rect) -> Rect {
@@ -328,7 +470,7 @@ impl ProjectSidebar {
             return Some(AppCommand::TogglePrimarySidebar);
         }
         if id == SIDEBAR_SEARCH_ID {
-            return Some(AppCommand::ToggleSidebarProjectPicker);
+            return Some(AppCommand::ToggleGlobalSearch);
         }
         if id == SIDEBAR_TASKS_TOGGLE_ID || id == SIDEBAR_TASKS_SECTION_ID {
             return Some(AppCommand::ToggleSidebarTasks);
@@ -423,6 +565,37 @@ impl ProjectSidebar {
         );
     }
 
+    /// Paints full-width sidebar content through a narrower animated reveal.
+    /// Keeping layout at its final width prevents labels and controls from
+    /// being compressed while the shell smoothly reallocates horizontal room.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_clipped_with_interaction(
+        painter: &mut dyn Painter,
+        clip: Rect,
+        rect: Rect,
+        state: &ZodeAppState,
+        focused: Option<WidgetId>,
+        hovered: Option<WidgetId>,
+        show_shortcuts: bool,
+        theme: &ZodeTheme,
+    ) {
+        if clip.size.x <= 0.0 || clip.size.y <= 0.0 {
+            return;
+        }
+        painter.save();
+        painter.clip_rect(clip);
+        Self::paint_with_interaction(
+            painter,
+            rect,
+            state,
+            focused,
+            hovered,
+            show_shortcuts,
+            theme,
+        );
+        painter.restore();
+    }
+
     /// Drawn after the primary surface so the hover card is not occluded by
     /// the content pane that begins at the sidebar's trailing edge.
     pub fn paint_hover_overlay(
@@ -435,10 +608,34 @@ impl ProjectSidebar {
     ) {
         paint::paint_hover_overlay(painter, rect, state, focused, hovered, theme);
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_hover_overlay_with_reveal(
+        painter: &mut dyn Painter,
+        reveal: Rect,
+        rect: Rect,
+        state: &ZodeAppState,
+        focused: Option<WidgetId>,
+        hovered: Option<WidgetId>,
+        theme: &ZodeTheme,
+    ) {
+        if reveal.size.x <= 0.0 || reveal.size.y <= 0.0 {
+            return;
+        }
+        if reveal.size.x + f32::EPSILON >= rect.size.x {
+            Self::paint_hover_overlay(painter, rect, state, focused, hovered, theme);
+            return;
+        }
+        painter.save();
+        painter.clip_rect(reveal);
+        Self::paint_hover_overlay(painter, rect, state, focused, hovered, theme);
+        painter.restore();
+    }
 }
 
 pub(super) fn dynamic_projects(state: &ZodeAppState) -> Vec<DynamicProject> {
-    let mut sessions = group_sessions(
+    let mut sessions = group_sessions_by_project(
+        state,
         state
             .threads
             .iter()
@@ -450,7 +647,6 @@ pub(super) fn dynamic_projects(state: &ZodeAppState) -> Vec<DynamicProject> {
             .collect(),
     )
     .into_iter()
-    .filter(|group| !state.is_projectless_workspace(&group.workspace_uri))
     .map(|group| (group.workspace_uri, group.sessions))
     .collect::<BTreeMap<_, _>>();
     let known_projects = state
@@ -529,7 +725,7 @@ pub(super) fn pinned_tasks(state: &ZodeAppState) -> Vec<ThreadSummary> {
 
 pub(super) fn projectless_tasks(state: &ZodeAppState) -> Vec<ThreadSummary> {
     sorted_tasks(state, |thread| {
-        state.is_projectless_workspace(&thread.workspace_uri)
+        state.is_projectless_thread(thread)
             && !state.pinned_sessions.contains(&thread.session)
             && !state.archived_sessions.contains(&thread.session)
     })
@@ -566,11 +762,9 @@ pub(crate) fn workspace_label(workspace: &WorkspaceUri, available: bool) -> Stri
 
 pub(super) fn navigation_item_selected(state: &ZodeAppState, item: SidebarItem) -> bool {
     match item.action {
-        SidebarAction::NewSession => {
-            state.presentation.route == ShellRoute::Conversation
-                && state.current_session.is_none()
-                && state.active_workspace.is_none()
-        }
+        // "New task" is an action, not a destination. It may show transient
+        // hover/focus feedback, but it must never look like the active route.
+        SidebarAction::NewSession => false,
         SidebarAction::Navigate(ShellRoute::Integrations(_)) => {
             matches!(state.presentation.route, ShellRoute::Integrations(_))
         }

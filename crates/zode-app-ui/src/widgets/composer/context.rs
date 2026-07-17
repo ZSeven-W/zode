@@ -93,7 +93,7 @@ pub fn layout(
         let detach_width = if detachable_project {
             DETACH_HIT_SIZE + 4.0
         } else {
-            CONTEXT_ICON_SIZE + CONTEXT_ICON_GAP
+            CHIP_PAD_X + CONTEXT_ICON_SIZE + CONTEXT_ICON_GAP
         };
         let desired = detach_width
             + estimated_text_width(label).min(MAX_CHIP_LABEL_WIDTH)
@@ -273,7 +273,9 @@ fn paint_chips(
 ) {
     if let (Some(chip), Some(label)) = (layout.project, non_empty(workspace_label)) {
         let detach_active = is_active(PROJECT_DETACH_ID, focused, hovered, menu_active);
-        if is_active(chip.id, focused, hovered, menu_active) || detach_active {
+        let project_active = is_active(chip.id, focused, hovered, menu_active);
+        let project_hovered = hovered == Some(chip.id) || hovered == Some(PROJECT_DETACH_ID);
+        if project_active || detach_active {
             painter.fill_round_rect(
                 chip.rect,
                 CHIP_RADIUS.min(chip.rect.size.y / 2.0),
@@ -281,25 +283,35 @@ fn paint_chips(
             );
         }
         if let Some(detach) = layout.detach {
-            let visual = centered_square(detach, DETACH_VISUAL_SIZE);
-            painter.fill_round_rect(
-                visual,
-                DETACH_VISUAL_SIZE / 2.0,
-                theme
-                    .tokens
-                    .muted_foreground
-                    .with_alpha(if detach_active { 0.2 } else { 0.12 }),
-            );
-            paint_icon(
-                painter,
-                SemanticIcon::Close,
-                centered_square(visual, 12.0),
-                if detach_active {
-                    theme.tokens.foreground
-                } else {
-                    theme.tokens.muted_foreground
-                },
-            );
+            if project_hovered || focused == Some(PROJECT_DETACH_ID) {
+                let visual = centered_square(detach, DETACH_VISUAL_SIZE);
+                painter.fill_round_rect(
+                    visual,
+                    DETACH_VISUAL_SIZE / 2.0,
+                    theme.tokens.muted_foreground.with_alpha(if detach_active {
+                        0.2
+                    } else {
+                        0.12
+                    }),
+                );
+                paint_icon(
+                    painter,
+                    SemanticIcon::Close,
+                    centered_square(visual, 12.0),
+                    if detach_active {
+                        theme.tokens.foreground
+                    } else {
+                        theme.tokens.muted_foreground
+                    },
+                );
+            } else {
+                paint_icon(
+                    painter,
+                    SemanticIcon::Folder,
+                    centered_square(detach, CONTEXT_ICON_SIZE),
+                    theme.tokens.foreground,
+                );
+            }
         } else {
             let icon = Rect::xywh(
                 chip.rect.origin.x + CHIP_PAD_X,
@@ -396,7 +408,14 @@ fn paint_active_tooltip(
         layout.detach.map(|rect| (rect, "不在项目中工作"))
     } else {
         [
-            (layout.project, "更改此任务的项目"),
+            (
+                layout.project,
+                if layout.detach.is_some() {
+                    "更改此任务的项目"
+                } else {
+                    "选择项目"
+                },
+            ),
             (layout.location, "选择任务的运行位置"),
             (layout.branch, "切换任务分支"),
         ]

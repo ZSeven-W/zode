@@ -11,7 +11,8 @@ use zode_app_ui::{
     ENVIRONMENT_PANEL_ID, ENVIRONMENT_REFRESH_ID, ENVIRONMENT_REVIEW_ID,
 };
 use zode_node_protocol::{
-    DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
+    BackgroundProcessSnapshot, BackgroundProcessStatus, DiffFile, DiffFileStatus, DiffSnapshot,
+    SessionLocator, SubagentSnapshot, SubagentStatus, ThreadStatus, ThreadSummary, TurnId,
     WorkspaceUri,
 };
 
@@ -101,21 +102,17 @@ fn ready_presentation(session: &SessionLocator) -> SessionPresentationState {
         context: LoadState::Ready(EnvironmentSnapshot {
             workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
             branch: Some("codex/zode-desktop".into()),
-            subagents: vec![EnvironmentEntry {
-                id: "agent-1".into(),
-                label: "界面实现".into(),
-                value: None,
-            }],
-            background_processes: vec![EnvironmentEntry {
-                id: "process-1".into(),
-                label: "cargo test -p zode-app-ui".into(),
-                value: None,
-            }],
-            sources: vec![EnvironmentEntry {
-                id: "source-1".into(),
-                label: "zode-superpowers.zip".into(),
-                value: None,
-            }],
+            background_processes: Vec::new(),
+            // Dead field (superseded by `transcript_sources`; see
+            // `EnvironmentSnapshot::sources` doc comment) - kept populated
+            // here only so `presentation_data_never_leaks_from_another_session`
+            // still has something to mutate per-session and assert isolation
+            // over.
+            sources: vec![EnvironmentEntry::new(
+                "source-1",
+                "zode-superpowers.zip",
+                None,
+            )],
         }),
         diff: SessionDiffState {
             dirty: false,
@@ -140,6 +137,25 @@ fn ready_presentation(session: &SessionLocator) -> SessionPresentationState {
         },
         preview: PreviewState::Idle,
         runtime_options: LoadState::Idle,
+        subagents: vec![SubagentSnapshot {
+            id: "agent-1".into(),
+            agent_type: "界面实现".into(),
+            display_name: "界面实现".into(),
+            depth: 0,
+            status: SubagentStatus::Completed,
+            tokens: 4_200,
+            turn_id: TurnId::new(),
+            completed_at_ms: Some(1_752_700_000_000),
+            result_summary: Some("完成环境面板紧凑行样式".into()),
+        }],
+        background_processes: vec![BackgroundProcessSnapshot {
+            id: "process-1".into(),
+            command: "cargo test".into(),
+            status: BackgroundProcessStatus::Running,
+            started_at_ms: 0,
+            tool_call_id: None,
+        }],
+        ..SessionPresentationState::default()
     }
 }
 
@@ -257,7 +273,7 @@ fn floating_panel_paints_one_soft_shadow_behind_the_card() {
     assert_eq!(painter.shadows.len(), 1);
     let (shadow, radius, blur) = painter.shadows[0];
     assert_eq!(shadow.origin.x, layout.card.origin.x);
-    assert_eq!(shadow.origin.y, layout.card.origin.y + 8.0);
+    assert_eq!(shadow.origin.y, layout.card.origin.y + 2.0);
     assert_eq!(shadow.size, layout.card.size);
     assert_eq!(radius, 20.0);
     assert_eq!(blur, 24.0);
@@ -327,7 +343,13 @@ fn panel_starts_with_environment_and_uses_compact_canonical_rows() {
             .iter()
             .any(|path| path.as_str() == icon.path()));
     }
-    assert_eq!(painter.rounded_fills, vec![layout.card]);
+    // The card background, plus one colored dot per real sub-agent row
+    // (`ready_presentation` seeds exactly one) — both are `fill_round_rect`
+    // calls, so the card is no longer the *only* rounded fill once the
+    // Subagents section has real rows to paint.
+    assert_eq!(painter.rounded_fills.len(), 2);
+    assert_eq!(painter.rounded_fills[0], layout.card);
+    assert_ne!(painter.rounded_fills[1], layout.card);
     assert_eq!(painter.rounded_strokes, vec![layout.card]);
 }
 
@@ -367,6 +389,8 @@ fn current_session_load_states_are_explicit_and_keep_the_real_workspace() {
                 diff: SessionDiffState::default(),
                 preview: PreviewState::Idle,
                 runtime_options: LoadState::Idle,
+                subagents: Vec::new(),
+                ..SessionPresentationState::default()
             },
         );
         let text = paint(&state, Rect::xywh(0.0, 0.0, 300.0, 600.0))
@@ -403,9 +427,10 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
     for expected in [
         "codex/zode-desktop",
         "子智能体",
-        "界面实现",
+        "1 完成",
         "后台进程",
-        "cargo test -p zode-app-ui",
+        "cargo test",
+        "运行中",
         "来源",
         "report.md",
         "查看全部",
@@ -445,7 +470,6 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
             context: LoadState::Ready(EnvironmentSnapshot {
                 workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
                 branch: None,
-                subagents: Vec::new(),
                 background_processes: Vec::new(),
                 sources: Vec::new(),
             }),
@@ -459,6 +483,8 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
             },
             preview: PreviewState::Idle,
             runtime_options: LoadState::Idle,
+            subagents: Vec::new(),
+            ..SessionPresentationState::default()
         },
     );
     state.transcripts.entry(session).or_default().items.clear();
@@ -532,6 +558,8 @@ fn diff_idle_loading_and_failure_are_honest_and_do_not_open_review() {
                 diff: SessionDiffState { dirty: true, load },
                 preview: PreviewState::Idle,
                 runtime_options: LoadState::Idle,
+                subagents: Vec::new(),
+                ..SessionPresentationState::default()
             },
         );
         let painter = paint(&state, Rect::xywh(0.0, 0.0, 300.0, 600.0));
@@ -658,21 +686,24 @@ fn real_sections_drive_content_hug_geometry_and_footer_availability() {
         .iter()
         .any(|path| path.as_str() == SemanticIcon::FileText.path()));
 
-    if let LoadState::Ready(context) = &mut state
+    // The Subagents row is a fixed-height compact summary regardless of how
+    // many real sub-agents exist (Codex's "avatar strip + N 完成", not a
+    // per-agent list), so it can no longer drive overflow by itself.
+    // Background processes still render one row per entry — extend that
+    // list instead to exercise the same max-height clamping/containment.
+    state
         .presentation
         .sessions
         .get_mut(&session)
         .expect("current session presentation")
-        .context
-    {
-        context
-            .subagents
-            .extend((0..20).map(|index| EnvironmentEntry {
-                id: format!("overflow-agent-{index}"),
-                label: format!("overflow agent {index}"),
-                value: None,
-            }));
-    }
+        .background_processes
+        .extend((0..20).map(|index| BackgroundProcessSnapshot {
+            id: format!("overflow-process-{index}"),
+            command: format!("overflow process {index}"),
+            status: BackgroundProcessStatus::Running,
+            started_at_ms: 0,
+            tool_call_id: None,
+        }));
     let overflow_surface = Rect::xywh(0.0, 0.0, 300.0, 900.0);
     let overflow = EnvironmentPanel::layout(overflow_surface, &state);
     let overflow_paint = paint(&state, overflow_surface);
@@ -689,7 +720,6 @@ fn real_sections_drive_content_hug_geometry_and_footer_availability() {
             context: LoadState::Ready(EnvironmentSnapshot {
                 workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
                 branch: None,
-                subagents: Vec::new(),
                 background_processes: Vec::new(),
                 sources: Vec::new(),
             }),
@@ -703,6 +733,8 @@ fn real_sections_drive_content_hug_geometry_and_footer_availability() {
             },
             preview: PreviewState::Idle,
             runtime_options: LoadState::Idle,
+            subagents: Vec::new(),
+            ..SessionPresentationState::default()
         },
     );
     state.transcripts.entry(session).or_default().items.clear();

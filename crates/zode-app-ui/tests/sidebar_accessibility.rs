@@ -1,10 +1,203 @@
+use accesskit::Action;
 use jian_widgets::{Point2D, Rect};
-use zode_app_model::AppCommand;
+use zode_app_model::{AppCommand, SecondaryPane};
 use zode_app_ui::{
-    Insets, ProjectSidebar, RectExt, WidgetId, WorkspaceSnapshot, SIDEBAR_PROJECTS_MORE_ID,
-    SIDEBAR_PROJECTS_NEW_ID, SIDEBAR_PROJECT_MENU_FINDER_ID, SIDEBAR_PROJECT_MENU_PIN_ID,
+    CollapsedSidebarChrome, GlobalSearchViewState, Insets, PrimarySidebarLayoutOptions,
+    ProjectPickerViewState, ProjectSidebar, RectExt, SecondarySidebarLayoutOptions,
+    SidebarLayoutOptions, WidgetId, WorkspaceSnapshot, COLLAPSED_SIDEBAR_BACK_ID,
+    COLLAPSED_SIDEBAR_FORWARD_ID, ENVIRONMENT_PANEL_ID, HELP_ID, NEW_SESSION_ID, REVIEW_CLOSE_ID,
+    SETTINGS_NAV_ID, SIDEBAR_ID, SIDEBAR_PROJECTS_MORE_ID, SIDEBAR_PROJECTS_NEW_ID,
+    SIDEBAR_PROJECT_MENU_FINDER_ID, SIDEBAR_PROJECT_MENU_PIN_ID, SIDEBAR_SEARCH_ID,
+    SIDEBAR_TOGGLE_ID,
 };
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
+
+#[test]
+fn collapsed_sidebar_keeps_four_titlebar_controls_accessible() {
+    let mut state = zode_app_model::demo_state();
+    state.shell.sidebar_open = false;
+
+    let snapshot = WorkspaceSnapshot::build(&state, 1_221.0, 992.0, Insets::ZERO);
+    assert_eq!(snapshot.layout.sidebar.size.x, 0.0);
+    let chrome = CollapsedSidebarChrome::layout(snapshot.layout.top_bar);
+
+    let toggle = snapshot
+        .node(SIDEBAR_TOGGLE_ID)
+        .expect("collapsed sidebar toggle remains accessible");
+    assert_eq!(toggle.name, "显示侧边栏");
+    assert_eq!(toggle.rect, chrome.toggle);
+    assert_eq!(toggle.actions, vec![Action::Click, Action::Focus]);
+    assert!(!toggle.disabled);
+    assert_eq!(snapshot.hit_test(rect_center(toggle.rect)), Some(toggle.id));
+
+    for (id, rect, name) in [
+        (COLLAPSED_SIDEBAR_BACK_ID, chrome.back, "返回"),
+        (COLLAPSED_SIDEBAR_FORWARD_ID, chrome.forward, "前进"),
+    ] {
+        let control = snapshot
+            .node(id)
+            .expect("disabled history control remains accessible");
+        assert_eq!(control.name, name);
+        assert_eq!(control.rect, rect);
+        assert!(control.disabled);
+        assert!(control.actions.is_empty());
+        assert_eq!(control.focus_order, None);
+        assert_eq!(snapshot.hit_test(rect_center(control.rect)), None);
+    }
+
+    let new_task = snapshot
+        .node(NEW_SESSION_ID)
+        .expect("collapsed new-task control remains accessible");
+    assert_eq!(new_task.name, "新建任务");
+    assert_eq!(new_task.rect, chrome.new_task);
+    assert_eq!(new_task.actions, vec![Action::Click, Action::Focus]);
+    assert!(!new_task.disabled);
+    assert_eq!(
+        snapshot.hit_test(rect_center(new_task.rect)),
+        Some(NEW_SESSION_ID)
+    );
+}
+
+#[test]
+fn transitioning_sidebar_clips_hit_targets_to_the_visible_slice() {
+    let state = zode_app_model::demo_state();
+    let snapshot = WorkspaceSnapshot::build_with_overlays_and_sidebar_options(
+        &state,
+        1_800.0,
+        1_080.0,
+        Insets::ZERO,
+        &ProjectPickerViewState::default(),
+        &GlobalSearchViewState::default(),
+        SidebarLayoutOptions {
+            primary: PrimarySidebarLayoutOptions {
+                open: true,
+                width: 293.0,
+                visibility: 0.25,
+            },
+            secondary: SecondarySidebarLayoutOptions::default(),
+        },
+    );
+    assert_eq!(snapshot.layout.primary_sidebar_content.width(), 293.0);
+    // 293.0 * 0.25 == 73.25, snapped to the nearest whole logical pixel.
+    assert_eq!(snapshot.layout.sidebar.width(), 73.0);
+
+    let sidebar_ids = [
+        SIDEBAR_ID,
+        SIDEBAR_TOGGLE_ID,
+        SIDEBAR_SEARCH_ID,
+        NEW_SESSION_ID,
+        SIDEBAR_PROJECTS_MORE_ID,
+        SIDEBAR_PROJECTS_NEW_ID,
+        SETTINGS_NAV_ID,
+        HELP_ID,
+    ];
+    for node in snapshot
+        .nodes
+        .iter()
+        .filter(|node| sidebar_ids.contains(&node.id))
+    {
+        assert!(node.rect.min_x() >= snapshot.layout.sidebar.min_x());
+        assert!(node.rect.max_x() <= snapshot.layout.sidebar.max_x());
+    }
+
+    let hidden_point = Point2D::new(
+        snapshot.layout.sidebar.max_x() + 2.0,
+        snapshot.layout.sidebar.min_y() + 100.0,
+    );
+    assert!(!snapshot
+        .hit_test(hidden_point)
+        .is_some_and(|id| sidebar_ids.contains(&id)));
+}
+
+#[test]
+fn transitioning_right_surfaces_clip_hit_and_accessibility_rects() {
+    let mut state = zode_app_model::demo_state();
+    state.presentation.secondary_pane = Some(SecondaryPane::Review);
+    state.presentation.secondary_sidebar_open = true;
+    let snapshot = WorkspaceSnapshot::build_with_overlays_and_sidebar_options(
+        &state,
+        1_800.0,
+        1_080.0,
+        Insets::ZERO,
+        &ProjectPickerViewState::default(),
+        &GlobalSearchViewState::default(),
+        SidebarLayoutOptions {
+            primary: PrimarySidebarLayoutOptions::default(),
+            secondary: SecondarySidebarLayoutOptions {
+                open: true,
+                width: 700.0,
+                pinned_summary_overlay: false,
+                visibility: 0.25,
+                pinned_summary_visibility: 0.0,
+            },
+        },
+    );
+    assert!(snapshot.node(REVIEW_CLOSE_ID).is_none());
+    for node in snapshot
+        .nodes
+        .iter()
+        .filter(|node| node.name.starts_with("预览文件"))
+    {
+        assert!(node.rect.min_x() >= snapshot.layout.review_panel.min_x());
+        assert!(node.rect.max_x() <= snapshot.layout.review_panel.max_x());
+    }
+
+    state.presentation.secondary_pane = None;
+    state.presentation.secondary_sidebar_open = false;
+    state.presentation.pinned_summary_overlay_open = true;
+    let summary = WorkspaceSnapshot::build_with_overlays_and_sidebar_options(
+        &state,
+        1_200.0,
+        900.0,
+        Insets::ZERO,
+        &ProjectPickerViewState::default(),
+        &GlobalSearchViewState::default(),
+        SidebarLayoutOptions {
+            primary: PrimarySidebarLayoutOptions::default(),
+            secondary: SecondarySidebarLayoutOptions {
+                open: false,
+                width: 700.0,
+                pinned_summary_overlay: true,
+                visibility: 0.0,
+                pinned_summary_visibility: 0.5,
+            },
+        },
+    );
+    let panel = summary
+        .node(ENVIRONMENT_PANEL_ID)
+        .expect("partially visible summary remains accessible");
+    assert!(panel.rect.min_x() >= summary.layout.context_panel.min_x());
+    assert!(panel.rect.max_x() <= summary.layout.context_panel.max_x());
+}
+
+#[test]
+fn zero_width_first_frame_of_right_transition_keeps_the_conversation_surface() {
+    let mut state = zode_app_model::demo_state();
+    state.presentation.secondary_pane = Some(SecondaryPane::Review);
+    state.presentation.secondary_sidebar_open = true;
+    let snapshot = WorkspaceSnapshot::build_with_overlays_and_sidebar_options(
+        &state,
+        1_800.0,
+        1_080.0,
+        Insets::ZERO,
+        &ProjectPickerViewState::default(),
+        &GlobalSearchViewState::default(),
+        SidebarLayoutOptions {
+            primary: PrimarySidebarLayoutOptions::default(),
+            secondary: SecondarySidebarLayoutOptions {
+                open: true,
+                width: 700.0,
+                pinned_summary_overlay: false,
+                visibility: 0.0,
+                pinned_summary_visibility: 0.0,
+            },
+        },
+    );
+
+    assert_eq!(snapshot.layout.review_panel.width(), 0.0);
+    assert!(snapshot.layout.secondary_sidebar_content.width() > 0.0);
+    assert!(snapshot.node(zode_app_ui::COMPOSER_ID).is_some());
+}
 
 #[test]
 fn sidebar_dynamic_rows_share_snapshot_hit_rects_and_keep_stable_ids() {

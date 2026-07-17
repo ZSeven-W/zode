@@ -164,8 +164,14 @@ fn wide_page_freezes_reference_column_and_exposes_real_tab_commands() {
 
     let layout = IntegrationsPage::layout(surface, &state);
 
-    assert_eq!(layout.content, Rect::xywh(652.0, 46.0, 736.0, 1_034.0));
-    assert_eq!(layout.search, Rect::xywh(652.0, 146.0, 736.0, 34.0));
+    assert_eq!(layout.content, Rect::xywh(636.0, 46.0, 768.0, 1_034.0));
+    // The Plugins tab reserves room for the add-plugin entry point beside
+    // the search box - see `IntegrationsPageLayout::add_plugin_button`.
+    assert_eq!(layout.search, Rect::xywh(636.0, 146.0, 664.0, 34.0));
+    assert_eq!(
+        layout.add_plugin_button,
+        Rect::xywh(1_308.0, 146.0, 96.0, 34.0)
+    );
     assert_eq!(layout.tabs[0].label, "插件");
     assert!(layout.tabs[0].selected);
     assert_eq!(layout.tabs[1].label, "技能");

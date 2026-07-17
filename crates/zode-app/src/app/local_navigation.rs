@@ -6,6 +6,7 @@ impl DesktopApp {
     pub(super) fn apply_local_navigation_command(&mut self, command: &AppCommand) -> bool {
         let previous_session = self.app_state.current_session.clone();
         let previous_queue_edit = self.app_state.composer.editing_queued_message;
+        let global_search_was_open = self.app_state.global_search.open;
         let project_picker_was_open = self.app_state.project_picker.open;
         let project_picker_previous_anchor = self.app_state.project_picker.anchor;
         let previous_context_menu = self.app_state.composer.context_menu;
@@ -73,6 +74,11 @@ impl DesktopApp {
             return false;
         }
         normalize_conversation_route(&mut self.app_state, command);
+        // Session/task navigation normalizes the conversation chrome directly,
+        // outside the presentation reducer. Keep the host-owned animations in
+        // lockstep so an outgoing right panel cannot survive the navigation.
+        self.sync_primary_sidebar_transition();
+        self.sync_right_panel_transition();
         if matches!(
             command,
             AppCommand::BeginTask { .. }
@@ -83,7 +89,9 @@ impl DesktopApp {
         ) {
             self.persist_ui_state();
         }
-        let focus_after = open_with_focus
+        let focus_after = self
+            .sync_global_search_after_navigation(command, global_search_was_open)
+            .or(open_with_focus)
             .or(session_focus)
             .or_else(|| {
                 self.sync_project_picker_after_navigation(

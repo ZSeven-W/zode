@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc, time::Instant};
 
 use winit::{
     application::ApplicationHandler,
@@ -9,8 +9,8 @@ use winit::{
 };
 use zode_app_model::{ProjectState, ZodeAppState};
 use zode_app_ui::{
-    Composer, ComposerController, Insets, ProjectPickerController, SessionRenameController,
-    TerminalGrid, TerminalPanelController, WidgetId, WorkspaceSnapshot,
+    Composer, ComposerController, GlobalSearchController, Insets, ProjectPickerController,
+    SessionRenameController, TerminalGrid, TerminalPanelController, WidgetId, WorkspaceSnapshot,
 };
 
 use crate::services::{
@@ -41,16 +41,20 @@ use zode_node_protocol::{AgentEndpoint, NodeCapability, UserContent, WorkspaceUr
 
 #[path = "app/branch_catalog.rs"]
 mod branch_catalog;
+mod browser;
 #[path = "app/composer_context.rs"]
 mod composer_context;
 #[path = "app/composer_footer.rs"]
 mod composer_footer;
+mod computer_use;
 #[path = "app/environment-actions.rs"]
 mod environment_actions;
 #[path = "app/external-preview.rs"]
 mod external_preview;
+mod global_search;
 mod integrations;
 mod interaction;
+mod lightbox;
 #[path = "app/local_navigation.rs"]
 mod local_navigation;
 mod navigation_persistence;
@@ -58,23 +62,42 @@ mod navigation_state;
 #[path = "app/open-with.rs"]
 mod open_with;
 mod persistence;
+mod plugin_market;
 mod presentation;
+#[path = "app/primary-sidebar-preview.rs"]
+mod primary_sidebar_preview;
+#[path = "app/primary-sidebar-preview-focus.rs"]
+mod primary_sidebar_preview_focus;
+#[path = "app/primary-sidebar-preview-host.rs"]
+mod primary_sidebar_preview_host;
 #[path = "app/primary-sidebar-resize.rs"]
 mod primary_sidebar_resize;
+#[path = "app/primary-sidebar-transition.rs"]
+mod primary_sidebar_transition;
 #[path = "app/project-actions.rs"]
 mod project_actions;
 mod project_picker;
+#[path = "app/provider-input.rs"]
+mod provider_input;
+#[path = "app/provider_models.rs"]
+mod provider_models;
 #[path = "app/provider-setup.rs"]
 mod provider_setup;
 mod queue;
 mod queue_focus;
+#[path = "app/right-panel-transition.rs"]
+mod right_panel_transition;
 mod session_menu;
 mod settings;
 mod sidebar;
 #[path = "app/sidebar-menu.rs"]
 mod sidebar_menu;
+#[path = "app/sidebar-motion.rs"]
+mod sidebar_motion;
 mod startup;
 mod terminal;
+#[path = "app/transcript-images.rs"]
+mod transcript_images;
 mod window;
 
 pub use startup::{run_demo, run_demo_for_session};
@@ -90,9 +113,11 @@ pub struct DesktopApp {
     proxy: EventLoopProxy<AppWake>,
     agent_events: Option<AgentEventBridge>,
     composer: ComposerController,
+    global_search_controller: GlobalSearchController,
     project_picker_controller: ProjectPickerController,
     branch_picker_controller: ProjectPickerController,
     session_rename_controller: SessionRenameController,
+    provider_models_controller: provider_models::ProviderModelsController,
     /// Full queued payloads stay controller-private so immutable UI snapshots
     /// never retain image base64. `ZodeAppState` stores only lightweight queue
     /// previews keyed by the same session-local message id.
@@ -105,6 +130,38 @@ pub struct DesktopApp {
     terminal_controller: TerminalPanelController,
     terminal_runtime: TerminalRuntime,
     terminal_workspace: Option<WorkspaceUri>,
+    /// Process-wide browser session shared with the agent's `browser_*`
+    /// tools (see `zode_core::engine::EngineTemplate::browser`) - attached
+    /// post-construction via `attach_browser_session`, mirroring
+    /// `attach_endpoint`. `None` until attached (e.g. in tests that never
+    /// call it), in which case the spectator panel stays idle.
+    browser_session: Option<Arc<zode_core::browser::BrowserSession>>,
+    /// Latest decoded-ready frame handed to the panel's paint call. `None`
+    /// before the first frame or once the stream stops.
+    browser_frame: Option<browser::BrowserFrameCache>,
+    /// Last `ScreencastFrame::sequence` observed - lets `poll_browser_frame`
+    /// tell "new frame" from "still the same frame" without touching bytes.
+    browser_frame_seq: u64,
+    /// Monotonic counter minted fresh for every NEW frame (never reused for
+    /// repeat paints of the same frame) - becomes the image cache key so a
+    /// stale decode is never shown. See `NativeBackend::image_source`.
+    browser_image_id: u64,
+    /// Background ticker that wakes the event loop at a fixed cadence while
+    /// the panel is visible, so `poll_browser_frame` actually gets called
+    /// between otherwise-unrelated events - screencast frames don't arrive
+    /// through any existing wake path. Aborted when the panel closes.
+    browser_wake_task: Option<tokio::task::JoinHandle<()>>,
+    /// Background ticker mirroring `browser_wake_task`, started the first
+    /// time a pull request shows pending checks so `redraw` gets a chance
+    /// to re-poll `gh` on a fixed cadence - see
+    /// `docs/proposals/right-panel-parity.md` section 1.1's poll policy and
+    /// `maybe_poll_pull_request_status`. Outside that window the PR status
+    /// is lazy (loaded once per pane-open/session-change/manual refresh),
+    /// never on a timer, so this never starts.
+    pull_request_poll_task: Option<tokio::task::JoinHandle<()>>,
+    /// Earliest time `maybe_poll_pull_request_status` may re-request the PR
+    /// status; `None` means no poll is currently scheduled.
+    pull_request_next_poll_at: Option<Instant>,
     modifiers: ModifiersState,
     command_bridge: Option<CommandBridge>,
     presentation_queries: Option<PresentationQueryBridge>,
@@ -116,8 +173,18 @@ pub struct DesktopApp {
     cursor: crate::cursor::NativeCursorState,
     terminal_grid_resize_pending: bool,
     window_metrics_update_pending: bool,
+    /// Set on every `Resized`/`ScaleFactorChanged` event to `now + settle
+    /// duration`; cleared once a redraw observes the deadline has passed.
+    /// While set, live-resize ticks skip the expensive AccessKit tree push
+    /// and keep the raster surface's current allocation (see
+    /// `app/window.rs`).
+    resize_settle_deadline: Option<Instant>,
     focused_widget: Option<WidgetId>,
     hovered_widget: Option<WidgetId>,
+    primary_sidebar_preview: primary_sidebar_preview::PrimarySidebarPreview,
+    primary_sidebar_preview_focus: Option<WidgetId>,
+    primary_sidebar_transition: primary_sidebar_transition::PrimarySidebarTransition,
+    right_panel_transition: right_panel_transition::RightPanelTransition,
     window_focused: bool,
     clipboard: Option<Arc<dyn ClipboardService>>,
     external_open: Arc<dyn ExternalOpenService>,
@@ -126,6 +193,11 @@ pub struct DesktopApp {
     workspace_picker: project_picker::WorkspacePickerEffect,
     branch_catalog: branch_catalog::BranchCatalogEffect,
     open_with_effect: open_with::OpenWithEffect,
+    /// Loads and caches decoded bytes for `TranscriptItem::Image` items in
+    /// the current transcript, feeding the `TranscriptImageSource` passed
+    /// into `WorkspaceShell::paint_snapshot_with_overlays` - see
+    /// `app/transcript-images.rs`.
+    transcript_images: transcript_images::TranscriptImageEffect,
     app_state_store: Option<AppStateStore>,
     window_geometry: Option<WindowGeometry>,
 }
@@ -213,6 +285,8 @@ impl DesktopApp {
                 Some("Terminal is unavailable on this node.".into());
         }
         let mut composer = ComposerController::new(app_state.composer.draft.clone());
+        let global_search_controller =
+            GlobalSearchController::new(app_state.global_search.query.clone());
         let project_picker_controller =
             ProjectPickerController::new(app_state.project_picker.search.clone());
         let branch_picker_controller =
@@ -234,6 +308,7 @@ impl DesktopApp {
             proxy.clone(),
             Arc::new(LocalExternalApplicationService),
         );
+        let transcript_images = transcript_images::TranscriptImageEffect::new(proxy.clone());
         let frame_snapshot = WorkspaceSnapshot::build(
             &app_state,
             DEFAULT_WINDOW_WIDTH as f32,
@@ -251,6 +326,13 @@ impl DesktopApp {
                 None
             }
         };
+        let primary_sidebar_transition =
+            primary_sidebar_transition::PrimarySidebarTransition::seeded(
+                app_state.shell.sidebar_open,
+            );
+        let right_panel_transition = right_panel_transition::RightPanelTransition::seeded(
+            right_panel_transition::targets_for_state(&app_state, DEFAULT_WINDOW_WIDTH as f32),
+        );
         Self {
             app_state,
             a11y: None,
@@ -262,15 +344,24 @@ impl DesktopApp {
             proxy,
             agent_events: None,
             composer,
+            global_search_controller,
             project_picker_controller,
             branch_picker_controller,
             session_rename_controller: SessionRenameController::default(),
+            provider_models_controller: provider_models::ProviderModelsController::default(),
             queued_payloads: queue::QueuedPayloadStore::default(),
             provisional_sessions: BTreeSet::new(),
             terminal_grid: TerminalGrid::new(80, 24),
             terminal_controller: TerminalPanelController::default(),
             terminal_runtime,
             terminal_workspace: None,
+            browser_session: None,
+            browser_frame: None,
+            browser_frame_seq: 0,
+            browser_image_id: 0,
+            browser_wake_task: None,
+            pull_request_poll_task: None,
+            pull_request_next_poll_at: None,
             modifiers: ModifiersState::empty(),
             command_bridge: None,
             presentation_queries: None,
@@ -282,8 +373,13 @@ impl DesktopApp {
             cursor: crate::cursor::NativeCursorState::default(),
             terminal_grid_resize_pending: false,
             window_metrics_update_pending: false,
+            resize_settle_deadline: None,
             focused_widget,
             hovered_widget: None,
+            primary_sidebar_preview: primary_sidebar_preview::PrimarySidebarPreview::default(),
+            primary_sidebar_preview_focus: None,
+            primary_sidebar_transition,
+            right_panel_transition,
             window_focused: false,
             clipboard,
             external_open: Arc::new(LocalExternalOpenService),
@@ -292,6 +388,7 @@ impl DesktopApp {
             workspace_picker,
             branch_catalog,
             open_with_effect,
+            transcript_images,
             app_state_store,
             window_geometry,
         }
@@ -336,6 +433,14 @@ impl DesktopApp {
             Some(PresentationQueryBridge::spawn(endpoint, self.proxy.clone()));
     }
 
+    /// Attaches the process-wide browser session - the SAME `Arc` the
+    /// assembled `ZodeEngine`s hand to `browser_read`/`browser_act`, so the
+    /// spectator panel (M1 route A) observes the actual browser the agent
+    /// drives rather than a second, unrelated Chrome instance.
+    pub fn attach_browser_session(&mut self, session: Arc<zode_core::browser::BrowserSession>) {
+        self.browser_session = Some(session);
+    }
+
     fn sync_composer_busy(&mut self) {
         let busy = self
             .app_state
@@ -344,6 +449,21 @@ impl DesktopApp {
             .and_then(|session| self.app_state.transcripts.get(session))
             .is_some_and(|transcript| transcript.busy);
         self.composer.set_busy(busy);
+    }
+
+    /// Seeds `text` into the composer draft, replacing whatever was there.
+    /// Used by the environment panel's "修复" merge-conflict action (see
+    /// `environment_actions::EnvironmentActionOutcome::SeedComposerPrompt`)
+    /// to hand a preset fix prompt to the agent without mutating the
+    /// repository directly. Goes through the same controller-to-state sync
+    /// path as normal typing (`ComposerController::set_text` then
+    /// `interaction::sync_draft`) so the composer's own invariants
+    /// (composition clearing, etc) stay intact.
+    pub(super) fn seed_composer_prompt(&mut self, prompt: String) {
+        self.composer.set_text(prompt);
+        interaction::sync_draft(&mut self.app_state, self.composer.text());
+        self.rebuild_frame_snapshot();
+        self.request_redraw();
     }
 
     fn apply_composer_outcome(&mut self, mut outcome: zode_app_ui::ComposerOutcome) {
@@ -366,7 +486,8 @@ impl DesktopApp {
             .zip(self.app_state.composer.editing_queued_message);
         let edited_submission = match &outcome {
             zode_app_ui::ComposerOutcome::Send(submission)
-            | zode_app_ui::ComposerOutcome::Queue(submission) => Some(submission),
+            | zode_app_ui::ComposerOutcome::Queue(submission)
+            | zode_app_ui::ComposerOutcome::QueueFront(submission) => Some(submission),
             _ => None,
         };
         if let (Some((session, id)), Some(submission)) = (editing, edited_submission) {
@@ -379,15 +500,18 @@ impl DesktopApp {
         }
 
         if let Some(session) = submission_queue_session(&self.app_state, &outcome) {
+            let front = matches!(outcome, zode_app_ui::ComposerOutcome::QueueFront(_));
             let submission = match &mut outcome {
                 zode_app_ui::ComposerOutcome::Send(submission)
-                | zode_app_ui::ComposerOutcome::Queue(submission) => submission,
+                | zode_app_ui::ComposerOutcome::Queue(submission)
+                | zode_app_ui::ComposerOutcome::QueueFront(submission) => submission,
                 _ => unreachable!("only sendable composer outcomes can enter a message queue"),
             };
             let command = zode_app_model::AppCommand::EnqueueMessage {
                 session,
                 content: std::mem::take(&mut submission.content),
                 attachments: submission.attachments.clone(),
+                front,
             };
             // A regular Send can arrive while the session is idle even though
             // it already owns pending queue items. Project it like Queue so it
@@ -397,7 +521,10 @@ impl DesktopApp {
             return;
         }
 
-        if matches!(outcome, zode_app_ui::ComposerOutcome::Queue(_)) {
+        if matches!(
+            outcome,
+            zode_app_ui::ComposerOutcome::Queue(_) | zode_app_ui::ComposerOutcome::QueueFront(_)
+        ) {
             crate::command_bridge::project_command_error(
                 &mut self.app_state,
                 "cannot queue a message without an active session".into(),
@@ -460,7 +587,9 @@ fn submission_queue_session(
         return None;
     }
     match outcome {
-        zode_app_ui::ComposerOutcome::Queue(_) => Some(session),
+        zode_app_ui::ComposerOutcome::Queue(_) | zode_app_ui::ComposerOutcome::QueueFront(_) => {
+            Some(session)
+        }
         zode_app_ui::ComposerOutcome::Send(_)
             if state
                 .message_queues
@@ -534,18 +663,27 @@ impl ApplicationHandler<AppWake> for DesktopApp {
                 }
                 let queries_applied = self.drain_presentation_queries();
                 let terminal_changed = self.drain_terminal_output();
+                let browser_poll = self.poll_browser_frame();
+                let transcript_images_changed = self.poll_transcript_images();
                 let background_changed = event_drain.changed
                     || commands_applied > 0
                     || queries_applied > 0
                     || workspace_picks_applied > 0
                     || branch_catalogs_applied > 0
                     || external_applications_applied > 0
-                    || terminal_changed;
+                    || terminal_changed
+                    || browser_poll.state_changed
+                    || transcript_images_changed;
                 if background_changed {
                     self.rebuild_frame_snapshot();
                 }
                 self.sync_composer_busy();
-                if background_changed {
+                // A new frame with no other state change (the common case
+                // while streaming) skips the snapshot rebuild above - the
+                // bitmap lives outside `ZodeAppState` on purpose - but must
+                // still redraw, or the panel would only repaint whenever
+                // something unrelated also changed.
+                if background_changed || browser_poll.new_frame {
                     self.request_redraw();
                 }
             }
@@ -579,7 +717,8 @@ impl ApplicationHandler<AppWake> for DesktopApp {
             WindowEvent::Resized(size) => {
                 self.window_state.physical_width = size.width.max(1);
                 self.window_state.physical_height = size.height.max(1);
-                self.invalidate_frame_snapshot();
+                self.sync_right_panel_transition_for_viewport_change();
+                self.begin_resize_settle();
                 self.terminal_grid_resize_pending = true;
                 self.window_metrics_update_pending = true;
                 self.request_redraw();
@@ -591,7 +730,8 @@ impl ApplicationHandler<AppWake> for DesktopApp {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.window_state.scale_factor = scale_factor;
                 self.renderer = NativeBackend::new(scale_factor as f32);
-                self.invalidate_frame_snapshot();
+                self.sync_right_panel_transition_for_viewport_change();
+                self.begin_resize_settle();
                 self.terminal_grid_resize_pending = true;
                 self.window_metrics_update_pending = true;
                 self.request_redraw();
@@ -635,6 +775,7 @@ impl ApplicationHandler<AppWake> for DesktopApp {
             WindowEvent::CursorLeft { .. } => {
                 self.cancel_primary_sidebar_resize();
                 self.cancel_secondary_sidebar_resize();
+                self.dismiss_primary_sidebar_preview();
                 self.hovered_widget = None;
                 self.request_redraw();
             }

@@ -16,6 +16,7 @@ impl DesktopApp {
         let submission = match outcome {
             ComposerOutcome::Send(submission)
             | ComposerOutcome::Queue(submission)
+            | ComposerOutcome::QueueFront(submission)
             | ComposerOutcome::Steer(submission) => submission,
             _ => return false,
         };
@@ -43,7 +44,7 @@ impl DesktopApp {
         self.app_state.composer.draft = self.composer.text().to_owned();
         self.app_state.composer.attachments = self.composer.attachment_metadata().to_vec();
         self.enqueue_command(AppCommand::Navigate(ShellRoute::Settings(
-            SettingsCategory::Configuration,
+            SettingsCategory::ProviderModels,
         )));
         true
     }

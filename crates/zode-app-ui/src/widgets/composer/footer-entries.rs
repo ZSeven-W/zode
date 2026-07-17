@@ -1,16 +1,16 @@
 use jian_widgets::Rect;
-use zode_app_model::{ComposerFooterMenu, ZodeAppState};
+use zode_app_model::{subagent_entry, ComposerFooterMenu, ZodeAppState};
 use zode_node_protocol::{ApprovalMode, SandboxMode};
 
 use super::{
     effort_label, runtime_controls_locked, ComposerFooterRowLayout, COMPACT_ROW_H,
     COMPOSER_ADD_FILE_ID, COMPOSER_ADD_GOAL_ID, COMPOSER_ADD_PLAN_ID, COMPOSER_ADD_WECHAT_ID,
-    COMPOSER_MODEL_BACK_ID, COMPOSER_MODEL_CONFIGURE_ID, COMPOSER_MODEL_EFFORTS_ID,
-    COMPOSER_MODEL_EFFORT_HIGH_ID, COMPOSER_MODEL_EFFORT_LOW_ID, COMPOSER_MODEL_EFFORT_MEDIUM_ID,
-    COMPOSER_MODEL_EFFORT_XHIGH_ID, COMPOSER_MODEL_MODELS_ID, COMPOSER_MODEL_RESET_ID,
-    COMPOSER_MODEL_SPEEDS_ID, COMPOSER_MODEL_SPEED_ID, COMPOSER_PERMISSION_AUTO_ID,
-    COMPOSER_PERMISSION_CUSTOM_ID, COMPOSER_PERMISSION_FULL_ID, COMPOSER_PERMISSION_REQUEST_ID,
-    ROW_H, SECTION_H,
+    COMPOSER_MODEL_ADD_ID, COMPOSER_MODEL_BACK_ID, COMPOSER_MODEL_CONFIGURE_ID,
+    COMPOSER_MODEL_EFFORTS_ID, COMPOSER_MODEL_EFFORT_HIGH_ID, COMPOSER_MODEL_EFFORT_LOW_ID,
+    COMPOSER_MODEL_EFFORT_MEDIUM_ID, COMPOSER_MODEL_EFFORT_XHIGH_ID, COMPOSER_MODEL_MODELS_ID,
+    COMPOSER_MODEL_RESET_ID, COMPOSER_MODEL_SPEEDS_ID, COMPOSER_MODEL_SPEED_ID,
+    COMPOSER_PERMISSION_AUTO_ID, COMPOSER_PERMISSION_CUSTOM_ID, COMPOSER_PERMISSION_FULL_ID,
+    COMPOSER_PERMISSION_REQUEST_ID, ROW_H, SECTION_H,
 };
 use crate::{stable_widget_id, SemanticIcon, WidgetId};
 
@@ -127,15 +127,14 @@ pub(super) fn add_entries(state: &ZodeAppState) -> Vec<MenuEntry> {
         .current_session
         .as_ref()
         .and_then(|session| state.presentation.sessions.get(session))
-        .and_then(|presentation| presentation.context.ready())
-        .map(|context| context.subagents.as_slice())
+        .map(|presentation| presentation.subagents.as_slice())
         .unwrap_or_default();
     if !subagents.is_empty() {
         entries.push(MenuEntry::Section("智能体".into()));
-        entries.extend(subagents.iter().map(|agent| {
+        entries.extend(subagents.iter().map(subagent_entry).map(|agent| {
             entry(
                 stable_widget_id(0x7e, &agent.id),
-                agent.label.clone(),
+                agent.label,
                 agent.value.as_deref(),
                 SemanticIcon::Sparkles,
                 false,
@@ -248,6 +247,15 @@ fn model_choice_entries(state: &ZodeAppState) -> Vec<MenuEntry> {
             true,
         ));
     }
+    entries.push(entry(
+        COMPOSER_MODEL_ADD_ID,
+        "添加模型",
+        Some("前往设置配置模型提供方"),
+        SemanticIcon::Plus,
+        true,
+        false,
+        true,
+    ));
     entries
 }
 

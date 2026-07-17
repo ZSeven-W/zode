@@ -9,7 +9,7 @@ impl DesktopApp {
         let target = Composer::queue_layout(self.frame_snapshot.layout.composer, &self.app_state)
             .and_then(|layout| layout.menu)
             .filter(|menu| menu.message_id == message_id)
-            .map(|menu| menu.edit_id);
+            .and_then(|menu| menu.focus_order().into_iter().next());
         if let Some(target) = target {
             self.set_focused_widget(Some(target));
         }
@@ -36,8 +36,10 @@ impl DesktopApp {
         let Some(menu) = menu else {
             return false;
         };
-        let order = [menu.edit_id, menu.close_id];
-        let target = next_menu_focus(order, self.focused_widget, backwards);
+        let order = menu.focus_order();
+        let Some(target) = next_menu_focus(&order, self.focused_widget, backwards) else {
+            return false;
+        };
         self.set_focused_widget(Some(target));
         true
     }
@@ -54,7 +56,14 @@ impl DesktopApp {
     }
 }
 
-fn next_menu_focus(order: [WidgetId; 2], current: Option<WidgetId>, backwards: bool) -> WidgetId {
+fn next_menu_focus(
+    order: &[WidgetId],
+    current: Option<WidgetId>,
+    backwards: bool,
+) -> Option<WidgetId> {
+    if order.is_empty() {
+        return None;
+    }
     let current = current.and_then(|focused| order.iter().position(|id| *id == focused));
     let index = match (backwards, current) {
         (false, Some(index)) => (index + 1) % order.len(),
@@ -62,7 +71,7 @@ fn next_menu_focus(order: [WidgetId; 2], current: Option<WidgetId>, backwards: b
         (true, Some(index)) => index - 1,
         (false, None) => 0,
     };
-    order[index]
+    order.get(index).copied()
 }
 
 #[cfg(test)]
@@ -77,10 +86,30 @@ mod tests {
         let close = WidgetId(2);
         let order = [edit, close];
 
-        assert_eq!(next_menu_focus(order, None, false), edit);
-        assert_eq!(next_menu_focus(order, Some(edit), false), close);
-        assert_eq!(next_menu_focus(order, Some(close), false), edit);
-        assert_eq!(next_menu_focus(order, Some(edit), true), close);
-        assert_eq!(next_menu_focus(order, Some(close), true), edit);
+        assert_eq!(next_menu_focus(&order, None, false), Some(edit));
+        assert_eq!(next_menu_focus(&order, Some(edit), false), Some(close));
+        assert_eq!(next_menu_focus(&order, Some(close), false), Some(edit));
+        assert_eq!(next_menu_focus(&order, Some(edit), true), Some(close));
+        assert_eq!(next_menu_focus(&order, Some(close), true), Some(edit));
+    }
+
+    #[test]
+    fn queue_menu_tab_focus_wraps_across_all_visible_menu_items() {
+        let front = WidgetId(1);
+        let up = WidgetId(2);
+        let down = WidgetId(3);
+        let edit = WidgetId(4);
+        let close = WidgetId(5);
+        let order = [front, up, down, edit, close];
+
+        assert_eq!(next_menu_focus(&order, None, false), Some(front));
+        assert_eq!(next_menu_focus(&order, Some(close), false), Some(front));
+        assert_eq!(next_menu_focus(&order, Some(front), true), Some(close));
+        assert_eq!(next_menu_focus(&order, Some(down), false), Some(edit));
+    }
+
+    #[test]
+    fn queue_menu_tab_focus_is_none_for_an_empty_order() {
+        assert_eq!(next_menu_focus(&[], None, false), None);
     }
 }

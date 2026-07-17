@@ -83,12 +83,19 @@ fn category_rail_has_stable_rows_and_typed_commands() {
 
     let rows = SettingsPanel::navigation_entries(Rect::xywh(0.0, 0.0, 240.0, 1_080.0), &state);
 
-    assert_eq!(rows.len(), 20);
+    assert_eq!(rows.len(), 21);
     assert_eq!(rows.iter().filter(|row| row.selected).count(), 1);
     assert!(rows.iter().any(|row| row.label == "外观" && row.selected));
     assert!(rows.iter().all(|row| row.enabled));
     assert_eq!(rows[0].rect, Rect::xywh(8.0, 150.0, 224.0, 28.0));
-    assert_eq!(rows[19].rect, Rect::xywh(8.0, 766.0, 224.0, 28.0));
+    assert!(rows.iter().any(|row| {
+        row.label == "模型"
+            && row.command
+                == Some(AppCommand::SelectSettingsCategory(
+                    SettingsCategory::ProviderModels,
+                ))
+    }));
+    assert_eq!(rows[20].rect, Rect::xywh(8.0, 794.0, 224.0, 28.0));
 
     for row in rows {
         assert_eq!(

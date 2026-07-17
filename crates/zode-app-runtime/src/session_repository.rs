@@ -3,12 +3,12 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agent::message::{ContentBlock, Message, MessageStore};
-use agent::session::SessionError;
-use zode_core::session_meta::SessionMeta;
 use crate::session_store::{
     SessionRepository as CoreSessionRepository, SessionSave, SessionSaveOutcome, SessionWriteMode,
 };
+use agent::message::{ContentBlock, Message, MessageStore};
+use agent::session::SessionError;
+use zode_core::session_meta::SessionMeta;
 use zode_core::CoreError;
 use zode_node_protocol::{
     EndpointError, EndpointErrorKind, HistoryItem, NodeId, SessionLocator, ThreadHistory,
@@ -78,6 +78,20 @@ impl LocalSessionRepository {
         workspace_uri: &WorkspaceUri,
         model: String,
     ) -> Result<LoadedSession, EndpointError> {
+        self.create_with_affiliation(session, workspace_uri, None, false, model)
+            .await
+    }
+
+    /// Creates a session while keeping its execution cwd independent from the
+    /// project that owns it in project-grouped navigation.
+    pub async fn create_with_affiliation(
+        &self,
+        session: &SessionLocator,
+        workspace_uri: &WorkspaceUri,
+        project_uri: Option<&WorkspaceUri>,
+        projectless: bool,
+        model: String,
+    ) -> Result<LoadedSession, EndpointError> {
         let id = self.local_session_id(session)?;
         let workspace = workspace_uri_to_path(workspace_uri)?;
         let cwd = workspace
@@ -96,6 +110,14 @@ impl LocalSessionRepository {
             .create(meta.clone())
             .await
             .map_err(map_core_error)?;
+        if let Err(error) = self
+            .app_state
+            .update(|state| state.set_session_affiliation(id, project_uri.cloned(), projectless))
+        {
+            let _ = self.inner.delete(id).await;
+            cleanup_task_workspace(&self.task_workspaces_root, &workspace, id)?;
+            return Err(map_core_error(error));
+        }
         Ok(LoadedSession { meta, store })
     }
 

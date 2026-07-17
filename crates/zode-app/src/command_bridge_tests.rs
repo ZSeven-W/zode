@@ -17,6 +17,8 @@ use super::{prepare_dispatch, reject_dispatch, CommandBridge};
 
 #[path = "command_bridge_tests/integrations.rs"]
 mod integrations;
+#[path = "command_bridge_tests/provider_reload.rs"]
+mod provider_reload;
 #[path = "command_bridge_tests/queue.rs"]
 mod queue;
 #[path = "command_bridge_tests/runtime.rs"]
@@ -149,6 +151,9 @@ impl AgentEndpoint for FakeEndpoint {
 
     async fn query(&self, query: AgentQuery) -> Result<AgentSnapshot, EndpointError> {
         match query {
+            AgentQuery::RuntimeOptions => {
+                Ok(AgentSnapshot::RuntimeOptions(self.runtime_options.clone()))
+            }
             AgentQuery::ProjectPermissions { .. } => {
                 Ok(AgentSnapshot::ProjectPermissions(self.permissions.clone()))
             }

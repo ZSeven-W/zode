@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent::message::{ContentBlock, Header, Message, MessageStore};
-use zode_app_runtime::{path_to_workspace_uri, workspace_uri_to_path, LocalSessionRepository};
 use zode_app_runtime::session_store::{SessionSaveOutcome, SessionWriteMode};
+use zode_app_runtime::{
+    path_to_workspace_uri, workspace_uri_to_path, AppStateStore, LocalSessionRepository,
+};
 use zode_node_protocol::{EndpointErrorKind, NodeId, SessionLocator, ThreadStatus, WorkspaceUri};
 
 static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(1);
@@ -157,6 +159,51 @@ async fn list_and_load_roundtrip_after_repository_restart() {
     assert_eq!(loaded.meta.id, "restart-id");
     assert_eq!(loaded.meta.model, "restart-model");
     assert_eq!(loaded.store.len(), 1);
+}
+
+#[tokio::test]
+async fn affiliation_persists_without_replacing_the_execution_workspace() {
+    let dir = TestDir::new("affiliation");
+    let node_id = NodeId::new();
+    let repository = LocalSessionRepository::new(dir.path(), node_id);
+    let session = locator(node_id, "owned-worktree");
+    let project = workspace(&dir.path().join("project"));
+    let execution = workspace(&dir.path().join("worktrees/owned-worktree"));
+
+    repository
+        .create_with_affiliation(&session, &execution, Some(&project), false, "model".into())
+        .await
+        .unwrap();
+
+    let threads = repository.list().unwrap();
+    let persisted = AppStateStore::new(dir.path()).load().unwrap();
+    assert_eq!(threads[0].workspace_uri, execution);
+    assert_eq!(
+        persisted.thread_workspace_root_hints["owned-worktree"],
+        project
+    );
+    assert!(!persisted.projectless_session_ids.contains("owned-worktree"));
+}
+
+#[tokio::test]
+async fn explicit_projectless_affiliation_is_persisted_outside_path_heuristics() {
+    let dir = TestDir::new("explicit-projectless");
+    let node_id = NodeId::new();
+    let repository = LocalSessionRepository::new(dir.path(), node_id);
+    let session = locator(node_id, "projectless");
+    let execution = workspace(&dir.path().join("arbitrary-execution-directory"));
+
+    repository
+        .create_with_affiliation(&session, &execution, None, true, "model".into())
+        .await
+        .unwrap();
+
+    let persisted = AppStateStore::new(dir.path()).load().unwrap();
+    assert!(persisted.projectless_session_ids.contains("projectless"));
+    assert!(!persisted
+        .thread_workspace_root_hints
+        .contains_key("projectless"));
+    assert_eq!(repository.list().unwrap()[0].workspace_uri, execution);
 }
 
 #[test]

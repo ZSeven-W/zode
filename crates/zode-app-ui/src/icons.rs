@@ -50,6 +50,8 @@ pub enum SemanticIcon {
     More,
     Edit,
     CloseQueue,
+    MoveUp,
+    MoveDown,
     Branch,
     Host,
     Diff,
@@ -57,6 +59,9 @@ pub enum SemanticIcon {
     Back,
     Forward,
     FileText,
+    FileCode,
+    FileData,
+    FileImage,
     Close,
     Check,
     ChevronRight,
@@ -67,10 +72,14 @@ pub enum SemanticIcon {
     Pin,
     Plus,
     ShieldAlert,
+    Copy,
+    ThumbsUp,
+    ThumbsDown,
+    Share,
 }
 
 impl SemanticIcon {
-    pub const ALL: [Self; 59] = [
+    pub const ALL: [Self; 68] = [
         Self::NewTask,
         Self::Scheduled,
         Self::Settings,
@@ -113,6 +122,8 @@ impl SemanticIcon {
         Self::More,
         Self::Edit,
         Self::CloseQueue,
+        Self::MoveUp,
+        Self::MoveDown,
         Self::Branch,
         Self::Host,
         Self::Diff,
@@ -120,6 +131,9 @@ impl SemanticIcon {
         Self::Back,
         Self::Forward,
         Self::FileText,
+        Self::FileCode,
+        Self::FileData,
+        Self::FileImage,
         Self::Close,
         Self::Check,
         Self::ChevronRight,
@@ -130,6 +144,10 @@ impl SemanticIcon {
         Self::Pin,
         Self::Plus,
         Self::ShieldAlert,
+        Self::Copy,
+        Self::ThumbsUp,
+        Self::ThumbsDown,
+        Self::Share,
     ];
 
     pub const fn path(self) -> &'static str {
@@ -178,6 +196,8 @@ impl SemanticIcon {
             Self::More => lucide::ELLIPSIS,
             Self::Edit => lucide::PENCIL,
             Self::CloseQueue => "M4 5V10C4 12.2 5.8 14 8 14H20M16 10L20 14L16 18",
+            Self::MoveUp => lucide::ARROW_UP,
+            Self::MoveDown => lucide::ARROW_DOWN,
             Self::Branch => "M6 3A2 2 0 1 0 6 7A2 2 0 1 0 6 3M18 17A2 2 0 1 0 18 21A2 2 0 1 0 18 17M6 7V13C6 16 8 19 12 19H16M18 5V17M15 8L18 5L21 8",
             Self::Host => "M3 5H21V17H3ZM8 21H16M12 17V21",
             Self::Diff => "M5 7H11M8 4V10M14 7H20M5 17H11M14 17H20M17 14V20",
@@ -185,6 +205,23 @@ impl SemanticIcon {
             Self::Back => "M15 18L9 12L15 6",
             Self::Forward => "M9 18L15 12L9 6",
             Self::FileText => "M6 3H14L19 8V21H6ZM14 3V8H19M9 13H16M9 17H16",
+            // File-type icons share FileText's folded-corner document
+            // silhouette (`M6 3H14L19 8V21H6ZM14 3V8H19`), differentiated
+            // only by the inner mark, so the file-card type icon family
+            // reads as one coherent set.
+            Self::FileCode => {
+                "M6 3H14L19 8V21H6ZM14 3V8H19M9.5 13L7.5 15.5L9.5 18M14.5 13L16.5 15.5L14.5 18"
+            }
+            Self::FileData => concat!(
+                "M6 3H14L19 8V21H6ZM14 3V8H19",
+                "M9.5 12.5C8.5 12.5 8.5 13.3 8.5 14C8.5 14.7 7.5 15 7.5 15C7.5 15 8.5 15.3 8.5 16C8.5 16.7 8.5 17.5 9.5 17.5",
+                "M14.5 12.5C15.5 12.5 15.5 13.3 15.5 14C15.5 14.7 16.5 15 16.5 15C16.5 15 15.5 15.3 15.5 16C15.5 16.7 15.5 17.5 14.5 17.5"
+            ),
+            Self::FileImage => concat!(
+                "M6 3H14L19 8V21H6ZM14 3V8H19",
+                "M9 13A1 1 0 1 0 9 15A1 1 0 1 0 9 13",
+                "M7.5 19L10.5 15.5L12.5 17.5L15.5 13.5L17.5 16.5"
+            ),
             Self::Close => lucide::X,
             Self::Check => lucide::CHECK,
             Self::ChevronRight => lucide::CHEVRON_RIGHT,
@@ -195,6 +232,10 @@ impl SemanticIcon {
             Self::Pin => lucide::PIN,
             Self::Plus => lucide::PLUS,
             Self::ShieldAlert => lucide::SHIELD_ALERT,
+            Self::Copy => lucide::COPY,
+            Self::ThumbsUp => lucide::THUMBS_UP,
+            Self::ThumbsDown => lucide::THUMBS_DOWN,
+            Self::Share => lucide::SHARE_2,
         }
     }
 

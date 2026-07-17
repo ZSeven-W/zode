@@ -1,6 +1,10 @@
+use std::cell::{Cell, Ref, RefCell};
 use std::time::{Duration, Instant};
 
-use zode_node_protocol::{ToolCall, TurnId};
+use zode_node_protocol::{ToolCall, ToolStatus, TurnId};
+
+mod anchors;
+pub use anchors::ConversationAnchor;
 
 /// Lightweight metadata for an attachment that can safely live in immutable UI state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +37,68 @@ pub struct FileArtifact {
     pub path: String,
     pub summary: String,
     pub change_summary: Option<String>,
+}
+
+/// An image the agent read or wrote, rendered inline as a thumbnail with a
+/// tap-to-enlarge lightbox (see `LightboxState`). Deliberately carries no
+/// encoded bytes - like `AttachmentMetadata`, this model crate never holds a
+/// binary payload; the desktop host resolves `path` to pixels at paint time
+/// (mirroring how `BrowserFrameView` supplies decoded frame bytes as an
+/// ephemeral, borrowed view rather than through app state) and corrects
+/// `item_heights` once the real aspect ratio is known via the existing
+/// `AppCommand::SetTranscriptItemHeight`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageItem {
+    /// Stable identity for this transcript position; addressed by
+    /// `LightboxState::item_id` and the inline thumbnail's image cache key.
+    pub id: String,
+    /// Absolute or workspace-relative source path. Always populated - unlike
+    /// `AttachmentMetadata::path`, an `Image` item only ever comes from a
+    /// file the agent touched on disk (see `image_from_completed_tool`), never
+    /// from clipboard/paste content.
+    pub path: String,
+    pub media_type: String,
+    /// Natural pixel size, when known. `None` until a host-side decode fills
+    /// it in; the inline thumbnail falls back to a placeholder height (see
+    /// `crate::widgets::transcript::image` in the UI crate) until then.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// The `agent-tools-code` file tools' stable wire names whose completed
+/// calls can attribute an inline image (see `image_from_completed_tool`).
+/// Duplicated from `presentation.rs`'s private constants of the same
+/// values rather than shared, since that module's are not `pub(crate)` and
+/// the two attribution paths (Sources rows vs. inline images) are allowed to
+/// evolve independently.
+const IMAGE_FILE_READ_TOOL_NAME: &str = "FileRead";
+const IMAGE_FILE_WRITE_TOOL_NAME: &str = "FileWrite";
+const IMAGE_FILE_EDIT_TOOL_NAME: &str = "FileEdit";
+
+/// Extensions recognized as inline-previewable images (case-insensitive).
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
+
+fn media_type_for_extension(extension: &str) -> &'static str {
+    match extension {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Pulls the `key=value` suffix `safe_tool_summary`
+/// (`zode_app_runtime::engine_backend`) formats a file tool's summary with,
+/// e.g. `"FileRead path=/repo/logo.png"`. Mirrors `tool_summary_value` in
+/// `presentation.rs`, which extracts the same shape for Sources rows.
+fn tool_summary_path(tool: &ToolCall) -> Option<&str> {
+    tool.summary
+        .strip_prefix(tool.name.as_str())
+        .and_then(|rest| rest.strip_prefix(' '))
+        .and_then(|rest| rest.split_once('='))
+        .map(|(_, value)| value)
 }
 
 /// Explicit progress supplied by a goal source. Status text is never inferred into this type.
@@ -145,10 +211,23 @@ pub enum TranscriptVisualKind {
     Tool,
     FileArtifact,
     Attachment,
+    Image,
     GoalProgress,
     Approval,
     Status,
     Error,
+}
+
+/// Local, UI-only reaction on one assistant message. Mutually exclusive:
+/// setting `Up` after `Down` (or vice versa) replaces the prior value, and
+/// clicking the active choice again clears it back to `None`. Not wired to
+/// any backend signal today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MessageFeedback {
+    #[default]
+    None,
+    Up,
+    Down,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,29 +279,124 @@ fn starts_with_any(name: &str, prefixes: &[&str]) -> bool {
 /// A renderable item in one conversation transcript.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptItem {
-    UserText(String),
-    AssistantText(String),
+    UserText {
+        text: String,
+        /// Wall-clock send time in epoch milliseconds, set once at insertion
+        /// time from the reducer's existing `now_ms` time source. `None` for
+        /// messages restored from history, which the current history
+        /// protocol does not persist a timestamp for (mirrors `TurnSummary`'s
+        /// `Restored` status carrying no elapsed time).
+        timestamp_ms: Option<i64>,
+    },
+    AssistantText {
+        text: String,
+        /// Wall-clock time the message started, epoch milliseconds. Same
+        /// "unknown for restored history" caveat as `UserText::timestamp_ms`.
+        timestamp_ms: Option<i64>,
+        /// Local-only reaction toggle. See `MessageFeedback`.
+        feedback: MessageFeedback,
+    },
     Thinking(String),
     ActivityGroup(Vec<ActivityEntry>),
     Tool(ToolCall),
     FileArtifact(FileArtifact),
     Attachment(AttachmentMetadata),
+    Image(ImageItem),
     GoalProgress(GoalProgress),
-    Approval { id: String, tool: String },
-    Status { code: String, message: String },
-    Error { message: String, retryable: bool },
+    Approval {
+        id: String,
+        tool: String,
+    },
+    Status {
+        code: String,
+        message: String,
+    },
+    Error {
+        message: String,
+        retryable: bool,
+    },
 }
 
 impl TranscriptItem {
+    /// Constructs a user message with no known send time (history restore).
+    pub fn user_text(text: impl Into<String>) -> Self {
+        Self::UserText {
+            text: text.into(),
+            timestamp_ms: None,
+        }
+    }
+
+    /// Constructs a user message stamped with its send time in epoch millis.
+    pub fn user_text_at(text: impl Into<String>, timestamp_ms: i64) -> Self {
+        Self::UserText {
+            text: text.into(),
+            timestamp_ms: Some(timestamp_ms),
+        }
+    }
+
+    /// Constructs an assistant message with no known start time (history
+    /// restore) and no reaction set yet.
+    pub fn assistant_text(text: impl Into<String>) -> Self {
+        Self::AssistantText {
+            text: text.into(),
+            timestamp_ms: None,
+            feedback: MessageFeedback::None,
+        }
+    }
+
+    /// Constructs an assistant message stamped with its start time in epoch
+    /// milliseconds.
+    pub fn assistant_text_at(text: impl Into<String>, timestamp_ms: i64) -> Self {
+        Self::AssistantText {
+            text: text.into(),
+            timestamp_ms: Some(timestamp_ms),
+            feedback: MessageFeedback::None,
+        }
+    }
+
+    /// Attributes a completed `FileRead`/`FileWrite`/`FileEdit` call that
+    /// touched a recognized image extension (see `IMAGE_EXTENSIONS`) into an
+    /// inline `Image` item. Returns `None` for every other tool, a failed
+    /// call, or a path this crate cannot recognize as an image - callers
+    /// must never fabricate an image item for a non-image tool. The path is
+    /// read back out of `tool.summary` (`"{name} path={value}"`, written by
+    /// `zode_app_runtime::engine_backend::safe_tool_summary`) rather than
+    /// plumbed through a new wire-protocol field, so this attributes purely
+    /// from data the reducer already has for every tool call.
+    pub fn image_from_completed_tool(tool: &ToolCall) -> Option<Self> {
+        if tool.status != ToolStatus::Completed {
+            return None;
+        }
+        if !matches!(
+            tool.name.as_str(),
+            IMAGE_FILE_READ_TOOL_NAME | IMAGE_FILE_WRITE_TOOL_NAME | IMAGE_FILE_EDIT_TOOL_NAME
+        ) {
+            return None;
+        }
+        let path = tool_summary_path(tool)?;
+        let extension = path.rsplit('.').next()?.to_ascii_lowercase();
+        if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
+            return None;
+        }
+        Some(Self::Image(ImageItem {
+            id: format!("image:{}", tool.id),
+            path: path.to_owned(),
+            media_type: media_type_for_extension(&extension).to_owned(),
+            width: None,
+            height: None,
+        }))
+    }
+
     pub const fn visual_kind(&self) -> TranscriptVisualKind {
         match self {
-            Self::UserText(_) => TranscriptVisualKind::UserMarkdown,
-            Self::AssistantText(_) => TranscriptVisualKind::AssistantMarkdown,
+            Self::UserText { .. } => TranscriptVisualKind::UserMarkdown,
+            Self::AssistantText { .. } => TranscriptVisualKind::AssistantMarkdown,
             Self::Thinking(_) => TranscriptVisualKind::Thinking,
             Self::ActivityGroup(_) => TranscriptVisualKind::Activity,
             Self::Tool(_) => TranscriptVisualKind::Tool,
             Self::FileArtifact(_) => TranscriptVisualKind::FileArtifact,
             Self::Attachment(_) => TranscriptVisualKind::Attachment,
+            Self::Image(_) => TranscriptVisualKind::Image,
             Self::GoalProgress(_) => TranscriptVisualKind::GoalProgress,
             Self::Approval { .. } => TranscriptVisualKind::Approval,
             Self::Status { .. } => TranscriptVisualKind::Status,
@@ -241,10 +415,11 @@ impl TranscriptItem {
             Self::Tool(tool) => format!("tool:{}", tool.id),
             Self::FileArtifact(file) => format!("file:{}", file.id),
             Self::Attachment(attachment) => format!("attachment:{}", attachment.id),
+            Self::Image(image) => format!("image:{}", image.id),
             Self::GoalProgress(goal) => format!("goal:{}", goal.id),
             Self::Approval { id, .. } => format!("approval:{id}"),
-            Self::UserText(_) => format!("user:{index}"),
-            Self::AssistantText(_) => format!("assistant:{index}"),
+            Self::UserText { .. } => format!("user:{index}"),
+            Self::AssistantText { .. } => format!("assistant:{index}"),
             Self::Thinking(_) => format!("thinking:{index}"),
             Self::Status { code, .. } => format!("status:{index}:{code}"),
             Self::Error { .. } => format!("error:{index}"),
@@ -252,8 +427,36 @@ impl TranscriptItem {
     }
 }
 
-/// Ordered transcript state and its event-stream cursor.
+/// Memoized cumulative item layout, keyed by the inputs that can invalidate
+/// it. Lives on `TranscriptState` (behind a `RefCell`) so the paint path and
+/// the accessibility-tree builder share one computation within a frame, and
+/// reuse it across frames whenever nothing relevant to this transcript
+/// changed (e.g. a sidebar-animation or resize-settle tick). Plain tuples
+/// rather than a UI-crate geometry type, since this crate has no rendering
+/// dependency.
+///
+/// Validity is checked with two complementary signals (see `layout_offsets`):
+/// `revision` catches content changes that a fixture might make through a
+/// `TranscriptState` method, while `items_len`/`item_heights_snapshot` are a
+/// safety net that also catches direct field mutation - `items` and
+/// `item_heights` are `pub` (existing test fixtures build `TranscriptState`
+/// literals and poke at them directly), so nothing guarantees every mutation
+/// path bumps `revision`. Comparing the small `item_heights` vector is far
+/// cheaper than the measurement work it lets us skip, and is exact rather
+/// than best-effort.
 #[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptLayoutCache {
+    pub revision: u64,
+    pub viewport_width_bits: u32,
+    items_len: usize,
+    item_heights_snapshot: Vec<f32>,
+    /// (top, bottom) per item, in item order.
+    pub offsets: Vec<(f32, f32)>,
+    pub total_height: f32,
+}
+
+/// Ordered transcript state and its event-stream cursor.
+#[derive(Debug, Clone)]
 pub struct TranscriptState {
     pub items: Vec<TranscriptItem>,
     /// Turn boundaries and lifecycle metadata kept separately from renderable items.
@@ -264,6 +467,48 @@ pub struct TranscriptState {
     pub follow_tail: bool,
     /// Last measured height for each item. Zero means the UI should estimate.
     pub item_heights: Vec<f32>,
+    /// Bumped by `touch_layout` whenever `items`/`item_heights` change in a
+    /// way that can affect cumulative layout (including a tool's
+    /// expanded/collapsed override, since that changes how an unmeasured
+    /// item's height is estimated). `layout_offsets` compares this instead
+    /// of diffing the vectors so a cache hit is O(1). `pub` only so `..`
+    /// struct-update syntax keeps working from the many existing test
+    /// fixtures that build a `TranscriptState` literal; prefer `touch_layout`
+    /// over writing this field directly.
+    pub revision: u64,
+    /// Memoized layout for the current `revision`/viewport width. See
+    /// `layout_offsets`. `pub` for the same struct-update-syntax reason as
+    /// `revision` above.
+    pub layout_cache: RefCell<Option<TranscriptLayoutCache>>,
+    /// Diagnostic-only: counts genuine recomputes (cache misses) in
+    /// `layout_offsets`. Negligible cost, always compiled in - both the
+    /// model crate's own tests and the UI crate's tests (a separate
+    /// compilation unit, where `#[cfg(test)]` items on this type would not
+    /// exist) assert on it to verify cache reuse.
+    pub layout_recompute_count: Cell<u64>,
+    /// Memoized conversation-anchor-rail derivation (one entry per turn).
+    /// `pub` for the same struct-update-syntax reason as `layout_cache`
+    /// above - existing test fixtures across the workspace build
+    /// `TranscriptState` literals with `..TranscriptState::default()`, which
+    /// requires every field (even ones no fixture sets explicitly) to be
+    /// visible. See `anchors()`.
+    pub anchor_cache: RefCell<Option<anchors::AnchorCache>>,
+}
+
+/// Two transcripts are equal iff their observable content is equal.
+/// `revision`, `layout_cache` and `layout_recompute_count` are derived
+/// bookkeeping - excluding them keeps equality identical to the plain
+/// `#[derive(PartialEq)]` this type used before the layout cache existed.
+impl PartialEq for TranscriptState {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
+            && self.turns == other.turns
+            && self.last_sequence == other.last_sequence
+            && self.busy == other.busy
+            && self.scroll_offset == other.scroll_offset
+            && self.follow_tail == other.follow_tail
+            && self.item_heights == other.item_heights
+    }
 }
 
 impl Default for TranscriptState {
@@ -276,6 +521,10 @@ impl Default for TranscriptState {
             scroll_offset: 0.0,
             follow_tail: true,
             item_heights: Vec::new(),
+            revision: 0,
+            layout_cache: RefCell::new(None),
+            layout_recompute_count: Cell::new(0),
+            anchor_cache: RefCell::new(None),
         }
     }
 }
@@ -416,6 +665,7 @@ impl TranscriptState {
                 *end += inserted;
             }
         }
+        self.touch_layout();
         true
     }
 
@@ -456,6 +706,7 @@ impl TranscriptState {
                 .end_item_index
                 .map(|boundary| remap_boundary(boundary, &removed));
         }
+        self.touch_layout();
         true
     }
 
@@ -494,13 +745,13 @@ impl TranscriptState {
         let mut groups = Vec::new();
         let mut index = 0;
         while index < self.items.len() {
-            if !matches!(self.items[index], TranscriptItem::UserText(_)) {
+            if !matches!(self.items[index], TranscriptItem::UserText { .. }) {
                 index += 1;
                 continue;
             }
             let start = index;
             while index < self.items.len()
-                && matches!(self.items[index], TranscriptItem::UserText(_))
+                && matches!(self.items[index], TranscriptItem::UserText { .. })
             {
                 index += 1;
             }
@@ -524,7 +775,108 @@ impl TranscriptState {
         if let Some(height) = self.item_heights.get_mut(index) {
             *height = 0.0;
         }
+        self.touch_layout();
         true
+    }
+
+    /// Bumps the layout revision. Every mutation of `items` or `item_heights`,
+    /// or of anything else that changes what `layout_offsets` would compute
+    /// (such as a tool's expanded/collapsed override), must call this so
+    /// cached layout gets recomputed instead of served stale.
+    pub fn touch_layout(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Returns the cumulative item layout (top/bottom offsets in item order,
+    /// plus total content height) for the given viewport width, recomputing
+    /// it via `compute` only when something that affects the result changed
+    /// since the last call. Paint and the accessibility-tree builder call
+    /// this every frame with the same viewport width, so within one frame
+    /// the second caller always hits the cache the first caller just
+    /// populated; across frames with no relevant change (e.g. a
+    /// sidebar-animation tick) every caller hits it.
+    ///
+    /// Validity requires `revision`, the viewport width, `items.len()` and
+    /// the full `item_heights` vector to all still match what the cache was
+    /// built from - see the doc comment on `TranscriptLayoutCache` for why
+    /// both a revision counter and a direct comparison are needed. The
+    /// `item_heights` comparison is a cheap numeric scan, far less work than
+    /// the measurement it lets us skip, so paying it on every call (even a
+    /// hit) is still a large net win.
+    ///
+    /// `compute` takes no arguments; the caller closes over `self` plus
+    /// whatever rendering-only inputs (like tool-expanded overrides) it
+    /// needs, because this crate has no rendering dependency and cannot
+    /// perform the actual measurement.
+    pub fn layout_offsets(
+        &self,
+        viewport_width: f32,
+        compute: impl FnOnce() -> (Vec<(f32, f32)>, f32),
+    ) -> Ref<'_, TranscriptLayoutCache> {
+        let viewport_width_bits = viewport_width.to_bits();
+        let hit = self.layout_cache.borrow().as_ref().is_some_and(|cache| {
+            cache.revision == self.revision
+                && cache.viewport_width_bits == viewport_width_bits
+                && cache.items_len == self.items.len()
+                && cache.item_heights_snapshot == self.item_heights
+        });
+        if !hit {
+            let (offsets, total_height) = compute();
+            self.layout_recompute_count
+                .set(self.layout_recompute_count.get() + 1);
+            *self.layout_cache.borrow_mut() = Some(TranscriptLayoutCache {
+                revision: self.revision,
+                viewport_width_bits,
+                items_len: self.items.len(),
+                item_heights_snapshot: self.item_heights.clone(),
+                offsets,
+                total_height,
+            });
+        }
+        Ref::map(self.layout_cache.borrow(), |cache| {
+            cache.as_ref().expect("populated above")
+        })
+    }
+
+    /// Diagnostic-only: how many times `layout_offsets` has actually
+    /// recomputed (as opposed to reusing the cache) since this transcript
+    /// was created. Tests assert on this to verify cache reuse across calls
+    /// and frames; production code never reads it.
+    pub fn layout_recompute_count(&self) -> u64 {
+        self.layout_recompute_count.get()
+    }
+
+    /// Returns one `ConversationAnchor` per turn (see `anchors::derive_anchors`),
+    /// recomputing only on the same cache-miss signals as `layout_offsets` -
+    /// the design deliberately rides that existing invalidation instead of a
+    /// second revision counter. `offsets` must be the same prefix-sum vector
+    /// `layout_offsets` produced for `viewport_width`; callers always fetch
+    /// that first (see `TranscriptState::layout_offsets`) and pass its
+    /// `.offsets` straight through.
+    pub fn anchors(
+        &self,
+        viewport_width: f32,
+        offsets: &[(f32, f32)],
+    ) -> Ref<'_, Vec<ConversationAnchor>> {
+        let viewport_width_bits = viewport_width.to_bits();
+        let hit = self
+            .anchor_cache
+            .borrow()
+            .as_ref()
+            .is_some_and(|cache| cache.matches(self, viewport_width_bits));
+        if !hit {
+            let anchors = anchors::derive_anchors(self, offsets);
+            *self.anchor_cache.borrow_mut() = Some(anchors::AnchorCache {
+                revision: self.revision,
+                viewport_width_bits,
+                items_len: self.items.len(),
+                item_heights_snapshot: self.item_heights.clone(),
+                anchors,
+            });
+        }
+        Ref::map(self.anchor_cache.borrow(), |cache| {
+            &cache.as_ref().expect("populated above").anchors
+        })
     }
 }
 
@@ -533,267 +885,8 @@ fn remap_boundary(boundary: usize, removed: &[usize]) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        collections::BTreeSet,
-        time::{Duration, Instant},
-    };
-
-    use super::{
-        ActivityEntry, AttachmentMetadata, FileArtifact, GoalProgress, TranscriptItem,
-        TranscriptTurnStatus, TranscriptVisualKind,
-    };
-    use zode_node_protocol::{ToolCall, ToolStatus, TurnId};
-
-    fn rich_transcript_fixture() -> Vec<TranscriptItem> {
-        vec![
-            TranscriptItem::UserText("Please update the renderer".into()),
-            TranscriptItem::AssistantText("## Done\n\nUpdated the renderer.".into()),
-            TranscriptItem::Thinking("Checking the layout".into()),
-            TranscriptItem::ActivityGroup(vec![ActivityEntry {
-                id: "activity-1".into(),
-                title: "Ran tests".into(),
-                detail: Some("12 passed".into()),
-                completed: true,
-            }]),
-            TranscriptItem::Tool(ToolCall {
-                id: "tool-1".into(),
-                name: "read_file".into(),
-                status: ToolStatus::Completed,
-                summary: "Read the source".into(),
-                detail: None,
-            }),
-            TranscriptItem::FileArtifact(FileArtifact {
-                id: "file-1".into(),
-                path: "crates/zode-app-ui/src/widgets/transcript/mod.rs".into(),
-                summary: "Updated transcript rendering".into(),
-                change_summary: Some("+120 -14".into()),
-            }),
-            TranscriptItem::Attachment(AttachmentMetadata {
-                id: "attachment-1".into(),
-                path: None,
-                display_name: "layout.png".into(),
-                media_type: "image/png".into(),
-                width: Some(1280),
-                height: Some(720),
-                byte_len: 42_000,
-            }),
-            TranscriptItem::GoalProgress(GoalProgress {
-                id: "goal-1".into(),
-                title: "Reference rebuild".into(),
-                completed: 3,
-                total: 7,
-            }),
-            TranscriptItem::Approval {
-                id: "approval-1".into(),
-                tool: "shell".into(),
-            },
-            TranscriptItem::Status {
-                code: "running".into(),
-                message: "Still working".into(),
-            },
-            TranscriptItem::Error {
-                message: "Build failed".into(),
-                retryable: true,
-            },
-        ]
-    }
-
-    #[test]
-    fn rich_transcript_exposes_five_visual_card_kinds() {
-        let kinds = rich_transcript_fixture()
-            .iter()
-            .map(TranscriptItem::visual_kind)
-            .collect::<BTreeSet<_>>();
-
-        assert!(kinds.len() >= 5);
-    }
-
-    #[test]
-    fn transcript_visual_kind_maps_every_variant() {
-        let kinds = rich_transcript_fixture()
-            .iter()
-            .map(TranscriptItem::visual_kind)
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            kinds,
-            vec![
-                TranscriptVisualKind::UserMarkdown,
-                TranscriptVisualKind::AssistantMarkdown,
-                TranscriptVisualKind::Thinking,
-                TranscriptVisualKind::Activity,
-                TranscriptVisualKind::Tool,
-                TranscriptVisualKind::FileArtifact,
-                TranscriptVisualKind::Attachment,
-                TranscriptVisualKind::GoalProgress,
-                TranscriptVisualKind::Approval,
-                TranscriptVisualKind::Status,
-                TranscriptVisualKind::Error,
-            ]
-        );
-    }
-
-    #[test]
-    fn replacing_rich_activity_or_goal_invalidates_cached_height() {
-        let mut transcript = super::TranscriptState {
-            items: vec![
-                TranscriptItem::ActivityGroup(vec![ActivityEntry {
-                    id: "activity-1".into(),
-                    title: "Running".into(),
-                    detail: None,
-                    completed: false,
-                }]),
-                TranscriptItem::GoalProgress(GoalProgress {
-                    id: "goal-1".into(),
-                    title: "Rebuild".into(),
-                    completed: 1,
-                    total: 4,
-                }),
-            ],
-            item_heights: vec![64.0, 72.0],
-            ..super::TranscriptState::default()
-        };
-
-        assert!(transcript.replace_item(
-            0,
-            TranscriptItem::ActivityGroup(vec![ActivityEntry {
-                id: "activity-1".into(),
-                title: "Complete".into(),
-                detail: Some("done".into()),
-                completed: true,
-            }]),
-        ));
-        assert!(transcript.replace_item(
-            1,
-            TranscriptItem::GoalProgress(GoalProgress {
-                id: "goal-1".into(),
-                title: "Rebuild".into(),
-                completed: 2,
-                total: 4,
-            }),
-        ));
-        assert_eq!(transcript.item_heights, [0.0, 0.0]);
-    }
-
-    #[test]
-    fn live_turn_freezes_real_monotonic_elapsed_at_completion() {
-        let turn_id = TurnId::parse("00000000-0000-0000-0000-000000000111").unwrap();
-        let started_at = Instant::now();
-        let mut transcript = super::TranscriptState {
-            items: vec![TranscriptItem::UserText("ship it".into())],
-            ..super::TranscriptState::default()
-        };
-
-        assert!(transcript.begin_turn_at(turn_id, 0, 1, started_at));
-        assert_eq!(
-            transcript.turns[0].elapsed_at(started_at + Duration::from_secs(2)),
-            Some(Duration::from_secs(2))
-        );
-        transcript
-            .items
-            .push(TranscriptItem::AssistantText("done".into()));
-        assert!(transcript.finish_turn_at(
-            turn_id,
-            false,
-            started_at + Duration::from_millis(3_250),
-        ));
-
-        let turn = &transcript.turns[0];
-        assert_eq!(turn.status, TranscriptTurnStatus::Completed);
-        assert_eq!(turn.start_item_index, 0);
-        assert_eq!(turn.response_item_index, 1);
-        assert_eq!(turn.end_item_index, Some(2));
-        assert_eq!(turn.elapsed, Some(Duration::from_millis(3_250)));
-        assert!(!transcript.busy);
-    }
-
-    #[test]
-    fn restored_turns_never_invent_ids_status_edges_or_elapsed_time() {
-        let mut transcript = super::TranscriptState {
-            items: vec![
-                TranscriptItem::UserText("first block".into()),
-                TranscriptItem::UserText("second block".into()),
-                TranscriptItem::AssistantText("first answer".into()),
-                TranscriptItem::UserText("next turn".into()),
-                TranscriptItem::AssistantText("second answer".into()),
-            ],
-            ..super::TranscriptState::default()
-        };
-
-        transcript.restore_historical_turns();
-
-        assert_eq!(transcript.turns.len(), 2);
-        assert_eq!(transcript.turns[0].start_item_index, 0);
-        assert_eq!(transcript.turns[0].response_item_index, 2);
-        assert_eq!(transcript.turns[0].end_item_index, Some(3));
-        assert_eq!(transcript.turns[1].start_item_index, 3);
-        assert_eq!(transcript.turns[1].response_item_index, 4);
-        assert_eq!(transcript.turns[1].end_item_index, Some(5));
-        assert!(transcript.turns.iter().all(|turn| {
-            turn.turn_id.is_none()
-                && turn.status == TranscriptTurnStatus::Restored
-                && turn.elapsed.is_none()
-        }));
-    }
-
-    #[test]
-    fn undispatched_turn_can_be_discarded_without_leaving_an_orphan_boundary() {
-        let turn_id = TurnId::parse("00000000-0000-0000-0000-000000000222").unwrap();
-        let mut transcript = super::TranscriptState {
-            items: vec![TranscriptItem::UserText("queued".into())],
-            ..super::TranscriptState::default()
-        };
-
-        assert!(transcript.begin_turn(turn_id, 0, 1));
-        transcript.items.clear();
-        assert!(transcript.discard_turn(turn_id));
-
-        assert!(transcript.turns.is_empty());
-        assert!(!transcript.busy);
-        assert!(!transcript.discard_turn(turn_id));
-    }
-
-    #[test]
-    fn late_user_artifacts_are_inserted_before_runtime_output_and_the_divider() {
-        let turn_id = TurnId::parse("00000000-0000-0000-0000-000000000223").unwrap();
-        let mut transcript = super::TranscriptState {
-            items: vec![TranscriptItem::UserText("with attachment".into())],
-            ..super::TranscriptState::default()
-        };
-        assert!(transcript.begin_turn(turn_id, 0, 1));
-        assert!(transcript.fail_turn(turn_id));
-        transcript.items.push(TranscriptItem::Error {
-            message: "dispatch failed".into(),
-            retryable: true,
-        });
-
-        assert!(
-            transcript.insert_latest_turn_user_items(vec![TranscriptItem::Attachment(
-                super::AttachmentMetadata {
-                    id: "shot".into(),
-                    path: None,
-                    display_name: "shot.png".into(),
-                    media_type: "image/png".into(),
-                    width: Some(640),
-                    height: Some(360),
-                    byte_len: 1_024,
-                },
-            )])
-        );
-
-        assert_eq!(transcript.turns[0].response_item_index, 2);
-        assert_eq!(transcript.turns[0].end_item_index, Some(2));
-        assert!(matches!(
-            transcript.items.as_slice(),
-            [
-                TranscriptItem::UserText(_),
-                TranscriptItem::Attachment(_),
-                TranscriptItem::Error { .. }
-            ]
-        ));
-    }
-}
+#[path = "transcript/tests.rs"]
+mod tests;
 
 #[cfg(test)]
 #[path = "transcript/approval-tests.rs"]

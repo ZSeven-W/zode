@@ -18,7 +18,7 @@ pub mod upload;
 
 pub use backend::{
     BrowserBackend, BrowserError, BrowserTarget, ClickTarget, ConsoleEntry, DownloadEntry,
-    DownloadStatus, NetworkEntry, Screenshot, TabInfo,
+    DownloadStatus, NetworkEntry, ScreencastFrame, Screenshot, TabInfo,
 };
 pub use managed::ManagedFactory;
 pub use session::{BackendFactory, BackendLease, BrowserSession};
