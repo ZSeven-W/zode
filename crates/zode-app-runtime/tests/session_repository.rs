@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent::message::{ContentBlock, Header, Message, MessageStore};
 use zode_app_runtime::{path_to_workspace_uri, workspace_uri_to_path, LocalSessionRepository};
-use zode_core::session_store::SessionWriteMode;
+use zode_core::session_store::{SessionSaveOutcome, SessionWriteMode};
 use zode_node_protocol::{EndpointErrorKind, NodeId, SessionLocator, ThreadStatus, WorkspaceUri};
 
 static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(1);
@@ -134,7 +134,7 @@ async fn list_and_load_roundtrip_after_repository_restart() {
         .create(&session, &workspace, "restart-model".to_string())
         .await
         .unwrap();
-    first
+    let outcome = first
         .save(
             &session,
             loaded.meta,
@@ -143,6 +143,7 @@ async fn list_and_load_roundtrip_after_repository_restart() {
         )
         .await
         .unwrap();
+    assert!(matches!(outcome, SessionSaveOutcome::Saved { .. }));
     drop(first);
 
     let restarted = LocalSessionRepository::new(dir.path(), node_id);
@@ -192,7 +193,7 @@ async fn explicit_rename_and_model_update_survive_a_later_stale_transcript_save(
         .await
         .unwrap();
 
-    repository
+    let outcome = repository
         .save(
             &session,
             stale.meta,
@@ -201,6 +202,7 @@ async fn explicit_rename_and_model_update_survive_a_later_stale_transcript_save(
         )
         .await
         .unwrap();
+    assert!(matches!(outcome, SessionSaveOutcome::Saved { .. }));
 
     let loaded = repository.load(&session).await.unwrap();
     assert_eq!(loaded.meta.title, "renamed session");
