@@ -238,7 +238,7 @@ fn paint_header(
         ),
         icon_size,
         theme.tokens.muted_foreground,
-        1.5,
+        SemanticIcon::Search.stroke_width(),
     );
     paint_single_line(
         painter,

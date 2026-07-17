@@ -30,6 +30,10 @@ pub enum SemanticIcon {
     Sites,
     PullRequest,
     Chat,
+    ExploreCode,
+    BuildFeature,
+    ReviewChange,
+    FixIssue,
     Folder,
     Send,
     Stop,
@@ -45,7 +49,7 @@ pub enum SemanticIcon {
 }
 
 impl SemanticIcon {
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 42] = [
         Self::NewTask,
         Self::Scheduled,
         Self::Settings,
@@ -72,6 +76,10 @@ impl SemanticIcon {
         Self::Sites,
         Self::PullRequest,
         Self::Chat,
+        Self::ExploreCode,
+        Self::BuildFeature,
+        Self::ReviewChange,
+        Self::FixIssue,
         Self::Folder,
         Self::Send,
         Self::Stop,
@@ -116,6 +124,12 @@ impl SemanticIcon {
             Self::Sites => "M4 4H9V9H4ZM15 4H20V9H15ZM4 15H9V20H4ZM15 15H20V20H15Z",
             Self::PullRequest => "M6 3A2 2 0 1 0 6 7A2 2 0 1 0 6 3M18 17A2 2 0 1 0 18 21A2 2 0 1 0 18 17M6 7V18M18 17V10C18 7 16 5 13 5H11M14 2L11 5L14 8",
             Self::Chat => "M4 4H20V16H9L4 21Z",
+            Self::ExploreCode => "M12 3L14 9L20 11L14 13L12 19L10 13L4 11L10 9Z",
+            Self::BuildFeature => "M4 18L11 11M9 5L19 15M13 3L21 11L17 15L9 7Z",
+            Self::ReviewChange => "M4 12L9 17L20 6",
+            Self::FixIssue => {
+                "M8 8H16V18H8ZM9 5L12 8L15 5M4 10H8M16 10H20M4 15H8M16 15H20"
+            }
             Self::Folder => "M3 6H10L12 8H21V19H3Z",
             Self::Send => "M12 19V5M6 11L12 5L18 11",
             Self::Stop => "M7 7H17V17H7Z",
@@ -147,7 +161,7 @@ mod tests {
     use super::SemanticIcon;
 
     #[test]
-    fn settings_icons_share_the_semantic_24px_registry() {
+    fn all_icons_share_the_semantic_24px_registry() {
         for icon in SemanticIcon::ALL {
             assert!(!icon.path().is_empty());
             assert_eq!(icon.viewbox(), 24.0);

@@ -1,22 +1,13 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 
-use crate::{BrandMark, RectExt, ZodeTheme};
+use crate::{BrandMark, RectExt, SemanticIcon, ZodeTheme};
 
 const TITLE: &str = "我们在 Zode 中构建什么？";
-const SUGGESTIONS: [(&str, &str); 4] = [
-    (
-        "探索并理解代码",
-        "M12 3L14 9L20 11L14 13L12 19L10 13L4 11L10 9Z",
-    ),
-    (
-        "构建新功能、应用或工具",
-        "M4 18L11 11M9 5L19 15M13 3L21 11L17 15L9 7Z",
-    ),
-    ("审查代码并提出修改建议", "M4 12L9 17L20 6"),
-    (
-        "修复问题和失败",
-        "M8 8H16V18H8ZM9 5L12 8L15 5M4 10H8M16 10H20M4 15H8M16 15H20",
-    ),
+const SUGGESTIONS: [(&str, SemanticIcon); 4] = [
+    ("探索并理解代码", SemanticIcon::ExploreCode),
+    ("构建新功能、应用或工具", SemanticIcon::BuildFeature),
+    ("审查代码并提出修改建议", SemanticIcon::ReviewChange),
+    ("修复问题和失败", SemanticIcon::FixIssue),
 ];
 
 const REFERENCE_HEIGHT: f32 = 868.0;
@@ -221,11 +212,11 @@ impl EmptyState {
                 .min((card.height() - 28.0).max(0.0));
             if icon_size > 0.0 {
                 painter.stroke_svg_path(
-                    icon,
+                    icon.path(),
                     Point2D::new(card.min_x() + horizontal_inset, card.min_y() + 14.0),
                     icon_size,
                     suggestion_color(index),
-                    1.7,
+                    icon.stroke_width(),
                 );
             }
 

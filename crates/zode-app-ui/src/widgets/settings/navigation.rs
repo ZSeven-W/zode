@@ -370,7 +370,7 @@ pub(super) fn paint(
         search_icon.origin,
         search_icon.size.x,
         theme.tokens.muted_foreground,
-        1.4,
+        SemanticIcon::Search.stroke_width(),
     );
     paint_single_line(
         painter,
@@ -411,7 +411,7 @@ pub(super) fn paint(
             entry.icon_rect.origin,
             entry.icon_rect.size.x,
             color,
-            1.35,
+            entry.icon.stroke_width(),
         );
         paint_single_line(
             painter,
