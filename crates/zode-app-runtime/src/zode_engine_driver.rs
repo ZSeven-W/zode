@@ -351,6 +351,7 @@ impl ZodeEngineDriver {
         session: &SessionLocator,
         effort: String,
     ) -> Result<(), EndpointError> {
+        self.ensure_engine(session).await?;
         self.reassemble(session, move |template, _| {
             Ok(template.with_effort(Some(effort)))
         })
@@ -363,6 +364,7 @@ impl ZodeEngineDriver {
         mode: SandboxMode,
         network: bool,
     ) -> Result<(), EndpointError> {
+        self.ensure_engine(session).await?;
         self.reassemble(session, move |template, cwd| {
             let sandbox = match mode {
                 SandboxMode::Off => None,
@@ -400,6 +402,21 @@ impl ZodeEngineDriver {
             Ok(template.with_sandbox(sandbox))
         })
         .await
+    }
+
+    async fn revoke_project_permission(
+        &self,
+        session: &SessionLocator,
+        workspace_uri: &zode_node_protocol::WorkspaceUri,
+        tool: &str,
+    ) -> Result<(), EndpointError> {
+        let cwd = workspace_uri_to_path(workspace_uri)?;
+        ConfigManager::revoke_project_tool(&cwd, tool).map_err(map_internal)?;
+        if self.runtime_engine(session).is_some() {
+            self.reassemble(session, |template, _| Ok(template.clone()))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn diff(&self, session: SessionLocator) -> Result<DiffSnapshot, EndpointError> {
@@ -481,8 +498,10 @@ impl EngineDriver for ZodeEngineDriver {
             AgentCommandKind::RevokeProjectPermission {
                 workspace_uri,
                 tool,
-            } => ConfigManager::revoke_project_tool(&workspace_uri_to_path(&workspace_uri)?, &tool)
-                .map_err(map_internal),
+            } => {
+                self.revoke_project_permission(&command.session, &workspace_uri, &tool)
+                    .await
+            }
             AgentCommandKind::SetModel { model } => self.set_model(&command.session, model).await,
             AgentCommandKind::SetEffort { effort } => {
                 self.set_effort(&command.session, effort).await
