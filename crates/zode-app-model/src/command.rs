@@ -3,8 +3,8 @@ use zode_node_protocol::{
 };
 
 use crate::{
-    IntegrationScope, IntegrationsTab, QueuedMessageId, SecondaryPane, SettingsCategory,
-    ShellRoute, ThemePreference,
+    EnvironmentActionKind, IntegrationScope, IntegrationsTab, QueuedMessageId, SecondaryPane,
+    SettingsCategory, ShellRoute, ThemePreference,
 };
 
 /// User intent emitted by widgets for the application controller to handle.
@@ -176,6 +176,10 @@ pub enum AppCommand {
         workspace_uri: WorkspaceUri,
         source_id: String,
         enabled: bool,
+    },
+    RunEnvironmentAction {
+        session: SessionLocator,
+        action: EnvironmentActionKind,
     },
     OpenReview,
     OpenTerminal,

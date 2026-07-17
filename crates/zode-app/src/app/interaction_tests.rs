@@ -1,9 +1,10 @@
 use std::sync::Mutex;
 
 use zode_app_model::{
-    demo_state, AppCommand, AttachmentMetadata, ComingSoonFeature, IntegrationsTab, LoadState,
-    PreviewKind, PreviewState, PreviewTarget, ProjectState, SecondaryPane, SettingsCategory,
-    SettingsCommandOutcome, ShellRoute, TranscriptState,
+    demo_state, AppCommand, AttachmentMetadata, ComingSoonFeature, EnvironmentActionKind,
+    EnvironmentSnapshot, IntegrationsTab, LoadState, PreviewKind, PreviewState, PreviewTarget,
+    ProjectState, SecondaryPane, SettingsCategory, SettingsCommandOutcome, ShellRoute,
+    TranscriptState,
 };
 use zode_app_ui::{
     ComposerController, ComposerOutcome, ComposerSubmission, Insets, Key, Modifiers, ProjectPicker,
@@ -172,6 +173,13 @@ fn page_and_pane_widget_ids_map_through_component_commands() {
         }],
         unified: String::new(),
     });
+    presentation.context = LoadState::Ready(EnvironmentSnapshot {
+        workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+        branch: Some("codex/test".into()),
+        subagents: Vec::new(),
+        background_processes: Vec::new(),
+        sources: Vec::new(),
+    });
     let expected = [
         (60, AppCommand::OpenSecondary(SecondaryPane::Environment)),
         (61, AppCommand::OpenReview),
@@ -196,13 +204,65 @@ fn page_and_pane_widget_ids_map_through_component_commands() {
             AppCommand::Navigate(ShellRoute::Integrations(IntegrationsTab::Plugins)),
         ),
         (100, AppCommand::CloseSecondary),
-        (101, AppCommand::OpenReview),
+        (
+            101,
+            AppCommand::RunEnvironmentAction {
+                session: session.clone(),
+                action: EnvironmentActionKind::CompareWorkspaceToHead,
+            },
+        ),
         (102, AppCommand::CloseSecondary),
+        (
+            200,
+            AppCommand::RunEnvironmentAction {
+                session: session.clone(),
+                action: EnvironmentActionKind::RefreshStatus,
+            },
+        ),
+        (
+            201,
+            AppCommand::RunEnvironmentAction {
+                session: session.clone(),
+                action: EnvironmentActionKind::OpenWorkspace,
+            },
+        ),
     ];
 
     for (id, command) in expected {
         assert_eq!(widget_command(&state, WidgetId(id)), Some(command));
     }
+
+    state
+        .presentation
+        .sessions
+        .get_mut(&session)
+        .unwrap()
+        .preview = PreviewState::Failed {
+        target: PreviewTarget {
+            workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+            relative_path: "docs/report.md".into(),
+        },
+        message: "retry".into(),
+    };
+    state.presentation.secondary_pane = Some(SecondaryPane::DocumentPreview);
+    assert_eq!(
+        widget_command(&state, WidgetId(103)),
+        Some(AppCommand::CloseSecondary)
+    );
+    assert_eq!(
+        widget_command(&state, WidgetId(104)),
+        Some(AppCommand::OpenPreviewExternally {
+            session: session.clone(),
+            relative_path: "docs/report.md".into(),
+        })
+    );
+    assert_eq!(
+        widget_command(&state, WidgetId(105)),
+        Some(AppCommand::PreviewWorkspaceFile {
+            session,
+            relative_path: "docs/report.md".into(),
+        })
+    );
 }
 
 #[test]

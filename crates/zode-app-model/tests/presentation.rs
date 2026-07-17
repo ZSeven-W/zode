@@ -1,10 +1,11 @@
 use zode_app_model::{
-    apply_session_runtime_options, demo_state, environment_sections, reduce_agent_event,
-    reduce_navigation_command, reduce_presentation_command, AppCommand, AttachmentMetadata,
-    ComingSoonFeature, EnvironmentSectionKind, EnvironmentSnapshot, FileArtifact, IntegrationScope,
-    IntegrationsTab, LoadState, NavigationOutcome, PresentationCommandOutcome, PreviewState,
-    PreviewTarget, SecondaryPane, SessionDiffState, SessionPresentationState, SettingsCategory,
-    ShellPage, ShellRoute, TranscriptItem, TranscriptState,
+    apply_session_runtime_options, demo_state, environment_actions, environment_sections,
+    reduce_agent_event, reduce_navigation_command, reduce_presentation_command, AppCommand,
+    AttachmentMetadata, ComingSoonFeature, EnvironmentActionKind,
+    EnvironmentActionUnavailableReason, EnvironmentSectionKind, EnvironmentSnapshot, FileArtifact,
+    IntegrationScope, IntegrationsTab, LoadState, NavigationOutcome, PresentationCommandOutcome,
+    PreviewState, PreviewTarget, SecondaryPane, SessionDiffState, SessionPresentationState,
+    SettingsCategory, ShellPage, ShellRoute, TranscriptItem, TranscriptState,
 };
 use zode_node_protocol::{
     AgentEvent, AgentEventKind, DiffFile, DiffFileStatus, DiffSnapshot, RuntimeOptions,
@@ -454,6 +455,55 @@ fn environment_sections_omit_empty_diff_branch_and_sources() {
     assert_eq!(sections.len(), 1);
     assert_eq!(sections[0].kind, EnvironmentSectionKind::Host);
     assert!(sections.iter().all(|section| !section.entries.is_empty()));
+}
+
+#[test]
+fn environment_actions_are_typed_and_never_offer_an_unbacked_git_mutation() {
+    let mut state = demo_state();
+    let session = add_session(&mut state, "actions", "file:///repo/zode");
+    state.current_session = Some(session.clone());
+    state.presentation.sessions.insert(
+        session.clone(),
+        ready_presentation(&session, "file:///repo/zode", "codex/actions"),
+    );
+
+    let actions = environment_actions(&state);
+    assert_eq!(
+        actions.iter().map(|action| action.kind).collect::<Vec<_>>(),
+        vec![
+            EnvironmentActionKind::RefreshStatus,
+            EnvironmentActionKind::CompareWorkspaceToHead,
+            EnvironmentActionKind::OpenWorkspace,
+            EnvironmentActionKind::CommitOrPush,
+        ]
+    );
+    assert!(actions[..3].iter().all(|action| action.enabled()));
+    assert_eq!(
+        actions[3].unavailable_reason,
+        Some(EnvironmentActionUnavailableReason::SafeMutationContractUnavailable)
+    );
+    assert_eq!(
+        actions[3].unavailable_reason.unwrap().message(),
+        "没有安全写入契约"
+    );
+}
+
+#[test]
+fn environment_actions_explain_missing_and_non_local_task_contexts() {
+    let state = demo_state();
+    let actions = environment_actions(&state);
+    assert!(actions[..3].iter().all(|action| {
+        action.unavailable_reason == Some(EnvironmentActionUnavailableReason::NoCurrentTask)
+    }));
+
+    let mut remote = demo_state();
+    let session = add_session(&mut remote, "remote", "zode-node://mac/repo");
+    remote.current_session = Some(session);
+    let actions = environment_actions(&remote);
+    assert!(actions[..3].iter().all(|action| {
+        action.unavailable_reason
+            == Some(EnvironmentActionUnavailableReason::LocalWorkspaceRequired)
+    }));
 }
 
 #[test]

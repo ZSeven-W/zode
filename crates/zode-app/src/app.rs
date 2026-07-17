@@ -14,8 +14,8 @@ use zode_app_ui::{
 };
 
 use crate::services::{
-    ExternalOpenService, LocalExternalOpenService, NativeSessionWindowService,
-    SessionWindowService, WorkspaceService,
+    ExternalOpenService, LocalExternalOpenService, LocalRepositoryService,
+    NativeSessionWindowService, RepositoryService, SessionWindowService, WorkspaceService,
 };
 use crate::{
     accessibility_host::{AccessibilityBridge, AccessibilityHost},
@@ -37,6 +37,8 @@ use crate::{
 use zode_app_runtime::{workspace_uri_to_path, AppStateStore, TaskContext};
 use zode_node_protocol::{AgentEndpoint, NodeCapability, UserContent, WorkspaceUri};
 
+#[path = "app/environment-actions.rs"]
+mod environment_actions;
 #[path = "app/external-preview.rs"]
 mod external_preview;
 mod integrations;
@@ -96,6 +98,7 @@ pub struct DesktopApp {
     window_focused: bool,
     clipboard: Option<Arc<dyn ClipboardService>>,
     external_open: Arc<dyn ExternalOpenService>,
+    repository_service: Arc<dyn RepositoryService>,
     session_window: Arc<dyn SessionWindowService>,
     workspace_picker: project_picker::WorkspacePickerEffect,
     app_state_store: Option<AppStateStore>,
@@ -251,6 +254,7 @@ impl DesktopApp {
             window_focused: false,
             clipboard,
             external_open: Arc::new(LocalExternalOpenService),
+            repository_service: Arc::new(LocalRepositoryService),
             session_window: Arc::new(NativeSessionWindowService),
             workspace_picker,
             app_state_store,
@@ -264,6 +268,10 @@ impl DesktopApp {
 
     pub fn set_external_open_service(&mut self, service: Arc<dyn ExternalOpenService>) {
         self.external_open = service;
+    }
+
+    pub fn set_repository_service(&mut self, service: Arc<dyn RepositoryService>) {
+        self.repository_service = service;
     }
 
     pub fn set_session_window_service(&mut self, service: Arc<dyn SessionWindowService>) {

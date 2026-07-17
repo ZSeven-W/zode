@@ -102,6 +102,9 @@ fn available_new_session_command(
 
 impl DesktopApp {
     pub(super) fn enqueue_command(&mut self, command: AppCommand) {
+        if self.apply_environment_action_command(&command) {
+            return;
+        }
         if consume_session_window_command(
             &mut self.app_state,
             self.session_window.as_ref(),

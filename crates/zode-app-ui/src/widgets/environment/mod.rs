@@ -1,18 +1,24 @@
+mod action;
 mod row;
 mod section;
 
 use jian_widgets::{HorizontalAlign, Painter, Rect};
 use zode_app_model::{
-    environment_sections, AppCommand, EnvironmentSectionKind, LoadState, ZodeAppState,
+    environment_actions, environment_sections, AppCommand, EnvironmentActionKind,
+    EnvironmentSectionKind, LoadState, ZodeAppState,
 };
 use zode_node_protocol::SessionLocator;
 
 use crate::{paint_single_line, stable_widget_id, RectExt, SemanticIcon, WidgetId, ZodeTheme};
 
+pub use action::EnvironmentActionLayout;
 pub use section::EnvironmentSectionLayout;
 
 pub const ENVIRONMENT_CLOSE_ID: WidgetId = WidgetId(100);
 pub const ENVIRONMENT_REVIEW_ID: WidgetId = WidgetId(101);
+pub const ENVIRONMENT_REFRESH_ID: WidgetId = WidgetId(200);
+pub const ENVIRONMENT_OPEN_WORKSPACE_ID: WidgetId = WidgetId(201);
+pub const ENVIRONMENT_COMMIT_PUSH_ID: WidgetId = WidgetId(202);
 
 const PANEL_WIDTH: f32 = 300.0;
 const PANEL_MIN_HEIGHT: f32 = 320.0;
@@ -22,11 +28,10 @@ const PANEL_INSET: f32 = 16.0;
 const HEADER_HEIGHT: f32 = 46.0;
 const CLOSE_SIZE: f32 = 20.0;
 const BODY_TOP: f32 = 10.0;
-const REVIEW_HEIGHT: f32 = 34.0;
-const REVIEW_GAP: f32 = 8.0;
-const REVIEW_BOTTOM: f32 = 16.0;
+const ACTION_SECTION_GAP: f32 = 8.0;
+const ACTION_BOTTOM: f32 = 16.0;
 const STATUS_HEIGHT: f32 = 24.0;
-const MIN_REVIEW_PANEL_HEIGHT: f32 = 112.0;
+const MIN_ACTION_PANEL_HEIGHT: f32 = 240.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnvironmentStatusLayout {
@@ -42,6 +47,8 @@ pub struct EnvironmentPanelLayout {
     pub close_button: Rect,
     pub sections: Vec<EnvironmentSectionLayout>,
     pub statuses: Vec<EnvironmentStatusLayout>,
+    pub repository_action_header: Option<Rect>,
+    pub repository_actions: Vec<EnvironmentActionLayout>,
     pub review_button: Option<Rect>,
     pub last_row: Option<Rect>,
 }
@@ -53,6 +60,7 @@ impl EnvironmentPanel {
         let available_width = finite_non_negative(rect.size.x);
         let available_height = finite_non_negative(rect.size.y);
         let projected = environment_sections(state);
+        let projected_actions = environment_actions(state);
         let status_messages = status_messages(state);
         let body_sections = projected
             .iter()
@@ -63,19 +71,15 @@ impl EnvironmentPanel {
             .map(|section| section::height(section))
             .sum::<f32>()
             + section::SECTION_GAP * body_sections.len().saturating_sub(1) as f32;
-        let has_review = projected
-            .iter()
-            .any(|section| section::is_repository_action(section.kind));
         let status_height = status_messages.len() as f32 * STATUS_HEIGHT;
+        let actions_height = action::section_height(projected_actions.len());
         let desired_height = HEADER_HEIGHT
             + BODY_TOP
             + sections_height
             + status_height
-            + if has_review {
-                REVIEW_GAP + REVIEW_HEIGHT + REVIEW_BOTTOM
-            } else {
-                REVIEW_BOTTOM
-            };
+            + ACTION_SECTION_GAP
+            + actions_height
+            + ACTION_BOTTOM;
         let card_width = PANEL_WIDTH.min(available_width);
         let card_height = if available_height > 0.0 {
             desired_height
@@ -103,21 +107,51 @@ impl EnvironmentPanel {
             close_size,
             close_size,
         );
-        let review_button = (has_review && card.size.y >= MIN_REVIEW_PANEL_HEIGHT).then(|| {
+        let shows_actions = card.size.y >= MIN_ACTION_PANEL_HEIGHT;
+        let action_section_y = card.max_y() - ACTION_BOTTOM - actions_height;
+        let repository_action_header = shows_actions.then(|| {
             Rect::xywh(
                 card.origin.x + PANEL_INSET,
-                card.max_y() - REVIEW_BOTTOM - REVIEW_HEIGHT,
+                action_section_y,
                 (card.size.x - PANEL_INSET * 2.0).max(0.0),
-                REVIEW_HEIGHT,
+                action::ACTION_HEADER_HEIGHT,
             )
         });
+        let repository_actions = repository_action_header
+            .map(|header| {
+                projected_actions
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(index, projected)| EnvironmentActionLayout {
+                        id: action_widget_id(projected.kind),
+                        action: projected,
+                        rect: Rect::xywh(
+                            header.origin.x,
+                            header.max_y()
+                                + index as f32
+                                    * (action::ACTION_ROW_HEIGHT + action::ACTION_ROW_GAP),
+                            header.size.x,
+                            action::ACTION_ROW_HEIGHT,
+                        ),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let review_button = repository_actions
+            .iter()
+            .find(|layout| {
+                layout.action.kind == EnvironmentActionKind::CompareWorkspaceToHead
+                    && layout.action.enabled()
+            })
+            .map(|layout| layout.rect);
         let content_rect = Rect::xywh(
             card.origin.x + PANEL_INSET,
             header.max_y() + BODY_TOP,
             (card.size.x - PANEL_INSET * 2.0).max(0.0),
-            (review_button
-                .map(|button| button.origin.y - REVIEW_GAP)
-                .unwrap_or(card.max_y() - REVIEW_BOTTOM)
+            (repository_action_header
+                .map(|header| header.origin.y - ACTION_SECTION_GAP)
+                .unwrap_or(card.max_y() - ACTION_BOTTOM)
                 - header.max_y()
                 - BODY_TOP)
                 .max(0.0),
@@ -159,12 +193,15 @@ impl EnvironmentPanel {
                 section::footer(repository, button),
             );
         }
-        let last_row = review_button.or_else(|| {
-            statuses
-                .last()
-                .map(|status| status.rect)
-                .or_else(|| sections.iter().rev().find_map(|section| section.last_row()))
-        });
+        let last_row = repository_actions
+            .last()
+            .map(|action| action.rect)
+            .or_else(|| {
+                statuses
+                    .last()
+                    .map(|status| status.rect)
+                    .or_else(|| sections.iter().rev().find_map(|section| section.last_row()))
+            });
 
         EnvironmentPanelLayout {
             card,
@@ -173,6 +210,8 @@ impl EnvironmentPanel {
             close_button,
             sections,
             statuses,
+            repository_action_header,
+            repository_actions,
             review_button,
             last_row,
         }
@@ -216,39 +255,24 @@ impl EnvironmentPanel {
             );
         }
         painter.restore();
-        if let Some(button) = layout.review_button {
-            painter.fill_round_rect(button, 9.0, theme.tokens.muted);
-            painter.stroke_round_rect(button, 9.0, theme.tokens.border, 1.0);
-            let label = layout
-                .sections
-                .iter()
-                .find(|section| section.footer)
-                .and_then(|section| section.section.entries.first())
-                .map_or("查看变更", |entry| entry.label.as_str());
-            paint_single_line(
-                painter,
-                label,
-                Rect::xywh(
-                    button.origin.x + 12.0,
-                    button.origin.y,
-                    (button.size.x - 24.0).max(0.0),
-                    button.size.y,
-                ),
-                13.0,
-                600,
-                theme.tokens.foreground,
-                HorizontalAlign::Start,
-            );
+        if let Some(header) = layout.repository_action_header {
+            action::paint(painter, header, &layout.repository_actions, theme);
         }
         painter.restore();
     }
 
     pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
-        match id {
-            ENVIRONMENT_CLOSE_ID => Some(AppCommand::CloseSecondary),
-            ENVIRONMENT_REVIEW_ID if review_available(state) => Some(AppCommand::OpenReview),
-            _ => None,
+        if id == ENVIRONMENT_CLOSE_ID {
+            return Some(AppCommand::CloseSecondary);
         }
+        let action = environment_actions(state)
+            .into_iter()
+            .find(|action| action_widget_id(action.kind) == id && action.enabled())?;
+        let session = state.current_session.as_ref()?.clone();
+        Some(AppCommand::RunEnvironmentAction {
+            session,
+            action: action.kind,
+        })
     }
 
     pub fn section_widget_id(session: &SessionLocator, kind: EnvironmentSectionKind) -> WidgetId {
@@ -260,10 +284,13 @@ impl EnvironmentPanel {
     }
 }
 
-fn review_available(state: &ZodeAppState) -> bool {
-    environment_sections(state)
-        .iter()
-        .any(|section| section.kind == EnvironmentSectionKind::RepositoryActions)
+pub const fn action_widget_id(kind: EnvironmentActionKind) -> WidgetId {
+    match kind {
+        EnvironmentActionKind::RefreshStatus => ENVIRONMENT_REFRESH_ID,
+        EnvironmentActionKind::CompareWorkspaceToHead => ENVIRONMENT_REVIEW_ID,
+        EnvironmentActionKind::OpenWorkspace => ENVIRONMENT_OPEN_WORKSPACE_ID,
+        EnvironmentActionKind::CommitOrPush => ENVIRONMENT_COMMIT_PUSH_ID,
+    }
 }
 
 fn status_messages(state: &ZodeAppState) -> Vec<String> {

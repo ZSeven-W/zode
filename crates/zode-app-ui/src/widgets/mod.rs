@@ -39,8 +39,9 @@ pub use document_preview::{
 };
 pub use empty_state::{EmptyState, EmptySuggestionLayout, EMPTY_SUGGESTION_IDS};
 pub use environment::{
-    EnvironmentPanel, EnvironmentPanelLayout, EnvironmentSectionLayout, ENVIRONMENT_CLOSE_ID,
-    ENVIRONMENT_REVIEW_ID,
+    EnvironmentActionLayout, EnvironmentPanel, EnvironmentPanelLayout, EnvironmentSectionLayout,
+    ENVIRONMENT_CLOSE_ID, ENVIRONMENT_COMMIT_PUSH_ID, ENVIRONMENT_OPEN_WORKSPACE_ID,
+    ENVIRONMENT_REFRESH_ID, ENVIRONMENT_REVIEW_ID,
 };
 pub use integrations::{
     CatalogSectionLayout, InstalledIconLayout, IntegrationRowLayout, IntegrationScopeLayout,

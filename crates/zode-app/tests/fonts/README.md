@@ -60,8 +60,8 @@ python3 crates/zode-app/tests/fonts/rename-family.py \
 Expected SHA-256 values:
 
 ```text
-a4e3c895af364ade3dd78d9e5745bacae4828c355bf933619a99163aa350d2a1  NotoSansSC-Regular.subset.ttf
-e5722ab7ad847e21ab4b976de81194ffafb431f3e42e32f898f921b910de7fb7  NotoSansSC-SemiBold.subset.ttf
+1bd1bda001f371bf04ff7fb95aaf7fa7efc3818026eab656632a384595189724  NotoSansSC-Regular.subset.ttf
+d44657dce2a962d61b2d709dbe12a95e2f2fc4e682f11464279ec9128fb90c3d  NotoSansSC-SemiBold.subset.ttf
 ```
 
 When visible copy changes, update `glyphs.txt`, rebuild both subsets, and run

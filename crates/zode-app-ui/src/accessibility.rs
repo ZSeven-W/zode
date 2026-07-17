@@ -6,16 +6,16 @@ use zode_app_model::{
 };
 
 use crate::{
-    composer_queue_reserved_height, Composer, DocumentPreview, EnvironmentPanel, Insets,
-    ProjectPickerViewState, RectExt, ReviewPanel, SettingsPanel, TerminalSecondaryPanel,
-    ThreadTranscript, UnavailableSecondaryPanel, WorkspaceLayout, COMPOSER_ATTACHMENT_H,
-    COMPOSER_H, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
-    DOCUMENT_PREVIEW_EXTERNAL_ID, DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID,
-    ENVIRONMENT_REVIEW_ID, INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
+    composer_queue_reserved_height, Composer, DocumentPreview, Insets, ProjectPickerViewState,
+    RectExt, ReviewPanel, SettingsPanel, TerminalSecondaryPanel, ThreadTranscript,
+    UnavailableSecondaryPanel, WorkspaceLayout, COMPOSER_ATTACHMENT_H, COMPOSER_H,
+    DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID, DOCUMENT_PREVIEW_EXTERNAL_ID,
+    DOCUMENT_PREVIEW_RETRY_ID, INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
     TERMINAL_SECONDARY_CLOSE_ID, UNAVAILABLE_SECONDARY_CLOSE_ID,
 };
 
 mod empty_state;
+mod environment;
 mod header;
 mod ids;
 mod integrations;
@@ -26,6 +26,7 @@ mod sidebar;
 mod transcript;
 
 use empty_state::append_empty_suggestion_nodes;
+use environment::append_environment_nodes;
 use header::{append_header_menu_nodes, append_header_nodes, append_panel_picker_nodes};
 pub(crate) use ids::stable_widget_id;
 use integrations::append_integration_nodes;
@@ -402,51 +403,7 @@ fn append_secondary_nodes(
     }
     match state.presentation.secondary_pane {
         Some(SecondaryPane::Environment) if visible_rect(layout.context_panel) => {
-            let panel = EnvironmentPanel::layout(layout.context_panel, state);
-            if !visible_rect(panel.card) {
-                return;
-            }
-            if let Some(session) = state.current_session.as_ref() {
-                for section in panel.sections.iter().filter(|section| !section.footer) {
-                    let Some(rect) =
-                        ThreadTranscript::clip_to_viewport(section.rect, panel.content)
-                    else {
-                        continue;
-                    };
-                    nodes.push(node(
-                        EnvironmentPanel::section_widget_id(session, section.section.kind),
-                        rect,
-                        Role::Group,
-                        &EnvironmentPanel::section_accessibility_name(section),
-                        None,
-                        Vec::new(),
-                        None,
-                        CursorHint::Default,
-                    ));
-                }
-            }
-            nodes.push(node(
-                ENVIRONMENT_CLOSE_ID,
-                panel.close_button,
-                Role::Button,
-                "关闭环境信息",
-                None,
-                vec![Action::Click, Action::Focus],
-                next_order(focus_order),
-                CursorHint::Pointer,
-            ));
-            if let Some(review_button) = panel.review_button.filter(|rect| visible_rect(*rect)) {
-                nodes.push(node(
-                    ENVIRONMENT_REVIEW_ID,
-                    review_button,
-                    Role::Button,
-                    "查看变更",
-                    None,
-                    vec![Action::Click, Action::Focus],
-                    next_order(focus_order),
-                    CursorHint::Pointer,
-                ));
-            }
+            append_environment_nodes(nodes, layout, focus_order, state);
         }
         Some(SecondaryPane::Review) => {
             let panel_rect = if visible_rect(layout.review_panel) {

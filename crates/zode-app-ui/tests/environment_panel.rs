@@ -1,11 +1,13 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
-    AppCommand, ConnectionState, EnvironmentEntry, EnvironmentSectionKind, EnvironmentSnapshot,
-    FileArtifact, LoadState, PreviewState, SessionDiffState, SessionPresentationState,
-    TranscriptItem,
+    AppCommand, ConnectionState, EnvironmentActionKind, EnvironmentEntry, EnvironmentSectionKind,
+    EnvironmentSnapshot, FileArtifact, LoadState, PreviewState, ProjectState, SessionDiffState,
+    SessionPresentationState, TranscriptItem, TranscriptState,
 };
 use zode_app_ui::{
-    EnvironmentPanel, RectExt, ZodeTheme, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID,
+    EnvironmentPanel, RectExt, ZodeTheme, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_EXTERNAL_ID,
+    DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_COMMIT_PUSH_ID,
+    ENVIRONMENT_OPEN_WORKSPACE_ID, ENVIRONMENT_REFRESH_ID, ENVIRONMENT_REVIEW_ID,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
@@ -72,6 +74,12 @@ fn state_with_session(id: &str) -> (zode_app_model::ZodeAppState, SessionLocator
     let session = SessionLocator::new(state.host.node_id, id);
     let workspace_uri = WorkspaceUri::new("file:///repo/zode").unwrap();
     state.current_session = Some(session.clone());
+    state.projects.push(ProjectState {
+        workspace_uri: workspace_uri.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
+    });
     state.threads.push(ThreadSummary {
         session: session.clone(),
         workspace_uri,
@@ -79,6 +87,9 @@ fn state_with_session(id: &str) -> (zode_app_model::ZodeAppState, SessionLocator
         updated_at_ms: 1,
         status: ThreadStatus::Idle,
     });
+    state
+        .transcripts
+        .insert(session.clone(), TranscriptState::default());
     (state, session)
 }
 
@@ -163,15 +174,55 @@ fn wide_layout_is_a_300px_content_hug_card_with_stable_real_commands() {
     assert_eq!(review.origin.x, 1_500.0);
     assert_eq!(review.size.x, 268.0);
     assert_eq!(review.size.y, 34.0);
-    assert_eq!(layout.card.max_y() - review.max_y(), 16.0);
+    assert_eq!(layout.repository_actions.len(), 4);
+    assert_eq!(layout.repository_actions[1].rect, review);
     assert_eq!(
         EnvironmentPanel::command_for_widget(&state, ENVIRONMENT_CLOSE_ID),
         Some(AppCommand::CloseSecondary),
     );
     assert_eq!(
         EnvironmentPanel::command_for_widget(&state, ENVIRONMENT_REVIEW_ID),
-        Some(AppCommand::OpenReview),
+        Some(AppCommand::RunEnvironmentAction {
+            session: state.current_session.clone().unwrap(),
+            action: EnvironmentActionKind::CompareWorkspaceToHead,
+        }),
     );
+    assert_eq!(
+        EnvironmentPanel::command_for_widget(&state, ENVIRONMENT_REFRESH_ID),
+        Some(AppCommand::RunEnvironmentAction {
+            session: state.current_session.clone().unwrap(),
+            action: EnvironmentActionKind::RefreshStatus,
+        }),
+    );
+    assert_eq!(
+        EnvironmentPanel::command_for_widget(&state, ENVIRONMENT_OPEN_WORKSPACE_ID),
+        Some(AppCommand::RunEnvironmentAction {
+            session: state.current_session.clone().unwrap(),
+            action: EnvironmentActionKind::OpenWorkspace,
+        }),
+    );
+    assert_eq!(
+        EnvironmentPanel::command_for_widget(&state, ENVIRONMENT_COMMIT_PUSH_ID),
+        None,
+    );
+}
+
+#[test]
+fn environment_action_ids_are_disjoint_from_document_preview_controls() {
+    let environment_ids = [
+        ENVIRONMENT_REFRESH_ID,
+        ENVIRONMENT_OPEN_WORKSPACE_ID,
+        ENVIRONMENT_COMMIT_PUSH_ID,
+    ];
+    let document_ids = [
+        DOCUMENT_PREVIEW_CLOSE_ID,
+        DOCUMENT_PREVIEW_EXTERNAL_ID,
+        DOCUMENT_PREVIEW_RETRY_ID,
+    ];
+
+    for id in environment_ids {
+        assert!(!document_ids.contains(&id), "duplicate widget id: {id:?}");
+    }
 }
 
 #[test]
@@ -271,7 +322,8 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
         "docs/report.md",
         "2 个文件",
         "+10 -4",
-        "审查 2 项变更",
+        "比较工作区与 HEAD",
+        "没有安全写入契约",
     ] {
         assert!(text.contains(expected), "missing real value: {expected}");
     }
@@ -326,9 +378,8 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
         .texts
         .join("\n");
     for absent in [
-        "变更",
-        "分支",
-        "仓库操作",
+        "文件变更",
+        "当前分支",
         "比较分支",
         "子智能体",
         "后台进程",

@@ -468,6 +468,119 @@ pub struct EnvironmentSnapshot {
     pub sources: Vec<EnvironmentEntry>,
 }
 
+/// Safe local repository intents exposed by the environment inspector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EnvironmentActionKind {
+    RefreshStatus,
+    CompareWorkspaceToHead,
+    OpenWorkspace,
+    CommitOrPush,
+}
+
+impl EnvironmentActionKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RefreshStatus => "刷新状态",
+            Self::CompareWorkspaceToHead => "比较工作区与 HEAD",
+            Self::OpenWorkspace => "打开工作目录",
+            Self::CommitOrPush => "提交或推送",
+        }
+    }
+}
+
+/// A typed reason why a repository action cannot be run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvironmentActionUnavailableReason {
+    NoCurrentTask,
+    TaskUnavailable,
+    ProjectTaskRequired,
+    LocalWorkspaceRequired,
+    StatusNotReady,
+    SafeMutationContractUnavailable,
+}
+
+impl EnvironmentActionUnavailableReason {
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NoCurrentTask => "请选择任务",
+            Self::TaskUnavailable => "任务不可用",
+            Self::ProjectTaskRequired => "需要项目任务",
+            Self::LocalWorkspaceRequired => "仅支持本地工作区",
+            Self::StatusNotReady => "等待分支和变更状态",
+            Self::SafeMutationContractUnavailable => "没有安全写入契约",
+        }
+    }
+}
+
+/// One environment action together with its truthful current availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnvironmentAction {
+    pub kind: EnvironmentActionKind,
+    pub unavailable_reason: Option<EnvironmentActionUnavailableReason>,
+}
+
+impl EnvironmentAction {
+    pub const fn enabled(self) -> bool {
+        self.unavailable_reason.is_none()
+    }
+}
+
+/// Projects repository action availability from the selected local task.
+pub fn environment_actions(state: &crate::ZodeAppState) -> Vec<EnvironmentAction> {
+    let base_reason = environment_workspace_unavailable_reason(state);
+    let compare_reason = base_reason.or_else(|| {
+        let presentation = state.current_session_presentation()?;
+        let branch_ready = presentation
+            .context
+            .ready()
+            .and_then(|context| context.branch.as_deref())
+            .is_some_and(|branch| !branch.trim().is_empty());
+        let diff_ready = presentation.diff.load.ready().is_some();
+        (!branch_ready || !diff_ready).then_some(EnvironmentActionUnavailableReason::StatusNotReady)
+    });
+    vec![
+        EnvironmentAction {
+            kind: EnvironmentActionKind::RefreshStatus,
+            unavailable_reason: base_reason,
+        },
+        EnvironmentAction {
+            kind: EnvironmentActionKind::CompareWorkspaceToHead,
+            unavailable_reason: compare_reason,
+        },
+        EnvironmentAction {
+            kind: EnvironmentActionKind::OpenWorkspace,
+            unavailable_reason: base_reason,
+        },
+        EnvironmentAction {
+            kind: EnvironmentActionKind::CommitOrPush,
+            unavailable_reason: Some(
+                EnvironmentActionUnavailableReason::SafeMutationContractUnavailable,
+            ),
+        },
+    ]
+}
+
+fn environment_workspace_unavailable_reason(
+    state: &crate::ZodeAppState,
+) -> Option<EnvironmentActionUnavailableReason> {
+    let Some(session) = state.current_session.as_ref() else {
+        return Some(EnvironmentActionUnavailableReason::NoCurrentTask);
+    };
+    if session.session_id.starts_with("local-error-") || !state.transcripts.contains_key(session) {
+        return Some(EnvironmentActionUnavailableReason::TaskUnavailable);
+    }
+    let Some(workspace) = state.available_workspace_for_session(session) else {
+        return Some(EnvironmentActionUnavailableReason::TaskUnavailable);
+    };
+    if state.is_projectless_workspace(workspace) {
+        return Some(EnvironmentActionUnavailableReason::ProjectTaskRequired);
+    }
+    if !workspace.as_str().starts_with("file://") {
+        return Some(EnvironmentActionUnavailableReason::LocalWorkspaceRequired);
+    }
+    None
+}
+
 /// Diff loading and invalidation state for one session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionDiffState {

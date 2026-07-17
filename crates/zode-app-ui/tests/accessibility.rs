@@ -5,8 +5,8 @@ use jian_core::CursorHint;
 use jian_widgets::{Point2D, Rect};
 use zode_app_model::{
     AppCommand, ComingSoonFeature, EnvironmentEntry, EnvironmentSectionKind, EnvironmentSnapshot,
-    IntegrationsTab, LoadState, SecondaryPane, SessionDiffState, SessionPresentationState,
-    SettingsCategory, ShellRoute, TranscriptItem, TranscriptState,
+    IntegrationsTab, LoadState, ProjectState, SecondaryPane, SessionDiffState,
+    SessionPresentationState, SettingsCategory, ShellRoute, TranscriptItem, TranscriptState,
 };
 use zode_app_ui::{
     accessibility_tree, ApprovalCard, Composer, EnvironmentPanel, FocusDirection, Insets,
@@ -132,9 +132,30 @@ fn each_page_has_a_useful_default_focus_target() {
 #[test]
 fn typed_secondary_panes_expose_only_visible_shared_geometry() {
     let (mut state, session) = transcript_fixture();
+    let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
+    state.projects.push(ProjectState {
+        workspace_uri: workspace.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
+    });
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: workspace.clone(),
+        title: "semantic transcript".into(),
+        updated_at_ms: 1,
+        status: ThreadStatus::Idle,
+    });
     state.presentation.sessions.insert(
         session.clone(),
         SessionPresentationState {
+            context: LoadState::Ready(EnvironmentSnapshot {
+                workspace_uri: workspace,
+                branch: Some("codex/a11y".into()),
+                subagents: Vec::new(),
+                background_processes: Vec::new(),
+                sources: Vec::new(),
+            }),
             diff: SessionDiffState {
                 dirty: false,
                 load: LoadState::Ready(DiffSnapshot {
@@ -164,6 +185,17 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
         environment.node(WidgetId(101)).unwrap().rect,
         panel_layout.review_button.unwrap()
     );
+    for id in [WidgetId(200), WidgetId(201)] {
+        let action = environment.node(id).expect("enabled environment action");
+        assert!(!action.disabled);
+        assert!(action.actions.contains(&Action::Click));
+    }
+    let commit = environment
+        .node(WidgetId(202))
+        .expect("disabled commit or push action remains discoverable");
+    assert!(commit.disabled);
+    assert!(commit.actions.is_empty());
+    assert_eq!(commit.value.as_deref(), Some("没有安全写入契约"));
     assert!(environment.node(WidgetId(60)).is_some());
     assert!(environment.node(WidgetId(61)).is_some());
     assert!(environment
@@ -195,7 +227,7 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
         .expect("current presentation")
         .context = LoadState::Ready(EnvironmentSnapshot {
         workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
-        branch: None,
+        branch: Some("codex/a11y".into()),
         subagents: (0..20)
             .map(|index| EnvironmentEntry {
                 id: format!("agent-{index}"),
@@ -226,7 +258,14 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
 
     let collapsed = WorkspaceSnapshot::build(&state, 1399.0, 900.0, Insets::ZERO);
     assert_eq!(collapsed.layout.context_panel.width(), 0.0);
-    for id in [WidgetId(60), WidgetId(100), WidgetId(101)] {
+    for id in [
+        WidgetId(60),
+        WidgetId(100),
+        WidgetId(101),
+        WidgetId(200),
+        WidgetId(201),
+        WidgetId(202),
+    ] {
         assert!(collapsed.node(id).is_none());
     }
     assert!(collapsed.node(WidgetId(61)).is_some());

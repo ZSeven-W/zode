@@ -1,6 +1,7 @@
 mod external_open;
 mod file;
 mod notification;
+mod repository;
 #[path = "session-window.rs"]
 mod session_window;
 mod terminal;
@@ -14,6 +15,7 @@ use zode_node_protocol::{EndpointErrorKind, WorkspaceUri};
 pub use external_open::LocalExternalOpenService;
 pub use file::LocalFileService;
 pub use notification::LocalNotificationService;
+pub use repository::LocalRepositoryService;
 pub use session_window::{NativeSessionWindowService, SessionWindowService};
 pub use terminal::{LocalTerminalService, TerminalError, TerminalOutputStream, TerminalService};
 pub use window::NativeWindowService;
@@ -29,6 +31,8 @@ pub enum ServiceError {
     CapabilityDenied(String),
     #[error("is a directory: {0}")]
     IsDirectory(String),
+    #[error("not a directory: {0}")]
+    NotDirectory(String),
     #[error("unsupported file type: {0}")]
     UnsupportedFileType(String),
     #[error("file changed while it was being opened: {0}")]
@@ -91,6 +95,14 @@ pub trait NotificationService: Send + Sync {
 pub trait ExternalOpenService: Send + Sync {
     fn open_file(&self, workspace: &WorkspaceUri, relative: &str) -> Result<(), ServiceError>;
     fn open_url(&self, url: &str) -> Result<(), ServiceError>;
+}
+
+/// Safe local repository-adjacent platform actions.
+///
+/// Git mutations are intentionally absent: the desktop cannot commit or push
+/// until a separately reviewed service contract exists.
+pub trait RepositoryService: Send + Sync {
+    fn open_workspace(&self, workspace: &WorkspaceUri) -> Result<(), ServiceError>;
 }
 
 pub(crate) fn workspace_root(workspace: &WorkspaceUri) -> Result<std::path::PathBuf, ServiceError> {
