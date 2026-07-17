@@ -109,7 +109,7 @@ impl ZodeTheme {
         tokens.row_selected_primary = Color::rgba_u8(124, 58, 237, 0.14);
         Self {
             tokens,
-            sidebar: Color::rgb_u8(246, 246, 244),
+            sidebar: Color::rgb_u8(238, 237, 234),
             sidebar_foreground: Color::rgb_u8(45, 45, 43),
             user_bubble: Color::rgb_u8(239, 239, 237),
             success: Color::rgb_u8(22, 163, 74),

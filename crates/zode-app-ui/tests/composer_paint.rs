@@ -125,3 +125,41 @@ fn composer_paints_only_the_verified_environment_branch() {
         .any(|text| text == "codex/zode-jian-desktop"));
     assert!(!painter.texts.iter().any(|text| text == "main"));
 }
+
+#[test]
+fn composer_hides_unknown_permission_and_connection_modes() {
+    let state = ComposerState::default();
+    let mut painter = TextCapture::default();
+
+    Composer::paint(
+        &mut painter,
+        Rect::xywh(0.0, 0.0, 500.0, 120.0),
+        &state,
+        &ZodeTheme::light(),
+    );
+
+    assert!(!painter.texts.iter().any(|text| text == "完全访问"));
+    assert!(!painter.texts.iter().any(|text| text == "本地"));
+}
+
+#[test]
+fn composer_paints_only_explicit_runtime_context_and_permission() {
+    let state = ComposerState {
+        sandbox_label: "工作区写入".into(),
+        ..ComposerState::default()
+    };
+    let mut painter = TextCapture::default();
+
+    Composer::paint_with_context(
+        &mut painter,
+        Rect::xywh(0.0, 0.0, 500.0, 120.0),
+        &state,
+        Some("本地"),
+        Some("codex/desktop"),
+        &ZodeTheme::light(),
+    );
+
+    for expected in ["本地", "codex/desktop", "工作区写入"] {
+        assert!(painter.texts.iter().any(|text| text == expected));
+    }
+}

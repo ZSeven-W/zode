@@ -162,6 +162,7 @@ fn wide_shell_keeps_the_warm_rail_white_canvas_and_floating_composer_contract() 
     assert!(painter
         .operations
         .contains(&PaintOp::Fill(geometry.sidebar, theme.sidebar)));
+    assert_eq!(theme.sidebar, Color::rgb_u8(238, 237, 234));
     assert!(theme.sidebar.r < theme.tokens.background.r);
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
@@ -220,10 +221,11 @@ fn empty_conversation_exposes_zode_guidance_and_full_composer_chrome() {
     for suggestion in ["探索代码", "构建功能", "审查变更", "修复问题"] {
         assert!(text.contains(suggestion));
     }
-    for composer_chrome in ["zode", "本地", "完全访问"] {
+    for composer_chrome in ["zode", "本地"] {
         assert!(text.contains(composer_chrome));
     }
     assert!(!painter.texts().contains(&"main"));
+    assert!(!painter.texts().contains(&"完全访问"));
     assert!(geometry.composer.min_y() > 900.0);
 }
 

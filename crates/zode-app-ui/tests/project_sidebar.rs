@@ -7,6 +7,7 @@ use zode_node_protocol::{NodeId, SessionLocator, ThreadStatus, ThreadSummary, Wo
 enum PaintOp {
     FillRound(Rect, Color),
     Text(String, Point2D, Color),
+    Svg(String, Point2D, f32, Color),
 }
 
 #[derive(Default)]
@@ -43,12 +44,14 @@ impl Painter for CapturePainter {
     fn stroke_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color, _width: f32) {}
     fn stroke_svg_path(
         &mut self,
-        _d: &str,
-        _top_left: Point2D,
-        _size: f32,
-        _color: Color,
+        d: &str,
+        top_left: Point2D,
+        size: f32,
+        color: Color,
         _width: f32,
     ) {
+        self.operations
+            .push(PaintOp::Svg(d.to_owned(), top_left, size, color));
     }
     fn save(&mut self) {}
     fn restore(&mut self) {}
@@ -96,6 +99,40 @@ fn local_settings_is_painted_in_the_bottom_footer() {
         .operations
         .iter()
         .any(|operation| matches!(operation, PaintOp::Text(text, _, _) if text.contains("账户"))));
+}
+
+#[test]
+fn wide_sidebar_reserves_titlebar_space_and_uses_navigation_icons() {
+    let rect = Rect::xywh(0.0, 0.0, 240.0, 600.0);
+    let mut painter = CapturePainter::default();
+
+    ProjectSidebar::paint(&mut painter, rect, &demo_state(), &ZodeTheme::light());
+
+    assert!(ProjectSidebar::navigation_row_layout(rect)[0].rect.origin.y >= 80.0);
+    let brand_y = painter
+        .operations
+        .iter()
+        .find_map(|operation| match operation {
+            PaintOp::Text(text, origin, _) if text == "Zode" => Some(origin.y),
+            _ => None,
+        });
+    assert!(brand_y.is_some_and(|y| y >= 54.0));
+    assert_eq!(
+        painter
+            .operations
+            .iter()
+            .filter(|operation| matches!(operation, PaintOp::Svg(..)))
+            .count(),
+        7
+    );
+    let new_task_x = painter
+        .operations
+        .iter()
+        .find_map(|operation| match operation {
+            PaintOp::Text(text, origin, _) if text == "新建任务" => Some(origin.x),
+            _ => None,
+        });
+    assert!(new_task_x.is_some_and(|x| x >= 40.0));
 }
 
 #[test]
@@ -281,12 +318,17 @@ fn compact_sidebar_keeps_navigation_and_settings_readable() {
         .iter()
         .filter_map(|operation| match operation {
             PaintOp::Text(text, _, _) => Some(text.as_str()),
-            PaintOp::FillRound(_, _) => None,
+            PaintOp::FillRound(_, _) | PaintOp::Svg(..) => None,
         })
         .collect::<Vec<_>>();
-    for label in ["新", "已", "插", "站", "拉", "聊", "设"] {
-        assert!(labels.contains(&label), "missing compact label {label}");
-    }
+    assert_eq!(
+        painter
+            .operations
+            .iter()
+            .filter(|operation| matches!(operation, PaintOp::Svg(..)))
+            .count(),
+        7
+    );
     assert!(!labels.contains(&"拉取请求"));
     assert!(!labels.contains(&"本地设置"));
 }

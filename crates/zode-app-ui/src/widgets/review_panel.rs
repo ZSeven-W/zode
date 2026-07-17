@@ -274,7 +274,7 @@ impl ReviewPanel {
         theme: &ZodeTheme,
     ) {
         const FILE_LIST_WIDTH: f32 = 210.0;
-        const LINE_HEIGHT: f32 = 20.0;
+        const LINE_HEIGHT: f32 = 24.0;
         let file_rect = Rect::xywh(
             rect.origin.x,
             rect.origin.y,
@@ -282,6 +282,8 @@ impl ReviewPanel {
             rect.size.y,
         );
         painter.fill_rect(file_rect, theme.tokens.muted);
+        painter.save();
+        painter.clip_rect(file_rect);
         for (index, file) in snapshot.files.iter().enumerate() {
             draw_text(
                 painter,
@@ -295,6 +297,7 @@ impl ReviewPanel {
                 theme.tokens.foreground,
             );
         }
+        painter.restore();
 
         let code_rect = Rect::xywh(
             rect.origin.x + file_rect.size.x,
@@ -326,7 +329,7 @@ impl ReviewPanel {
             draw_text(
                 painter,
                 &numbers,
-                Point2D::new(code_rect.origin.x + 8.0, y + 14.0),
+                Point2D::new(code_rect.origin.x + 8.0, y + 5.0),
                 10.0,
                 400,
                 theme.tokens.muted_foreground,
@@ -334,7 +337,7 @@ impl ReviewPanel {
             draw_text(
                 painter,
                 &line.text,
-                Point2D::new(code_rect.origin.x + 82.0, y + 14.0),
+                Point2D::new(code_rect.origin.x + 82.0, y + 5.0),
                 11.0,
                 400,
                 theme.tokens.foreground,

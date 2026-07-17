@@ -1,6 +1,6 @@
 use jian_core::text_input::TextInputState;
 use jian_widgets::{Painter, Rect};
-use zode_app_model::{SecondaryPane, ShellRoute, ZodeAppState};
+use zode_app_model::{ConnectionState, SecondaryPane, ShellRoute, ZodeAppState};
 
 use super::{
     ComingSoonPage, Composer, EmptyState, EnvironmentPanel, IntegrationsPage, ProjectSidebar,
@@ -209,11 +209,17 @@ fn paint_conversation(
         .current_session_presentation()
         .and_then(|presentation| presentation.context.ready())
         .and_then(|context| context.branch.as_deref());
-    Composer::paint_input_with_branch(
+    let connection_label = match state.host.connection {
+        ConnectionState::Local => "本地",
+        ConnectionState::Connecting => "连接中",
+        ConnectionState::Unavailable => "不可用",
+    };
+    Composer::paint_input_with_context(
         painter,
         composer_rect,
         composer_input,
         &state.composer,
+        Some(connection_label),
         branch,
         theme,
     );

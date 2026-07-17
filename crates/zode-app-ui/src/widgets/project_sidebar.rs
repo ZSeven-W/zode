@@ -9,10 +9,15 @@ use zode_node_protocol::{SessionLocator, ThreadSummary, WorkspaceUri};
 use crate::{stable_widget_id, RectExt, WidgetId, ZodeTheme};
 
 const FONT: &str = "system-ui";
-const HEADER_H: f32 = 46.0;
+const TITLEBAR_H: f32 = 38.0;
+const BRAND_H: f32 = 46.0;
+const HEADER_H: f32 = TITLEBAR_H + BRAND_H;
 const ROW_H: f32 = 32.0;
 const ROW_INSET: f32 = 12.0;
 const FOOTER_BOTTOM: f32 = 8.0;
+const ICON_SIZE: f32 = 16.0;
+const FOLDER_ICON: &str = "M3 6H9L11 8H21V19H3Z";
+const SETTINGS_ICON: &str = "M4 7H20M4 17H20M8 4V10M16 14V20";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarAction {
@@ -23,6 +28,7 @@ pub enum SidebarAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SidebarItem {
     pub label: &'static str,
+    pub icon: &'static str,
     pub action: SidebarAction,
     pub implemented: bool,
 }
@@ -30,31 +36,37 @@ pub struct SidebarItem {
 const NAVIGATION: [SidebarItem; 6] = [
     SidebarItem {
         label: "新建任务",
+        icon: "M12 5V19M5 12H19",
         action: SidebarAction::NewSession,
         implemented: true,
     },
     SidebarItem {
         label: "已安排",
+        icon: "M12 7V12L15 14M21 12A9 9 0 1 1 12 3",
         action: SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::ScheduledTasks)),
         implemented: false,
     },
     SidebarItem {
         label: "插件",
+        icon: "M8 9H16V12A4 4 0 0 1 12 16V21M10 9V4M14 9V4",
         action: SidebarAction::Navigate(ShellRoute::Integrations(IntegrationsTab::Plugins)),
         implemented: true,
     },
     SidebarItem {
         label: "站点",
+        icon: "M4 4H10V10H4ZM14 4H20V10H14ZM4 14H10V20H4ZM14 14H20V20H14Z",
         action: SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::Sites)),
         implemented: false,
     },
     SidebarItem {
         label: "拉取请求",
+        icon: "M6 4V16M18 8V20M6 16C12 16 12 8 18 8",
         action: SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::PullRequests)),
         implemented: false,
     },
     SidebarItem {
         label: "聊天",
+        icon: "M4 5H20V16H8L4 20Z",
         action: SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::Chats)),
         implemented: false,
     },
@@ -62,6 +74,7 @@ const NAVIGATION: [SidebarItem; 6] = [
 
 const SETTINGS_FOOTER: SidebarItem = SidebarItem {
     label: "本地设置",
+    icon: SETTINGS_ICON,
     action: SidebarAction::Navigate(ShellRoute::Settings(SettingsCategory::General)),
     implemented: true,
 };
@@ -262,12 +275,12 @@ impl ProjectSidebar {
         }
         draw_label(
             painter,
-            "Zode",
+            if rect.size.x < 100.0 { "Z" } else { "Zode" },
             Rect::xywh(
                 rect.origin.x + ROW_INSET,
-                rect.origin.y,
+                rect.origin.y + TITLEBAR_H,
                 rect.size.x - ROW_INSET,
-                HEADER_H,
+                BRAND_H,
             ),
             13.0,
             700,
@@ -280,28 +293,41 @@ impl ProjectSidebar {
             if selected {
                 painter.fill_round_rect(row.rect, theme.tokens.radius, theme.tokens.row_selected);
             }
-            let label = if compact {
-                row.item.label.chars().next().unwrap_or(' ').to_string()
+            let icon_x = if compact {
+                row.rect.origin.x + (row.rect.size.x - ICON_SIZE) / 2.0
             } else {
-                row.item.label.to_string()
+                row.rect.origin.x + 8.0
             };
-            draw_label(
-                painter,
-                &label,
-                Rect::xywh(
-                    row.rect.origin.x + 8.0,
-                    row.rect.origin.y,
-                    (row.rect.size.x - 16.0).max(0.0),
-                    row.rect.size.y,
+            let color = if row.item.implemented {
+                theme.sidebar_foreground
+            } else {
+                theme.tokens.muted_foreground
+            };
+            painter.stroke_svg_path(
+                row.item.icon,
+                Point2D::new(
+                    icon_x,
+                    row.rect.origin.y + (row.rect.size.y - ICON_SIZE) / 2.0,
                 ),
-                13.0,
-                if selected { 600 } else { 400 },
-                if row.item.implemented {
-                    theme.sidebar_foreground
-                } else {
-                    theme.tokens.muted_foreground
-                },
+                ICON_SIZE,
+                color,
+                1.5,
             );
+            if !compact {
+                draw_label(
+                    painter,
+                    row.item.label,
+                    Rect::xywh(
+                        row.rect.origin.x + 32.0,
+                        row.rect.origin.y,
+                        (row.rect.size.x - 40.0).max(0.0),
+                        row.rect.size.y,
+                    ),
+                    13.0,
+                    if selected { 600 } else { 400 },
+                    color,
+                );
+            }
         }
 
         if !compact {
@@ -326,17 +352,29 @@ impl ProjectSidebar {
                         theme.tokens.row_selected,
                     );
                 }
-                let (left_inset, weight) = match row.target {
-                    SidebarRowTarget::Project(_) => (8.0, 600),
-                    SidebarRowTarget::Session(_) => (20.0, 400),
+                let weight = match row.target {
+                    SidebarRowTarget::Project(_) => {
+                        painter.stroke_svg_path(
+                            FOLDER_ICON,
+                            Point2D::new(
+                                row.rect.origin.x + 8.0,
+                                row.rect.origin.y + (row.rect.size.y - ICON_SIZE) / 2.0,
+                            ),
+                            ICON_SIZE,
+                            theme.sidebar_foreground,
+                            1.5,
+                        );
+                        600
+                    }
+                    SidebarRowTarget::Session(_) => 400,
                 };
                 draw_label(
                     painter,
                     &row.label,
                     Rect::xywh(
-                        row.rect.origin.x + left_inset,
+                        row.rect.origin.x + 32.0,
                         row.rect.origin.y,
-                        (row.rect.size.x - left_inset - 8.0).max(0.0),
+                        (row.rect.size.x - 40.0).max(0.0),
                         row.rect.size.y,
                     ),
                     12.0,
@@ -354,17 +392,31 @@ impl ProjectSidebar {
         if footer_selected {
             painter.fill_round_rect(footer, theme.tokens.radius, theme.tokens.row_selected);
         }
+        let footer_icon_x = if compact {
+            footer.origin.x + (footer.size.x - ICON_SIZE) / 2.0
+        } else {
+            footer.origin.x + 8.0
+        };
+        painter.stroke_svg_path(
+            SETTINGS_FOOTER.icon,
+            Point2D::new(
+                footer_icon_x,
+                footer.origin.y + (footer.size.y - ICON_SIZE) / 2.0,
+            ),
+            ICON_SIZE,
+            theme.sidebar_foreground,
+            1.5,
+        );
+        if compact {
+            return;
+        }
         draw_label(
             painter,
-            if compact {
-                "设"
-            } else {
-                SETTINGS_FOOTER.label
-            },
+            SETTINGS_FOOTER.label,
             Rect::xywh(
-                footer.origin.x + 8.0,
+                footer.origin.x + 32.0,
                 footer.origin.y,
-                (footer.size.x - 16.0).max(0.0),
+                (footer.size.x - 40.0).max(0.0),
                 footer.size.y,
             ),
             12.0,

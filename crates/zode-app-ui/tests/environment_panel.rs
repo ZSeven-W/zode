@@ -14,6 +14,7 @@ use zode_node_protocol::{
 #[derive(Default)]
 struct PaintCapture {
     texts: Vec<String>,
+    text_origins: Vec<(String, Point2D)>,
     clips: Vec<Rect>,
     rounded_fills: Vec<Rect>,
     rounded_strokes: Vec<Rect>,
@@ -24,14 +25,14 @@ impl Painter for PaintCapture {
     fn end_frame(&mut self) {}
     fn fill_rect(&mut self, _rect: Rect, _color: Color) {}
     fn stroke_rect(&mut self, _rect: Rect, _color: Color, _width: f32) {}
-    fn draw_text(&mut self, layout: &TextLayout, _origin: Point2D) {
-        self.texts.push(
-            layout
-                .runs()
-                .iter()
-                .map(|run| run.content.as_str())
-                .collect(),
-        );
+    fn draw_text(&mut self, layout: &TextLayout, origin: Point2D) {
+        let text: String = layout
+            .runs()
+            .iter()
+            .map(|run| run.content.as_str())
+            .collect();
+        self.texts.push(text.clone());
+        self.text_origins.push((text, origin));
     }
     fn clip_rect(&mut self, rect: Rect) {
         self.clips.push(rect);
@@ -214,9 +215,8 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
         .sessions
         .insert(session.clone(), ready_presentation(&session));
 
-    let text = paint(&state, Rect::xywh(0.0, 0.0, 300.0, 700.0))
-        .texts
-        .join("\n");
+    let painter = paint(&state, Rect::xywh(0.0, 0.0, 300.0, 700.0));
+    let text = painter.texts.join("\n");
 
     for expected in [
         "已就绪",
@@ -236,6 +236,19 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
     for fabricated in ["51 完成", "main", "网页搜索", "查看全部"] {
         assert!(!text.contains(fabricated), "fabricated value: {fabricated}");
     }
+    let text_y = |needle: &str| {
+        painter
+            .text_origins
+            .iter()
+            .find_map(|(text, origin)| (text == needle).then_some(origin.y))
+            .expect("text is painted")
+    };
+    assert!(text_y("变更") < text_y("当前工作区"));
+    assert!(text_y("当前工作区") < text_y("子智能体"));
+    assert!(
+        text_y("上下文") - text_y("file:///repo/zode") >= 18.0,
+        "workspace value and context row must not overlap",
+    );
 
     state.presentation.sessions.insert(
         session.clone(),

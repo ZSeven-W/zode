@@ -3,7 +3,7 @@ use jian_widgets::{components::text_area::TextArea, Painter, Point2D, Rect, Text
 use zode_app_model::ComposerState;
 use zode_node_protocol::{SandboxMode, UserContent};
 
-use crate::{ImeEvent, Key, Modifiers, ZodeTheme};
+use crate::{ImeEvent, Key, Modifiers, RectExt, ZodeTheme};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposerSubmission {
@@ -228,7 +228,7 @@ pub struct Composer;
 
 impl Composer {
     pub fn paint(painter: &mut dyn Painter, rect: Rect, state: &ComposerState, theme: &ZodeTheme) {
-        Self::paint_with_branch(painter, rect, state, None, theme);
+        Self::paint_with_context(painter, rect, state, None, None, theme);
     }
 
     pub fn paint_with_branch(
@@ -238,8 +238,27 @@ impl Composer {
         branch: Option<&str>,
         theme: &ZodeTheme,
     ) {
+        Self::paint_with_context(painter, rect, state, None, branch, theme);
+    }
+
+    pub fn paint_with_context(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        state: &ComposerState,
+        connection_label: Option<&str>,
+        branch: Option<&str>,
+        theme: &ZodeTheme,
+    ) {
         let input = TextInputState::with_text(state.draft.clone());
-        Self::paint_input_with_branch(painter, rect, &input, state, branch, theme);
+        Self::paint_input_with_context(
+            painter,
+            rect,
+            &input,
+            state,
+            connection_label,
+            branch,
+            theme,
+        );
     }
 
     pub fn paint_input(
@@ -249,7 +268,7 @@ impl Composer {
         state: &ComposerState,
         theme: &ZodeTheme,
     ) {
-        Self::paint_input_with_branch(painter, rect, input, state, None, theme);
+        Self::paint_input_with_context(painter, rect, input, state, None, None, theme);
     }
 
     pub fn paint_input_with_branch(
@@ -257,6 +276,19 @@ impl Composer {
         rect: Rect,
         input: &TextInputState,
         state: &ComposerState,
+        branch: Option<&str>,
+        theme: &ZodeTheme,
+    ) {
+        Self::paint_input_with_context(painter, rect, input, state, None, branch, theme);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_input_with_context(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        input: &TextInputState,
+        state: &ComposerState,
+        connection_label: Option<&str>,
         branch: Option<&str>,
         theme: &ZodeTheme,
     ) {
@@ -272,23 +304,20 @@ impl Composer {
         painter.fill_round_rect(rect, 12.0, theme.tokens.card);
         painter.stroke_round_rect(rect, 12.0, theme.tokens.border, 1.0);
 
-        for (label, x) in [("zode", 16.0), ("本地", 74.0)] {
+        let mut context_x = 16.0;
+        for label in [Some("zode"), connection_label, branch]
+            .into_iter()
+            .flatten()
+            .filter(|label| !label.trim().is_empty())
+        {
             draw_text(
                 painter,
                 label,
-                Point2D::new(rect.origin.x + x, rect.origin.y + 18.0),
+                Point2D::new(rect.origin.x + context_x, rect.origin.y + 18.0),
                 10.0,
                 theme.tokens.muted_foreground,
             );
-        }
-        if let Some(branch) = branch.filter(|branch| !branch.trim().is_empty()) {
-            draw_text(
-                painter,
-                branch,
-                Point2D::new(rect.origin.x + 124.0, rect.origin.y + 18.0),
-                10.0,
-                theme.tokens.muted_foreground,
-            );
+            context_x += painter.measure_text_weighted(label, 10.0, 400) + 20.0;
         }
 
         TextArea {
@@ -310,34 +339,65 @@ impl Composer {
             ),
             &theme.tokens,
         );
+        let controls_y = rect.origin.y + rect.size.y - 17.0;
+        painter.stroke_svg_path(
+            "M4 12H20M12 4V20",
+            Point2D::new(rect.origin.x + 14.0, controls_y - 13.0),
+            16.0,
+            theme.tokens.muted_foreground,
+            1.5,
+        );
+        if !state.sandbox_label.trim().is_empty() {
+            draw_text(
+                painter,
+                &state.sandbox_label,
+                Point2D::new(rect.origin.x + 44.0, controls_y),
+                11.0,
+                theme.tokens.muted_foreground,
+            );
+        }
         let model = state.model.as_deref().unwrap_or("选择模型");
         draw_text(
             painter,
             model,
-            Point2D::new(rect.origin.x + 16.0, rect.origin.y + rect.size.y - 16.0),
-            11.0,
-            theme.tokens.muted_foreground,
-        );
-        draw_text(
-            painter,
-            if state.sandbox_label.is_empty() {
-                "完全访问"
-            } else {
-                &state.sandbox_label
-            },
-            Point2D::new(rect.origin.x + 120.0, rect.origin.y + rect.size.y - 16.0),
-            11.0,
-            theme.tokens.muted_foreground,
-        );
-        painter.fill_round_rect(
-            Rect::xywh(
-                rect.origin.x + rect.size.x - 42.0,
-                rect.origin.y + rect.size.y - 38.0,
-                28.0,
-                28.0,
+            Point2D::new(
+                (rect.max_x() - 190.0).max(rect.origin.x + 140.0),
+                controls_y,
             ),
-            14.0,
-            theme.zode_purple,
+            11.0,
+            theme.tokens.muted_foreground,
+        );
+        if let Some(effort) = state
+            .effort
+            .as_deref()
+            .filter(|effort| !effort.trim().is_empty())
+        {
+            draw_text(
+                painter,
+                effort,
+                Point2D::new(
+                    (rect.max_x() - 108.0).max(rect.origin.x + 220.0),
+                    controls_y,
+                ),
+                11.0,
+                theme.tokens.muted_foreground,
+            );
+        }
+        painter.stroke_svg_path(
+            "M9 5V12A3 3 0 0 0 15 12V5M6 11A6 6 0 0 0 18 11M12 17V21",
+            Point2D::new(rect.max_x() - 70.0, controls_y - 14.0),
+            16.0,
+            theme.tokens.muted_foreground,
+            1.4,
+        );
+        let send = Rect::xywh(rect.max_x() - 42.0, rect.max_y() - 38.0, 28.0, 28.0);
+        painter.fill_round_rect(send, 14.0, theme.zode_purple);
+        painter.stroke_svg_path(
+            "M7 13L12 8L17 13M12 8V18",
+            Point2D::new(send.origin.x + 6.0, send.origin.y + 6.0),
+            16.0,
+            jian_widgets::Color::WHITE,
+            1.6,
         );
     }
 }

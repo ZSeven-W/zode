@@ -165,17 +165,15 @@ fn paint_header(painter: &mut dyn Painter, layout: &EnvironmentPanelLayout, them
 
 fn paint_body(painter: &mut dyn Painter, body: Rect, state: &ZodeAppState, theme: &ZodeTheme) {
     let mut y = body.origin.y + 22.0;
-    paint_value_row(
-        painter,
-        body,
-        y,
-        "主机连接",
-        connection_label(state.host.connection),
-        theme,
-    );
-    y += 28.0;
-
     let Some(session) = state.current_session.as_ref() else {
+        paint_value_row(
+            painter,
+            body,
+            y,
+            "主机连接",
+            connection_label(state.host.connection),
+            theme,
+        );
         draw_text(
             painter,
             "选择任务以查看环境",
@@ -188,51 +186,6 @@ fn paint_body(painter: &mut dyn Painter, body: Rect, state: &ZodeAppState, theme
     };
 
     let presentation = state.current_session_presentation();
-    let workspace = presentation
-        .and_then(|presentation| presentation.context.ready())
-        .map(|context| context.workspace_uri.as_str())
-        .or_else(|| {
-            state
-                .threads
-                .iter()
-                .find(|thread| &thread.session == session)
-                .map(|thread| thread.workspace_uri.as_str())
-        })
-        .unwrap_or("未知");
-    paint_stacked_value(painter, body, &mut y, "当前工作区", workspace, theme);
-
-    match presentation.map(|presentation| &presentation.context) {
-        None | Some(LoadState::Idle) => {
-            paint_value_row(painter, body, y, "上下文", "尚未加载", theme);
-            y += 28.0;
-        }
-        Some(LoadState::Loading) => {
-            paint_value_row(painter, body, y, "上下文", "加载中", theme);
-            y += 28.0;
-        }
-        Some(LoadState::Failed(error)) => {
-            let message = format!("加载失败：{error}");
-            paint_stacked_value(painter, body, &mut y, "上下文", &message, theme);
-        }
-        Some(LoadState::Ready(context)) => {
-            paint_value_row(painter, body, y, "上下文", "已就绪", theme);
-            y += 28.0;
-            if let Some(branch) = context.branch.as_deref() {
-                paint_stacked_value(painter, body, &mut y, "分支", branch, theme);
-            }
-            paint_entries(painter, body, &mut y, "子智能体", &context.subagents, theme);
-            paint_entries(
-                painter,
-                body,
-                &mut y,
-                "后台进程",
-                &context.background_processes,
-                theme,
-            );
-            paint_entries(painter, body, &mut y, "来源", &context.sources, theme);
-        }
-    }
-
     let diff_state = presentation.map(|presentation| &presentation.diff.load);
     match diff_state {
         None | Some(LoadState::Idle) => {
@@ -263,6 +216,60 @@ fn paint_body(painter: &mut dyn Painter, body: Rect, state: &ZodeAppState, theme
                 550,
                 theme.success,
             );
+            y += 20.0;
+        }
+    }
+
+    y += 8.0;
+    paint_value_row(
+        painter,
+        body,
+        y,
+        "主机连接",
+        connection_label(state.host.connection),
+        theme,
+    );
+    y += 28.0;
+    let workspace = presentation
+        .and_then(|presentation| presentation.context.ready())
+        .map(|context| context.workspace_uri.as_str())
+        .or_else(|| {
+            state
+                .threads
+                .iter()
+                .find(|thread| &thread.session == session)
+                .map(|thread| thread.workspace_uri.as_str())
+        })
+        .unwrap_or("未知");
+    paint_stacked_value(painter, body, &mut y, "当前工作区", workspace, theme);
+
+    match presentation.map(|presentation| &presentation.context) {
+        None | Some(LoadState::Idle) => {
+            paint_value_row(painter, body, y, "上下文", "尚未加载", theme);
+        }
+        Some(LoadState::Loading) => {
+            paint_value_row(painter, body, y, "上下文", "加载中", theme);
+        }
+        Some(LoadState::Failed(error)) => {
+            let message = format!("加载失败：{error}");
+            paint_stacked_value(painter, body, &mut y, "上下文", &message, theme);
+        }
+        Some(LoadState::Ready(context)) => {
+            paint_value_row(painter, body, y, "上下文", "已就绪", theme);
+            y += 28.0;
+            if let Some(branch) = context.branch.as_deref() {
+                paint_stacked_value(painter, body, &mut y, "分支", branch, theme);
+            }
+            paint_entries(painter, body, &mut y, "子智能体", &context.subagents, theme);
+            paint_entries(
+                painter,
+                body,
+                &mut y,
+                "后台进程",
+                &context.background_processes,
+                theme,
+            );
+            paint_entries(painter, body, &mut y, "来源", &context.sources, theme);
         }
     }
 }
@@ -338,7 +345,7 @@ fn paint_stacked_value(
         450,
         theme.tokens.foreground,
     );
-    *y += 24.0;
+    *y += 34.0;
 }
 
 fn paint_value_row(
