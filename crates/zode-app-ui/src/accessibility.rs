@@ -7,13 +7,14 @@ use zode_app_model::{
 
 use crate::{
     composer_queue_reserved_height, Composer, DocumentPreview, EnvironmentPanel, Insets,
-    IntegrationsPage, ProjectPickerViewState, RectExt, ReviewPanel, SettingsPanel, ThreadHeader,
+    IntegrationsPage, ProjectPickerViewState, RectExt, ReviewPanel, SettingsPanel,
     ThreadTranscript, WorkspaceLayout, COMPOSER_ATTACHMENT_H, COMPOSER_H,
     DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID, DOCUMENT_PREVIEW_EXTERNAL_ID,
     DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID,
     INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
 };
 
+mod header;
 mod ids;
 mod project_picker;
 mod queue;
@@ -21,6 +22,7 @@ mod settings;
 mod sidebar;
 mod transcript;
 
+use header::{append_header_menu_nodes, append_header_nodes};
 pub(crate) use ids::stable_widget_id;
 use project_picker::{
     append_composer_detach, append_picker_overlay, append_welcome_project_trigger,
@@ -282,6 +284,9 @@ impl WorkspaceSnapshot {
                 }
             }
         };
+        if route == ShellRoute::Conversation {
+            append_header_menu_nodes(&mut nodes, &layout, &mut focus_order, state);
+        }
         append_secondary_nodes(&mut nodes, &layout, &mut focus_order, state);
         let mut focused = if split_fallback {
             let close_id = match state.presentation.secondary_pane {
@@ -360,34 +365,6 @@ fn current_session_busy(state: &ZodeAppState) -> bool {
         .as_ref()
         .and_then(|session| state.transcripts.get(session))
         .is_some_and(|transcript| transcript.busy)
-}
-
-fn append_header_nodes(
-    nodes: &mut Vec<InteractionNode>,
-    layout: &WorkspaceLayout,
-    focus_order: &mut u32,
-    state: &ZodeAppState,
-) {
-    let header = ThreadHeader::layout(layout.top_bar, state);
-    for (action, id, label) in [
-        (header.environment, HEADER_ENVIRONMENT_ID, "环境信息"),
-        (header.review, HEADER_REVIEW_ID, "审查变更"),
-    ] {
-        let Some(action) = action.filter(|action| visible_rect(action.rect)) else {
-            continue;
-        };
-        debug_assert_eq!(action.id, id);
-        nodes.push(node(
-            id,
-            action.rect,
-            Role::Button,
-            label,
-            None,
-            vec![Action::Click, Action::Focus],
-            next_order(focus_order),
-            CursorHint::Pointer,
-        ));
-    }
 }
 
 fn append_integration_nodes(

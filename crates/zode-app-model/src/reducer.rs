@@ -110,12 +110,14 @@ pub fn reduce_presentation_command(
     if route != crate::ShellRoute::Conversation {
         close_secondary(state);
     }
+    state.session_menu = None;
     state.presentation.route = route;
     state.shell.page = route.legacy_page();
     PresentationCommandOutcome::Applied
 }
 
 fn open_secondary(state: &mut ZodeAppState, pane: crate::SecondaryPane) {
+    state.session_menu = None;
     state.presentation.route = crate::ShellRoute::Conversation;
     state.presentation.secondary_pane = Some(pane);
     state.shell.page = crate::ShellPage::Conversation;
@@ -293,6 +295,7 @@ pub fn reduce_queue_command(state: &mut ZodeAppState, command: &AppCommand) -> Q
                 return QueueCommandOutcome::Ignored;
             }
             state.composer.queue_menu = (state.composer.queue_menu != Some(*id)).then_some(*id);
+            state.session_menu = None;
             QueueCommandOutcome::Applied
         }
         AppCommand::BeginEditQueuedMessage { session, id } => {
@@ -506,6 +509,16 @@ pub fn reduce_navigation_command(
         return outcome;
     }
     match command {
+        AppCommand::ToggleSessionMenu { session } => {
+            if state.current_session.as_ref() != Some(&session)
+                || !state.threads.iter().any(|thread| thread.session == session)
+            {
+                return NavigationOutcome::Ignored;
+            }
+            state.session_menu = (state.session_menu.as_ref() != Some(&session)).then_some(session);
+            state.composer.queue_menu = None;
+            NavigationOutcome::Applied
+        }
         AppCommand::SelectSession(session) => {
             let Some(workspace_uri) = state
                 .threads
@@ -525,6 +538,7 @@ pub fn reduce_navigation_command(
                 state.composer.queue_menu = None;
                 state.composer.finish_queue_edit();
             }
+            state.session_menu = None;
             state.project_picker = crate::ProjectPickerState::default();
             state.current_session = Some(session.clone());
             if let Some(options) = state.presentation.sessions[&session]
@@ -585,6 +599,7 @@ pub fn reduce_navigation_command(
                 .retain(|_, approval_session| approval_session != &session);
             if deleting_current {
                 state.current_session = None;
+                state.session_menu = None;
                 state.composer.queue_menu = None;
                 state.composer.finish_queue_edit();
                 state.review = crate::ReviewState::default();

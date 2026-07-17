@@ -130,3 +130,35 @@ fn terminal_runtime_reaps_stream_eof_before_reopening() {
     runtime.close(second).unwrap();
     assert_eq!(service.state.lock().unwrap().closes, 2);
 }
+
+#[test]
+fn terminal_output_and_eof_share_one_wake_then_rearm_after_drain() {
+    let service = Arc::new(FakeTerminalService::default());
+    let wakes = Arc::new(Mutex::new(0_usize));
+    let wake_count = Arc::clone(&wakes);
+    let mut runtime = TerminalRuntime::new(service, move || {
+        *wake_count.lock().unwrap() += 1;
+    });
+    let cwd = std::env::current_dir().unwrap();
+
+    for expected_wakes in 1..=2 {
+        runtime.open(&cwd, 80, 24).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if runtime.reap_finished().unwrap().is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "terminal stream did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            *wakes.lock().unwrap(),
+            expected_wakes,
+            "output chunks and EOF must remain coalesced until the UI drain"
+        );
+        let output = runtime.drain_output();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].as_ref().unwrap(), b"runtime-ready");
+    }
+}

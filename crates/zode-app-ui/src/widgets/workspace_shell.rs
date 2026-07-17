@@ -302,6 +302,16 @@ impl WorkspaceShell {
         if !matches!(state.presentation.route, ShellRoute::Settings(_)) {
             ProjectSidebar::paint_hover_overlay(painter, geometry.sidebar, state, hovered, theme);
         }
+        if state.presentation.route == ShellRoute::Conversation {
+            ThreadHeader::paint_overlays(
+                painter,
+                geometry.top_bar,
+                state,
+                snapshot.focused,
+                hovered,
+                theme,
+            );
+        }
         painter.end_frame();
         geometry
     }

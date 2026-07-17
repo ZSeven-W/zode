@@ -4,8 +4,8 @@ use zode_app_model::{
     SessionPresentationState, TranscriptItem, TranscriptState,
 };
 use zode_app_ui::{
-    Composer, ComposerController, ImeEvent, Insets, RectExt, WorkspaceShell, WorkspaceSnapshot,
-    ZodeTheme, COMPOSER_ID,
+    Composer, ComposerController, ImeEvent, Insets, Key, RectExt, WorkspaceShell,
+    WorkspaceSnapshot, ZodeTheme, COMPOSER_ID,
 };
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
@@ -14,12 +14,15 @@ struct TextCapture {
     texts: Vec<String>,
     text_lines: Vec<(String, Point2D, f32)>,
     icons: Vec<(&'static str, Point2D, f32)>,
+    fill_rects: Vec<Rect>,
 }
 
 impl Painter for TextCapture {
     fn begin_frame(&mut self) {}
     fn end_frame(&mut self) {}
-    fn fill_rect(&mut self, _rect: Rect, _color: Color) {}
+    fn fill_rect(&mut self, rect: Rect, _color: Color) {
+        self.fill_rects.push(rect);
+    }
     fn stroke_rect(&mut self, _rect: Rect, _color: Color, _width: f32) {}
     fn draw_text(&mut self, layout: &TextLayout, origin: Point2D) {
         let text: String = layout
@@ -105,6 +108,61 @@ fn composer_paints_live_ime_preedit() {
     );
 
     assert!(painter.texts.iter().any(|text| text.contains("中文")));
+}
+
+#[test]
+fn composer_ime_cursor_area_tracks_the_painted_preedit_caret() {
+    let mut state = zode_app_model::demo_state();
+    state.composer.focused = true;
+    let mut controller = ComposerController::fixture("prefix ");
+    controller.ime(ImeEvent::Update {
+        text: "中文".into(),
+        cursor: Some("中".len()),
+    });
+    let rect = Rect::xywh(40.0, 500.0, 500.0, 120.0);
+    let theme = ZodeTheme::light();
+    let mut painted = TextCapture::default();
+
+    Composer::paint_input(
+        &mut painted,
+        rect,
+        controller.input_state(),
+        &state.composer,
+        &theme,
+    );
+    let painted_caret = *painted
+        .fill_rects
+        .last()
+        .expect("focused composer paints a caret");
+    let mut metrics = TextCapture::default();
+    let ime_area =
+        Composer::ime_cursor_area(&mut metrics, rect, controller.input_state(), &state, &theme)
+            .expect("focused composer exposes its caret area");
+
+    assert_eq!(ime_area, painted_caret);
+    assert!(ime_area.origin.y > rect.origin.y);
+}
+
+#[test]
+fn composer_ime_cursor_area_remains_available_for_a_selection() {
+    let mut state = zode_app_model::demo_state();
+    state.composer.focused = true;
+    let mut controller = ComposerController::fixture("selected text");
+    let _ = controller.key(Key::Character("a".into()), zode_app_ui::Modifiers::SUPER);
+    let rect = Rect::xywh(40.0, 500.0, 500.0, 120.0);
+
+    let area = Composer::ime_cursor_area(
+        &mut TextCapture::default(),
+        rect,
+        controller.input_state(),
+        &state,
+        &ZodeTheme::light(),
+    )
+    .expect("selection focus still provides an IME insertion anchor");
+
+    assert!(Composer::layout_for_state(rect, &state)
+        .input
+        .contains(area.origin));
 }
 
 #[test]

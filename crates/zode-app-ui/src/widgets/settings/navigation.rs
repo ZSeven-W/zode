@@ -186,7 +186,7 @@ const NAVIGATION: [NavigationDescriptor; 20] = [
         "已归档",
         "已归档任务",
         SemanticIcon::Archive,
-        None,
+        Some(NavigationTarget::Settings(SettingsCategory::ArchivedTasks)),
     ),
 ];
 
@@ -455,5 +455,6 @@ pub(super) const fn category_widget_id(category: SettingsCategory) -> WidgetId {
         SettingsCategory::Permissions => SETTINGS_PERMISSIONS_CATEGORY_ID,
         SettingsCategory::KeyboardShortcuts => SETTINGS_KEYBOARD_SHORTCUTS_CATEGORY_ID,
         SettingsCategory::Environment => SETTINGS_ENVIRONMENT_CATEGORY_ID,
+        SettingsCategory::ArchivedTasks => SETTINGS_ARCHIVED_ID,
     }
 }

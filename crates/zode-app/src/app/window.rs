@@ -1,7 +1,7 @@
 use std::{num::NonZeroU32, sync::Arc};
 
 use winit::event_loop::ActiveEventLoop;
-use zode_app_ui::{accessibility_tree, WorkspaceShell, WorkspaceSnapshot};
+use zode_app_ui::{accessibility_tree, Composer, WorkspaceShell, WorkspaceSnapshot, COMPOSER_ID};
 
 #[cfg(not(target_os = "macos"))]
 use crate::event_map::resize_direction;
@@ -69,11 +69,16 @@ impl DesktopApp {
     }
 
     pub(super) fn redraw(&mut self) -> Result<(), String> {
+        // Most state-changing input paths prepare the next immutable snapshot
+        // before requesting a frame. Rebuild only as a fallback for paint-only
+        // wakes (focus, hover, expose), never twice for the same frame.
+        if !self.frame_snapshot_prepared {
+            self.rebuild_frame_snapshot();
+        }
         let (physical_width, physical_height) = (
             self.window_state.physical_width.max(1),
             self.window_state.physical_height.max(1),
         );
-        self.rebuild_frame_snapshot();
         let required = (physical_width, physical_height);
         if self.raster.as_ref().map(RasterSurface::size) != Some(required) {
             self.raster = Some(
@@ -87,15 +92,18 @@ impl DesktopApp {
         canvas.reset_matrix();
         canvas.clear(skia_safe::Color::WHITE);
         let scale = self.window_state.scale_factor as f32;
-        if let Some(a11y) = self.a11y.as_mut() {
-            a11y.push(accessibility_tree(
-                &self.frame_snapshot,
-                self.window_state.scale_factor,
-            ));
+        if self.accessibility_tree_dirty {
+            if let Some(a11y) = self.a11y.as_mut() {
+                a11y.push(accessibility_tree(
+                    &self.frame_snapshot,
+                    self.window_state.scale_factor,
+                ));
+                self.accessibility_tree_dirty = false;
+            }
         }
         canvas.scale((scale, scale));
         let theme = crate::preferences::theme_for_state(&self.app_state);
-        {
+        let ime_cursor_area = {
             let mut painter = FramePainter::new(&mut self.renderer, canvas);
             WorkspaceShell::paint_snapshot_with_project_picker(
                 &mut painter,
@@ -109,33 +117,49 @@ impl DesktopApp {
                 self.hovered_widget,
                 &theme,
             );
+            // Focus sync already anchors IME to the input bounds. Probe the
+            // exact caret only while a candidate/preedit session is active,
+            // avoiding a second text-layout pass for ordinary redraws.
+            (self.window_focused
+                && self.focused_widget == Some(COMPOSER_ID)
+                && self.composer.input_state().composition().is_some())
+            .then(|| {
+                Composer::ime_cursor_area(
+                    &mut painter,
+                    self.frame_snapshot.layout.composer,
+                    self.composer.input_state(),
+                    &self.app_state,
+                    &theme,
+                )
+            })
+            .flatten()
+        };
+        if let (Some(window), Some(area)) = (self.window.as_deref(), ime_cursor_area) {
+            crate::ime::set_cursor_area(window, area);
         }
 
-        let mut rgba = vec![0_u8; physical_width as usize * physical_height as usize * 4];
-        if !raster.read_rgba8(&mut rgba) {
-            return Err("Skia framebuffer read failed".into());
-        }
         let presenter = self
             .presenter
             .as_mut()
             .ok_or_else(|| "presenter is not initialized".to_owned())?;
-        presenter
-            .resize(
-                NonZeroU32::new(physical_width).expect("positive width"),
-                NonZeroU32::new(physical_height).expect("positive height"),
-            )
-            .map_err(|error| error.to_string())?;
+        if self.presenter_size != Some(required) {
+            presenter
+                .resize(
+                    NonZeroU32::new(physical_width).expect("positive width"),
+                    NonZeroU32::new(physical_height).expect("positive height"),
+                )
+                .map_err(|error| error.to_string())?;
+            self.presenter_size = Some(required);
+        }
         let mut buffer = presenter.buffer_mut().map_err(|error| error.to_string())?;
-        for (index, pixel) in buffer.iter_mut().enumerate() {
-            let offset = index * 4;
-            *pixel = (u32::from(rgba[offset]) << 16)
-                | (u32::from(rgba[offset + 1]) << 8)
-                | u32::from(rgba[offset + 2]);
+        if !raster.copy_rgb_to(&mut buffer) {
+            return Err("Skia framebuffer copy failed".into());
         }
         if let Some(window) = self.window.as_ref() {
             window.pre_present_notify();
         }
         buffer.present().map_err(|error| error.to_string())?;
+        self.frame_snapshot_prepared = false;
         self.window_state.dirty = false;
         Ok(())
     }
@@ -180,6 +204,8 @@ impl DesktopApp {
         self.focused_widget = snapshot.focused;
         self.hovered_widget = snapshot.hit_test(self.window_state.cursor_logical);
         self.frame_snapshot = snapshot;
+        self.frame_snapshot_prepared = true;
+        self.accessibility_tree_dirty = true;
     }
 
     pub(super) fn record_window_geometry(&mut self) {

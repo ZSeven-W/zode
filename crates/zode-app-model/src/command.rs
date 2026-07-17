@@ -21,6 +21,9 @@ pub enum AppCommand {
         workspace_uri: WorkspaceUri,
     },
     SelectSession(SessionLocator),
+    ToggleSessionMenu {
+        session: SessionLocator,
+    },
     RenameSession {
         session: SessionLocator,
         title: String,

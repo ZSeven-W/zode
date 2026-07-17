@@ -18,6 +18,9 @@ pub(crate) fn reduce_sidebar_navigation(
             } else {
                 state.pinned_sessions.remove(session);
             }
+            if state.session_menu.as_ref() == Some(session) {
+                state.session_menu = None;
+            }
             NavigationOutcome::NeedsEffect
         }
         AppCommand::SetSessionArchived { session, archived } => {
@@ -32,6 +35,9 @@ pub(crate) fn reduce_sidebar_navigation(
                 state.archived_sessions.insert(session.clone());
             } else {
                 state.archived_sessions.remove(session);
+            }
+            if state.session_menu.as_ref() == Some(session) {
+                state.session_menu = None;
             }
             if *archived && state.current_session.as_ref() == Some(session) {
                 state.current_session = None;

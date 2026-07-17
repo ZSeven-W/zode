@@ -111,7 +111,7 @@ impl DesktopApp {
         cwd.is_dir().then(|| (root.clone(), cwd))
     }
 
-    pub(super) fn drain_terminal_output(&mut self) {
+    pub(super) fn drain_terminal_output(&mut self) -> bool {
         let mut changed = false;
         for output in self.terminal_runtime.drain_output() {
             match output {
@@ -119,7 +119,10 @@ impl DesktopApp {
                     self.terminal_grid.feed(&bytes);
                     changed = true;
                 }
-                Err(error) => self.app_state.terminal.unavailable_reason = Some(error.to_string()),
+                Err(error) => {
+                    self.app_state.terminal.unavailable_reason = Some(error.to_string());
+                    changed = true;
+                }
             }
         }
         if changed && self.app_state.terminal.follow_tail {
@@ -134,10 +137,15 @@ impl DesktopApp {
                 self.terminal_workspace = None;
                 self.app_state.terminal.open = false;
                 self.app_state.terminal.focused = false;
+                changed = true;
             }
             Ok(_) => {}
-            Err(error) => self.app_state.terminal.unavailable_reason = Some(error.to_string()),
+            Err(error) => {
+                self.app_state.terminal.unavailable_reason = Some(error.to_string());
+                changed = true;
+            }
         }
+        changed
     }
 
     pub(super) fn terminal_rect(&self) -> Rect {

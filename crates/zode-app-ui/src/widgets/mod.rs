@@ -58,8 +58,9 @@ pub use review_panel::{
     ReviewSelection,
 };
 pub use settings::{
-    GeneralSettingsLayout, PermissionPresetLayout, PermissionRow, PermissionRowLayout,
-    SettingControl, SettingControlLayout, SettingRowLayout, SettingsNavigationEntryLayout,
+    ArchivedTaskGroupLayout, ArchivedTaskRowLayout, ArchivedTasksLayout, GeneralSettingsLayout,
+    PermissionPresetLayout, PermissionRow, PermissionRowLayout, SettingControl,
+    SettingControlLayout, SettingRowLayout, SettingsNavigationEntryLayout,
     SettingsNavigationGroupLayout, SettingsNavigationLayout, SettingsPanel, SettingsPanelLayout,
     SETTINGS_BACK_ID,
 };
@@ -69,6 +70,9 @@ pub use terminal_grid::{
 };
 pub use terminal_panel::TerminalPanel;
 pub use thread_header::{HeaderActionLayout, ThreadHeader, ThreadHeaderLayout};
+pub(crate) use thread_header::{
+    HEADER_MENU_ARCHIVE_ID, HEADER_MENU_ID, HEADER_MENU_PIN_ID, HEADER_MORE_ID,
+};
 pub use tool_card::{ToolCard, ToolTone};
 pub use transcript::{ThreadTranscript, TranscriptItemLayout};
 pub use usage_chip::{UsageChip, UsageDisplay};

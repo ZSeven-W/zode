@@ -10,6 +10,7 @@ mod command_projection;
 pub mod cursor;
 mod event_bridge;
 pub mod event_map;
+mod ime;
 pub mod input_dispatch;
 mod platform_work_area;
 pub mod preferences;

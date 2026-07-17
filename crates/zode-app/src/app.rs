@@ -46,6 +46,7 @@ mod presentation;
 mod project_picker;
 mod queue;
 mod queue_focus;
+mod session_menu;
 mod sidebar;
 mod terminal;
 mod window;
@@ -98,6 +99,7 @@ pub struct DesktopApp {
     a11y: Option<AccessibilityHost>,
     window: Option<Arc<Window>>,
     presenter: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    presenter_size: Option<(u32, u32)>,
     raster: Option<RasterSurface>,
     renderer: NativeBackend,
     window_state: WindowState,
@@ -122,6 +124,8 @@ pub struct DesktopApp {
     presentation_queries: Option<PresentationQueryBridge>,
     settings_touch: crate::input_dispatch::SettingsTouchTracker,
     frame_snapshot: WorkspaceSnapshot,
+    frame_snapshot_prepared: bool,
+    accessibility_tree_dirty: bool,
     focused_widget: Option<WidgetId>,
     hovered_widget: Option<WidgetId>,
     window_focused: bool,
@@ -253,6 +257,7 @@ impl DesktopApp {
             a11y: None,
             window: None,
             presenter: None,
+            presenter_size: None,
             raster: None,
             renderer: NativeBackend::new(1.0),
             window_state: WindowState::new(1221, 992, 1.0),
@@ -271,6 +276,8 @@ impl DesktopApp {
             presentation_queries: None,
             settings_touch: crate::input_dispatch::SettingsTouchTracker::default(),
             frame_snapshot,
+            frame_snapshot_prepared: true,
+            accessibility_tree_dirty: true,
             focused_widget,
             hovered_widget: None,
             window_focused: false,
@@ -477,19 +484,18 @@ impl ApplicationHandler<AppWake> for DesktopApp {
                     }
                 }
                 let queries_applied = self.drain_presentation_queries();
-                if event_drain.applied
-                    + commands_applied
-                    + queries_applied
-                    + workspace_picks_applied
-                    > 0
-                {
+                let terminal_changed = self.drain_terminal_output();
+                let background_changed = event_drain.changed
+                    || commands_applied > 0
+                    || queries_applied > 0
+                    || workspace_picks_applied > 0
+                    || terminal_changed;
+                if background_changed {
                     self.rebuild_frame_snapshot();
                 }
-                self.drain_terminal_output();
                 self.sync_composer_busy();
-                self.window_state.dirty = true;
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
+                if background_changed {
+                    self.request_redraw();
                 }
             }
             AppWake::Close => {
@@ -543,7 +549,8 @@ impl ApplicationHandler<AppWake> for DesktopApp {
             }
             WindowEvent::ThemeChanged(theme) => {
                 self.app_state.host.system_theme = crate::event_map::map_system_theme(Some(theme));
-                let _ = self.proxy.send_event(AppWake::Redraw);
+                self.rebuild_frame_snapshot();
+                self.request_redraw();
             }
             WindowEvent::Focused(focused) => {
                 if let Some(a11y) = self.a11y.as_mut() {

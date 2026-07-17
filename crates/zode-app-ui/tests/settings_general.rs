@@ -102,7 +102,7 @@ fn unavailable_navigation_and_general_rows_are_semantically_disabled() {
             .iter()
             .filter(|entry| entry.enabled)
             .count(),
-        3
+        4
     );
     assert!(layout
         .navigation

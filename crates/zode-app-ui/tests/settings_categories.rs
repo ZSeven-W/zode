@@ -68,9 +68,12 @@ fn category_rail_has_stable_rows_typed_commands_and_honest_placeholders() {
     assert_eq!(rows.len(), 20);
     assert_eq!(rows.iter().filter(|row| row.selected).count(), 1);
     assert!(rows.iter().any(|row| row.label == "外观" && row.selected));
-    assert_eq!(rows.iter().filter(|row| row.enabled).count(), 3);
+    assert_eq!(rows.iter().filter(|row| row.enabled).count(), 4);
     assert!(rows.iter().any(|row| row.label == "常规" && row.enabled));
     assert!(rows.iter().any(|row| row.label == "插件" && row.enabled));
+    assert!(rows
+        .iter()
+        .any(|row| row.label == "已归档任务" && row.enabled));
     assert!(rows
         .iter()
         .any(|row| row.label == "键盘快捷键" && !row.enabled));
@@ -109,7 +112,32 @@ fn category_rail_has_stable_rows_typed_commands_and_honest_placeholders() {
             .iter()
             .filter(|text| text.as_str() == "即将支持")
             .count(),
-        17
+        16
+    );
+}
+
+#[test]
+fn archived_tasks_navigation_is_a_selected_typed_destination() {
+    let mut state = demo_state();
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::ArchivedTasks);
+    state.shell.page = ShellPage::Settings;
+
+    let archived = SettingsPanel::navigation_entries(Rect::xywh(0.0, 0.0, 240.0, 1_080.0), &state)
+        .into_iter()
+        .find(|row| row.label == "已归档任务")
+        .expect("archived tasks navigation row");
+
+    assert!(archived.enabled);
+    assert!(archived.selected);
+    assert_eq!(
+        archived.command,
+        Some(AppCommand::SelectSettingsCategory(
+            SettingsCategory::ArchivedTasks,
+        ))
+    );
+    assert_eq!(
+        SettingsPanel::command_for_widget(&state, archived.id),
+        archived.command,
     );
 }
 

@@ -110,6 +110,24 @@ rfd = "0.15"
 open = "5"
 notify-rust = "=4.11.7"
 
+# The desktop app moves a Retina-sized framebuffer through Rust on every
+# interaction. Keep normal workspace debug semantics, but optimize the live UI
+# path so `cargo run -p zode-app` remains usable for local product testing.
+[profile.dev.package.zode-app]
+opt-level = 2
+
+[profile.dev.package.zode-app-ui]
+opt-level = 2
+
+[profile.dev.package.jian-widgets]
+opt-level = 2
+
+[profile.dev.package.jian-skia]
+opt-level = 2
+
+[profile.dev.package.softbuffer]
+opt-level = 2
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

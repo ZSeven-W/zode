@@ -10,6 +10,7 @@ use crate::{
 
 mod attachments;
 mod context;
+mod ime;
 mod input;
 mod queue;
 
@@ -403,6 +404,24 @@ impl Composer {
     pub fn layout_for_state(rect: Rect, state: &ZodeAppState) -> ComposerLayout {
         let queue_count = queue::current_queue(state).map_or(0, |(_, items)| items.len());
         Self::layout_with_queue_count(rect, &state.composer, queue_count)
+    }
+
+    /// Returns the logical caret rectangle used to anchor the native IME
+    /// candidate window. Geometry is probed through the same `TextArea` paint
+    /// path as the visible composer so wrapping, font metrics and preedit stay aligned.
+    pub fn ime_cursor_area(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        text_input: &TextInputState,
+        state: &ZodeAppState,
+        theme: &ZodeTheme,
+    ) -> Option<Rect> {
+        ime::cursor_area(
+            painter,
+            Self::layout_for_state(rect, state).input,
+            text_input,
+            theme,
+        )
     }
 
     fn layout_with_queue_count(

@@ -1,3 +1,4 @@
+mod archived;
 mod general;
 mod navigation;
 mod permissions;
@@ -17,6 +18,7 @@ use crate::{
     REDUCED_MOTION_ID, THEME_DARK_ID, THEME_LIGHT_ID, THEME_SYSTEM_ID,
 };
 
+pub use archived::{ArchivedTaskGroupLayout, ArchivedTaskRowLayout, ArchivedTasksLayout};
 pub use general::GeneralSettingsLayout;
 pub use navigation::{
     SettingsNavigationEntryLayout, SettingsNavigationGroupLayout, SettingsNavigationLayout,
@@ -53,6 +55,7 @@ pub struct SettingsPanelLayout {
     pub content: Rect,
     pub scroll_offset: f32,
     pub navigation: SettingsNavigationLayout,
+    pub archived: ArchivedTasksLayout,
     pub general: GeneralSettingsLayout,
 }
 
@@ -71,6 +74,7 @@ impl SettingsPanel {
             content,
             scroll_offset,
             navigation: navigation::layout(sidebar, state),
+            archived: archived::layout(content, state, scroll_offset),
             general: general::layout(content, state, scroll_offset),
         }
     }
@@ -245,10 +249,15 @@ impl SettingsPanel {
         permissions::preset_layouts(card, content, state)
     }
 
+    pub fn archived_task_layout(content: Rect, state: &ZodeAppState) -> ArchivedTasksLayout {
+        archived::layout(content, state, scroll_offset(content, state))
+    }
+
     pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
         navigation::command_for_widget(id)
             .or_else(|| permissions::command_for_preset(state, id))
             .or_else(|| general::command_for_widget(state, id))
+            .or_else(|| archived::command_for_widget(state, id))
             .or_else(|| {
                 (Self::active_category(state) == SettingsCategory::Appearance).then_some(())?;
                 [
@@ -339,6 +348,13 @@ impl SettingsPanel {
             SettingsCategory::Environment => {
                 paint_placeholder(painter, layout.content, "环境", "环境设置即将支持", theme)
             }
+            SettingsCategory::ArchivedTasks => archived::paint(
+                painter,
+                layout.content,
+                &layout.archived,
+                layout.scroll_offset,
+                theme,
+            ),
         }
         painter.restore();
     }
@@ -417,6 +433,7 @@ fn settings_content_height(state: &ZodeAppState) -> f32 {
                 + 24.0
         }
         SettingsCategory::KeyboardShortcuts | SettingsCategory::Environment => 244.0,
+        SettingsCategory::ArchivedTasks => archived::content_height(state),
     }
 }
 

@@ -168,6 +168,29 @@ pub(super) fn append_settings_nodes(
         nodes.push(control);
     }
 
+    if SettingsPanel::active_category(state) == zode_app_model::SettingsCategory::ArchivedTasks {
+        for row in settings
+            .archived
+            .groups
+            .iter()
+            .flat_map(|group| group.rows.iter())
+        {
+            let Some(visible_rect) = row.visible_action_rect else {
+                continue;
+            };
+            nodes.push(node(
+                row.id,
+                visible_rect,
+                Role::Button,
+                &format!("取消归档 {}", row.title),
+                Some(row.workspace_uri.as_str().into()),
+                vec![Action::Click, Action::Focus],
+                next_order(focus_order),
+                CursorHint::Pointer,
+            ));
+        }
+    }
+
     let Some(workspace_uri) = SettingsPanel::active_workspace_uri(state) else {
         return;
     };

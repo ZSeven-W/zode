@@ -72,6 +72,43 @@ fn pin_and_archive_commands_update_memory_before_requesting_persistence() {
 }
 
 #[test]
+fn task_menu_is_session_scoped_and_closes_after_a_real_action() {
+    let (mut state, session, _) = state_with_thread();
+    state.current_session = Some(session.clone());
+
+    assert_eq!(
+        reduce_navigation_command(
+            &mut state,
+            AppCommand::ToggleSessionMenu {
+                session: session.clone(),
+            },
+        ),
+        NavigationOutcome::Applied
+    );
+    assert_eq!(state.session_menu, Some(session.clone()));
+
+    assert_eq!(
+        reduce_navigation_command(
+            &mut state,
+            AppCommand::SetSessionPinned {
+                session: session.clone(),
+                pinned: true,
+            },
+        ),
+        NavigationOutcome::NeedsEffect
+    );
+    assert!(state.pinned_sessions.contains(&session));
+    assert_eq!(state.session_menu, None);
+
+    let stale = SessionLocator::new(state.host.node_id, "stale");
+    assert_eq!(
+        reduce_navigation_command(&mut state, AppCommand::ToggleSessionMenu { session: stale },),
+        NavigationOutcome::Ignored
+    );
+    assert_eq!(state.session_menu, None);
+}
+
+#[test]
 fn sidebar_commands_update_transient_navigation_state() {
     let (mut state, _, workspace) = state_with_thread();
     assert!(state.sidebar.tasks_expanded);

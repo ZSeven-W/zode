@@ -7,16 +7,20 @@ use zode_app_model::{
 };
 use zode_app_ui::{
     Composer, Key, KeyEvent, PointerButton, PointerEvent, PointerEventKind, SettingsPanel,
-    ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId, WorkspaceSnapshot,
-    COMPOSER_ID, SEND_ID, TERMINAL_ID,
+    ThreadHeader, ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId,
+    WorkspaceSnapshot, COMPOSER_ID, SEND_ID, TERMINAL_ID,
 };
 
-use super::DesktopApp;
+use super::{
+    session_menu::{close_session_menu_command, session_menu_outside_click_command},
+    DesktopApp,
+};
 use crate::{
     accessibility_host::AccessibilityBridge,
     clipboard::{execute_clipboard_command, paste_from_clipboard},
     cursor::{cursor_hint_at, cursor_icon_for_hint},
     event_map::{is_paste_shortcut, terminal_shortcut_command},
+    ime::set_cursor_area,
     input_dispatch::{
         dispatch_key, ime_allowed_for_focus, settings_scroll_delta_for_action,
         settings_scroll_delta_for_key, KeyDispatch, SettingsTouchOutcome,
@@ -402,14 +406,28 @@ impl DesktopApp {
             &mut self.app_state,
             AppCommand::SetTerminalFocus(terminal_focused),
         );
-        if let Some(window) = self.window.as_ref() {
-            window.set_ime_allowed(ime_allowed_for_focus(
-                self.app_state.presentation.route.legacy_page(),
-                focused,
-                self.window_focused,
-            ));
-        }
+        self.sync_ime_for_focus(focused, self.window_focused);
         self.request_redraw();
+    }
+
+    fn sync_ime_for_focus(&self, focused: Option<WidgetId>, window_focused: bool) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let allowed = ime_allowed_for_focus(
+            self.app_state.presentation.route.legacy_page(),
+            focused,
+            window_focused,
+        );
+        if allowed {
+            // Give the platform a non-zero anchor before enabling IME. The
+            // next redraw replaces the composer fallback with the exact caret.
+            if let Some(rect) = focused.and_then(|id| self.frame_snapshot.node(id).map(|n| n.rect))
+            {
+                set_cursor_area(window, rect);
+            }
+        }
+        window.set_ime_allowed(allowed);
     }
 
     pub(super) fn activate_widget(&mut self, id: WidgetId) {
@@ -509,13 +527,7 @@ impl DesktopApp {
             &mut self.app_state,
             AppCommand::SetTerminalFocus(terminal_focused),
         );
-        if let Some(window) = self.window.as_ref() {
-            window.set_ime_allowed(ime_allowed_for_focus(
-                self.app_state.presentation.route.legacy_page(),
-                self.focused_widget,
-                focused,
-            ));
-        }
+        self.sync_ime_for_focus(self.focused_widget, focused);
         self.request_redraw();
     }
 
@@ -561,6 +573,23 @@ impl DesktopApp {
                 return;
             }
             if self.frame_snapshot.hit_test(event.position).is_none() {
+                return;
+            }
+        }
+        if let Some(command) = session_menu_outside_click_command(
+            &self.app_state,
+            &self.frame_snapshot,
+            event.position,
+        ) {
+            self.enqueue_command(command);
+            return;
+        }
+        if self.app_state.session_menu.is_some() {
+            let actionable = self
+                .frame_snapshot
+                .hit_test(event.position)
+                .is_some_and(|id| ThreadHeader::command_for_widget(&self.app_state, id).is_some());
+            if !actionable {
                 return;
             }
         }
@@ -623,6 +652,10 @@ impl DesktopApp {
             return;
         }
         if event.pressed && event.key == Key::Escape {
+            if let Some(command) = close_session_menu_command(&self.app_state) {
+                self.enqueue_command(command);
+                return;
+            }
             if let (Some(session), Some(id)) = (
                 self.app_state.current_session.clone(),
                 self.app_state.composer.queue_menu,

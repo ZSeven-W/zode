@@ -4,6 +4,13 @@ use zode_app_model::ComposerState;
 
 use crate::{paint_single_line, RectExt, SemanticIcon, ZodeTheme};
 
+const TEXT_AREA_INSET_X: f32 = 8.0;
+const TEXT_AREA_INSET_TOP: f32 = 6.0;
+const TEXT_AREA_CONTROLS_H: f32 = 48.0;
+const TEXT_AREA_FONT_SIZE: f32 = 14.0;
+const TEXT_AREA_PAD_X: f32 = 8.0;
+const TEXT_AREA_VISIBLE_LINES: usize = 3;
+
 pub(super) fn paint(
     painter: &mut dyn Painter,
     rect: Rect,
@@ -24,25 +31,7 @@ pub(super) fn paint(
     painter.fill_round_rect(rect, 12.0, theme.tokens.card);
     painter.stroke_round_rect(rect, 12.0, theme.tokens.border, 1.0);
 
-    TextArea {
-        state: input,
-        placeholder: "向 Zode 描述一个任务",
-        focused: state.focused,
-        font_size: 14.0,
-        now_ms: 0,
-        pad_x: 8.0,
-        max_visible_lines: 3,
-    }
-    .paint(
-        painter,
-        Rect::xywh(
-            rect.origin.x + 8.0,
-            rect.origin.y + 6.0,
-            (rect.size.x - 16.0).max(0.0),
-            (rect.size.y - 48.0).max(0.0),
-        ),
-        &theme.tokens,
-    );
+    text_area(input, state.focused).paint(painter, text_area_rect(rect), &theme.tokens);
 
     let controls = Rect::xywh(
         rect.origin.x + 14.0,
@@ -149,4 +138,25 @@ pub(super) fn paint(
             SemanticIcon::Send.stroke_width(),
         );
     }
+}
+
+pub(super) fn text_area<'a>(input: &'a TextInputState, focused: bool) -> TextArea<'a> {
+    TextArea {
+        state: input,
+        placeholder: "向 Zode 描述一个任务",
+        focused,
+        font_size: TEXT_AREA_FONT_SIZE,
+        now_ms: 0,
+        pad_x: TEXT_AREA_PAD_X,
+        max_visible_lines: TEXT_AREA_VISIBLE_LINES,
+    }
+}
+
+pub(super) fn text_area_rect(rect: Rect) -> Rect {
+    Rect::xywh(
+        rect.origin.x + TEXT_AREA_INSET_X,
+        rect.origin.y + TEXT_AREA_INSET_TOP,
+        (rect.size.x - TEXT_AREA_INSET_X * 2.0).max(0.0),
+        (rect.size.y - TEXT_AREA_CONTROLS_H).max(0.0),
+    )
 }

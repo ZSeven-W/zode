@@ -14,6 +14,13 @@ use skia_safe::{canvas::SaveLayerRec, image_filters, BlurStyle, MaskFilter, Pain
 
 use super::text_metrics::TextMetricsEngine;
 
+#[path = "text_picture_cache.rs"]
+mod text_picture_cache;
+
+use text_picture_cache::TextPictureCache;
+
+const TEXT_PICTURE_CULL_EXTENT: f32 = 1_048_576.0;
+
 struct CachedImageSource {
     key: Arc<str>,
     bytes: Arc<Vec<u8>>,
@@ -41,6 +48,7 @@ pub struct NativeBackend {
     image_sources: HashMap<u64, CachedImageSource>,
     dpi: f32,
     text_metrics: TextMetricsEngine,
+    text_pictures: TextPictureCache,
     font_family_override: Option<String>,
 }
 
@@ -55,6 +63,7 @@ impl NativeBackend {
             image_sources: HashMap::new(),
             dpi,
             text_metrics: TextMetricsEngine::new(),
+            text_pictures: TextPictureCache::new(),
             font_family_override,
         }
     }
@@ -96,8 +105,36 @@ impl NativeBackend {
     pub fn draw_text(&mut self, canvas: &skia_safe::Canvas, layout: &TextLayout, origin: Point2D) {
         for source in layout.runs() {
             let run = self.prepare_text_run(source, origin);
-            self.draw_op(canvas, &DrawOp::Text(run));
+            self.draw_text_run(canvas, &run);
         }
+    }
+
+    fn draw_text_run(&mut self, canvas: &skia_safe::Canvas, run: &TextRun) {
+        let picture = if let Some(picture) = self.text_pictures.get(run) {
+            picture
+        } else {
+            let mut normalized = run.clone();
+            normalized.origin = Point::new(0.0, 0.0);
+            let mut recorder = skia_safe::PictureRecorder::new();
+            let cull = skia_safe::Rect::from_xywh(
+                -TEXT_PICTURE_CULL_EXTENT,
+                -TEXT_PICTURE_CULL_EXTENT,
+                TEXT_PICTURE_CULL_EXTENT * 2.0,
+                TEXT_PICTURE_CULL_EXTENT * 2.0,
+            );
+            let recording_canvas = recorder.begin_recording(cull, false);
+            self.skia
+                .draw_on_canvas(recording_canvas, &DrawOp::Text(normalized));
+            let Some(picture) = recorder.finish_recording_as_picture(None) else {
+                self.draw_op(canvas, &DrawOp::Text(run.clone()));
+                return;
+            };
+            self.text_pictures.insert(run, picture.clone());
+            picture
+        };
+
+        let matrix = skia_safe::Matrix::translate((run.origin.x, run.origin.y));
+        canvas.draw_picture(&picture, Some(&matrix), None);
     }
 
     fn prepare_text_run(&self, source: &TextRun, origin: Point2D) -> TextRun {
@@ -494,8 +531,10 @@ fn round_rect(rect: Rect, radius: f32) -> skia_safe::RRect {
 mod tests {
     use std::sync::Arc;
 
-    use jian_core::render::ImageSource;
+    use jian_core::render::{DrawOp, ImageSource};
     use jian_widgets::{Color, Point2D, Rect, TextLayout};
+
+    use crate::render::RasterSurface;
 
     use super::NativeBackend;
 
@@ -649,5 +688,50 @@ mod tests {
 
         backend.measure_text_metrics("cached control", 14.0, Some("system-ui"), 400, false);
         assert_eq!(backend.text_metrics.cache_len(), 2);
+    }
+
+    #[test]
+    fn cached_text_picture_matches_direct_jian_pixels() {
+        const WIDTH: u32 = 320;
+        const HEIGHT: u32 = 96;
+        let layout = TextLayout::single_run(
+            "Cached text 文字",
+            "system-ui",
+            17.0,
+            Color::BLACK.to_jian(),
+            Point2D::new(3.25, 2.5),
+        )
+        .with_font_weight(600);
+        let origin = Point2D::new(21.5, 19.25);
+        let mut cached_backend = NativeBackend::new(1.0);
+        let direct_run = cached_backend.prepare_text_run(&layout.runs()[0], origin);
+
+        let mut direct = RasterSurface::new(WIDTH, HEIGHT).expect("direct surface");
+        direct.canvas().clear(skia_safe::Color::WHITE);
+        let mut jian = jian_skia::SkiaBackend::new();
+        jian.draw_on_canvas(direct.canvas(), &DrawOp::Text(direct_run));
+
+        let mut first = RasterSurface::new(WIDTH, HEIGHT).expect("first cached surface");
+        first.canvas().clear(skia_safe::Color::WHITE);
+        cached_backend.draw_text(first.canvas(), &layout, origin);
+
+        let mut second = RasterSurface::new(WIDTH, HEIGHT).expect("hit surface");
+        second.canvas().clear(skia_safe::Color::WHITE);
+        cached_backend.draw_text(second.canvas(), &layout, origin);
+
+        let mut direct_pixels = vec![0; (WIDTH * HEIGHT * 4) as usize];
+        let mut first_pixels = vec![0; direct_pixels.len()];
+        let mut second_pixels = vec![0; direct_pixels.len()];
+        assert!(direct.read_rgba8(&mut direct_pixels));
+        assert!(first.read_rgba8(&mut first_pixels));
+        assert!(second.read_rgba8(&mut second_pixels));
+        assert_eq!(
+            first_pixels, direct_pixels,
+            "cache miss changed text pixels"
+        );
+        assert_eq!(
+            second_pixels, direct_pixels,
+            "cache hit changed text pixels"
+        );
     }
 }

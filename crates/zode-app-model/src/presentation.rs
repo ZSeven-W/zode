@@ -37,6 +37,7 @@ pub enum SettingsCategory {
     Permissions,
     KeyboardShortcuts,
     Environment,
+    ArchivedTasks,
 }
 
 /// Integration catalog views available to the desktop shell.

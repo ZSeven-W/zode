@@ -11,7 +11,10 @@ use std::{
 use futures_util::StreamExt;
 use zode_node_protocol::TerminalId;
 
-use crate::services::{TerminalError, TerminalService};
+use crate::{
+    event_bridge::CoalescedWake,
+    services::{TerminalError, TerminalService},
+};
 
 const OUTPUT_ITEM_LIMIT: usize = 128;
 const OUTPUT_BYTE_LIMIT: usize = 1024 * 1024;
@@ -67,7 +70,7 @@ struct RuntimeSession {
 pub struct TerminalRuntime {
     service: Arc<dyn TerminalService>,
     output: Arc<Mutex<OutputBuffer>>,
-    wake: Arc<dyn Fn() + Send + Sync>,
+    wake: Arc<CoalescedWake>,
     session: Option<RuntimeSession>,
 }
 
@@ -79,7 +82,7 @@ impl TerminalRuntime {
         Self {
             service,
             output: Arc::new(Mutex::new(OutputBuffer::new())),
-            wake: Arc::new(wake),
+            wake: Arc::new(CoalescedWake::new(wake)),
             session: None,
         }
     }
@@ -90,7 +93,7 @@ impl TerminalRuntime {
 
     pub fn open(&mut self, cwd: &Path, cols: u16, rows: u16) -> Result<TerminalId, TerminalError> {
         if self.reap_finished()?.is_some() {
-            output_buffer(&self.output).drain();
+            self.drain_output();
         }
         if self.session.is_some() {
             return Err(TerminalError::Busy);
@@ -121,16 +124,16 @@ impl TerminalRuntime {
                     Ok(runtime) => runtime.block_on(async {
                         while let Some(item) = stream.next().await {
                             output_buffer(&output).push(item);
-                            wake();
+                            wake.notify();
                         }
                     }),
                     Err(error) => {
                         output_buffer(&output).push(Err(TerminalError::Io(error)));
-                        wake();
+                        wake.notify();
                     }
                 }
                 thread_finished.store(true, Ordering::Release);
-                wake();
+                wake.notify();
             }) {
             Ok(thread) => thread,
             Err(error) => {
@@ -147,7 +150,17 @@ impl TerminalRuntime {
     }
 
     pub fn drain_output(&self) -> Vec<Result<Vec<u8>, TerminalError>> {
-        output_buffer(&self.output).drain()
+        if !self.wake.begin_drain() {
+            return Vec::new();
+        }
+        let mut drained = Vec::new();
+        loop {
+            drained.extend(output_buffer(&self.output).drain());
+            if !self.wake.finish_drain() {
+                break;
+            }
+        }
+        drained
     }
 
     pub fn write(&self, id: TerminalId, bytes: Vec<u8>) -> Result<(), TerminalError> {

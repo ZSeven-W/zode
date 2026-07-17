@@ -7,8 +7,8 @@ use zode_app_model::{
 };
 use zode_app_ui::{
     ComposerController, ComposerOutcome, ComposerSubmission, Insets, Key, Modifiers, ProjectPicker,
-    SettingsPanel, WidgetId, WorkspaceSnapshot, PROJECT_DETACH_ID, PROJECT_PICKER_NEW_ID,
-    PROJECT_PICKER_PROJECTLESS_ID, PROJECT_PICKER_TRIGGER_ID,
+    SettingsPanel, ThreadHeader, WidgetId, WorkspaceSnapshot, PROJECT_DETACH_ID,
+    PROJECT_PICKER_NEW_ID, PROJECT_PICKER_PROJECTLESS_ID, PROJECT_PICKER_TRIGGER_ID,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
@@ -16,8 +16,9 @@ use zode_node_protocol::{
 };
 
 use super::{
-    consume_external_preview_command, normalize_conversation_route, project_composer_outcome,
-    reduce_local_settings_command, settings_interaction_viewport, widget_command,
+    close_session_menu_command, consume_external_preview_command, normalize_conversation_route,
+    project_composer_outcome, reduce_local_settings_command, session_menu_outside_click_command,
+    settings_interaction_viewport, widget_command,
 };
 use crate::services::{ExternalOpenService, ServiceError};
 use crate::{command_bridge::prepare_dispatch, event_map::composer_outcome_command};
@@ -200,6 +201,41 @@ fn page_and_pane_widget_ids_map_through_component_commands() {
     for (id, command) in expected {
         assert_eq!(widget_command(&state, WidgetId(id)), Some(command));
     }
+}
+
+#[test]
+fn task_menu_closes_on_escape_or_outside_click_but_not_inside_click() {
+    let (mut state, session, _) = state_with_session();
+    state.session_menu = Some(session.clone());
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let menu = ThreadHeader::menu_layout(snapshot.layout.top_bar, &state).unwrap();
+    let close = AppCommand::ToggleSessionMenu {
+        session: session.clone(),
+    };
+
+    assert_eq!(close_session_menu_command(&state), Some(close.clone()));
+    let inside = jian_widgets::Point2D::new(
+        menu.pin.rect.origin.x + menu.pin.rect.size.x / 2.0,
+        menu.pin.rect.origin.y + menu.pin.rect.size.y / 2.0,
+    );
+    assert_eq!(
+        session_menu_outside_click_command(&state, &snapshot, inside),
+        None
+    );
+    assert_eq!(
+        session_menu_outside_click_command(
+            &state,
+            &snapshot,
+            jian_widgets::Point2D::new(
+                snapshot.layout.composer.origin.x,
+                snapshot.layout.composer.origin.y,
+            ),
+        ),
+        Some(close)
+    );
+
+    state.current_session = Some(SessionLocator::new(state.host.node_id, "other"));
+    assert_eq!(close_session_menu_command(&state), None);
 }
 
 #[test]

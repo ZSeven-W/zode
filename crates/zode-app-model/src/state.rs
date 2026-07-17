@@ -197,6 +197,8 @@ pub struct ZodeAppState {
     /// Hidden local cwd used by sessions that are not attached to a user project.
     pub projectless_workspace_root: Option<WorkspaceUri>,
     pub current_session: Option<SessionLocator>,
+    /// Session whose task-actions menu is currently visible in the thread header.
+    pub session_menu: Option<SessionLocator>,
     pub pending_session_delete: Option<SessionLocator>,
     pub threads: Vec<ThreadSummary>,
     pub pinned_sessions: BTreeSet<SessionLocator>,
@@ -311,6 +313,7 @@ pub fn demo_state() -> ZodeAppState {
         project_picker: ProjectPickerState::default(),
         projectless_workspace_root: None,
         current_session: None,
+        session_menu: None,
         pending_session_delete: None,
         threads: Vec::new(),
         pinned_sessions: BTreeSet::new(),
