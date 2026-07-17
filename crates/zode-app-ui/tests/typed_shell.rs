@@ -162,7 +162,7 @@ fn typed_integrations_and_coming_soon_routes_render_honest_pages() {
     let (plugins, _) = paint_shell(&state, 1_800.0);
     let plugins = text(&plugins);
     assert!(plugins.contains("插件"));
-    assert!(plugins.contains("当前节点尚未提供能力"));
+    assert!(plugins.contains("尚未加载本机集成"));
     assert!(!plugins.contains("安装"));
     assert!(!plugins.contains("常规"));
 

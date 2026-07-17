@@ -1,6 +1,7 @@
 use crate::{
-    AgentCommand, AgentEvent, CapabilityManifest, DiffSnapshot, EndpointError, RuntimeOptions,
-    SessionLocator, ThreadHistory, ThreadSummary, WorkspaceUri,
+    AgentCommand, AgentEvent, CapabilityManifest, DiffSnapshot, EndpointError,
+    IntegrationRegistrySnapshot, RuntimeOptions, SessionLocator, ThreadHistory, ThreadSummary,
+    WorkspaceUri,
 };
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -17,6 +18,7 @@ pub enum AgentQuery {
     RuntimeOptions,
     SessionRuntimeOptions { session: SessionLocator },
     ProjectPermissions { workspace_uri: WorkspaceUri },
+    Integrations { workspace_uri: WorkspaceUri },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +33,7 @@ pub enum AgentSnapshot {
         options: RuntimeOptions,
     },
     ProjectPermissions(Vec<String>),
+    Integrations(IntegrationRegistrySnapshot),
 }
 
 #[async_trait]

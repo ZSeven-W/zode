@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use zode_app_model::{
-    apply_session_runtime_options, LoadState, ProjectState, TranscriptItem, TranscriptState,
-    ZodeAppState,
+    apply_session_runtime_options, integration_catalog, LoadState, ProjectState, TranscriptItem,
+    TranscriptState, ZodeAppState,
 };
 use zode_app_runtime::workspace_uri_to_path;
 use zode_node_protocol::{
@@ -56,6 +56,7 @@ pub(super) async fn load_initial_state(
                 .find(|project| project.available)
                 .map(|project| project.workspace_uri.clone())
         });
+    load_integrations(endpoint, &mut state).await;
     load_session_runtime_options(endpoint, &mut state).await;
     for workspace_uri in state
         .projects
@@ -91,6 +92,31 @@ pub(super) async fn load_initial_state(
         }
     }
     Ok(state)
+}
+
+async fn load_integrations(endpoint: &dyn AgentEndpoint, state: &mut ZodeAppState) {
+    let Some(workspace_uri) = state.active_available_workspace().cloned() else {
+        return;
+    };
+    state.presentation.integrations = LoadState::Loading;
+    state.presentation.integrations = match endpoint
+        .query(AgentQuery::Integrations {
+            workspace_uri: workspace_uri.clone(),
+        })
+        .await
+    {
+        Ok(AgentSnapshot::Integrations(snapshot)) if snapshot.workspace_uri == workspace_uri => {
+            LoadState::Ready(integration_catalog(snapshot))
+        }
+        Ok(AgentSnapshot::Integrations(_)) => {
+            LoadState::Failed("the endpoint returned integrations for the wrong workspace".into())
+        }
+        Ok(_) => LoadState::Failed("the endpoint returned the wrong integrations snapshot".into()),
+        Err(error) => {
+            eprintln!("zode-app: integrations could not be loaded: {error}");
+            LoadState::Failed(error.to_string())
+        }
+    };
 }
 
 async fn load_session_runtime_options(endpoint: &dyn AgentEndpoint, state: &mut ZodeAppState) {
@@ -266,6 +292,7 @@ mod tests {
         threads: Vec<ThreadSummary>,
         good_session: SessionLocator,
         options: RuntimeOptions,
+        integrations: Vec<zode_node_protocol::IntegrationRegistryEntry>,
     }
 
     #[async_trait]
@@ -300,6 +327,13 @@ mod tests {
                 AgentQuery::ProjectPermissions { .. } => {
                     Ok(AgentSnapshot::ProjectPermissions(Vec::new()))
                 }
+                AgentQuery::Integrations { workspace_uri } => Ok(AgentSnapshot::Integrations(
+                    zode_node_protocol::IntegrationRegistrySnapshot {
+                        workspace_uri,
+                        entries: self.integrations.clone(),
+                        directory_error: Some("directory unavailable".into()),
+                    },
+                )),
                 AgentQuery::Capabilities | AgentQuery::Diff { .. } => unreachable!(),
             }
         }
@@ -474,6 +508,7 @@ mod tests {
             threads,
             good_session: current.clone(),
             options: canonical.clone(),
+            integrations: Vec::new(),
         };
         let state = load_initial_state(
             &endpoint,
@@ -502,6 +537,81 @@ mod tests {
             state.project_permissions[&workspace],
             LoadState::Ready(Vec::new())
         );
+    }
+
+    #[tokio::test]
+    async fn integrations_truthfulness_survives_production_bootstrap() {
+        use zode_node_protocol::{
+            IntegrationRegistryEntry, IntegrationRegistryKind, IntegrationRegistryState,
+        };
+
+        let node_id = NodeId::new();
+        let workspace = WorkspaceUri::new("file:///repo/bootstrap-integrations").unwrap();
+        let mut integrations = [
+            "filesystem",
+            "search",
+            "shell",
+            "git",
+            "web",
+            "notebook",
+            "todo",
+            "subagent",
+            "op",
+            "browser",
+        ]
+        .into_iter()
+        .map(|name| IntegrationRegistryEntry {
+            source_id: format!("tools:{name}"),
+            name: name.into(),
+            description: format!("{name} tools"),
+            kind: IntegrationRegistryKind::ToolGroup,
+            state: IntegrationRegistryState::Ready,
+            installed: true,
+        })
+        .collect::<Vec<_>>();
+        integrations.extend([
+            IntegrationRegistryEntry {
+                source_id: "capability:agent".into(),
+                name: "智能体".into(),
+                description: "运行 AI 任务".into(),
+                kind: IntegrationRegistryKind::NodeCapability,
+                state: IntegrationRegistryState::Ready,
+                installed: true,
+            },
+            IntegrationRegistryEntry {
+                source_id: "mcp:github".into(),
+                name: "github".into(),
+                description: "MCP server".into(),
+                kind: IntegrationRegistryKind::Mcp,
+                state: IntegrationRegistryState::Configured,
+                installed: false,
+            },
+        ]);
+        let endpoint = BootstrapEndpoint {
+            threads: Vec::new(),
+            good_session: SessionLocator::new(node_id, "unused"),
+            options: default_bootstrap_runtime_options(),
+            integrations,
+        };
+
+        let state = load_initial_state(
+            &endpoint,
+            CapabilityManifest {
+                node_id,
+                capabilities: BTreeSet::new(),
+            },
+            workspace,
+        )
+        .await
+        .unwrap();
+        let catalog = state.presentation.integrations.ready().unwrap();
+
+        assert!(catalog.installed.len() >= 8);
+        assert!(catalog.sections.len() >= 2);
+        assert!(catalog.all_entries().count() >= 10);
+        assert!(catalog
+            .all_entries()
+            .all(|entry| entry.source_id.is_some() && !entry.fixture_only));
     }
 
     fn thread(workspace_uri: WorkspaceUri, id: &str, updated_at_ms: i64) -> ThreadSummary {

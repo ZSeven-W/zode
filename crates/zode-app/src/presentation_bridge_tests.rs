@@ -14,7 +14,9 @@ use zode_app_model::{
 use zode_app_runtime::path_to_workspace_uri;
 use zode_node_protocol::{
     AgentCommand, AgentEndpoint, AgentEventStream, AgentQuery, AgentSnapshot, DiffSnapshot,
-    EndpointError, EndpointErrorKind, NodeId, SessionLocator, ThreadStatus, ThreadSummary,
+    EndpointError, EndpointErrorKind, IntegrationRegistryEntry, IntegrationRegistryKind,
+    IntegrationRegistrySnapshot, IntegrationRegistryState, NodeId, SessionLocator, ThreadStatus,
+    ThreadSummary, WorkspaceUri,
 };
 
 use super::{PresentationQuery, PresentationQueryBridge};
@@ -161,6 +163,96 @@ impl AgentEndpoint for BlockingDiffEndpoint {
     async fn subscribe(&self) -> Result<AgentEventStream, EndpointError> {
         Err(unexpected())
     }
+}
+
+fn integration_snapshot(workspace_uri: WorkspaceUri) -> IntegrationRegistrySnapshot {
+    IntegrationRegistrySnapshot {
+        workspace_uri,
+        entries: vec![IntegrationRegistryEntry {
+            source_id: "tools:git".into(),
+            name: "git".into(),
+            description: "Git tools".into(),
+            kind: IntegrationRegistryKind::ToolGroup,
+            state: IntegrationRegistryState::Ready,
+            installed: true,
+        }],
+        directory_error: Some("directory unavailable".into()),
+    }
+}
+
+fn state_with_active_workspace(workspace_uri: WorkspaceUri) -> zode_app_model::ZodeAppState {
+    let mut state = demo_state();
+    state.projects.push(ProjectState {
+        workspace_uri: workspace_uri.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 0,
+    });
+    state.active_workspace = Some(workspace_uri);
+    state
+}
+
+#[tokio::test]
+async fn integration_query_projects_only_the_addressed_workspace_catalog() {
+    let workspace_uri = WorkspaceUri::new("file:///repo/integrations").unwrap();
+    let endpoint = FakeEndpoint::returning(Ok(AgentSnapshot::Integrations(integration_snapshot(
+        workspace_uri.clone(),
+    ))));
+    let (mut bridge, wake) = test_bridge(endpoint.clone());
+    let mut state = state_with_active_workspace(workspace_uri.clone());
+
+    bridge
+        .request(
+            &mut state,
+            PresentationQuery::Integrations {
+                workspace_uri: workspace_uri.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(state.presentation.integrations, LoadState::Loading);
+    wake.notified().await;
+    assert_eq!(bridge.drain_into(&mut state), 1);
+
+    let catalog = state.presentation.integrations.ready().unwrap();
+    assert_eq!(catalog.workspace_uri, workspace_uri);
+    assert_eq!(catalog.all_entries().count(), 1);
+    assert_eq!(
+        endpoint.queries.lock().unwrap().as_slice(),
+        &[AgentQuery::Integrations {
+            workspace_uri: catalog.workspace_uri.clone(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn integration_result_for_a_workspace_that_is_no_longer_active_is_ignored() {
+    let previous = WorkspaceUri::new("file:///repo/previous").unwrap();
+    let current = WorkspaceUri::new("file:///repo/current").unwrap();
+    let endpoint = FakeEndpoint::returning(Ok(AgentSnapshot::Integrations(integration_snapshot(
+        previous.clone(),
+    ))));
+    let (mut bridge, wake) = test_bridge(endpoint);
+    let mut state = state_with_active_workspace(previous.clone());
+
+    bridge
+        .request(
+            &mut state,
+            PresentationQuery::Integrations {
+                workspace_uri: previous,
+            },
+        )
+        .unwrap();
+    state.projects.push(ProjectState {
+        workspace_uri: current.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
+    });
+    state.active_workspace = Some(current);
+    wake.notified().await;
+
+    assert_eq!(bridge.drain_into(&mut state), 0);
+    assert_eq!(state.presentation.integrations, LoadState::Loading);
 }
 
 #[tokio::test]

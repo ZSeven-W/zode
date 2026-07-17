@@ -1,48 +1,33 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
-use zode_app_model::{demo_state, AppCommand, IntegrationsTab, ShellRoute};
-use zode_app_ui::{IntegrationsPage, ZodeTheme};
-use zode_node_protocol::NodeCapability;
-
-#[derive(Debug, Clone)]
-struct TextDraw {
-    content: String,
-    origin: Point2D,
-    font_size: f32,
-    weight: u16,
-}
+use zode_app_model::{
+    demo_state, integration_catalog, AppCommand, IntegrationsTab, LoadState, ShellRoute,
+};
+use zode_app_ui::{Insets, IntegrationsPage, RectExt, WorkspaceSnapshot, ZodeTheme};
+use zode_node_protocol::{
+    IntegrationRegistryEntry, IntegrationRegistryKind, IntegrationRegistrySnapshot,
+    IntegrationRegistryState, WorkspaceUri,
+};
 
 #[derive(Default)]
-struct TextCapture {
+struct PaintCapture {
     texts: Vec<String>,
-    text_draws: Vec<TextDraw>,
     rounded_fills: Vec<Rect>,
     clips: Vec<Rect>,
-    svg_strokes: usize,
-    measurements: Vec<(String, f32, u16)>,
 }
 
-impl Painter for TextCapture {
+impl Painter for PaintCapture {
     fn begin_frame(&mut self) {}
     fn end_frame(&mut self) {}
     fn fill_rect(&mut self, _rect: Rect, _color: Color) {}
     fn stroke_rect(&mut self, _rect: Rect, _color: Color, _width: f32) {}
-    fn draw_text(&mut self, layout: &TextLayout, origin: Point2D) {
-        let content = layout
-            .runs()
-            .iter()
-            .map(|run| run.content.as_str())
-            .collect::<String>();
-        let (font_size, weight) = layout
-            .runs()
-            .first()
-            .map_or((0.0, 400), |run| (run.font_size, run.font_weight));
-        self.texts.push(content.clone());
-        self.text_draws.push(TextDraw {
-            content,
-            origin,
-            font_size,
-            weight,
-        });
+    fn draw_text(&mut self, layout: &TextLayout, _origin: Point2D) {
+        self.texts.push(
+            layout
+                .runs()
+                .iter()
+                .map(|run| run.content.as_str())
+                .collect(),
+        );
     }
     fn clip_rect(&mut self, rect: Rect) {
         self.clips.push(rect);
@@ -60,7 +45,6 @@ impl Painter for TextCapture {
         _color: Color,
         _width: f32,
     ) {
-        self.svg_strokes += 1;
     }
     fn save(&mut self) {}
     fn restore(&mut self) {}
@@ -69,29 +53,104 @@ impl Painter for TextCapture {
     fn dpi_scale(&self) -> f32 {
         1.0
     }
-    fn measure_text_weighted(&mut self, text: &str, font_size: f32, weight: u16) -> f32 {
-        self.measurements
-            .push((text.to_string(), font_size, weight));
-        estimated_text_width(text, font_size)
+    fn measure_text_weighted(&mut self, text: &str, font_size: f32, _weight: u16) -> f32 {
+        text.chars().count() as f32 * font_size * 0.55
     }
 }
 
-fn estimated_text_width(text: &str, font_size: f32) -> f32 {
-    text.chars()
-        .map(|character| {
-            if character.is_ascii() {
-                font_size * 0.55
-            } else {
-                font_size
-            }
-        })
-        .sum()
+fn raw_entry(
+    source_id: &str,
+    name: &str,
+    kind: IntegrationRegistryKind,
+    state: IntegrationRegistryState,
+    installed: bool,
+) -> IntegrationRegistryEntry {
+    IntegrationRegistryEntry {
+        source_id: source_id.into(),
+        name: name.into(),
+        description: format!("{name} description"),
+        kind,
+        state,
+        installed,
+    }
+}
+
+fn catalog_state(tab: IntegrationsTab) -> zode_app_model::ZodeAppState {
+    let mut state = demo_state();
+    state.presentation.route = ShellRoute::Integrations(tab);
+    let workspace_uri = WorkspaceUri::new("file:///repo/zode").unwrap();
+    let mut entries = [
+        "filesystem",
+        "search",
+        "shell",
+        "git",
+        "web",
+        "notebook",
+        "todo",
+        "subagent",
+        "op",
+        "browser",
+    ]
+    .into_iter()
+    .map(|name| {
+        raw_entry(
+            &format!("tools:{name}"),
+            name,
+            IntegrationRegistryKind::ToolGroup,
+            IntegrationRegistryState::Ready,
+            true,
+        )
+    })
+    .collect::<Vec<_>>();
+    entries.extend([
+        raw_entry(
+            "capability:agent",
+            "智能体",
+            IntegrationRegistryKind::NodeCapability,
+            IntegrationRegistryState::Ready,
+            true,
+        ),
+        raw_entry(
+            "capability:workspace",
+            "工作区",
+            IntegrationRegistryKind::NodeCapability,
+            IntegrationRegistryState::Ready,
+            true,
+        ),
+        raw_entry(
+            "skill:review",
+            "review",
+            IntegrationRegistryKind::Skill,
+            IntegrationRegistryState::Disabled,
+            true,
+        ),
+        raw_entry(
+            "mcp:github",
+            "github",
+            IntegrationRegistryKind::Mcp,
+            IntegrationRegistryState::Configured,
+            false,
+        ),
+        raw_entry(
+            "lsp:rust",
+            "rust",
+            IntegrationRegistryKind::Lsp,
+            IntegrationRegistryState::Configured,
+            false,
+        ),
+    ]);
+    state.presentation.integrations =
+        LoadState::Ready(integration_catalog(IntegrationRegistrySnapshot {
+            workspace_uri,
+            entries,
+            directory_error: Some("在线目录不可用；当前仅显示本机已发现的集成。".into()),
+        }));
+    state
 }
 
 #[test]
-fn wide_page_centers_a_736px_content_column_and_exposes_real_tab_commands() {
-    let mut state = demo_state();
-    state.presentation.route = ShellRoute::Integrations(IntegrationsTab::Plugins);
+fn wide_page_freezes_reference_column_and_exposes_real_tab_commands() {
+    let state = catalog_state(IntegrationsTab::Plugins);
     let surface = Rect::xywh(240.0, 0.0, 1_560.0, 1_080.0);
 
     let layout = IntegrationsPage::layout(surface, &state);
@@ -99,13 +158,8 @@ fn wide_page_centers_a_736px_content_column_and_exposes_real_tab_commands() {
     assert_eq!(layout.content, Rect::xywh(652.0, 46.0, 736.0, 1_034.0));
     assert_eq!(layout.search, Rect::xywh(652.0, 146.0, 736.0, 34.0));
     assert_eq!(layout.tabs[0].label, "插件");
-    assert_eq!(layout.tabs[0].tab, IntegrationsTab::Plugins);
     assert!(layout.tabs[0].selected);
     assert_eq!(layout.tabs[1].label, "技能");
-    assert_eq!(layout.tabs[1].tab, IntegrationsTab::Skills);
-    assert!(!layout.tabs[1].selected);
-    assert_eq!(layout.tabs[0].rect, Rect::xywh(248.0, 6.0, 48.0, 32.0));
-    assert_eq!(layout.tabs[1].rect, Rect::xywh(300.0, 6.0, 48.0, 32.0));
     assert_eq!(
         IntegrationsPage::command_for_widget(layout.tabs[1].id),
         Some(AppCommand::SelectIntegrationsTab(IntegrationsTab::Skills)),
@@ -113,283 +167,166 @@ fn wide_page_centers_a_736px_content_column_and_exposes_real_tab_commands() {
 }
 
 #[test]
-fn capability_cards_are_a_strict_projection_of_the_host_manifest() {
-    let mut state = demo_state();
-    state.host.capabilities.capabilities.extend([
-        NodeCapability::Agent,
-        NodeCapability::Browser,
-        NodeCapability::Notifications,
-    ]);
+fn production_catalog_meets_truthful_landmarks_and_uses_non_empty_monograms() {
+    let state = catalog_state(IntegrationsTab::Plugins);
+    let catalog = state.presentation.integrations.ready().unwrap();
 
-    let cards = IntegrationsPage::capability_cards(&state);
-
-    assert_eq!(
-        cards
-            .iter()
-            .map(|card| (card.capability.clone(), card.label, card.description))
-            .collect::<Vec<_>>(),
-        vec![
-            (NodeCapability::Agent, "智能体", "运行并协调 AI 编码任务",),
-            (NodeCapability::Browser, "浏览器", "打开网页并与页面交互",),
-            (NodeCapability::Notifications, "通知", "发送本地系统通知",),
-        ],
-    );
+    assert!(catalog.installed.len() >= 8);
+    assert!(catalog.sections.len() >= 2);
+    assert!(catalog.all_entries().count() >= 10);
+    assert!(catalog
+        .all_entries()
+        .all(|entry| entry.source_id.is_some() && !entry.fixture_only));
+    assert!(catalog
+        .all_entries()
+        .all(|entry| !entry.icon.label().is_empty()));
+    assert!(catalog.all_entries().all(|entry| {
+        entry.category != zode_app_model::IntegrationCategory::Mcp
+            || matches!(
+                entry.availability,
+                zode_app_model::Availability::Configured | zode_app_model::Availability::Disabled
+            )
+    }));
 }
 
 #[test]
-fn plugin_capabilities_use_a_stable_two_column_card_grid() {
-    let mut state = demo_state();
-    state.presentation.route = ShellRoute::Integrations(IntegrationsTab::Plugins);
-    state.host.capabilities.capabilities.extend([
-        NodeCapability::Agent,
-        NodeCapability::Workspace,
-        NodeCapability::Terminal,
-    ]);
+fn installed_strip_and_catalog_rows_share_stable_source_backed_layouts() {
+    let state = catalog_state(IntegrationsTab::Plugins);
+    let surface = Rect::xywh(240.0, 0.0, 1_560.0, 1_080.0);
+    let installed = IntegrationsPage::installed_icon_layout(surface, &state);
+    let sections = IntegrationsPage::catalog_section_layout(surface, &state);
+
+    assert!(installed.len() >= 8);
+    assert!(sections.len() >= 2);
+    assert!(
+        sections
+            .iter()
+            .map(|section| section.rows.len())
+            .sum::<usize>()
+            >= 10
+    );
+    for icon in &installed {
+        assert!(!icon.source_id.is_empty());
+        assert!(!icon.monogram.is_empty());
+        assert!(icon.rect.size.x > 0.0 && icon.rect.size.y > 0.0);
+    }
+    for row in sections.iter().flat_map(|section| &section.rows) {
+        assert!(!row.source_id.is_empty());
+        assert_eq!(
+            IntegrationsPage::row_widget_id(&row.source_id),
+            row.id,
+            "paint/a11y identity must derive from the registry source id",
+        );
+    }
+}
+
+#[test]
+fn paint_renders_installed_categories_and_honest_states_without_marketplace_claims() {
+    let state = catalog_state(IntegrationsTab::Plugins);
+    let surface = Rect::xywh(240.0, 0.0, 1_560.0, 1_080.0);
+    let mut painter = PaintCapture::default();
+
+    IntegrationsPage::paint(&mut painter, surface, &state, &ZodeTheme::light());
+
+    let text = painter.texts.join("\n");
+    for expected in [
+        "插件",
+        "在常用工具与 Zode 协作",
+        "搜索本机集成（即将支持）",
+        "已安装",
+        "内置工具",
+        "节点能力",
+        "github",
+        "已配置",
+        "在线目录不可用；当前仅显示本机已发现的集成。",
+    ] {
+        assert!(text.contains(expected), "missing paint text: {expected}");
+    }
+    for forbidden in ["connected", "已连接", "Featured", "安装 51"] {
+        assert!(!text.contains(forbidden), "fabricated state: {forbidden}");
+    }
+    assert!(painter.clips.contains(&surface));
+}
+
+#[test]
+fn skills_tab_filters_rows_but_keeps_the_real_installed_strip() {
+    let state = catalog_state(IntegrationsTab::Skills);
     let surface = Rect::xywh(240.0, 0.0, 1_560.0, 1_080.0);
 
-    let cards = IntegrationsPage::capability_card_layout(surface, &state);
+    let sections = IntegrationsPage::catalog_section_layout(surface, &state);
+    let installed = IntegrationsPage::installed_icon_layout(surface, &state);
 
-    assert_eq!(cards.len(), 3);
-    assert_eq!(cards[0].rect, Rect::xywh(652.0, 252.0, 352.0, 74.0));
-    assert_eq!(cards[1].rect, Rect::xywh(1_036.0, 252.0, 352.0, 74.0));
-    assert_eq!(cards[2].rect, Rect::xywh(652.0, 338.0, 352.0, 74.0));
-    assert_eq!(cards[0].card.capability, NodeCapability::Agent);
-    assert_eq!(cards[1].card.capability, NodeCapability::Workspace);
-    assert_eq!(cards[2].card.capability, NodeCapability::Terminal);
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].title, "技能");
+    assert_eq!(sections[0].rows.len(), 1);
+    assert_eq!(sections[0].rows[0].source_id, "skill:review");
+    assert!(installed.len() >= 8);
 }
 
 #[test]
-fn narrow_plugins_use_one_clipped_column_with_a_14px_icon_inset() {
-    let mut state = demo_state();
-    state.presentation.route = ShellRoute::Integrations(IntegrationsTab::Plugins);
-    state.host.capabilities.capabilities.extend([
-        NodeCapability::Agent,
-        NodeCapability::Workspace,
-        NodeCapability::Terminal,
-    ]);
-    let surface = Rect::xywh(0.0, 0.0, 520.0, 720.0);
+fn accessibility_uses_the_same_catalog_row_rects_and_keeps_rows_non_actionable() {
+    let state = catalog_state(IntegrationsTab::Plugins);
+    let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
+    let sections =
+        IntegrationsPage::catalog_section_layout(snapshot.layout.primary_surface, &state);
+    let first = sections
+        .iter()
+        .flat_map(|section| &section.rows)
+        .next()
+        .unwrap();
+    let node = snapshot.node(first.id).expect("catalog row is accessible");
 
-    let cards = IntegrationsPage::capability_card_layout(surface, &state);
-
-    assert_eq!(cards.len(), 3);
-    assert_eq!(cards[0].rect, Rect::xywh(0.0, 252.0, 520.0, 74.0));
-    assert_eq!(cards[1].rect, Rect::xywh(0.0, 338.0, 520.0, 74.0));
-    assert_eq!(cards[2].rect, Rect::xywh(0.0, 424.0, 520.0, 74.0));
-
-    let mut painter = TextCapture::default();
-    IntegrationsPage::paint(&mut painter, surface, &state, &ZodeTheme::light());
-
-    for card in &cards {
-        assert!(painter.clips.contains(&card.rect));
-        let icon = painter
-            .rounded_fills
-            .iter()
-            .find(|rect| {
-                (rect.origin.x - (card.rect.origin.x + 14.0)).abs() <= 0.01
-                    && rect.size == Point2D::new(40.0, 40.0)
-                    && rect.origin.y >= card.rect.origin.y
-                    && rect.origin.y + rect.size.y <= card.rect.origin.y + card.rect.size.y
-            })
-            .expect("each card keeps the 14px icon inset");
-        assert!(
-            (icon.origin.y + icon.size.y / 2.0 - (card.rect.origin.y + card.rect.size.y / 2.0))
-                .abs()
-                <= 0.01
-        );
-    }
-}
-
-#[test]
-fn narrow_plugins_fit_all_eight_capabilities_and_center_compact_card_contents() {
-    let mut state = demo_state();
-    state.presentation.route = ShellRoute::Integrations(IntegrationsTab::Plugins);
-    state.host.capabilities.capabilities.extend([
-        NodeCapability::Agent,
-        NodeCapability::Workspace,
-        NodeCapability::FileSystem,
-        NodeCapability::Terminal,
-        NodeCapability::Browser,
-        NodeCapability::Camera,
-        NodeCapability::Notifications,
-        NodeCapability::Approval,
-    ]);
-    let surface = Rect::xywh(0.0, 0.0, 520.0, 720.0);
-
-    let cards = IntegrationsPage::capability_card_layout(surface, &state);
-
-    assert_eq!(cards.len(), 8);
-    assert!(cards[0].rect.size.y >= 48.0);
-    assert!(cards[0].rect.size.y < 74.0);
-    for pair in cards.windows(2) {
-        let previous_bottom = pair[0].rect.origin.y + pair[0].rect.size.y;
-        assert!(previous_bottom <= pair[1].rect.origin.y);
-    }
-    for card in &cards {
-        assert!(card.rect.origin.y >= surface.origin.y);
-        assert!(card.rect.origin.y + card.rect.size.y <= surface.origin.y + surface.size.y + 0.01);
-    }
-
-    let mut painter = TextCapture::default();
-    IntegrationsPage::paint(&mut painter, surface, &state, &ZodeTheme::light());
-
-    for card in &cards {
-        let icon = painter
-            .rounded_fills
-            .iter()
-            .find(|rect| {
-                (rect.origin.x - (card.rect.origin.x + 14.0)).abs() <= 0.01
-                    && rect.size.x <= 40.0
-                    && rect.size.y <= 40.0
-                    && rect.origin.y >= card.rect.origin.y
-                    && rect.origin.y + rect.size.y <= card.rect.origin.y + card.rect.size.y + 0.01
-            })
-            .expect("each compact card paints a contained icon");
-        let icon_center = icon.origin.y + icon.size.y / 2.0;
-        let card_center = card.rect.origin.y + card.rect.size.y / 2.0;
-        assert!((icon_center - card_center).abs() <= 0.01);
-
-        for content in [card.card.label, card.card.description] {
-            let draw = painter
-                .text_draws
-                .iter()
-                .find(|draw| draw.content == content)
-                .expect("each compact card paints both text rows");
-            assert!(draw.origin.y > card.rect.origin.y);
-            assert!(draw.origin.y < card.rect.origin.y + card.rect.size.y);
-        }
-    }
-}
-
-#[test]
-fn plugin_paint_shows_only_real_node_capabilities_without_marketplace_claims() {
-    let mut state = demo_state();
-    state.presentation.route = ShellRoute::Integrations(IntegrationsTab::Plugins);
-    state
-        .host
-        .capabilities
-        .capabilities
-        .extend([NodeCapability::Terminal, NodeCapability::Approval]);
-    let mut painter = TextCapture::default();
-
-    IntegrationsPage::paint(
-        &mut painter,
-        Rect::xywh(240.0, 0.0, 1_560.0, 1_080.0),
-        &state,
-        &ZodeTheme::light(),
+    assert_eq!(node.rect, first.rect);
+    assert!(node.name.contains(&first.name));
+    assert!(node.actions.is_empty());
+    assert!(node.focus_order.is_none());
+    assert_eq!(
+        snapshot.hit_test(Point2D::new(
+            first.rect.origin.x + first.rect.size.x / 2.0,
+            first.rect.origin.y + first.rect.size.y / 2.0,
+        )),
+        None
     );
-
-    let text = painter.texts.join("\n");
-    for expected in [
-        "插件",
-        "技能",
-        "使用当前节点提供的本地能力",
-        "搜索即将支持",
-        "可用能力",
-        "终端",
-        "运行本地命令与开发工具",
-        "审批",
-        "在敏感操作前请求确认",
-    ] {
-        assert!(text.contains(expected), "missing paint text: {expected}");
-    }
-    for fabricated in ["智能体", "已安装", "安装", "51 完成"] {
-        assert!(
-            !text.contains(fabricated),
-            "fabricated marketplace state was painted: {fabricated}"
-        );
-    }
 }
 
 #[test]
-fn skills_paint_is_an_explicit_empty_catalog_and_never_rebrands_capabilities() {
-    let mut state = demo_state();
-    state.presentation.route = ShellRoute::Integrations(IntegrationsTab::Skills);
-    state
-        .host
-        .capabilities
-        .capabilities
-        .extend([NodeCapability::Agent, NodeCapability::Terminal]);
-    let mut painter = TextCapture::default();
-
-    IntegrationsPage::paint(
-        &mut painter,
-        Rect::xywh(240.0, 0.0, 1_560.0, 1_080.0),
-        &state,
-        &ZodeTheme::light(),
-    );
-
-    let text = painter.texts.join("\n");
-    for expected in [
-        "插件",
-        "技能",
-        "通过可复用指令扩展 Zode 工作流",
-        "搜索即将支持",
-        "尚未接入技能目录",
+fn loading_failed_and_idle_states_are_explicit_and_never_fabricate_rows() {
+    for (load, expected) in [
+        (LoadState::Idle, "尚未加载本机集成"),
+        (LoadState::Loading, "正在读取本机集成…"),
+        (
+            LoadState::Failed("permission denied".into()),
+            "permission denied",
+        ),
     ] {
-        assert!(text.contains(expected), "missing paint text: {expected}");
-    }
-    for fabricated in ["智能体", "终端", "已安装", "安装"] {
-        assert!(
-            !text.contains(fabricated),
-            "capability or marketplace state was painted as a skill: {fabricated}"
-        );
-    }
-    assert!(IntegrationsPage::capability_card_layout(
-        Rect::xywh(240.0, 0.0, 1_560.0, 1_080.0),
-        &state,
-    )
-    .is_empty());
-}
-
-#[test]
-fn search_shell_is_explicitly_unavailable_instead_of_looking_editable() {
-    for tab in [IntegrationsTab::Plugins, IntegrationsTab::Skills] {
         let mut state = demo_state();
-        state.presentation.route = ShellRoute::Integrations(tab);
-        let mut painter = TextCapture::default();
+        state.presentation.route = ShellRoute::Integrations(IntegrationsTab::Plugins);
+        state.presentation.integrations = load;
+        let surface = Rect::xywh(0.0, 0.0, 736.0, 720.0);
+        let mut painter = PaintCapture::default();
 
-        IntegrationsPage::paint(
-            &mut painter,
-            Rect::xywh(0.0, 0.0, 736.0, 720.0),
-            &state,
-            &ZodeTheme::light(),
-        );
+        IntegrationsPage::paint(&mut painter, surface, &state, &ZodeTheme::light());
 
-        let text = painter.texts.join("\n");
-        assert!(text.contains("搜索即将支持"));
-        assert!(!text.contains("搜索能力"));
-        assert!(!text.contains("搜索技能"));
-        assert_eq!(painter.svg_strokes, 0);
+        assert!(painter.texts.join("\n").contains(expected));
+        assert!(IntegrationsPage::installed_icon_layout(surface, &state).is_empty());
+        assert!(IntegrationsPage::catalog_section_layout(surface, &state).is_empty());
     }
 }
 
 #[test]
-fn narrow_skills_empty_copy_is_measured_centered_and_kept_inside_its_card() {
-    let mut state = demo_state();
-    state.presentation.route = ShellRoute::Integrations(IntegrationsTab::Skills);
-    let surface = Rect::xywh(0.0, 0.0, 320.0, 720.0);
-    let empty = Rect::xywh(0.0, 252.0, 320.0, 136.0);
-    let mut painter = TextCapture::default();
+fn narrow_layout_never_produces_negative_or_overlapping_row_columns() {
+    let state = catalog_state(IntegrationsTab::Plugins);
+    let surface = Rect::xywh(0.0, 0.0, 420.0, 720.0);
+    let sections = IntegrationsPage::catalog_section_layout(surface, &state);
 
-    IntegrationsPage::paint(&mut painter, surface, &state, &ZodeTheme::light());
-
-    for (content, font_size, weight) in [
-        ("尚未接入技能目录", 15.0, 600),
-        ("接入真实目录后，这里将展示可用技能。", 13.0, 400),
-    ] {
-        assert!(painter
-            .measurements
-            .contains(&(content.to_string(), font_size, weight)));
-        let draw = painter
-            .text_draws
-            .iter()
-            .find(|draw| draw.content == content)
-            .expect("empty-state copy is painted");
-        assert_eq!((draw.font_size, draw.weight), (font_size, weight));
-        let width = estimated_text_width(content, font_size);
-        let expected_x = empty.origin.x + (empty.size.x - width) / 2.0;
-        assert!((draw.origin.x - expected_x).abs() <= 0.01);
-        assert!(draw.origin.x >= empty.origin.x);
-        assert!(draw.origin.x + width <= empty.origin.x + empty.size.x);
+    for section in sections {
+        for row in &section.rows {
+            assert!(row.rect.size.x >= 0.0 && row.rect.size.y > 0.0);
+            assert!(row.rect.min_x() >= surface.min_x());
+            assert!(row.rect.max_x() <= surface.max_x());
+        }
+        for pair in section.rows.windows(2) {
+            assert!(pair[0].rect.max_y() <= pair[1].rect.min_y());
+        }
     }
 }

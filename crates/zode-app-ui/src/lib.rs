@@ -20,26 +20,27 @@ pub use layout::{
     COMPOSER_ATTACHMENT_H, COMPOSER_BOTTOM, COMPOSER_CONTEXT_H, COMPOSER_H, COMPOSER_INPUT_H,
     CONTENT_GUTTER, CONTENT_W, SIDEBAR_W, TOP_BAR_H, TRANSCRIPT_COMPOSER_GAP, TRANSCRIPT_TOP_GAP,
 };
+pub use text::{paint_role_single_line, TypographyRole, TypographyStyle};
 pub use theme::{animation_duration_ms, resolve_theme, ThemeMode, ZodeTheme, ZODE_PURPLE};
 pub use virtual_list::{visible_range, MeasuredItem, MeasurementCache, VirtualListState};
 pub use widgets::{
-    group_sessions, ApprovalAction, ApprovalButtonLayout, ApprovalCard, CapabilityCard,
-    CapabilityCardLayout, CellPosition, ComingSoonPage, Composer, ComposerController,
-    ComposerLayout, ComposerOutcome, ComposerSubmission, DocumentPreview, DocumentPreviewLayout,
-    EnvironmentPanel, EnvironmentPanelLayout, EnvironmentSectionLayout, GeneralSettingsLayout,
-    HeaderActionLayout, IntegrationTabLayout, IntegrationsPage, IntegrationsPageLayout,
-    PermissionPresetLayout, PermissionRow, PermissionRowLayout, ProjectSessionGroup,
-    ProjectSidebar, ReviewDraft, ReviewFileRowLayout, ReviewLine, ReviewLineKind, ReviewPanel,
-    ReviewPanelLayout, ReviewSelection, SandboxSelection, SettingControl, SettingControlLayout,
-    SettingRowLayout, SettingsNavigationEntryLayout, SettingsNavigationGroupLayout,
-    SettingsNavigationLayout, SettingsPanel, SettingsPanelLayout, SidebarAction, SidebarItem,
-    SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget, TerminalCell, TerminalColor,
-    TerminalGrid, TerminalLine, TerminalPanel, TerminalPanelController, TerminalSelection,
-    ThreadHeader, ThreadHeaderLayout, ThreadTranscript, ToolCard, ToolTone, TranscriptItemLayout,
-    UsageChip, UsageDisplay, WindowChrome, WorkspaceShell, DOCUMENT_PREVIEW_CLOSE_ID,
-    DOCUMENT_PREVIEW_CONTENT_ID, DOCUMENT_PREVIEW_EXTERNAL_ID, DOCUMENT_PREVIEW_RETRY_ID,
-    ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID, INTEGRATIONS_PLUGINS_TAB_ID,
-    INTEGRATIONS_SKILLS_TAB_ID,
+    group_sessions, ApprovalAction, ApprovalButtonLayout, ApprovalCard, CatalogSectionLayout,
+    CellPosition, ComingSoonPage, Composer, ComposerController, ComposerLayout, ComposerOutcome,
+    ComposerSubmission, DocumentPreview, DocumentPreviewLayout, EnvironmentPanel,
+    EnvironmentPanelLayout, EnvironmentSectionLayout, GeneralSettingsLayout, HeaderActionLayout,
+    InstalledIconLayout, IntegrationRowLayout, IntegrationTabLayout, IntegrationsPage,
+    IntegrationsPageLayout, PermissionPresetLayout, PermissionRow, PermissionRowLayout,
+    ProjectSessionGroup, ProjectSidebar, ReviewDraft, ReviewFileRowLayout, ReviewLine,
+    ReviewLineKind, ReviewPanel, ReviewPanelLayout, ReviewSelection, SandboxSelection,
+    SettingControl, SettingControlLayout, SettingRowLayout, SettingsNavigationEntryLayout,
+    SettingsNavigationGroupLayout, SettingsNavigationLayout, SettingsPanel, SettingsPanelLayout,
+    SidebarAction, SidebarItem, SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget,
+    TerminalCell, TerminalColor, TerminalGrid, TerminalLine, TerminalPanel,
+    TerminalPanelController, TerminalSelection, ThreadHeader, ThreadHeaderLayout, ThreadTranscript,
+    ToolCard, ToolTone, TranscriptItemLayout, UsageChip, UsageDisplay, WindowChrome,
+    WorkspaceShell, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
+    DOCUMENT_PREVIEW_EXTERNAL_ID, DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID,
+    ENVIRONMENT_REVIEW_ID, INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
 };
 
 pub const CRATE_READY: bool = true;

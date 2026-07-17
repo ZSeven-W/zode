@@ -1,6 +1,6 @@
 use zode_app_model::{
     reduce_presentation_command, AppCommand, LoadState, PresentationCommandOutcome, PreviewState,
-    SecondaryPane, ZodeAppState,
+    SecondaryPane, ShellRoute, ZodeAppState,
 };
 use zode_node_protocol::SessionLocator;
 
@@ -10,6 +10,7 @@ use crate::presentation_bridge::PresentationQuery;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PresentationRefresh {
     PaneOpened,
+    IntegrationsOpened,
     SessionChanged,
     CommandCompleted,
     DiffInvalidated(SessionLocator),
@@ -24,13 +25,21 @@ pub(super) fn reduce_local_presentation_command(
     state: &mut ZodeAppState,
     command: AppCommand,
 ) -> Option<LocalPresentationOutcome> {
-    let refresh = matches!(
-        command,
+    let refresh = if matches!(&command, AppCommand::Navigate(ShellRoute::Integrations(_)))
+        || matches!(&command, AppCommand::SelectIntegrationsTab(_))
+            && integrations_need_refresh(state)
+    {
+        Some(PresentationRefresh::IntegrationsOpened)
+    } else if matches!(
+        &command,
         AppCommand::OpenSecondary(_)
             | AppCommand::OpenReview
             | AppCommand::PreviewWorkspaceFile { .. }
-    )
-    .then_some(PresentationRefresh::PaneOpened);
+    ) {
+        Some(PresentationRefresh::PaneOpened)
+    } else {
+        None
+    };
     if reduce_presentation_command(state, command) == PresentationCommandOutcome::Applied {
         Some(LocalPresentationOutcome { refresh })
     } else {
@@ -38,10 +47,28 @@ pub(super) fn reduce_local_presentation_command(
     }
 }
 
+fn integrations_need_refresh(state: &ZodeAppState) -> bool {
+    let Some(workspace_uri) = state.active_available_workspace() else {
+        return false;
+    };
+    !matches!(
+        &state.presentation.integrations,
+        LoadState::Ready(catalog) if &catalog.workspace_uri == workspace_uri
+    ) && !matches!(&state.presentation.integrations, LoadState::Loading)
+}
+
 pub(super) fn presentation_queries_for_refresh(
     state: &ZodeAppState,
     refresh: PresentationRefresh,
 ) -> Vec<PresentationQuery> {
+    if refresh == PresentationRefresh::IntegrationsOpened {
+        return state
+            .active_available_workspace()
+            .cloned()
+            .map(|workspace_uri| PresentationQuery::Integrations { workspace_uri })
+            .into_iter()
+            .collect();
+    }
     let Some(session) = state.current_session.as_ref().cloned() else {
         return Vec::new();
     };
@@ -139,6 +166,9 @@ pub(super) fn mark_presentation_query_failed(
             if preview.target() == Some(&target) {
                 *preview = PreviewState::Failed { target, message };
             }
+        }
+        PresentationQuery::Integrations { .. } => {
+            state.presentation.integrations = LoadState::Failed(message);
         }
     }
 }
@@ -285,6 +315,52 @@ mod tests {
             presentation_queries_for_refresh(&state, PresentationRefresh::PaneOpened),
             vec![PresentationQuery::Diff { session }]
         );
+    }
+
+    #[test]
+    fn opening_integrations_queries_the_active_workspace_without_session_assembly() {
+        let (mut state, _) = state_with_session(true);
+        let outcome = reduce_local_presentation_command(
+            &mut state,
+            AppCommand::Navigate(ShellRoute::Integrations(IntegrationsTab::Plugins)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.refresh,
+            Some(PresentationRefresh::IntegrationsOpened)
+        );
+        assert_eq!(
+            presentation_queries_for_refresh(&state, PresentationRefresh::IntegrationsOpened),
+            vec![PresentationQuery::Integrations {
+                workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+            }]
+        );
+    }
+
+    #[test]
+    fn switching_integration_tabs_reuses_the_current_workspace_catalog() {
+        let (mut state, _) = state_with_session(true);
+        state.presentation.route = ShellRoute::Integrations(IntegrationsTab::Plugins);
+        state.presentation.integrations = LoadState::Ready(zode_app_model::IntegrationCatalog {
+            workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+            installed: Vec::new(),
+            sections: Vec::new(),
+            directory_error: None,
+        });
+
+        let outcome = reduce_local_presentation_command(
+            &mut state,
+            AppCommand::SelectIntegrationsTab(IntegrationsTab::Skills),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.refresh, None);
+        assert_eq!(
+            state.presentation.route,
+            ShellRoute::Integrations(IntegrationsTab::Skills)
+        );
+        assert!(state.presentation.integrations.ready().is_some());
     }
 
     #[test]

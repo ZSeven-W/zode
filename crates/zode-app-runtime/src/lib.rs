@@ -4,6 +4,7 @@ mod app_state_store;
 mod bootstrap;
 mod engine_backend;
 mod event_sink;
+mod integrations;
 mod local_endpoint;
 mod node;
 mod node_identity;

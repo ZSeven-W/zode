@@ -711,6 +711,29 @@ async fn steer_and_all_query_shapes_delegate_to_stable_sources() {
     assert_eq!(diff_session, session);
     assert!(files.is_empty());
     assert!(unified.is_empty());
+    let AgentSnapshot::Integrations(integrations) = driver
+        .query(AgentQuery::Integrations {
+            workspace_uri: workspace_uri.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected integrations snapshot");
+    };
+    assert_eq!(integrations.workspace_uri, workspace_uri);
+    assert!(integrations.entries.len() >= 10);
+    assert!(integrations
+        .entries
+        .iter()
+        .all(|entry| !entry.source_id.is_empty()));
+    assert!(integrations.entries.iter().all(|entry| {
+        entry.kind != zode_node_protocol::IntegrationRegistryKind::Mcp
+            || matches!(
+                entry.state,
+                zode_node_protocol::IntegrationRegistryState::Configured
+                    | zode_node_protocol::IntegrationRegistryState::Disabled
+            )
+    }));
     assert_eq!(
         driver
             .query(AgentQuery::ProjectPermissions { workspace_uri })
@@ -718,6 +741,40 @@ async fn steer_and_all_query_shapes_delegate_to_stable_sources() {
             .unwrap(),
         AgentSnapshot::ProjectPermissions(Vec::new())
     );
+}
+
+#[tokio::test]
+async fn integration_discovery_never_assembles_a_session_engine() {
+    let dir = TestDir::new("integration-query");
+    let project = dir.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let node_id = NodeId::new();
+    let capabilities = manifest(node_id);
+    let repository = LocalSessionRepository::new(dir.path(), node_id);
+    let factory = Arc::new(FakeFactory::new(Vec::new()));
+    let driver = ZodeEngineDriver::with_factory_and_config_dir(
+        node_id,
+        template(&project, "query-model"),
+        repository,
+        capabilities,
+        factory.clone(),
+        dir.path().join("config"),
+    );
+    let workspace_uri = workspace(&project);
+
+    let AgentSnapshot::Integrations(snapshot) = driver
+        .query(AgentQuery::Integrations {
+            workspace_uri: workspace_uri.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected integrations snapshot");
+    };
+
+    assert_eq!(snapshot.workspace_uri, workspace_uri);
+    assert!(snapshot.entries.len() >= 10);
+    assert!(factory.assemblies.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

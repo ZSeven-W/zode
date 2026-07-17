@@ -2,11 +2,13 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use tokio::sync::mpsc;
 use zode_app_model::{
-    EnvironmentSnapshot, LoadState, PreviewKind, PreviewState, PreviewTarget, ZodeAppState,
+    integration_catalog, EnvironmentSnapshot, LoadState, PreviewKind, PreviewState, PreviewTarget,
+    ZodeAppState,
 };
 use zode_app_runtime::workspace_uri_to_path;
 use zode_node_protocol::{
-    AgentEndpoint, AgentQuery, AgentSnapshot, DiffSnapshot, SessionLocator, WorkspaceUri,
+    AgentEndpoint, AgentQuery, AgentSnapshot, DiffSnapshot, IntegrationRegistrySnapshot,
+    SessionLocator, WorkspaceUri,
 };
 
 use crate::{
@@ -30,6 +32,9 @@ pub enum PresentationQuery {
         session: SessionLocator,
         target: PreviewTarget,
     },
+    Integrations {
+        workspace_uri: WorkspaceUri,
+    },
 }
 
 impl PresentationQuery {
@@ -38,6 +43,7 @@ impl PresentationQuery {
             Self::Environment { session, .. } => QueryKey::Environment(session.clone()),
             Self::Diff { session } => QueryKey::Diff(session.clone()),
             Self::DocumentPreview { session, .. } => QueryKey::DocumentPreview(session.clone()),
+            Self::Integrations { .. } => QueryKey::Integrations,
         }
     }
 }
@@ -47,6 +53,7 @@ enum QueryKey {
     Environment(SessionLocator),
     Diff(SessionLocator),
     DocumentPreview(SessionLocator),
+    Integrations,
 }
 
 struct PendingQuery {
@@ -77,6 +84,11 @@ enum BridgeItem {
         target: PreviewTarget,
         result: Result<LoadedPreview, String>,
     },
+    Integrations {
+        generation: u64,
+        workspace_uri: WorkspaceUri,
+        result: Result<IntegrationRegistrySnapshot, String>,
+    },
 }
 
 struct LoadedPreview {
@@ -91,6 +103,7 @@ impl BridgeItem {
             Self::Environment { session, .. } => QueryKey::Environment(session.clone()),
             Self::Diff { session, .. } => QueryKey::Diff(session.clone()),
             Self::DocumentPreview { session, .. } => QueryKey::DocumentPreview(session.clone()),
+            Self::Integrations { .. } => QueryKey::Integrations,
         }
     }
 
@@ -98,7 +111,8 @@ impl BridgeItem {
         match self {
             Self::Environment { generation, .. }
             | Self::Diff { generation, .. }
-            | Self::DocumentPreview { generation, .. } => *generation,
+            | Self::DocumentPreview { generation, .. }
+            | Self::Integrations { generation, .. } => *generation,
         }
     }
 }
@@ -289,6 +303,25 @@ impl PresentationQueryBridge {
                     };
                     applied += 1;
                 }
+                BridgeItem::Integrations {
+                    workspace_uri,
+                    result,
+                    ..
+                } => {
+                    if state.active_available_workspace() != Some(&workspace_uri) {
+                        continue;
+                    }
+                    state.presentation.integrations = match result {
+                        Ok(snapshot) if snapshot.workspace_uri == workspace_uri => {
+                            LoadState::Ready(integration_catalog(snapshot))
+                        }
+                        Ok(_) => LoadState::Failed(
+                            "the endpoint returned integrations for the wrong workspace".into(),
+                        ),
+                        Err(message) => LoadState::Failed(message),
+                    };
+                    applied += 1;
+                }
             }
         }
         applied
@@ -343,6 +376,23 @@ async fn execute_work(
                 result,
             }
         }
+        PresentationQuery::Integrations { workspace_uri } => {
+            let result = match endpoint
+                .query(AgentQuery::Integrations {
+                    workspace_uri: workspace_uri.clone(),
+                })
+                .await
+            {
+                Ok(AgentSnapshot::Integrations(snapshot)) => Ok(snapshot),
+                Ok(_) => Err("the endpoint returned the wrong integrations snapshot".into()),
+                Err(error) => Err(error.to_string()),
+            };
+            BridgeItem::Integrations {
+                generation,
+                workspace_uri,
+                result,
+            }
+        }
     }
 }
 
@@ -372,6 +422,9 @@ fn mark_loading(state: &mut ZodeAppState, request: PresentationQuery) {
                 .entry(session)
                 .or_default()
                 .preview = PreviewState::Loading { target };
+        }
+        PresentationQuery::Integrations { .. } => {
+            state.presentation.integrations = LoadState::Loading;
         }
     }
 }

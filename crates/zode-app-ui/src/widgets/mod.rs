@@ -4,7 +4,7 @@ mod composer;
 mod document_preview;
 mod empty_state;
 mod environment;
-mod integrations_page;
+mod integrations;
 mod project_sidebar;
 mod review_panel;
 mod settings;
@@ -33,9 +33,10 @@ pub use environment::{
     EnvironmentPanel, EnvironmentPanelLayout, EnvironmentSectionLayout, ENVIRONMENT_CLOSE_ID,
     ENVIRONMENT_REVIEW_ID,
 };
-pub use integrations_page::{
-    CapabilityCard, CapabilityCardLayout, IntegrationTabLayout, IntegrationsPage,
-    IntegrationsPageLayout, INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
+pub use integrations::{
+    CatalogSectionLayout, InstalledIconLayout, IntegrationRowLayout, IntegrationTabLayout,
+    IntegrationsPage, IntegrationsPageLayout, INTEGRATIONS_PLUGINS_TAB_ID,
+    INTEGRATIONS_SKILLS_TAB_ID,
 };
 pub use project_sidebar::{
     group_sessions, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarItem,

@@ -99,6 +99,50 @@ pub struct CapabilityManifest {
     pub capabilities: BTreeSet<NodeCapability>,
 }
 
+/// Canonical local source that contributed one integration registry row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IntegrationRegistryKind {
+    ToolGroup,
+    Skill,
+    Mcp,
+    Lsp,
+    NodeCapability,
+}
+
+/// Truthful availability derived without starting an integration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IntegrationRegistryState {
+    Ready,
+    Configured,
+    Disabled,
+}
+
+/// One locally discovered integration. `source_id` is the stable registry key,
+/// never a display label reconstructed by the frontend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrationRegistryEntry {
+    pub source_id: String,
+    pub name: String,
+    pub description: String,
+    pub kind: IntegrationRegistryKind,
+    pub state: IntegrationRegistryState,
+    pub installed: bool,
+}
+
+/// Workspace-scoped, disk-only integration discovery result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrationRegistrySnapshot {
+    pub workspace_uri: WorkspaceUri,
+    pub entries: Vec<IntegrationRegistryEntry>,
+    /// The optional online directory is independent from local discovery. A
+    /// failure here must not erase `entries` or be replaced with fake offers.
+    pub directory_error: Option<String>,
+}
+
 /// A versioned command sent to a Zode node.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

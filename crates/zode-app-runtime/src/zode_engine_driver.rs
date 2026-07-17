@@ -689,6 +689,15 @@ impl EngineDriver for ZodeEngineDriver {
                 let allowed = ConfigManager::project_allowed_tools(&cwd).map_err(map_internal)?;
                 Ok(AgentSnapshot::ProjectPermissions(allowed))
             }
+            AgentQuery::Integrations { workspace_uri } => {
+                let snapshot = crate::integrations::discover_registry(
+                    workspace_uri,
+                    self.config_dir.as_deref(),
+                    &self.capabilities,
+                )
+                .map_err(map_internal)?;
+                Ok(AgentSnapshot::Integrations(snapshot))
+            }
         }
     }
 }
