@@ -69,7 +69,10 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
             vec![
                 "exec".to_string(),
                 "--json".to_string(),
-                "--full-auto".to_string(),
+                // Current flag (replaces the deprecated `--full-auto`); grants
+                // codex its workspace-write self-sandbox.
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
             ],
             vec![],
         ),
