@@ -93,7 +93,7 @@ fn busy_composer_steers_and_exposes_stop() {
 
 #[test]
 fn picker_choices_are_explicit_outcomes() {
-    let mut composer = ComposerController::fixture("");
+    let composer = ComposerController::fixture("");
     assert_eq!(
         composer.select_model("gpt-5.2"),
         ComposerOutcome::SetModel("gpt-5.2".into()),
