@@ -147,13 +147,14 @@ fn paint_navigation_row(
             20.0,
         );
         painter.fill_round_rect(keycap, 10.0, theme.tokens.muted.with_alpha(0.78));
-        draw_label(
+        paint_single_line(
             painter,
             "⌘N",
             keycap,
             10.0,
             400,
             theme.tokens.muted_foreground,
+            HorizontalAlign::Center,
         );
     }
 }
@@ -258,7 +259,7 @@ fn paint_row_trailing(
 ) {
     if show_shortcuts {
         if let Some(shortcut) = row.shortcut {
-            draw_label(
+            paint_single_line(
                 painter,
                 &format!("⌘{shortcut}"),
                 Rect::xywh(
@@ -270,6 +271,7 @@ fn paint_row_trailing(
                 10.0,
                 400,
                 theme.tokens.muted_foreground,
+                HorizontalAlign::Center,
             );
             return;
         }
