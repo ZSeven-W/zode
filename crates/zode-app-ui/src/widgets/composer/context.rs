@@ -81,6 +81,18 @@ pub(super) fn paint_interactive(
         rect.size.y + COMPOSER_CONTEXT_OVERLAP,
     );
     painter.fill_round_rect(surface, CONTEXT_RADIUS, theme.tokens.muted);
+    let square_tail_height = CONTEXT_RADIUS
+        .min(surface.size.x / 2.0)
+        .min(surface.size.y / 2.0);
+    painter.fill_rect(
+        Rect::xywh(
+            surface.origin.x,
+            surface.max_y() - square_tail_height,
+            surface.size.x,
+            square_tail_height,
+        ),
+        theme.tokens.muted,
+    );
     painter.save();
     painter.clip_rect(rect);
     let mut x = rect.origin.x + CONTEXT_INSET_X;

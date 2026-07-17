@@ -16,14 +16,17 @@ struct TextCapture {
     text_lines: Vec<(String, Point2D, f32)>,
     icons: Vec<(&'static str, Point2D, f32)>,
     fill_rects: Vec<Rect>,
+    rect_fills: Vec<(Rect, Color)>,
     round_fills: Vec<(Rect, Color)>,
+    round_fill_details: Vec<(Rect, f32, Color)>,
 }
 
 impl Painter for TextCapture {
     fn begin_frame(&mut self) {}
     fn end_frame(&mut self) {}
-    fn fill_rect(&mut self, rect: Rect, _color: Color) {
+    fn fill_rect(&mut self, rect: Rect, color: Color) {
         self.fill_rects.push(rect);
+        self.rect_fills.push((rect, color));
     }
     fn stroke_rect(&mut self, _rect: Rect, _color: Color, _width: f32) {}
     fn draw_text(&mut self, layout: &TextLayout, origin: Point2D) {
@@ -39,8 +42,9 @@ impl Painter for TextCapture {
     }
     fn clip_rect(&mut self, _rect: Rect) {}
     fn stroke_line(&mut self, _from: Point2D, _to: Point2D, _color: Color, _width: f32) {}
-    fn fill_round_rect(&mut self, rect: Rect, _radius: f32, color: Color) {
+    fn fill_round_rect(&mut self, rect: Rect, radius: f32, color: Color) {
         self.round_fills.push((rect, color));
+        self.round_fill_details.push((rect, radius, color));
     }
     fn stroke_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color, _width: f32) {}
     fn stroke_svg_path(
@@ -420,6 +424,21 @@ fn context_rail_paints_behind_the_later_input_card() {
         .find(|(_, (_, color))| *color == theme.tokens.muted)
         .map(|(index, (rect, _))| (index, *rect))
         .expect("muted context rail surface");
+    let (_, rail_radius, _) = painter
+        .round_fill_details
+        .iter()
+        .find(|(rect, _, color)| *rect == rail && *color == theme.tokens.muted)
+        .expect("context rail retains its rounded top surface");
+    let (square_tail, _) = painter
+        .rect_fills
+        .iter()
+        .find(|(rect, color)| {
+            *color == theme.tokens.muted
+                && rect.min_x() == rail.min_x()
+                && rect.max_x() == rail.max_x()
+                && rect.max_y() == rail.max_y()
+        })
+        .expect("context rail fills its square lower corners to both edges");
     let (input_index, _) = painter
         .round_fills
         .iter()
@@ -429,12 +448,43 @@ fn context_rail_paints_behind_the_later_input_card() {
 
     assert_eq!(rail.min_x(), layout.context.min_x());
     assert_eq!(rail.max_x(), layout.context.max_x());
+    assert_eq!(*rail_radius, 18.0);
     assert!((rail.height() - 44.0).abs() <= f32::EPSILON);
     assert!((rail.max_y() - layout.input.min_y() - 6.0).abs() <= f32::EPSILON);
+    assert!(square_tail.min_y() > rail.min_y());
+    assert!(square_tail.min_y() < layout.context.max_y());
+    assert_eq!(layout.context, Rect::xywh(14.0, 0.0, 708.0, 38.0));
+    assert_eq!(layout.input, Rect::xywh(0.0, 38.0, 736.0, 100.0));
     assert!(
         rail_index < input_index,
         "input card must cover the rail tail"
     );
+}
+
+#[test]
+fn shallow_context_rail_keeps_a_rounded_top_cap() {
+    let state = ComposerState::default();
+    let rect = Rect::xywh(0.0, 0.0, 736.0, 110.0);
+    let theme = ZodeTheme::light();
+    let mut painter = TextCapture::default();
+    Composer::paint_input(
+        &mut painter,
+        rect,
+        &jian_core::text_input::TextInputState::default(),
+        &state,
+        &theme,
+    );
+    let (rail, _) = painter
+        .round_fills
+        .iter()
+        .find(|(_, color)| *color == theme.tokens.muted)
+        .expect("shallow rail surface");
+    let (tail, _) = painter
+        .rect_fills
+        .iter()
+        .find(|(_, color)| *color == theme.tokens.muted)
+        .expect("shallow rail square tail");
+    assert!(tail.min_y() > rail.min_y());
 }
 
 #[test]
