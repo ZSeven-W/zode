@@ -30,7 +30,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: install skia text dependencies
-        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk libfontconfig1-dev libfreetype6-dev
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap fonts-noto-cjk libfontconfig1-dev libfreetype6-dev
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
