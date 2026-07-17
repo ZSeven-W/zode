@@ -61,6 +61,22 @@ pub fn reduce_presentation_command(
         AppCommand::Navigate(route) => Some(route),
         AppCommand::SelectSettingsCategory(category) => Some(crate::ShellRoute::Settings(category)),
         AppCommand::SelectIntegrationsTab(tab) => Some(crate::ShellRoute::Integrations(tab)),
+        AppCommand::ToggleSecondaryMenu => {
+            if state.presentation.route != crate::ShellRoute::Conversation {
+                return PresentationCommandOutcome::Ignored;
+            }
+            state.presentation.secondary_menu_open = !state.presentation.secondary_menu_open;
+            state.session_menu = None;
+            state.composer.queue_menu = None;
+            return PresentationCommandOutcome::Applied;
+        }
+        AppCommand::CloseSecondaryMenu => {
+            if !state.presentation.secondary_menu_open {
+                return PresentationCommandOutcome::Ignored;
+            }
+            state.presentation.secondary_menu_open = false;
+            return PresentationCommandOutcome::Applied;
+        }
         AppCommand::OpenSecondary(pane) => {
             open_secondary(state, pane);
             return PresentationCommandOutcome::Applied;
@@ -111,6 +127,7 @@ pub fn reduce_presentation_command(
         close_secondary(state);
     }
     state.session_menu = None;
+    state.presentation.secondary_menu_open = false;
     state.presentation.route = route;
     state.shell.page = route.legacy_page();
     PresentationCommandOutcome::Applied
@@ -118,15 +135,22 @@ pub fn reduce_presentation_command(
 
 fn open_secondary(state: &mut ZodeAppState, pane: crate::SecondaryPane) {
     state.session_menu = None;
+    state.composer.queue_menu = None;
+    state.presentation.secondary_menu_open = false;
     state.presentation.route = crate::ShellRoute::Conversation;
     state.presentation.secondary_pane = Some(pane);
     state.shell.page = crate::ShellPage::Conversation;
     state.review.open = pane == crate::SecondaryPane::Review;
+    state.terminal.open = pane == crate::SecondaryPane::Terminal;
+    state.terminal.focused = pane == crate::SecondaryPane::Terminal;
 }
 
 fn close_secondary(state: &mut ZodeAppState) {
+    state.presentation.secondary_menu_open = false;
     state.presentation.secondary_pane = None;
     state.review.open = false;
+    state.terminal.open = false;
+    state.terminal.focused = false;
 }
 
 /// Applies terminal-only UI state and identifies commands that must be
@@ -522,6 +546,7 @@ pub fn reduce_navigation_command(
             }
             state.session_menu = (state.session_menu.as_ref() != Some(&session)).then_some(session);
             state.composer.queue_menu = None;
+            state.presentation.secondary_menu_open = false;
             NavigationOutcome::Applied
         }
         AppCommand::SelectSession(session) => {
@@ -544,6 +569,7 @@ pub fn reduce_navigation_command(
                 state.composer.finish_queue_edit();
             }
             state.session_menu = None;
+            state.presentation.secondary_menu_open = false;
             state.project_picker = crate::ProjectPickerState::default();
             state.current_session = Some(session.clone());
             if let Some(options) = state.presentation.sessions[&session]

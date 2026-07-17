@@ -569,3 +569,44 @@ fn preview_command_derives_workspace_from_the_bound_current_session() {
         PresentationCommandOutcome::Ignored,
     );
 }
+
+#[test]
+fn secondary_picker_state_is_mutually_exclusive_and_terminal_is_typed() {
+    let mut state = demo_state();
+    assert_eq!(
+        reduce_presentation_command(&mut state, AppCommand::ToggleSecondaryMenu),
+        PresentationCommandOutcome::Applied
+    );
+    assert!(state.presentation.secondary_menu_open);
+
+    assert_eq!(
+        reduce_presentation_command(
+            &mut state,
+            AppCommand::OpenSecondary(SecondaryPane::Terminal),
+        ),
+        PresentationCommandOutcome::Applied
+    );
+    assert_eq!(state.presentation.route, ShellRoute::Conversation);
+    assert_eq!(
+        state.presentation.secondary_pane,
+        Some(SecondaryPane::Terminal)
+    );
+    assert!(!state.presentation.secondary_menu_open);
+    assert!(state.terminal.open);
+    assert!(state.terminal.focused);
+
+    assert_eq!(
+        reduce_presentation_command(&mut state, AppCommand::CloseSecondary),
+        PresentationCommandOutcome::Applied
+    );
+    assert_eq!(state.presentation.secondary_pane, None);
+    assert!(!state.terminal.open);
+    assert!(!state.terminal.focused);
+}
+
+#[test]
+fn missing_desktop_contracts_have_distinct_typed_panes() {
+    assert_ne!(SecondaryPane::Browser, SecondaryPane::Files);
+    assert_ne!(SecondaryPane::Files, SecondaryPane::SideTask);
+    assert_ne!(SecondaryPane::SideTask, SecondaryPane::DocumentPreview);
+}

@@ -138,6 +138,8 @@ pub enum AppCommand {
     },
     ToggleSidebar,
     Navigate(ShellRoute),
+    ToggleSecondaryMenu,
+    CloseSecondaryMenu,
     OpenSecondary(SecondaryPane),
     CloseSecondary,
     SelectSettingsCategory(SettingsCategory),

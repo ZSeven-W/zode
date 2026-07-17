@@ -4,7 +4,8 @@ use zode_app_model::ZodeAppState;
 
 use crate::widgets::{HEADER_MENU_ARCHIVE_ID, HEADER_MENU_ID, HEADER_MENU_PIN_ID, HEADER_MORE_ID};
 use crate::{
-    ThreadHeader, ThreadTranscript, WorkspaceLayout, HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID,
+    PanelPicker, ThreadHeader, ThreadTranscript, WorkspaceLayout, HEADER_ENVIRONMENT_ID,
+    HEADER_REVIEW_ID, PANEL_PICKER_ID, PANEL_PICKER_MENU_ID,
 };
 
 use super::{next_order, node, visible_rect, InteractionNode};
@@ -20,6 +21,7 @@ pub(super) fn append_header_nodes(
         (header.more, HEADER_MORE_ID, "任务操作"),
         (header.environment, HEADER_ENVIRONMENT_ID, "环境信息"),
         (header.review, HEADER_REVIEW_ID, "审查变更"),
+        (header.panel_picker, PANEL_PICKER_ID, "选择侧边面板"),
     ] {
         let Some(action) = action.filter(|action| visible_rect(action.rect)) else {
             continue;
@@ -35,6 +37,53 @@ pub(super) fn append_header_nodes(
             next_order(focus_order),
             CursorHint::Pointer,
         ));
+    }
+}
+
+pub(super) fn append_panel_picker_nodes(
+    nodes: &mut Vec<InteractionNode>,
+    layout: &WorkspaceLayout,
+    focus_order: &mut u32,
+    state: &ZodeAppState,
+) {
+    let Some(anchor) = ThreadHeader::layout(layout.top_bar, state).panel_picker else {
+        return;
+    };
+    let Some(menu) = PanelPicker::menu_layout(anchor.rect, layout.viewport, state) else {
+        return;
+    };
+    debug_assert_eq!(menu.id, PANEL_PICKER_MENU_ID);
+    nodes.push(node(
+        PANEL_PICKER_MENU_ID,
+        menu.rect,
+        Role::Menu,
+        "侧边面板",
+        None,
+        Vec::new(),
+        None,
+        CursorHint::Default,
+    ));
+    for item in menu.items {
+        let mut interaction = node(
+            item.id,
+            item.rect,
+            Role::MenuItem,
+            item.label,
+            item.unavailable_reason.map(str::to_owned),
+            if item.enabled {
+                vec![Action::Click, Action::Focus]
+            } else {
+                Vec::new()
+            },
+            item.enabled.then(|| next_order(focus_order)).flatten(),
+            if item.enabled {
+                CursorHint::Pointer
+            } else {
+                CursorHint::Default
+            },
+        );
+        interaction.disabled = !item.enabled;
+        nodes.push(interaction);
     }
 }
 

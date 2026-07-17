@@ -8,10 +8,11 @@ use zode_app_model::{
 use crate::{
     composer_queue_reserved_height, Composer, DocumentPreview, EnvironmentPanel, Insets,
     IntegrationsPage, ProjectPickerViewState, RectExt, ReviewPanel, SettingsPanel,
-    ThreadTranscript, WorkspaceLayout, COMPOSER_ATTACHMENT_H, COMPOSER_H,
-    DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID, DOCUMENT_PREVIEW_EXTERNAL_ID,
-    DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID,
-    INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
+    TerminalSecondaryPanel, ThreadTranscript, UnavailableSecondaryPanel, WorkspaceLayout,
+    COMPOSER_ATTACHMENT_H, COMPOSER_H, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
+    DOCUMENT_PREVIEW_EXTERNAL_ID, DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID,
+    ENVIRONMENT_REVIEW_ID, INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
+    TERMINAL_SECONDARY_CLOSE_ID, UNAVAILABLE_SECONDARY_CLOSE_ID,
 };
 
 mod empty_state;
@@ -24,7 +25,7 @@ mod sidebar;
 mod transcript;
 
 use empty_state::append_empty_suggestion_nodes;
-use header::{append_header_menu_nodes, append_header_nodes};
+use header::{append_header_menu_nodes, append_header_nodes, append_panel_picker_nodes};
 pub(crate) use ids::stable_widget_id;
 use project_picker::{
     append_composer_detach, append_picker_overlay, append_welcome_project_trigger,
@@ -146,7 +147,14 @@ impl WorkspaceSnapshot {
         let split_fallback = route == ShellRoute::Conversation
             && matches!(
                 state.presentation.secondary_pane,
-                Some(SecondaryPane::Review | SecondaryPane::DocumentPreview)
+                Some(
+                    SecondaryPane::Review
+                        | SecondaryPane::DocumentPreview
+                        | SecondaryPane::Terminal
+                        | SecondaryPane::Browser
+                        | SecondaryPane::Files
+                        | SecondaryPane::SideTask
+                )
             )
             && !visible_rect(layout.review_panel)
             && visible_rect(layout.primary_surface);
@@ -289,11 +297,16 @@ impl WorkspaceSnapshot {
         };
         if route == ShellRoute::Conversation {
             append_header_menu_nodes(&mut nodes, &layout, &mut focus_order, state);
+            append_panel_picker_nodes(&mut nodes, &layout, &mut focus_order, state);
         }
         append_secondary_nodes(&mut nodes, &layout, &mut focus_order, state);
         let mut focused = if split_fallback {
             let close_id = match state.presentation.secondary_pane {
                 Some(SecondaryPane::DocumentPreview) => DOCUMENT_PREVIEW_CLOSE_ID,
+                Some(SecondaryPane::Terminal) => TERMINAL_ID,
+                Some(SecondaryPane::Browser | SecondaryPane::Files | SecondaryPane::SideTask) => {
+                    UNAVAILABLE_SECONDARY_CLOSE_ID
+                }
                 Some(SecondaryPane::Review | SecondaryPane::Environment) | None => REVIEW_CLOSE_ID,
             };
             nodes
@@ -602,6 +615,66 @@ fn append_secondary_nodes(
                     CursorHint::Default,
                 ));
             }
+        }
+        Some(SecondaryPane::Terminal) => {
+            let panel_rect = if visible_rect(layout.review_panel) {
+                layout.review_panel
+            } else {
+                layout.primary_surface
+            };
+            let panel = TerminalSecondaryPanel::layout(panel_rect);
+            if visible_rect(panel.close_button) {
+                nodes.push(node(
+                    TERMINAL_SECONDARY_CLOSE_ID,
+                    panel.close_button,
+                    Role::Button,
+                    "关闭终端面板",
+                    None,
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
+            if visible_rect(panel.content) {
+                nodes.push(node(
+                    TERMINAL_ID,
+                    panel.content,
+                    Role::TextInput,
+                    "终端",
+                    state.terminal.unavailable_reason.clone(),
+                    vec![Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Text,
+                ));
+            }
+        }
+        Some(pane @ (SecondaryPane::Browser | SecondaryPane::Files | SecondaryPane::SideTask)) => {
+            let panel_rect = if visible_rect(layout.review_panel) {
+                layout.review_panel
+            } else {
+                layout.primary_surface
+            };
+            let close = UnavailableSecondaryPanel::close_button(panel_rect);
+            nodes.push(node(
+                UNAVAILABLE_SECONDARY_CLOSE_ID,
+                close,
+                Role::Button,
+                &format!("关闭{}面板", UnavailableSecondaryPanel::title(pane)),
+                None,
+                vec![Action::Click, Action::Focus],
+                next_order(focus_order),
+                CursorHint::Pointer,
+            ));
+            nodes.push(node(
+                WidgetId(112),
+                panel_rect,
+                Role::Group,
+                UnavailableSecondaryPanel::title(pane),
+                Some(UnavailableSecondaryPanel::message(pane).into()),
+                Vec::new(),
+                None,
+                CursorHint::Default,
+            ));
         }
         Some(SecondaryPane::Environment) | None => {}
     }

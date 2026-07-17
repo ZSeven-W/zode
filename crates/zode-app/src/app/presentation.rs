@@ -2,6 +2,7 @@ use zode_app_model::{
     reduce_presentation_command, AppCommand, LoadState, PresentationCommandOutcome, PreviewState,
     SecondaryPane, ShellRoute, ZodeAppState,
 };
+use zode_app_ui::{COMPOSER_ID, TERMINAL_ID};
 use zode_node_protocol::SessionLocator;
 
 use super::DesktopApp;
@@ -180,6 +181,11 @@ impl DesktopApp {
             | AppCommand::SelectSettingsCategory(category) => Some(*category),
             _ => None,
         };
+        let opens_terminal = command == AppCommand::OpenSecondary(SecondaryPane::Terminal);
+        let closes_terminal = (command == AppCommand::CloseSecondary
+            || matches!(&command, AppCommand::OpenSecondary(_)))
+            && self.app_state.presentation.secondary_pane == Some(SecondaryPane::Terminal)
+            && !opens_terminal;
         let Some(outcome) = reduce_local_presentation_command(&mut self.app_state, command) else {
             return false;
         };
@@ -189,8 +195,18 @@ impl DesktopApp {
         if let Some(refresh) = outcome.refresh {
             self.request_presentation_refresh(refresh);
         }
+        if opens_terminal {
+            self.ensure_terminal_runtime();
+        }
         self.rebuild_frame_snapshot();
-        self.request_redraw();
+        if opens_terminal {
+            self.resize_terminal_grid();
+            self.set_focused_widget(Some(TERMINAL_ID));
+        } else if closes_terminal {
+            self.set_focused_widget(Some(COMPOSER_ID));
+        } else {
+            self.request_redraw();
+        }
         true
     }
 

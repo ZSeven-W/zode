@@ -138,6 +138,7 @@ fn task_menu_paints_native_icons_and_reflects_pinned_state() {
     ThreadHeader::paint_overlays(
         &mut painter,
         rect,
+        Rect::xywh(0.0, 0.0, 1_800.0, 1_080.0),
         &state,
         None,
         Some(menu.pin.id),

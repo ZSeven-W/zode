@@ -6,7 +6,7 @@ use zode_app_model::{
 };
 use zode_app_ui::{
     EnvironmentPanel, Insets, ReviewPanel, ThreadHeader, WorkspaceShell, ZodeTheme,
-    HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID, REVIEW_CLOSE_ID,
+    HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID, PANEL_PICKER_ID, REVIEW_CLOSE_ID,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
@@ -271,7 +271,7 @@ fn new_task_composer_projects_the_latest_verified_active_workspace_branch() {
 }
 
 #[test]
-fn header_actions_are_stable_real_commands_and_require_a_current_session() {
+fn header_actions_are_stable_real_commands_and_picker_survives_without_a_session() {
     let (mut state, _) = state_with_ready_session();
     let rect = Rect::xywh(240.0, 0.0, 1_560.0, 46.0);
 
@@ -279,10 +279,13 @@ fn header_actions_are_stable_real_commands_and_require_a_current_session() {
 
     let environment = layout.environment.expect("environment action");
     let review = layout.review.expect("review action");
+    let picker = layout.panel_picker.expect("panel picker");
     assert_eq!(environment.id, HEADER_ENVIRONMENT_ID);
-    assert_eq!(environment.rect, Rect::xywh(1_720.0, 7.0, 32.0, 32.0));
+    assert_eq!(environment.rect, Rect::xywh(1_684.0, 7.0, 32.0, 32.0));
     assert_eq!(review.id, HEADER_REVIEW_ID);
-    assert_eq!(review.rect, Rect::xywh(1_756.0, 7.0, 32.0, 32.0));
+    assert_eq!(review.rect, Rect::xywh(1_720.0, 7.0, 32.0, 32.0));
+    assert_eq!(picker.id, PANEL_PICKER_ID);
+    assert_eq!(picker.rect, Rect::xywh(1_756.0, 7.0, 32.0, 32.0));
     assert_eq!(
         ThreadHeader::command_for_widget(&state, environment.id),
         Some(AppCommand::OpenSecondary(SecondaryPane::Environment)),
@@ -301,13 +304,14 @@ fn header_actions_are_stable_real_commands_and_require_a_current_session() {
     assert!(narrow.environment.is_none());
     assert_eq!(
         narrow.review.unwrap().rect,
-        Rect::xywh(1_156.0, 7.0, 32.0, 32.0),
+        Rect::xywh(1_120.0, 7.0, 32.0, 32.0),
     );
 
     state.current_session = None;
     let empty = ThreadHeader::layout(rect, &state);
     assert!(empty.environment.is_none());
     assert!(empty.review.is_none());
+    assert_eq!(empty.panel_picker.unwrap().id, PANEL_PICKER_ID);
     assert_eq!(
         ThreadHeader::command_for_widget(&state, HEADER_ENVIRONMENT_ID),
         None,

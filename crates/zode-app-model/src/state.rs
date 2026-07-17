@@ -278,6 +278,12 @@ impl ZodeAppState {
             .as_ref()
             .and_then(|session| self.presentation.sessions.get(session))
     }
+
+    pub fn terminal_surface_visible(&self) -> bool {
+        self.presentation.route == crate::ShellRoute::Terminal
+            || (self.presentation.route == crate::ShellRoute::Conversation
+                && self.presentation.secondary_pane == Some(crate::SecondaryPane::Terminal))
+    }
 }
 
 fn uri_is_same_or_descendant(root: &WorkspaceUri, candidate: &WorkspaceUri) -> bool {

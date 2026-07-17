@@ -1,6 +1,8 @@
 use jian_widgets::Rect;
-use zode_app_model::{reduce_terminal_command, AppCommand, ShellPage, TerminalCommandOutcome};
-use zode_app_ui::{KeyEvent, TerminalPanel, TerminalPanelController, TERMINAL_ID};
+use zode_app_model::{reduce_terminal_command, AppCommand, SecondaryPane, TerminalCommandOutcome};
+use zode_app_ui::{
+    KeyEvent, TerminalPanel, TerminalPanelController, TerminalSecondaryPanel, TERMINAL_ID,
+};
 use zode_node_protocol::NodeCapability;
 
 use super::DesktopApp;
@@ -10,56 +12,9 @@ impl DesktopApp {
     pub(super) fn apply_terminal_command(&mut self, command: AppCommand) {
         if command == AppCommand::OpenTerminal {
             let _ = reduce_terminal_command(&mut self.app_state, command);
-            if !self
-                .app_state
-                .host
-                .capabilities
-                .capabilities
-                .contains(&NodeCapability::Terminal)
-            {
-                self.app_state.terminal.unavailable_reason =
-                    Some("Terminal is unavailable on this node.".into());
-                self.rebuild_frame_snapshot();
-                self.set_focused_widget(Some(TERMINAL_ID));
-                return;
-            }
-            let target = self.terminal_target();
-            let target_workspace = target.as_ref().map(|(workspace, _)| workspace);
-            if self.terminal_runtime.active_id().is_some()
-                && self.terminal_workspace.as_ref() != target_workspace
-            {
-                if let Some(id) = self.terminal_runtime.active_id() {
-                    let _ = self.terminal_runtime.close(id);
-                }
-                self.app_state.terminal.active_id = None;
-                self.terminal_workspace = None;
-            }
-            if self.terminal_runtime.active_id().is_none() {
-                let (cols, rows) = self.terminal_grid.size();
-                match target {
-                    Some((workspace, cwd)) => {
-                        self.app_state.terminal.unavailable_reason = None;
-                        match self.terminal_runtime.open(
-                            &cwd,
-                            u16::try_from(cols).unwrap_or(u16::MAX),
-                            u16::try_from(rows).unwrap_or(u16::MAX),
-                        ) {
-                            Ok(id) => {
-                                self.app_state.terminal.active_id = Some(id);
-                                self.terminal_workspace = Some(workspace);
-                            }
-                            Err(error) => {
-                                self.app_state.terminal.unavailable_reason = Some(error.to_string())
-                            }
-                        }
-                    }
-                    None => {
-                        self.app_state.terminal.unavailable_reason =
-                            Some("当前任务没有可用工作目录。".into());
-                    }
-                }
-            }
+            self.ensure_terminal_runtime();
             self.rebuild_frame_snapshot();
+            self.resize_terminal_grid();
             self.set_focused_widget(Some(TERMINAL_ID));
         } else {
             match reduce_terminal_command(&mut self.app_state, command.clone()) {
@@ -94,6 +49,58 @@ impl DesktopApp {
         self.window_state.dirty = true;
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
+        }
+    }
+
+    pub(super) fn ensure_terminal_runtime(&mut self) {
+        if !self
+            .app_state
+            .host
+            .capabilities
+            .capabilities
+            .contains(&NodeCapability::Terminal)
+        {
+            self.app_state.terminal.unavailable_reason =
+                Some("Terminal is unavailable on this node.".into());
+            return;
+        }
+        let target = self.terminal_target();
+        let target_workspace = target.as_ref().map(|(workspace, _)| workspace);
+        if self.terminal_runtime.active_id().is_some()
+            && self.terminal_workspace.as_ref() != target_workspace
+        {
+            if let Some(id) = self.terminal_runtime.active_id() {
+                let _ = self.terminal_runtime.close(id);
+            }
+            self.app_state.terminal.active_id = None;
+            self.terminal_workspace = None;
+        }
+        if self.terminal_runtime.active_id().is_some() {
+            self.app_state.terminal.unavailable_reason = None;
+            return;
+        }
+        let (cols, rows) = self.terminal_grid.size();
+        match target {
+            Some((workspace, cwd)) => {
+                self.app_state.terminal.unavailable_reason = None;
+                match self.terminal_runtime.open(
+                    &cwd,
+                    u16::try_from(cols).unwrap_or(u16::MAX),
+                    u16::try_from(rows).unwrap_or(u16::MAX),
+                ) {
+                    Ok(id) => {
+                        self.app_state.terminal.active_id = Some(id);
+                        self.terminal_workspace = Some(workspace);
+                    }
+                    Err(error) => {
+                        self.app_state.terminal.unavailable_reason = Some(error.to_string())
+                    }
+                }
+            }
+            None => {
+                self.app_state.terminal.unavailable_reason =
+                    Some("当前任务没有可用工作目录。".into());
+            }
         }
     }
 
@@ -150,6 +157,14 @@ impl DesktopApp {
 
     pub(super) fn terminal_rect(&self) -> Rect {
         let geometry = self.frame_snapshot.layout;
+        if self.app_state.presentation.secondary_pane == Some(SecondaryPane::Terminal) {
+            let panel = if geometry.review_panel.size.x > 0.0 {
+                geometry.review_panel
+            } else {
+                geometry.primary_surface
+            };
+            return TerminalSecondaryPanel::layout(panel).content;
+        }
         Rect::xywh(
             geometry.transcript.origin.x,
             geometry.transcript.origin.y,
@@ -163,7 +178,7 @@ impl DesktopApp {
             self.apply_terminal_command(command);
             return true;
         }
-        if self.app_state.shell.page != ShellPage::Terminal || !self.app_state.terminal.focused {
+        if !self.app_state.terminal_surface_visible() || !self.app_state.terminal.focused {
             return false;
         }
         if TerminalPanelController::is_copy_shortcut(event) {

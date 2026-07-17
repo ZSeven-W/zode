@@ -25,6 +25,8 @@ pub enum SemanticIcon {
     Connect,
     Git,
     Environment,
+    Panel,
+    Terminal,
     Worktree,
     Archive,
     Sites,
@@ -60,7 +62,7 @@ pub enum SemanticIcon {
 }
 
 impl SemanticIcon {
-    pub const ALL: [Self; 53] = [
+    pub const ALL: [Self; 55] = [
         Self::NewTask,
         Self::Scheduled,
         Self::Settings,
@@ -82,6 +84,8 @@ impl SemanticIcon {
         Self::Connect,
         Self::Git,
         Self::Environment,
+        Self::Panel,
+        Self::Terminal,
         Self::Worktree,
         Self::Archive,
         Self::Sites,
@@ -141,6 +145,8 @@ impl SemanticIcon {
             Self::Connect => "M8 12H16M5 9L2 12L5 15M19 9L22 12L19 15M8 5H16M8 19H16",
             Self::Git => "M7 3A2 2 0 1 0 7 7A2 2 0 1 0 7 3M17 17A2 2 0 1 0 17 21A2 2 0 1 0 17 17M7 7V13C7 16 9 19 13 19H15M17 5V17M14 8L17 5L20 8",
             Self::Environment => "M4 5H20V19H4ZM7 9L10 12L7 15M12 15H17",
+            Self::Panel => "M3 4H21V20H3ZM15 4V20M18 8H18.1M18 12H18.1M18 16H18.1",
+            Self::Terminal => "M4 5H20V19H4ZM7 9L10 12L7 15M12 15H17",
             Self::Worktree => "M6 4V18M18 6V20M6 9H12C15 9 18 7 18 4M6 15H12C15 15 18 17 18 20",
             Self::Archive => "M4 7H20V20H4ZM3 4H21V7H3ZM9 11H15",
             Self::Sites => "M4 4H9V9H4ZM15 4H20V9H15ZM4 15H9V20H4ZM15 15H20V20H15Z",

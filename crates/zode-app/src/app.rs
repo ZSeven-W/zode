@@ -41,6 +41,7 @@ use zode_node_protocol::{AgentEndpoint, NodeCapability, UserContent, WorkspaceUr
 mod interaction;
 mod navigation_persistence;
 mod navigation_state;
+mod panel_menu;
 mod persistence;
 mod presentation;
 mod project_picker;

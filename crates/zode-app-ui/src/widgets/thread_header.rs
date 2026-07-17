@@ -2,7 +2,7 @@ use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect};
 use zode_app_model::{AppCommand, SecondaryPane, ZodeAppState};
 
 use crate::{
-    paint_single_line, RectExt, SemanticIcon, UsageChip, WidgetId, ZodeTheme,
+    paint_single_line, PanelPicker, RectExt, SemanticIcon, UsageChip, WidgetId, ZodeTheme,
     HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID,
 };
 
@@ -33,6 +33,7 @@ pub struct ThreadHeaderLayout {
     pub more: Option<HeaderActionLayout>,
     pub environment: Option<HeaderActionLayout>,
     pub review: Option<HeaderActionLayout>,
+    pub panel_picker: Option<HeaderActionLayout>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,19 +54,27 @@ pub struct ThreadHeader;
 
 impl ThreadHeader {
     pub fn layout(rect: Rect, state: &ZodeAppState) -> ThreadHeaderLayout {
-        let review = state.current_session.as_ref().and_then(|_| {
-            if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
-                return None;
-            }
+        let panel_picker = (rect.size.x > 0.0 && rect.size.y > 0.0).then(|| {
             let action_size = ACTION_SIZE
                 .min(rect.size.x.max(0.0))
                 .min(rect.size.y.max(0.0));
             let y = rect.origin.y + (rect.size.y - action_size).max(0.0) / 2.0;
-            let review_x =
-                (rect.origin.x + rect.size.x - ACTION_RIGHT - action_size).max(rect.origin.x);
-            Some(HeaderActionLayout {
+            let x = (rect.origin.x + rect.size.x - ACTION_RIGHT - action_size).max(rect.origin.x);
+            HeaderActionLayout {
+                id: crate::PANEL_PICKER_ID,
+                rect: Rect::xywh(x, y, action_size, action_size),
+                selected: state.presentation.secondary_menu_open,
+            }
+        });
+        let review = state.current_session.as_ref().and_then(|_| {
+            panel_picker.map(|picker| HeaderActionLayout {
                 id: HEADER_REVIEW_ID,
-                rect: Rect::xywh(review_x, y, action_size, action_size),
+                rect: Rect::xywh(
+                    (picker.rect.origin.x - ACTION_GAP - picker.rect.size.x).max(rect.origin.x),
+                    picker.rect.origin.y,
+                    picker.rect.size.x,
+                    picker.rect.size.y,
+                ),
                 selected: state.presentation.secondary_pane == Some(SecondaryPane::Review),
             })
         });
@@ -83,6 +92,7 @@ impl ThreadHeader {
             });
         let title_right = environment
             .or(review)
+            .or(panel_picker)
             .map(|action| action.rect.origin.x - 12.0)
             .unwrap_or(rect.origin.x + rect.size.x - 20.0)
             .max(rect.origin.x + 20.0);
@@ -116,6 +126,7 @@ impl ThreadHeader {
             more,
             environment,
             review,
+            panel_picker,
         }
     }
 
@@ -160,6 +171,9 @@ impl ThreadHeader {
     }
 
     pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+        if let Some(command) = PanelPicker::command_for_widget(state, id) {
+            return Some(command);
+        }
         let session = state.current_session.as_ref()?;
         match id {
             HEADER_MORE_ID => Some(AppCommand::ToggleSessionMenu {
@@ -214,6 +228,7 @@ impl ThreadHeader {
             header.more = None;
             header.environment = None;
             header.review = None;
+            header.panel_picker = None;
         }
         let title = current_title(state);
         if let Some(title) = title {
@@ -231,6 +246,7 @@ impl ThreadHeader {
             (header.more, SemanticIcon::More),
             (header.environment, SemanticIcon::Environment),
             (header.review, SemanticIcon::Diff),
+            (header.panel_picker, SemanticIcon::Panel),
         ] {
             let Some(action) = action else {
                 continue;
@@ -260,6 +276,7 @@ impl ThreadHeader {
             let right = header
                 .environment
                 .or(header.review)
+                .or(header.panel_picker)
                 .map(|action| action.rect.origin.x - 12.0)
                 .unwrap_or(rect.origin.x + rect.size.x - 20.0);
             let width = 260.0_f32.min((right - rect.origin.x - 180.0).max(0.0));
@@ -287,78 +304,94 @@ impl ThreadHeader {
     pub fn paint_overlays(
         painter: &mut dyn Painter,
         rect: Rect,
+        viewport: Rect,
         state: &ZodeAppState,
         focused: Option<WidgetId>,
         hovered: Option<WidgetId>,
         theme: &ZodeTheme,
     ) {
-        let Some(menu) = Self::menu_layout(rect, state) else {
-            return;
-        };
-        painter.fill_drop_shadow(
-            Rect::xywh(
-                menu.rect.origin.x,
-                menu.rect.origin.y + 2.0,
-                menu.rect.size.x,
-                menu.rect.size.y,
-            ),
-            10.0,
-            16.0,
-            theme.tokens.foreground.with_alpha(0.12),
-        );
-        painter.fill_round_rect(menu.rect, 10.0, theme.tokens.popover);
-        painter.stroke_round_rect(menu.rect, 10.0, theme.tokens.border, 1.0);
-
-        let pinned = state
-            .current_session
-            .as_ref()
-            .is_some_and(|session| state.pinned_sessions.contains(session));
-        for (action, icon, label) in [
-            (
-                menu.pin,
-                SemanticIcon::Pin,
-                if pinned {
-                    "取消置顶"
-                } else {
-                    "置顶任务"
-                },
-            ),
-            (menu.archive, SemanticIcon::Archive, "归档任务"),
-        ] {
-            if hovered == Some(action.id) {
-                painter.fill_round_rect(action.rect, 7.0, theme.tokens.accent);
-            }
-            if focused == Some(action.id) {
-                painter.stroke_round_rect(action.rect, 7.0, theme.tokens.ring, 1.5);
-            }
-            let icon_rect = Rect::xywh(
-                action.rect.origin.x + 10.0,
-                action.rect.origin.y + (action.rect.size.y - 16.0) / 2.0,
-                16.0,
-                16.0,
-            );
-            painter.stroke_svg_path(
-                icon.path(),
-                icon_rect.origin,
-                icon_rect.size.x,
-                theme.tokens.popover_foreground,
-                icon.stroke_width(),
-            );
-            paint_single_line(
-                painter,
-                label,
-                Rect::xywh(
-                    icon_rect.max_x() + 9.0,
-                    action.rect.origin.y,
-                    (action.rect.max_x() - icon_rect.max_x() - 15.0).max(0.0),
-                    action.rect.size.y,
-                ),
-                13.0,
-                400,
-                theme.tokens.popover_foreground,
-                HorizontalAlign::Start,
-            );
+        if let Some(menu) = Self::menu_layout(rect, state) {
+            paint_task_menu(painter, &menu, state, focused, hovered, theme);
         }
+        if let Some(anchor) = Self::layout(rect, state).panel_picker {
+            if let Some(menu) = PanelPicker::menu_layout(anchor.rect, viewport, state) {
+                PanelPicker::paint(painter, &menu, focused, hovered, theme);
+            }
+        }
+    }
+}
+
+fn paint_task_menu(
+    painter: &mut dyn Painter,
+    menu: &ThreadMenuLayout,
+    state: &ZodeAppState,
+    focused: Option<WidgetId>,
+    hovered: Option<WidgetId>,
+    theme: &ZodeTheme,
+) {
+    painter.fill_drop_shadow(
+        Rect::xywh(
+            menu.rect.origin.x,
+            menu.rect.origin.y + 2.0,
+            menu.rect.size.x,
+            menu.rect.size.y,
+        ),
+        10.0,
+        16.0,
+        theme.tokens.foreground.with_alpha(0.12),
+    );
+    painter.fill_round_rect(menu.rect, 10.0, theme.tokens.popover);
+    painter.stroke_round_rect(menu.rect, 10.0, theme.tokens.border, 1.0);
+
+    let pinned = state
+        .current_session
+        .as_ref()
+        .is_some_and(|session| state.pinned_sessions.contains(session));
+    for (action, icon, label) in [
+        (
+            menu.pin,
+            SemanticIcon::Pin,
+            if pinned {
+                "取消置顶"
+            } else {
+                "置顶任务"
+            },
+        ),
+        (menu.archive, SemanticIcon::Archive, "归档任务"),
+    ] {
+        if hovered == Some(action.id) {
+            painter.fill_round_rect(action.rect, 7.0, theme.tokens.accent);
+        }
+        if focused == Some(action.id) {
+            painter.stroke_round_rect(action.rect, 7.0, theme.tokens.ring, 1.5);
+        }
+        let icon_rect = Rect::xywh(
+            action.rect.origin.x + 10.0,
+            action.rect.origin.y + (action.rect.size.y - 16.0) / 2.0,
+            16.0,
+            16.0,
+        );
+        painter.stroke_svg_path(
+            icon.path(),
+            icon_rect.origin,
+            icon_rect.size.x,
+            theme.tokens.popover_foreground,
+            icon.stroke_width(),
+        );
+        paint_single_line(
+            painter,
+            label,
+            Rect::xywh(
+                icon_rect.max_x() + 9.0,
+                action.rect.origin.y,
+                (action.rect.max_x() - icon_rect.max_x() - 15.0).max(0.0),
+                action.rect.size.y,
+            ),
+            13.0,
+            400,
+            theme.tokens.popover_foreground,
+            HorizontalAlign::Start,
+        );
     }
 }
 

@@ -11,6 +11,7 @@ use zode_app_ui::{
 };
 
 use super::{
+    panel_menu::close_panel_menu_command,
     session_menu::{close_session_menu_command, session_menu_outside_click_command},
     settings::{reduce_local_settings_command, settings_interaction_viewport},
     DesktopApp,
@@ -234,7 +235,7 @@ impl DesktopApp {
                 if self.handle_project_picker_ime(event.clone()) {
                     return;
                 }
-                if self.app_state.presentation.route == ShellRoute::Terminal
+                if self.app_state.terminal_surface_visible()
                     && self.focused_widget == Some(TERMINAL_ID)
                 {
                     if let (Some(id), zode_app_ui::ImeEvent::Commit(text)) =
@@ -260,7 +261,11 @@ impl DesktopApp {
                 if self.handle_sidebar_scroll_delta(delta) {
                     return;
                 }
-                if self.app_state.presentation.route == ShellRoute::Terminal {
+                let terminal_under_pointer = self.app_state.terminal_surface_visible()
+                    && self
+                        .terminal_rect()
+                        .contains(self.window_state.cursor_logical);
+                if terminal_under_pointer {
                     let command = self.terminal_controller.scroll_command(
                         &self.app_state.terminal,
                         &self.terminal_grid,
@@ -355,9 +360,7 @@ impl DesktopApp {
             }
             return;
         }
-        if self.app_state.presentation.route == ShellRoute::Terminal
-            && self.focused_widget == Some(TERMINAL_ID)
-        {
+        if self.app_state.terminal_surface_visible() && self.focused_widget == Some(TERMINAL_ID) {
             match clipboard.read_text() {
                 Ok(Some(text)) if !text.is_empty() => {
                     if let Some(id) = self.app_state.terminal.active_id {
@@ -392,7 +395,7 @@ impl DesktopApp {
         self.focused_widget = focused;
         self.app_state.composer.focused = self.window_focused && focused == Some(COMPOSER_ID);
         let terminal_focused = self.window_focused
-            && self.app_state.presentation.route == ShellRoute::Terminal
+            && self.app_state.terminal_surface_visible()
             && focused == Some(TERMINAL_ID);
         let _ = zode_app_model::reduce_terminal_command(
             &mut self.app_state,
@@ -406,14 +409,14 @@ impl DesktopApp {
         let Some(window) = self.window.as_ref() else {
             return;
         };
-        let allowed = ime_allowed_for_focus(
-            self.app_state.presentation.route.legacy_page(),
-            focused,
-            window_focused,
-        );
+        let ime_page = if self.app_state.terminal_surface_visible() && focused == Some(TERMINAL_ID)
+        {
+            zode_app_model::ShellPage::Terminal
+        } else {
+            self.app_state.presentation.route.legacy_page()
+        };
+        let allowed = ime_allowed_for_focus(ime_page, focused, window_focused);
         if allowed {
-            // Give the platform a non-zero anchor before enabling IME. The
-            // next redraw replaces the composer fallback with the exact caret.
             if let Some(rect) = focused.and_then(|id| self.frame_snapshot.node(id).map(|n| n.rect))
             {
                 set_cursor_area(window, rect);
@@ -527,7 +530,7 @@ impl DesktopApp {
         self.window_focused = focused;
         self.app_state.composer.focused = focused && self.focused_widget == Some(COMPOSER_ID);
         let terminal_focused = focused
-            && self.app_state.presentation.route == ShellRoute::Terminal
+            && self.app_state.terminal_surface_visible()
             && self.focused_widget == Some(TERMINAL_ID);
         let _ = zode_app_model::reduce_terminal_command(
             &mut self.app_state,
@@ -552,7 +555,7 @@ impl DesktopApp {
                     event.position,
                 )));
             }
-            if self.app_state.presentation.route == ShellRoute::Terminal
+            if self.app_state.terminal_surface_visible()
                 && self.terminal_controller.pointer_move(
                     self.terminal_rect(),
                     event.position,
@@ -590,6 +593,9 @@ impl DesktopApp {
             self.enqueue_command(command);
             return;
         }
+        if self.handle_panel_menu_pointer(event.position) {
+            return;
+        }
         if self.app_state.session_menu.is_some() {
             let actionable = self
                 .frame_snapshot
@@ -619,7 +625,7 @@ impl DesktopApp {
                 return;
             }
         }
-        if self.app_state.presentation.route == ShellRoute::Terminal
+        if self.app_state.terminal_surface_visible()
             && self.frame_snapshot.hit_test(event.position) == Some(TERMINAL_ID)
         {
             self.set_focused_widget(Some(TERMINAL_ID));
@@ -654,13 +660,17 @@ impl DesktopApp {
             self.apply_terminal_command(command);
             return;
         }
-        let terminal_focused = self.app_state.presentation.route == ShellRoute::Terminal
-            && self.focused_widget == Some(TERMINAL_ID);
+        let terminal_focused =
+            self.app_state.terminal_surface_visible() && self.focused_widget == Some(TERMINAL_ID);
         if is_paste_shortcut(&event, terminal_focused) {
             self.handle_paste();
             return;
         }
         if event.pressed && event.key == Key::Escape {
+            if let Some(command) = close_panel_menu_command(&self.app_state) {
+                self.enqueue_command(command);
+                return;
+            }
             if let Some(command) = close_session_menu_command(&self.app_state) {
                 self.enqueue_command(command);
                 return;

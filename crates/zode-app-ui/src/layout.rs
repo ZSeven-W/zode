@@ -149,11 +149,7 @@ impl WorkspaceLayout {
         route: ShellRoute,
         secondary_pane: Option<SecondaryPane>,
     ) -> Self {
-        let secondary = match secondary_pane {
-            Some(SecondaryPane::Environment) => SecondaryLayout::Environment(ENVIRONMENT_PANEL_W),
-            Some(SecondaryPane::Review | SecondaryPane::DocumentPreview) => SecondaryLayout::Review,
-            None => SecondaryLayout::None,
-        };
+        let secondary = secondary_layout(secondary_pane);
         Self::compute_internal(width, height, insets, route, secondary, COMPOSER_H)
     }
 
@@ -167,11 +163,7 @@ impl WorkspaceLayout {
         secondary_pane: Option<SecondaryPane>,
         has_attachments: bool,
     ) -> Self {
-        let secondary = match secondary_pane {
-            Some(SecondaryPane::Environment) => SecondaryLayout::Environment(ENVIRONMENT_PANEL_W),
-            Some(SecondaryPane::Review | SecondaryPane::DocumentPreview) => SecondaryLayout::Review,
-            None => SecondaryLayout::None,
-        };
+        let secondary = secondary_layout(secondary_pane);
         let composer_height = COMPOSER_H
             + if has_attachments {
                 COMPOSER_ATTACHMENT_H
@@ -191,11 +183,7 @@ impl WorkspaceLayout {
         secondary_pane: Option<SecondaryPane>,
         composer_height: f32,
     ) -> Self {
-        let secondary = match secondary_pane {
-            Some(SecondaryPane::Environment) => SecondaryLayout::Environment(ENVIRONMENT_PANEL_W),
-            Some(SecondaryPane::Review | SecondaryPane::DocumentPreview) => SecondaryLayout::Review,
-            None => SecondaryLayout::None,
-        };
+        let secondary = secondary_layout(secondary_pane);
         Self::compute_internal(width, height, insets, route, secondary, composer_height)
     }
 
@@ -326,6 +314,21 @@ enum SecondaryLayout {
     None,
     Environment(f32),
     Review,
+}
+
+const fn secondary_layout(pane: Option<SecondaryPane>) -> SecondaryLayout {
+    match pane {
+        Some(SecondaryPane::Environment) => SecondaryLayout::Environment(ENVIRONMENT_PANEL_W),
+        Some(
+            SecondaryPane::Review
+            | SecondaryPane::DocumentPreview
+            | SecondaryPane::Terminal
+            | SecondaryPane::Browser
+            | SecondaryPane::Files
+            | SecondaryPane::SideTask,
+        ) => SecondaryLayout::Review,
+        None => SecondaryLayout::None,
+    }
 }
 
 fn normalized_insets(width: f32, height: f32, insets: Insets) -> Insets {

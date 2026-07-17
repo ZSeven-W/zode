@@ -1,9 +1,10 @@
 use zode_app_model::{AppCommand, ThemePreference, ZodeAppState};
 use zode_app_ui::{
     Composer, DocumentPreview, EnvironmentPanel, IntegrationsPage, ProjectPicker, ProjectSidebar,
-    ReviewPanel, SettingsPanel, SidebarAction, ThreadHeader, ThreadTranscript, WidgetId,
-    HIGH_CONTRAST_ID, PROJECT_PICKER_NEW_ID, PROJECT_PICKER_PROJECTLESS_ID,
-    PROJECT_PICKER_TRIGGER_ID, REDUCED_MOTION_ID, THEME_DARK_ID, THEME_LIGHT_ID, THEME_SYSTEM_ID,
+    ReviewPanel, SettingsPanel, SidebarAction, TerminalSecondaryPanel, ThreadHeader,
+    ThreadTranscript, UnavailableSecondaryPanel, WidgetId, HIGH_CONTRAST_ID, PROJECT_PICKER_NEW_ID,
+    PROJECT_PICKER_PROJECTLESS_ID, PROJECT_PICKER_TRIGGER_ID, REDUCED_MOTION_ID, THEME_DARK_ID,
+    THEME_LIGHT_ID, THEME_SYSTEM_ID,
 };
 
 pub(super) fn widget_command(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
@@ -15,6 +16,8 @@ pub(super) fn widget_command(state: &ZodeAppState, id: WidgetId) -> Option<AppCo
         .or_else(|| EnvironmentPanel::command_for_widget(state, id))
         .or_else(|| ReviewPanel::command_for_widget(state, id))
         .or_else(|| DocumentPreview::command_for_widget(state, id))
+        .or_else(|| TerminalSecondaryPanel::command_for_widget(state, id))
+        .or_else(|| UnavailableSecondaryPanel::command_for_widget(state, id))
         .or_else(|| appearance_command(state, id))
         .or_else(|| project_picker_command(state, id))
         .or_else(|| Composer::command_for_widget(state, id))

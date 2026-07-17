@@ -5,6 +5,7 @@ mod document_preview;
 mod empty_state;
 mod environment;
 mod integrations;
+mod panel_picker;
 mod project_picker;
 mod project_sidebar;
 mod review_panel;
@@ -12,9 +13,11 @@ mod settings;
 mod terminal_controller;
 mod terminal_grid;
 mod terminal_panel;
+mod terminal_secondary;
 mod thread_header;
 mod tool_card;
 pub(crate) mod transcript;
+mod unavailable_secondary;
 mod usage_chip;
 mod window_chrome;
 mod workspace_shell;
@@ -39,6 +42,9 @@ pub use integrations::{
     CatalogSectionLayout, InstalledIconLayout, IntegrationRowLayout, IntegrationTabLayout,
     IntegrationsPage, IntegrationsPageLayout, INTEGRATIONS_PLUGINS_TAB_ID,
     INTEGRATIONS_SKILLS_TAB_ID,
+};
+pub use panel_picker::{
+    PanelMenuItemLayout, PanelPicker, PanelPickerMenuLayout, PANEL_PICKER_ID, PANEL_PICKER_MENU_ID,
 };
 pub use project_picker::{
     ProjectChoice, ProjectPicker, ProjectPickerController, ProjectPickerLayout,
@@ -69,12 +75,16 @@ pub use terminal_grid::{
     CellPosition, TerminalCell, TerminalColor, TerminalGrid, TerminalLine, TerminalSelection,
 };
 pub use terminal_panel::TerminalPanel;
+pub use terminal_secondary::{
+    TerminalSecondaryLayout, TerminalSecondaryPanel, TERMINAL_SECONDARY_CLOSE_ID,
+};
 pub use thread_header::{HeaderActionLayout, ThreadHeader, ThreadHeaderLayout};
 pub(crate) use thread_header::{
     HEADER_MENU_ARCHIVE_ID, HEADER_MENU_ID, HEADER_MENU_PIN_ID, HEADER_MORE_ID,
 };
 pub use tool_card::{ToolCard, ToolTone};
 pub use transcript::{ThreadTranscript, TranscriptItemLayout};
+pub use unavailable_secondary::{UnavailableSecondaryPanel, UNAVAILABLE_SECONDARY_CLOSE_ID};
 pub use usage_chip::{UsageChip, UsageDisplay};
 pub use window_chrome::WindowChrome;
 pub use workspace_shell::WorkspaceShell;

@@ -79,6 +79,10 @@ pub enum SecondaryPane {
     Environment,
     Review,
     DocumentPreview,
+    Terminal,
+    Browser,
+    Files,
+    SideTask,
 }
 
 /// One workspace-owned file target. Callers bind only a session and relative
@@ -454,6 +458,7 @@ pub struct SessionPresentationState {
 pub struct PresentationState {
     pub route: ShellRoute,
     pub secondary_pane: Option<SecondaryPane>,
+    pub secondary_menu_open: bool,
     pub sessions: BTreeMap<SessionLocator, SessionPresentationState>,
     pub integrations: LoadState<IntegrationCatalog>,
 }

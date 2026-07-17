@@ -6,7 +6,8 @@ use super::project_sidebar::workspace_label;
 use super::{
     ComingSoonPage, Composer, DocumentPreview, EmptyState, EnvironmentPanel, IntegrationsPage,
     ProjectPicker, ProjectPickerViewState, ProjectSidebar, ReviewPanel, SettingsPanel,
-    TerminalGrid, TerminalPanel, TerminalSelection, ThreadHeader, ThreadTranscript, WindowChrome,
+    TerminalGrid, TerminalPanel, TerminalSecondaryPanel, TerminalSelection, ThreadHeader,
+    ThreadTranscript, UnavailableSecondaryPanel, WindowChrome,
 };
 use crate::TRANSCRIPT_COMPOSER_GAP;
 use crate::{Insets, RectExt, WidgetId, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme};
@@ -236,7 +237,14 @@ impl WorkspaceShell {
         let split_fallback = state.presentation.route == ShellRoute::Conversation
             && matches!(
                 state.presentation.secondary_pane,
-                Some(SecondaryPane::Review | SecondaryPane::DocumentPreview)
+                Some(
+                    SecondaryPane::Review
+                        | SecondaryPane::DocumentPreview
+                        | SecondaryPane::Terminal
+                        | SecondaryPane::Browser
+                        | SecondaryPane::Files
+                        | SecondaryPane::SideTask
+                )
             )
             && geometry.review_panel.size.x <= 0.0;
         match state.presentation.route {
@@ -265,6 +273,20 @@ impl WorkspaceShell {
                 Some(SecondaryPane::DocumentPreview) => {
                     DocumentPreview::paint(painter, geometry.primary_surface, state, theme)
                 }
+                Some(SecondaryPane::Terminal) => paint_terminal_secondary(
+                    painter,
+                    geometry.primary_surface,
+                    state,
+                    terminal_grid,
+                    terminal_selection,
+                    theme,
+                ),
+                Some(
+                    pane
+                    @ (SecondaryPane::Browser | SecondaryPane::Files | SecondaryPane::SideTask),
+                ) => {
+                    UnavailableSecondaryPanel::paint(painter, geometry.primary_surface, pane, theme)
+                }
                 Some(SecondaryPane::Environment) | None => {}
             },
             ShellRoute::Conversation => paint_conversation(
@@ -291,10 +313,32 @@ impl WorkspaceShell {
                     painter.fill_rect(geometry.divider, theme.tokens.border);
                     DocumentPreview::paint(painter, geometry.review_panel, state, theme);
                 }
+                Some(SecondaryPane::Terminal) if geometry.review_panel.size.x > 0.0 => {
+                    painter.fill_rect(geometry.divider, theme.tokens.border);
+                    paint_terminal_secondary(
+                        painter,
+                        geometry.review_panel,
+                        state,
+                        terminal_grid,
+                        terminal_selection,
+                        theme,
+                    );
+                }
+                Some(
+                    pane
+                    @ (SecondaryPane::Browser | SecondaryPane::Files | SecondaryPane::SideTask),
+                ) if geometry.review_panel.size.x > 0.0 => {
+                    painter.fill_rect(geometry.divider, theme.tokens.border);
+                    UnavailableSecondaryPanel::paint(painter, geometry.review_panel, pane, theme);
+                }
                 Some(
                     SecondaryPane::Environment
                     | SecondaryPane::Review
-                    | SecondaryPane::DocumentPreview,
+                    | SecondaryPane::DocumentPreview
+                    | SecondaryPane::Terminal
+                    | SecondaryPane::Browser
+                    | SecondaryPane::Files
+                    | SecondaryPane::SideTask,
                 )
                 | None => {}
             }
@@ -306,6 +350,7 @@ impl WorkspaceShell {
             ThreadHeader::paint_overlays(
                 painter,
                 geometry.top_bar,
+                geometry.viewport,
                 state,
                 snapshot.focused,
                 hovered,
@@ -484,6 +529,25 @@ fn paint_terminal(
         painter,
         terminal_rect,
         grid,
+        &state.terminal,
+        terminal_selection,
+        theme,
+    );
+}
+
+fn paint_terminal_secondary(
+    painter: &mut dyn Painter,
+    rect: Rect,
+    state: &ZodeAppState,
+    terminal_grid: Option<&TerminalGrid>,
+    terminal_selection: Option<TerminalSelection>,
+    theme: &ZodeTheme,
+) {
+    let fallback = TerminalGrid::new(1, 1);
+    TerminalSecondaryPanel::paint(
+        painter,
+        rect,
+        terminal_grid.unwrap_or(&fallback),
         &state.terminal,
         terminal_selection,
         theme,
