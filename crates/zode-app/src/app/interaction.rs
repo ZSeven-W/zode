@@ -1,8 +1,8 @@
 use accesskit::{Action, ActionData};
 use zode_app_model::{
-    reduce_navigation_command, reduce_presentation_command, reduce_tool_command,
-    reduce_transcript_command, AppCommand, NavigationOutcome, SettingsCommandOutcome, ShellRoute,
-    ToolCommandOutcome, TranscriptCommandOutcome, ZodeAppState,
+    reduce_navigation_command, reduce_tool_command, reduce_transcript_command, AppCommand,
+    NavigationOutcome, SettingsCommandOutcome, ShellRoute, ToolCommandOutcome,
+    TranscriptCommandOutcome,
 };
 use zode_app_ui::{
     Composer, EmptyState, Key, KeyEvent, PointerButton, PointerEvent, PointerEventKind,
@@ -38,67 +38,13 @@ mod tests;
 mod widget_commands;
 use widget_commands::widget_command;
 
-pub(super) fn project_composer_outcome(
-    state: &mut ZodeAppState,
-    outcome: &zode_app_ui::ComposerOutcome,
-) {
-    match outcome {
-        zode_app_ui::ComposerOutcome::AttachmentsChanged(attachments) => {
-            state.composer.attachments.clone_from(attachments);
-        }
-        zode_app_ui::ComposerOutcome::Queue(_) => {
-            state.composer.attachments.clear();
-        }
-        zode_app_ui::ComposerOutcome::Send(submission)
-        | zode_app_ui::ComposerOutcome::Steer(submission) => {
-            state.composer.attachments.clear();
-            let Some(session) = state.current_session.clone() else {
-                return;
-            };
-            let Some(transcript) = state.transcripts.get_mut(&session) else {
-                return;
-            };
-            transcript.items.extend(
-                submission
-                    .attachments
-                    .iter()
-                    .cloned()
-                    .map(zode_app_model::TranscriptItem::Attachment),
-            );
-        }
-        zode_app_ui::ComposerOutcome::Ignored
-        | zode_app_ui::ComposerOutcome::Edited
-        | zode_app_ui::ComposerOutcome::Stop
-        | zode_app_ui::ComposerOutcome::SetModel(_)
-        | zode_app_ui::ComposerOutcome::SetEffort(_)
-        | zode_app_ui::ComposerOutcome::SetSandbox(_) => {}
-    }
-}
+#[path = "interaction-routing.rs"]
+mod routing;
+use routing::{available_new_session_command, normalize_conversation_route};
 
-fn normalize_conversation_route(
-    state: &mut zode_app_model::ZodeAppState,
-    command: &AppCommand,
-) -> bool {
-    if !matches!(
-        command,
-        AppCommand::SelectSession(_) | AppCommand::NewSession { .. } | AppCommand::BeginTask { .. }
-    ) {
-        return false;
-    }
-    let _ = reduce_presentation_command(state, AppCommand::CloseSecondary);
-    let _ = reduce_presentation_command(state, AppCommand::Navigate(ShellRoute::Conversation));
-    true
-}
-
-fn available_new_session_command(
-    state: &zode_app_model::ZodeAppState,
-    command: &AppCommand,
-) -> bool {
-    matches!(
-        command,
-        AppCommand::NewSession { workspace_uri } if state.available_workspace(workspace_uri)
-    )
-}
+#[path = "composer-outcome.rs"]
+mod composer_outcome;
+pub(super) use composer_outcome::project_composer_outcome;
 
 impl DesktopApp {
     pub(super) fn enqueue_command(&mut self, command: AppCommand) {
@@ -387,7 +333,11 @@ impl DesktopApp {
     pub(super) fn set_focused_widget(&mut self, focused: Option<WidgetId>) {
         let focused = focused.filter(|id| self.frame_snapshot.node(*id).is_some());
         self.focused_widget = focused;
+        self.refresh_snapshot_focus(focused);
         self.app_state.composer.focused = self.window_focused && focused == Some(COMPOSER_ID);
+        if focused == Some(COMPOSER_ID) {
+            self.composer_ime_cursor_area_dirty = true;
+        }
         let terminal_focused = self.window_focused
             && self.app_state.terminal_surface_visible()
             && focused == Some(TERMINAL_ID);
@@ -411,9 +361,22 @@ impl DesktopApp {
         };
         let allowed = ime_allowed_for_focus(ime_page, focused, window_focused);
         if allowed {
-            if let Some(rect) = focused.and_then(|id| self.frame_snapshot.node(id).map(|n| n.rect))
-            {
-                set_cursor_area(window, rect);
+            let area = if focused == Some(COMPOSER_ID) {
+                (!self.composer_ime_cursor_area_dirty)
+                    .then_some(self.composer_ime_cursor_area)
+                    .flatten()
+                    .or_else(|| {
+                        focused
+                            .and_then(|id| self.frame_snapshot.node(id).map(|node| node.rect))
+                            .map(crate::ime::fallback_cursor_area)
+                    })
+            } else {
+                focused
+                    .and_then(|id| self.frame_snapshot.node(id).map(|node| node.rect))
+                    .map(crate::ime::fallback_cursor_area)
+            };
+            if let Some(area) = area {
+                set_cursor_area(window, area);
             }
         }
         window.set_ime_allowed(allowed);

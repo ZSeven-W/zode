@@ -69,11 +69,22 @@ impl DesktopApp {
     }
 
     pub(super) fn redraw(&mut self) -> Result<(), String> {
-        // Most state-changing input paths prepare the next immutable snapshot
-        // before requesting a frame. Rebuild only as a fallback for paint-only
-        // wakes (focus, hover, expose), never twice for the same frame.
-        if !self.frame_snapshot_prepared {
+        // Layout-affecting paths explicitly invalidate the immutable snapshot.
+        // Paint-only wakes (hover, focus, expose) keep using the last valid tree.
+        if !self.frame_snapshot_valid {
             self.rebuild_frame_snapshot();
+        }
+        if self.terminal_grid_resize_pending {
+            self.terminal_grid_resize_pending = false;
+            self.resize_terminal_grid();
+            if !self.frame_snapshot_valid {
+                self.rebuild_frame_snapshot();
+            }
+        }
+        if self.window_metrics_update_pending {
+            self.window_metrics_update_pending = false;
+            self.record_window_geometry();
+            self.update_accessibility_window_bounds();
         }
         let (physical_width, physical_height) = (
             self.window_state.physical_width.max(1),
@@ -118,12 +129,12 @@ impl DesktopApp {
                 self.hovered_widget,
                 &theme,
             );
-            // Focus sync already anchors IME to the input bounds. Probe the
-            // exact caret only while a candidate/preedit session is active,
-            // avoiding a second text-layout pass for ordinary redraws.
+            // Focus sync installs a caret-shaped fallback before IME is
+            // enabled. Resolve the exact caret on the first focused frame and
+            // only after input/layout changes thereafter.
             (self.window_focused
                 && self.focused_widget == Some(COMPOSER_ID)
-                && self.composer.input_state().composition().is_some())
+                && (self.composer_ime_cursor_area_dirty || self.composer_ime_cursor_area.is_none()))
             .then(|| {
                 Composer::ime_cursor_area(
                     &mut painter,
@@ -135,8 +146,16 @@ impl DesktopApp {
             })
             .flatten()
         };
-        if let (Some(window), Some(area)) = (self.window.as_deref(), ime_cursor_area) {
-            crate::ime::set_cursor_area(window, area);
+        if let Some(area) = ime_cursor_area {
+            self.composer_ime_cursor_area = Some(area);
+            self.composer_ime_cursor_area_dirty = false;
+        }
+        if self.window_focused && self.focused_widget == Some(COMPOSER_ID) {
+            if let (Some(window), Some(area)) =
+                (self.window.as_deref(), self.composer_ime_cursor_area)
+            {
+                crate::ime::set_cursor_area(window, area);
+            }
         }
 
         let presenter = self
@@ -160,7 +179,6 @@ impl DesktopApp {
             window.pre_present_notify();
         }
         buffer.present().map_err(|error| error.to_string())?;
-        self.frame_snapshot_prepared = false;
         self.window_state.dirty = false;
         Ok(())
     }
@@ -205,8 +223,45 @@ impl DesktopApp {
         self.focused_widget = snapshot.focused;
         self.hovered_widget = snapshot.hit_test(self.window_state.cursor_logical);
         self.frame_snapshot = snapshot;
-        self.frame_snapshot_prepared = true;
+        self.frame_snapshot_valid = true;
         self.accessibility_tree_dirty = true;
+        self.composer_ime_cursor_area_dirty = true;
+    }
+
+    pub(super) fn invalidate_frame_snapshot(&mut self) {
+        self.frame_snapshot_valid = false;
+        self.accessibility_tree_dirty = true;
+        self.composer_ime_cursor_area_dirty = true;
+    }
+
+    /// Composer typing does not change shell geometry or hit testing. Keep the
+    /// existing snapshot and update only the value exposed to accessibility.
+    pub(super) fn refresh_composer_snapshot_value(&mut self, value_changed: bool) {
+        if !self.frame_snapshot_valid {
+            return;
+        }
+        if value_changed
+            && !update_composer_snapshot_value(
+                &mut self.frame_snapshot,
+                &self.app_state.composer.draft,
+            )
+        {
+            self.invalidate_frame_snapshot();
+            return;
+        }
+        if value_changed {
+            self.accessibility_tree_dirty = true;
+        }
+    }
+
+    pub(super) fn refresh_snapshot_focus(&mut self, focused: Option<zode_app_ui::WidgetId>) {
+        if !self.frame_snapshot_valid {
+            return;
+        }
+        if self.frame_snapshot.focused != focused {
+            self.frame_snapshot.focused = focused;
+            self.accessibility_tree_dirty = true;
+        }
     }
 
     pub(super) fn record_window_geometry(&mut self) {
@@ -254,5 +309,44 @@ impl DesktopApp {
         if let (Some(a11y), Some(window)) = (self.a11y.as_mut(), self.window.as_ref()) {
             a11y.update_window_bounds(window);
         }
+    }
+}
+
+fn update_composer_snapshot_value(snapshot: &mut WorkspaceSnapshot, value: &str) -> bool {
+    let Some(node) = snapshot
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == COMPOSER_ID)
+    else {
+        return false;
+    };
+    node.value = Some(value.to_owned());
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use zode_app_ui::{Insets, WorkspaceSnapshot, COMPOSER_ID};
+
+    use super::update_composer_snapshot_value;
+
+    #[test]
+    fn composer_value_refresh_preserves_layout_and_hit_geometry() {
+        let state = zode_app_model::demo_state();
+        let mut snapshot = WorkspaceSnapshot::build(&state, 1_221.0, 992.0, Insets::ZERO);
+        let layout = snapshot.layout;
+        let node_count = snapshot.nodes.len();
+        let composer_rect = snapshot.node(COMPOSER_ID).unwrap().rect;
+
+        assert!(update_composer_snapshot_value(
+            &mut snapshot,
+            "incremental draft"
+        ));
+
+        assert_eq!(snapshot.layout, layout);
+        assert_eq!(snapshot.nodes.len(), node_count);
+        let composer = snapshot.node(COMPOSER_ID).unwrap();
+        assert_eq!(composer.rect, composer_rect);
+        assert_eq!(composer.value.as_deref(), Some("incremental draft"));
     }
 }

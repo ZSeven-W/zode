@@ -91,8 +91,12 @@ pub struct DesktopApp {
     presentation_queries: Option<PresentationQueryBridge>,
     settings_touch: crate::input_dispatch::SettingsTouchTracker,
     frame_snapshot: WorkspaceSnapshot,
-    frame_snapshot_prepared: bool,
+    frame_snapshot_valid: bool,
     accessibility_tree_dirty: bool,
+    composer_ime_cursor_area: Option<jian_widgets::Rect>,
+    composer_ime_cursor_area_dirty: bool,
+    terminal_grid_resize_pending: bool,
+    window_metrics_update_pending: bool,
     focused_widget: Option<WidgetId>,
     hovered_widget: Option<WidgetId>,
     window_focused: bool,
@@ -247,8 +251,12 @@ impl DesktopApp {
             presentation_queries: None,
             settings_touch: crate::input_dispatch::SettingsTouchTracker::default(),
             frame_snapshot,
-            frame_snapshot_prepared: true,
+            frame_snapshot_valid: true,
             accessibility_tree_dirty: true,
+            composer_ime_cursor_area: None,
+            composer_ime_cursor_area_dirty: true,
+            terminal_grid_resize_pending: false,
+            window_metrics_update_pending: false,
             focused_widget,
             hovered_widget: None,
             window_focused: false,
@@ -305,6 +313,9 @@ impl DesktopApp {
     }
 
     fn apply_composer_outcome(&mut self, mut outcome: zode_app_ui::ComposerOutcome) {
+        let incremental_edit = matches!(outcome, zode_app_ui::ComposerOutcome::Edited);
+        let ignored = matches!(outcome, zode_app_ui::ComposerOutcome::Ignored);
+        let draft_changed = self.app_state.composer.draft != self.composer.text();
         self.app_state.composer.draft = self.composer.text().to_owned();
 
         let editing = self
@@ -364,11 +375,17 @@ impl DesktopApp {
             }
         }
         interaction::project_composer_outcome(&mut self.app_state, &outcome);
-        self.rebuild_frame_snapshot();
-        self.window_state.dirty = true;
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
+        if ignored {
+            return;
         }
+        if incremental_edit {
+            self.refresh_composer_snapshot_value(draft_changed);
+            self.composer_ime_cursor_area_dirty = true;
+            self.request_redraw();
+            return;
+        }
+        self.rebuild_frame_snapshot();
+        self.request_redraw();
     }
 }
 
@@ -509,10 +526,9 @@ impl ApplicationHandler<AppWake> for DesktopApp {
             WindowEvent::Resized(size) => {
                 self.window_state.physical_width = size.width.max(1);
                 self.window_state.physical_height = size.height.max(1);
-                self.rebuild_frame_snapshot();
-                self.resize_terminal_grid();
-                self.record_window_geometry();
-                self.update_accessibility_window_bounds();
+                self.invalidate_frame_snapshot();
+                self.terminal_grid_resize_pending = true;
+                self.window_metrics_update_pending = true;
                 self.request_redraw();
             }
             WindowEvent::Moved(_) => {
@@ -522,10 +538,9 @@ impl ApplicationHandler<AppWake> for DesktopApp {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.window_state.scale_factor = scale_factor;
                 self.renderer = NativeBackend::new(scale_factor as f32);
-                self.rebuild_frame_snapshot();
-                self.resize_terminal_grid();
-                self.record_window_geometry();
-                self.update_accessibility_window_bounds();
+                self.invalidate_frame_snapshot();
+                self.terminal_grid_resize_pending = true;
+                self.window_metrics_update_pending = true;
                 self.request_redraw();
             }
             WindowEvent::ThemeChanged(theme) => {

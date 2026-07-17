@@ -10,6 +10,14 @@ use crate::event_map::terminal_shortcut_command;
 
 impl DesktopApp {
     pub(super) fn apply_terminal_command(&mut self, command: AppCommand) {
+        let invalidates_snapshot = matches!(
+            &command,
+            AppCommand::SetTerminalScroll { .. } | AppCommand::CloseTerminal(_)
+        );
+        let redraw_immediately = !matches!(
+            &command,
+            AppCommand::WriteTerminal { .. } | AppCommand::ResizeTerminal { .. }
+        );
         if command == AppCommand::OpenTerminal {
             let _ = reduce_terminal_command(&mut self.app_state, command);
             self.ensure_terminal_runtime();
@@ -46,9 +54,11 @@ impl DesktopApp {
                 TerminalCommandOutcome::Ignored => return,
             }
         }
-        self.window_state.dirty = true;
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
+        if invalidates_snapshot {
+            self.invalidate_frame_snapshot();
+        }
+        if redraw_immediately {
+            self.request_redraw();
         }
     }
 
@@ -204,6 +214,7 @@ impl DesktopApp {
             return;
         }
         self.terminal_grid.resize(cols, rows);
+        self.invalidate_frame_snapshot();
         if self.app_state.terminal.follow_tail {
             self.app_state.terminal.scroll_offset =
                 TerminalPanel::tail_offset(self.terminal_grid.line_count(), rect.size.y);
