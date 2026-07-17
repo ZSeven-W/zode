@@ -1,0 +1,39 @@
+[package]
+name = "zode-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zode-app-model = { path = "../zode-app-model" }
+zode-app-runtime = { path = "../zode-app-runtime" }
+zode-app-ui = { path = "../zode-app-ui" }
+zode-node-protocol = { path = "../zode-node-protocol" }
+jian-core = { workspace = true }
+jian-widgets = { workspace = true }
+jian-skia = { workspace = true }
+skia-safe = { workspace = true }
+casement = { workspace = true }
+glutin = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures-core = { workspace = true }
+thiserror = { workspace = true }
+accesskit = { workspace = true }
+image = { workspace = true }
+portable-pty = { workspace = true }
+vte = { workspace = true }
+rfd = { workspace = true }
+open = { workspace = true }
+notify-rust = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+accesskit_macos = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+accesskit_windows = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+accesskit_unix = { workspace = true }

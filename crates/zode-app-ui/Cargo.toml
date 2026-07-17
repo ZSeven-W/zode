@@ -1,0 +1,14 @@
+[package]
+name = "zode-app-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zode-app-model = { path = "../zode-app-model" }
+zode-node-protocol = { path = "../zode-node-protocol" }
+jian-core = { workspace = true }
+jian-widgets = { workspace = true }
+accesskit = { workspace = true }

@@ -9,11 +9,16 @@ members = [
   "crates/zode-app-server-transport",
   "crates/zode-app-server",
   "crates/zode-pty-harness",
+  "crates/zode-node-protocol",
+  "crates/zode-app-model",
+  "crates/zode-app-runtime",
+  "crates/zode-app-ui",
+  "crates/zode-app",
   "sdk/rust",
 ]
-# vendor/agent is its own (agent-rs) workspace; keep it out of ours so its
-# crates resolve `*.workspace = true` against agent-rs's root, not zode's.
-exclude = ["vendor/agent", "vendor/noema"]
+# Vendored projects are independent workspaces; keep them out of Zode's so
+# their crates resolve `*.workspace = true` against their own roots.
+exclude = ["vendor/agent", "vendor/noema", "vendor/jian", "vendor/casement"]
 
 [workspace.package]
 version = "0.1.0-beta.7"
@@ -75,6 +80,27 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 chromiumoxide = { version = "0.9", default-features = true }
 portable-pty = "0.9"
 vt100 = "0.15"
+
+jian-core = { path = "vendor/jian/crates/jian-core", version = "0.0.1" }
+jian-widgets = { path = "vendor/jian/crates/jian-widgets", version = "0.0.1" }
+jian-skia = { path = "vendor/jian/crates/jian-skia", version = "0.0.1", features = ["textlayout"] }
+skia-safe = "0.97.0"
+casement = { path = "vendor/casement", version = "0.30.13" }
+glutin = "0.32"
+accesskit = "0.24"
+# accesskit_winit hard-depends on crates.io winit, whose Window types are
+# incompatible with the casement fork. Platform adapters avoid a second winit.
+accesskit_macos = "0.26"
+accesskit_windows = "0.33"
+accesskit_unix = "0.22"
+image = { version = "=0.25.8", default-features = false, features = ["png"] }
+futures-core = "0.3"
+fs2 = "0.4"
+portable-pty = "0.9"
+vte = "0.13"
+rfd = "0.15"
+open = "5"
+notify-rust = "=4.11.7"
 
 [profile.release]
 lto = "thin"
