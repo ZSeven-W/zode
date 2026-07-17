@@ -347,6 +347,35 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
 }
 
 #[test]
+fn long_environment_values_use_middle_ellipsis_but_keep_full_semantics() {
+    let (mut state, session) = state_with_session("long-workspace");
+    let workspace = "file:///Users/fini/workspace/z-seven/zode/.worktrees/zode-jian-desktop/crates/zode-app-ui/src/widgets/environment/mod.rs";
+    let mut presentation = ready_presentation(&session);
+    let LoadState::Ready(context) = &mut presentation.context else {
+        unreachable!("ready fixture context")
+    };
+    context.workspace_uri = WorkspaceUri::new(workspace).unwrap();
+    state.presentation.sessions.insert(session, presentation);
+
+    let surface = Rect::xywh(0.0, 0.0, 300.0, 700.0);
+    let layout = EnvironmentPanel::layout(surface, &state);
+    let painter = paint(&state, surface);
+
+    let visible = painter
+        .texts
+        .iter()
+        .find(|text| text.contains('…') && text.starts_with("file") && text.ends_with("mod.rs"))
+        .expect("long path keeps its identity around a middle ellipsis");
+    assert_ne!(visible, workspace);
+    let host = layout
+        .sections
+        .iter()
+        .find(|section| section.section.kind == EnvironmentSectionKind::Host)
+        .expect("host section");
+    assert!(EnvironmentPanel::section_accessibility_name(host).contains(workspace));
+}
+
+#[test]
 fn diff_idle_loading_and_failure_are_honest_and_do_not_open_review() {
     let (mut state, session) = state_with_session("current");
 
