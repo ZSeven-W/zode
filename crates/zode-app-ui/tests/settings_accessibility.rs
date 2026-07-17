@@ -1,6 +1,8 @@
 use accesskit::{Action, NodeId, Role};
 use jian_widgets::{Point2D, Rect};
-use zode_app_model::{reduce_settings_command, AppCommand, SettingsCommandOutcome};
+use zode_app_model::{
+    reduce_settings_command, AppCommand, SettingsCategory, SettingsCommandOutcome, ShellRoute,
+};
 use zode_app_ui::{
     accessibility_tree, Insets, RectExt, SettingsPanel, WorkspaceSnapshot, SETTINGS_ROOT_ID,
 };
@@ -12,6 +14,7 @@ use zode_node_protocol::{
 fn settings_nodes_expose_current_toggle_state_and_full_visual_hit_width() {
     let mut state = zode_app_model::demo_state();
     state.shell.page = zode_app_model::ShellPage::Settings;
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::Appearance);
     state.ui_preferences.theme = zode_app_model::ThemePreference::Dark;
     state.ui_preferences.reduced_motion = true;
     let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
@@ -61,6 +64,7 @@ fn settings_scroll_view_exposes_accessibility_scroll_actions() {
     );
 
     state.shell.page = zode_app_model::ShellPage::Settings;
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::General);
     let settings = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
     assert!(settings.node(zode_app_ui::SETTINGS_NAV_ID).is_none());
     let scroll_view = settings.node(SETTINGS_ROOT_ID).unwrap();
@@ -75,6 +79,7 @@ fn settings_scroll_view_exposes_accessibility_scroll_actions() {
 fn project_permission_revoke_uses_shared_visible_action_geometry() {
     let (mut state, session) = transcript_fixture();
     state.shell.page = zode_app_model::ShellPage::Settings;
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::Permissions);
     let workspace = state
         .threads
         .iter()
@@ -105,6 +110,7 @@ fn project_permission_revoke_uses_shared_visible_action_geometry() {
 fn zero_thread_startup_project_permissions_remain_visible_and_actionable() {
     let mut state = zode_app_model::demo_state();
     state.shell.page = zode_app_model::ShellPage::Settings;
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::Permissions);
     let workspace = WorkspaceUri::new("file:///repo/startup").unwrap();
     state.projects.push(zode_app_model::ProjectState {
         workspace_uri: workspace.clone(),
@@ -135,6 +141,7 @@ fn zero_thread_startup_project_permissions_remain_visible_and_actionable() {
 fn many_permissions_never_expose_controls_beyond_a_480px_root() {
     let (mut state, session) = transcript_fixture();
     state.shell.page = zode_app_model::ShellPage::Settings;
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::Permissions);
     let workspace = state
         .threads
         .iter()
