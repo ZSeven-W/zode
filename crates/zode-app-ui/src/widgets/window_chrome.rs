@@ -57,7 +57,12 @@ fn paint_sidebar_material_edge(painter: &mut dyn Painter, sidebar: Rect, theme: 
         return;
     }
 
-    const EDGE_ALPHA: [f32; 8] = [0.004, 0.008, 0.016, 0.016, 0.024, 0.024, 0.035, 0.09];
+    // Codex's macOS sidebar material resolves to a 13 px inner-edge ramp at
+    // 1x. Keep the early steps nearly transparent so the material remains
+    // airy, then converge on the final separator hairline.
+    const EDGE_ALPHA: [f32; 13] = [
+        0.004, 0.008, 0.008, 0.008, 0.012, 0.012, 0.012, 0.020, 0.020, 0.028, 0.028, 0.036, 0.09,
+    ];
     let edge_x = sidebar.max_x() - EDGE_ALPHA.len() as f32;
     for (index, alpha) in EDGE_ALPHA.into_iter().enumerate() {
         painter.fill_rect(

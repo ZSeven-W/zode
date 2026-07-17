@@ -78,3 +78,13 @@ fn unsafe_is_confined_to_explicit_platform_adapter_modules() {
         "only the macOS presenter adapter may opt out within presenter",
     );
 }
+
+#[test]
+fn native_sidebar_material_does_not_capture_winit_pointer_events() {
+    let presenter = include_str!("../src/presenter/macos.rs");
+
+    assert!(presenter.contains("struct PassthroughVisualEffectView"));
+    assert!(presenter.contains("#[unsafe(method_id(hitTest:))]"));
+    assert!(presenter.contains("fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>>"));
+    assert!(presenter.contains("PassthroughVisualEffectView::new(mtm, zero_frame).into_super()"));
+}

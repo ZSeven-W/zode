@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use objc2::{rc::Retained, ClassType, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, rc::Retained, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
     NSVisualEffectView, NSWindowOrderingMode,
@@ -14,6 +14,7 @@ use objc2_core_graphics::{
     CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage, CGImageAlphaInfo,
     CGImageByteOrderInfo, CGImageComponentInfo, CGImagePixelFormatInfo,
 };
+use objc2_foundation::NSPoint;
 use objc2_quartz_core::{kCAGravityResize, CALayer, CATransaction};
 use winit::{
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
@@ -23,6 +24,32 @@ use winit::{
 use crate::render::RasterSurface;
 
 use super::PresentationFrame;
+
+define_class!(
+    // SAFETY:
+    // - NSVisualEffectView supports subclassing without extra invariants.
+    // - `PassthroughVisualEffectView` has no ivars and does not implement Drop.
+    #[unsafe(super(NSVisualEffectView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ZodePassthroughVisualEffectView"]
+    struct PassthroughVisualEffectView;
+
+    impl PassthroughVisualEffectView {
+        // SAFETY: The signature matches NSView's `hitTest:` method exactly.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+    }
+);
+
+impl PassthroughVisualEffectView {
+    fn new(mtm: MainThreadMarker, frame: CGRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: The signature matches NSVisualEffectView's designated frame initializer.
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
 
 pub(crate) struct MacMaterialPresenter {
     window: Arc<Window>,
@@ -52,8 +79,7 @@ impl MacMaterialPresenter {
         root_layer.setOpaque(false);
 
         let zero_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0));
-        let effect_view =
-            NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), zero_frame);
+        let effect_view = PassthroughVisualEffectView::new(mtm, zero_frame).into_super();
         effect_view.setMaterial(NSVisualEffectMaterial::Sidebar);
         effect_view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
         effect_view.setState(NSVisualEffectState::FollowsWindowActiveState);
