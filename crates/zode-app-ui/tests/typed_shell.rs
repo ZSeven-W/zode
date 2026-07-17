@@ -1,8 +1,8 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
     AppCommand, ComingSoonFeature, EnvironmentSnapshot, IntegrationsTab, LoadState, PreviewState,
-    SecondaryPane, SessionDiffState, SessionPresentationState, SettingsCategory, ShellPage,
-    ShellRoute,
+    ProjectState, SecondaryPane, SessionDiffState, SessionPresentationState, SettingsCategory,
+    ShellPage, ShellRoute,
 };
 use zode_app_ui::{
     EnvironmentPanel, Insets, ReviewPanel, ThreadHeader, WorkspaceShell, ZodeTheme,
@@ -16,6 +16,7 @@ use zode_node_protocol::{
 #[derive(Default)]
 struct PaintCapture {
     texts: Vec<String>,
+    svg_paths: Vec<String>,
     fills: Vec<Rect>,
     rounded_fills: Vec<Rect>,
     clips: Vec<Rect>,
@@ -47,12 +48,13 @@ impl Painter for PaintCapture {
     fn stroke_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color, _width: f32) {}
     fn stroke_svg_path(
         &mut self,
-        _d: &str,
+        d: &str,
         _top_left: Point2D,
         _size: f32,
         _color: Color,
         _width: f32,
     ) {
+        self.svg_paths.push(d.to_owned());
     }
     fn save(&mut self) {}
     fn restore(&mut self) {}
@@ -74,6 +76,12 @@ fn state_with_ready_session() -> (zode_app_model::ZodeAppState, SessionLocator) 
         title: "Zode 桌面端".into(),
         updated_at_ms: 1,
         status: ThreadStatus::Idle,
+    });
+    state.projects.push(ProjectState {
+        workspace_uri: workspace_uri.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
     });
     state.presentation.sessions.insert(
         session.clone(),
@@ -219,6 +227,47 @@ fn conversation_composer_projects_only_the_ready_current_session_branch() {
     let (loading, _) = paint_shell(&state, 1_800.0);
     assert!(!text(&loading).contains("codex/typed-shell"));
     assert!(!text(&loading).lines().any(|line| line == "main"));
+}
+
+#[test]
+fn new_task_composer_projects_the_latest_verified_active_workspace_branch() {
+    let (mut state, session) = state_with_ready_session();
+    let workspace = state.threads[0].workspace_uri.clone();
+    state.active_workspace = Some(workspace.clone());
+    state.current_session = None;
+    state.presentation.route = ShellRoute::Conversation;
+
+    let (ready, _) = paint_shell(&state, 1_800.0);
+    let ready_text = text(&ready);
+    assert!(ready_text.contains("zode"));
+    assert!(ready_text.contains("本地"));
+    assert!(ready_text.contains("codex/typed-shell"));
+    assert!(ready
+        .svg_paths
+        .iter()
+        .any(|path| path == zode_app_ui::SemanticIcon::Branch.path()));
+
+    state
+        .presentation
+        .sessions
+        .get_mut(&session)
+        .unwrap()
+        .context = LoadState::Ready(EnvironmentSnapshot {
+        workspace_uri: WorkspaceUri::new("file:///repo/other").unwrap(),
+        branch: Some("other-secret-branch".into()),
+        subagents: Vec::new(),
+        background_processes: Vec::new(),
+        sources: Vec::new(),
+    });
+    let (mismatched, _) = paint_shell(&state, 1_800.0);
+    let mismatched_text = text(&mismatched);
+    assert!(!mismatched_text.contains("codex/typed-shell"));
+    assert!(!mismatched_text.contains("other-secret-branch"));
+    assert!(!mismatched_text.lines().any(|line| line == "main"));
+    assert!(!mismatched
+        .svg_paths
+        .iter()
+        .any(|path| path == zode_app_ui::SemanticIcon::Branch.path()));
 }
 
 #[test]

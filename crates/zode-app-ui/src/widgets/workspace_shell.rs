@@ -236,10 +236,7 @@ fn paint_conversation(
     } else {
         ThreadTranscript::paint(painter, geometry.transcript, state, theme);
     }
-    let branch = state
-        .current_session_presentation()
-        .and_then(|presentation| presentation.context.ready())
-        .and_then(|context| context.branch.as_deref());
+    let branch = current_branch(state);
     let connection_label = match state.host.connection {
         ConnectionState::Local => "本地",
         ConnectionState::Connecting => "连接中",
@@ -270,6 +267,51 @@ fn current_goal_progress(state: &ZodeAppState) -> Option<&zode_app_model::GoalPr
         zode_app_model::TranscriptItem::GoalProgress(goal) => Some(goal),
         _ => None,
     })
+}
+
+/// Returns only a branch that was loaded for the workspace the composer targets.
+///
+/// A new-task composer has no current session yet, so it may reuse the most
+/// recently loaded context for its active workspace. Keeping the workspace
+/// identity check here prevents a branch from another project leaking into the
+/// new task surface.
+fn current_branch(state: &ZodeAppState) -> Option<&str> {
+    if let Some(session) = state.current_session.as_ref() {
+        let workspace = state.available_workspace_for_session(session)?;
+        let context = state.presentation.sessions.get(session)?.context.ready()?;
+        return verified_branch(context, workspace);
+    }
+
+    let workspace = state.active_available_workspace()?;
+    state
+        .threads
+        .iter()
+        .filter(|thread| &thread.workspace_uri == workspace)
+        .filter_map(|thread| {
+            let context = state
+                .presentation
+                .sessions
+                .get(&thread.session)?
+                .context
+                .ready()?;
+            let branch = verified_branch(context, workspace)?;
+            Some((thread.updated_at_ms, branch))
+        })
+        .max_by_key(|(updated_at_ms, _)| *updated_at_ms)
+        .map(|(_, branch)| branch)
+}
+
+fn verified_branch<'a>(
+    context: &'a zode_app_model::EnvironmentSnapshot,
+    workspace: &zode_node_protocol::WorkspaceUri,
+) -> Option<&'a str> {
+    if &context.workspace_uri != workspace {
+        return None;
+    }
+    context
+        .branch
+        .as_deref()
+        .filter(|branch| !branch.trim().is_empty())
 }
 
 fn current_workspace_label(state: &ZodeAppState) -> Option<String> {

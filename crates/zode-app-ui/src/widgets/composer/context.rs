@@ -1,7 +1,11 @@
 use jian_widgets::{HorizontalAlign, Painter, Rect};
 use zode_app_model::GoalProgress;
 
-use crate::{paint_single_line, RectExt, ZodeTheme};
+use crate::{paint_single_line, RectExt, SemanticIcon, ZodeTheme};
+
+const CONTEXT_ICON_SIZE: f32 = 12.0;
+const CONTEXT_ICON_GAP: f32 = 6.0;
+const CONTEXT_ITEM_GAP: f32 = 20.0;
 
 pub(super) fn paint(
     painter: &mut dyn Painter,
@@ -20,11 +24,27 @@ pub(super) fn paint(
     painter.save();
     painter.clip_rect(rect);
     let mut x = rect.origin.x + 16.0;
-    for label in [workspace_label, connection_label, branch]
-        .into_iter()
-        .flatten()
-        .filter(|label| !label.trim().is_empty())
+    for (icon, label) in [
+        (SemanticIcon::Folder, workspace_label),
+        (SemanticIcon::Host, connection_label),
+        (SemanticIcon::Branch, branch),
+    ]
+    .into_iter()
+    .filter_map(|(icon, label)| label.map(|label| (icon, label)))
+    .filter(|(_, label)| !label.trim().is_empty())
     {
+        let icon_origin = jian_widgets::Point2D::new(
+            x,
+            rect.origin.y + (rect.size.y - CONTEXT_ICON_SIZE).max(0.0) / 2.0,
+        );
+        painter.stroke_svg_path(
+            icon.path(),
+            icon_origin,
+            CONTEXT_ICON_SIZE,
+            theme.tokens.muted_foreground,
+            icon.stroke_width(),
+        );
+        x += CONTEXT_ICON_SIZE + CONTEXT_ICON_GAP;
         let label_width = painter.measure_text_weighted(label, 10.0, 400);
         paint_single_line(
             painter,
@@ -35,7 +55,7 @@ pub(super) fn paint(
             theme.tokens.muted_foreground,
             HorizontalAlign::Start,
         );
-        x += label_width + 20.0;
+        x += label_width + CONTEXT_ITEM_GAP;
         if x >= rect.max_x() - 16.0 {
             break;
         }

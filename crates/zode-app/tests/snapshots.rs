@@ -132,6 +132,23 @@ fn assert_scene_landmarks(scene: &ReferenceScene) {
             assert!(scene.state.current_session.is_none());
             assert!(scene.state.transcripts.is_empty());
             assert!(scene.state.active_workspace.is_some());
+            let active_workspace = scene.state.active_workspace.as_ref().unwrap();
+            assert!(scene.state.threads.iter().any(|thread| {
+                &thread.workspace_uri == active_workspace
+                    && scene
+                        .state
+                        .presentation
+                        .sessions
+                        .get(&thread.session)
+                        .and_then(|presentation| presentation.context.ready())
+                        .is_some_and(|context| {
+                            &context.workspace_uri == active_workspace
+                                && context
+                                    .branch
+                                    .as_deref()
+                                    .is_some_and(|branch| !branch.is_empty())
+                        })
+            }));
             let input = Composer::layout(snapshot.layout.composer, &scene.state.composer).input;
             let empty_height =
                 input.origin.y - TRANSCRIPT_COMPOSER_GAP - snapshot.layout.transcript.origin.y;

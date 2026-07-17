@@ -11,6 +11,8 @@ use zode_node_protocol::{SessionLocator, WorkspaceUri};
 #[derive(Default)]
 struct TextCapture {
     texts: Vec<String>,
+    text_lines: Vec<(String, Point2D, f32)>,
+    icons: Vec<(&'static str, Point2D, f32)>,
 }
 
 impl Painter for TextCapture {
@@ -18,14 +20,16 @@ impl Painter for TextCapture {
     fn end_frame(&mut self) {}
     fn fill_rect(&mut self, _rect: Rect, _color: Color) {}
     fn stroke_rect(&mut self, _rect: Rect, _color: Color, _width: f32) {}
-    fn draw_text(&mut self, layout: &TextLayout, _origin: Point2D) {
-        self.texts.push(
-            layout
-                .runs()
-                .iter()
-                .map(|run| run.content.as_str())
-                .collect(),
-        );
+    fn draw_text(&mut self, layout: &TextLayout, origin: Point2D) {
+        let text: String = layout
+            .runs()
+            .iter()
+            .map(|run| run.content.as_str())
+            .collect();
+        if let Some(run) = layout.runs().first() {
+            self.text_lines.push((text.clone(), origin, run.font_size));
+        }
+        self.texts.push(text);
     }
     fn clip_rect(&mut self, _rect: Rect) {}
     fn stroke_line(&mut self, _from: Point2D, _to: Point2D, _color: Color, _width: f32) {}
@@ -33,12 +37,17 @@ impl Painter for TextCapture {
     fn stroke_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color, _width: f32) {}
     fn stroke_svg_path(
         &mut self,
-        _d: &str,
-        _top_left: Point2D,
-        _size: f32,
+        d: &str,
+        top_left: Point2D,
+        size: f32,
         _color: Color,
         _width: f32,
     ) {
+        let semantic = zode_app_ui::SemanticIcon::ALL
+            .into_iter()
+            .find(|icon| icon.path() == d)
+            .expect("composer uses a registered semantic icon");
+        self.icons.push((semantic.path(), top_left, size));
     }
     fn save(&mut self) {}
     fn restore(&mut self) {}
@@ -167,6 +176,48 @@ fn composer_paints_only_explicit_runtime_context_and_permission() {
 
     for expected in ["本地", "codex/desktop", "工作区写入"] {
         assert!(painter.texts.iter().any(|text| text == expected));
+    }
+}
+
+#[test]
+fn composer_context_uses_semantic_icons_centered_in_the_context_row() {
+    let state = ComposerState::default();
+    let mut painter = TextCapture::default();
+    let rect = Rect::xywh(0.0, 0.0, 500.0, 144.0);
+
+    Composer::paint_input_with_workspace_context(
+        &mut painter,
+        rect,
+        &jian_core::text_input::TextInputState::default(),
+        &state,
+        Some("zode"),
+        Some("本地"),
+        Some("main"),
+        None,
+        &ZodeTheme::light(),
+    );
+
+    for expected in [
+        zode_app_ui::SemanticIcon::Folder,
+        zode_app_ui::SemanticIcon::Host,
+        zode_app_ui::SemanticIcon::Branch,
+    ] {
+        let (_, origin, size) = painter
+            .icons
+            .iter()
+            .find(|(path, _, _)| *path == expected.path())
+            .expect("context semantic icon is painted");
+        assert_eq!(*size, 12.0);
+        assert_eq!(origin.y, 16.0);
+    }
+    for expected in ["zode", "本地", "main"] {
+        assert!(painter.texts.iter().any(|text| text == expected));
+        let (_, origin, size) = painter
+            .text_lines
+            .iter()
+            .find(|(text, _, _)| text == expected)
+            .expect("context label uses the shared TextBox path");
+        assert!((origin.y + size / 2.0 - 22.0).abs() <= 0.01);
     }
 }
 
