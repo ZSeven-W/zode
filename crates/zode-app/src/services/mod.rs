@@ -138,33 +138,13 @@ pub(crate) fn open_read_no_follow(path: &std::path::Path) -> std::io::Result<std
     options.open(path)
 }
 
-#[cfg(unix)]
-pub(crate) fn same_file_identity(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    before.dev() == after.dev() && before.ino() == after.ino()
-}
-
-#[cfg(windows)]
-pub(crate) fn same_file_identity(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    before.volume_serial_number().is_some()
-        && before.volume_serial_number() == after.volume_serial_number()
-        && before.file_index().is_some()
-        && before.file_index() == after.file_index()
-}
-
-#[cfg(not(any(unix, windows)))]
-pub(crate) fn same_file_identity(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
-    before.len() == after.len()
-        && before.modified().ok().is_some()
-        && before.modified().ok() == after.modified().ok()
+pub(crate) fn file_identity(file: &std::fs::File) -> std::io::Result<same_file::Handle> {
+    same_file::Handle::from_file(file.try_clone()?)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::same_file_identity;
+    use super::file_identity;
 
     #[test]
     fn file_identity_distinguishes_replaced_objects() {
@@ -175,12 +155,18 @@ mod tests {
         let second = root.join("second");
         std::fs::write(&first, b"same length").unwrap();
         std::fs::write(&second, b"same length").unwrap();
-        let first_metadata = std::fs::metadata(&first).unwrap();
-        let first_again = std::fs::metadata(&first).unwrap();
-        let second_metadata = std::fs::metadata(&second).unwrap();
+        let first_file = std::fs::File::open(&first).unwrap();
+        let first_again = std::fs::File::open(&first).unwrap();
+        let second_file = std::fs::File::open(&second).unwrap();
 
-        assert!(same_file_identity(&first_metadata, &first_again));
-        assert!(!same_file_identity(&first_metadata, &second_metadata));
+        assert_eq!(
+            file_identity(&first_file).unwrap(),
+            file_identity(&first_again).unwrap()
+        );
+        assert_ne!(
+            file_identity(&first_file).unwrap(),
+            file_identity(&second_file).unwrap()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

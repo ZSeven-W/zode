@@ -5,8 +5,8 @@ use tokio::io::AsyncReadExt;
 use zode_node_protocol::WorkspaceUri;
 
 use super::{
-    open_read_no_follow, safe_relative, same_file_identity, workspace_root, FileMetadata,
-    FileService, ServiceError,
+    file_identity, open_read_no_follow, safe_relative, workspace_root, FileMetadata, FileService,
+    ServiceError,
 };
 
 #[derive(Default)]
@@ -106,24 +106,24 @@ async fn open_validated_regular(
     relative: &str,
 ) -> Result<(tokio::fs::File, std::fs::Metadata, std::path::PathBuf), ServiceError> {
     let (root, path) = resolve_existing(workspace, relative).await?;
-    let before = tokio::fs::metadata(&path).await?;
-    ensure_regular(&path, &before)?;
-
     let open_path = path.clone();
     let std_file = tokio::task::spawn_blocking(move || open_read_no_follow(&open_path))
         .await
         .map_err(|error| ServiceError::Platform(format!("file open task failed: {error}")))??;
+    let opened_identity = file_identity(&std_file)?;
     let file = tokio::fs::File::from_std(std_file);
     let opened = file.metadata().await?;
     ensure_regular(&path, &opened)?;
-    if !same_file_identity(&before, &opened) {
-        return Err(ServiceError::FileChanged(path.display().to_string()));
-    }
 
     let current_path = tokio::fs::canonicalize(&path).await?;
     ensure_inside(&root, &current_path)?;
-    let current = tokio::fs::metadata(&current_path).await?;
-    if !same_file_identity(&opened, &current) {
+    let verify_path = current_path.clone();
+    let current_file = tokio::task::spawn_blocking(move || open_read_no_follow(&verify_path))
+        .await
+        .map_err(|error| ServiceError::Platform(format!("file verify task failed: {error}")))??;
+    let current = current_file.metadata()?;
+    ensure_regular(&current_path, &current)?;
+    if opened_identity != file_identity(&current_file)? {
         return Err(ServiceError::FileChanged(path.display().to_string()));
     }
     Ok((file, opened, current_path))

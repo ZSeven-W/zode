@@ -1,7 +1,7 @@
 use zode_node_protocol::WorkspaceUri;
 
 use super::{
-    open_read_no_follow, safe_relative, same_file_identity, workspace_root, ExternalOpenService,
+    file_identity, open_read_no_follow, safe_relative, workspace_root, ExternalOpenService,
     ServiceError,
 };
 
@@ -13,21 +13,20 @@ impl ExternalOpenService for LocalExternalOpenService {
         let root = workspace_root(workspace)?.canonicalize()?;
         let path = root.join(safe_relative(relative)?).canonicalize()?;
         ensure_inside(&root, &path)?;
-        let before = std::fs::metadata(&path)?;
-        ensure_regular(&path, &before)?;
         let guard = open_read_no_follow(&path)?;
+        let opened_identity = file_identity(&guard)?;
         let opened = guard.metadata()?;
         ensure_regular(&path, &opened)?;
-        if !same_file_identity(&before, &opened) {
-            return Err(ServiceError::FileChanged(path.display().to_string()));
-        }
         let current = path.canonicalize()?;
         ensure_inside(&root, &current)?;
-        let current_metadata = std::fs::metadata(&current)?;
-        if !same_file_identity(&opened, &current_metadata) {
+        let current_guard = open_read_no_follow(&current)?;
+        let current_metadata = current_guard.metadata()?;
+        ensure_regular(&current, &current_metadata)?;
+        if opened_identity != file_identity(&current_guard)? {
             return Err(ServiceError::FileChanged(path.display().to_string()));
         }
         let result = open::that(current).map_err(ServiceError::Io);
+        drop(current_guard);
         drop(guard);
         result
     }

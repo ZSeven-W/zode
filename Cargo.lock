@@ -7600,6 +7600,7 @@ dependencies = [
  "open",
  "portable-pty",
  "rfd",
+ "same-file",
  "serde_json",
  "skia-safe",
  "softbuffer",
