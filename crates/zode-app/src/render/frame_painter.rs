@@ -1,4 +1,6 @@
-use jian_widgets::{Color, ImageAdjustments, ImageDrawMode, Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{
+    Color, ImageAdjustments, ImageDrawMode, Painter, Point2D, Rect, TextLayout, TextMetrics,
+};
 use skia_safe::PaintStyle;
 
 use super::native_backend::{skia_paint, to_sk_rect};
@@ -326,6 +328,18 @@ impl Painter for FramePainter<'_> {
     ) -> f32 {
         self.backend
             .measure_text(text, font_size, Some(family), weight, italic)
+    }
+
+    fn measure_text_metrics_family_styled(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        family: &str,
+        weight: u16,
+        italic: bool,
+    ) -> TextMetrics {
+        self.backend
+            .measure_text_metrics(text, font_size, Some(family), weight, italic)
     }
 }
 

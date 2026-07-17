@@ -7,8 +7,12 @@ use jian_core::{
         RadialGradient, ShaderSpec, ShaderUniform, ShadowSpec, StrokeOp, TextRun,
     },
 };
-use jian_widgets::{Color, ImageAdjustments, ImageDrawMode, Point2D, Rect, TextLayout};
+use jian_widgets::{
+    Color, ImageAdjustments, ImageDrawMode, Point2D, Rect, TextLayout, TextMetrics,
+};
 use skia_safe::{canvas::SaveLayerRec, image_filters, BlurStyle, MaskFilter, PaintStyle};
+
+use super::text_metrics::TextMetricsEngine;
 
 struct CachedImageSource {
     key: Arc<str>,
@@ -36,7 +40,7 @@ pub struct NativeBackend {
     skia: jian_skia::SkiaBackend,
     image_sources: HashMap<u64, CachedImageSource>,
     dpi: f32,
-    fonts: jian_skia::FontResolver,
+    text_metrics: TextMetricsEngine,
     font_family_override: Option<String>,
 }
 
@@ -50,7 +54,7 @@ impl NativeBackend {
             skia: jian_skia::SkiaBackend::new(),
             image_sources: HashMap::new(),
             dpi,
-            fonts: jian_skia::FontResolver::new(skia_safe::FontMgr::new()),
+            text_metrics: TextMetricsEngine::new(),
             font_family_override,
         }
     }
@@ -397,8 +401,21 @@ impl NativeBackend {
         italic: bool,
     ) -> f32 {
         let family = self.font_family_for_measure(family);
-        self.fonts
-            .measure_text(text, font_size, family, weight, italic)
+        self.text_metrics
+            .measure_width(text, font_size, family, weight, italic)
+    }
+
+    pub fn measure_text_metrics(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        family: Option<&str>,
+        weight: u16,
+        italic: bool,
+    ) -> TextMetrics {
+        let family = self.font_family_override.as_deref().or(family);
+        self.text_metrics
+            .measure(text, font_size, family, weight, italic)
     }
 
     fn font_family_for_measure<'a>(&'a self, requested: Option<&'a str>) -> Option<&'a str> {
@@ -616,5 +633,21 @@ mod tests {
             Some("system-ui")
         );
         assert_eq!(backend.font_family_for_measure(None), None);
+    }
+
+    #[test]
+    fn repeated_text_metrics_are_cached_per_style() {
+        let mut backend = NativeBackend::new(1.0);
+
+        let first =
+            backend.measure_text_metrics("cached control", 13.0, Some("system-ui"), 400, false);
+        let second =
+            backend.measure_text_metrics("cached control", 13.0, Some("system-ui"), 400, false);
+
+        assert_eq!(first, second);
+        assert_eq!(backend.text_metrics.cache_len(), 1);
+
+        backend.measure_text_metrics("cached control", 14.0, Some("system-ui"), 400, false);
+        assert_eq!(backend.text_metrics.cache_len(), 2);
     }
 }
