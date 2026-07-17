@@ -323,11 +323,11 @@ impl Painter for FramePainter<'_> {
 
 fn polygon(points: &[Point2D]) -> Option<skia_safe::Path> {
     let (first, rest) = points.split_first()?;
-    let mut path = skia_safe::Path::new();
+    let mut path = skia_safe::PathBuilder::new();
     path.move_to((first.x, first.y));
     for point in rest {
         path.line_to((point.x, point.y));
     }
     path.close();
-    Some(path)
+    Some(path.detach())
 }
