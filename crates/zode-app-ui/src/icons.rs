@@ -4,6 +4,8 @@
 /// color; the semantic name keeps product code independent from path data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticIcon {
+    NewTask,
+    Scheduled,
     Settings,
     Search,
     User,
@@ -25,11 +27,59 @@ pub enum SemanticIcon {
     Environment,
     Worktree,
     Archive,
+    Sites,
+    PullRequest,
+    Chat,
+    Folder,
+    Send,
+    Stop,
+    Branch,
+    Host,
+    Diff,
+    Compare,
 }
 
 impl SemanticIcon {
+    pub const ALL: [Self; 33] = [
+        Self::NewTask,
+        Self::Scheduled,
+        Self::Settings,
+        Self::Search,
+        Self::User,
+        Self::Appearance,
+        Self::Microphone,
+        Self::Configuration,
+        Self::Sparkles,
+        Self::Pet,
+        Self::Keyboard,
+        Self::Usage,
+        Self::Account,
+        Self::Snapshot,
+        Self::Integrations,
+        Self::Browser,
+        Self::Computer,
+        Self::Hook,
+        Self::Connect,
+        Self::Git,
+        Self::Environment,
+        Self::Worktree,
+        Self::Archive,
+        Self::Sites,
+        Self::PullRequest,
+        Self::Chat,
+        Self::Folder,
+        Self::Send,
+        Self::Stop,
+        Self::Branch,
+        Self::Host,
+        Self::Diff,
+        Self::Compare,
+    ];
+
     pub const fn path(self) -> &'static str {
         match self {
+            Self::NewTask => "M12 5V19M5 12H19",
+            Self::Scheduled => "M12 6V12L16 14M12 2A10 10 0 1 0 12 22A10 10 0 1 0 12 2",
             Self::Settings => {
                 "M12 8A4 4 0 1 0 12 16A4 4 0 1 0 12 8M19 12L22 12M2 12L5 12M12 2L12 5M12 19L12 22M17 7L19 5M5 19L7 17M17 17L19 19M5 5L7 7"
             }
@@ -53,12 +103,27 @@ impl SemanticIcon {
             Self::Environment => "M4 5H20V19H4ZM7 9L10 12L7 15M12 15H17",
             Self::Worktree => "M6 4V18M18 6V20M6 9H12C15 9 18 7 18 4M6 15H12C15 15 18 17 18 20",
             Self::Archive => "M4 7H20V20H4ZM3 4H21V7H3ZM9 11H15",
+            Self::Sites => "M4 4H9V9H4ZM15 4H20V9H15ZM4 15H9V20H4ZM15 15H20V20H15Z",
+            Self::PullRequest => "M6 3A2 2 0 1 0 6 7A2 2 0 1 0 6 3M18 17A2 2 0 1 0 18 21A2 2 0 1 0 18 17M6 7V18M18 17V10C18 7 16 5 13 5H11M14 2L11 5L14 8",
+            Self::Chat => "M4 4H20V16H9L4 21Z",
+            Self::Folder => "M3 6H10L12 8H21V19H3Z",
+            Self::Send => "M12 19V5M6 11L12 5L18 11",
+            Self::Stop => "M7 7H17V17H7Z",
+            Self::Branch => "M6 3A2 2 0 1 0 6 7A2 2 0 1 0 6 3M18 17A2 2 0 1 0 18 21A2 2 0 1 0 18 17M6 7V13C6 16 8 19 12 19H16M18 5V17M15 8L18 5L21 8",
+            Self::Host => "M3 5H21V17H3ZM8 21H16M12 17V21",
+            Self::Diff => "M5 7H11M8 4V10M14 7H20M5 17H11M14 17H20M17 14V20",
+            Self::Compare => "M7 7H19M16 4L19 7L16 10M17 17H5M8 14L5 17L8 20",
         }
     }
 
     pub const fn viewbox(self) -> f32 {
         let _ = self;
         24.0
+    }
+
+    pub const fn stroke_width(self) -> f32 {
+        let _ = self;
+        1.75
     }
 }
 
@@ -68,15 +133,10 @@ mod tests {
 
     #[test]
     fn settings_icons_share_the_semantic_24px_registry() {
-        for icon in [
-            SemanticIcon::Settings,
-            SemanticIcon::Search,
-            SemanticIcon::Appearance,
-            SemanticIcon::Integrations,
-            SemanticIcon::Environment,
-        ] {
+        for icon in SemanticIcon::ALL {
             assert!(!icon.path().is_empty());
             assert_eq!(icon.viewbox(), 24.0);
+            assert_eq!(icon.stroke_width(), 1.75);
         }
     }
 }

@@ -1,5 +1,80 @@
 use jian_widgets::{Color, HorizontalAlign, Painter, Rect, TextBox, VerticalAlign};
 
+/// Semantic typography roles shared by the desktop presentation layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypographyRole {
+    UiDisplay,
+    UiBody,
+    UiLabel,
+    UiCaption,
+    Code,
+}
+
+/// Resolved typography values for one semantic role.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TypographyStyle {
+    pub family: &'static str,
+    pub size: f32,
+    pub weight: u16,
+    pub line_height: f32,
+}
+
+impl TypographyRole {
+    pub const fn style(self) -> TypographyStyle {
+        match self {
+            Self::UiDisplay => TypographyStyle {
+                family: "system-ui",
+                size: 28.0,
+                weight: 650,
+                line_height: 36.0,
+            },
+            Self::UiBody => TypographyStyle {
+                family: "system-ui",
+                size: 14.0,
+                weight: 400,
+                line_height: 22.0,
+            },
+            Self::UiLabel => TypographyStyle {
+                family: "system-ui",
+                size: 13.0,
+                weight: 550,
+                line_height: 18.0,
+            },
+            Self::UiCaption => TypographyStyle {
+                family: "system-ui",
+                size: 11.0,
+                weight: 400,
+                line_height: 16.0,
+            },
+            Self::Code => TypographyStyle {
+                family: "monospace",
+                size: 12.0,
+                weight: 400,
+                line_height: 18.0,
+            },
+        }
+    }
+}
+
+pub fn paint_role_single_line(
+    painter: &mut dyn Painter,
+    text: &str,
+    rect: Rect,
+    role: TypographyRole,
+    color: Color,
+    horizontal_align: HorizontalAlign,
+) {
+    let style = role.style();
+    TextBox::new(text)
+        .with_font_family(style.family)
+        .with_font_size(style.size)
+        .with_font_weight(style.weight)
+        .with_color(color)
+        .with_horizontal_align(horizontal_align)
+        .with_vertical_align(VerticalAlign::Center)
+        .paint(painter, rect);
+}
+
 pub(crate) fn paint_single_line(
     painter: &mut dyn Painter,
     text: &str,
@@ -17,4 +92,27 @@ pub(crate) fn paint_single_line(
         .with_horizontal_align(horizontal_align)
         .with_vertical_align(VerticalAlign::Center)
         .paint(painter, rect);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_roles_keep_ui_and_code_families_distinct() {
+        assert_eq!(TypographyRole::Code.style().family, "monospace");
+        assert_eq!(TypographyRole::UiLabel.style().family, "system-ui");
+        for role in [
+            TypographyRole::UiDisplay,
+            TypographyRole::UiBody,
+            TypographyRole::UiLabel,
+            TypographyRole::UiCaption,
+            TypographyRole::Code,
+        ] {
+            let style = role.style();
+            assert!(style.size > 0.0);
+            assert!(style.line_height >= style.size);
+            assert!(style.weight > 0);
+        }
+    }
 }
