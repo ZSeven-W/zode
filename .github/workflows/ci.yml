@@ -98,6 +98,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: portable-${{ matrix.target }}
+      - name: Install portable target explicitly
+        run: rustup target add --toolchain 1.94.0 "${{ matrix.target }}"
       - name: Check portable protocol, model, and UI crates
         run: >-
           cargo check --locked
