@@ -372,6 +372,9 @@ fn control_loop(
                 break;
             }
         }
+        // Release the control-owned master before waiting so pending PTY
+        // output cannot keep macOS child reaping blocked on this handle.
+        drop(master);
         #[cfg(unix)]
         if natural_exit {
             if let Some(session_id) = session_id {
