@@ -21,6 +21,7 @@ const CHIP_MIN_WIDTH: f32 = 48.0;
 const PROJECT_CHIP_MIN_WIDTH: f32 = 56.0;
 const PROJECT_LABEL_GAP: f32 = 2.0;
 const MAX_CHIP_LABEL_WIDTH: f32 = 180.0;
+const CHIP_LABEL_WIDTH_SLOP: f32 = 1.0;
 const DETACH_HIT_SIZE: f32 = 24.0;
 const DETACH_VISUAL_SIZE: f32 = 20.0;
 const TOOLTIP_H: f32 = 28.0;
@@ -94,8 +95,10 @@ pub fn layout(
         } else {
             CONTEXT_ICON_SIZE + CONTEXT_ICON_GAP
         };
-        let desired =
-            detach_width + estimated_text_width(label).min(MAX_CHIP_LABEL_WIDTH) + CHIP_PAD_X;
+        let desired = detach_width
+            + estimated_text_width(label).min(MAX_CHIP_LABEL_WIDTH)
+            + CHIP_LABEL_WIDTH_SLOP
+            + CHIP_PAD_X;
         if let Some(chip_rect) =
             take_chip(&mut x, right, top, height, desired, PROJECT_CHIP_MIN_WIDTH)
         {
@@ -487,7 +490,8 @@ fn take_standard_chip(
     let desired = CHIP_PAD_X * 2.0
         + CONTEXT_ICON_SIZE
         + CONTEXT_ICON_GAP
-        + estimated_text_width(label).min(MAX_CHIP_LABEL_WIDTH);
+        + estimated_text_width(label).min(MAX_CHIP_LABEL_WIDTH)
+        + CHIP_LABEL_WIDTH_SLOP;
     let rect = take_chip(x, right, top, height, desired, CHIP_MIN_WIDTH)?;
     let label_left = rect.origin.x + CHIP_PAD_X + CONTEXT_ICON_SIZE + CONTEXT_ICON_GAP;
     Some(ComposerContextChipLayout {
