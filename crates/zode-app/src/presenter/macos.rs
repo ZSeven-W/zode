@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use objc2::{rc::Retained, ClassType, MainThreadMarker};
+use objc2::{rc::Retained, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
     NSVisualEffectView, NSWindowOrderingMode,
