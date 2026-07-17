@@ -1,8 +1,11 @@
+use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
     demo_state, reduce_tool_command, AppCommand, ToolCommandOutcome, TranscriptItem,
     TranscriptState,
 };
-use zode_app_ui::{ApprovalAction, ApprovalCard, ToolCard, ToolTone, UsageChip, UsageDisplay};
+use zode_app_ui::{
+    ApprovalAction, ApprovalCard, ToolCard, ToolTone, UsageChip, UsageDisplay, ZodeTheme,
+};
 use zode_node_protocol::{ApprovalDecision, SessionLocator, ToolCall, ToolStatus, UsageSnapshot};
 
 fn tool(id: &str, name: &str, status: ToolStatus) -> ToolCall {
@@ -129,4 +132,102 @@ fn usage_display_includes_model_context_tokens_and_optional_cost() {
         ..usage
     };
     assert_eq!(UsageChip::display(None, &no_price).cost, "n/a");
+}
+
+#[test]
+fn card_controls_share_their_visual_centerline() {
+    let theme = ZodeTheme::light();
+    let mut painter = TextCapture::default();
+    let approval_rect = Rect::xywh(0.0, 0.0, 260.0, 64.0);
+    ApprovalCard::paint(&mut painter, approval_rect, "write_file", &theme);
+    for button in ApprovalCard::button_layout(approval_rect) {
+        assert_close(
+            painter.center_y(button.label),
+            button.rect.origin.y + button.rect.size.y / 2.0,
+            1.0,
+        );
+    }
+
+    let chip = Rect::xywh(0.0, 80.0, 300.0, 24.0);
+    UsageChip::paint(
+        &mut painter,
+        chip,
+        Some("gpt-5.2"),
+        &UsageSnapshot {
+            input_tokens: 100,
+            output_tokens: 20,
+            context_used: Some(0.2),
+            cost_usd: None,
+        },
+        &theme,
+    );
+    assert_close(
+        painter.center_y("gpt-5.2 · 20% · 120 tok · n/a"),
+        chip.origin.y + chip.size.y / 2.0,
+        1.0,
+    );
+
+    let tool_rect = Rect::xywh(0.0, 120.0, 260.0, 64.0);
+    let painted_tool = tool("centered", "read_file", ToolStatus::Running);
+    ToolCard::paint(&mut painter, tool_rect, &painted_tool, false, &theme);
+    assert_close(
+        painter.center_y("read_file"),
+        tool_rect.origin.y + 17.5,
+        1.0,
+    );
+}
+
+#[derive(Default)]
+struct TextCapture {
+    calls: Vec<(String, Point2D, f32)>,
+}
+
+impl TextCapture {
+    fn center_y(&self, text: &str) -> f32 {
+        let (_, origin, size) = self
+            .calls
+            .iter()
+            .find(|(candidate, _, _)| candidate == text)
+            .unwrap_or_else(|| panic!("missing text call: {text}"));
+        origin.y + size / 2.0
+    }
+}
+
+impl Painter for TextCapture {
+    fn begin_frame(&mut self) {}
+    fn end_frame(&mut self) {}
+    fn fill_rect(&mut self, _rect: Rect, _color: Color) {}
+    fn stroke_rect(&mut self, _rect: Rect, _color: Color, _width: f32) {}
+    fn draw_text(&mut self, layout: &TextLayout, origin: Point2D) {
+        let run = layout.runs().first().expect("single-line text");
+        self.calls
+            .push((run.content.clone(), origin, run.font_size));
+    }
+    fn clip_rect(&mut self, _rect: Rect) {}
+    fn stroke_line(&mut self, _from: Point2D, _to: Point2D, _color: Color, _width: f32) {}
+    fn fill_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color) {}
+    fn stroke_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color, _width: f32) {}
+    fn stroke_svg_path(
+        &mut self,
+        _path: &str,
+        _top_left: Point2D,
+        _size: f32,
+        _color: Color,
+        _width: f32,
+    ) {
+    }
+    fn save(&mut self) {}
+    fn restore(&mut self) {}
+    fn translate(&mut self, _offset: Point2D) {}
+    fn resize(&mut self, _width: u32, _height: u32) {}
+    fn dpi_scale(&self) -> f32 {
+        1.0
+    }
+}
+
+fn assert_close(actual: f32, expected: f32, tolerance: f32) {
+    assert!(
+        (actual - expected).abs() <= tolerance,
+        "expected {actual} within {tolerance} of {expected}"
+    );
 }

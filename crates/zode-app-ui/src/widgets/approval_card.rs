@@ -1,8 +1,8 @@
-use jian_widgets::{Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{HorizontalAlign, Painter, Rect};
 use zode_app_model::AppCommand;
 use zode_node_protocol::ApprovalDecision;
 
-use crate::ZodeTheme;
+use crate::{paint_single_line, ZodeTheme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalAction {
@@ -62,13 +62,19 @@ impl ApprovalCard {
     pub fn paint(painter: &mut dyn Painter, rect: Rect, tool: &str, theme: &ZodeTheme) {
         painter.fill_round_rect(rect, 10.0, theme.tokens.muted);
         painter.stroke_round_rect(rect, 10.0, theme.tokens.border, 1.0);
-        draw_text(
+        paint_single_line(
             painter,
             &format!("需要批准 · {tool}"),
-            Point2D::new(rect.origin.x + 12.0, rect.origin.y + 22.0),
+            Rect::xywh(
+                rect.origin.x + 12.0,
+                rect.origin.y + 2.0,
+                (rect.size.x - 24.0).max(0.0),
+                30.0,
+            ),
             12.0,
             600,
             theme.tokens.foreground,
+            HorizontalAlign::Start,
         );
         for (index, button) in Self::button_layout(rect).into_iter().enumerate() {
             painter.fill_round_rect(
@@ -80,10 +86,10 @@ impl ApprovalCard {
                     theme.tokens.card
                 },
             );
-            draw_text(
+            paint_single_line(
                 painter,
                 button.label,
-                Point2D::new(button.rect.origin.x + 8.0, rect.origin.y + 50.0),
+                button.rect,
                 11.0,
                 500,
                 if index == 2 {
@@ -91,20 +97,8 @@ impl ApprovalCard {
                 } else {
                     theme.tokens.foreground
                 },
+                HorizontalAlign::Center,
             );
         }
     }
-}
-
-fn draw_text(
-    painter: &mut dyn Painter,
-    text: &str,
-    origin: Point2D,
-    size: f32,
-    weight: u16,
-    color: jian_widgets::Color,
-) {
-    let layout = TextLayout::single_run(text, "system-ui", size, color.to_jian(), Point2D::ZERO)
-        .with_font_weight(weight);
-    painter.draw_text(&layout, origin);
 }

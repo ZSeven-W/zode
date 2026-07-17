@@ -1,8 +1,8 @@
-use jian_widgets::{Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{HorizontalAlign, Painter, Rect};
 use zode_app_model::default_tool_expanded;
 use zode_node_protocol::{ToolCall, ToolStatus};
 
-use crate::ZodeTheme;
+use crate::{paint_single_line, ZodeTheme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolTone {
@@ -41,40 +41,45 @@ impl ToolCard {
         };
         painter.fill_round_rect(rect, 8.0, theme.tokens.muted);
         painter.stroke_round_rect(rect, 8.0, accent.with_alpha(0.55), 1.0);
+        let header = Rect::xywh(rect.origin.x, rect.origin.y, rect.size.x, 35.0);
         painter.fill_oval(
-            Rect::xywh(rect.origin.x + 10.0, rect.origin.y + 14.0, 7.0, 7.0),
+            Rect::xywh(
+                rect.origin.x + 10.0,
+                header.origin.y + (header.size.y - 7.0) / 2.0,
+                7.0,
+                7.0,
+            ),
             accent,
         );
-        draw_text(
+        paint_single_line(
             painter,
             &tool.name,
-            Point2D::new(rect.origin.x + 26.0, rect.origin.y + 22.0),
+            Rect::xywh(
+                rect.origin.x + 26.0,
+                header.origin.y,
+                (rect.size.x - 38.0).max(0.0),
+                header.size.y,
+            ),
             12.0,
             600,
             theme.tokens.foreground,
+            HorizontalAlign::Start,
         );
         if expanded {
-            draw_text(
+            paint_single_line(
                 painter,
                 &tool.summary,
-                Point2D::new(rect.origin.x + 12.0, rect.origin.y + 45.0),
+                Rect::xywh(
+                    rect.origin.x + 12.0,
+                    rect.origin.y + 35.0,
+                    (rect.size.x - 24.0).max(0.0),
+                    (rect.size.y - 35.0).max(0.0),
+                ),
                 11.0,
                 400,
                 theme.tokens.muted_foreground,
+                HorizontalAlign::Start,
             );
         }
     }
-}
-
-fn draw_text(
-    painter: &mut dyn Painter,
-    text: &str,
-    origin: Point2D,
-    size: f32,
-    weight: u16,
-    color: jian_widgets::Color,
-) {
-    let layout = TextLayout::single_run(text, "system-ui", size, color.to_jian(), Point2D::ZERO)
-        .with_font_weight(weight);
-    painter.draw_text(&layout, origin);
 }

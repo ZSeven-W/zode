@@ -1,7 +1,7 @@
-use jian_widgets::{Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{HorizontalAlign, Painter, Rect};
 use zode_node_protocol::UsageSnapshot;
 
-use crate::ZodeTheme;
+use crate::{paint_single_line, ZodeTheme};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageDisplay {
@@ -42,17 +42,19 @@ impl UsageChip {
             "{} · {} · {} tok · {}",
             display.model, display.context, display.tokens, display.cost
         );
-        let layout = TextLayout::single_run(
+        paint_single_line(
+            painter,
             &label,
-            "system-ui",
+            Rect::xywh(
+                rect.origin.x + 10.0,
+                rect.origin.y,
+                (rect.size.x - 20.0).max(0.0),
+                rect.size.y,
+            ),
             10.0,
-            theme.tokens.muted_foreground.to_jian(),
-            Point2D::ZERO,
-        )
-        .with_font_weight(500);
-        painter.draw_text(
-            &layout,
-            Point2D::new(rect.origin.x + 10.0, rect.origin.y + rect.size.y * 0.68),
+            500,
+            theme.tokens.muted_foreground,
+            HorizontalAlign::Start,
         );
     }
 }
