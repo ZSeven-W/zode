@@ -5,6 +5,13 @@ use zode_node_protocol::WorkspaceUri;
 use crate::ZodeTheme;
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SettingControl {
+    pub label: String,
+    pub selected: bool,
+    pub command: AppCommand,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct PermissionRow {
     pub tool: String,
     pub revoke_command: AppCommand,
@@ -13,6 +20,9 @@ pub struct PermissionRow {
 pub struct SettingsPanel;
 
 impl SettingsPanel {
+    pub fn appearance_controls(_state: &ZodeAppState) -> Vec<SettingControl> {
+        Vec::new()
+    }
     pub fn permission_rows(
         state: &ZodeAppState,
         workspace_uri: &WorkspaceUri,

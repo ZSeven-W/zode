@@ -74,10 +74,33 @@ pub struct WorkspaceLayout {
     pub top_bar: Rect,
     pub transcript: Rect,
     pub composer: Rect,
+    pub context_panel: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorkspaceLayoutOptions {
+    pub context_panel_width: f32,
+}
+
+impl Default for WorkspaceLayoutOptions {
+    fn default() -> Self {
+        Self {
+            context_panel_width: 0.0,
+        }
+    }
 }
 
 impl WorkspaceLayout {
     pub fn compute(width: f32, height: f32, insets: Insets) -> Self {
+        Self::compute_with_options(width, height, insets, WorkspaceLayoutOptions::default())
+    }
+
+    pub fn compute_with_options(
+        width: f32,
+        height: f32,
+        insets: Insets,
+        _options: WorkspaceLayoutOptions,
+    ) -> Self {
         let width = finite_non_negative(width);
         let height = finite_non_negative(height);
         let insets = Insets {
@@ -121,6 +144,7 @@ impl WorkspaceLayout {
                 transcript_bottom - transcript_y,
             ),
             composer: Rect::xywh(content_x, composer_y, content_w, composer_h),
+            context_panel: Rect::ZERO,
         }
     }
 }

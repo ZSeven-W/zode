@@ -16,7 +16,7 @@ use jian_core::text_input::TextInputState;
 use jian_widgets::{Painter, Rect};
 use zode_app_model::{ShellPage, ZodeAppState};
 
-use crate::{Insets, WorkspaceLayout, ZodeTheme};
+use crate::{Insets, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme};
 
 pub use approval_card::{ApprovalAction, ApprovalCard};
 pub use composer::{
@@ -26,7 +26,7 @@ pub use project_sidebar::{
     group_sessions, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarItem,
 };
 pub use review_panel::{ReviewDraft, ReviewLine, ReviewLineKind, ReviewPanel, ReviewSelection};
-pub use settings_panel::{PermissionRow, SettingsPanel};
+pub use settings_panel::{PermissionRow, SettingControl, SettingsPanel};
 pub use terminal_controller::TerminalPanelController;
 pub use terminal_grid::{
     CellPosition, TerminalCell, TerminalColor, TerminalGrid, TerminalLine, TerminalSelection,
@@ -42,6 +42,18 @@ pub use window_chrome::WindowChrome;
 pub struct WorkspaceShell;
 
 impl WorkspaceShell {
+    /// Paint entry point for the immutable snapshot shared with hit testing and a11y.
+    pub fn paint_snapshot(
+        painter: &mut dyn Painter,
+        snapshot: &WorkspaceSnapshot,
+        _state: &ZodeAppState,
+        _theme: &ZodeTheme,
+    ) -> WorkspaceLayout {
+        painter.begin_frame();
+        painter.end_frame();
+        snapshot.layout
+    }
+
     pub fn paint(
         painter: &mut dyn Painter,
         viewport: Rect,

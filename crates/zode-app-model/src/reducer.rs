@@ -100,17 +100,21 @@ pub fn reduce_settings_command(
     state: &mut ZodeAppState,
     command: AppCommand,
 ) -> SettingsCommandOutcome {
-    let AppCommand::SetProjectPermissions {
-        workspace_uri,
-        mut tools,
-    } = command
-    else {
-        return SettingsCommandOutcome::Ignored;
-    };
-    tools.sort();
-    tools.dedup();
-    state.project_permissions.insert(workspace_uri, tools);
-    SettingsCommandOutcome::Applied
+    match command {
+        AppCommand::SetProjectPermissions {
+            workspace_uri,
+            mut tools,
+        } => {
+            tools.sort();
+            tools.dedup();
+            state.project_permissions.insert(workspace_uri, tools);
+            SettingsCommandOutcome::Applied
+        }
+        AppCommand::SetThemePreference(_)
+        | AppCommand::SetReducedMotion(_)
+        | AppCommand::SetHighContrast(_) => SettingsCommandOutcome::Ignored,
+        _ => SettingsCommandOutcome::Ignored,
+    }
 }
 
 /// Applies viewport state emitted by the transcript widget without involving

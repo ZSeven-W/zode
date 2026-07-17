@@ -1,6 +1,24 @@
 use jian_widgets::{Color, Tokens};
+use zode_app_model::{SystemTheme, UiPreferences};
 
 pub const ZODE_PURPLE: Color = Color::rgb_u8(124, 58, 237);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeMode {
+    Light,
+    Dark,
+}
+
+pub fn resolve_theme(system: SystemTheme, _preferences: &UiPreferences) -> ThemeMode {
+    match system {
+        SystemTheme::Light => ThemeMode::Light,
+        SystemTheme::Dark => ThemeMode::Dark,
+    }
+}
+
+pub fn animation_duration_ms(duration_ms: u64, _preferences: &UiPreferences) -> u64 {
+    duration_ms
+}
 
 /// Jian component tokens plus Zode shell-specific semantic colors.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -15,6 +33,12 @@ pub struct ZodeTheme {
 }
 
 impl ZodeTheme {
+    pub fn for_preferences(system: SystemTheme, preferences: &UiPreferences) -> Self {
+        match resolve_theme(system, preferences) {
+            ThemeMode::Light => Self::light(),
+            ThemeMode::Dark => Self::dark(),
+        }
+    }
     pub const fn light() -> Self {
         let mut tokens = Tokens::light();
         tokens.primary = ZODE_PURPLE;

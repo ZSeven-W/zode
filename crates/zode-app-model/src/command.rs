@@ -2,6 +2,8 @@ use zode_node_protocol::{
     ApprovalDecision, SandboxMode, SessionLocator, UserContent, WorkspaceUri,
 };
 
+use crate::ThemePreference;
+
 /// User intent emitted by widgets for the application controller to handle.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppCommand {
@@ -35,6 +37,9 @@ pub enum AppCommand {
         workspace_uri: WorkspaceUri,
         tools: Vec<String>,
     },
+    SetThemePreference(ThemePreference),
+    SetReducedMotion(bool),
+    SetHighContrast(bool),
     RequestDeleteSession(SessionLocator),
     CancelDeleteSession,
     DeleteSession(SessionLocator),

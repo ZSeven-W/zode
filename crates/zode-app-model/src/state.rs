@@ -1,4 +1,5 @@
 use crate::{LayoutClass, TranscriptState};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zode_node_protocol::{
     CapabilityManifest, NodeId, SessionLocator, ThreadSummary, TurnId, UsageSnapshot, UserContent,
@@ -73,6 +74,25 @@ pub enum SystemTheme {
     Dark,
 }
 
+/// User-selected color-scheme behavior. The host-observed system value stays separate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThemePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// Durable appearance and motion preferences shared by every render surface.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiPreferences {
+    pub theme: ThemePreference,
+    pub reduced_motion: bool,
+    pub high_contrast: bool,
+}
+
 /// State owned by the node hosting the current application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostState {
@@ -116,6 +136,7 @@ pub struct ZodeAppState {
     pub usage: BTreeMap<SessionLocator, UsageSnapshot>,
     pub review: ReviewState,
     pub terminal: TerminalState,
+    pub ui_preferences: UiPreferences,
     pub shell: ShellState,
 }
 
@@ -147,6 +168,7 @@ pub fn demo_state() -> ZodeAppState {
         usage: BTreeMap::new(),
         review: ReviewState::default(),
         terminal: TerminalState::default(),
+        ui_preferences: UiPreferences::default(),
         shell: ShellState {
             layout: LayoutClass::Wide,
             sidebar_open: true,
