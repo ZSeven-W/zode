@@ -182,7 +182,7 @@ fn composer_bottom_controls_share_the_send_button_centerline() {
         .find(|fill| fill.size == Point2D::new(28.0, 28.0))
         .expect("send button fill");
     let center_y = send.origin.y + send.size.y / 2.0;
-    for icon in [SemanticIcon::NewTask, SemanticIcon::Send] {
+    for icon in [SemanticIcon::Plus, SemanticIcon::Send] {
         let svg = painter.svg(icon.path());
         assert_close(svg.top_left.y + svg.size / 2.0, center_y, 1.0);
     }
