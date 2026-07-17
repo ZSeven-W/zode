@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use agent::message::{ContentBlock, Message, MessageStore};
 use agent::session::SessionError;
 use zode_core::session_meta::SessionMeta;
-use zode_core::session_store::{
+use crate::session_store::{
     SessionRepository as CoreSessionRepository, SessionSave, SessionSaveOutcome, SessionWriteMode,
 };
 use zode_core::CoreError;

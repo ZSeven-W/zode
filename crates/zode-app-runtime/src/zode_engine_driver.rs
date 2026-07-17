@@ -13,7 +13,7 @@ use futures::stream;
 use zode_core::config::ConfigManager;
 use zode_core::engine::CarryState;
 use zode_core::session_meta::title_from_prompt;
-use zode_core::session_store::{SessionSaveOutcome, SessionWriteMode};
+use crate::session_store::{SessionSaveOutcome, SessionWriteMode};
 use zode_core::{EngineTemplate, ZodeEngine};
 use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentQuery, AgentSnapshot, CapabilityManifest, DiffFile,

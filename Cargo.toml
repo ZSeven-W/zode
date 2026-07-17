@@ -107,7 +107,6 @@ futures-core = "0.3"
 fs2 = "0.4"
 same-file = "1"
 nix = { version = "0.28", features = ["fs", "process", "signal"] }
-portable-pty = "0.9"
 vte = "0.13"
 rfd = "0.15"
 open = "5"

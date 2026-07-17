@@ -15,7 +15,7 @@ use zode_app_runtime::{
 };
 use zode_core::config::ZodeConfig;
 use zode_core::engine::CarryState;
-use zode_core::session_store::SessionWriteMode;
+use zode_app_runtime::session_store::SessionWriteMode;
 use zode_core::EngineTemplate;
 use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentQuery, AgentSnapshot, ApprovalMode, CapabilityManifest,

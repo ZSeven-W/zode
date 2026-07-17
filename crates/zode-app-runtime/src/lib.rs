@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod persistence;
+pub mod session_store;
 mod app_state_store;
 mod bootstrap;
 mod engine_backend;

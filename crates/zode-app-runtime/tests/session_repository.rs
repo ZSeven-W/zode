@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent::message::{ContentBlock, Header, Message, MessageStore};
 use zode_app_runtime::{path_to_workspace_uri, workspace_uri_to_path, LocalSessionRepository};
-use zode_core::session_store::{SessionSaveOutcome, SessionWriteMode};
+use zode_app_runtime::session_store::{SessionSaveOutcome, SessionWriteMode};
 use zode_node_protocol::{EndpointErrorKind, NodeId, SessionLocator, ThreadStatus, WorkspaceUri};
 
 static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(1);

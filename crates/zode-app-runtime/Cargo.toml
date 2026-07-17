@@ -16,6 +16,7 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+fs4 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
