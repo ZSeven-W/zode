@@ -249,6 +249,7 @@ pub fn prepare_dispatch(
             let session = state
                 .current_session
                 .clone()
+                .filter(|session| !session.session_id.starts_with("local-error-"))
                 .filter(|session| state.available_workspace_for_session(session).is_some());
             let Some(session) = session else {
                 return prepare_first_submit(state, input).map(Some);
