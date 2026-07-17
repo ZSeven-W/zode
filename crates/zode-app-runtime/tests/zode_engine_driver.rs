@@ -261,7 +261,7 @@ fn template(cwd: &Path, model: &str) -> EngineTemplate {
         config,
         cwd.to_path_buf(),
         None,
-        true,
+        false,
         None,
         "2026-07-11".into(),
     )
