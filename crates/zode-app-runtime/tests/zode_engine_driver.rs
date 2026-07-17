@@ -511,6 +511,70 @@ async fn idle_model_switch_reassembles_with_carry_and_preserves_transcript() {
 }
 
 #[tokio::test]
+async fn revoking_project_permission_reassembles_loaded_session_gate() {
+    let dir = TestDir::new("revoke-permission");
+    let node_id = NodeId::new();
+    let session = session(node_id, "permission-id");
+    let repository = LocalSessionRepository::new(dir.path(), node_id);
+    let first = Arc::new(FakeSessionEngine::new(Vec::new()));
+    let replacement = Arc::new(FakeSessionEngine::new(Vec::new()));
+    let factory = Arc::new(FakeFactory::new(vec![first, replacement]));
+    let driver = ZodeEngineDriver::with_factory(
+        node_id,
+        template(dir.path(), "permission-model"),
+        repository,
+        manifest(node_id),
+        factory.clone(),
+    );
+    let project = dir.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let workspace_uri = workspace(&project);
+    driver
+        .command(create_command(
+            session.clone(),
+            workspace_uri.clone(),
+            "permission-model",
+        ))
+        .await
+        .unwrap();
+    let turn_id = TurnId::new();
+    let events = driver
+        .start_turn(
+            start_command(session.clone(), turn_id, "load gate"),
+            AbortController::new(),
+        )
+        .await;
+    collect_stream(events).await;
+    driver
+        .finish_turn(&session, turn_id, None, false)
+        .await
+        .unwrap();
+    zode_core::config::ConfigManager::allow_project_tool(&project, "Bash").unwrap();
+
+    driver
+        .command(command(
+            session,
+            None,
+            AgentCommandKind::RevokeProjectPermission {
+                workspace_uri,
+                tool: "Bash".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        zode_core::config::ConfigManager::project_allowed_tools(&project)
+            .unwrap()
+            .is_empty()
+    );
+    let assemblies = factory.assemblies.lock().unwrap();
+    assert_eq!(assemblies.len(), 2, "gate topology must be rebuilt");
+    assert!(assemblies[1].carried);
+    assert_eq!(assemblies[1].prior_messages, 2);
+}
+
+#[tokio::test]
 async fn steer_and_all_query_shapes_delegate_to_stable_sources() {
     let dir = TestDir::new("queries");
     let node_id = NodeId::new();
