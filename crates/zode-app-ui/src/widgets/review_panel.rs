@@ -2,9 +2,11 @@ use std::ops::Range;
 
 use jian_widgets::{Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{AppCommand, LoadState, ZodeAppState};
-use zode_node_protocol::{DiffSnapshot, WorkspaceUri};
+use zode_node_protocol::{DiffSnapshot, SessionLocator};
 
-use crate::{visible_range, MeasuredItem, RectExt, WidgetId, ZodeTheme, REVIEW_CLOSE_ID};
+use crate::{
+    stable_widget_id, visible_range, MeasuredItem, RectExt, WidgetId, ZodeTheme, REVIEW_CLOSE_ID,
+};
 
 const REVIEW_HEADER_HEIGHT: f32 = 46.0;
 const REVIEW_CLOSE_SIZE: f32 = 24.0;
@@ -44,6 +46,13 @@ pub struct ReviewPanelLayout {
     pub header: Rect,
     pub content: Rect,
     pub close_button: Rect,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewFileRowLayout {
+    pub id: WidgetId,
+    pub path: String,
+    pub rect: Rect,
 }
 
 impl ReviewDraft {
@@ -91,11 +100,59 @@ impl ReviewPanel {
         }
     }
 
-    pub const fn command_for_widget(id: WidgetId) -> Option<AppCommand> {
-        match id {
-            REVIEW_CLOSE_ID => Some(AppCommand::CloseSecondary),
-            _ => None,
+    pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+        if id == REVIEW_CLOSE_ID {
+            return Some(AppCommand::CloseSecondary);
         }
+        let session = state.current_session.as_ref()?.clone();
+        let row = Self::file_row_layouts(Rect::xywh(0.0, 0.0, 1.0, f32::MAX), state)
+            .into_iter()
+            .find(|row| row.id == id)?;
+        Some(Self::open_file_command(session, row.path))
+    }
+
+    pub fn file_widget_id(session: &SessionLocator, path: &str) -> WidgetId {
+        stable_widget_id(0x41, &(session, path))
+    }
+
+    pub fn file_row_layouts(rect: Rect, state: &ZodeAppState) -> Vec<ReviewFileRowLayout> {
+        let Some(session) = state.current_session.as_ref() else {
+            return Vec::new();
+        };
+        if !state
+            .available_workspace_for_session(session)
+            .is_some_and(|workspace| workspace.as_str().starts_with("file://"))
+        {
+            return Vec::new();
+        }
+        let Some(snapshot) = state
+            .presentation
+            .sessions
+            .get(session)
+            .and_then(|presentation| presentation.diff.load.ready())
+            .filter(|snapshot| &snapshot.session == session)
+        else {
+            return Vec::new();
+        };
+        let content = Self::layout(rect).content;
+        let width = 210.0_f32.min(content.size.x.max(0.0));
+        snapshot
+            .files
+            .iter()
+            .enumerate()
+            .filter_map(|(index, file)| {
+                let y = content.origin.y + index as f32 * 28.0;
+                let height = (content.max_y() - y).clamp(0.0, 28.0);
+                let rect = Rect::xywh(content.origin.x, y, width, height);
+                (rect.size.x > 0.0 && rect.size.y > 0.0 && rect.origin.y < content.max_y()).then(
+                    || ReviewFileRowLayout {
+                        id: Self::file_widget_id(session, &file.path),
+                        path: file.path.clone(),
+                        rect,
+                    },
+                )
+            })
+            .collect()
     }
 
     pub fn paint_state(
@@ -257,11 +314,11 @@ impl ReviewPanel {
     }
 
     pub fn open_file_command(
-        workspace_uri: WorkspaceUri,
+        session: SessionLocator,
         relative_path: impl Into<String>,
     ) -> AppCommand {
-        AppCommand::OpenWorkspaceFile {
-            workspace_uri,
+        AppCommand::PreviewWorkspaceFile {
+            session,
             relative_path: relative_path.into(),
         }
     }

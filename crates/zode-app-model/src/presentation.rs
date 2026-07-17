@@ -59,6 +59,58 @@ pub enum ComingSoonFeature {
 pub enum SecondaryPane {
     Environment,
     Review,
+    DocumentPreview,
+}
+
+/// One workspace-owned file target. Callers bind only a session and relative
+/// path; the controller derives the workspace URI from canonical thread state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewTarget {
+    pub workspace_uri: WorkspaceUri,
+    pub relative_path: String,
+}
+
+/// Text rendering mode selected from the real file extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewKind {
+    Markdown,
+    PlainText,
+}
+
+/// Session-isolated document preview state. Failure retains the exact target
+/// so retry and external-open actions never reconstruct a path from UI text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PreviewState {
+    #[default]
+    Idle,
+    Loading {
+        target: PreviewTarget,
+    },
+    Ready {
+        target: PreviewTarget,
+        title: String,
+        content: String,
+        kind: PreviewKind,
+    },
+    Failed {
+        target: PreviewTarget,
+        message: String,
+    },
+}
+
+impl PreviewState {
+    pub const fn target(&self) -> Option<&PreviewTarget> {
+        match self {
+            Self::Loading { target } | Self::Ready { target, .. } | Self::Failed { target, .. } => {
+                Some(target)
+            }
+            Self::Idle => None,
+        }
+    }
+
+    pub fn path(&self) -> Option<&str> {
+        self.target().map(|target| target.relative_path.as_str())
+    }
 }
 
 /// Explicit asynchronous state that never substitutes placeholder content.
@@ -152,6 +204,7 @@ impl SessionDiffState {
 pub struct SessionPresentationState {
     pub diff: SessionDiffState,
     pub context: LoadState<EnvironmentSnapshot>,
+    pub preview: PreviewState,
 }
 
 /// Typed route, pane selection, and session-isolated presentation data.

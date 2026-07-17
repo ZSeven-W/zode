@@ -185,6 +185,7 @@ pub fn fixture_state(
                     value: None,
                 }],
             }),
+            preview: zode_app_model::PreviewState::Idle,
         },
     );
 

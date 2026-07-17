@@ -7,7 +7,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use zode_app_model::{demo_state, EnvironmentSnapshot, LoadState};
+use zode_app_model::{
+    demo_state, EnvironmentSnapshot, LoadState, PreviewKind, PreviewState, PreviewTarget,
+    ProjectState, TranscriptState,
+};
 use zode_app_runtime::path_to_workspace_uri;
 use zode_node_protocol::{
     AgentCommand, AgentEndpoint, AgentEventStream, AgentQuery, AgentSnapshot, DiffSnapshot,
@@ -15,6 +18,7 @@ use zode_node_protocol::{
 };
 
 use super::{PresentationQuery, PresentationQueryBridge};
+use crate::services::{FileMetadata, FileService, LocalFileService, ServiceError};
 
 struct FakeEndpoint {
     responses: Mutex<VecDeque<Result<AgentSnapshot, EndpointError>>>,
@@ -59,6 +63,63 @@ struct BlockingDiffEndpoint {
     queries: Mutex<Vec<AgentQuery>>,
     started: tokio::sync::Notify,
     release: tokio::sync::Notify,
+}
+
+struct BlockingFileService {
+    block_once: AtomicBool,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl BlockingFileService {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            block_once: AtomicBool::new(true),
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl FileService for BlockingFileService {
+    async fn read(
+        &self,
+        _workspace: &zode_node_protocol::WorkspaceUri,
+        _relative: &str,
+    ) -> Result<Vec<u8>, ServiceError> {
+        Err(ServiceError::Platform("unexpected unbounded read".into()))
+    }
+
+    async fn read_bounded(
+        &self,
+        _workspace: &zode_node_protocol::WorkspaceUri,
+        relative: &str,
+        _max_bytes: u64,
+    ) -> Result<Vec<u8>, ServiceError> {
+        if self.block_once.swap(false, Ordering::SeqCst) {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        Ok(format!("content:{relative}").into_bytes())
+    }
+
+    async fn write(
+        &self,
+        _workspace: &zode_node_protocol::WorkspaceUri,
+        _relative: &str,
+        _bytes: Vec<u8>,
+    ) -> Result<(), ServiceError> {
+        Err(ServiceError::Platform("unexpected write".into()))
+    }
+
+    async fn metadata(
+        &self,
+        _workspace: &zode_node_protocol::WorkspaceUri,
+        _relative: &str,
+    ) -> Result<FileMetadata, ServiceError> {
+        Err(ServiceError::Platform("unexpected metadata".into()))
+    }
 }
 
 impl BlockingDiffEndpoint {
@@ -486,6 +547,190 @@ async fn environment_reruns_latest_workspace_and_rejects_stale_thread_context() 
     assert_eq!(ready.workspace_uri, current_uri);
 }
 
+#[tokio::test]
+async fn document_preview_loads_real_markdown_and_plain_text_from_a_temp_workspace() {
+    let workspace = TempWorkspace::new();
+    std::fs::write(workspace.path.join("README.md"), "# Real markdown\n").unwrap();
+    std::fs::write(workspace.path.join("notes.txt"), "plain text\n").unwrap();
+    let workspace_uri = path_to_workspace_uri(&workspace.path).unwrap();
+    let session = session("documents");
+    let mut state = preview_state(session.clone(), workspace_uri.clone());
+    let endpoint = FakeEndpoint::returning(Err(unexpected()));
+    let (mut bridge, wake) = test_bridge_with_file_service(endpoint, Arc::new(LocalFileService));
+
+    for (path, expected_kind, expected_content) in [
+        ("README.md", PreviewKind::Markdown, "# Real markdown\n"),
+        ("notes.txt", PreviewKind::PlainText, "plain text\n"),
+    ] {
+        let target = PreviewTarget {
+            workspace_uri: workspace_uri.clone(),
+            relative_path: path.into(),
+        };
+        bridge
+            .request(
+                &mut state,
+                PresentationQuery::DocumentPreview {
+                    session: session.clone(),
+                    target: target.clone(),
+                },
+            )
+            .unwrap();
+        wake.notified().await;
+        assert_eq!(bridge.drain_into(&mut state), 1);
+        assert!(matches!(
+            &state.presentation.sessions[&session].preview,
+            PreviewState::Ready { target: ready_target, content, kind, .. }
+                if ready_target == &target && content == expected_content && kind == &expected_kind
+        ));
+    }
+}
+
+#[tokio::test]
+async fn document_preview_rejects_non_utf8_and_nul_without_lossy_decode() {
+    let workspace = TempWorkspace::new();
+    std::fs::write(workspace.path.join("invalid.txt"), [0xff, 0xfe]).unwrap();
+    std::fs::write(workspace.path.join("binary.txt"), b"hello\0secret").unwrap();
+    let workspace_uri = path_to_workspace_uri(&workspace.path).unwrap();
+    let session = session("invalid-text");
+    let mut state = preview_state(session.clone(), workspace_uri.clone());
+    let endpoint = FakeEndpoint::returning(Err(unexpected()));
+    let (mut bridge, wake) = test_bridge_with_file_service(endpoint, Arc::new(LocalFileService));
+
+    for (path, expected) in [("invalid.txt", "UTF-8"), ("binary.txt", "binary")] {
+        let target = PreviewTarget {
+            workspace_uri: workspace_uri.clone(),
+            relative_path: path.into(),
+        };
+        bridge
+            .request(
+                &mut state,
+                PresentationQuery::DocumentPreview {
+                    session: session.clone(),
+                    target: target.clone(),
+                },
+            )
+            .unwrap();
+        wake.notified().await;
+        assert_eq!(bridge.drain_into(&mut state), 1);
+        assert!(matches!(
+            &state.presentation.sessions[&session].preview,
+            PreviewState::Failed { target: failed_target, message }
+                if failed_target == &target && message.contains(expected) && !message.contains('�')
+        ));
+    }
+}
+
+#[tokio::test]
+async fn newer_document_path_discards_the_in_flight_result() {
+    let workspace = TempWorkspace::new();
+    let workspace_uri = path_to_workspace_uri(&workspace.path).unwrap();
+    let session = session("latest-document");
+    let mut state = preview_state(session.clone(), workspace_uri.clone());
+    let endpoint = FakeEndpoint::returning(Err(unexpected()));
+    let files = BlockingFileService::new();
+    let (mut bridge, wake) = test_bridge_with_file_service(endpoint, files.clone());
+    let old = PreviewTarget {
+        workspace_uri: workspace_uri.clone(),
+        relative_path: "old.md".into(),
+    };
+    let latest = PreviewTarget {
+        workspace_uri,
+        relative_path: "latest.md".into(),
+    };
+
+    bridge
+        .request(
+            &mut state,
+            PresentationQuery::DocumentPreview {
+                session: session.clone(),
+                target: old,
+            },
+        )
+        .unwrap();
+    files.started.notified().await;
+    bridge
+        .request(
+            &mut state,
+            PresentationQuery::DocumentPreview {
+                session: session.clone(),
+                target: latest.clone(),
+            },
+        )
+        .unwrap();
+    files.release.notify_one();
+
+    wake.notified().await;
+    assert_eq!(bridge.drain_into(&mut state), 0);
+    assert_eq!(
+        state.presentation.sessions[&session].preview,
+        PreviewState::Loading {
+            target: latest.clone()
+        }
+    );
+    wake.notified().await;
+    assert_eq!(bridge.drain_into(&mut state), 1);
+    assert!(matches!(
+        &state.presentation.sessions[&session].preview,
+        PreviewState::Ready { target, content, .. }
+            if target == &latest && content == "content:latest.md"
+    ));
+}
+
+#[tokio::test]
+async fn deleted_or_retargeted_session_discards_document_results() {
+    let first = TempWorkspace::new();
+    let second = TempWorkspace::new();
+    std::fs::write(first.path.join("report.md"), "first").unwrap();
+    let first_uri = path_to_workspace_uri(&first.path).unwrap();
+    let second_uri = path_to_workspace_uri(&second.path).unwrap();
+    let endpoint = FakeEndpoint::returning(Err(unexpected()));
+    let (mut bridge, wake) = test_bridge_with_file_service(endpoint, Arc::new(LocalFileService));
+
+    let deleted = session("deleted-preview");
+    let mut state = preview_state(deleted.clone(), first_uri.clone());
+    let deleted_target = PreviewTarget {
+        workspace_uri: first_uri.clone(),
+        relative_path: "report.md".into(),
+    };
+    bridge
+        .request(
+            &mut state,
+            PresentationQuery::DocumentPreview {
+                session: deleted.clone(),
+                target: deleted_target,
+            },
+        )
+        .unwrap();
+    wake.notified().await;
+    state.threads.clear();
+    state.transcripts.remove(&deleted);
+    state.presentation.sessions.remove(&deleted);
+    assert_eq!(bridge.drain_into(&mut state), 0);
+
+    let moved = session("moved-preview");
+    let mut state = preview_state(moved.clone(), first_uri.clone());
+    let moved_target = PreviewTarget {
+        workspace_uri: first_uri,
+        relative_path: "report.md".into(),
+    };
+    bridge
+        .request(
+            &mut state,
+            PresentationQuery::DocumentPreview {
+                session: moved.clone(),
+                target: moved_target,
+            },
+        )
+        .unwrap();
+    wake.notified().await;
+    state.threads[0].workspace_uri = second_uri;
+    assert_eq!(bridge.drain_into(&mut state), 0);
+    assert!(!matches!(
+        state.presentation.sessions[&moved].preview,
+        PreviewState::Ready { .. }
+    ));
+}
+
 fn test_bridge(
     endpoint: Arc<dyn AgentEndpoint>,
 ) -> (PresentationQueryBridge, Arc<tokio::sync::Notify>) {
@@ -495,6 +740,49 @@ fn test_bridge(
         wake_worker.notify_one();
     });
     (bridge, wake)
+}
+
+fn test_bridge_with_file_service(
+    endpoint: Arc<dyn AgentEndpoint>,
+    files: Arc<dyn FileService>,
+) -> (PresentationQueryBridge, Arc<tokio::sync::Notify>) {
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let wake_worker = Arc::clone(&wake);
+    let bridge = PresentationQueryBridge::spawn_with_services(endpoint, files, move || {
+        wake_worker.notify_one();
+    });
+    (bridge, wake)
+}
+
+fn preview_state(
+    session: SessionLocator,
+    workspace_uri: zode_node_protocol::WorkspaceUri,
+) -> zode_app_model::ZodeAppState {
+    let mut state = demo_state();
+    state.projects.push(ProjectState {
+        workspace_uri: workspace_uri.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 0,
+    });
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: workspace_uri.clone(),
+        title: "preview".into(),
+        updated_at_ms: 0,
+        status: ThreadStatus::Idle,
+    });
+    state
+        .transcripts
+        .insert(session.clone(), TranscriptState::default());
+    state
+        .presentation
+        .sessions
+        .entry(session.clone())
+        .or_default();
+    state.current_session = Some(session);
+    state.active_workspace = Some(workspace_uri);
+    state
 }
 
 fn session(id: &str) -> SessionLocator {

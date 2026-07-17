@@ -3,13 +3,16 @@ use std::hash::{Hash, Hasher};
 use accesskit::{Action, Node, NodeId, Role, Toggled, Tree, TreeId, TreeUpdate};
 use jian_core::CursorHint;
 use jian_widgets::{Point2D, Rect};
-use zode_app_model::{ComingSoonFeature, IntegrationsTab, SecondaryPane, ShellRoute, ZodeAppState};
+use zode_app_model::{
+    ComingSoonFeature, IntegrationsTab, PreviewState, SecondaryPane, ShellRoute, ZodeAppState,
+};
 
 use crate::{
-    Composer, EnvironmentPanel, Insets, IntegrationsPage, ProjectSidebar, RectExt, ReviewPanel,
-    SettingsPanel, SidebarRowTarget, ThreadHeader, ThreadTranscript, WorkspaceLayout,
-    ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID, INTEGRATIONS_PLUGINS_TAB_ID,
-    INTEGRATIONS_SKILLS_TAB_ID,
+    Composer, DocumentPreview, EnvironmentPanel, Insets, IntegrationsPage, ProjectSidebar, RectExt,
+    ReviewPanel, SettingsPanel, SidebarRowTarget, ThreadHeader, ThreadTranscript, WorkspaceLayout,
+    DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID, DOCUMENT_PREVIEW_EXTERNAL_ID,
+    DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID,
+    INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
 };
 
 mod transcript;
@@ -83,8 +86,11 @@ impl WorkspaceSnapshot {
         );
         let mut nodes = Vec::new();
         let mut focus_order = 0;
-        let review_fallback = route == ShellRoute::Conversation
-            && state.presentation.secondary_pane == Some(SecondaryPane::Review)
+        let split_fallback = route == ShellRoute::Conversation
+            && matches!(
+                state.presentation.secondary_pane,
+                Some(SecondaryPane::Review | SecondaryPane::DocumentPreview)
+            )
             && !visible_rect(layout.review_panel)
             && visible_rect(layout.primary_surface);
 
@@ -140,7 +146,7 @@ impl WorkspaceSnapshot {
                 coming_soon_focus(feature).filter(|id| nodes.iter().any(|node| node.id == *id))
             }
             ShellRoute::Conversation => {
-                if review_fallback {
+                if split_fallback {
                     None
                 } else {
                     append_header_nodes(&mut nodes, &layout, &mut focus_order, state);
@@ -216,10 +222,14 @@ impl WorkspaceSnapshot {
             }
         };
         append_secondary_nodes(&mut nodes, &layout, &mut focus_order, state);
-        let focused = if review_fallback {
+        let focused = if split_fallback {
+            let close_id = match state.presentation.secondary_pane {
+                Some(SecondaryPane::DocumentPreview) => DOCUMENT_PREVIEW_CLOSE_ID,
+                Some(SecondaryPane::Review | SecondaryPane::Environment) | None => REVIEW_CLOSE_ID,
+            };
             nodes
                 .iter()
-                .find(|node| node.id == REVIEW_CLOSE_ID)
+                .find(|node| node.id == close_id)
                 .map(|node| node.id)
         } else {
             focused
@@ -490,6 +500,101 @@ fn append_secondary_nodes(
                     CursorHint::Pointer,
                 ));
             }
+            for row in ReviewPanel::file_row_layouts(panel_rect, state) {
+                if !visible_rect(row.rect) {
+                    continue;
+                }
+                nodes.push(node(
+                    row.id,
+                    row.rect,
+                    Role::Button,
+                    &format!("预览文件 {}", row.path),
+                    None,
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
+        }
+        Some(SecondaryPane::DocumentPreview) => {
+            let panel_rect = if visible_rect(layout.review_panel) {
+                layout.review_panel
+            } else {
+                layout.primary_surface
+            };
+            let preview = DocumentPreview::layout(panel_rect, state);
+            if visible_rect(preview.close_button) {
+                nodes.push(node(
+                    DOCUMENT_PREVIEW_CLOSE_ID,
+                    preview.close_button,
+                    Role::Button,
+                    "关闭文档预览",
+                    None,
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
+            if let Some(rect) = preview.external_button.filter(|rect| visible_rect(*rect)) {
+                nodes.push(node(
+                    DOCUMENT_PREVIEW_EXTERNAL_ID,
+                    rect,
+                    Role::Button,
+                    "在外部打开文件",
+                    None,
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
+            if let Some(rect) = preview.retry_button.filter(|rect| visible_rect(*rect)) {
+                nodes.push(node(
+                    DOCUMENT_PREVIEW_RETRY_ID,
+                    rect,
+                    Role::Button,
+                    "重试文档预览",
+                    None,
+                    vec![Action::Click, Action::Focus],
+                    next_order(focus_order),
+                    CursorHint::Pointer,
+                ));
+            }
+            let preview_state = DocumentPreview::current_state(state);
+            let (name, value) = match preview_state {
+                Some(PreviewState::Ready {
+                    title,
+                    content,
+                    target,
+                    ..
+                }) => (
+                    format!("文档预览：{title}"),
+                    Some(format!(
+                        "{}，{}",
+                        target.relative_path,
+                        preview_accessibility_excerpt(content)
+                    )),
+                ),
+                Some(PreviewState::Failed { target, message }) => (
+                    format!("文档预览失败：{}", target.relative_path),
+                    Some(message.clone()),
+                ),
+                Some(PreviewState::Loading { target }) => {
+                    (format!("正在加载文档：{}", target.relative_path), None)
+                }
+                None | Some(PreviewState::Idle) => ("文档预览".into(), None),
+            };
+            if visible_rect(preview.content) {
+                nodes.push(node(
+                    DOCUMENT_PREVIEW_CONTENT_ID,
+                    preview.content,
+                    Role::Document,
+                    &name,
+                    value,
+                    Vec::new(),
+                    None,
+                    CursorHint::Default,
+                ));
+            }
         }
         Some(SecondaryPane::Environment) | None => {}
     }
@@ -506,6 +611,17 @@ const fn coming_soon_focus(feature: ComingSoonFeature) -> Option<WidgetId> {
 
 fn visible_rect(rect: Rect) -> bool {
     rect.size.x > 0.0 && rect.size.y > 0.0
+}
+
+fn preview_accessibility_excerpt(content: &str) -> String {
+    const LIMIT: usize = 2_000;
+    let mut chars = content.chars();
+    let excerpt = chars.by_ref().take(LIMIT).collect::<String>();
+    if chars.next().is_some() {
+        format!("{excerpt}…")
+    } else {
+        excerpt
+    }
 }
 
 /// Stable FNV-1a IDs occupy a namespace byte plus a deterministic 56-bit

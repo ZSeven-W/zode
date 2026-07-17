@@ -7,7 +7,7 @@ mod workspace;
 
 use async_trait::async_trait;
 use zode_app_model::SystemTheme;
-use zode_node_protocol::WorkspaceUri;
+use zode_node_protocol::{EndpointErrorKind, WorkspaceUri};
 
 pub use external_open::LocalExternalOpenService;
 pub use file::LocalFileService;
@@ -24,6 +24,14 @@ pub enum ServiceError {
     InvalidPath(String),
     #[error("capability denied: {0}")]
     CapabilityDenied(String),
+    #[error("is a directory: {0}")]
+    IsDirectory(String),
+    #[error("unsupported file type: {0}")]
+    UnsupportedFileType(String),
+    #[error("file changed while it was being opened: {0}")]
+    FileChanged(String),
+    #[error("file is too large: {len} bytes exceeds the {max} byte limit")]
+    FileTooLarge { len: u64, max: u64 },
     #[error("platform service: {0}")]
     Platform(String),
 }
@@ -54,6 +62,12 @@ pub trait WorkspaceService: Send + Sync {
 pub trait FileService: Send + Sync {
     async fn read(&self, workspace: &WorkspaceUri, relative: &str)
         -> Result<Vec<u8>, ServiceError>;
+    async fn read_bounded(
+        &self,
+        workspace: &WorkspaceUri,
+        relative: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, ServiceError>;
     async fn write(
         &self,
         workspace: &WorkspaceUri,
@@ -77,16 +91,26 @@ pub trait ExternalOpenService: Send + Sync {
 }
 
 pub(crate) fn workspace_root(workspace: &WorkspaceUri) -> Result<std::path::PathBuf, ServiceError> {
-    let value = workspace.as_str();
-    let path = value.strip_prefix("file://").ok_or_else(|| {
-        ServiceError::CapabilityDenied(format!("workspace is not local: {value}"))
-    })?;
-    Ok(std::path::PathBuf::from(path))
+    zode_app_runtime::workspace_uri_to_path(workspace).map_err(|error| match error.kind {
+        EndpointErrorKind::CapabilityDenied => ServiceError::CapabilityDenied(error.message),
+        _ => ServiceError::InvalidPath(error.message),
+    })
 }
 
 pub(crate) fn safe_relative(relative: &str) -> Result<std::path::PathBuf, ServiceError> {
     let path = std::path::Path::new(relative);
+    let bytes = relative.as_bytes();
+    let windows_absolute = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\');
+    let forbidden_segment = relative
+        .split(['/', '\\'])
+        .any(|segment| matches!(segment, "." | ".."));
     if relative.is_empty()
+        || relative.contains('\0')
+        || windows_absolute
+        || forbidden_segment
         || path.is_absolute()
         || path
             .components()
@@ -95,4 +119,68 @@ pub(crate) fn safe_relative(relative: &str) -> Result<std::path::PathBuf, Servic
         return Err(ServiceError::InvalidPath(relative.to_owned()));
     }
     Ok(path.to_path_buf())
+}
+
+pub(crate) fn open_read_no_follow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+#[cfg(unix)]
+pub(crate) fn same_file_identity(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    before.dev() == after.dev() && before.ino() == after.ino()
+}
+
+#[cfg(windows)]
+pub(crate) fn same_file_identity(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    before.volume_serial_number().is_some()
+        && before.volume_serial_number() == after.volume_serial_number()
+        && before.file_index().is_some()
+        && before.file_index() == after.file_index()
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn same_file_identity(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    before.len() == after.len()
+        && before.modified().ok().is_some()
+        && before.modified().ok() == after.modified().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_file_identity;
+
+    #[test]
+    fn file_identity_distinguishes_replaced_objects() {
+        let root =
+            std::env::temp_dir().join(format!("zode-file-identity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::write(&first, b"same length").unwrap();
+        std::fs::write(&second, b"same length").unwrap();
+        let first_metadata = std::fs::metadata(&first).unwrap();
+        let first_again = std::fs::metadata(&first).unwrap();
+        let second_metadata = std::fs::metadata(&second).unwrap();
+
+        assert!(same_file_identity(&first_metadata, &first_again));
+        assert!(!same_file_identity(&first_metadata, &second_metadata));
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

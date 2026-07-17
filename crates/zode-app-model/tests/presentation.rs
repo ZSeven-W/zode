@@ -2,9 +2,9 @@ use zode_app_model::{
     demo_state, environment_sections, reduce_agent_event, reduce_navigation_command,
     reduce_presentation_command, AppCommand, AttachmentMetadata, ComingSoonFeature,
     EnvironmentSectionKind, EnvironmentSnapshot, FileArtifact, IntegrationsTab, LoadState,
-    NavigationOutcome, PresentationCommandOutcome, SecondaryPane, SessionDiffState,
-    SessionPresentationState, SettingsCategory, ShellPage, ShellRoute, TranscriptItem,
-    TranscriptState,
+    NavigationOutcome, PresentationCommandOutcome, PreviewState, PreviewTarget, SecondaryPane,
+    SessionDiffState, SessionPresentationState, SettingsCategory, ShellPage, ShellRoute,
+    TranscriptItem, TranscriptState,
 };
 use zode_node_protocol::{
     AgentEvent, AgentEventKind, DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator,
@@ -58,6 +58,7 @@ fn ready_presentation(
             background_processes: Vec::new(),
             sources: Vec::new(),
         }),
+        preview: PreviewState::Idle,
     }
 }
 
@@ -318,6 +319,7 @@ fn environment_sections_project_only_real_current_session_facts() {
                     unified: "real diff".into(),
                 }),
             },
+            preview: PreviewState::Idle,
         },
     );
     state.transcripts.get_mut(&session).unwrap().items = vec![
@@ -404,6 +406,7 @@ fn environment_sections_omit_empty_diff_branch_and_sources() {
                     unified: String::new(),
                 }),
             },
+            preview: PreviewState::Idle,
         },
     );
 
@@ -447,5 +450,64 @@ fn environment_sections_reject_a_diff_snapshot_for_another_session() {
             .map(|section| section.kind)
             .collect::<Vec<_>>(),
         vec![EnvironmentSectionKind::Host]
+    );
+}
+
+#[test]
+fn document_preview_is_distinct_from_diff_review() {
+    assert_ne!(SecondaryPane::DocumentPreview, SecondaryPane::Review);
+    let target = PreviewTarget {
+        workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+        relative_path: "docs/report.md".into(),
+    };
+    let failed = PreviewState::Failed {
+        target: target.clone(),
+        message: "not found".into(),
+    };
+
+    assert_eq!(failed.target(), Some(&target));
+    assert_eq!(failed.path(), Some("docs/report.md"));
+}
+
+#[test]
+fn preview_command_derives_workspace_from_the_bound_current_session() {
+    let mut state = demo_state();
+    let session = add_session(&mut state, "preview", "file:///repo/zode");
+    state.current_session = Some(session.clone());
+
+    assert_eq!(
+        reduce_presentation_command(
+            &mut state,
+            AppCommand::PreviewWorkspaceFile {
+                session: session.clone(),
+                relative_path: "docs/report.md".into(),
+            },
+        ),
+        PresentationCommandOutcome::Applied,
+    );
+    assert_eq!(
+        state.presentation.secondary_pane,
+        Some(SecondaryPane::DocumentPreview)
+    );
+    assert_eq!(
+        state.presentation.sessions[&session].preview,
+        PreviewState::Loading {
+            target: PreviewTarget {
+                workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+                relative_path: "docs/report.md".into(),
+            }
+        }
+    );
+
+    let other = SessionLocator::new(state.host.node_id, "other");
+    assert_eq!(
+        reduce_presentation_command(
+            &mut state,
+            AppCommand::PreviewWorkspaceFile {
+                session: other,
+                relative_path: "secrets.md".into(),
+            },
+        ),
+        PresentationCommandOutcome::Ignored,
     );
 }

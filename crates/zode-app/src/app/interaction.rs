@@ -1,16 +1,16 @@
 use accesskit::{Action, ActionData};
 use zode_app_model::{
     reduce_navigation_command, reduce_presentation_command, reduce_settings_command,
-    reduce_tool_command, reduce_transcript_command, AppCommand, NavigationOutcome,
-    SettingsCommandOutcome, ShellRoute, ThemePreference, ToolCommandOutcome,
+    reduce_tool_command, reduce_transcript_command, AppCommand, NavigationOutcome, PreviewState,
+    PreviewTarget, SettingsCommandOutcome, ShellRoute, ThemePreference, ToolCommandOutcome,
     TranscriptCommandOutcome, ZodeAppState,
 };
 use zode_app_ui::{
-    EnvironmentPanel, IntegrationsPage, Key, KeyEvent, PointerButton, PointerEvent,
-    PointerEventKind, ProjectSidebar, ReviewPanel, SettingsPanel, SidebarAction, ThreadHeader,
-    ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId, WorkspaceSnapshot,
-    COMPOSER_ID, HIGH_CONTRAST_ID, REDUCED_MOTION_ID, SEND_ID, TERMINAL_ID, THEME_DARK_ID,
-    THEME_LIGHT_ID, THEME_SYSTEM_ID,
+    DocumentPreview, EnvironmentPanel, IntegrationsPage, Key, KeyEvent, PointerButton,
+    PointerEvent, PointerEventKind, ProjectSidebar, ReviewPanel, SettingsPanel, SidebarAction,
+    ThreadHeader, ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId,
+    WorkspaceSnapshot, COMPOSER_ID, HIGH_CONTRAST_ID, REDUCED_MOTION_ID, SEND_ID, TERMINAL_ID,
+    THEME_DARK_ID, THEME_LIGHT_ID, THEME_SYSTEM_ID,
 };
 
 use super::DesktopApp;
@@ -23,6 +23,7 @@ use crate::{
         dispatch_key, ime_allowed_for_focus, settings_scroll_delta_for_action,
         settings_scroll_delta_for_key, KeyDispatch, SettingsTouchOutcome,
     },
+    services::ExternalOpenService,
 };
 
 #[cfg(test)]
@@ -70,7 +71,8 @@ fn widget_command(state: &zode_app_model::ZodeAppState, id: WidgetId) -> Option<
         .or_else(|| IntegrationsPage::command_for_widget(id))
         .or_else(|| SettingsPanel::command_for_widget(state, id))
         .or_else(|| EnvironmentPanel::command_for_widget(state, id))
-        .or_else(|| ReviewPanel::command_for_widget(id))
+        .or_else(|| ReviewPanel::command_for_widget(state, id))
+        .or_else(|| DocumentPreview::command_for_widget(state, id))
         .or_else(|| appearance_command(state, id))
         .or_else(|| ThreadTranscript::command_for_widget(state, id))
 }
@@ -169,8 +171,63 @@ fn settings_interaction_viewport(snapshot: &WorkspaceSnapshot) -> jian_widgets::
     SettingsPanel::page_layout(snapshot.layout.primary_surface).0
 }
 
+pub(super) fn consume_external_preview_command(
+    state: &mut zode_app_model::ZodeAppState,
+    external_open: &dyn ExternalOpenService,
+    command: &AppCommand,
+) -> bool {
+    let AppCommand::OpenPreviewExternally {
+        session,
+        relative_path,
+    } = command
+    else {
+        return false;
+    };
+    let valid_session = state.current_session.as_ref() == Some(session)
+        && !session.session_id.starts_with("local-error-")
+        && state.transcripts.contains_key(session);
+    let Some(workspace_uri) = valid_session
+        .then(|| state.available_workspace_for_session(session).cloned())
+        .flatten()
+        .filter(|workspace| workspace.as_str().starts_with("file://"))
+    else {
+        return true;
+    };
+    let target = PreviewTarget {
+        workspace_uri,
+        relative_path: relative_path.clone(),
+    };
+    let Some(preview) = state
+        .presentation
+        .sessions
+        .get_mut(session)
+        .map(|presentation| &mut presentation.preview)
+    else {
+        return true;
+    };
+    if preview.target() != Some(&target) {
+        return true;
+    }
+    if let Err(error) = external_open.open_file(&target.workspace_uri, &target.relative_path) {
+        *preview = PreviewState::Failed {
+            target,
+            message: error.to_string(),
+        };
+    }
+    true
+}
+
 impl DesktopApp {
     pub(super) fn enqueue_command(&mut self, command: AppCommand) {
+        if consume_external_preview_command(
+            &mut self.app_state,
+            self.external_open.as_ref(),
+            &command,
+        ) {
+            self.rebuild_frame_snapshot();
+            self.request_redraw();
+            return;
+        }
         if matches!(command, AppCommand::CopyText(_)) {
             if let Some(clipboard) = self.clipboard.as_ref() {
                 if let Err(error) = execute_clipboard_command(&command, clipboard.as_ref()) {

@@ -1,7 +1,8 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
     AppCommand, ConnectionState, EnvironmentEntry, EnvironmentSectionKind, EnvironmentSnapshot,
-    FileArtifact, LoadState, SessionDiffState, SessionPresentationState, TranscriptItem,
+    FileArtifact, LoadState, PreviewState, SessionDiffState, SessionPresentationState,
+    TranscriptItem,
 };
 use zode_app_ui::{
     EnvironmentPanel, RectExt, ZodeTheme, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID,
@@ -119,6 +120,7 @@ fn ready_presentation(session: &SessionLocator) -> SessionPresentationState {
                 unified: "diff --git a/README.md b/README.md".into(),
             }),
         },
+        preview: PreviewState::Idle,
     }
 }
 
@@ -202,6 +204,7 @@ fn current_session_load_states_are_explicit_and_keep_the_real_workspace() {
             SessionPresentationState {
                 context,
                 diff: SessionDiffState::default(),
+                preview: PreviewState::Idle,
             },
         );
         let text = paint(&state, Rect::xywh(0.0, 0.0, 300.0, 600.0))
@@ -291,6 +294,7 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
                     unified: String::new(),
                 }),
             },
+            preview: PreviewState::Idle,
         },
     );
     state.transcripts.entry(session).or_default().items.clear();
@@ -335,6 +339,7 @@ fn diff_idle_loading_and_failure_are_honest_and_do_not_open_review() {
             SessionPresentationState {
                 context: LoadState::Idle,
                 diff: SessionDiffState { dirty: true, load },
+                preview: PreviewState::Idle,
             },
         );
         let painter = paint(&state, Rect::xywh(0.0, 0.0, 300.0, 600.0));
@@ -496,6 +501,7 @@ fn real_sections_drive_content_hug_geometry_and_footer_availability() {
                     unified: String::new(),
                 }),
             },
+            preview: PreviewState::Idle,
         },
     );
     state.transcripts.entry(session).or_default().items.clear();

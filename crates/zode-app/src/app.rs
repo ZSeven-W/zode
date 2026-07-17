@@ -12,6 +12,7 @@ use zode_app_ui::{
     ComposerController, Insets, TerminalGrid, TerminalPanelController, WidgetId, WorkspaceSnapshot,
 };
 
+use crate::services::{ExternalOpenService, LocalExternalOpenService};
 use crate::{
     accessibility_host::{AccessibilityBridge, AccessibilityHost},
     bootstrap_state::load_initial_state,
@@ -90,6 +91,7 @@ pub struct DesktopApp {
     focused_widget: Option<WidgetId>,
     window_focused: bool,
     clipboard: Option<Arc<dyn ClipboardService>>,
+    external_open: Arc<dyn ExternalOpenService>,
     app_state_store: Option<AppStateStore>,
     window_geometry: Option<WindowGeometry>,
 }
@@ -199,6 +201,7 @@ impl DesktopApp {
             focused_widget,
             window_focused: false,
             clipboard,
+            external_open: Arc::new(LocalExternalOpenService),
             app_state_store,
             window_geometry,
         }
@@ -206,6 +209,10 @@ impl DesktopApp {
 
     pub fn set_clipboard_service(&mut self, clipboard: Arc<dyn ClipboardService>) {
         self.clipboard = Some(clipboard);
+    }
+
+    pub fn set_external_open_service(&mut self, service: Arc<dyn ExternalOpenService>) {
+        self.external_open = service;
     }
 
     /// Connect a live endpoint stream to the winit wake path. Call while the

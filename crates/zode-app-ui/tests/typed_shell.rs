@@ -1,7 +1,8 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
-    AppCommand, ComingSoonFeature, EnvironmentSnapshot, IntegrationsTab, LoadState, SecondaryPane,
-    SessionDiffState, SessionPresentationState, SettingsCategory, ShellPage, ShellRoute,
+    AppCommand, ComingSoonFeature, EnvironmentSnapshot, IntegrationsTab, LoadState, PreviewState,
+    SecondaryPane, SessionDiffState, SessionPresentationState, SettingsCategory, ShellPage,
+    ShellRoute,
 };
 use zode_app_ui::{
     EnvironmentPanel, Insets, ReviewPanel, ThreadHeader, WorkspaceShell, ZodeTheme,
@@ -88,6 +89,7 @@ fn state_with_ready_session() -> (zode_app_model::ZodeAppState, SessionLocator) 
                 dirty: false,
                 load: LoadState::Ready(ready_diff(&session)),
             },
+            preview: PreviewState::Idle,
         },
     );
     (state, session)
@@ -317,7 +319,7 @@ fn review_surface_exposes_all_real_load_states_and_a_stable_close_command() {
     assert_eq!(layout.header, Rect::xywh(1_100.0, 0.0, 700.0, 46.0));
     assert_eq!(layout.close_button, Rect::xywh(1_764.0, 11.0, 24.0, 24.0));
     assert_eq!(
-        ReviewPanel::command_for_widget(REVIEW_CLOSE_ID),
+        ReviewPanel::command_for_widget(&state, REVIEW_CLOSE_ID),
         Some(AppCommand::CloseSecondary),
     );
 

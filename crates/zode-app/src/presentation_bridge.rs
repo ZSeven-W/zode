@@ -1,13 +1,20 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use tokio::sync::mpsc;
-use zode_app_model::{EnvironmentSnapshot, LoadState, ZodeAppState};
+use zode_app_model::{
+    EnvironmentSnapshot, LoadState, PreviewKind, PreviewState, PreviewTarget, ZodeAppState,
+};
 use zode_app_runtime::workspace_uri_to_path;
 use zode_node_protocol::{
     AgentEndpoint, AgentQuery, AgentSnapshot, DiffSnapshot, SessionLocator, WorkspaceUri,
 };
 
-use crate::window_state::AppWake;
+use crate::{
+    services::{FileService, LocalFileService},
+    window_state::AppWake,
+};
+
+const MAX_PREVIEW_BYTES: u64 = 1024 * 1024;
 
 /// One presentation-only snapshot request that must not block the window loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +26,10 @@ pub enum PresentationQuery {
     Diff {
         session: SessionLocator,
     },
+    DocumentPreview {
+        session: SessionLocator,
+        target: PreviewTarget,
+    },
 }
 
 impl PresentationQuery {
@@ -26,6 +37,7 @@ impl PresentationQuery {
         match self {
             Self::Environment { session, .. } => QueryKey::Environment(session.clone()),
             Self::Diff { session } => QueryKey::Diff(session.clone()),
+            Self::DocumentPreview { session, .. } => QueryKey::DocumentPreview(session.clone()),
         }
     }
 }
@@ -34,6 +46,7 @@ impl PresentationQuery {
 enum QueryKey {
     Environment(SessionLocator),
     Diff(SessionLocator),
+    DocumentPreview(SessionLocator),
 }
 
 struct PendingQuery {
@@ -58,6 +71,18 @@ enum BridgeItem {
         workspace_uri: WorkspaceUri,
         result: Result<EnvironmentSnapshot, String>,
     },
+    DocumentPreview {
+        generation: u64,
+        session: SessionLocator,
+        target: PreviewTarget,
+        result: Result<LoadedPreview, String>,
+    },
+}
+
+struct LoadedPreview {
+    title: String,
+    content: String,
+    kind: PreviewKind,
 }
 
 impl BridgeItem {
@@ -65,12 +90,15 @@ impl BridgeItem {
         match self {
             Self::Environment { session, .. } => QueryKey::Environment(session.clone()),
             Self::Diff { session, .. } => QueryKey::Diff(session.clone()),
+            Self::DocumentPreview { session, .. } => QueryKey::DocumentPreview(session.clone()),
         }
     }
 
     fn generation(&self) -> u64 {
         match self {
-            Self::Environment { generation, .. } | Self::Diff { generation, .. } => *generation,
+            Self::Environment { generation, .. }
+            | Self::Diff { generation, .. }
+            | Self::DocumentPreview { generation, .. } => *generation,
         }
     }
 }
@@ -88,7 +116,7 @@ impl PresentationQueryBridge {
         endpoint: Arc<dyn AgentEndpoint>,
         proxy: winit::event_loop::EventLoopProxy<AppWake>,
     ) -> Self {
-        Self::spawn_with_wake(endpoint, move || {
+        Self::spawn_with_services(endpoint, Arc::new(LocalFileService), move || {
             let _ = proxy.send_event(AppWake::Redraw);
         })
     }
@@ -98,16 +126,25 @@ impl PresentationQueryBridge {
         endpoint: Arc<dyn AgentEndpoint>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
+        Self::spawn_with_services(endpoint, Arc::new(LocalFileService), wake)
+    }
+
+    pub(crate) fn spawn_with_services(
+        endpoint: Arc<dyn AgentEndpoint>,
+        files: Arc<dyn FileService>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
         let (request_sender, mut requests) = mpsc::unbounded_channel::<WorkItem>();
         let (result_sender, results) = mpsc::unbounded_channel::<BridgeItem>();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         tokio::spawn(async move {
             while let Some(work) = requests.recv().await {
                 let endpoint = Arc::clone(&endpoint);
+                let files = Arc::clone(&files);
                 let result_sender = result_sender.clone();
                 let wake = Arc::clone(&wake);
                 tokio::spawn(async move {
-                    let item = execute_work(endpoint, work).await;
+                    let item = execute_work(endpoint, files, work).await;
                     if result_sender.send(item).is_ok() {
                         wake();
                     }
@@ -216,13 +253,53 @@ impl PresentationQueryBridge {
                     }
                     applied += 1;
                 }
+                BridgeItem::DocumentPreview {
+                    session,
+                    target,
+                    result,
+                    ..
+                } => {
+                    let session_is_current = state.transcripts.contains_key(&session)
+                        && state
+                            .threads
+                            .iter()
+                            .find(|thread| thread.session == session)
+                            .is_some_and(|thread| {
+                                thread.workspace_uri == target.workspace_uri
+                                    && state.available_workspace(&thread.workspace_uri)
+                            });
+                    let Some(presentation) = state.presentation.sessions.get_mut(&session) else {
+                        continue;
+                    };
+                    let target_is_current = presentation.preview.target() == Some(&target);
+                    if !session_is_current || !target_is_current {
+                        if target_is_current {
+                            presentation.preview = PreviewState::Idle;
+                        }
+                        continue;
+                    }
+                    presentation.preview = match result {
+                        Ok(loaded) => PreviewState::Ready {
+                            target,
+                            title: loaded.title,
+                            content: loaded.content,
+                            kind: loaded.kind,
+                        },
+                        Err(message) => PreviewState::Failed { target, message },
+                    };
+                    applied += 1;
+                }
             }
         }
         applied
     }
 }
 
-async fn execute_work(endpoint: Arc<dyn AgentEndpoint>, work: WorkItem) -> BridgeItem {
+async fn execute_work(
+    endpoint: Arc<dyn AgentEndpoint>,
+    files: Arc<dyn FileService>,
+    work: WorkItem,
+) -> BridgeItem {
     let generation = work.generation;
     match work.query {
         PresentationQuery::Environment {
@@ -257,6 +334,15 @@ async fn execute_work(endpoint: Arc<dyn AgentEndpoint>, work: WorkItem) -> Bridg
                 result,
             }
         }
+        PresentationQuery::DocumentPreview { session, target } => {
+            let result = load_document(files.as_ref(), &target).await;
+            BridgeItem::DocumentPreview {
+                generation,
+                session,
+                target,
+                result,
+            }
+        }
     }
 }
 
@@ -279,7 +365,54 @@ fn mark_loading(state: &mut ZodeAppState, request: PresentationQuery) {
                 .diff
                 .load = LoadState::Loading;
         }
+        PresentationQuery::DocumentPreview { session, target } => {
+            state
+                .presentation
+                .sessions
+                .entry(session)
+                .or_default()
+                .preview = PreviewState::Loading { target };
+        }
     }
+}
+
+async fn load_document(
+    files: &dyn FileService,
+    target: &PreviewTarget,
+) -> Result<LoadedPreview, String> {
+    let bytes = files
+        .read_bounded(
+            &target.workspace_uri,
+            &target.relative_path,
+            MAX_PREVIEW_BYTES,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let content = String::from_utf8(bytes)
+        .map_err(|_| "the document is not valid UTF-8 and cannot be previewed".to_owned())?;
+    if content.contains('\0') {
+        return Err("the document appears to be binary and cannot be previewed".into());
+    }
+    let path = std::path::Path::new(&target.relative_path);
+    let title = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or(&target.relative_path)
+        .to_owned();
+    let kind = match path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("md" | "markdown") => PreviewKind::Markdown,
+        _ => PreviewKind::PlainText,
+    };
+    Ok(LoadedPreview {
+        title,
+        content,
+        kind,
+    })
 }
 
 async fn load_environment(workspace_uri: WorkspaceUri) -> Result<EnvironmentSnapshot, String> {

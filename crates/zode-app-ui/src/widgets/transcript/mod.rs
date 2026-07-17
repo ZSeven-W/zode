@@ -177,6 +177,25 @@ impl ThreadTranscript {
                         expanded: !expanded,
                     });
                 }
+                TranscriptItem::FileArtifact(file)
+                    if preview_available(state, session)
+                        && Self::semantic_widget_id(session, 0, item) == id =>
+                {
+                    return Some(AppCommand::PreviewWorkspaceFile {
+                        session: session.clone(),
+                        relative_path: file.path.clone(),
+                    });
+                }
+                TranscriptItem::Attachment(attachment)
+                    if preview_available(state, session)
+                        && attachment.path.is_some()
+                        && Self::semantic_widget_id(session, 0, item) == id =>
+                {
+                    return Some(AppCommand::PreviewWorkspaceFile {
+                        session: session.clone(),
+                        relative_path: attachment.path.clone().expect("path was checked"),
+                    });
+                }
                 TranscriptItem::Approval {
                     id: approval_id, ..
                 } => {
@@ -284,6 +303,12 @@ impl ThreadTranscript {
         paint_items(painter, rect, transcript, tool_expanded, theme);
         painter.restore();
     }
+}
+
+pub(crate) fn preview_available(state: &ZodeAppState, session: &SessionLocator) -> bool {
+    state
+        .available_workspace_for_session(session)
+        .is_some_and(|workspace| workspace.as_str().starts_with("file://"))
 }
 
 fn paint_items(

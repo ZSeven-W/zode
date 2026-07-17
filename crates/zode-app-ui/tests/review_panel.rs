@@ -1,7 +1,7 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::AppCommand;
 use zode_app_ui::{ReviewDraft, ReviewLineKind, ReviewPanel, ReviewSelection, ZodeTheme};
-use zode_node_protocol::{DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, WorkspaceUri};
+use zode_node_protocol::{DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator};
 
 const UNIFIED: &str =
     "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,3 @@\n one\n+two\n three\n";
@@ -88,11 +88,11 @@ fn review_draft_tracks_selection_and_inline_comment_without_touching_git() {
 
 #[test]
 fn open_file_action_routes_through_the_host_command() {
-    let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
+    let session = SessionLocator::new(Default::default(), "review");
     assert_eq!(
-        ReviewPanel::open_file_command(workspace.clone(), "src/main.rs"),
-        AppCommand::OpenWorkspaceFile {
-            workspace_uri: workspace,
+        ReviewPanel::open_file_command(session.clone(), "src/main.rs"),
+        AppCommand::PreviewWorkspaceFile {
+            session,
             relative_path: "src/main.rs".into(),
         },
     );

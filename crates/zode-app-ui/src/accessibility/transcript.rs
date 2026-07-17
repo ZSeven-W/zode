@@ -3,6 +3,7 @@ use jian_core::CursorHint;
 use std::collections::BTreeMap;
 use zode_app_model::{TranscriptItem, ZodeAppState};
 
+use crate::widgets::transcript::preview_available;
 use crate::{ApprovalCard, ThreadTranscript, ToolCard, WorkspaceLayout};
 
 use super::{next_order, node, InteractionNode};
@@ -127,34 +128,72 @@ pub(super) fn append_transcript_nodes(
                     ));
                 }
             }
-            TranscriptItem::FileArtifact(file) => nodes.push(node(
-                ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
-                item_layout.visible_rect,
-                Role::Group,
-                &format!(
-                    "文件：{}，{}，{}",
-                    file.summary,
-                    file.path,
-                    file.change_summary.as_deref().unwrap_or("无变更摘要")
-                ),
-                None,
-                Vec::new(),
-                None,
-                CursorHint::Default,
-            )),
-            TranscriptItem::Attachment(attachment) => nodes.push(node(
-                ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
-                item_layout.visible_rect,
-                Role::Image,
-                &format!(
-                    "附件：{}，{}",
-                    attachment.display_name, attachment.media_type
-                ),
-                None,
-                Vec::new(),
-                None,
-                CursorHint::Default,
-            )),
+            TranscriptItem::FileArtifact(file) => {
+                let actionable = preview_available(state, session);
+                nodes.push(node(
+                    ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
+                    item_layout.visible_rect,
+                    if actionable {
+                        Role::Button
+                    } else {
+                        Role::Group
+                    },
+                    &format!(
+                        "文件：{}，{}，{}",
+                        file.summary,
+                        file.path,
+                        file.change_summary.as_deref().unwrap_or("无变更摘要")
+                    ),
+                    None,
+                    if actionable {
+                        vec![Action::Click, Action::Focus]
+                    } else {
+                        Vec::new()
+                    },
+                    if actionable {
+                        next_order(focus_order)
+                    } else {
+                        None
+                    },
+                    if actionable {
+                        CursorHint::Pointer
+                    } else {
+                        CursorHint::Default
+                    },
+                ));
+            }
+            TranscriptItem::Attachment(attachment) => {
+                let actionable = attachment.path.is_some() && preview_available(state, session);
+                nodes.push(node(
+                    ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
+                    item_layout.visible_rect,
+                    if actionable {
+                        Role::Button
+                    } else {
+                        Role::Image
+                    },
+                    &format!(
+                        "附件：{}，{}",
+                        attachment.display_name, attachment.media_type
+                    ),
+                    None,
+                    if actionable {
+                        vec![Action::Click, Action::Focus]
+                    } else {
+                        Vec::new()
+                    },
+                    if actionable {
+                        next_order(focus_order)
+                    } else {
+                        None
+                    },
+                    if actionable {
+                        CursorHint::Pointer
+                    } else {
+                        CursorHint::Default
+                    },
+                ));
+            }
             TranscriptItem::GoalProgress(goal) => nodes.push(node(
                 ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
                 item_layout.visible_rect,

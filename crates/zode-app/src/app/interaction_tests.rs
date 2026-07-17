@@ -1,7 +1,9 @@
+use std::sync::Mutex;
+
 use zode_app_model::{
     demo_state, AppCommand, AttachmentMetadata, ComingSoonFeature, IntegrationsTab, LoadState,
-    ProjectState, SecondaryPane, SettingsCategory, SettingsCommandOutcome, ShellRoute,
-    TranscriptState,
+    PreviewKind, PreviewState, PreviewTarget, ProjectState, SecondaryPane, SettingsCategory,
+    SettingsCommandOutcome, ShellRoute, TranscriptState,
 };
 use zode_app_ui::{
     ComposerOutcome, ComposerSubmission, Insets, SettingsPanel, WidgetId, WorkspaceSnapshot,
@@ -12,10 +14,35 @@ use zode_node_protocol::{
 };
 
 use super::{
-    normalize_conversation_route, project_composer_outcome, reduce_local_settings_command,
-    settings_interaction_viewport, widget_command,
+    consume_external_preview_command, normalize_conversation_route, project_composer_outcome,
+    reduce_local_settings_command, settings_interaction_viewport, widget_command,
 };
+use crate::services::{ExternalOpenService, ServiceError};
 use crate::{command_bridge::prepare_dispatch, event_map::composer_outcome_command};
+
+#[derive(Default)]
+struct FakeExternalOpen {
+    calls: Mutex<Vec<(WorkspaceUri, String)>>,
+    fail: bool,
+}
+
+impl ExternalOpenService for FakeExternalOpen {
+    fn open_file(&self, workspace: &WorkspaceUri, relative: &str) -> Result<(), ServiceError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((workspace.clone(), relative.into()));
+        if self.fail {
+            Err(ServiceError::Platform("external open failed".into()))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn open_url(&self, _url: &str) -> Result<(), ServiceError> {
+        Err(ServiceError::Platform("unexpected url".into()))
+    }
+}
 
 fn state_with_session() -> (zode_app_model::ZodeAppState, SessionLocator, WorkspaceUri) {
     let mut state = demo_state();
@@ -371,5 +398,68 @@ fn first_attachment_submit_creates_session_before_metadata_projection() {
     assert!(matches!(
         state.transcripts[&session].items.last(),
         Some(zode_app_model::TranscriptItem::Attachment(projected)) if projected == &attachment
+    ));
+}
+
+#[test]
+fn external_preview_open_is_session_validated_locally_and_projects_failure() {
+    let (mut state, session, workspace_uri) = state_with_session();
+    let target = PreviewTarget {
+        workspace_uri: workspace_uri.clone(),
+        relative_path: "docs/report.md".into(),
+    };
+    state
+        .presentation
+        .sessions
+        .entry(session.clone())
+        .or_default()
+        .preview = PreviewState::Ready {
+        target: target.clone(),
+        title: "report.md".into(),
+        content: "# report".into(),
+        kind: PreviewKind::Markdown,
+    };
+    let external = FakeExternalOpen::default();
+
+    assert!(consume_external_preview_command(
+        &mut state,
+        &external,
+        &AppCommand::OpenPreviewExternally {
+            session: session.clone(),
+            relative_path: "docs/report.md".into(),
+        },
+    ));
+    assert_eq!(
+        external.calls.lock().unwrap().as_slice(),
+        &[(workspace_uri.clone(), "docs/report.md".into())]
+    );
+
+    let other = SessionLocator::new(state.host.node_id, "other");
+    assert!(consume_external_preview_command(
+        &mut state,
+        &external,
+        &AppCommand::OpenPreviewExternally {
+            session: other,
+            relative_path: "docs/secret.md".into(),
+        },
+    ));
+    assert_eq!(external.calls.lock().unwrap().len(), 1);
+
+    let failing = FakeExternalOpen {
+        fail: true,
+        ..FakeExternalOpen::default()
+    };
+    assert!(consume_external_preview_command(
+        &mut state,
+        &failing,
+        &AppCommand::OpenPreviewExternally {
+            session: session.clone(),
+            relative_path: "docs/report.md".into(),
+        },
+    ));
+    assert!(matches!(
+        &state.presentation.sessions[&session].preview,
+        PreviewState::Failed { target: failed_target, message }
+            if failed_target == &target && message.contains("external open failed")
     ));
 }

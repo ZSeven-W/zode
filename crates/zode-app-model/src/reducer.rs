@@ -64,6 +64,34 @@ pub fn reduce_presentation_command(
             open_secondary(state, crate::SecondaryPane::Review);
             return PresentationCommandOutcome::Applied;
         }
+        AppCommand::PreviewWorkspaceFile {
+            session,
+            relative_path,
+        } => {
+            let valid_session = state.current_session.as_ref() == Some(&session)
+                && !session.session_id.starts_with("local-error-")
+                && state.transcripts.contains_key(&session);
+            let Some(workspace_uri) = valid_session
+                .then(|| state.available_workspace_for_session(&session).cloned())
+                .flatten()
+                .filter(|workspace| workspace.as_str().starts_with("file://"))
+            else {
+                return PresentationCommandOutcome::Ignored;
+            };
+            state
+                .presentation
+                .sessions
+                .entry(session)
+                .or_default()
+                .preview = crate::PreviewState::Loading {
+                target: crate::PreviewTarget {
+                    workspace_uri,
+                    relative_path,
+                },
+            };
+            open_secondary(state, crate::SecondaryPane::DocumentPreview);
+            return PresentationCommandOutcome::Applied;
+        }
         _ => None,
     };
 

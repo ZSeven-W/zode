@@ -146,7 +146,7 @@ impl WorkspaceLayout {
     ) -> Self {
         let secondary = match secondary_pane {
             Some(SecondaryPane::Environment) => SecondaryLayout::Environment(ENVIRONMENT_PANEL_W),
-            Some(SecondaryPane::Review) => SecondaryLayout::Review,
+            Some(SecondaryPane::Review | SecondaryPane::DocumentPreview) => SecondaryLayout::Review,
             None => SecondaryLayout::None,
         };
         Self::compute_internal(width, height, insets, route, secondary, false)
@@ -164,7 +164,7 @@ impl WorkspaceLayout {
     ) -> Self {
         let secondary = match secondary_pane {
             Some(SecondaryPane::Environment) => SecondaryLayout::Environment(ENVIRONMENT_PANEL_W),
-            Some(SecondaryPane::Review) => SecondaryLayout::Review,
+            Some(SecondaryPane::Review | SecondaryPane::DocumentPreview) => SecondaryLayout::Review,
             None => SecondaryLayout::None,
         };
         Self::compute_internal(width, height, insets, route, secondary, has_attachments)

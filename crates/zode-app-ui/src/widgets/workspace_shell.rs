@@ -4,9 +4,9 @@ use zode_app_model::{ConnectionState, SecondaryPane, ShellRoute, ZodeAppState};
 
 use super::project_sidebar::workspace_label;
 use super::{
-    ComingSoonPage, Composer, EmptyState, EnvironmentPanel, IntegrationsPage, ProjectSidebar,
-    ReviewPanel, SettingsPanel, TerminalGrid, TerminalPanel, TerminalSelection, ThreadHeader,
-    ThreadTranscript, WindowChrome,
+    ComingSoonPage, Composer, DocumentPreview, EmptyState, EnvironmentPanel, IntegrationsPage,
+    ProjectSidebar, ReviewPanel, SettingsPanel, TerminalGrid, TerminalPanel, TerminalSelection,
+    ThreadHeader, ThreadTranscript, WindowChrome,
 };
 use crate::TRANSCRIPT_COMPOSER_GAP;
 use crate::{Insets, RectExt, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme};
@@ -142,8 +142,11 @@ impl WorkspaceShell {
             ShellRoute::Settings(_) | ShellRoute::Integrations(_) | ShellRoute::ComingSoon(_) => {}
         }
 
-        let review_fallback = state.presentation.route == ShellRoute::Conversation
-            && state.presentation.secondary_pane == Some(SecondaryPane::Review)
+        let split_fallback = state.presentation.route == ShellRoute::Conversation
+            && matches!(
+                state.presentation.secondary_pane,
+                Some(SecondaryPane::Review | SecondaryPane::DocumentPreview)
+            )
             && geometry.review_panel.size.x <= 0.0;
         match state.presentation.route {
             ShellRoute::Settings(_) => {
@@ -164,9 +167,15 @@ impl WorkspaceShell {
                 terminal_selection,
                 theme,
             ),
-            ShellRoute::Conversation if review_fallback => {
-                ReviewPanel::paint_state(painter, geometry.primary_surface, state, theme);
-            }
+            ShellRoute::Conversation if split_fallback => match state.presentation.secondary_pane {
+                Some(SecondaryPane::Review) => {
+                    ReviewPanel::paint_state(painter, geometry.primary_surface, state, theme)
+                }
+                Some(SecondaryPane::DocumentPreview) => {
+                    DocumentPreview::paint(painter, geometry.primary_surface, state, theme)
+                }
+                Some(SecondaryPane::Environment) | None => {}
+            },
             ShellRoute::Conversation => {
                 paint_conversation(painter, &snapshot, state, composer_input, theme)
             }
@@ -181,7 +190,16 @@ impl WorkspaceShell {
                     painter.fill_rect(geometry.divider, theme.tokens.border);
                     ReviewPanel::paint_state(painter, geometry.review_panel, state, theme);
                 }
-                Some(SecondaryPane::Environment | SecondaryPane::Review) | None => {}
+                Some(SecondaryPane::DocumentPreview) if geometry.review_panel.size.x > 0.0 => {
+                    painter.fill_rect(geometry.divider, theme.tokens.border);
+                    DocumentPreview::paint(painter, geometry.review_panel, state, theme);
+                }
+                Some(
+                    SecondaryPane::Environment
+                    | SecondaryPane::Review
+                    | SecondaryPane::DocumentPreview,
+                )
+                | None => {}
             }
         }
         painter.end_frame();

@@ -1,6 +1,7 @@
 mod approval_card;
 mod coming_soon_page;
 mod composer;
+mod document_preview;
 mod empty_state;
 mod environment;
 mod integrations_page;
@@ -12,7 +13,7 @@ mod terminal_grid;
 mod terminal_panel;
 mod thread_header;
 mod tool_card;
-mod transcript;
+pub(crate) mod transcript;
 mod usage_chip;
 mod window_chrome;
 mod workspace_shell;
@@ -22,6 +23,10 @@ pub use coming_soon_page::ComingSoonPage;
 pub use composer::{
     Composer, ComposerController, ComposerLayout, ComposerOutcome, ComposerSubmission,
     SandboxSelection,
+};
+pub use document_preview::{
+    DocumentPreview, DocumentPreviewLayout, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
+    DOCUMENT_PREVIEW_EXTERNAL_ID, DOCUMENT_PREVIEW_RETRY_ID,
 };
 pub use empty_state::EmptyState;
 pub use environment::{
@@ -37,7 +42,8 @@ pub use project_sidebar::{
     SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget,
 };
 pub use review_panel::{
-    ReviewDraft, ReviewLine, ReviewLineKind, ReviewPanel, ReviewPanelLayout, ReviewSelection,
+    ReviewDraft, ReviewFileRowLayout, ReviewLine, ReviewLineKind, ReviewPanel, ReviewPanelLayout,
+    ReviewSelection,
 };
 pub use settings_panel::{
     PermissionRow, PermissionRowLayout, SettingControl, SettingControlLayout, SettingsPanel,

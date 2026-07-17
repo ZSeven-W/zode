@@ -67,8 +67,12 @@ pub enum AppCommand {
         tool: String,
     },
     CopyText(String),
-    OpenWorkspaceFile {
-        workspace_uri: WorkspaceUri,
+    PreviewWorkspaceFile {
+        session: SessionLocator,
+        relative_path: String,
+    },
+    OpenPreviewExternally {
+        session: SessionLocator,
         relative_path: String,
     },
     ToggleSidebar,
