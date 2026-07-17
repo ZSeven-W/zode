@@ -145,11 +145,12 @@ impl DesktopApp {
         };
         {
             let mut painter = FramePainter::new(&mut self.renderer, canvas);
-            WorkspaceShell::paint(
+            WorkspaceShell::paint_with_composer_input(
                 &mut painter,
                 Rect::xywh(0.0, 0.0, logical_width, logical_height),
                 Insets::ZERO,
                 &self.app_state,
+                self.composer.input_state(),
                 &theme,
             );
         }

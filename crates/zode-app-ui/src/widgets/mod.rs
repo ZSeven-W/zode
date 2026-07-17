@@ -4,6 +4,7 @@ mod thread_header;
 mod transcript;
 mod window_chrome;
 
+use jian_core::text_input::TextInputState;
 use jian_widgets::{Painter, Rect};
 use zode_app_model::ZodeAppState;
 
@@ -30,13 +31,31 @@ impl WorkspaceShell {
         state: &ZodeAppState,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
+        let input = TextInputState::with_text(state.composer.draft.clone());
+        Self::paint_with_composer_input(painter, viewport, insets, state, &input, theme)
+    }
+
+    pub fn paint_with_composer_input(
+        painter: &mut dyn Painter,
+        viewport: Rect,
+        insets: Insets,
+        state: &ZodeAppState,
+        composer_input: &TextInputState,
+        theme: &ZodeTheme,
+    ) -> WorkspaceLayout {
         let geometry = WorkspaceLayout::compute(viewport.size.x, viewport.size.y, insets);
         painter.begin_frame();
         WindowChrome::paint(painter, viewport, &geometry, theme);
         ProjectSidebar::paint(painter, geometry.sidebar, state, theme);
         ThreadHeader::paint(painter, geometry.top_bar, state, theme);
         ThreadTranscript::paint(painter, geometry.transcript, state, theme);
-        Composer::paint(painter, geometry.composer, &state.composer, theme);
+        Composer::paint_input(
+            painter,
+            geometry.composer,
+            composer_input,
+            &state.composer,
+            theme,
+        );
         painter.end_frame();
         geometry
     }

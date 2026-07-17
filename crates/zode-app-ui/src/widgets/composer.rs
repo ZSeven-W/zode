@@ -221,6 +221,17 @@ pub struct Composer;
 
 impl Composer {
     pub fn paint(painter: &mut dyn Painter, rect: Rect, state: &ComposerState, theme: &ZodeTheme) {
+        let input = TextInputState::with_text(state.draft.clone());
+        Self::paint_input(painter, rect, &input, state, theme);
+    }
+
+    pub fn paint_input(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        input: &TextInputState,
+        state: &ComposerState,
+        theme: &ZodeTheme,
+    ) {
         if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
             return;
         }
@@ -233,9 +244,8 @@ impl Composer {
         painter.fill_round_rect(rect, 12.0, theme.tokens.card);
         painter.stroke_round_rect(rect, 12.0, theme.tokens.border, 1.0);
 
-        let input = TextInputState::with_text(state.draft.clone());
         TextArea {
-            state: &input,
+            state: input,
             placeholder: "向 Zode 描述一个任务",
             focused: state.focused,
             font_size: 14.0,
