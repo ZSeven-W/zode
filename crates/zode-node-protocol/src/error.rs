@@ -1,5 +1,30 @@
 use thiserror::Error;
 
+/// Stable categories for failures at an agent endpoint boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EndpointErrorKind {
+    Unavailable,
+    InvalidRequest,
+    CapabilityDenied,
+    NotFound,
+    Busy,
+    Internal,
+}
+
+/// A stable error envelope returned by an agent endpoint.
+///
+/// Runtime error text must pass through the caller's redactor before it is
+/// placed in `message`; `message` must not contain secrets, API keys, or complete
+/// tool arguments.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
+#[error("{kind:?}: {message}")]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointError {
+    pub kind: EndpointErrorKind,
+    pub message: String,
+}
+
 /// Errors produced while constructing or decoding the node protocol.
 #[derive(Debug, Error)]
 pub enum ProtocolError {

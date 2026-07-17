@@ -1,0 +1,34 @@
+use crate::{
+    AgentCommand, AgentEvent, CapabilityManifest, DiffSnapshot, EndpointError, RuntimeOptions,
+    SessionLocator, ThreadSummary, WorkspaceUri,
+};
+use async_trait::async_trait;
+use futures_core::Stream;
+use std::pin::Pin;
+
+pub type AgentEventStream = Pin<Box<dyn Stream<Item = Result<AgentEvent, EndpointError>> + Send>>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentQuery {
+    Capabilities,
+    Threads,
+    Diff { session: SessionLocator },
+    RuntimeOptions,
+    ProjectPermissions { workspace_uri: WorkspaceUri },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentSnapshot {
+    Capabilities(CapabilityManifest),
+    Threads(Vec<ThreadSummary>),
+    Diff(DiffSnapshot),
+    RuntimeOptions(RuntimeOptions),
+    ProjectPermissions(Vec<String>),
+}
+
+#[async_trait]
+pub trait AgentEndpoint: Send + Sync {
+    async fn command(&self, command: AgentCommand) -> Result<(), EndpointError>;
+    async fn query(&self, query: AgentQuery) -> Result<AgentSnapshot, EndpointError>;
+    async fn subscribe(&self) -> Result<AgentEventStream, EndpointError>;
+}
