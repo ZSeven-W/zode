@@ -1,6 +1,9 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
-    demo_state, AppCommand, IntegrationsTab, ProjectState, SettingsCategory, ShellRoute,
+    demo_state, AppCommand, EnvironmentSnapshot, IntegrationsTab, LoadState, ProjectState,
+    SettingsCategory, ShellRoute,
 };
 use zode_app_ui::{
     group_sessions, ProjectSidebar, RectExt, SidebarRowTarget, SidebarSection, ZodeTheme,
@@ -10,6 +13,7 @@ use zode_node_protocol::{NodeId, SessionLocator, ThreadStatus, ThreadSummary, Wo
 #[derive(Debug, Clone, PartialEq)]
 enum PaintOp {
     FillRound(Rect, Color),
+    Shadow(Rect),
     Text(String, Point2D, Color),
     Svg(String, Point2D, f32, Color),
 }
@@ -46,6 +50,9 @@ impl Painter for CapturePainter {
         self.operations.push(PaintOp::FillRound(rect, color));
     }
     fn stroke_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color, _width: f32) {}
+    fn fill_drop_shadow(&mut self, rect: Rect, _radius: f32, _blur: f32, _color: Color) {
+        self.operations.push(PaintOp::Shadow(rect));
+    }
     fn stroke_svg_path(
         &mut self,
         d: &str,
@@ -321,7 +328,7 @@ fn compact_sidebar_keeps_navigation_and_settings_readable() {
         .iter()
         .filter_map(|operation| match operation {
             PaintOp::Text(text, _, _) => Some(text.as_str()),
-            PaintOp::FillRound(_, _) | PaintOp::Svg(..) => None,
+            PaintOp::FillRound(_, _) | PaintOp::Shadow(_) | PaintOp::Svg(..) => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -492,6 +499,223 @@ fn session_actions_and_scroll_emit_typed_commands() {
         ProjectSidebar::scroll_command(rect, &state, 100.0),
         Some(AppCommand::SetSidebarScroll { offset }) if offset > 0.0
     ));
+}
+
+#[test]
+fn action_hover_keeps_row_active_and_matches_the_reference_preview_card() {
+    let mut state = demo_state();
+    let workspace = WorkspaceUri::new("file:///repo/openpencil").unwrap();
+    let session = SessionLocator::new(state.host.node_id, "hover-card");
+    state.projects.push(ProjectState {
+        workspace_uri: workspace.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
+    });
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: workspace.clone(),
+        title: "Codex Companion Task: implement every sidebar hover detail".into(),
+        updated_at_ms: now_ms() - 2 * 24 * 60 * 60 * 1_000,
+        status: ThreadStatus::Idle,
+    });
+    state
+        .presentation
+        .sessions
+        .entry(session.clone())
+        .or_default()
+        .context = LoadState::Ready(EnvironmentSnapshot {
+        workspace_uri: workspace,
+        branch: Some("v0.8.1".into()),
+        subagents: Vec::new(),
+        background_processes: Vec::new(),
+        sources: Vec::new(),
+    });
+    let rect = Rect::xywh(0.0, 0.0, 240.0, 800.0);
+    let row = ProjectSidebar::dynamic_row_layout(rect, &state)
+        .into_iter()
+        .find(|row| row.session() == Some(&session))
+        .unwrap();
+    let pin = row.pin_id.unwrap();
+    let theme = ZodeTheme::light();
+    let mut painter = CapturePainter::default();
+
+    ProjectSidebar::paint_with_interaction(&mut painter, rect, &state, None, Some(pin), &theme);
+    ProjectSidebar::paint_hover_overlay(&mut painter, rect, &state, Some(pin), &theme);
+
+    assert!(painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::FillRound(active, color)
+            if *active == row.rect && *color == theme.tokens.muted.with_alpha(0.72)
+    )));
+    let preview_card = painter
+        .operations
+        .iter()
+        .find_map(|operation| match operation {
+            PaintOp::FillRound(card, color)
+                if card.size.x == 226.0
+                    && card.size.y == 88.0
+                    && *color == theme.tokens.popover =>
+            {
+                Some(*card)
+            }
+            _ => None,
+        })
+        .expect("preview card is painted");
+    assert_eq!(preview_card.origin.y, row.rect.origin.y);
+    assert!(painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::Shadow(card) if card.size.x == 226.0 && card.size.y == 88.0
+    )));
+    let labels = painted_labels(&painter);
+    assert!(labels.contains(&"置顶任务"));
+    assert!(labels.contains(&"2 天"));
+    assert!(labels.contains(&"openpencil"));
+    assert!(labels.contains(&"v0.8.1"));
+    assert!(labels
+        .iter()
+        .any(|label| label.starts_with("Codex Companion") && label.ends_with('…')));
+}
+
+#[test]
+fn project_row_keeps_its_hover_background() {
+    let mut state = demo_state();
+    state.projects.push(ProjectState {
+        workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+        expanded: false,
+        available: true,
+        last_opened_ms: 1,
+    });
+    let rect = Rect::xywh(0.0, 0.0, 240.0, 800.0);
+    let project = ProjectSidebar::dynamic_row_layout(rect, &state)
+        .into_iter()
+        .find(|row| matches!(row.target, SidebarRowTarget::Project(_)))
+        .unwrap();
+    let theme = ZodeTheme::light();
+    let mut painter = CapturePainter::default();
+
+    ProjectSidebar::paint_with_interaction(
+        &mut painter,
+        rect,
+        &state,
+        None,
+        Some(project.id),
+        &theme,
+    );
+
+    assert!(painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::FillRound(active, color)
+            if *active == project.rect && *color == theme.tokens.muted.with_alpha(0.72)
+    )));
+}
+
+#[test]
+fn action_tooltips_follow_pin_state_and_archive_action() {
+    let mut state = demo_state();
+    let workspace = WorkspaceUri::new("file:///repo/openpencil").unwrap();
+    let session = SessionLocator::new(state.host.node_id, "hover-actions");
+    state.projects.push(ProjectState {
+        workspace_uri: workspace.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
+    });
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: workspace,
+        title: "Hover actions".into(),
+        updated_at_ms: now_ms(),
+        status: ThreadStatus::Idle,
+    });
+    let rect = Rect::xywh(0.0, 0.0, 240.0, 800.0);
+    let theme = ZodeTheme::light();
+    let row = ProjectSidebar::dynamic_row_layout(rect, &state)
+        .into_iter()
+        .find(|row| row.session() == Some(&session))
+        .unwrap();
+    let mut archive_painter = CapturePainter::default();
+    ProjectSidebar::paint_hover_overlay(&mut archive_painter, rect, &state, row.archive_id, &theme);
+    assert!(painted_labels(&archive_painter).contains(&"归档任务"));
+
+    state.pinned_sessions.insert(session.clone());
+    let row = ProjectSidebar::dynamic_row_layout(rect, &state)
+        .into_iter()
+        .find(|row| row.session() == Some(&session))
+        .unwrap();
+    let mut pin_painter = CapturePainter::default();
+    ProjectSidebar::paint_hover_overlay(&mut pin_painter, rect, &state, row.pin_id, &theme);
+    assert!(painted_labels(&pin_painter).contains(&"取消置顶"));
+}
+
+#[test]
+fn hover_card_never_leaks_a_branch_from_another_workspace() {
+    let mut state = demo_state();
+    let workspace = WorkspaceUri::new("file:///repo/openpencil").unwrap();
+    let session = SessionLocator::new(state.host.node_id, "hover-branch-scope");
+    state.projects.push(ProjectState {
+        workspace_uri: workspace.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
+    });
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: workspace,
+        title: "Scoped branch".into(),
+        updated_at_ms: now_ms(),
+        status: ThreadStatus::Idle,
+    });
+    state
+        .presentation
+        .sessions
+        .entry(session.clone())
+        .or_default()
+        .context = LoadState::Ready(EnvironmentSnapshot {
+        workspace_uri: WorkspaceUri::new("file:///repo/other").unwrap(),
+        branch: Some("secret-branch".into()),
+        subagents: Vec::new(),
+        background_processes: Vec::new(),
+        sources: Vec::new(),
+    });
+    let rect = Rect::xywh(0.0, 0.0, 240.0, 800.0);
+    let row = ProjectSidebar::dynamic_row_layout(rect, &state)
+        .into_iter()
+        .find(|row| row.session() == Some(&session))
+        .unwrap();
+    let mut painter = CapturePainter::default();
+
+    ProjectSidebar::paint_hover_overlay(
+        &mut painter,
+        rect,
+        &state,
+        Some(row.id),
+        &ZodeTheme::light(),
+    );
+
+    assert!(!painted_labels(&painter).contains(&"secret-branch"));
+    assert!(painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::FillRound(card, _) if card.size.x == 226.0 && card.size.y == 68.0
+    )));
+}
+
+fn painted_labels(painter: &CapturePainter) -> Vec<&str> {
+    painter
+        .operations
+        .iter()
+        .filter_map(|operation| match operation {
+            PaintOp::Text(text, _, _) => Some(text.as_str()),
+            PaintOp::FillRound(_, _) | PaintOp::Shadow(_) | PaintOp::Svg(..) => None,
+        })
+        .collect()
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
 }
 
 fn fixture_sessions() -> Vec<ThreadSummary> {

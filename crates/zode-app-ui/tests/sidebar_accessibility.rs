@@ -33,6 +33,18 @@ fn sidebar_dynamic_rows_share_snapshot_hit_rects_and_keep_stable_ids() {
         ProjectSidebar::command_for_widget(&state, rows[1].id),
         Some(AppCommand::SelectSession(session.clone())),
     );
+    let session_row = rows
+        .iter()
+        .find(|row| row.session() == Some(&session))
+        .unwrap();
+    assert_eq!(
+        first.node(session_row.pin_id.unwrap()).unwrap().name,
+        "置顶任务"
+    );
+    assert_eq!(
+        first.node(session_row.archive_id.unwrap()).unwrap().name,
+        "归档任务"
+    );
 
     state.threads.insert(
         0,

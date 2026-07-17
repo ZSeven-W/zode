@@ -1,9 +1,12 @@
 use accesskit::Action;
 use jian_widgets::{Point2D, Rect};
-use zode_app_model::{reduce_navigation_command, AppCommand, NavigationOutcome, ShellRoute};
-use zode_app_ui::{Key, KeyEvent, ProjectSidebar};
+use zode_app_model::{
+    reduce_navigation_command, AppCommand, LoadState, NavigationOutcome, ShellRoute, ZodeAppState,
+};
+use zode_app_ui::{Key, KeyEvent, ProjectSidebar, WidgetId};
 
 use super::DesktopApp;
+use crate::presentation_bridge::PresentationQuery;
 
 impl DesktopApp {
     /// Scrolls only the sidebar content beneath the fixed new-task row. A
@@ -66,6 +69,60 @@ impl DesktopApp {
         }
         true
     }
+
+    /// Lazily resolves branch metadata for the session preview card. Paint
+    /// stays side-effect free; pointer movement requests the context once and
+    /// the presentation bridge wakes the window when it is ready.
+    pub(super) fn request_sidebar_hover_context(&mut self, hovered: Option<WidgetId>) {
+        let Some(query) = sidebar_hover_environment_query(
+            &self.app_state,
+            self.frame_snapshot.layout.sidebar,
+            hovered,
+        ) else {
+            return;
+        };
+        if let Some(bridge) = self.presentation_queries.as_mut() {
+            let _ = bridge.request(&mut self.app_state, query);
+        }
+    }
+}
+
+fn sidebar_hover_environment_query(
+    state: &ZodeAppState,
+    sidebar: Rect,
+    hovered: Option<WidgetId>,
+) -> Option<PresentationQuery> {
+    let hovered = hovered?;
+    let row = ProjectSidebar::layout(sidebar, state)
+        .rows
+        .into_iter()
+        .find(|row| {
+            row.session().is_some()
+                && (row.id == hovered
+                    || row.pin_id == Some(hovered)
+                    || row.archive_id == Some(hovered))
+        })?;
+    let session = row.session()?.clone();
+    if session.session_id.starts_with("local-error-") {
+        return None;
+    }
+    let workspace_uri = row.workspace_uri?;
+    let context = state
+        .presentation
+        .sessions
+        .get(&session)
+        .map(|presentation| &presentation.context);
+    if matches!(context, Some(LoadState::Loading))
+        || context
+            .and_then(LoadState::ready)
+            .is_some_and(|context| context.workspace_uri == workspace_uri)
+    {
+        return None;
+    }
+    Some(PresentationQuery::Environment {
+        session,
+        workspace_uri,
+    })
 }
 
 fn sidebar_accepts_scroll(
@@ -93,10 +150,14 @@ fn shortcut_number(event: &KeyEvent) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use jian_widgets::{Point2D, Rect};
-    use zode_app_model::{SettingsCategory, ShellRoute};
-    use zode_app_ui::{Key, KeyEvent, Modifiers};
+    use zode_app_model::{
+        EnvironmentSnapshot, LoadState, ProjectState, SettingsCategory, ShellRoute,
+    };
+    use zode_app_ui::{Key, KeyEvent, Modifiers, ProjectSidebar};
+    use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
-    use super::{shortcut_number, sidebar_accepts_scroll};
+    use super::{shortcut_number, sidebar_accepts_scroll, sidebar_hover_environment_query};
+    use crate::presentation_bridge::PresentationQuery;
 
     #[test]
     fn sidebar_scroll_capture_is_limited_to_its_visible_middle() {
@@ -132,5 +193,55 @@ mod tests {
         assert_eq!(shortcut_number(&event("5")), Some(5));
         assert_eq!(shortcut_number(&event("0")), None);
         assert_eq!(shortcut_number(&event("12")), None);
+    }
+
+    #[test]
+    fn session_hover_requests_missing_branch_context_once() {
+        let mut state = zode_app_model::demo_state();
+        let workspace = WorkspaceUri::new("file:///repo/openpencil").unwrap();
+        let session = SessionLocator::new(state.host.node_id, "hover-context");
+        state.projects.push(ProjectState {
+            workspace_uri: workspace.clone(),
+            expanded: true,
+            available: true,
+            last_opened_ms: 1,
+        });
+        state.threads.push(ThreadSummary {
+            session: session.clone(),
+            workspace_uri: workspace.clone(),
+            title: "Hover context".into(),
+            updated_at_ms: 1,
+            status: ThreadStatus::Idle,
+        });
+        let sidebar = Rect::xywh(0.0, 0.0, 240.0, 800.0);
+        let row = ProjectSidebar::dynamic_row_layout(sidebar, &state)
+            .into_iter()
+            .find(|row| row.session() == Some(&session))
+            .unwrap();
+
+        assert_eq!(
+            sidebar_hover_environment_query(&state, sidebar, row.pin_id),
+            Some(PresentationQuery::Environment {
+                session: session.clone(),
+                workspace_uri: workspace.clone(),
+            })
+        );
+
+        state
+            .presentation
+            .sessions
+            .entry(session)
+            .or_default()
+            .context = LoadState::Ready(EnvironmentSnapshot {
+            workspace_uri: workspace,
+            branch: Some("v0.8.1".into()),
+            subagents: Vec::new(),
+            background_processes: Vec::new(),
+            sources: Vec::new(),
+        });
+        assert_eq!(
+            sidebar_hover_environment_query(&state, sidebar, row.pin_id),
+            None
+        );
     }
 }

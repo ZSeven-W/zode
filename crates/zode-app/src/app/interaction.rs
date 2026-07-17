@@ -525,6 +525,7 @@ impl DesktopApp {
             let hovered = self.frame_snapshot.hit_test(event.position);
             if self.hovered_widget != hovered {
                 self.hovered_widget = hovered;
+                self.request_sidebar_hover_context(hovered);
                 self.request_redraw();
             }
             if let Some(window) = self.window.as_ref() {

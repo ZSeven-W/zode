@@ -105,7 +105,11 @@ pub(super) fn append_sidebar_nodes(
                     id,
                     action_rect,
                     Role::Button,
-                    if row.pinned { "取消置顶" } else { "置顶" },
+                    if row.pinned {
+                        "取消置顶"
+                    } else {
+                        "置顶任务"
+                    },
                     Some(session.session_id.clone()),
                     vec![Action::Click, Action::Focus],
                     next_order(focus_order),

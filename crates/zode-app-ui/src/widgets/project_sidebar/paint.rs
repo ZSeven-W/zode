@@ -1,4 +1,6 @@
-use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use jian_widgets::{components::tooltip::Tooltip, HorizontalAlign, Painter, Point2D, Rect};
 use zode_app_model::ZodeAppState;
 use zode_node_protocol::ThreadStatus;
 
@@ -162,7 +164,7 @@ fn paint_dynamic_row(
     let action_active = row_interaction_active(row, focused, hovered);
     if row.selected {
         painter.fill_round_rect(row.rect, 8.0, theme.tokens.row_selected);
-    } else if hovered == Some(row.id) {
+    } else if hovered == Some(row.id) || action_active {
         painter.fill_round_rect(row.rect, 8.0, theme.tokens.muted.with_alpha(0.72));
     }
 
@@ -479,56 +481,251 @@ pub(super) fn paint_hover_overlay(
     let Some(workspace) = row.workspace_uri.as_ref() else {
         return;
     };
-    let card_h = 82.0;
+    let branch = verified_branch(state, row);
+    let card_h = if branch.is_some() { 88.0 } else { 68.0 };
+    let min_y = sidebar.origin.y + 8.0;
+    let max_y = (sidebar.max_y() - card_h - 8.0).max(min_y);
     let card = Rect::xywh(
         sidebar.max_x() + 8.0,
-        row.rect
-            .origin
-            .y
-            .clamp(sidebar.origin.y + 8.0, sidebar.max_y() - card_h - 8.0),
-        260.0,
+        row.rect.origin.y.clamp(min_y, max_y),
+        226.0,
         card_h,
     );
-    painter.fill_round_rect(card, 10.0, theme.tokens.popover);
-    painter.stroke_round_rect(card, 10.0, theme.tokens.border, 1.0);
+    painter.fill_drop_shadow(
+        Rect::xywh(card.origin.x, card.origin.y + 2.0, card.size.x, card.size.y),
+        12.0,
+        16.0,
+        theme.tokens.foreground.with_alpha(0.10),
+    );
+    painter.fill_round_rect(card, 12.0, theme.tokens.popover);
+    painter.stroke_round_rect(card, 12.0, theme.tokens.border, 1.0);
+
+    let updated_at_ms = row
+        .session()
+        .and_then(|session| {
+            state
+                .threads
+                .iter()
+                .find(|thread| &thread.session == session)
+        })
+        .map_or(0, |thread| thread.updated_at_ms);
+    let age = relative_age_label(updated_at_ms, current_time_ms());
+    let age_width = painter
+        .measure_text_weighted(&age, 11.0, 400)
+        .clamp(32.0, 56.0);
+    let age_rect = Rect::xywh(
+        card.max_x() - 14.0 - age_width,
+        card.origin.y + 5.0,
+        age_width,
+        26.0,
+    );
+    let title_rect = Rect::xywh(
+        card.origin.x + 14.0,
+        card.origin.y + 5.0,
+        (age_rect.origin.x - card.origin.x - 22.0).max(0.0),
+        26.0,
+    );
+    let title = end_ellipsize(painter, &row.label, title_rect.size.x, 13.0, 500);
     draw_label(
         painter,
-        &row.label,
-        Rect::xywh(card.origin.x + 14.0, card.origin.y + 8.0, 232.0, 28.0),
+        &title,
+        title_rect,
         13.0,
-        600,
+        500,
         theme.tokens.popover_foreground,
     );
+    paint_single_line(
+        painter,
+        &age,
+        age_rect,
+        11.0,
+        400,
+        theme.tokens.muted_foreground,
+        HorizontalAlign::End,
+    );
+
     let workspace = if state.is_projectless_workspace(workspace) {
         "不在项目中工作".into()
     } else {
         super::workspace_label(workspace, true)
     };
-    draw_label(
+    paint_metadata_row(
         painter,
+        SemanticIcon::Folder,
         &workspace,
-        Rect::xywh(card.origin.x + 14.0, card.origin.y + 34.0, 232.0, 20.0),
-        11.0,
-        400,
-        theme.tokens.muted_foreground,
+        Rect::xywh(card.origin.x + 14.0, card.origin.y + 32.0, 198.0, 22.0),
+        theme,
     );
-    let status = match row.status {
-        Some(ThreadStatus::Running) => "运行中",
-        Some(ThreadStatus::Failed) => "需要处理",
-        Some(ThreadStatus::Idle) | None => "已就绪",
-    };
+    if let Some(branch) = branch {
+        paint_metadata_row(
+            painter,
+            SemanticIcon::Branch,
+            &branch,
+            Rect::xywh(card.origin.x + 14.0, card.origin.y + 54.0, 198.0, 22.0),
+            theme,
+        );
+    }
+
+    paint_session_action_tooltip(painter, sidebar, row, hovered, theme);
+}
+
+fn verified_branch(state: &ZodeAppState, row: &SidebarRowLayout) -> Option<String> {
+    let session = row.session()?;
+    let workspace = row.workspace_uri.as_ref()?;
+    let context = state.presentation.sessions.get(session)?.context.ready()?;
+    (&context.workspace_uri == workspace)
+        .then_some(context.branch.as_deref())
+        .flatten()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
+}
+
+fn paint_metadata_row(
+    painter: &mut dyn Painter,
+    icon: SemanticIcon,
+    label: &str,
+    rect: Rect,
+    theme: &ZodeTheme,
+) {
+    let icon_size = 13.0;
+    painter.stroke_svg_path(
+        icon.path(),
+        Point2D::new(
+            rect.origin.x,
+            rect.origin.y + (rect.size.y - icon_size) / 2.0,
+        ),
+        icon_size,
+        theme.tokens.muted_foreground,
+        icon.stroke_width(),
+    );
+    let label_rect = Rect::xywh(
+        rect.origin.x + 21.0,
+        rect.origin.y,
+        (rect.size.x - 21.0).max(0.0),
+        rect.size.y,
+    );
+    let visible = end_ellipsize(painter, label, label_rect.size.x, 11.0, 400);
     draw_label(
         painter,
-        status,
-        Rect::xywh(card.origin.x + 14.0, card.origin.y + 54.0, 232.0, 20.0),
+        &visible,
+        label_rect,
         11.0,
         400,
-        if row.status == Some(ThreadStatus::Failed) {
-            theme.tokens.destructive
-        } else {
-            theme.tokens.muted_foreground
-        },
+        theme.tokens.popover_foreground,
     );
+}
+
+fn paint_session_action_tooltip(
+    painter: &mut dyn Painter,
+    sidebar: Rect,
+    row: &SidebarRowLayout,
+    hovered: WidgetId,
+    theme: &ZodeTheme,
+) {
+    let (anchor, label) = if row.pin_id == Some(hovered) {
+        let Some(anchor) = ProjectSidebar::session_pin_rect(row) else {
+            return;
+        };
+        (
+            anchor,
+            if row.pinned {
+                "取消置顶"
+            } else {
+                "置顶任务"
+            },
+        )
+    } else if row.archive_id == Some(hovered) {
+        let Some(anchor) = ProjectSidebar::session_archive_rect(row) else {
+            return;
+        };
+        (anchor, "归档任务")
+    } else {
+        return;
+    };
+    let height = 28.0;
+    let width = (painter.measure_text_weighted(label, 12.0, 400) + 16.0).clamp(60.0, 88.0);
+    let min_x = sidebar.origin.x + 4.0;
+    let max_x = (sidebar.max_x() - width - 4.0).max(min_x);
+    let tooltip = Rect::xywh(
+        (anchor.origin.x + anchor.size.x / 2.0 - width / 2.0).clamp(min_x, max_x),
+        (anchor.origin.y - height - 6.0).max(sidebar.origin.y + 4.0),
+        width,
+        height,
+    );
+    painter.fill_drop_shadow(
+        Rect::xywh(
+            tooltip.origin.x,
+            tooltip.origin.y + 1.0,
+            tooltip.size.x,
+            tooltip.size.y,
+        ),
+        6.0,
+        8.0,
+        theme.tokens.foreground.with_alpha(0.10),
+    );
+    Tooltip { label }.paint(painter, tooltip, &theme.tokens);
+}
+
+fn current_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(i64::MAX)
+}
+
+fn relative_age_label(updated_at_ms: i64, now_ms: i64) -> String {
+    if updated_at_ms <= 0 || updated_at_ms >= now_ms {
+        return "现在".into();
+    }
+    let elapsed_ms = now_ms.saturating_sub(updated_at_ms);
+    const HOUR_MS: i64 = 60 * 60 * 1_000;
+    const DAY_MS: i64 = 24 * HOUR_MS;
+    if elapsed_ms >= DAY_MS {
+        format!("{} 天", elapsed_ms / DAY_MS)
+    } else if elapsed_ms >= HOUR_MS {
+        format!("{} 小时", elapsed_ms / HOUR_MS)
+    } else {
+        "现在".into()
+    }
+}
+
+fn end_ellipsize(
+    painter: &mut dyn Painter,
+    value: &str,
+    width: f32,
+    font_size: f32,
+    weight: u16,
+) -> String {
+    const ELLIPSIS: &str = "…";
+    if width <= 0.0 {
+        return String::new();
+    }
+    if painter.measure_text_weighted(value, font_size, weight) <= width {
+        return value.to_owned();
+    }
+    if painter.measure_text_weighted(ELLIPSIS, font_size, weight) > width {
+        return String::new();
+    }
+    let mut boundaries = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    boundaries.push(value.len());
+    let mut lower = 0usize;
+    let mut upper = boundaries.len() - 1;
+    while lower < upper {
+        let middle = (lower + upper).div_ceil(2);
+        let prefix = value[..boundaries[middle]].trim_end();
+        let candidate = format!("{prefix}{ELLIPSIS}");
+        if painter.measure_text_weighted(&candidate, font_size, weight) <= width {
+            lower = middle;
+        } else {
+            upper = middle - 1;
+        }
+    }
+    format!("{}{}", value[..boundaries[lower]].trim_end(), ELLIPSIS)
 }
 
 fn draw_label(
