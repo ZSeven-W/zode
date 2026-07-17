@@ -3,8 +3,8 @@ use jian_widgets::{Point2D, Rect};
 use zode_app_model::ShellPage;
 use zode_app_ui::{
     FocusDirection, Key, KeyEvent, TouchEvent, TouchPhase, WidgetId, WorkspaceSnapshot,
-    ARCHIVED_TASK_SEARCH_ID, COMPOSER_ID, HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID,
-    PROJECT_PICKER_SEARCH_ID, SETTINGS_SEARCH_ID, TERMINAL_ID,
+    ARCHIVED_TASK_SEARCH_ID, COMPOSER_BRANCH_SEARCH_ID, COMPOSER_ID, HEADER_RENAME_INPUT_ID,
+    INTEGRATIONS_SEARCH_ID, PROJECT_PICKER_SEARCH_ID, SETTINGS_SEARCH_ID, TERMINAL_ID,
 };
 
 use crate::event_map::{route_key_event, InputRoute};
@@ -144,6 +144,7 @@ pub fn ime_allowed_for_focus(
         }
         ShellPage::Conversation | ShellPage::Review | ShellPage::ComingSoon => {
             focused == Some(COMPOSER_ID)
+                || focused == Some(COMPOSER_BRANCH_SEARCH_ID)
                 || focused == Some(PROJECT_PICKER_SEARCH_ID)
                 || focused == Some(HEADER_RENAME_INPUT_ID)
                 || focused == Some(INTEGRATIONS_SEARCH_ID)
@@ -155,8 +156,8 @@ pub fn ime_allowed_for_focus(
 mod tests {
     use zode_app_model::ShellPage;
     use zode_app_ui::{
-        WidgetId, ARCHIVED_TASK_SEARCH_ID, HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID,
-        SETTINGS_SEARCH_ID,
+        WidgetId, ARCHIVED_TASK_SEARCH_ID, COMPOSER_BRANCH_SEARCH_ID, HEADER_RENAME_INPUT_ID,
+        INTEGRATIONS_SEARCH_ID, SETTINGS_SEARCH_ID,
     };
 
     use super::ime_allowed_for_focus;
@@ -191,6 +192,20 @@ mod tests {
             ShellPage::ComingSoon,
             Some(INTEGRATIONS_SEARCH_ID),
             false,
+        ));
+    }
+
+    #[test]
+    fn branch_search_enables_ime_only_on_conversation_surfaces() {
+        assert!(ime_allowed_for_focus(
+            ShellPage::Conversation,
+            Some(COMPOSER_BRANCH_SEARCH_ID),
+            true,
+        ));
+        assert!(!ime_allowed_for_focus(
+            ShellPage::Settings,
+            Some(COMPOSER_BRANCH_SEARCH_ID),
+            true,
         ));
     }
 

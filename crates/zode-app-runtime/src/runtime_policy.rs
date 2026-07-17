@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use zode_core::approval::ApprovalPolicy;
 use zode_core::config::ConfigManager;
 use zode_core::sandbox::{SandboxConfig, SandboxMode as CoreSandboxMode};
 use zode_core::{CoreError, EngineTemplate};
-use zode_node_protocol::{RuntimeOptions, SandboxMode};
+use zode_node_protocol::{ApprovalMode, RuntimeOptions, SandboxMode};
 
 pub(crate) fn apply_workspace_policy(
     template: &EngineTemplate,
@@ -48,6 +49,11 @@ pub(crate) fn runtime_options(template: &EngineTemplate) -> RuntimeOptions {
         models: template.model_ids(),
         active_model: template.model().map(str::to_string),
         effort: template.effort().map(str::to_string),
+        approval_mode: match template.approval_policy() {
+            ApprovalPolicy::Request => ApprovalMode::Request,
+            ApprovalPolicy::Auto => ApprovalMode::Auto,
+            ApprovalPolicy::Full => ApprovalMode::Full,
+        },
         sandbox_mode: match sandbox.map(SandboxConfig::mode) {
             None => SandboxMode::Off,
             Some(CoreSandboxMode::ReadOnly) => SandboxMode::ReadOnly,
@@ -55,4 +61,71 @@ pub(crate) fn runtime_options(template: &EngineTemplate) -> RuntimeOptions {
         },
         sandbox_network: sandbox.is_some_and(SandboxConfig::allow_network),
     }
+}
+
+pub(crate) fn with_approval_mode(template: &EngineTemplate, mode: ApprovalMode) -> EngineTemplate {
+    let policy = match mode {
+        ApprovalMode::Request => ApprovalPolicy::Request,
+        ApprovalMode::Auto => ApprovalPolicy::Auto,
+        ApprovalMode::Full => ApprovalPolicy::Full,
+    };
+    template.with_approval_policy(policy)
+}
+
+pub(crate) fn with_sandbox(
+    template: &EngineTemplate,
+    cwd: &Path,
+    mode: SandboxMode,
+    network: bool,
+) -> Result<EngineTemplate, CoreError> {
+    let sandbox = match mode {
+        SandboxMode::Off => None,
+        SandboxMode::ReadOnly | SandboxMode::WorkspaceWrite => {
+            let core_mode = match mode {
+                SandboxMode::ReadOnly => CoreSandboxMode::ReadOnly,
+                _ => CoreSandboxMode::WorkspaceWrite,
+            };
+            Some(
+                template
+                    .sandbox()
+                    .cloned()
+                    .map(|sandbox| sandbox.with_mode(core_mode).with_network(network))
+                    .map(Ok)
+                    .unwrap_or_else(|| SandboxConfig::new(cwd, core_mode, network, &[]))?,
+            )
+        }
+    };
+    Ok(template.with_sandbox(sandbox))
+}
+
+pub(crate) fn with_permission_preset(
+    template: &EngineTemplate,
+    cwd: &Path,
+    approval_mode: ApprovalMode,
+    sandbox_mode: SandboxMode,
+    network: bool,
+) -> Result<EngineTemplate, CoreError> {
+    let template = with_approval_mode(template, approval_mode);
+    with_sandbox(&template, cwd, sandbox_mode, network)
+}
+
+pub(crate) fn persist_sandbox(
+    cwd: &Path,
+    mode: SandboxMode,
+    network: bool,
+) -> Result<(), CoreError> {
+    ConfigManager::update_project_state(cwd, |state| {
+        state.insert(
+            "sandbox".to_string(),
+            serde_json::json!({
+                "enabled": mode != SandboxMode::Off,
+                "mode": match mode {
+                    SandboxMode::ReadOnly => Some("read-only"),
+                    SandboxMode::WorkspaceWrite => Some("workspace-write"),
+                    SandboxMode::Off => None,
+                },
+                "network": (mode != SandboxMode::Off).then_some(network),
+            }),
+        );
+    })
 }

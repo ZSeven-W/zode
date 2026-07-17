@@ -12,7 +12,6 @@ use async_trait::async_trait;
 use futures::stream;
 use zode_core::config::ConfigManager;
 use zode_core::engine::CarryState;
-use zode_core::sandbox::{SandboxConfig, SandboxMode as CoreSandboxMode};
 use zode_core::session_meta::title_from_prompt;
 use zode_core::session_store::{SessionSaveOutcome, SessionWriteMode};
 use zode_core::{EngineTemplate, ZodeEngine};
@@ -419,42 +418,35 @@ impl ZodeEngineDriver {
         self.reassemble_with_commit(
             session,
             move |template, cwd| {
-                let sandbox = match mode {
-                    SandboxMode::Off => None,
-                    SandboxMode::ReadOnly | SandboxMode::WorkspaceWrite => {
-                        let core_mode = match mode {
-                            SandboxMode::ReadOnly => CoreSandboxMode::ReadOnly,
-                            _ => CoreSandboxMode::WorkspaceWrite,
-                        };
-                        Some(
-                            template
-                                .sandbox()
-                                .cloned()
-                                .map(|sandbox| sandbox.with_mode(core_mode).with_network(network))
-                                .map(Ok)
-                                .unwrap_or_else(|| SandboxConfig::new(cwd, core_mode, network, &[]))
-                                .map_err(map_internal)?,
-                        )
-                    }
-                };
-                Ok(template.with_sandbox(sandbox))
+                runtime_policy::with_sandbox(template, cwd, mode, network).map_err(map_internal)
+            },
+            move |cwd| runtime_policy::persist_sandbox(cwd, mode, network).map_err(map_internal),
+        )
+        .await
+    }
+
+    async fn set_permission_preset(
+        &self,
+        session: &SessionLocator,
+        approval_mode: zode_node_protocol::ApprovalMode,
+        sandbox_mode: SandboxMode,
+        network: bool,
+    ) -> Result<(), EndpointError> {
+        self.ensure_engine(session).await?;
+        self.reassemble_with_commit(
+            session,
+            move |template, cwd| {
+                runtime_policy::with_permission_preset(
+                    template,
+                    cwd,
+                    approval_mode,
+                    sandbox_mode,
+                    network,
+                )
+                .map_err(map_internal)
             },
             move |cwd| {
-                ConfigManager::update_project_state(cwd, |state| {
-                    state.insert(
-                        "sandbox".to_string(),
-                        serde_json::json!({
-                            "enabled": mode != SandboxMode::Off,
-                            "mode": match mode {
-                                SandboxMode::ReadOnly => Some("read-only"),
-                                SandboxMode::WorkspaceWrite => Some("workspace-write"),
-                                SandboxMode::Off => None,
-                            },
-                            "network": (mode != SandboxMode::Off).then_some(network),
-                        }),
-                    );
-                })
-                .map_err(map_internal)
+                runtime_policy::persist_sandbox(cwd, sandbox_mode, network).map_err(map_internal)
             },
         )
         .await
@@ -536,10 +528,6 @@ impl ZodeEngineDriver {
         })
     }
 
-    fn runtime_options(&self) -> RuntimeOptions {
-        runtime_policy::runtime_options(&self.template)
-    }
-
     async fn session_runtime_options(
         &self,
         session: &SessionLocator,
@@ -608,6 +596,14 @@ impl EngineDriver for ZodeEngineDriver {
             }
             AgentCommandKind::SetSandbox { mode, network } => {
                 self.set_sandbox(&command.session, mode, network).await
+            }
+            AgentCommandKind::SetPermissionPreset {
+                approval_mode,
+                sandbox_mode,
+                network,
+            } => {
+                self.set_permission_preset(&command.session, approval_mode, sandbox_mode, network)
+                    .await
             }
             AgentCommandKind::Approve { .. }
             | AgentCommandKind::StartTurn { .. }
@@ -711,7 +707,9 @@ impl EngineDriver for ZodeEngineDriver {
                 self.repository.history(&session).await?,
             )),
             AgentQuery::Diff { session } => Ok(AgentSnapshot::Diff(self.diff(session).await?)),
-            AgentQuery::RuntimeOptions => Ok(AgentSnapshot::RuntimeOptions(self.runtime_options())),
+            AgentQuery::RuntimeOptions => Ok(AgentSnapshot::RuntimeOptions(
+                runtime_policy::runtime_options(&self.template),
+            )),
             AgentQuery::SessionRuntimeOptions { session } => {
                 let options = self.session_runtime_options(&session).await?;
                 Ok(AgentSnapshot::SessionRuntimeOptions { session, options })

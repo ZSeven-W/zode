@@ -362,6 +362,7 @@ impl EngineDriver for FakeDriver {
             models: vec!["test-model".into()],
             active_model: Some("test-model".into()),
             effort: None,
+            approval_mode: Default::default(),
             sandbox_mode: SandboxMode::WorkspaceWrite,
             sandbox_network: false,
         }))

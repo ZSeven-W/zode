@@ -1,9 +1,9 @@
 use serde_json::{json, Value};
 use zode_node_protocol::{
-    AgentCommand, AgentCommandKind, AgentEvent, AgentEventKind, ApprovalDecision, EndpointError,
-    EndpointErrorKind, NodeId, ProtocolError, RuntimeOptions, SandboxMode, SessionLocator,
-    TerminalId, ToolCall, ToolStatus, TurnId, UsageSnapshot, UserContent, WorkspaceUri,
-    PROTOCOL_VERSION,
+    AgentCommand, AgentCommandKind, AgentEvent, AgentEventKind, ApprovalDecision, ApprovalMode,
+    EndpointError, EndpointErrorKind, NodeId, ProtocolError, RuntimeOptions, SandboxMode,
+    SessionLocator, TerminalId, ToolCall, ToolStatus, TurnId, UsageSnapshot, UserContent,
+    WorkspaceUri, PROTOCOL_VERSION,
 };
 
 const NODE_ID: &str = "00000000-0000-0000-0000-000000000001";
@@ -227,9 +227,27 @@ fn all_command_variants_have_golden_camel_case_wire_shapes() {
                 "network": true
             }),
         ),
+        (
+            command(
+                AgentCommandKind::SetPermissionPreset {
+                    approval_mode: ApprovalMode::Auto,
+                    sandbox_mode: SandboxMode::WorkspaceWrite,
+                    network: true,
+                },
+                None,
+            ),
+            json!({
+                "version": 1,
+                "session": { "nodeId": NODE_ID, "sessionId": "session-1" },
+                "type": "setPermissionPreset",
+                "approvalMode": "auto",
+                "sandboxMode": "workspaceWrite",
+                "network": true
+            }),
+        ),
     ];
 
-    assert_eq!(cases.len(), 11);
+    assert_eq!(cases.len(), 12);
     for (command, expected) in cases {
         assert_eq!(serde_json::to_value(&command).unwrap(), expected);
         let decoded = AgentCommand::decode_json(&expected.to_string()).unwrap();
@@ -490,6 +508,7 @@ fn option_wire_policy_omits_command_turn_id_but_keeps_dto_nulls() {
         models: vec!["gpt-5".into()],
         active_model: None,
         effort: None,
+        approval_mode: Default::default(),
         sandbox_mode: SandboxMode::ReadOnly,
         sandbox_network: false,
     };
@@ -499,6 +518,7 @@ fn option_wire_policy_omits_command_turn_id_but_keeps_dto_nulls() {
             "models": ["gpt-5"],
             "activeModel": null,
             "effort": null,
+            "approvalMode": "request",
             "sandboxMode": "readOnly",
             "sandboxNetwork": false
         })

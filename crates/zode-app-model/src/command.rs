@@ -1,10 +1,11 @@
 use zode_node_protocol::{
-    ApprovalDecision, SandboxMode, SessionLocator, UserContent, WorkspaceUri,
+    ApprovalDecision, ApprovalMode, SandboxMode, SessionLocator, UserContent, WorkspaceUri,
 };
 
 use crate::{
-    EnvironmentActionKind, IntegrationScope, IntegrationsTab, ProjectDisplayMode, ProjectSortMode,
-    QueuedMessageId, SecondaryPane, SettingsCategory, ShellRoute, SidebarSectionMenu,
+    BranchCatalog, ComposerContextMenu, ComposerFooterMenu, EnvironmentActionKind,
+    IntegrationScope, IntegrationsTab, ProjectDisplayMode, ProjectSortMode, QueuedMessageId,
+    SecondaryPane, SettingsCategory, ShellRoute, SidebarSectionMenu, TaskLaunchMode,
     ThemePreference,
 };
 
@@ -15,9 +16,28 @@ pub enum AppCommand {
         workspace_uri: Option<WorkspaceUri>,
     },
     ToggleProjectPicker,
+    ToggleComposerProjectPicker,
     CloseProjectPicker,
     SetProjectSearch(String),
     SetProjectPickerActive(usize),
+    ToggleComposerContextMenu(ComposerContextMenu),
+    CloseComposerContextMenu,
+    ToggleComposerFooterMenu(ComposerFooterMenu),
+    CloseComposerFooterMenu,
+    SelectTaskLaunchMode(TaskLaunchMode),
+    SetBranchSearch(String),
+    LoadBranches {
+        workspace_uri: WorkspaceUri,
+    },
+    BranchesLoaded(BranchCatalog),
+    BranchesFailed {
+        workspace_uri: WorkspaceUri,
+        message: String,
+    },
+    SelectBranch {
+        workspace_uri: WorkspaceUri,
+        branch: String,
+    },
     CreateProject,
     NewSession {
         workspace_uri: WorkspaceUri,
@@ -165,6 +185,12 @@ pub enum AppCommand {
         mode: SandboxMode,
         network: bool,
     },
+    SetPermissionPreset {
+        approval_mode: ApprovalMode,
+        sandbox_mode: SandboxMode,
+        network: bool,
+    },
+    ResetComposerRuntime,
     RetryLastTurn,
     RevokeProjectPermission {
         workspace_uri: WorkspaceUri,

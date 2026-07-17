@@ -716,6 +716,7 @@ mod tests {
             models: vec!["model".into()],
             active_model: Some("model".into()),
             effort: None,
+            approval_mode: Default::default(),
             sandbox_mode: SandboxMode::WorkspaceWrite,
             sandbox_network: false,
         });

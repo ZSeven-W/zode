@@ -165,13 +165,7 @@ fn page(state: &ZodeAppState, category: SettingsCategory) -> DetailPage {
         SettingsCategory::Voice => {
             unavailable("语音", "语音输入", "当前节点没有提供可配置的语音输入设备。")
         }
-        SettingsCategory::Configuration => loaded_page(
-            "配置",
-            "本机有效配置",
-            "安全配置摘要",
-            &state.local_settings.configuration,
-            "尚未读取本机配置。",
-        ),
+        SettingsCategory::Configuration => configuration_page(state),
         SettingsCategory::Personalization => unavailable(
             "个性化",
             "自定义指令与记忆",
@@ -270,6 +264,31 @@ fn loaded_page(
         subtitle,
         sections: vec![detail],
     }
+}
+
+fn configuration_page(state: &ZodeAppState) -> DetailPage {
+    let mut page = loaded_page(
+        "配置",
+        "本机有效配置",
+        "安全配置摘要",
+        &state.local_settings.configuration,
+        "尚未读取本机配置。",
+    );
+    if state.provider_setup_required {
+        page.subtitle = "Codex 内置提供方尚未配置";
+        page.sections.insert(
+            0,
+            DetailSection::facts(
+                "连接 Codex",
+                vec![
+                    fact("配置方式", "运行 cargo run -p zode，然后输入 /connect"),
+                    fact("配置文件", "~/.zode/config.json"),
+                    fact("完成后", "重新启动 Zode Desktop 以加载凭证"),
+                ],
+            ),
+        );
+    }
+    page
 }
 
 fn usage_page(state: &ZodeAppState) -> DetailPage {

@@ -28,8 +28,25 @@ pub(super) async fn load_initial_state(
     state.projectless_workspace_root = Some(projectless_workspace_root);
     state.host.node_id = capabilities.node_id;
     state.host.capabilities = capabilities;
-    state.composer.model = runtime_options.active_model;
-    state.composer.effort = runtime_options.effort;
+    state
+        .composer
+        .model
+        .clone_from(&runtime_options.active_model);
+    state.composer.effort.clone_from(&runtime_options.effort);
+    state
+        .composer
+        .available_models
+        .clone_from(&runtime_options.models);
+    state.composer.approval_mode = runtime_options.approval_mode;
+    state.composer.sandbox_mode = runtime_options.sandbox_mode;
+    state.composer.sandbox_network = runtime_options.sandbox_network;
+    state.composer.sandbox_label = match runtime_options.approval_mode {
+        zode_node_protocol::ApprovalMode::Request => "请求批准",
+        zode_node_protocol::ApprovalMode::Auto => "替我审批",
+        zode_node_protocol::ApprovalMode::Full => "完全访问",
+    }
+    .into();
+    state.composer_defaults = Some(runtime_options);
     state.threads = threads;
     restore_projectless_workspaces(&state);
     state.transcripts = load_transcripts(endpoint, &state.threads).await;
@@ -395,6 +412,7 @@ mod tests {
             models: vec!["global-model".into()],
             active_model: Some("global-model".into()),
             effort: None,
+            approval_mode: Default::default(),
             sandbox_mode: SandboxMode::Off,
             sandbox_network: false,
         }
@@ -598,6 +616,7 @@ mod tests {
             models: vec!["session-model".into()],
             active_model: Some("session-model".into()),
             effort: Some("high".into()),
+            approval_mode: Default::default(),
             sandbox_mode: SandboxMode::ReadOnly,
             sandbox_network: true,
         };
@@ -630,7 +649,7 @@ mod tests {
         ));
         assert_eq!(state.composer.model.as_deref(), Some("session-model"));
         assert_eq!(state.composer.effort.as_deref(), Some("high"));
-        assert_eq!(state.composer.sandbox_label, "只读");
+        assert_eq!(state.composer.sandbox_label, "请求批准");
         assert_eq!(
             state.project_permissions[&workspace],
             LoadState::Ready(Vec::new())

@@ -601,6 +601,7 @@ fn runtime_options_are_applied_only_to_the_addressed_live_session() {
         models: vec!["model-a".into(), "model-b".into()],
         active_model: Some("model-b".into()),
         effort: Some("high".into()),
+        approval_mode: Default::default(),
         sandbox_mode: SandboxMode::ReadOnly,
         sandbox_network: true,
     };
@@ -620,7 +621,7 @@ fn runtime_options_are_applied_only_to_the_addressed_live_session() {
     );
     assert_eq!(state.composer.model.as_deref(), Some("model-b"));
     assert_eq!(state.composer.effort.as_deref(), Some("high"));
-    assert_eq!(state.composer.sandbox_label, "只读");
+    assert_eq!(state.composer.sandbox_label, "请求批准");
 
     let deleted = SessionLocator::new(state.host.node_id, "deleted");
     assert!(!apply_session_runtime_options(
@@ -630,6 +631,7 @@ fn runtime_options_are_applied_only_to_the_addressed_live_session() {
             models: Vec::new(),
             active_model: None,
             effort: None,
+            approval_mode: Default::default(),
             sandbox_mode: SandboxMode::Off,
             sandbox_network: false,
         },

@@ -7,16 +7,31 @@ use crate::{stable_widget_id, ImeEvent, Key, Modifiers, RectExt, WidgetId, ZodeT
 
 mod attachments;
 mod context;
+mod footer;
 mod ime;
 mod input;
 mod queue;
 mod stack;
 
-pub use context::ComposerContextLayout;
+pub use context::{ComposerContextChipLayout, ComposerContextLayout};
+pub use footer::{
+    ComposerFooterLayout, ComposerFooterMenuLayout, ComposerFooterMenuWidget,
+    ComposerFooterRowLayout, ComposerFooterSectionLayout, COMPOSER_ADD_FILE_ID,
+    COMPOSER_ADD_GOAL_ID, COMPOSER_ADD_ID, COMPOSER_ADD_PLAN_ID, COMPOSER_ADD_WECHAT_ID,
+    COMPOSER_FOOTER_MENU_SURFACE_ID, COMPOSER_MODEL_BACK_ID, COMPOSER_MODEL_CONFIGURE_ID,
+    COMPOSER_MODEL_EFFORTS_ID, COMPOSER_MODEL_EFFORT_HIGH_ID, COMPOSER_MODEL_EFFORT_LOW_ID,
+    COMPOSER_MODEL_EFFORT_MEDIUM_ID, COMPOSER_MODEL_EFFORT_XHIGH_ID, COMPOSER_MODEL_ID,
+    COMPOSER_MODEL_MODELS_ID, COMPOSER_MODEL_RESET_ID, COMPOSER_MODEL_SPEEDS_ID,
+    COMPOSER_MODEL_SPEED_ID, COMPOSER_PERMISSION_AUTO_ID, COMPOSER_PERMISSION_CUSTOM_ID,
+    COMPOSER_PERMISSION_FULL_ID, COMPOSER_PERMISSION_ID, COMPOSER_PERMISSION_REQUEST_ID,
+};
 pub use queue::{ComposerQueueLayout, ComposerQueueMenuLayout, ComposerQueueRowLayout};
 pub use stack::ComposerLayout;
 
 pub const PROJECT_DETACH_ID: WidgetId = WidgetId(125);
+pub const COMPOSER_PROJECT_ID: WidgetId = WidgetId(126);
+pub const COMPOSER_LOCATION_ID: WidgetId = WidgetId(127);
+pub const COMPOSER_BRANCH_ID: WidgetId = WidgetId(128);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposerSubmission {
@@ -457,9 +472,23 @@ impl Composer {
         state: &ZodeAppState,
         workspace_label: Option<&str>,
     ) -> ComposerContextLayout {
+        Self::context_interaction_layout(rect, state, workspace_label, None, None)
+    }
+
+    pub fn context_interaction_layout(
+        rect: Rect,
+        state: &ZodeAppState,
+        workspace_label: Option<&str>,
+        connection_label: Option<&str>,
+        branch: Option<&str>,
+    ) -> ComposerContextLayout {
         let context = Self::layout_for_state(rect, state).context;
         context::layout(
             context,
+            workspace_label,
+            connection_label,
+            branch,
+            state.current_session.is_none(),
             state.current_session.is_none() && workspace_label.is_some(),
         )
     }
@@ -617,7 +646,20 @@ impl Composer {
                 theme,
             );
         }
-        input::paint(painter, layout.input, text_input, state, false, theme);
+        input::paint_surface(painter, layout.input, text_input, state, theme);
+        let mut preview_state = zode_app_model::demo_state();
+        preview_state.composer = state.clone();
+        let footer = ComposerFooterMenuWidget::trigger_layout(layout.input, &preview_state);
+        footer::ComposerFooterMenuWidget::paint_controls(
+            painter,
+            footer,
+            &preview_state,
+            Self::can_submit(state),
+            false,
+            None,
+            None,
+            theme,
+        );
     }
 
     pub fn paint_input_with_app_context(
@@ -647,6 +689,39 @@ impl Composer {
         hovered: Option<WidgetId>,
         theme: &ZodeTheme,
     ) {
+        Self::paint_input_with_workspace_app_context_interactions(
+            painter,
+            rect,
+            text_input,
+            state,
+            workspace_label,
+            connection_label,
+            branch,
+            goal,
+            focused,
+            hovered,
+            None,
+            theme,
+        );
+    }
+
+    /// Paints the app composer with explicit menu ownership for its context chips.
+    /// `menu_active` keeps the trigger pill highlighted while its popover owns focus.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_input_with_workspace_app_context_interactions(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        text_input: &TextInputState,
+        state: &ZodeAppState,
+        workspace_label: Option<&str>,
+        connection_label: Option<&str>,
+        branch: Option<&str>,
+        goal: Option<&GoalProgress>,
+        focused: Option<WidgetId>,
+        hovered: Option<WidgetId>,
+        menu_active: Option<WidgetId>,
+        theme: &ZodeTheme,
+    ) {
         let layout = Self::layout_for_state(rect, state);
         context::paint_interactive(
             painter,
@@ -655,9 +730,11 @@ impl Composer {
             connection_label,
             branch,
             goal,
+            state.current_session.is_none(),
             state.current_session.is_none() && workspace_label.is_some(),
             focused,
             hovered,
+            menu_active,
             theme,
         );
         if let Some(attachment_rect) = layout.attachments {
@@ -676,12 +753,15 @@ impl Composer {
         {
             queue::paint_rows(painter, queue_layout, messages, focused, hovered, theme);
         }
-        input::paint(
+        input::paint_surface(painter, layout.input, text_input, &state.composer, theme);
+        footer::ComposerFooterMenuWidget::paint_controls(
             painter,
-            layout.input,
-            text_input,
-            &state.composer,
+            footer::ComposerFooterMenuWidget::trigger_layout(layout.input, state),
+            state,
+            Self::can_submit(&state.composer),
             current_session_busy(state),
+            focused,
+            hovered,
             theme,
         );
         if let Some(queue_layout) = queue_layout.as_ref() {

@@ -1,9 +1,9 @@
 use jian_widgets::{components::tooltip::Tooltip, HorizontalAlign, Painter, Point2D, Rect};
 use zode_app_model::GoalProgress;
 
+use super::{COMPOSER_BRANCH_ID, COMPOSER_LOCATION_ID, COMPOSER_PROJECT_ID, PROJECT_DETACH_ID};
 use crate::{
     paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme, COMPOSER_CONTEXT_OVERLAP,
-    PROJECT_DETACH_ID,
 };
 
 const CONTEXT_ICON_SIZE: f32 = 14.0;
@@ -12,27 +12,135 @@ const CONTEXT_ICON_GAP: f32 = 8.0;
 const CONTEXT_ITEM_GAP: f32 = 24.0;
 const CONTEXT_INSET_X: f32 = 18.0;
 const CONTEXT_RADIUS: f32 = 18.0;
+const CHIP_HEIGHT: f32 = 28.0;
+const CHIP_RADIUS: f32 = CHIP_HEIGHT / 2.0;
+const CHIP_GAP: f32 = 2.0;
+const CHIP_INSET_X: f32 = 10.0;
+const CHIP_PAD_X: f32 = 10.0;
+const CHIP_MIN_WIDTH: f32 = 48.0;
+const PROJECT_CHIP_MIN_WIDTH: f32 = 56.0;
+const PROJECT_LABEL_GAP: f32 = 2.0;
+const MAX_CHIP_LABEL_WIDTH: f32 = 180.0;
 const DETACH_HIT_SIZE: f32 = 24.0;
 const DETACH_VISUAL_SIZE: f32 = 20.0;
-const TOOLTIP_W: f32 = 112.0;
 const TOOLTIP_H: f32 = 28.0;
 const TOOLTIP_GAP: f32 = 5.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ComposerContextChipLayout {
+    pub id: WidgetId,
+    /// Complete visual pill, including the project detach affordance.
+    pub rect: Rect,
+    /// Click target for the chip action. Project detach never overlaps this rectangle.
+    pub action_rect: Rect,
+    pub label_rect: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ComposerContextLayout {
+    pub project: Option<ComposerContextChipLayout>,
+    pub location: Option<ComposerContextChipLayout>,
+    pub branch: Option<ComposerContextChipLayout>,
     pub detach: Option<Rect>,
 }
 
-pub fn layout(rect: Rect, detachable_project: bool) -> ComposerContextLayout {
-    let detach = (detachable_project && rect.size.x > 0.0 && rect.size.y > 0.0).then(|| {
-        Rect::xywh(
-            rect.origin.x + 10.0,
-            rect.origin.y + (rect.size.y - DETACH_HIT_SIZE).max(0.0) / 2.0,
-            DETACH_HIT_SIZE.min(rect.size.x.max(0.0)),
-            DETACH_HIT_SIZE.min(rect.size.y.max(0.0)),
-        )
+impl ComposerContextLayout {
+    pub fn hit_test(&self, point: Point2D) -> Option<WidgetId> {
+        if self.detach.is_some_and(|rect| rect.contains(point)) {
+            return Some(PROJECT_DETACH_ID);
+        }
+        [self.project, self.location, self.branch]
+            .into_iter()
+            .flatten()
+            .find(|chip| chip.action_rect.contains(point))
+            .map(|chip| chip.id)
+    }
+
+    fn occupied_right(self, fallback: f32) -> f32 {
+        [self.project, self.location, self.branch]
+            .into_iter()
+            .flatten()
+            .map(|chip| chip.rect.max_x())
+            .fold(fallback, f32::max)
+    }
+}
+
+pub fn layout(
+    rect: Rect,
+    workspace_label: Option<&str>,
+    connection_label: Option<&str>,
+    branch_label: Option<&str>,
+    interactive: bool,
+    detachable_project: bool,
+) -> ComposerContextLayout {
+    let mut result = ComposerContextLayout {
+        project: None,
+        location: None,
+        branch: None,
+        detach: None,
+    };
+    if !interactive || rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+        return result;
+    }
+
+    let top = rect.origin.y + (rect.size.y - CHIP_HEIGHT.min(rect.size.y)).max(0.0) / 2.0;
+    let height = CHIP_HEIGHT.min(rect.size.y.max(0.0));
+    let right = (rect.max_x() - CHIP_INSET_X).max(rect.origin.x);
+    let mut x = (rect.origin.x + CHIP_INSET_X).min(right);
+
+    if let Some(label) = non_empty(workspace_label) {
+        let detach_width = if detachable_project {
+            DETACH_HIT_SIZE + 4.0
+        } else {
+            CONTEXT_ICON_SIZE + CONTEXT_ICON_GAP
+        };
+        let desired =
+            detach_width + estimated_text_width(label).min(MAX_CHIP_LABEL_WIDTH) + CHIP_PAD_X;
+        if let Some(chip_rect) =
+            take_chip(&mut x, right, top, height, desired, PROJECT_CHIP_MIN_WIDTH)
+        {
+            let detach = detachable_project.then(|| {
+                Rect::xywh(
+                    chip_rect.origin.x + 2.0,
+                    chip_rect.origin.y + (chip_rect.size.y - DETACH_HIT_SIZE).max(0.0) / 2.0,
+                    DETACH_HIT_SIZE.min((chip_rect.size.x - 2.0).max(0.0)),
+                    DETACH_HIT_SIZE.min(chip_rect.size.y.max(0.0)),
+                )
+            });
+            let leading_right = detach.map_or(
+                chip_rect.origin.x + CHIP_PAD_X + CONTEXT_ICON_SIZE + CONTEXT_ICON_GAP,
+                |detach| detach.max_x() + PROJECT_LABEL_GAP,
+            );
+            let label_rect = Rect::xywh(
+                leading_right.min(chip_rect.max_x()),
+                chip_rect.origin.y,
+                (chip_rect.max_x() - CHIP_PAD_X - leading_right).max(0.0),
+                chip_rect.size.y,
+            );
+            let action_left = detach.map_or(chip_rect.origin.x, |rect| rect.max_x());
+            let action_rect = Rect::xywh(
+                action_left.min(chip_rect.max_x()),
+                chip_rect.origin.y,
+                (chip_rect.max_x() - action_left).max(0.0),
+                chip_rect.size.y,
+            );
+            result.detach = detach;
+            result.project = Some(ComposerContextChipLayout {
+                id: COMPOSER_PROJECT_ID,
+                rect: chip_rect,
+                action_rect,
+                label_rect,
+            });
+        }
+    }
+
+    result.location = non_empty(connection_label).and_then(|label| {
+        take_standard_chip(&mut x, right, top, height, COMPOSER_LOCATION_ID, label)
     });
-    ComposerContextLayout { detach }
+    result.branch = non_empty(branch_label).and_then(|label| {
+        take_standard_chip(&mut x, right, top, height, COMPOSER_BRANCH_ID, label)
+    });
+    result
 }
 
 pub(super) fn paint(
@@ -52,6 +160,8 @@ pub(super) fn paint(
         branch,
         goal,
         false,
+        false,
+        None,
         None,
         None,
         theme,
@@ -66,9 +176,11 @@ pub(super) fn paint_interactive(
     connection_label: Option<&str>,
     branch: Option<&str>,
     goal: Option<&GoalProgress>,
+    interactive: bool,
     detachable_project: bool,
     focused: Option<WidgetId>,
     hovered: Option<WidgetId>,
+    menu_active: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
     if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
@@ -95,72 +207,160 @@ pub(super) fn paint_interactive(
     );
     painter.save();
     painter.clip_rect(rect);
-    let mut x = rect.origin.x + CONTEXT_INSET_X;
-    let context_layout = layout(rect, detachable_project && workspace_label.is_some());
-    if let (Some(label), Some(detach)) = (workspace_label, context_layout.detach) {
-        let detach_active =
-            focused == Some(PROJECT_DETACH_ID) || hovered == Some(PROJECT_DETACH_ID);
-        if detach_active {
-            let visual = Rect::xywh(
-                detach.origin.x + (detach.size.x - DETACH_VISUAL_SIZE) / 2.0,
-                detach.origin.y + (detach.size.y - DETACH_VISUAL_SIZE) / 2.0,
-                DETACH_VISUAL_SIZE,
-                DETACH_VISUAL_SIZE,
-            );
-            painter.fill_round_rect(visual, DETACH_VISUAL_SIZE / 2.0, theme.tokens.accent);
-            painter.stroke_svg_path(
-                SemanticIcon::Close.path(),
-                Point2D::new(visual.origin.x + 4.0, visual.origin.y + 4.0),
+    let context_layout = layout(
+        rect,
+        workspace_label,
+        connection_label,
+        branch,
+        interactive,
+        detachable_project && workspace_label.is_some(),
+    );
+    let occupied_right = if interactive {
+        paint_chips(
+            painter,
+            context_layout,
+            workspace_label,
+            connection_label,
+            branch,
+            focused,
+            hovered,
+            menu_active,
+            theme,
+        );
+        context_layout.occupied_right(rect.origin.x + CHIP_INSET_X)
+    } else {
+        paint_static_items(
+            painter,
+            rect,
+            workspace_label,
+            connection_label,
+            branch,
+            theme,
+        )
+    };
+    if let Some(goal) = goal {
+        let label = format!("{} · {} / {}", goal.title, goal.completed, goal.total);
+        if let Some(slot) = goal_slot(rect, occupied_right) {
+            paint_single_line(
+                painter,
+                &label,
+                slot,
                 12.0,
-                theme.tokens.accent_foreground,
-                SemanticIcon::Close.stroke_width(),
-            );
-        } else {
-            painter.stroke_svg_path(
-                SemanticIcon::Folder.path(),
-                Point2D::new(
-                    detach.origin.x + (detach.size.x - CONTEXT_ICON_SIZE) / 2.0,
-                    detach.origin.y + (detach.size.y - CONTEXT_ICON_SIZE) / 2.0,
-                ),
-                CONTEXT_ICON_SIZE,
-                theme.tokens.foreground,
-                SemanticIcon::Folder.stroke_width(),
+                500,
+                theme.zode_purple,
+                HorizontalAlign::End,
             );
         }
-        x = detach.max_x() + 4.0;
-        let label_width = painter.measure_text_weighted(label, CONTEXT_FONT_SIZE, 400);
-        paint_single_line(
-            painter,
-            label,
-            Rect::xywh(x, rect.origin.y, label_width, rect.size.y),
-            CONTEXT_FONT_SIZE,
-            400,
-            theme.tokens.foreground,
-            HorizontalAlign::Start,
-        );
-        x += label_width + CONTEXT_ITEM_GAP;
     }
-    let standard_workspace = (!detachable_project).then_some(workspace_label).flatten();
+    painter.restore();
+    paint_active_tooltip(painter, rect, context_layout, focused, hovered, theme);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_chips(
+    painter: &mut dyn Painter,
+    layout: ComposerContextLayout,
+    workspace_label: Option<&str>,
+    connection_label: Option<&str>,
+    branch_label: Option<&str>,
+    focused: Option<WidgetId>,
+    hovered: Option<WidgetId>,
+    menu_active: Option<WidgetId>,
+    theme: &ZodeTheme,
+) {
+    if let (Some(chip), Some(label)) = (layout.project, non_empty(workspace_label)) {
+        let detach_active = is_active(PROJECT_DETACH_ID, focused, hovered, menu_active);
+        if is_active(chip.id, focused, hovered, menu_active) || detach_active {
+            painter.fill_round_rect(
+                chip.rect,
+                CHIP_RADIUS.min(chip.rect.size.y / 2.0),
+                theme.tokens.accent,
+            );
+        }
+        if let Some(detach) = layout.detach {
+            let visual = centered_square(detach, DETACH_VISUAL_SIZE);
+            painter.fill_round_rect(
+                visual,
+                DETACH_VISUAL_SIZE / 2.0,
+                theme
+                    .tokens
+                    .muted_foreground
+                    .with_alpha(if detach_active { 0.2 } else { 0.12 }),
+            );
+            paint_icon(
+                painter,
+                SemanticIcon::Close,
+                centered_square(visual, 12.0),
+                if detach_active {
+                    theme.tokens.foreground
+                } else {
+                    theme.tokens.muted_foreground
+                },
+            );
+        } else {
+            let icon = Rect::xywh(
+                chip.rect.origin.x + CHIP_PAD_X,
+                chip.rect.origin.y + (chip.rect.size.y - CONTEXT_ICON_SIZE) / 2.0,
+                CONTEXT_ICON_SIZE,
+                CONTEXT_ICON_SIZE,
+            );
+            paint_icon(painter, SemanticIcon::Folder, icon, theme.tokens.foreground);
+        }
+        paint_chip_label(painter, label, chip.label_rect, theme);
+    }
+    for (chip, label, icon) in [
+        (
+            layout.location,
+            non_empty(connection_label),
+            SemanticIcon::Host,
+        ),
+        (layout.branch, non_empty(branch_label), SemanticIcon::Branch),
+    ] {
+        let (Some(chip), Some(label)) = (chip, label) else {
+            continue;
+        };
+        if is_active(chip.id, focused, hovered, menu_active) {
+            painter.fill_round_rect(
+                chip.rect,
+                CHIP_RADIUS.min(chip.rect.size.y / 2.0),
+                theme.tokens.accent,
+            );
+        }
+        let icon_rect = Rect::xywh(
+            chip.rect.origin.x + CHIP_PAD_X,
+            chip.rect.origin.y + (chip.rect.size.y - CONTEXT_ICON_SIZE) / 2.0,
+            CONTEXT_ICON_SIZE,
+            CONTEXT_ICON_SIZE,
+        );
+        paint_icon(painter, icon, icon_rect, theme.tokens.foreground);
+        paint_chip_label(painter, label, chip.label_rect, theme);
+    }
+}
+
+fn paint_static_items(
+    painter: &mut dyn Painter,
+    rect: Rect,
+    workspace_label: Option<&str>,
+    connection_label: Option<&str>,
+    branch_label: Option<&str>,
+    theme: &ZodeTheme,
+) -> f32 {
+    let mut x = rect.origin.x + CONTEXT_INSET_X;
     for (icon, label) in [
-        (SemanticIcon::Folder, standard_workspace),
+        (SemanticIcon::Folder, workspace_label),
         (SemanticIcon::Host, connection_label),
-        (SemanticIcon::Branch, branch),
+        (SemanticIcon::Branch, branch_label),
     ]
     .into_iter()
-    .filter_map(|(icon, label)| label.map(|label| (icon, label)))
-    .filter(|(_, label)| !label.trim().is_empty())
+    .filter_map(|(icon, label)| non_empty(label).map(|label| (icon, label)))
     {
-        let icon_origin = jian_widgets::Point2D::new(
+        let icon_rect = Rect::xywh(
             x,
             rect.origin.y + (rect.size.y - CONTEXT_ICON_SIZE).max(0.0) / 2.0,
-        );
-        painter.stroke_svg_path(
-            icon.path(),
-            icon_origin,
             CONTEXT_ICON_SIZE,
-            theme.tokens.foreground,
-            icon.stroke_width(),
+            CONTEXT_ICON_SIZE,
         );
+        paint_icon(painter, icon, icon_rect, theme.tokens.foreground);
         x += CONTEXT_ICON_SIZE + CONTEXT_ICON_GAP;
         let label_width = painter.measure_text_weighted(label, CONTEXT_FONT_SIZE, 400);
         paint_single_line(
@@ -177,40 +377,196 @@ pub(super) fn paint_interactive(
             break;
         }
     }
-    if let Some(goal) = goal {
-        let label = format!("{} · {} / {}", goal.title, goal.completed, goal.total);
-        if let Some(slot) = goal_slot(rect, x) {
-            paint_single_line(
-                painter,
-                &label,
-                slot,
-                12.0,
-                500,
-                theme.zode_purple,
-                HorizontalAlign::End,
-            );
-        }
+    x
+}
+
+fn paint_active_tooltip(
+    painter: &mut dyn Painter,
+    rail: Rect,
+    layout: ComposerContextLayout,
+    focused: Option<WidgetId>,
+    hovered: Option<WidgetId>,
+    theme: &ZodeTheme,
+) {
+    let active = hovered.or(focused);
+    let tooltip = if active == Some(PROJECT_DETACH_ID) {
+        layout.detach.map(|rect| (rect, "不在项目中工作"))
+    } else {
+        [
+            (layout.project, "更改此任务的项目"),
+            (layout.location, "选择任务的运行位置"),
+            (layout.branch, "切换任务分支"),
+        ]
+        .into_iter()
+        .find_map(|(chip, label)| {
+            chip.filter(|chip| active == Some(chip.id))
+                .map(|chip| (chip.rect, label))
+        })
+    };
+    let Some((anchor, label)) = tooltip else {
+        return;
+    };
+    let width = (painter.measure_text_weighted(label, 12.0, 400) + 16.0)
+        .clamp(80.0, 200.0)
+        .min(rail.size.x);
+    let x = (anchor.origin.x + anchor.size.x / 2.0 - width / 2.0)
+        .clamp(rail.origin.x, (rail.max_x() - width).max(rail.origin.x));
+    Tooltip { label }.paint(
+        painter,
+        Rect::xywh(
+            x,
+            anchor.origin.y - TOOLTIP_GAP - TOOLTIP_H,
+            width,
+            TOOLTIP_H,
+        ),
+        &theme.tokens,
+    );
+}
+
+fn paint_chip_label(painter: &mut dyn Painter, label: &str, rect: Rect, theme: &ZodeTheme) {
+    if rect.size.x <= 0.0 {
+        return;
     }
+    let visible = end_ellipsize(painter, label, rect.size.x, CONTEXT_FONT_SIZE, 400);
+    painter.save();
+    painter.clip_rect(rect);
+    paint_single_line(
+        painter,
+        &visible,
+        rect,
+        CONTEXT_FONT_SIZE,
+        400,
+        theme.tokens.foreground,
+        HorizontalAlign::Start,
+    );
     painter.restore();
-    if hovered == Some(PROJECT_DETACH_ID) || focused == Some(PROJECT_DETACH_ID) {
-        if let Some(detach) = context_layout.detach {
-            let tooltip_x = (detach.origin.x + detach.size.x / 2.0 - TOOLTIP_W / 2.0)
-                .clamp(rect.origin.x, (rect.max_x() - TOOLTIP_W).max(rect.origin.x));
-            Tooltip {
-                label: "不在项目中工作",
-            }
-            .paint(
-                painter,
-                Rect::xywh(
-                    tooltip_x,
-                    detach.origin.y - TOOLTIP_GAP - TOOLTIP_H,
-                    TOOLTIP_W.min(rect.size.x),
-                    TOOLTIP_H,
-                ),
-                &theme.tokens,
-            );
+}
+
+fn paint_icon(
+    painter: &mut dyn Painter,
+    icon: SemanticIcon,
+    rect: Rect,
+    color: jian_widgets::Color,
+) {
+    painter.stroke_svg_path(
+        icon.path(),
+        rect.origin,
+        rect.size.x,
+        color,
+        icon.stroke_width(),
+    );
+}
+
+fn centered_square(rect: Rect, side: f32) -> Rect {
+    let side = side.min(rect.size.x).min(rect.size.y).max(0.0);
+    Rect::xywh(
+        rect.origin.x + (rect.size.x - side) / 2.0,
+        rect.origin.y + (rect.size.y - side) / 2.0,
+        side,
+        side,
+    )
+}
+
+fn is_active(
+    id: WidgetId,
+    focused: Option<WidgetId>,
+    hovered: Option<WidgetId>,
+    menu_active: Option<WidgetId>,
+) -> bool {
+    focused == Some(id) || hovered == Some(id) || menu_active == Some(id)
+}
+
+fn take_standard_chip(
+    x: &mut f32,
+    right: f32,
+    top: f32,
+    height: f32,
+    id: WidgetId,
+    label: &str,
+) -> Option<ComposerContextChipLayout> {
+    let desired = CHIP_PAD_X * 2.0
+        + CONTEXT_ICON_SIZE
+        + CONTEXT_ICON_GAP
+        + estimated_text_width(label).min(MAX_CHIP_LABEL_WIDTH);
+    let rect = take_chip(x, right, top, height, desired, CHIP_MIN_WIDTH)?;
+    let label_left = rect.origin.x + CHIP_PAD_X + CONTEXT_ICON_SIZE + CONTEXT_ICON_GAP;
+    Some(ComposerContextChipLayout {
+        id,
+        rect,
+        action_rect: rect,
+        label_rect: Rect::xywh(
+            label_left.min(rect.max_x()),
+            rect.origin.y,
+            (rect.max_x() - CHIP_PAD_X - label_left).max(0.0),
+            rect.size.y,
+        ),
+    })
+}
+
+fn take_chip(
+    x: &mut f32,
+    right: f32,
+    top: f32,
+    height: f32,
+    desired_width: f32,
+    minimum_width: f32,
+) -> Option<Rect> {
+    let remaining = (right - *x).max(0.0);
+    if remaining < minimum_width || height <= 0.0 {
+        *x = right;
+        return None;
+    }
+    let width = desired_width.max(minimum_width).min(remaining);
+    let rect = Rect::xywh(*x, top, width, height);
+    *x = if width + f32::EPSILON < desired_width {
+        right
+    } else {
+        rect.max_x() + CHIP_GAP
+    };
+    Some(rect)
+}
+
+fn estimated_text_width(label: &str) -> f32 {
+    label
+        .chars()
+        .map(|character| if character.is_ascii() { 7.2 } else { 14.0 })
+        .sum()
+}
+
+fn non_empty(label: Option<&str>) -> Option<&str> {
+    label.filter(|label| !label.trim().is_empty())
+}
+
+fn end_ellipsize(
+    painter: &dyn Painter,
+    text: &str,
+    max_width: f32,
+    font_size: f32,
+    weight: u16,
+) -> String {
+    if max_width <= 0.0 {
+        return String::new();
+    }
+    if painter.measure_text_weighted(text, font_size, weight) <= max_width {
+        return text.to_owned();
+    }
+    let ellipsis = "…";
+    let ellipsis_width = painter.measure_text_weighted(ellipsis, font_size, weight);
+    if ellipsis_width > max_width {
+        return String::new();
+    }
+    let mut end = text.len();
+    while end > 0 {
+        end = text[..end]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(index, _)| index);
+        let candidate = format!("{}…", &text[..end]);
+        if painter.measure_text_weighted(&candidate, font_size, weight) <= max_width {
+            return candidate;
         }
     }
+    ellipsis.to_owned()
 }
 
 fn goal_slot(rect: Rect, occupied_right: f32) -> Option<Rect> {

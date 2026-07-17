@@ -199,6 +199,7 @@ pub(crate) fn base_scene_state(theme: ThemePreference, viewport_width: u32) -> Z
                 models: vec!["gpt-5.6".into()],
                 active_model: Some("gpt-5.6".into()),
                 effort: Some("high".into()),
+                approval_mode: Default::default(),
                 sandbox_mode: SandboxMode::Off,
                 sandbox_network: false,
             }),

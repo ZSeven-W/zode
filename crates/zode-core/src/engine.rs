@@ -28,7 +28,9 @@ use agent_tools_code::{
 // before async work.
 use std::sync::Mutex;
 
-use crate::approval::{ApprovalGate, ApprovalQueue, BypassGate, QueueGate};
+use crate::approval::{
+    gate_for_policy, ApprovalGate, ApprovalPolicy, ApprovalQueue, BypassGate, QueueGate,
+};
 use crate::bg_shells::{BackgroundShellTracker, BgShellHook};
 use crate::browser::{
     BrowserActTool, BrowserEvalTool, BrowserReadTool, BrowserSession, BrowserTabsTool,
@@ -2333,8 +2335,7 @@ pub struct EngineTemplate {
     /// Interactive question channel (TUI) for `AskUserQuestion`. `None` → the
     /// tool isn't registered (no UI to answer it).
     question_queue: Option<crate::question::QuestionQueue>,
-    /// When true, tools auto-approve (BypassGate) regardless of `queue`.
-    yolo: bool,
+    approval_policy: ApprovalPolicy,
     /// Plan mode: only read-only tools are registered and the system prompt
     /// directs the agent to research and present a plan, not make changes.
     plan_mode: bool,
@@ -2379,7 +2380,11 @@ impl EngineTemplate {
             cwd,
             queue,
             question_queue: None,
-            yolo,
+            approval_policy: if yolo {
+                ApprovalPolicy::Full
+            } else {
+                ApprovalPolicy::Request
+            },
             plan_mode: false,
             read_only_tools: false,
             tool_filter: None,
@@ -2461,10 +2466,11 @@ impl EngineTemplate {
         label: Option<String>,
         carry: CarryState,
     ) -> Result<ZodeEngine, CoreError> {
-        let gate: Arc<dyn ApprovalGate> = match (&self.queue, self.yolo) {
-            (Some(q), false) => Arc::new(QueueGate::with_label(q.clone(), label.clone())),
-            _ => Arc::new(BypassGate),
+        let interactive: Arc<dyn ApprovalGate> = match &self.queue {
+            Some(q) => Arc::new(QueueGate::with_label(q.clone(), label.clone())),
+            None => Arc::new(BypassGate),
         };
+        let gate = gate_for_policy(self.approval_policy, interactive);
         // AskUserQuestion is registered only when a UI question channel exists.
         let question_tool: Option<Arc<dyn Tool>> = self.question_queue.as_ref().map(|q| {
             Arc::new(crate::question::AskUserQuestionTool::new(
@@ -2618,7 +2624,11 @@ impl EngineTemplate {
     }
 
     pub fn yolo(&self) -> bool {
-        self.yolo
+        self.approval_policy == ApprovalPolicy::Full
+    }
+
+    pub fn approval_policy(&self) -> ApprovalPolicy {
+        self.approval_policy
     }
 
     pub fn plan_mode(&self) -> bool {
@@ -2711,6 +2721,18 @@ impl EngineTemplate {
         // explicit access modes instead of an unrepresentable read-only+yolo
         // hybrid. Plan mode remains independent and can still filter tools.
         t.read_only_tools = false;
+        t.approval_policy = if yolo {
+            ApprovalPolicy::Full
+        } else {
+            ApprovalPolicy::Request
+        };
+        t
+    }
+
+    /// Clone with the session approval policy replaced.
+    pub fn with_approval_policy(&self, policy: ApprovalPolicy) -> Self {
+        let mut t = self.clone();
+        t.approval_policy = policy;
         t
     }
 

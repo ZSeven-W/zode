@@ -37,12 +37,20 @@ use crate::{
 use zode_app_runtime::{workspace_uri_to_path, AppStateStore, TaskContext};
 use zode_node_protocol::{AgentEndpoint, NodeCapability, UserContent, WorkspaceUri};
 
+#[path = "app/branch_catalog.rs"]
+mod branch_catalog;
+#[path = "app/composer_context.rs"]
+mod composer_context;
+#[path = "app/composer_footer.rs"]
+mod composer_footer;
 #[path = "app/environment-actions.rs"]
 mod environment_actions;
 #[path = "app/external-preview.rs"]
 mod external_preview;
 mod integrations;
 mod interaction;
+#[path = "app/local_navigation.rs"]
+mod local_navigation;
 mod navigation_persistence;
 mod navigation_state;
 mod panel_menu;
@@ -51,6 +59,8 @@ mod presentation;
 #[path = "app/project-actions.rs"]
 mod project_actions;
 mod project_picker;
+#[path = "app/provider-setup.rs"]
+mod provider_setup;
 mod queue;
 mod queue_focus;
 mod session_menu;
@@ -77,6 +87,7 @@ pub struct DesktopApp {
     agent_events: Option<AgentEventBridge>,
     composer: ComposerController,
     project_picker_controller: ProjectPickerController,
+    branch_picker_controller: ProjectPickerController,
     session_rename_controller: SessionRenameController,
     /// Full queued payloads stay controller-private so immutable UI snapshots
     /// never retain image base64. `ZodeAppState` stores only lightweight queue
@@ -109,6 +120,7 @@ pub struct DesktopApp {
     repository_service: Arc<dyn RepositoryService>,
     session_window: Arc<dyn SessionWindowService>,
     workspace_picker: project_picker::WorkspacePickerEffect,
+    branch_catalog: branch_catalog::BranchCatalogEffect,
     app_state_store: Option<AppStateStore>,
     window_geometry: Option<WindowGeometry>,
 }
@@ -197,6 +209,8 @@ impl DesktopApp {
         let mut composer = ComposerController::new(app_state.composer.draft.clone());
         let project_picker_controller =
             ProjectPickerController::new(app_state.project_picker.search.clone());
+        let branch_picker_controller =
+            ProjectPickerController::new(app_state.composer.branch_picker.query.clone());
         let busy = app_state
             .current_session
             .as_ref()
@@ -209,6 +223,7 @@ impl DesktopApp {
                 let _ = terminal_proxy.send_event(AppWake::Redraw);
             });
         let workspace_picker = project_picker::WorkspacePickerEffect::new(proxy.clone());
+        let branch_catalog = branch_catalog::BranchCatalogEffect::new(proxy.clone());
         let frame_snapshot = WorkspaceSnapshot::build(
             &app_state,
             DEFAULT_WINDOW_WIDTH as f32,
@@ -239,6 +254,7 @@ impl DesktopApp {
             agent_events: None,
             composer,
             project_picker_controller,
+            branch_picker_controller,
             session_rename_controller: SessionRenameController::default(),
             queued_payloads: queue::QueuedPayloadStore::default(),
             provisional_sessions: BTreeSet::new(),
@@ -265,6 +281,7 @@ impl DesktopApp {
             repository_service: Arc::new(LocalRepositoryService),
             session_window: Arc::new(NativeSessionWindowService),
             workspace_picker,
+            branch_catalog,
             app_state_store,
             window_geometry,
         }
@@ -317,6 +334,10 @@ impl DesktopApp {
         let ignored = matches!(outcome, zode_app_ui::ComposerOutcome::Ignored);
         let draft_changed = self.app_state.composer.draft != self.composer.text();
         self.app_state.composer.draft = self.composer.text().to_owned();
+
+        if self.redirect_unconfigured_submission(&outcome) {
+            return;
+        }
 
         let editing = self
             .app_state
@@ -445,6 +466,7 @@ impl ApplicationHandler<AppWake> for DesktopApp {
             AppWake::Redraw => {
                 self.drain_accessibility_actions();
                 let workspace_picks_applied = self.drain_workspace_pick_results();
+                let branch_catalogs_applied = self.drain_branch_catalog_results();
                 let event_drain = self
                     .agent_events
                     .as_mut()
@@ -487,6 +509,7 @@ impl ApplicationHandler<AppWake> for DesktopApp {
                     || commands_applied > 0
                     || queries_applied > 0
                     || workspace_picks_applied > 0
+                    || branch_catalogs_applied > 0
                     || terminal_changed;
                 if background_changed {
                     self.rebuild_frame_snapshot();

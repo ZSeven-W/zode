@@ -1,7 +1,10 @@
 use std::{num::NonZeroU32, sync::Arc};
 
 use winit::event_loop::ActiveEventLoop;
-use zode_app_ui::{accessibility_tree, Composer, WorkspaceShell, WorkspaceSnapshot, COMPOSER_ID};
+use zode_app_ui::{
+    accessibility_tree, Composer, ComposerContextMenu, WorkspaceShell, WorkspaceSnapshot,
+    COMPOSER_BRANCH_SEARCH_ID, COMPOSER_ID,
+};
 
 #[cfg(not(target_os = "macos"))]
 use crate::event_map::resize_direction;
@@ -114,7 +117,7 @@ impl DesktopApp {
         }
         canvas.scale((scale, scale));
         let theme = crate::preferences::theme_for_state(&self.app_state);
-        let ime_cursor_area = {
+        let (composer_ime_cursor_area, branch_search_ime_cursor_area) = {
             let mut painter = FramePainter::new(&mut self.renderer, canvas);
             WorkspaceShell::paint_snapshot_with_project_picker(
                 &mut painter,
@@ -125,6 +128,7 @@ impl DesktopApp {
                 self.terminal_controller.selection(),
                 &project_picker,
                 self.project_picker_controller.input_state(),
+                self.branch_picker_controller.input_state(),
                 self.session_rename_controller.input_state(),
                 self.hovered_widget,
                 self.modifiers.super_key(),
@@ -133,9 +137,10 @@ impl DesktopApp {
             // Focus sync installs a caret-shaped fallback before IME is
             // enabled. Resolve the exact caret on the first focused frame and
             // only after input/layout changes thereafter.
-            (self.window_focused
+            let composer = (self.window_focused
                 && self.focused_widget == Some(COMPOSER_ID)
-                && (self.composer_ime_cursor_area_dirty || self.composer_ime_cursor_area.is_none()))
+                && (self.composer_ime_cursor_area_dirty
+                    || self.composer_ime_cursor_area.is_none()))
             .then(|| {
                 Composer::ime_cursor_area(
                     &mut painter,
@@ -145,15 +150,34 @@ impl DesktopApp {
                     &theme,
                 )
             })
-            .flatten()
+            .flatten();
+            let branch_search = (self.window_focused
+                && self.focused_widget == Some(COMPOSER_BRANCH_SEARCH_ID))
+            .then(|| {
+                let search = self.frame_snapshot.node(COMPOSER_BRANCH_SEARCH_ID)?.rect;
+                ComposerContextMenu::branch_search_ime_cursor_area(
+                    &mut painter,
+                    search,
+                    self.branch_picker_controller.input_state(),
+                    &theme,
+                )
+            })
+            .flatten();
+            (composer, branch_search)
         };
-        if let Some(area) = ime_cursor_area {
+        if let Some(area) = composer_ime_cursor_area {
             self.composer_ime_cursor_area = Some(area);
             self.composer_ime_cursor_area_dirty = false;
         }
         if self.window_focused && self.focused_widget == Some(COMPOSER_ID) {
             if let (Some(window), Some(area)) =
                 (self.window.as_deref(), self.composer_ime_cursor_area)
+            {
+                crate::ime::set_cursor_area(window, area);
+            }
+        } else if self.window_focused && self.focused_widget == Some(COMPOSER_BRANCH_SEARCH_ID) {
+            if let (Some(window), Some(area)) =
+                (self.window.as_deref(), branch_search_ime_cursor_area)
             {
                 crate::ime::set_cursor_area(window, area);
             }

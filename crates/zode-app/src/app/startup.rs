@@ -24,6 +24,7 @@ fn run_demo_with_session(session_id: Option<String>) -> Result<(), Box<dyn std::
     let cwd = std::env::current_dir()?;
     let startup_workspace = path_to_workspace_uri(&cwd)?;
     let bootstrap = tokio_runtime.block_on(AppBootstrap::new(cwd).resolve())?;
+    let provider_setup_required = bootstrap.needs_setup;
     let config_dir = ConfigManager::config_dir()?;
     let projectless_workspace = config_dir.join("task-workspaces");
     ensure_private_task_root(&projectless_workspace)?;
@@ -33,12 +34,13 @@ fn run_demo_with_session(session_id: Option<String>) -> Result<(), Box<dyn std::
         LocalAppRuntime::new(config_dir, bootstrap, 256)?
     };
     let endpoint: Arc<dyn AgentEndpoint> = runtime.endpoint();
-    let state = tokio_runtime.block_on(load_initial_state(
+    let mut state = tokio_runtime.block_on(load_initial_state(
         endpoint.as_ref(),
         runtime.capabilities().clone(),
         startup_workspace,
         projectless_workspace_root,
     ))?;
+    state.provider_setup_required = provider_setup_required;
 
     let event_loop = EventLoop::<AppWake>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);

@@ -272,6 +272,11 @@ pub enum AgentCommandKind {
         mode: SandboxMode,
         network: bool,
     },
+    SetPermissionPreset {
+        approval_mode: ApprovalMode,
+        sandbox_mode: SandboxMode,
+        network: bool,
+    },
 }
 
 /// A decision for one tool approval request.
@@ -310,6 +315,19 @@ pub enum SandboxMode {
     Off,
 }
 
+/// Session-scoped policy for approving mutating tool calls.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalMode {
+    /// Ask before every mutating or destructive tool call.
+    #[default]
+    Request,
+    /// Auto-approve ordinary mutations and ask only for sandbox escapes.
+    Auto,
+    /// Auto-approve every tool call, including sandbox escapes.
+    Full,
+}
+
 /// Runtime options exposed to an application client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -317,6 +335,8 @@ pub struct RuntimeOptions {
     pub models: Vec<String>,
     pub active_model: Option<String>,
     pub effort: Option<String>,
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
     pub sandbox_mode: SandboxMode,
     pub sandbox_network: bool,
 }

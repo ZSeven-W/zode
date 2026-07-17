@@ -18,9 +18,10 @@ use zode_core::engine::CarryState;
 use zode_core::session_store::SessionWriteMode;
 use zode_core::EngineTemplate;
 use zode_node_protocol::{
-    AgentCommand, AgentCommandKind, AgentQuery, AgentSnapshot, CapabilityManifest, DiffSnapshot,
-    EndpointError, EndpointErrorKind, NodeCapability, NodeId, RuntimeOptions, SandboxMode,
-    SessionLocator, TurnId, UsageSnapshot, UserContent, WorkspaceUri, PROTOCOL_VERSION,
+    AgentCommand, AgentCommandKind, AgentQuery, AgentSnapshot, ApprovalMode, CapabilityManifest,
+    DiffSnapshot, EndpointError, EndpointErrorKind, NodeCapability, NodeId, RuntimeOptions,
+    SandboxMode, SessionLocator, TurnId, UsageSnapshot, UserContent, WorkspaceUri,
+    PROTOCOL_VERSION,
 };
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
@@ -820,8 +821,9 @@ async fn session_runtime_options_read_back_only_the_addressed_loaded_session() {
         .command(command(
             session_a.clone(),
             None,
-            AgentCommandKind::SetSandbox {
-                mode: SandboxMode::ReadOnly,
+            AgentCommandKind::SetPermissionPreset {
+                approval_mode: ApprovalMode::Auto,
+                sandbox_mode: SandboxMode::ReadOnly,
                 network: true,
             },
         ))
@@ -859,6 +861,7 @@ async fn session_runtime_options_read_back_only_the_addressed_loaded_session() {
     );
     assert_eq!(options_a.active_model.as_deref(), Some("session-a-model"));
     assert_eq!(options_a.effort.as_deref(), Some("high"));
+    assert_eq!(options_a.approval_mode, ApprovalMode::Auto);
     assert_eq!(options_a.sandbox_mode, SandboxMode::ReadOnly);
     assert!(options_a.sandbox_network);
 
@@ -873,6 +876,7 @@ async fn session_runtime_options_read_back_only_the_addressed_loaded_session() {
     );
     assert_eq!(options_b.active_model.as_deref(), Some("initial-model"));
     assert_eq!(options_b.effort, None);
+    assert_eq!(options_b.approval_mode, ApprovalMode::Request);
     assert_eq!(options_b.sandbox_mode, SandboxMode::Off);
     assert!(!options_b.sandbox_network);
 }

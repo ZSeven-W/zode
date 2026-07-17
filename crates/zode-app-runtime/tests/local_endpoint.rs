@@ -35,6 +35,7 @@ fn runtime_options() -> RuntimeOptions {
         models: vec!["fake-model".into()],
         active_model: Some("fake-model".into()),
         effort: None,
+        approval_mode: Default::default(),
         sandbox_mode: SandboxMode::WorkspaceWrite,
         sandbox_network: false,
     }

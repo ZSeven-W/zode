@@ -259,6 +259,7 @@ fn state_with_runtime(
                 models: vec!["gpt-5".into()],
                 active_model: Some("gpt-5".into()),
                 effort: Some("standard".into()),
+                approval_mode: Default::default(),
                 sandbox_mode,
                 sandbox_network,
             }),

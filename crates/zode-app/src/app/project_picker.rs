@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use winit::event_loop::EventLoopProxy;
-use zode_app_model::{AppCommand, ProjectState};
+use zode_app_model::{AppCommand, ProjectPickerAnchor, ProjectState};
 use zode_app_ui::{
     ImeEvent, Key, KeyEvent, Modifiers, ProjectPicker, ProjectSearchOutcome, WidgetId, COMPOSER_ID,
-    PROJECT_PICKER_NEW_ID, PROJECT_PICKER_PROJECTLESS_ID, PROJECT_PICKER_SEARCH_ID,
-    PROJECT_PICKER_SURFACE_ID, PROJECT_PICKER_TRIGGER_ID,
+    COMPOSER_PROJECT_ID, PROJECT_PICKER_NEW_ID, PROJECT_PICKER_PROJECTLESS_ID,
+    PROJECT_PICKER_SEARCH_ID, PROJECT_PICKER_SURFACE_ID, PROJECT_PICKER_TRIGGER_ID,
 };
 use zode_node_protocol::{SessionLocator, WorkspaceUri};
 
@@ -54,18 +54,30 @@ impl DesktopApp {
         &mut self,
         command: &AppCommand,
         was_open: bool,
+        previous_anchor: ProjectPickerAnchor,
     ) -> Option<WidgetId> {
         if !self.app_state.project_picker.open {
             self.project_picker_controller.set_text("");
         }
         match command {
-            AppCommand::ToggleProjectPicker if !was_open && self.app_state.project_picker.open => {
+            AppCommand::ToggleProjectPicker
+                if self.app_state.project_picker.open
+                    && (!was_open || previous_anchor != ProjectPickerAnchor::Welcome) =>
+            {
+                self.project_picker_controller.set_text("");
+                Some(PROJECT_PICKER_SEARCH_ID)
+            }
+            AppCommand::ToggleComposerProjectPicker
+                if self.app_state.project_picker.open
+                    && (!was_open || previous_anchor != ProjectPickerAnchor::Composer) =>
+            {
                 self.project_picker_controller.set_text("");
                 Some(PROJECT_PICKER_SEARCH_ID)
             }
             AppCommand::ToggleProjectPicker | AppCommand::CloseProjectPicker => {
-                Some(PROJECT_PICKER_TRIGGER_ID)
+                Some(project_picker_trigger(previous_anchor))
             }
+            AppCommand::ToggleComposerProjectPicker => Some(COMPOSER_PROJECT_ID),
             AppCommand::BeginTask { .. } => Some(COMPOSER_ID),
             _ => None,
         }
@@ -256,6 +268,13 @@ impl DesktopApp {
             }
         }
         applied
+    }
+}
+
+fn project_picker_trigger(anchor: ProjectPickerAnchor) -> WidgetId {
+    match anchor {
+        ProjectPickerAnchor::Welcome => PROJECT_PICKER_TRIGGER_ID,
+        ProjectPickerAnchor::Composer => COMPOSER_PROJECT_ID,
     }
 }
 

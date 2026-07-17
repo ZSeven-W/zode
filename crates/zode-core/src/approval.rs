@@ -42,6 +42,29 @@ impl ApprovalScope {
     }
 }
 
+/// Session-scoped policy used to decide which tool calls reach the approver.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ApprovalPolicy {
+    /// Ask before every mutating or destructive tool call.
+    #[default]
+    Request,
+    /// Auto-approve ordinary mutations, but still ask before leaving the sandbox.
+    Auto,
+    /// Auto-approve every tool call, including sandbox escapes.
+    Full,
+}
+
+pub fn gate_for_policy(
+    policy: ApprovalPolicy,
+    interactive: std::sync::Arc<dyn ApprovalGate>,
+) -> std::sync::Arc<dyn ApprovalGate> {
+    match policy {
+        ApprovalPolicy::Request => interactive,
+        ApprovalPolicy::Auto => std::sync::Arc::new(EscalationOnlyGate::new(interactive)),
+        ApprovalPolicy::Full => std::sync::Arc::new(BypassGate),
+    }
+}
+
 /// Host-supplied approver. Headless uses [`StdinGate`]; the TUI supplies
 /// a queue-backed gate (Phase 05); `--yolo` uses [`BypassGate`].
 #[async_trait]
@@ -113,6 +136,22 @@ fn accept_edits_auto_allows(tool: &str, input: &serde_json::Value) -> bool {
     }
 }
 
+/// Auto-approval gate that only delegates sandbox escape requests.
+///
+/// The same gate is used by the outer mutating-tool decorator and by the
+/// sandbox fallback path. Explicit escape flags are visible to the former;
+/// the latter uses a dedicated escalation label after a sandbox denial.
+#[derive(Debug)]
+pub struct EscalationOnlyGate {
+    inner: std::sync::Arc<dyn ApprovalGate>,
+}
+
+impl EscalationOnlyGate {
+    pub fn new(inner: std::sync::Arc<dyn ApprovalGate>) -> Self {
+        Self { inner }
+    }
+}
+
 #[async_trait]
 impl ApprovalGate for AcceptEditsGate {
     fn interactive(&self) -> bool {
@@ -124,6 +163,17 @@ impl ApprovalGate for AcceptEditsGate {
             Approval::AllowOnce
         } else {
             self.prompt.approve(tool, input).await
+        }
+    }
+}
+
+#[async_trait]
+impl ApprovalGate for EscalationOnlyGate {
+    async fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval {
+        if tool.contains("escalate") || crate::sandbox::wants_escape(input) {
+            self.inner.approve(tool, input).await
+        } else {
+            Approval::AllowOnce
         }
     }
 }
@@ -621,6 +671,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn escalation_only_gate_auto_approves_ordinary_mutations() {
+        let gate = EscalationOnlyGate::new(std::sync::Arc::new(DenyGate));
+        assert_eq!(
+            gate.approve("FileWrite", &json!({"path": "src/lib.rs"})).await,
+            Approval::AllowOnce
+        );
+    }
+
+    #[tokio::test]
+    async fn escalation_only_gate_delegates_explicit_and_fallback_escalations() {
+        let gate = EscalationOnlyGate::new(std::sync::Arc::new(DenyGate));
+        assert_eq!(
+            gate.approve("Bash", &json!({"sandbox_permissions": "require_escalated"})).await,
+            Approval::Deny
+        );
+        assert_eq!(
+            gate.approve("Bash — escalate: outside sandbox", &json!({})).await,
+            Approval::Deny
+        );
+    }
+
+    #[tokio::test]
     async fn accept_edits_auto_allows_only_file_mutations() {
         let gate = AcceptEditsGate::default();
         assert_eq!(
@@ -649,6 +721,20 @@ mod tests {
         ));
         assert!(accept_edits_auto_allows("FileWrite", &json!({"path": "a"})));
         assert!(accept_edits_auto_allows("NotebookEdit", &json!({})));
+    }
+
+    #[tokio::test]
+    async fn approval_policies_distinguish_request_auto_and_full() {
+        let ordinary = json!({"path": "src/lib.rs"});
+        let escape = json!({"sandbox_permissions": "require_escalated"});
+        let request = gate_for_policy(ApprovalPolicy::Request, std::sync::Arc::new(DenyGate));
+        let auto = gate_for_policy(ApprovalPolicy::Auto, std::sync::Arc::new(DenyGate));
+        let full = gate_for_policy(ApprovalPolicy::Full, std::sync::Arc::new(DenyGate));
+
+        assert_eq!(request.approve("FileWrite", &ordinary).await, Approval::Deny);
+        assert_eq!(auto.approve("FileWrite", &ordinary).await, Approval::AllowOnce);
+        assert_eq!(auto.approve("Bash", &escape).await, Approval::Deny);
+        assert_eq!(full.approve("Bash", &escape).await, Approval::AllowOnce);
     }
 
     #[test]

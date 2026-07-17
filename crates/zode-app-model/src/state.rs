@@ -5,11 +5,74 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use zode_node_protocol::{
-    CapabilityManifest, NodeId, SessionLocator, ThreadSummary, TurnId, UsageSnapshot, WorkspaceUri,
+    ApprovalMode, CapabilityManifest, NodeId, RuntimeOptions, SandboxMode, SessionLocator,
+    ThreadSummary, TurnId, UsageSnapshot, WorkspaceUri,
 };
 
+/// Menu anchored to one of the interactive composer context chips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerContextMenu {
+    Location,
+    Branch,
+}
+
+/// Menu anchored to one of the controls in the composer footer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerFooterMenu {
+    Add,
+    Permission,
+    Model,
+    ModelModels,
+    ModelEffort,
+    ModelSpeed,
+}
+
+/// Where a newly submitted task should run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TaskLaunchMode {
+    #[default]
+    Local,
+    Worktree,
+}
+
+/// Truthful branch data loaded for exactly one workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchCatalog {
+    pub workspace_uri: WorkspaceUri,
+    pub current: String,
+    pub branches: Vec<String>,
+    pub dirty_files: usize,
+}
+
+/// Workspace-scoped asynchronous state for the branch picker.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum BranchCatalogState {
+    #[default]
+    Idle,
+    Loading {
+        workspace_uri: WorkspaceUri,
+    },
+    Switching {
+        workspace_uri: WorkspaceUri,
+        from: String,
+        branch: String,
+    },
+    Ready(BranchCatalog),
+    Failed {
+        workspace_uri: WorkspaceUri,
+        message: String,
+    },
+}
+
+/// Search and catalog state owned by the branch context menu.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BranchPickerState {
+    pub query: String,
+    pub catalog: BranchCatalogState,
+}
+
 /// Editable composer settings for the current session.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ComposerState {
     pub draft: String,
     /// Lightweight attachment projection only. Encoded payloads stay in the controller.
@@ -18,9 +81,45 @@ pub struct ComposerState {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub sandbox_label: String,
+    pub approval_mode: ApprovalMode,
+    pub sandbox_mode: SandboxMode,
+    pub sandbox_network: bool,
+    pub available_models: Vec<String>,
+    pub footer_menu: Option<ComposerFooterMenu>,
     pub queue_menu: Option<crate::QueuedMessageId>,
     pub editing_queued_message: Option<crate::QueuedMessageId>,
     pub draft_before_queue_edit: Option<String>,
+    pub context_menu: Option<ComposerContextMenu>,
+    pub launch_mode: TaskLaunchMode,
+    pub branch_picker: BranchPickerState,
+    /// Current branch confirmed by Git. The UI never changes this
+    /// optimistically while a checkout is still in flight.
+    pub selected_branch: Option<String>,
+}
+
+impl Default for ComposerState {
+    fn default() -> Self {
+        Self {
+            draft: String::new(),
+            attachments: Vec::new(),
+            focused: false,
+            model: None,
+            effort: None,
+            sandbox_label: String::new(),
+            approval_mode: ApprovalMode::Request,
+            sandbox_mode: SandboxMode::WorkspaceWrite,
+            sandbox_network: false,
+            available_models: Vec::new(),
+            footer_menu: None,
+            queue_menu: None,
+            editing_queued_message: None,
+            draft_before_queue_edit: None,
+            context_menu: None,
+            launch_mode: TaskLaunchMode::default(),
+            branch_picker: BranchPickerState::default(),
+            selected_branch: None,
+        }
+    }
 }
 
 impl ComposerState {
@@ -166,9 +265,18 @@ pub struct ProjectState {
 }
 
 /// Transient state for the project switcher shown on a new-task surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProjectPickerAnchor {
+    #[default]
+    Welcome,
+    Composer,
+}
+
+/// Transient state for the project switcher shown on a new-task surface.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectPickerState {
     pub open: bool,
+    pub anchor: ProjectPickerAnchor,
     pub search: String,
     pub active_index: usize,
 }
@@ -309,6 +417,10 @@ pub struct ZodeAppState {
     pub local_settings: LocalSettingsState,
     pub archived_tasks: ArchivedTasksState,
     pub composer: ComposerState,
+    /// Global runtime defaults used by new tasks and the composer reset action.
+    pub composer_defaults: Option<RuntimeOptions>,
+    /// Interactive bootstrap detected that provider credentials are still absent.
+    pub provider_setup_required: bool,
     pub usage: BTreeMap<SessionLocator, UsageSnapshot>,
     pub presentation: PresentationState,
     pub review: ReviewState,
@@ -324,6 +436,8 @@ impl ZodeAppState {
         self.session_rename = None;
         self.sidebar.project_menu = None;
         self.sidebar.section_menu = None;
+        self.composer.context_menu = None;
+        self.composer.footer_menu = None;
     }
 
     pub fn available_workspace(&self, workspace_uri: &WorkspaceUri) -> bool {
@@ -443,6 +557,8 @@ pub fn demo_state() -> ZodeAppState {
         local_settings: LocalSettingsState::default(),
         archived_tasks: ArchivedTasksState::default(),
         composer: ComposerState::default(),
+        composer_defaults: None,
+        provider_setup_required: false,
         usage: BTreeMap::new(),
         presentation: PresentationState::default(),
         review: ReviewState::default(),

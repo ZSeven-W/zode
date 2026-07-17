@@ -1,7 +1,7 @@
 use zode_app_model::{
-    reduce_agent_event, reduce_navigation_command, reduce_queue_command, AppCommand, LoadState,
-    NavigationOutcome, ProjectState, QueueCommandOutcome, ReduceOutcome, TranscriptItem,
-    TranscriptState, TranscriptTurnStatus,
+    reduce_agent_event, reduce_navigation_command, reduce_queue_command, AppCommand,
+    BranchCatalogState, LoadState, NavigationOutcome, ProjectState, QueueCommandOutcome,
+    ReduceOutcome, TranscriptItem, TranscriptState, TranscriptTurnStatus,
 };
 use zode_node_protocol::{
     AgentCommandKind, AgentEvent, AgentEventKind, SessionLocator, ThreadStatus, ThreadSummary,
@@ -28,6 +28,35 @@ impl TempTaskRoot {
     }
 }
 
+#[test]
+fn first_submit_waits_until_a_requested_branch_checkout_is_confirmed() {
+    let mut state = zode_app_model::demo_state();
+    let workspace_uri = WorkspaceUri::new("file:///repo/zode").unwrap();
+    state.projects.push(ProjectState {
+        workspace_uri: workspace_uri.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 0,
+    });
+    state.active_workspace = Some(workspace_uri.clone());
+    state.composer.branch_picker.catalog = BranchCatalogState::Switching {
+        workspace_uri,
+        from: "main".into(),
+        branch: "feature/menu".into(),
+    };
+
+    let error = prepare_dispatch(
+        &mut state,
+        AppCommand::Submit(vec![UserContent::Text {
+            text: "hello".into(),
+        }]),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("still being switched"));
+    assert!(state.current_session.is_none());
+}
+
 impl Drop for TempTaskRoot {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -50,6 +79,7 @@ async fn selected_project_submit_uses_exact_active_workspace_before_starting_tur
         });
     }
     state.active_workspace = Some(selected.clone());
+    state.composer.model = Some("model-b".into());
     let dispatch = prepare_dispatch(
         &mut state,
         AppCommand::Submit(vec![UserContent::Text {
@@ -60,7 +90,10 @@ async fn selected_project_submit_uses_exact_active_workspace_before_starting_tur
     .unwrap();
     assert!(matches!(
         dispatch.commands[0].kind,
-        AgentCommandKind::CreateSession { ref workspace_uri, .. } if workspace_uri == &selected
+        AgentCommandKind::CreateSession {
+            ref workspace_uri,
+            model: Some(ref model),
+        } if workspace_uri == &selected && model == "model-b"
     ));
     assert!(matches!(
         dispatch.commands[1].kind,

@@ -1,8 +1,8 @@
 use zode_app_model::{TranscriptState, ZodeAppState};
 use zode_app_runtime::{path_to_workspace_uri, workspace_uri_to_path};
 use zode_node_protocol::{
-    AgentCommand, AgentCommandKind, SessionLocator, ThreadStatus, ThreadSummary, TurnId,
-    UserContent, WorkspaceUri, PROTOCOL_VERSION,
+    AgentCommand, AgentCommandKind, RuntimeOptions, SessionLocator, ThreadStatus, ThreadSummary,
+    TurnId, UserContent, WorkspaceUri, PROTOCOL_VERSION,
 };
 
 use super::{append_user_content, CommandDispatch, Completion};
@@ -12,6 +12,10 @@ pub(super) fn prepare_first_submit(
     state: &mut ZodeAppState,
     input: Vec<UserContent>,
 ) -> Result<CommandDispatch, String> {
+    ensure_composer_context_ready(state)?;
+    if state.provider_setup_required {
+        return Err("Codex provider configuration is required before starting a task".into());
+    }
     let session = SessionLocator::new(state.host.node_id, uuid::Uuid::new_v4().to_string());
     let workspace_uri = first_session_workspace(state, &session)?;
     let turn_id = TurnId::new();
@@ -51,10 +55,69 @@ pub(super) fn prepare_first_submit(
     state.transcripts.insert(session.clone(), transcript);
     state.active_turns.insert(session.clone(), turn_id);
     state.current_session = Some(session.clone());
+    let mut commands = vec![create];
+    append_runtime_overrides(&mut commands, state, &session);
+    commands.push(start);
     Ok(CommandDispatch {
-        commands: vec![create, start],
+        commands,
         completion: Completion::RefreshRuntimeOptions { session },
     })
+}
+
+fn append_runtime_overrides(
+    commands: &mut Vec<AgentCommand>,
+    state: &ZodeAppState,
+    session: &SessionLocator,
+) {
+    let Some(defaults) = state.composer_defaults.as_ref() else {
+        return;
+    };
+    if state.composer.effort != defaults.effort {
+        if let Some(effort) = state.composer.effort.clone() {
+            commands.push(runtime_command(
+                session,
+                AgentCommandKind::SetEffort { effort },
+            ));
+        }
+    }
+    if runtime_permission_differs(state, defaults) {
+        commands.push(runtime_command(
+            session,
+            AgentCommandKind::SetPermissionPreset {
+                approval_mode: state.composer.approval_mode,
+                sandbox_mode: state.composer.sandbox_mode,
+                network: state.composer.sandbox_network,
+            },
+        ));
+    }
+}
+
+fn runtime_permission_differs(state: &ZodeAppState, defaults: &RuntimeOptions) -> bool {
+    state.composer.approval_mode != defaults.approval_mode
+        || state.composer.sandbox_mode != defaults.sandbox_mode
+        || state.composer.sandbox_network != defaults.sandbox_network
+}
+
+fn runtime_command(session: &SessionLocator, kind: AgentCommandKind) -> AgentCommand {
+    AgentCommand {
+        version: PROTOCOL_VERSION,
+        session: session.clone(),
+        turn_id: None,
+        kind,
+    }
+}
+
+fn ensure_composer_context_ready(state: &ZodeAppState) -> Result<(), String> {
+    if matches!(
+        &state.composer.branch_picker.catalog,
+        zode_app_model::BranchCatalogState::Switching { .. }
+    ) {
+        return Err("the selected branch is still being switched".into());
+    }
+    if state.composer.launch_mode != zode_app_model::TaskLaunchMode::Local {
+        return Err("the selected task launch mode is not available".into());
+    }
+    Ok(())
 }
 
 fn first_session_workspace(

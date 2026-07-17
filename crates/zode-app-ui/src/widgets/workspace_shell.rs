@@ -1,10 +1,14 @@
 use jian_core::text_input::TextInputState;
 use jian_widgets::{Painter, Rect};
-use zode_app_model::{ConnectionState, SecondaryPane, ShellRoute, ZodeAppState};
+use zode_app_model::{
+    BranchCatalogState, ComposerContextMenu, ConnectionState, ProjectPickerAnchor, SecondaryPane,
+    ShellRoute, TaskLaunchMode, ZodeAppState,
+};
 
 use super::project_sidebar::workspace_label;
 use super::{
-    ComingSoonPage, Composer, DocumentPreview, EmptyState, EnvironmentPanel, IntegrationsPage,
+    ComingSoonPage, Composer, ComposerContextMenu as ComposerContextMenuWidget,
+    ComposerFooterMenuWidget, DocumentPreview, EmptyState, EnvironmentPanel, IntegrationsPage,
     ProjectPicker, ProjectPickerViewState, ProjectSidebar, ReviewPanel, SettingsPanel,
     TerminalGrid, TerminalPanel, TerminalSecondaryPanel, TerminalSelection, ThreadHeader,
     ThreadTranscript, UnavailableSecondaryPanel, WindowChrome,
@@ -12,6 +16,7 @@ use super::{
 use crate::TRANSCRIPT_COMPOSER_GAP;
 use crate::{
     Insets, PinnedSummaryMode, RectExt, WidgetId, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme,
+    COMPOSER_BRANCH_ID, COMPOSER_LOCATION_ID, COMPOSER_PROJECT_ID,
 };
 
 /// Paints the complete platform-neutral workbench shell in stable z-order.
@@ -41,6 +46,7 @@ impl WorkspaceShell {
             None,
             false,
             Some((&project_picker, &project_search)),
+            None,
             None,
             theme,
         )
@@ -77,6 +83,7 @@ impl WorkspaceShell {
             false,
             None,
             None,
+            None,
             theme,
         )
     }
@@ -101,6 +108,7 @@ impl WorkspaceShell {
             terminal_selection,
             None,
             false,
+            None,
             None,
             None,
             theme,
@@ -151,6 +159,7 @@ impl WorkspaceShell {
             false,
             None,
             None,
+            None,
             theme,
         )
     }
@@ -177,6 +186,7 @@ impl WorkspaceShell {
             false,
             None,
             None,
+            None,
             theme,
         )
     }
@@ -194,6 +204,7 @@ impl WorkspaceShell {
         terminal_selection: Option<TerminalSelection>,
         project_picker: &ProjectPickerViewState,
         project_search_input: &TextInputState,
+        branch_search_input: &TextInputState,
         session_rename_input: &TextInputState,
         hovered: Option<WidgetId>,
         show_sidebar_shortcuts: bool,
@@ -209,6 +220,7 @@ impl WorkspaceShell {
             hovered,
             show_sidebar_shortcuts,
             Some((project_picker, project_search_input)),
+            Some(branch_search_input),
             Some(session_rename_input),
             theme,
         )
@@ -225,6 +237,7 @@ impl WorkspaceShell {
         hovered: Option<WidgetId>,
         show_sidebar_shortcuts: bool,
         project_picker: Option<(&ProjectPickerViewState, &TextInputState)>,
+        branch_search_input: Option<&TextInputState>,
         session_rename_input: Option<&TextInputState>,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
@@ -320,15 +333,20 @@ impl WorkspaceShell {
                 }
                 Some(SecondaryPane::Environment) | None => {}
             },
-            ShellRoute::Conversation => paint_conversation(
-                painter,
-                &snapshot,
-                state,
-                composer_input,
-                hovered,
-                project_picker,
-                theme,
-            ),
+            ShellRoute::Conversation => {
+                let fallback_branch_search =
+                    TextInputState::with_text(state.composer.branch_picker.query.clone());
+                paint_conversation(
+                    painter,
+                    &snapshot,
+                    state,
+                    composer_input,
+                    hovered,
+                    project_picker,
+                    branch_search_input.unwrap_or(&fallback_branch_search),
+                    theme,
+                )
+            }
         }
 
         if state.presentation.route == ShellRoute::Conversation {
@@ -422,6 +440,7 @@ fn paint_conversation(
     composer_input: &TextInputState,
     hovered: Option<WidgetId>,
     project_picker: Option<(&ProjectPickerViewState, &TextInputState)>,
+    branch_search_input: &TextInputState,
     theme: &ZodeTheme,
 ) {
     let geometry = snapshot.layout;
@@ -455,13 +474,20 @@ fn paint_conversation(
         ThreadTranscript::paint(painter, geometry.transcript, state, theme);
     }
     let branch = current_branch(state);
-    let connection_label = match state.host.connection {
-        ConnectionState::Local => "本地",
-        ConnectionState::Connecting => "连接中",
-        ConnectionState::Unavailable => "不可用",
-    };
+    let connection_label = composer_connection_label(state);
     let goal = current_goal_progress(state);
-    Composer::paint_input_with_workspace_app_context(
+    let menu_active = if state.project_picker.open
+        && state.project_picker.anchor == ProjectPickerAnchor::Composer
+    {
+        Some(COMPOSER_PROJECT_ID)
+    } else {
+        match state.composer.context_menu {
+            Some(ComposerContextMenu::Location) => Some(COMPOSER_LOCATION_ID),
+            Some(ComposerContextMenu::Branch) => Some(COMPOSER_BRANCH_ID),
+            None => None,
+        }
+    };
+    Composer::paint_input_with_workspace_app_context_interactions(
         painter,
         geometry.composer,
         composer_input,
@@ -472,12 +498,22 @@ fn paint_conversation(
         goal,
         snapshot.focused,
         hovered,
+        menu_active,
         theme,
     );
-    if let (Some((picker, search_input)), Some(trigger)) = (
-        project_picker,
-        welcome_title.and_then(|title| title.project),
-    ) {
+    let picker_trigger = match state.project_picker.anchor {
+        ProjectPickerAnchor::Welcome => welcome_title.and_then(|title| title.project),
+        ProjectPickerAnchor::Composer => Composer::context_interaction_layout(
+            geometry.composer,
+            state,
+            workspace_label.as_deref(),
+            Some(connection_label),
+            branch,
+        )
+        .project
+        .map(|chip| chip.rect),
+    };
+    if let (Some((picker, search_input)), Some(trigger)) = (project_picker, picker_trigger) {
         if let Some(layout) = ProjectPicker::layout(geometry.viewport, trigger, state, picker) {
             ProjectPicker::paint(
                 painter,
@@ -488,6 +524,27 @@ fn paint_conversation(
                 theme,
             );
         }
+    }
+    let context = Composer::context_interaction_layout(
+        geometry.composer,
+        state,
+        workspace_label.as_deref(),
+        Some(connection_label),
+        branch,
+    );
+    if let Some(layout) = ComposerContextMenuWidget::layout(geometry.viewport, context, state) {
+        ComposerContextMenuWidget::paint(
+            painter,
+            &layout,
+            branch_search_input,
+            snapshot.focused,
+            hovered,
+            theme,
+        );
+    }
+    let input = Composer::layout_for_state(geometry.composer, state).input;
+    if let Some(layout) = ComposerFooterMenuWidget::layout(geometry.viewport, input, state) {
+        ComposerFooterMenuWidget::paint(painter, &layout, snapshot.focused, hovered, theme);
     }
 }
 
@@ -520,6 +577,14 @@ fn current_branch(state: &ZodeAppState) -> Option<&str> {
     }
 
     let workspace = state.active_available_workspace()?;
+    if let Some(selected) = state.composer.selected_branch.as_deref() {
+        return Some(selected);
+    }
+    if let BranchCatalogState::Ready(catalog) = &state.composer.branch_picker.catalog {
+        if &catalog.workspace_uri == workspace && !catalog.current.trim().is_empty() {
+            return Some(catalog.current.as_str());
+        }
+    }
     state
         .threads
         .iter()
@@ -536,6 +601,17 @@ fn current_branch(state: &ZodeAppState) -> Option<&str> {
         })
         .max_by_key(|(updated_at_ms, _)| *updated_at_ms)
         .map(|(_, branch)| branch)
+}
+
+fn composer_connection_label(state: &ZodeAppState) -> &'static str {
+    match state.composer.launch_mode {
+        TaskLaunchMode::Worktree => "新工作树",
+        TaskLaunchMode::Local => match state.host.connection {
+            ConnectionState::Local => "本地",
+            ConnectionState::Connecting => "连接中",
+            ConnectionState::Unavailable => "不可用",
+        },
+    }
 }
 
 fn verified_branch<'a>(

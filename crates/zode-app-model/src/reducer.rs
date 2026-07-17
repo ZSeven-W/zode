@@ -1,8 +1,6 @@
 use crate::{default_tool_expanded, AppCommand, TranscriptItem, TranscriptState, ZodeAppState};
 use std::time::Instant;
-use zode_node_protocol::{
-    AgentEvent, AgentEventKind, RuntimeOptions, SandboxMode, SessionLocator, ToolCall,
-};
+use zode_node_protocol::{AgentEvent, AgentEventKind, RuntimeOptions, SessionLocator, ToolCall};
 
 const UNKNOWN_EVENT_CODE: &str = "agent.event.unknown";
 const UNKNOWN_EVENT_MESSAGE: &str = "Ignored an unknown agent event";
@@ -446,12 +444,17 @@ pub fn apply_session_runtime_options(
 fn sync_composer_runtime(state: &mut ZodeAppState, options: &RuntimeOptions) {
     state.composer.model.clone_from(&options.active_model);
     state.composer.effort.clone_from(&options.effort);
-    state.composer.sandbox_label = match options.sandbox_mode {
-        SandboxMode::ReadOnly => "只读",
-        SandboxMode::WorkspaceWrite => "工作区写入",
-        SandboxMode::Off => "完全访问",
+    state.composer.available_models.clone_from(&options.models);
+    state.composer.approval_mode = options.approval_mode;
+    state.composer.sandbox_mode = options.sandbox_mode;
+    state.composer.sandbox_network = options.sandbox_network;
+    state.composer.sandbox_label = match options.approval_mode {
+        zode_node_protocol::ApprovalMode::Request => "请求批准",
+        zode_node_protocol::ApprovalMode::Auto => "替我审批",
+        zode_node_protocol::ApprovalMode::Full => "完全访问",
     }
     .into();
+    state.composer.footer_menu = None;
 }
 
 /// Applies viewport state emitted by the transcript widget without involving

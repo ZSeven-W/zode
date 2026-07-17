@@ -10,7 +10,7 @@ use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentEndpoint, AgentEventStream, AgentQuery, AgentSnapshot,
     ApprovalDecision, EndpointError, EndpointErrorKind, IntegrationRegistryEntry,
     IntegrationRegistryKind, IntegrationRegistrySnapshot, IntegrationRegistryState, RuntimeOptions,
-    SandboxMode, SessionLocator, ThreadStatus, ThreadSummary, UserContent, WorkspaceUri,
+    SandboxMode, SessionLocator, ThreadStatus, ThreadSummary, TurnId, UserContent, WorkspaceUri,
 };
 
 use super::{prepare_dispatch, reject_dispatch, CommandBridge};
@@ -19,6 +19,8 @@ use super::{prepare_dispatch, reject_dispatch, CommandBridge};
 mod integrations;
 #[path = "command_bridge_tests/queue.rs"]
 mod queue;
+#[path = "command_bridge_tests/runtime.rs"]
+mod runtime;
 #[path = "command_bridge_tests/session_creation.rs"]
 mod session_creation;
 
@@ -210,6 +212,7 @@ fn default_runtime_options() -> RuntimeOptions {
         models: vec!["test-model".into()],
         active_model: Some("test-model".into()),
         effort: None,
+        approval_mode: Default::default(),
         sandbox_mode: SandboxMode::Off,
         sandbox_network: false,
     }
@@ -253,6 +256,7 @@ async fn runtime_setting_projects_only_after_canonical_session_readback() {
         models: vec!["old-model".into(), "new-model".into()],
         active_model: Some("new-model".into()),
         effort: Some("high".into()),
+        approval_mode: Default::default(),
         sandbox_mode: SandboxMode::ReadOnly,
         sandbox_network: true,
     };
@@ -284,7 +288,7 @@ async fn runtime_setting_projects_only_after_canonical_session_readback() {
     );
     assert_eq!(state.composer.model.as_deref(), Some("new-model"));
     assert_eq!(state.composer.effort.as_deref(), Some("high"));
-    assert_eq!(state.composer.sandbox_label, "只读");
+    assert_eq!(state.composer.sandbox_label, "请求批准");
 }
 
 #[tokio::test]
@@ -293,6 +297,7 @@ async fn delayed_runtime_readback_stays_bound_to_the_original_session() {
         models: vec!["model-a".into()],
         active_model: Some("model-a".into()),
         effort: Some("high".into()),
+        approval_mode: Default::default(),
         sandbox_mode: SandboxMode::ReadOnly,
         sandbox_network: true,
     };
@@ -334,6 +339,7 @@ async fn delayed_runtime_readback_stays_bound_to_the_original_session() {
         models: vec!["model-b".into()],
         active_model: Some("model-b".into()),
         effort: Some("low".into()),
+        approval_mode: Default::default(),
         sandbox_mode: SandboxMode::Off,
         sandbox_network: false,
     };
@@ -373,6 +379,7 @@ async fn wrong_session_or_failed_runtime_readback_retains_the_last_canonical_sta
             models: vec!["stable".into()],
             active_model: Some("stable".into()),
             effort: Some("medium".into()),
+            approval_mode: Default::default(),
             sandbox_mode: SandboxMode::WorkspaceWrite,
             sandbox_network: false,
         };
@@ -405,6 +412,7 @@ async fn new_session_is_populated_from_its_canonical_runtime_snapshot() {
         models: vec!["new-session-model".into()],
         active_model: Some("new-session-model".into()),
         effort: Some("medium".into()),
+        approval_mode: Default::default(),
         sandbox_mode: SandboxMode::WorkspaceWrite,
         sandbox_network: false,
     };

@@ -15,6 +15,7 @@ use crate::{
     UNAVAILABLE_SECONDARY_CLOSE_ID,
 };
 
+mod composer_footer;
 mod empty_state;
 mod environment;
 mod header;
@@ -26,13 +27,15 @@ mod settings;
 mod sidebar;
 mod transcript;
 
+use composer_footer::{append_composer_footer_nodes, append_composer_footer_overlay};
 use empty_state::append_empty_suggestion_nodes;
 use environment::append_environment_nodes;
 use header::{append_header_menu_nodes, append_header_nodes, append_panel_picker_nodes};
 pub(crate) use ids::stable_widget_id;
 use integrations::append_integration_nodes;
 use project_picker::{
-    append_composer_detach, append_picker_overlay, append_welcome_project_trigger,
+    append_composer_context_nodes, append_composer_context_overlay, append_picker_overlay,
+    append_welcome_project_trigger,
 };
 use queue::{append_queue_menu_nodes, append_queue_nodes};
 use settings::append_settings_nodes;
@@ -265,7 +268,8 @@ impl WorkspaceSnapshot {
                             ));
                         }
                     }
-                    append_composer_detach(&mut nodes, &layout, &mut focus_order, state);
+                    append_composer_context_nodes(&mut nodes, &layout, &mut focus_order, state);
+                    append_composer_footer_nodes(&mut nodes, &layout, &mut focus_order, state);
                     if visible_rect(composer_layout.input) {
                         nodes.push(node(
                             COMPOSER_ID,
@@ -357,6 +361,16 @@ impl WorkspaceSnapshot {
             {
                 focused = Some(picker_focus);
             }
+        }
+        if let Some(context_focus) =
+            append_composer_context_overlay(&mut nodes, &layout, &mut focus_order, state)
+        {
+            focused = Some(context_focus);
+        }
+        if let Some(footer_focus) =
+            append_composer_footer_overlay(&mut nodes, &layout, &mut focus_order, state)
+        {
+            focused = Some(footer_focus);
         }
 
         Self {

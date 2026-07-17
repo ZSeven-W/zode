@@ -1,14 +1,13 @@
 use accesskit::{Action, ActionData};
 use zode_app_model::{
-    reduce_navigation_command, reduce_tool_command, reduce_transcript_command, AppCommand,
-    NavigationOutcome, SettingsCommandOutcome, ShellRoute, ToolCommandOutcome,
-    TranscriptCommandOutcome,
+    reduce_tool_command, reduce_transcript_command, AppCommand, SettingsCommandOutcome, ShellRoute,
+    ToolCommandOutcome, TranscriptCommandOutcome,
 };
 use zode_app_ui::{
     Composer, EmptyState, Key, KeyEvent, PointerButton, PointerEvent, PointerEventKind,
     ThreadHeader, ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId,
-    ARCHIVED_TASK_SEARCH_ID, COMPOSER_ID, INTEGRATIONS_SEARCH_ID, SEND_ID, SETTINGS_SEARCH_ID,
-    TERMINAL_ID,
+    ARCHIVED_TASK_SEARCH_ID, COMPOSER_BRANCH_SEARCH_ID, COMPOSER_ID, INTEGRATIONS_SEARCH_ID,
+    SEND_ID, SETTINGS_SEARCH_ID, TERMINAL_ID,
 };
 
 use super::{
@@ -42,7 +41,8 @@ use widget_commands::widget_command_for_snapshot;
 
 #[path = "interaction-routing.rs"]
 mod routing;
-use routing::{available_new_session_command, normalize_conversation_route};
+use routing::available_new_session_command;
+pub(super) use routing::normalize_conversation_route;
 
 #[path = "composer-outcome.rs"]
 mod composer_outcome;
@@ -161,6 +161,9 @@ impl DesktopApp {
                 if self.handle_project_picker_ime(event.clone()) {
                     return;
                 }
+                if self.handle_branch_picker_ime(event.clone()) {
+                    return;
+                }
                 if self.app_state.terminal_surface_visible()
                     && self.focused_widget == Some(TERMINAL_ID)
                 {
@@ -277,6 +280,9 @@ impl DesktopApp {
                 Ok(_) => {}
                 Err(error) => eprintln!("zode-app: clipboard read failed: {error}"),
             }
+            return;
+        }
+        if self.paste_branch_search_from_clipboard(clipboard.as_ref()) {
             return;
         }
         if matches!(
@@ -415,6 +421,7 @@ impl DesktopApp {
             | SETTINGS_SEARCH_ID
             | ARCHIVED_TASK_SEARCH_ID
             | zode_app_ui::PROJECT_PICKER_SEARCH_ID
+            | COMPOSER_BRANCH_SEARCH_ID
             | zode_app_ui::HEADER_RENAME_INPUT_ID => {}
             _ => {
                 if let Some(command) =
@@ -455,6 +462,12 @@ impl DesktopApp {
             if !self.project_picker_allows_accessibility_action(id) {
                 continue;
             }
+            if !self.composer_context_allows_accessibility_action(id) {
+                continue;
+            }
+            if !self.composer_footer_allows_accessibility_action(id) {
+                continue;
+            }
             match request.action {
                 Action::Focus => self.set_focused_widget(Some(id)),
                 Action::Click => self.activate_widget(id),
@@ -467,6 +480,11 @@ impl DesktopApp {
                 Action::SetValue if id == zode_app_ui::PROJECT_PICKER_SEARCH_ID => {
                     if let Some(ActionData::Value(value)) = request.data {
                         self.set_project_search_value(value.into_string());
+                    }
+                }
+                Action::SetValue if id == COMPOSER_BRANCH_SEARCH_ID => {
+                    if let Some(ActionData::Value(value)) = request.data {
+                        self.set_branch_search_value(value.into_string());
                     }
                 }
                 Action::SetValue if matches!(id, SETTINGS_SEARCH_ID | ARCHIVED_TASK_SEARCH_ID) => {
@@ -559,6 +577,12 @@ impl DesktopApp {
                 return;
             }
         }
+        if self.handle_composer_context_menu_pointer(event.position) {
+            return;
+        }
+        if self.handle_composer_footer_pointer(event.position) {
+            return;
+        }
         if let Some(command) = session_menu_outside_click_command(
             &self.app_state,
             &self.frame_snapshot,
@@ -628,6 +652,12 @@ impl DesktopApp {
             return;
         }
         if self.handle_sidebar_menu_key(&event) {
+            return;
+        }
+        if self.handle_branch_picker_key(&event) {
+            return;
+        }
+        if self.handle_composer_footer_key(&event) {
             return;
         }
         if self.handle_project_picker_key(&event) {
@@ -722,70 +752,5 @@ impl DesktopApp {
                 }
             }
         }
-    }
-
-    fn apply_local_navigation_command(&mut self, command: &AppCommand) -> bool {
-        let previous_session = self.app_state.current_session.clone();
-        let previous_queue_edit = self.app_state.composer.editing_queued_message;
-        let project_picker_was_open = self.app_state.project_picker.open;
-        let outcome = reduce_navigation_command(&mut self.app_state, command.clone());
-        let session_focus = self.sync_session_action_after_navigation(command);
-        self.sync_queue_editor_after_state_change(previous_session.clone(), previous_queue_edit);
-        self.prune_queued_payloads();
-        let handled = match outcome {
-            NavigationOutcome::Applied => {
-                let _ = self.persist_local_navigation_effect(command);
-                true
-            }
-            NavigationOutcome::NeedsEffect if matches!(command, AppCommand::CreateProject) => {
-                self.request_workspace_pick();
-                true
-            }
-            NavigationOutcome::NeedsEffect
-                if matches!(command, AppCommand::OpenProjectInFinder { .. }) =>
-            {
-                self.apply_project_action_command(command)
-            }
-            NavigationOutcome::NeedsEffect
-                if matches!(
-                    command,
-                    AppCommand::ToggleProject(_)
-                        | AppCommand::SetSessionPinned { .. }
-                        | AppCommand::SetSessionArchived { .. }
-                        | AppCommand::ArchiveProjectTasks { .. }
-                        | AppCommand::RequestDeleteSession(_)
-                ) =>
-            {
-                let _ = self.persist_local_navigation_effect(command);
-                true
-            }
-            NavigationOutcome::NeedsEffect | NavigationOutcome::Ignored => false,
-        };
-        if !handled {
-            return false;
-        }
-        normalize_conversation_route(&mut self.app_state, command);
-        if matches!(
-            command,
-            AppCommand::BeginTask { .. }
-                | AppCommand::SelectSession(_)
-                | AppCommand::SetSessionArchived { archived: true, .. }
-                | AppCommand::ArchiveProjectTasks { .. }
-                | AppCommand::ToggleSidebarTasks
-        ) {
-            self.persist_ui_state();
-        }
-        let focus_after = session_focus.or_else(|| {
-            self.sync_project_picker_after_navigation(command, project_picker_was_open)
-        });
-        self.refresh_if_session_changed(previous_session);
-        self.sync_composer_busy();
-        self.rebuild_frame_snapshot();
-        if let Some(id) = focus_after {
-            self.set_focused_widget(Some(id));
-        } else {
-            self.request_redraw();
-        }
-        true
     }
 }

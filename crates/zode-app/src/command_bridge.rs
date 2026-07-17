@@ -20,7 +20,12 @@ use crate::window_state::AppWake;
 mod approval;
 mod first_submit;
 mod integrations;
+mod runtime;
 use first_submit::prepare_first_submit;
+use runtime::{
+    ensure_runtime_idle, prepare_permission_preset, prepare_reset_runtime,
+    query_session_runtime_options,
+};
 
 #[derive(Debug)]
 pub struct CommandDispatch {
@@ -249,32 +254,13 @@ async fn complete(
     }
 }
 
-async fn query_session_runtime_options(
-    endpoint: &dyn AgentEndpoint,
-    session: &SessionLocator,
-) -> Result<RuntimeOptions, String> {
-    match endpoint
-        .query(AgentQuery::SessionRuntimeOptions {
-            session: session.clone(),
-        })
-        .await
-        .map_err(|error| error.to_string())?
-    {
-        AgentSnapshot::SessionRuntimeOptions {
-            session: snapshot_session,
-            options,
-        } if &snapshot_session == session => Ok(options),
-        AgentSnapshot::SessionRuntimeOptions { .. } => {
-            Err("the endpoint returned runtime options for the wrong session".into())
-        }
-        _ => Err("the endpoint returned the wrong runtime-options snapshot".into()),
-    }
-}
-
 pub fn prepare_dispatch(
     state: &mut ZodeAppState,
     command: AppCommand,
 ) -> Result<Option<CommandDispatch>, String> {
+    if matches!(command, AppCommand::ResetComposerRuntime) {
+        return prepare_reset_runtime(state).map(Some);
+    }
     let (session, turn_id, kind, completion) = match command {
         AppCommand::NewSession { workspace_uri } => {
             if !state.available_workspace(&workspace_uri) {
@@ -382,6 +368,8 @@ pub fn prepare_dispatch(
         }
         AppCommand::SetModel(model) => {
             let session = current_session(state)?;
+            ensure_runtime_idle(state, &session)?;
+            state.composer.footer_menu = None;
             (
                 session.clone(),
                 None,
@@ -391,6 +379,8 @@ pub fn prepare_dispatch(
         }
         AppCommand::SetEffort(effort) => {
             let session = current_session(state)?;
+            ensure_runtime_idle(state, &session)?;
+            state.composer.footer_menu = None;
             (
                 session.clone(),
                 None,
@@ -400,12 +390,17 @@ pub fn prepare_dispatch(
         }
         AppCommand::SetSandbox { mode, network } => {
             let session = current_session(state)?;
+            ensure_runtime_idle(state, &session)?;
+            state.composer.footer_menu = None;
             (
                 session.clone(),
                 None,
                 AgentCommandKind::SetSandbox { mode, network },
                 Completion::RefreshRuntimeOptions { session },
             )
+        }
+        command @ AppCommand::SetPermissionPreset { .. } => {
+            return prepare_permission_preset(state, command).map(Some);
         }
         _ => return Ok(None),
     };
@@ -633,6 +628,7 @@ fn apply_completion_failure(state: &mut ZodeAppState, command: &AgentCommand, me
             | AgentCommandKind::SetModel { .. }
             | AgentCommandKind::SetEffort { .. }
             | AgentCommandKind::SetSandbox { .. }
+            | AgentCommandKind::SetPermissionPreset { .. }
     );
     let summary = if runtime_sync {
         let runtime_options = &mut state

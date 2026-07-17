@@ -1,6 +1,8 @@
 mod approval_card;
 mod coming_soon_page;
 mod composer;
+#[path = "composer-context-menu.rs"]
+mod composer_context_menu;
 mod document_preview;
 mod empty_state;
 mod environment;
@@ -29,9 +31,25 @@ mod workspace_shell;
 pub use approval_card::{ApprovalAction, ApprovalButtonLayout, ApprovalCard};
 pub use coming_soon_page::ComingSoonPage;
 pub use composer::{
-    Composer, ComposerContextLayout, ComposerController, ComposerLayout, ComposerOutcome,
+    Composer, ComposerContextChipLayout, ComposerContextLayout, ComposerController,
+    ComposerFooterLayout, ComposerFooterMenuLayout, ComposerFooterMenuWidget,
+    ComposerFooterRowLayout, ComposerFooterSectionLayout, ComposerLayout, ComposerOutcome,
     ComposerQueueLayout, ComposerQueueMenuLayout, ComposerQueueRowLayout, ComposerSubmission,
-    SandboxSelection, PROJECT_DETACH_ID,
+    SandboxSelection, COMPOSER_ADD_FILE_ID, COMPOSER_ADD_GOAL_ID, COMPOSER_ADD_ID,
+    COMPOSER_ADD_PLAN_ID, COMPOSER_ADD_WECHAT_ID, COMPOSER_BRANCH_ID,
+    COMPOSER_FOOTER_MENU_SURFACE_ID, COMPOSER_LOCATION_ID, COMPOSER_MODEL_BACK_ID,
+    COMPOSER_MODEL_CONFIGURE_ID, COMPOSER_MODEL_EFFORTS_ID, COMPOSER_MODEL_EFFORT_HIGH_ID,
+    COMPOSER_MODEL_EFFORT_LOW_ID, COMPOSER_MODEL_EFFORT_MEDIUM_ID, COMPOSER_MODEL_EFFORT_XHIGH_ID,
+    COMPOSER_MODEL_ID, COMPOSER_MODEL_MODELS_ID, COMPOSER_MODEL_RESET_ID, COMPOSER_MODEL_SPEEDS_ID,
+    COMPOSER_MODEL_SPEED_ID, COMPOSER_PERMISSION_AUTO_ID, COMPOSER_PERMISSION_CUSTOM_ID,
+    COMPOSER_PERMISSION_FULL_ID, COMPOSER_PERMISSION_ID, COMPOSER_PERMISSION_REQUEST_ID,
+    COMPOSER_PROJECT_ID, PROJECT_DETACH_ID,
+};
+pub use composer_context_menu::{
+    ComposerContextMenu, ComposerContextMenuLayout, ComposerContextMenuRowLayout,
+    ComposerContextMenuRowTarget, ComposerContextMenuStatusLayout, COMPOSER_BRANCH_CREATE_ID,
+    COMPOSER_BRANCH_SEARCH_ID, COMPOSER_CONTEXT_MENU_SURFACE_ID, COMPOSER_LOCATION_LOCAL_ID,
+    COMPOSER_LOCATION_WORKTREE_ID,
 };
 pub use document_preview::{
     DocumentPreview, DocumentPreviewLayout, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
