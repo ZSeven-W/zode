@@ -1,10 +1,8 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 
-use crate::{RectExt, ZodeTheme};
+use crate::{BrandMark, RectExt, ZodeTheme};
 
 const TITLE: &str = "我们在 Zode 中构建什么？";
-const MARK_CHEVRON: &str = "M4 8L8 12L4 16";
-const MARK_Z: &str = "M10 5H20L11 19H21";
 const SUGGESTIONS: [(&str, &str, &str); 4] = [
     (
         "探索代码",
@@ -34,19 +32,14 @@ impl EmptyState {
         let title_size = 27.0;
         let title_width = painter.measure_text_weighted(TITLE, title_size, 500);
         let title_y = rect.origin.y + rect.size.y * 0.5 - 70.0;
-        let mark_size = 40.0;
-        let mark_origin = Point2D::new(
-            rect.origin.x + (rect.size.x - mark_size) / 2.0,
-            title_y - 58.0,
+        BrandMark::paint(
+            painter,
+            Point2D::new(
+                rect.origin.x + rect.size.x / 2.0,
+                title_y - BrandMark::SIZE / 2.0 - 18.0,
+            ),
+            theme,
         );
-        painter.stroke_svg_path(
-            MARK_CHEVRON,
-            mark_origin,
-            mark_size,
-            Color::rgb_u8(56, 189, 248),
-            2.0,
-        );
-        painter.stroke_svg_path(MARK_Z, mark_origin, mark_size, theme.zode_purple, 2.4);
         draw_text(
             painter,
             TITLE,

@@ -1,10 +1,10 @@
 use accesskit::{Action, Role};
 use jian_core::CursorHint;
-use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{Color, ImageDrawMode, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{demo_state, SettingsCategory, ShellRoute};
 use zode_app_ui::{
-    Insets, InteractionNode, RectExt, WidgetId, WorkspaceLayout, WorkspaceShell, WorkspaceSnapshot,
-    ZodeTheme, CONTENT_W, SIDEBAR_W,
+    Insets, InteractionNode, RectExt, ThemeMode, WidgetId, WorkspaceLayout, WorkspaceShell,
+    WorkspaceSnapshot, ZodeTheme, CONTENT_W, SIDEBAR_W,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +21,12 @@ enum PaintOp {
         top_left: Point2D,
         size: f32,
         color: Color,
+    },
+    Image {
+        rect: Rect,
+        image_id: u64,
+        encoded: Vec<u8>,
+        mode: ImageDrawMode,
     },
 }
 
@@ -58,6 +64,20 @@ impl CapturePainter {
             .iter()
             .filter_map(|operation| match operation {
                 PaintOp::FillRound(rect, radius, _) => Some((*rect, *radius)),
+                _ => None,
+            })
+    }
+
+    fn images(&self) -> impl Iterator<Item = (Rect, u64, &[u8], ImageDrawMode)> + '_ {
+        self.operations
+            .iter()
+            .filter_map(|operation| match operation {
+                PaintOp::Image {
+                    rect,
+                    image_id,
+                    encoded,
+                    mode,
+                } => Some((*rect, *image_id, encoded.as_slice(), *mode)),
                 _ => None,
             })
     }
@@ -109,6 +129,20 @@ impl Painter for CapturePainter {
             color,
         });
     }
+    fn draw_image_with_mode(
+        &mut self,
+        rect: Rect,
+        image_id: u64,
+        encoded: &[u8],
+        mode: ImageDrawMode,
+    ) {
+        self.operations.push(PaintOp::Image {
+            rect,
+            image_id,
+            encoded: encoded.to_vec(),
+            mode,
+        });
+    }
     fn save(&mut self) {}
     fn restore(&mut self) {}
     fn translate(&mut self, _offset: Point2D) {}
@@ -118,18 +152,25 @@ impl Painter for CapturePainter {
     }
 }
 
-fn paint_empty_wide() -> (CapturePainter, WorkspaceLayout) {
+fn paint_empty_wide_with_theme(theme: &ZodeTheme) -> (CapturePainter, WorkspaceLayout) {
     let viewport = Rect::xywh(0.0, 0.0, 1800.0, 1080.0);
     let geometry = WorkspaceLayout::compute(1800.0, 1080.0, Insets::ZERO);
     let mut painter = CapturePainter::default();
-    WorkspaceShell::paint(
-        &mut painter,
-        viewport,
-        Insets::ZERO,
-        &demo_state(),
-        &ZodeTheme::light(),
-    );
+    WorkspaceShell::paint(&mut painter, viewport, Insets::ZERO, &demo_state(), theme);
     (painter, geometry)
+}
+
+fn paint_empty_wide() -> (CapturePainter, WorkspaceLayout) {
+    paint_empty_wide_with_theme(&ZodeTheme::light())
+}
+
+fn repository_asset(filename: &str) -> Vec<u8> {
+    std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets")
+            .join(filename),
+    )
+    .unwrap_or_else(|error| panic!("read repository brand asset {filename}: {error}"))
 }
 
 fn estimated_text_width(text: &str, font_size: f32) -> f32 {
@@ -264,30 +305,55 @@ fn empty_conversation_paints_four_distinct_suggestion_cards() {
 }
 
 #[test]
-fn empty_conversation_uses_a_zode_mark_and_colored_suggestion_glyphs() {
+fn empty_conversation_uses_the_theme_specific_repository_brand_mark() {
+    const DARK_IMAGE_ID: u64 = 0x248d_4a5b_143e_0780;
+    const LIGHT_IMAGE_ID: u64 = 0x69f3_60d5_c3e4_1b23;
+
+    for (theme, filename, expected_image_id) in [
+        (ZodeTheme::light(), "logo-light.png", LIGHT_IMAGE_ID),
+        (ZodeTheme::dark(), "logo.png", DARK_IMAGE_ID),
+        (
+            ZodeTheme::high_contrast(ThemeMode::Light),
+            "logo-light.png",
+            LIGHT_IMAGE_ID,
+        ),
+        (
+            ZodeTheme::high_contrast(ThemeMode::Dark),
+            "logo.png",
+            DARK_IMAGE_ID,
+        ),
+    ] {
+        let (painter, geometry) = paint_empty_wide_with_theme(&theme);
+        let images = painter.images().collect::<Vec<_>>();
+
+        assert_eq!(images.len(), 1, "theme should paint one brand image");
+        let (rect, image_id, encoded, mode) = images[0];
+        assert_eq!(rect.size, Point2D::new(48.0, 48.0));
+        assert_eq!(image_id, expected_image_id);
+        assert_eq!(encoded, repository_asset(filename));
+        assert_eq!(mode, ImageDrawMode::Fit);
+
+        let image_center = rect.min_x() + rect.width() / 2.0;
+        let main_center = geometry.primary_surface.min_x() + geometry.primary_surface.width() / 2.0;
+        assert!((image_center - main_center).abs() <= f32::EPSILON);
+    }
+}
+
+#[test]
+fn empty_conversation_only_uses_svg_paths_for_the_four_suggestions() {
     let (painter, geometry) = paint_empty_wide();
-    let glyphs = painter
+    let suggestion_glyphs = painter
         .operations
         .iter()
-        .filter_map(|operation| match operation {
-            PaintOp::Svg {
-                top_left,
-                size,
-                color,
-            } if geometry.transcript.contains(*top_left) => Some((*top_left, *size, *color)),
-            _ => None,
+        .filter(|operation| {
+            matches!(
+                operation,
+                PaintOp::Svg { top_left, .. } if geometry.transcript.contains(*top_left)
+            )
         })
-        .collect::<Vec<_>>();
+        .count();
 
-    assert_eq!(glyphs.len(), 6);
-    assert!(glyphs.iter().any(|(_, size, _)| *size >= 36.0));
-    let mut colors = Vec::new();
-    for (_, _, color) in glyphs {
-        if !colors.contains(&color) {
-            colors.push(color);
-        }
-    }
-    assert!(colors.len() >= 5);
+    assert_eq!(suggestion_glyphs, 4);
 }
 
 fn paint_settings(category: SettingsCategory) -> (CapturePainter, WorkspaceLayout) {

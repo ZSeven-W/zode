@@ -154,10 +154,11 @@ impl Painter for FramePainter<'_> {
         }
     }
 
-    fn draw_image(&mut self, rect: Rect, _image_id: u64, encoded: &[u8]) {
+    fn draw_image(&mut self, rect: Rect, image_id: u64, encoded: &[u8]) {
         self.backend.draw_image(
             self.canvas,
             rect,
+            image_id,
             encoded,
             ImageDrawMode::Fill,
             ImageAdjustments::default(),
@@ -169,13 +170,14 @@ impl Painter for FramePainter<'_> {
     fn draw_image_with_mode(
         &mut self,
         rect: Rect,
-        _image_id: u64,
+        image_id: u64,
         encoded: &[u8],
         mode: ImageDrawMode,
     ) {
         self.backend.draw_image(
             self.canvas,
             rect,
+            image_id,
             encoded,
             mode,
             ImageAdjustments::default(),
@@ -188,7 +190,7 @@ impl Painter for FramePainter<'_> {
     fn draw_image_with_options(
         &mut self,
         rect: Rect,
-        _image_id: u64,
+        image_id: u64,
         encoded: &[u8],
         mode: ImageDrawMode,
         adjustments: ImageAdjustments,
@@ -198,6 +200,7 @@ impl Painter for FramePainter<'_> {
         self.backend.draw_image(
             self.canvas,
             rect,
+            image_id,
             encoded,
             mode,
             adjustments,

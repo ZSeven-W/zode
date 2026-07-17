@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use jian_core::{
     geometry::{Point, Rect as JianRect, Size},
@@ -10,9 +10,31 @@ use jian_core::{
 use jian_widgets::{Color, ImageAdjustments, ImageDrawMode, Point2D, Rect, TextLayout};
 use skia_safe::{canvas::SaveLayerRec, image_filters, BlurStyle, MaskFilter, PaintStyle};
 
+struct CachedImageSource {
+    key: Arc<str>,
+    bytes: Arc<Vec<u8>>,
+}
+
+impl CachedImageSource {
+    fn new(image_id: u64, encoded: &[u8]) -> Self {
+        Self {
+            key: Arc::from(format!("zode-image:{image_id:016x}")),
+            bytes: Arc::new(encoded.to_vec()),
+        }
+    }
+
+    fn to_image_source(&self) -> ImageSource {
+        ImageSource::KeyedBytes {
+            key: Arc::clone(&self.key),
+            bytes: Arc::clone(&self.bytes),
+        }
+    }
+}
+
 /// Canvas-independent renderer state kept across frames for image and shader caches.
 pub struct NativeBackend {
     skia: jian_skia::SkiaBackend,
+    image_sources: HashMap<u64, CachedImageSource>,
     dpi: f32,
     fonts: jian_skia::FontResolver,
     font_family_override: Option<String>,
@@ -26,6 +48,7 @@ impl NativeBackend {
     pub(crate) fn with_font_family(dpi: f32, font_family_override: Option<String>) -> Self {
         Self {
             skia: jian_skia::SkiaBackend::new(),
+            image_sources: HashMap::new(),
             dpi,
             fonts: jian_skia::FontResolver::new(skia_safe::FontMgr::new()),
             font_family_override,
@@ -87,6 +110,7 @@ impl NativeBackend {
         &mut self,
         canvas: &skia_safe::Canvas,
         rect: Rect,
+        image_id: u64,
         encoded: &[u8],
         _mode: ImageDrawMode,
         _adjustments: ImageAdjustments,
@@ -98,10 +122,11 @@ impl NativeBackend {
             canvas.save();
             canvas.clip_rrect(round_rect(rect, corner_radius), None, true);
         }
+        let source = self.image_source(image_id, encoded);
         self.draw_op(
             canvas,
             &DrawOp::Image {
-                source: ImageSource::Bytes(Arc::new(encoded.to_vec())),
+                source,
                 dst: to_jian_rect(rect),
                 opacity: opacity.clamp(0.0, 1.0),
             },
@@ -356,6 +381,20 @@ impl NativeBackend {
     fn font_family_for_measure<'a>(&'a self, requested: Option<&'a str>) -> Option<&'a str> {
         self.font_family_override.as_deref().or(requested)
     }
+
+    /// Resolve an encoded source by the stable caller-provided image ID.
+    ///
+    /// The first ID-to-bytes binding wins. Later lookups clone the cached Arc
+    /// without reading or comparing `encoded`, so every cache hit stays O(1).
+    fn image_source(&mut self, image_id: u64, encoded: &[u8]) -> ImageSource {
+        let source = match self.image_sources.entry(image_id) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(CachedImageSource::new(image_id, encoded))
+            }
+        };
+        source.to_image_source()
+    }
 }
 
 pub fn to_jian_rect(rect: Rect) -> JianRect {
@@ -413,6 +452,9 @@ fn round_rect(rect: Rect, radius: f32) -> skia_safe::RRect {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use jian_core::render::ImageSource;
     use jian_widgets::{Color, Point2D, TextLayout};
 
     use super::NativeBackend;
@@ -421,6 +463,56 @@ mod tests {
         include_bytes!("../../tests/fonts/NotoSansSC-Regular.subset.ttf");
     const SNAPSHOT_SEMIBOLD: &[u8] =
         include_bytes!("../../tests/fonts/NotoSansSC-SemiBold.subset.ttf");
+
+    #[test]
+    fn repeated_image_id_reuses_the_same_encoded_bytes() {
+        let mut backend = NativeBackend::new(1.0);
+
+        let first = backend.image_source(7, b"full repository png");
+        let second = backend.image_source(7, b"full repository png");
+        let (
+            ImageSource::KeyedBytes {
+                key: first_key,
+                bytes: first_bytes,
+            },
+            ImageSource::KeyedBytes {
+                key: second_key,
+                bytes: second_bytes,
+            },
+        ) = (first, second)
+        else {
+            panic!("native images should use keyed encoded bytes");
+        };
+
+        assert_eq!(first_key.as_ref(), "zode-image:0000000000000007");
+        assert!(Arc::ptr_eq(&first_key, &second_key));
+        assert!(Arc::ptr_eq(&first_bytes, &second_bytes));
+    }
+
+    #[test]
+    fn repeated_image_id_keeps_the_first_encoded_bytes() {
+        let mut backend = NativeBackend::new(1.0);
+
+        let first = backend.image_source(7, b"first png");
+        let second = backend.image_source(7, b"different png");
+        let (
+            ImageSource::KeyedBytes {
+                key: first_key,
+                bytes: first_bytes,
+            },
+            ImageSource::KeyedBytes {
+                key: second_key,
+                bytes: second_bytes,
+            },
+        ) = (first, second)
+        else {
+            panic!("native images should use keyed encoded bytes");
+        };
+
+        assert!(Arc::ptr_eq(&first_key, &second_key));
+        assert!(Arc::ptr_eq(&first_bytes, &second_bytes));
+        assert_eq!(second_bytes.as_slice(), b"first png");
+    }
 
     #[test]
     fn injected_family_overrides_paint_and_measure_requests() {

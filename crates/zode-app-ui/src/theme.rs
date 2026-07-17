@@ -31,6 +31,7 @@ pub fn animation_duration_ms(duration_ms: u64, preferences: &UiPreferences) -> u
 /// Jian component tokens plus Zode shell-specific semantic colors.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ZodeTheme {
+    mode: ThemeMode,
     pub tokens: Tokens,
     pub sidebar: Color,
     pub sidebar_foreground: Color,
@@ -41,6 +42,10 @@ pub struct ZodeTheme {
 }
 
 impl ZodeTheme {
+    pub(crate) const fn mode(&self) -> ThemeMode {
+        self.mode
+    }
+
     pub fn for_preferences(system: SystemTheme, preferences: &UiPreferences) -> Self {
         let mode = resolve_theme(system, preferences);
         if preferences.high_contrast {
@@ -108,6 +113,7 @@ impl ZodeTheme {
         tokens.ring = ZODE_PURPLE;
         tokens.row_selected_primary = Color::rgba_u8(124, 58, 237, 0.14);
         Self {
+            mode: ThemeMode::Light,
             tokens,
             sidebar: Color::rgb_u8(238, 237, 234),
             sidebar_foreground: Color::rgb_u8(45, 45, 43),
@@ -124,6 +130,7 @@ impl ZodeTheme {
         tokens.ring = ZODE_PURPLE;
         tokens.row_selected_primary = Color::rgba_u8(124, 58, 237, 0.22);
         Self {
+            mode: ThemeMode::Dark,
             tokens,
             sidebar: Color::rgb_u8(21, 21, 22),
             sidebar_foreground: Color::rgb_u8(232, 232, 230),

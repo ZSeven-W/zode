@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod accessibility;
+mod brand;
 mod input;
 mod layout;
 mod theme;
@@ -42,3 +43,4 @@ pub use accessibility::{
     SETTINGS_NAV_ID, SETTINGS_ROOT_ID, SIDEBAR_ID, TERMINAL_ID, THEME_DARK_ID, THEME_LIGHT_ID,
     THEME_SYSTEM_ID, WORKFLOWS_NAV_ID,
 };
+pub(crate) use brand::BrandMark;
