@@ -17,6 +17,16 @@ pub enum AppCommand {
         session: SessionLocator,
         pinned: bool,
     },
+    SetTranscriptViewport {
+        session: SessionLocator,
+        scroll_offset: f32,
+        follow_tail: bool,
+    },
+    SetTranscriptItemHeight {
+        session: SessionLocator,
+        index: usize,
+        height: f32,
+    },
     RequestDeleteSession(SessionLocator),
     CancelDeleteSession,
     DeleteSession(SessionLocator),

@@ -13,9 +13,26 @@ pub enum TranscriptItem {
 }
 
 /// Ordered transcript state and its event-stream cursor.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TranscriptState {
     pub items: Vec<TranscriptItem>,
     pub last_sequence: u64,
     pub busy: bool,
+    pub scroll_offset: f32,
+    pub follow_tail: bool,
+    /// Last measured height for each item. Zero means the UI should estimate.
+    pub item_heights: Vec<f32>,
+}
+
+impl Default for TranscriptState {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            last_sequence: 0,
+            busy: false,
+            scroll_offset: 0.0,
+            follow_tail: true,
+            item_heights: Vec::new(),
+        }
+    }
 }

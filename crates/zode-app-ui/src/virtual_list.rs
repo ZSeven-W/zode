@@ -14,6 +14,47 @@ impl MeasuredItem {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasurementCache {
+    heights: Vec<f32>,
+}
+
+impl MeasurementCache {
+    pub fn with_estimate(item_count: usize, estimate: f32) -> Self {
+        Self {
+            heights: vec![estimate.max(1.0); item_count],
+        }
+    }
+
+    /// Replaces one cached height and returns its effect on total content
+    /// height. Invalid indices or measurements are ignored.
+    pub fn update(&mut self, index: usize, height: f32) -> Option<f32> {
+        if !height.is_finite() || height <= 0.0 {
+            return None;
+        }
+        let previous = self.heights.get_mut(index)?;
+        let delta = height - *previous;
+        *previous = height;
+        Some(delta)
+    }
+
+    pub fn items(&self) -> Vec<MeasuredItem> {
+        let mut top = 0.0;
+        self.heights
+            .iter()
+            .map(|height| {
+                let item = MeasuredItem::new(top, top + height);
+                top = item.bottom;
+                item
+            })
+            .collect()
+    }
+
+    pub fn total_height(&self) -> f32 {
+        self.heights.iter().sum()
+    }
+}
+
 /// Returns the transcript slice intersecting the viewport plus one item above
 /// it, which prevents visible seams while fractional wheel deltas are applied.
 pub fn visible_range(items: &[MeasuredItem], offset: f32, viewport_h: f32) -> Range<usize> {

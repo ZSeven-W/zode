@@ -15,7 +15,7 @@ pub use layout::{
     CONTENT_GUTTER, CONTENT_W, SIDEBAR_W, TOP_BAR_H, TRANSCRIPT_COMPOSER_GAP, TRANSCRIPT_TOP_GAP,
 };
 pub use theme::{ZodeTheme, ZODE_PURPLE};
-pub use virtual_list::{visible_range, MeasuredItem, VirtualListState};
+pub use virtual_list::{visible_range, MeasuredItem, MeasurementCache, VirtualListState};
 pub use widgets::{
     group_sessions, Composer, ComposerController, ComposerOutcome, ComposerSubmission,
     ProjectSessionGroup, ProjectSidebar, SandboxSelection, SidebarAction, SidebarItem,

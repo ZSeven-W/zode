@@ -18,6 +18,50 @@ pub enum NavigationOutcome {
     Ignored,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptCommandOutcome {
+    Applied,
+    Ignored,
+}
+
+/// Applies viewport state emitted by the transcript widget without involving
+/// the endpoint. Measurements are scoped to the addressed session.
+pub fn reduce_transcript_command(
+    state: &mut ZodeAppState,
+    command: AppCommand,
+) -> TranscriptCommandOutcome {
+    match command {
+        AppCommand::SetTranscriptViewport {
+            session,
+            scroll_offset,
+            follow_tail,
+        } if scroll_offset.is_finite() => {
+            let Some(transcript) = state.transcripts.get_mut(&session) else {
+                return TranscriptCommandOutcome::Ignored;
+            };
+            transcript.scroll_offset = scroll_offset.max(0.0);
+            transcript.follow_tail = follow_tail;
+            TranscriptCommandOutcome::Applied
+        }
+        AppCommand::SetTranscriptItemHeight {
+            session,
+            index,
+            height,
+        } if height.is_finite() && height > 0.0 => {
+            let Some(transcript) = state.transcripts.get_mut(&session) else {
+                return TranscriptCommandOutcome::Ignored;
+            };
+            if index >= transcript.items.len() {
+                return TranscriptCommandOutcome::Ignored;
+            }
+            transcript.item_heights.resize(transcript.items.len(), 0.0);
+            transcript.item_heights[index] = height;
+            TranscriptCommandOutcome::Applied
+        }
+        _ => TranscriptCommandOutcome::Ignored,
+    }
+}
+
 /// Applies navigation-local state immediately and identifies commands whose
 /// durable session/app-state mutation must also be executed by the controller.
 pub fn reduce_navigation_command(
