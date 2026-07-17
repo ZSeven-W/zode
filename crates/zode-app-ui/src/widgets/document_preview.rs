@@ -1,5 +1,5 @@
 use jian_widgets::{
-    components::markdown::{parse_blocks, parse_inline, MdBlock, MdRun},
+    components::markdown::{parse_inline, MdRun},
     Color, HorizontalAlign, Painter, Point2D, Rect, TextLayout,
 };
 use zode_app_model::{AppCommand, PreviewKind, PreviewState, ZodeAppState};
@@ -250,7 +250,7 @@ impl DocumentPreview {
                 painter.clip_rect(layout.content);
                 match kind {
                     PreviewKind::Markdown => {
-                        paint_markdown(painter, layout.content, content, theme)
+                        paint_markdown(painter, layout.content, content, title, theme)
                     }
                     PreviewKind::PlainText => {
                         paint_plain_text(painter, layout.content, content, theme)
@@ -382,7 +382,7 @@ fn paint_path_and_title(
         painter,
         title,
         layout.title,
-        18.0,
+        22.0,
         650,
         theme.tokens.foreground,
         HorizontalAlign::Start,
@@ -401,68 +401,161 @@ fn paint_status(painter: &mut dyn Painter, rect: Rect, message: &str, theme: &Zo
     );
 }
 
-fn paint_markdown(painter: &mut dyn Painter, rect: Rect, markdown: &str, theme: &ZodeTheme) {
-    let mut y = rect.origin.y + 18.0;
+fn paint_markdown(
+    painter: &mut dyn Painter,
+    rect: Rect,
+    markdown: &str,
+    document_title: &str,
+    theme: &ZodeTheme,
+) {
+    let mut source_lines = char_prefix(markdown, MARKDOWN_LIMIT).lines();
+    let mut y = rect.origin.y + 12.0;
     let max_chars = chars_per_line(rect.size.x, 13.0);
-    for block in parse_blocks(markdown, MARKDOWN_LIMIT) {
+    let mut first_block = true;
+    while let Some(line) = source_lines.next() {
         if y > rect.max_y() {
             break;
         }
-        match block {
-            MdBlock::Heading { level, text } => {
-                let size = if level <= 2 { 18.0 } else { 15.0 };
-                let lines = paint_inline_lines(
+        let text = line.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if text.starts_with("```") {
+            let code = source_lines
+                .by_ref()
+                .take_while(|line| !line.trim().starts_with("```"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            y = paint_code_block(painter, rect, y, &code, theme);
+        } else if let Some((level, text)) = markdown_heading(text) {
+            if !(first_block && level == 1 && text.trim() == document_title.trim()) {
+                let (size, weight, line_height) = heading_style(level);
+                let line_count = paint_inline_lines(
                     painter,
-                    &text,
+                    text,
                     Point2D::new(rect.origin.x, y),
                     chars_per_line(rect.size.x, size),
                     size,
-                    size + 6.0,
-                    650,
+                    line_height,
+                    weight,
                     rect.max_y(),
                     theme,
                 );
-                y += lines as f32 * (size + 6.0) + 3.0;
+                y += line_count as f32 * line_height + 8.0;
             }
-            MdBlock::Bullet(text) => {
-                draw_text(
-                    painter,
-                    "•",
-                    Point2D::new(rect.origin.x, y),
-                    "system-ui",
-                    13.0,
-                    600,
-                    theme.zode_purple,
-                );
-                let lines = paint_inline_lines(
-                    painter,
-                    &text,
-                    Point2D::new(rect.origin.x + 16.0, y),
-                    chars_per_line((rect.size.x - 16.0).max(0.0), 13.0),
-                    13.0,
-                    20.0,
-                    400,
-                    rect.max_y(),
-                    theme,
-                );
-                y += lines as f32 * 20.0 + 4.0;
-            }
-            MdBlock::Paragraph(text) => {
-                let lines = paint_inline_lines(
-                    painter,
-                    &text,
-                    Point2D::new(rect.origin.x, y),
-                    max_chars,
-                    13.0,
-                    20.0,
-                    400,
-                    rect.max_y(),
-                    theme,
-                );
-                y += lines as f32 * 20.0 + 4.0;
-            }
+        } else if let Some(text) = markdown_bullet(text) {
+            draw_text(
+                painter,
+                "•",
+                Point2D::new(rect.origin.x, y),
+                "system-ui",
+                13.0,
+                600,
+                theme.zode_purple,
+            );
+            let line_count = paint_inline_lines(
+                painter,
+                text,
+                Point2D::new(rect.origin.x + 16.0, y),
+                chars_per_line((rect.size.x - 16.0).max(0.0), 13.0),
+                13.0,
+                20.0,
+                400,
+                rect.max_y(),
+                theme,
+            );
+            y += line_count as f32 * 20.0 + 4.0;
+        } else {
+            let line_count = paint_inline_lines(
+                painter,
+                text,
+                Point2D::new(rect.origin.x, y),
+                max_chars,
+                13.0,
+                20.0,
+                400,
+                rect.max_y(),
+                theme,
+            );
+            y += line_count as f32 * 20.0 + 4.0;
         }
+        first_block = false;
     }
+}
+
+fn paint_code_block(
+    painter: &mut dyn Painter,
+    rect: Rect,
+    y: f32,
+    lines: &[String],
+    theme: &ZodeTheme,
+) -> f32 {
+    let max_lines = visible_line_budget(y + 8.0, rect.max_y(), 18.0);
+    let rendered = wrap_code_lines(
+        lines,
+        chars_per_line((rect.size.x - 20.0).max(0.0), 12.0),
+        max_lines,
+    );
+    let height = (rendered.len() as f32 * 18.0 + 16.0).min((rect.max_y() - y).max(0.0));
+    painter.fill_round_rect(
+        Rect::xywh(rect.origin.x, y, rect.size.x, height),
+        8.0,
+        theme.tokens.muted,
+    );
+    for (index, line) in rendered.iter().enumerate() {
+        draw_text(
+            painter,
+            line,
+            Point2D::new(rect.origin.x + 10.0, y + 8.0 + index as f32 * 18.0),
+            "monospace",
+            12.0,
+            400,
+            theme.tokens.foreground,
+        );
+    }
+    y + height + 8.0
+}
+
+fn markdown_heading(line: &str) -> Option<(u8, &str)> {
+    let level = line
+        .find(|character| character != '#')
+        .unwrap_or(line.len());
+    if !(1..=6).contains(&level) {
+        return None;
+    }
+    line.get(level..)?
+        .strip_prefix(' ')
+        .map(|text| (level as u8, text.trim()))
+}
+
+fn markdown_bullet(line: &str) -> Option<&str> {
+    line.strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .map(str::trim)
+}
+
+fn heading_style(level: u8) -> (f32, u16, f32) {
+    match level {
+        1 => (22.0, 700, 30.0),
+        2 => (18.0, 650, 26.0),
+        3 => (15.0, 650, 23.0),
+        _ => (13.0, 600, 20.0),
+    }
+}
+
+fn wrap_code_lines(lines: &[String], max_chars: usize, max_lines: usize) -> Vec<String> {
+    let mut rendered = Vec::new();
+    for line in lines {
+        let remaining = max_lines.saturating_sub(rendered.len());
+        if remaining == 0 {
+            break;
+        }
+        rendered.extend(hard_wrap_text_limited(line, max_chars, remaining));
+    }
+    if rendered.is_empty() && max_lines > 0 {
+        rendered.push(String::new());
+    }
+    rendered
 }
 
 fn paint_plain_text(painter: &mut dyn Painter, rect: Rect, content: &str, theme: &ZodeTheme) {
@@ -512,17 +605,18 @@ fn paint_inline_lines(
         }
         let mut x = origin.x;
         for run in line {
-            let (weight, color) = match run {
-                MdRun::Bold(_) => (650, theme.tokens.foreground),
-                MdRun::Code(_) | MdRun::Color(_) => (500, theme.zode_purple),
-                MdRun::Plain(_) => (base_weight, theme.tokens.foreground),
+            let (family, weight, color) = match run {
+                MdRun::Bold(_) => ("system-ui", 650, theme.tokens.foreground),
+                MdRun::Code(_) => ("monospace", 500, theme.zode_purple),
+                MdRun::Color(_) => ("system-ui", 500, theme.zode_purple),
+                MdRun::Plain(_) => ("system-ui", base_weight, theme.tokens.foreground),
             };
             let text = run.text();
             draw_text(
                 painter,
                 text,
                 Point2D::new(x, y),
-                "system-ui",
+                family,
                 size,
                 weight,
                 color,
@@ -536,11 +630,6 @@ fn paint_inline_lines(
 
 fn chars_per_line(width: f32, size: f32) -> usize {
     (width.max(0.0) / size.max(1.0)).floor().max(1.0) as usize
-}
-
-#[cfg(test)]
-fn hard_wrap_text(text: &str, max_chars: usize) -> Vec<String> {
-    hard_wrap_text_limited(text, max_chars, usize::MAX)
 }
 
 fn hard_wrap_text_limited(text: &str, max_chars: usize, max_lines: usize) -> Vec<String> {
@@ -566,11 +655,6 @@ fn hard_wrap_text_limited(text: &str, max_chars: usize, max_lines: usize) -> Vec
         lines.push(line);
     }
     lines
-}
-
-#[cfg(test)]
-fn hard_wrap_runs(runs: &[MdRun], max_chars: usize) -> Vec<Vec<MdRun>> {
-    hard_wrap_runs_limited(runs, max_chars, usize::MAX)
 }
 
 fn hard_wrap_runs_limited(runs: &[MdRun], max_chars: usize, max_lines: usize) -> Vec<Vec<MdRun>> {
@@ -657,10 +741,12 @@ mod tests {
 
     #[test]
     fn hard_wrapping_bounds_plain_and_styled_unbroken_text() {
-        let plain = hard_wrap_text("abcdefghijklmnop", 5);
-        assert_eq!(plain, ["abcde", "fghij", "klmno", "p"]);
+        assert_eq!(
+            hard_wrap_text_limited("abcdefghijklmnop", 5, usize::MAX),
+            ["abcde", "fghij", "klmno", "p"]
+        );
 
-        let styled = hard_wrap_runs(&parse_inline("**abcdefghijklmnop**"), 5);
+        let styled = hard_wrap_runs_limited(&parse_inline("**abcdefghijklmnop**"), 5, usize::MAX);
         assert!(styled.iter().all(|line| {
             line.iter()
                 .map(|run| run.text().chars().count())
@@ -668,11 +754,7 @@ mod tests {
                 <= 5
         }));
         assert_eq!(
-            styled
-                .iter()
-                .flat_map(|line| line.iter())
-                .map(MdRun::text)
-                .collect::<String>(),
+            styled.iter().flatten().map(MdRun::text).collect::<String>(),
             "abcdefghijklmnop"
         );
 

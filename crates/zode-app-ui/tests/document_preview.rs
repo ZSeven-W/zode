@@ -306,6 +306,75 @@ fn compact_preview_hard_wraps_long_markdown_and_plain_text_inside_content() {
 }
 
 #[test]
+fn markdown_preview_renders_document_hierarchy_without_literal_markers_or_duplicate_h1() {
+    let (mut state, session, workspace_uri) = state_with_session();
+    state.presentation.secondary_pane = Some(SecondaryPane::DocumentPreview);
+    state
+        .presentation
+        .sessions
+        .entry(session)
+        .or_default()
+        .preview = PreviewState::Ready {
+        target: PreviewTarget {
+            workspace_uri,
+            relative_path: "docs/plan.md".into(),
+        },
+        title: "设计计划".into(),
+        content: concat!(
+            "# 设计计划\n\n",
+            "## 目标\n\n",
+            "用真实层级绘制 Markdown 正文。\n\n",
+            "- 保留列表语义\n\n",
+            "```rust\n",
+            "fn main() { println!(\"zode\"); }\n",
+            "```\n",
+        )
+        .into(),
+        kind: PreviewKind::Markdown,
+    };
+    let rect = Rect::xywh(1_100.0, 0.0, 700.0, 1_080.0);
+    let layout = DocumentPreview::layout(rect, &state);
+    let mut painter = PaintCapture::default();
+
+    DocumentPreview::paint(&mut painter, rect, &state, &ZodeTheme::light());
+
+    let visible_title_count = painter
+        .texts
+        .iter()
+        .filter(|text| {
+            text.origin.y >= layout.title.origin.y
+                && text.content.trim_start_matches('#').trim() == "设计计划"
+        })
+        .count();
+    assert_eq!(visible_title_count, 1, "the matching body H1 is redundant");
+    assert!(painter.texts.iter().all(|text| {
+        let content = text.content.trim_start();
+        !content.starts_with("# ") && !content.starts_with("## ")
+    }));
+
+    let heading = painter
+        .texts
+        .iter()
+        .find(|text| text.content == "目标")
+        .expect("H2 text");
+    let paragraph = painter
+        .texts
+        .iter()
+        .find(|text| text.content.starts_with("用真实层级"))
+        .expect("paragraph text");
+    assert!(heading.font_size > paragraph.font_size);
+    assert!(heading.font_weight > paragraph.font_weight);
+    assert!(painter
+        .texts
+        .iter()
+        .any(|text| { text.content.contains("fn main") && text.font_family == "monospace" }));
+    assert!(painter.clips.contains(&layout.content));
+    assert!(painter.texts.iter().all(|text| {
+        text.origin.y < layout.content.origin.y || text.origin.y <= layout.content.max_y()
+    }));
+}
+
+#[test]
 fn review_rows_require_available_local_workspace_and_clip_the_last_visible_row() {
     let (mut state, session, _) = state_with_session();
     state.presentation.sessions.insert(
@@ -573,6 +642,8 @@ struct PaintedText {
     content: String,
     origin: Point2D,
     font_size: f32,
+    font_weight: u16,
+    font_family: String,
 }
 
 struct PaintedSvg {
@@ -598,6 +669,16 @@ impl Painter for PaintCapture {
                 .runs()
                 .first()
                 .map(|run| run.font_size)
+                .unwrap_or_default(),
+            font_weight: layout
+                .runs()
+                .first()
+                .map(|run| run.font_weight)
+                .unwrap_or_default(),
+            font_family: layout
+                .runs()
+                .first()
+                .map(|run| run.font_family.clone())
                 .unwrap_or_default(),
         });
     }
