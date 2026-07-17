@@ -529,7 +529,13 @@ fn take_chip(
 fn estimated_text_width(label: &str) -> f32 {
     label
         .chars()
-        .map(|character| if character.is_ascii() { 7.2 } else { 14.0 })
+        .map(|character| {
+            if character.is_ascii() {
+                CONTEXT_FONT_SIZE * 0.55
+            } else {
+                CONTEXT_FONT_SIZE
+            }
+        })
         .sum()
 }
 
