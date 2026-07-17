@@ -8,6 +8,7 @@ use zode_app_model::{
 use zode_app_ui::{
     DocumentPreview, Insets, RectExt, ReviewPanel, SemanticIcon, ThreadTranscript, WorkspaceLayout,
     WorkspaceSnapshot, ZodeTheme, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
+    SECONDARY_SIDEBAR_MAX_VIEWPORT_RATIO,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
@@ -119,6 +120,7 @@ fn path_backed_transcript_items_share_button_hit_a11y_and_command_geometry() {
 fn real_review_file_row_is_a_preview_button_with_one_shared_rect() {
     let (mut state, session, _) = state_with_session();
     state.presentation.secondary_pane = Some(SecondaryPane::Review);
+    state.presentation.secondary_sidebar_open = true;
     state.presentation.sessions.insert(
         session.clone(),
         SessionPresentationState {
@@ -181,8 +183,9 @@ fn document_preview_reuses_review_split_and_compact_primary_fallback() {
     );
 
     assert_eq!(preview.review_panel, review.review_panel);
-    assert_eq!(preview.review_panel.width(), 700.0);
-    assert_eq!(preview.review_panel.min_x(), 1_100.0);
+    let constrained_width = 1_800.0 * SECONDARY_SIDEBAR_MAX_VIEWPORT_RATIO;
+    assert_eq!(preview.review_panel.width(), constrained_width);
+    assert_eq!(preview.review_panel.min_x(), 1_800.0 - constrained_width);
     assert_eq!(compact.review_panel.width(), 0.0);
     assert!(compact.primary_surface.width() > 0.0);
 }
@@ -195,6 +198,7 @@ fn ready_and_failed_preview_controls_are_accessible_and_emit_bound_commands() {
         relative_path: "docs/report.md".into(),
     };
     state.presentation.secondary_pane = Some(SecondaryPane::DocumentPreview);
+    state.presentation.secondary_sidebar_open = true;
     state
         .presentation
         .sessions
@@ -452,6 +456,7 @@ fn zero_sized_preview_exposes_no_empty_accessibility_nodes_and_caps_value() {
 fn retargeted_workspace_hides_stale_content_and_uses_a_contained_document_tab() {
     let (mut state, session, old_workspace) = state_with_session();
     state.presentation.secondary_pane = Some(SecondaryPane::DocumentPreview);
+    state.presentation.secondary_sidebar_open = true;
     state
         .presentation
         .sessions

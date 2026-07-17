@@ -1,6 +1,9 @@
 use jian_widgets::Rect;
 use zode_app_model::{IntegrationsTab, LayoutClass, SecondaryPane, SettingsCategory, ShellRoute};
-use zode_app_ui::{Insets, PinnedSummaryMode, RectExt, WorkspaceLayout, PRIMARY_SIDEBAR_DEFAULT_W};
+use zode_app_ui::{
+    Insets, PinnedSummaryMode, RectExt, WorkspaceLayout, PRIMARY_SIDEBAR_DEFAULT_W,
+    SECONDARY_SIDEBAR_MAX_VIEWPORT_RATIO,
+};
 
 const EPSILON: f32 = 0.01;
 
@@ -73,11 +76,13 @@ fn review_panel_creates_the_reference_split() {
         Some(SecondaryPane::Review),
     );
 
-    assert!((layout.review_panel.min_x() - 1100.0).abs() <= EPSILON);
-    assert!((layout.review_panel.width() - 700.0).abs() <= EPSILON);
-    assert!((layout.divider.min_x() - 1099.0).abs() <= EPSILON);
+    let constrained_width = 1_800.0 * SECONDARY_SIDEBAR_MAX_VIEWPORT_RATIO;
+    let panel_x = 1_800.0 - constrained_width;
+    assert!((layout.review_panel.min_x() - panel_x).abs() <= EPSILON);
+    assert!((layout.review_panel.width() - constrained_width).abs() <= EPSILON);
+    assert!((layout.divider.min_x() - (panel_x - 1.0)).abs() <= EPSILON);
     assert_eq!(layout.divider.width(), 1.0);
-    assert!((layout.transcript.min_x() - 301.5).abs() <= EPSILON);
+    assert!((layout.transcript.min_x() - 336.5).abs() <= EPSILON);
     assert_eq!(layout.transcript.width(), 736.0);
     assert_eq!(layout.primary_surface.max_x(), layout.divider.min_x());
 }
