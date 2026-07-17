@@ -58,16 +58,23 @@ fn accessibility_adapter_is_installed_before_the_window_is_visible() {
 }
 
 #[test]
-fn unsafe_is_confined_to_the_explicit_platform_adapter_module() {
+fn unsafe_is_confined_to_explicit_platform_adapter_modules() {
     let crate_root = include_str!("../src/lib.rs");
     let adapter = include_str!("../src/accessibility_host.rs");
+    let presenter = include_str!("../src/presenter/mod.rs");
 
     assert!(crate_root.contains("#![deny(unsafe_code)]"));
     assert!(crate_root.contains("#[allow(unsafe_code)]\npub mod accessibility_host;"));
     assert_eq!(
         crate_root.matches("#[allow(unsafe_code)]").count(),
         1,
-        "only the native accessibility adapter may opt out of the crate unsafe ban",
+        "only the native accessibility adapter may opt out at the crate root",
     );
     assert!(adapter.contains("accesskit_macos::SubclassingAdapter::new"));
+    assert!(presenter.contains("#[cfg(target_os = \"macos\")]\n#[allow(unsafe_code)]\nmod macos;"));
+    assert_eq!(
+        presenter.matches("#[allow(unsafe_code)]").count(),
+        1,
+        "only the macOS presenter adapter may opt out within presenter",
+    );
 }

@@ -5,6 +5,7 @@ use winit::window::Window;
 use crate::render::RasterSurface;
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 mod macos;
 mod softbuffer;
 

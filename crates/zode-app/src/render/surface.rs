@@ -39,6 +39,7 @@ impl RasterSurface {
         if pixmap.row_bytes() != expected_row_bytes {
             return false;
         }
+        let color_type = pixmap.color_type();
         let Some(pixels) = pixmap.pixels::<u32>() else {
             return false;
         };
@@ -46,12 +47,17 @@ impl RasterSurface {
             return false;
         }
         for (target, source) in output.iter_mut().zip(pixels) {
-            // Skia's N32 raster is laid out as RGBA bytes on our supported
-            // little-endian desktop targets, while softbuffer expects a
-            // numeric 0x00RRGGBB word.
-            *target = ((source & 0x0000_00ff) << 16)
-                | (source & 0x0000_ff00)
-                | ((source & 0x00ff_0000) >> 16);
+            // Skia's native N32 color type differs by platform. Softbuffer
+            // always expects a numeric 0x00RRGGBB word.
+            *target = match color_type {
+                skia_safe::ColorType::RGBA8888 => {
+                    ((source & 0x0000_00ff) << 16)
+                        | (source & 0x0000_ff00)
+                        | ((source & 0x00ff_0000) >> 16)
+                }
+                skia_safe::ColorType::BGRA8888 => source & 0x00ff_ffff,
+                _ => return false,
+            };
         }
         true
     }
@@ -67,6 +73,7 @@ impl RasterSurface {
         if pixmap.row_bytes() != expected_row_bytes {
             return false;
         }
+        let color_type = pixmap.color_type();
         let Some(pixels) = pixmap.pixels::<u32>() else {
             return false;
         };
@@ -74,13 +81,20 @@ impl RasterSurface {
             return false;
         }
         for (target, source) in output.chunks_exact_mut(4).zip(pixels) {
-            // Skia N32 is numeric 0xAABBGGRR on our little-endian desktop
-            // target. Core Graphics PremultipliedFirst + Order32Little uses
-            // the matching in-memory BGRA order.
-            target[0] = ((source >> 16) & 0xff) as u8;
-            target[1] = ((source >> 8) & 0xff) as u8;
-            target[2] = (source & 0xff) as u8;
-            target[3] = ((source >> 24) & 0xff) as u8;
+            // Core Graphics PremultipliedFirst + Order32Little expects BGRA
+            // bytes. Convert from whichever N32 layout Skia selected.
+            match color_type {
+                skia_safe::ColorType::RGBA8888 => {
+                    target[0] = ((source >> 16) & 0xff) as u8;
+                    target[1] = ((source >> 8) & 0xff) as u8;
+                    target[2] = (source & 0xff) as u8;
+                    target[3] = ((source >> 24) & 0xff) as u8;
+                }
+                skia_safe::ColorType::BGRA8888 => {
+                    target.copy_from_slice(&source.to_le_bytes());
+                }
+                _ => return false,
+            }
         }
         true
     }
