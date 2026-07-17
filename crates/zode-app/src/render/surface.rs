@@ -56,6 +56,35 @@ impl RasterSurface {
         true
     }
 
+    /// Copy native premultiplied N32 pixels into Core Graphics BGRA bytes.
+    /// Alpha is preserved so the macOS foreground layer can reveal the
+    /// native sidebar material without changing opaque main-content RGB.
+    pub fn copy_bgra_premultiplied_to(&mut self, output: &mut [u8]) -> bool {
+        let expected_row_bytes = self.size().0 as usize * std::mem::size_of::<u32>();
+        let Some(pixmap) = self.inner.canvas().peek_pixels() else {
+            return false;
+        };
+        if pixmap.row_bytes() != expected_row_bytes {
+            return false;
+        }
+        let Some(pixels) = pixmap.pixels::<u32>() else {
+            return false;
+        };
+        if pixels.len().saturating_mul(4) != output.len() {
+            return false;
+        }
+        for (target, source) in output.chunks_exact_mut(4).zip(pixels) {
+            // Skia N32 is numeric 0xAABBGGRR on our little-endian desktop
+            // target. Core Graphics PremultipliedFirst + Order32Little uses
+            // the matching in-memory BGRA order.
+            target[0] = ((source >> 16) & 0xff) as u8;
+            target[1] = ((source >> 8) & 0xff) as u8;
+            target[2] = (source & 0xff) as u8;
+            target[3] = ((source >> 24) & 0xff) as u8;
+        }
+        true
+    }
+
     pub fn size(&self) -> (u32, u32) {
         (self.inner.width() as u32, self.inner.height() as u32)
     }
@@ -99,5 +128,39 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(direct, expected);
+    }
+
+    #[test]
+    fn bgra_copy_preserves_premultiplied_alpha() {
+        let mut surface = RasterSurface::new(2, 1).expect("surface");
+        surface.canvas().clear(skia_safe::Color::TRANSPARENT);
+        let mut paint = skia_safe::Paint::new(
+            skia_safe::Color4f::new(128.0 / 255.0, 64.0 / 255.0, 32.0 / 255.0, 0.5),
+            None,
+        );
+        paint.set_anti_alias(false);
+        surface
+            .canvas()
+            .draw_rect(skia_safe::Rect::from_xywh(0.0, 0.0, 1.0, 1.0), &paint);
+        let mut output = vec![0; 8];
+
+        assert!(surface.copy_bgra_premultiplied_to(&mut output));
+        assert_eq!(output[3], 128);
+        assert_eq!(output[4..8], [0, 0, 0, 0]);
+        assert!(output[0] <= 17, "blue must remain premultiplied");
+        assert!(output[1] <= 33, "green must remain premultiplied");
+        assert!(output[2] <= 65, "red must remain premultiplied");
+    }
+
+    #[test]
+    fn bgra_copy_keeps_opaque_main_rgb_exact() {
+        let mut surface = RasterSurface::new(1, 1).expect("surface");
+        surface
+            .canvas()
+            .clear(skia_safe::Color::from_argb(255, 0x12, 0x34, 0x56));
+        let mut output = vec![0; 4];
+
+        assert!(surface.copy_bgra_premultiplied_to(&mut output));
+        assert_eq!(output, [0x56, 0x34, 0x12, 0xff]);
     }
 }

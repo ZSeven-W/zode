@@ -1,4 +1,4 @@
-use std::{num::NonZeroU32, sync::Arc};
+use std::sync::Arc;
 
 use winit::event_loop::ActiveEventLoop;
 use zode_app_ui::{
@@ -11,6 +11,7 @@ use crate::event_map::resize_direction;
 use crate::{
     accessibility_host::{AccessibilityBridge, AccessibilityHost},
     event_map::{is_drag_region, map_system_theme},
+    presenter::{LivePresenter, PresentationFrame},
     render::{FramePainter, NativeBackend, RasterSurface},
     window_bootstrap::hidden_window_attributes_for_placement,
     window_state::{update_window_geometry, AppWake, WindowGeometry, WindowState},
@@ -59,10 +60,7 @@ impl DesktopApp {
             placement.maximized(),
         )
         .map_err(|error| error.to_string())?;
-        let context =
-            softbuffer::Context::new(window.clone()).map_err(|error| error.to_string())?;
-        let presenter = softbuffer::Surface::new(&context, window.clone())
-            .map_err(|error| error.to_string())?;
+        let presenter = LivePresenter::new(window.clone())?;
         self.presenter = Some(presenter);
         self.a11y = Some(a11y);
         self.window = Some(window.clone());
@@ -100,11 +98,26 @@ impl DesktopApp {
                     .map_err(|error| error.to_string())?,
             );
         }
+        let base_theme = crate::preferences::theme_for_state(&self.app_state);
+        let native_sidebar_material = self
+            .presenter
+            .as_ref()
+            .is_some_and(LivePresenter::supports_native_sidebar_material)
+            && base_theme.uses_sidebar_material();
+        let theme = if native_sidebar_material {
+            base_theme.with_native_sidebar_material()
+        } else {
+            base_theme
+        };
         let project_picker = self.project_picker_view_state();
         let raster = self.raster.as_mut().expect("raster initialized");
         let canvas = raster.canvas();
         canvas.reset_matrix();
-        canvas.clear(skia_safe::Color::WHITE);
+        canvas.clear(if native_sidebar_material {
+            skia_safe::Color::TRANSPARENT
+        } else {
+            skia_safe::Color::WHITE
+        });
         let scale = self.window_state.scale_factor as f32;
         if self.accessibility_tree_dirty {
             if let Some(a11y) = self.a11y.as_mut() {
@@ -116,7 +129,6 @@ impl DesktopApp {
             }
         }
         canvas.scale((scale, scale));
-        let theme = crate::preferences::theme_for_state(&self.app_state);
         let (composer_ime_cursor_area, branch_search_ime_cursor_area) = {
             let mut painter = FramePainter::new(&mut self.renderer, canvas);
             WorkspaceShell::paint_snapshot_with_project_picker(
@@ -187,23 +199,17 @@ impl DesktopApp {
             .presenter
             .as_mut()
             .ok_or_else(|| "presenter is not initialized".to_owned())?;
-        if self.presenter_size != Some(required) {
-            presenter
-                .resize(
-                    NonZeroU32::new(physical_width).expect("positive width"),
-                    NonZeroU32::new(physical_height).expect("positive height"),
-                )
-                .map_err(|error| error.to_string())?;
-            self.presenter_size = Some(required);
-        }
-        let mut buffer = presenter.buffer_mut().map_err(|error| error.to_string())?;
-        if !raster.copy_rgb_to(&mut buffer) {
-            return Err("Skia framebuffer copy failed".into());
-        }
-        if let Some(window) = self.window.as_ref() {
-            window.pre_present_notify();
-        }
-        buffer.present().map_err(|error| error.to_string())?;
+        let sidebar = self.frame_snapshot.layout.sidebar;
+        presenter.present(
+            raster,
+            PresentationFrame {
+                physical_width,
+                physical_height,
+                scale_factor: self.window_state.scale_factor,
+                sidebar_width: sidebar.origin.x + sidebar.size.x,
+                native_sidebar_material,
+            },
+        )?;
         self.window_state.dirty = false;
         Ok(())
     }

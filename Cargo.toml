@@ -96,8 +96,11 @@ accesskit_macos = "0.26"
 accesskit_windows = "0.33"
 accesskit_unix = "0.22"
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSGraphics", "NSScreen"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSGraphics", "NSResponder", "NSScreen", "NSView", "NSVisualEffectView", "objc2-quartz-core"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CGColorSpace", "CGDataProvider", "CGImage"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSDictionary", "NSObject", "NSString"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "CALayer", "CATransaction"] }
 x11rb = { version = "0.13.2", features = ["randr"] }
 image = { version = "=0.25.8", default-features = false, features = ["png"] }
 futures-core = "0.3"

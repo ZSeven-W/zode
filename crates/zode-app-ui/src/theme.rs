@@ -33,6 +33,7 @@ pub fn animation_duration_ms(duration_ms: u64, preferences: &UiPreferences) -> u
 pub struct ZodeTheme {
     mode: ThemeMode,
     sidebar_material: bool,
+    native_sidebar_material: bool,
     pub tokens: Tokens,
     pub sidebar: Color,
     pub sidebar_foreground: Color,
@@ -52,8 +53,20 @@ impl ZodeTheme {
         self.mode
     }
 
-    pub(crate) const fn uses_sidebar_material(&self) -> bool {
+    pub const fn uses_sidebar_material(&self) -> bool {
         self.sidebar_material
+    }
+
+    pub const fn uses_native_sidebar_material(&self) -> bool {
+        self.native_sidebar_material
+    }
+
+    pub fn with_native_sidebar_material(mut self) -> Self {
+        if self.sidebar_material {
+            self.native_sidebar_material = true;
+            self.sidebar = Color::TRANSPARENT;
+        }
+        self
     }
 
     pub fn for_preferences(system: SystemTheme, preferences: &UiPreferences) -> Self {
@@ -134,6 +147,7 @@ impl ZodeTheme {
         Self {
             mode: ThemeMode::Light,
             sidebar_material: true,
+            native_sidebar_material: false,
             tokens,
             // Softbuffer presents opaque RGB words, so use the pre-composited
             // visual equivalent of the macOS light sidebar material. Keeping
@@ -161,6 +175,7 @@ impl ZodeTheme {
         Self {
             mode: ThemeMode::Dark,
             sidebar_material: false,
+            native_sidebar_material: false,
             tokens,
             sidebar: Color::rgb_u8(21, 21, 22),
             sidebar_foreground: Color::rgb_u8(232, 232, 230),
@@ -218,6 +233,17 @@ mod tests {
         assert!(!ZodeTheme::dark().uses_sidebar_material());
         assert!(!ZodeTheme::high_contrast(super::ThemeMode::Light).uses_sidebar_material());
         assert!(!ZodeTheme::high_contrast(super::ThemeMode::Dark).uses_sidebar_material());
+    }
+
+    #[test]
+    fn native_material_variant_only_makes_supported_sidebar_transparent() {
+        let light = ZodeTheme::light().with_native_sidebar_material();
+        let dark = ZodeTheme::dark().with_native_sidebar_material();
+
+        assert!(light.uses_native_sidebar_material());
+        assert_eq!(light.sidebar, Color::TRANSPARENT);
+        assert!(!dark.uses_native_sidebar_material());
+        assert_eq!(dark.sidebar, ZodeTheme::dark().sidebar);
     }
 
     #[test]

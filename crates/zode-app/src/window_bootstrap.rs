@@ -64,6 +64,7 @@ pub fn hidden_window_attributes_for_placement(
     {
         use winit::platform::macos::WindowAttributesExtMacOS;
         attributes = attributes
+            .with_transparent(true)
             .with_titlebar_transparent(true)
             .with_fullsize_content_view(true)
             .with_title_hidden(true)

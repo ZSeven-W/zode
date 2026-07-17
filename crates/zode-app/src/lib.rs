@@ -15,6 +15,8 @@ pub mod input_dispatch;
 mod platform_work_area;
 pub mod preferences;
 pub mod presentation_bridge;
+#[allow(unsafe_code)]
+mod presenter;
 pub mod render;
 pub mod services;
 pub mod terminal_runtime;

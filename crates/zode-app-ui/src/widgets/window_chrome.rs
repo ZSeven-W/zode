@@ -11,9 +11,27 @@ impl WindowChrome {
         geometry: &WorkspaceLayout,
         theme: &ZodeTheme,
     ) {
-        painter.fill_rect(viewport, theme.tokens.background);
+        if theme.uses_native_sidebar_material() {
+            let main_x = geometry
+                .sidebar
+                .max_x()
+                .clamp(viewport.origin.x, viewport.max_x());
+            painter.fill_rect(
+                Rect::xywh(
+                    main_x,
+                    viewport.origin.y,
+                    (viewport.max_x() - main_x).max(0.0),
+                    viewport.size.y,
+                ),
+                theme.tokens.background,
+            );
+        } else {
+            painter.fill_rect(viewport, theme.tokens.background);
+        }
         if geometry.sidebar.size.x > 0.0 {
-            painter.fill_rect(geometry.sidebar, theme.sidebar);
+            if !theme.uses_native_sidebar_material() {
+                painter.fill_rect(geometry.sidebar, theme.sidebar);
+            }
             paint_sidebar_material_edge(painter, geometry.sidebar, theme);
         }
         painter.fill_rect(geometry.top_bar, theme.tokens.background);
@@ -32,9 +50,8 @@ impl WindowChrome {
 
 /// Approximate the inner edge produced by macOS sidebar material.
 ///
-/// The live Softbuffer presenter is opaque RGB, so it cannot expose a native
-/// `NSVisualEffectView` behind the raster. A short translucent ramp preserves
-/// the same visual separation without changing the window or Jian renderer.
+/// A short translucent ramp preserves the reference material's inner edge for
+/// both the native macOS material and the deterministic opaque fallback.
 fn paint_sidebar_material_edge(painter: &mut dyn Painter, sidebar: Rect, theme: &ZodeTheme) {
     if !theme.uses_sidebar_material() || sidebar.size.x < 8.0 {
         return;

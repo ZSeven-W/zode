@@ -49,7 +49,10 @@ x11rb = { workspace = true }
 accesskit_macos = { workspace = true }
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true }
+objc2-core-foundation = { workspace = true }
+objc2-core-graphics = { workspace = true }
 objc2-foundation = { workspace = true }
+objc2-quartz-core = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 accesskit_windows = { workspace = true }
