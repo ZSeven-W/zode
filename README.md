@@ -128,8 +128,15 @@ cargo +1.94 run -p zode-app
 ```
 
 See [docs/zode-app.md](docs/zode-app.md) for native packages, persisted state,
-desktop shortcuts, permission semantics, terminal limitations, and the current
-local-only scope.
+desktop shortcuts, per-session message queues, permission semantics, terminal
+limitations, and the current local-only scope.
+
+While a native desktop turn is running, `Enter` adds the draft to that
+session's FIFO queue instead of steering the live turn, and the primary send
+button becomes **Stop**. Pending messages can be guided into the active turn
+without interrupting it, edited, deleted, or cleared together. Each applied
+`TurnFinished` event starts the next pending message automatically; queues stay
+isolated when you switch between sessions.
 
 ## Quick Start
 
@@ -1164,7 +1171,7 @@ slash commands (e.g. `/<name>`) and can be invoked directly.
 
 | Key | Action |
 |---|---|
-| `Enter` | Send message (queues if a turn is running) |
+| `Enter` | Send message (the native desktop app queues it for the current session if a turn is running) |
 | `Shift`/`Alt`+`Enter` | Newline |
 | `Up` / `Down` | Recall previous / next submitted prompt (or move the autocomplete selection) |
 | `Ctrl+C` | Interrupt the turn (quit when idle) |

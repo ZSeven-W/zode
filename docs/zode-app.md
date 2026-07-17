@@ -60,7 +60,7 @@ cargo +1.94 run -p zode-app -- --render-snapshot /tmp/zode-app.png
 | --- | --- |
 | `Tab` / `Shift+Tab` | 在可聚焦控件之间前进/后退 |
 | `Enter` / `Space` | 激活当前非输入控件 |
-| 编辑器内 `Enter` | 发送；turn 运行中则作为 steer 输入 |
+| 编辑器内 `Enter` | 空闲时发送；turn 运行中则加入当前 session 的 FIFO 队列 |
 | 编辑器内 `Shift+Enter` | 插入换行 |
 | `Primary+A` | 全选编辑器文本 |
 | `Primary+V` | 粘贴文本或受支持的图片 |
@@ -69,6 +69,14 @@ cargo +1.94 run -p zode-app -- --render-snapshot /tmp/zode-app.png
 | 设置页 `PageUp/PageDown/Home/End` | 翻页或跳到开头/末尾 |
 
 终端获得焦点后，macOS 使用 `Cmd+C` / `Cmd+V` 复制粘贴；Windows/Linux 使用 `Ctrl+Shift+C` / `Ctrl+Shift+V`。普通 `Ctrl+C` 会发送给 PTY 内的前台进程。
+
+## 运行中的消息队列
+
+Desktop 的消息队列以 session 为单位隔离。当前 turn 运行中时，在编辑器内按 `Enter` 会把消息追加到该 session 的 FIFO 队列，不会中断模型，也不会混入切换后所见的其他 session。主发送按钮在运行期间显示为停止操作，只负责中断当前 turn，不会顺带清空待处理消息。
+
+待处理消息显示在编辑器上方，可以逐条编辑、删除，或使用“关闭排队”清空该 session 尚未发送的消息；这些操作都不会中断当前 turn。编辑排队消息结束后，编辑器会恢复此前尚未发送的草稿和附件。
+
+逐条点击“引导”会把该消息作为 steer 输入提交给当前运行中的 turn，并从待处理队列移除，但不会先停止或重启模型。普通排队消息则在当前 session 收到已应用的 `TurnFinished` 事件后，严格按 FIFO 顺序一次自动启动一条；即使界面已经切换到另一 session，续跑仍归属于原 session。
 
 ## 内置终端的 VT 边界
 
