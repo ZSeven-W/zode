@@ -3,7 +3,7 @@ use zode_app_model::{
     demo_state, AppCommand, ComposerFooterMenu, SettingsCategory, ShellRoute, ZodeAppState,
 };
 use zode_app_ui::{
-    Composer, ComposerFooterMenuWidget, Insets, WorkspaceSnapshot, COMPOSER_ADD_FILE_ID,
+    Composer, ComposerFooterMenuWidget, Insets, RectExt, WorkspaceSnapshot, COMPOSER_ADD_FILE_ID,
     COMPOSER_ADD_GOAL_ID, COMPOSER_ADD_ID, COMPOSER_ADD_PLAN_ID, COMPOSER_ADD_WECHAT_ID,
     COMPOSER_MODEL_CONFIGURE_ID, COMPOSER_MODEL_EFFORTS_ID, COMPOSER_MODEL_EFFORT_HIGH_ID,
     COMPOSER_MODEL_ID, COMPOSER_MODEL_MODELS_ID, COMPOSER_MODEL_RESET_ID, COMPOSER_MODEL_SPEEDS_ID,

@@ -5,7 +5,9 @@ Chinese and Latin shaping do not depend on fonts installed on the runner.
 Their internal family is renamed to the repository-private
 **Zode Snapshot Sans SC**, preventing an installed copy of Noto Sans SC from
 taking precedence over the bundled faces. They are not application release
-assets.
+assets. Two keyboard shortcut symbols are completed from **Noto Sans Symbols
+2**: U+2325 uses its original outline, while U+2303 is a deterministic cmap
+alias to Noto Sans SC's ASCII circumflex.
 
 ## Source and license
 
@@ -13,6 +15,11 @@ assets.
 - Source commit: `ec0464b978de222073645d6d3366f3fdf03376d8`
 - Source file: `NotoSansSC[wght].ttf`
 - Source SHA-256: `a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da`
+- Symbol source: [google/fonts `ofl/notosanssymbols2`](https://github.com/google/fonts/tree/ec0464b978de222073645d6d3366f3fdf03376d8/ofl/notosanssymbols2)
+- Symbol source file: `NotoSansSymbols2-Regular.ttf`
+- Symbol source SHA-256: `7d5fb73b7ca67a6798101741f5d280a3d016a56a197afcd4199dbb57b4b82a21`
+- Symbol copyright: `Copyright 2022 The Noto Project Authors
+  (https://github.com/notofonts/symbols)`
 - License: SIL Open Font License 1.1; the exact upstream text is copied to
   [`LICENSE.txt`](LICENSE.txt).
 
@@ -30,6 +37,9 @@ repository root, with `fonttools` and `pyftsubset` on `PATH`, run:
 curl -fL \
   'https://raw.githubusercontent.com/google/fonts/ec0464b978de222073645d6d3366f3fdf03376d8/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf' \
   -o /tmp/NotoSansSC-wght-ec0464b.ttf
+curl -fL \
+  'https://raw.githubusercontent.com/google/fonts/ec0464b978de222073645d6d3366f3fdf03376d8/ofl/notosanssymbols2/NotoSansSymbols2-Regular.ttf' \
+  -o /tmp/NotoSansSymbols2-Regular-ec0464b.ttf
 
 fonttools varLib.instancer /tmp/NotoSansSC-wght-ec0464b.ttf \
   wght=400 --update-name-table --no-recalc-timestamp \
@@ -55,13 +65,20 @@ python3 crates/zode-app/tests/fonts/rename-family.py \
   crates/zode-app/tests/fonts/NotoSansSC-Regular.subset.ttf Regular
 python3 crates/zode-app/tests/fonts/rename-family.py \
   crates/zode-app/tests/fonts/NotoSansSC-SemiBold.subset.ttf SemiBold
+
+python3 crates/zode-app/tests/fonts/augment-symbols.py \
+  crates/zode-app/tests/fonts/NotoSansSC-Regular.subset.ttf \
+  /tmp/NotoSansSymbols2-Regular-ec0464b.ttf
+python3 crates/zode-app/tests/fonts/augment-symbols.py \
+  crates/zode-app/tests/fonts/NotoSansSC-SemiBold.subset.ttf \
+  /tmp/NotoSansSymbols2-Regular-ec0464b.ttf
 ```
 
 Expected SHA-256 values:
 
 ```text
-caf1ba1944d4509a15edf85be282f60e897b0e7546cec08676d9dbc3ffd10dff  NotoSansSC-Regular.subset.ttf
-4fe935a7d7a30313529a50d384e5713f7736cadb5f52d1e4ad7895c29710e4fb  NotoSansSC-SemiBold.subset.ttf
+110f403dde342982626151f36bbba7cc61372a87f69efc0af9761be7c960798c  NotoSansSC-Regular.subset.ttf
+42eaf6d9ce4635ef0f9fc8fe57dc2e55ab20f4d3935ef50a6062c253c4c7ce75  NotoSansSC-SemiBold.subset.ttf
 ```
 
 When visible copy changes, update `glyphs.txt`, rebuild both subsets, and run
