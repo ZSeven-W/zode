@@ -1,232 +1,309 @@
 mod snapshot_support;
 
+use std::path::{Path, PathBuf};
+
 use snapshot_support::{
-    assert_platform_snapshot, fixture_state, GeometryExpectation, LayoutRect, SnapshotCase,
-    SnapshotRoute,
+    assert_case_geometry, assert_platform_snapshot, compare_reference_images, named_scene,
+    reference_scenes, render_snapshot, scene_names, GeometryExpectation, LayoutRect,
+    ReferenceScene, SnapshotCase, REFERENCE_SCENE_NAMES,
 };
-use zode_app_model::ThemePreference;
+use zode_app_model::{
+    environment_sections, LoadState, PreviewState, SecondaryPane, ThemePreference,
+};
+use zode_app_ui::{
+    Composer, Insets, RectExt, SettingsPanel, WorkspaceSnapshot, TRANSCRIPT_COMPOSER_GAP,
+};
 
-const CONVERSATION_1221X992: &[GeometryExpectation] = &[
-    GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1221.0, 992.0),
-    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 992.0),
-    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 981.0, 46.0),
-    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 981.0, 992.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 362.5, 70.0, 736.0, 780.0),
-    GeometryExpectation::new(LayoutRect::Composer, 362.5, 878.0, 736.0, 100.0),
-];
+const WIDTH: u32 = 1800;
+const HEIGHT: u32 = 1080;
+const SCALE: f32 = 1.0;
 
-const CONVERSATION_900X700: &[GeometryExpectation] = &[
-    GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 900.0, 700.0),
-    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 64.0, 700.0),
-    GeometryExpectation::new(LayoutRect::TopBar, 64.0, 0.0, 836.0, 46.0),
-    GeometryExpectation::new(LayoutRect::PrimarySurface, 64.0, 0.0, 836.0, 700.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 114.0, 70.0, 736.0, 488.0),
-    GeometryExpectation::new(LayoutRect::Composer, 114.0, 586.0, 736.0, 100.0),
-];
-
-const CONVERSATION_640X900: &[GeometryExpectation] = &[
-    GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 640.0, 900.0),
-    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 0.0, 900.0),
-    GeometryExpectation::new(LayoutRect::TopBar, 0.0, 0.0, 640.0, 46.0),
-    GeometryExpectation::new(LayoutRect::PrimarySurface, 0.0, 0.0, 640.0, 900.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 16.0, 70.0, 608.0, 688.0),
-    GeometryExpectation::new(LayoutRect::Composer, 16.0, 786.0, 608.0, 100.0),
-];
-
-#[cfg(target_os = "macos")]
-const EMPTY_TASK_1800X1080: &[GeometryExpectation] = &[
+const EMPTY_TASK_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
     GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
     GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
     GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 652.0, 70.0, 736.0, 868.0),
-    GeometryExpectation::new(LayoutRect::Composer, 652.0, 966.0, 736.0, 100.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 652.0, 70.0, 736.0, 824.0),
+    GeometryExpectation::new(LayoutRect::Composer, 652.0, 922.0, 736.0, 144.0),
 ];
 
-const SETTINGS_1440X900: &[GeometryExpectation] = &[
-    GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1440.0, 900.0),
-    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 900.0),
-    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1200.0, 46.0),
-    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1200.0, 900.0),
-    GeometryExpectation::new(LayoutRect::PageContent, 456.0, 70.0, 768.0, 830.0),
-];
-
-const INTEGRATIONS_1728X1117: &[GeometryExpectation] = &[
-    GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1728.0, 1117.0),
-    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1117.0),
-    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1488.0, 46.0),
-    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1488.0, 1117.0),
-    GeometryExpectation::new(LayoutRect::PageContent, 616.0, 70.0, 736.0, 1047.0),
-];
-
-const ENVIRONMENT_1800X1080: &[GeometryExpectation] = &[
+const FULL_PAGE_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
     GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
     GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
     GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 652.0, 70.0, 736.0, 868.0),
-    GeometryExpectation::new(LayoutRect::Composer, 652.0, 966.0, 736.0, 100.0),
-    GeometryExpectation::new(LayoutRect::ContextPanel, 1484.0, 62.0, 300.0, 1002.0),
+    GeometryExpectation::new(LayoutRect::PageContent, 652.0, 70.0, 736.0, 1010.0),
 ];
 
-const REVIEW_1800X1080: &[GeometryExpectation] = &[
+const SETTINGS_GEOMETRY: &[GeometryExpectation] = &[
+    GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
+    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::PageContent, 636.0, 70.0, 768.0, 1010.0),
+];
+
+const DOCUMENT_PREVIEW_GEOMETRY: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
     GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
     GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 859.0, 46.0),
     GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 859.0, 1080.0),
-    GeometryExpectation::new(LayoutRect::Transcript, 301.5, 70.0, 736.0, 868.0),
-    GeometryExpectation::new(LayoutRect::Composer, 301.5, 966.0, 736.0, 100.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 301.5, 70.0, 736.0, 824.0),
+    GeometryExpectation::new(LayoutRect::Composer, 301.5, 922.0, 736.0, 144.0),
     GeometryExpectation::new(LayoutRect::Divider, 1099.0, 0.0, 1.0, 1080.0),
     GeometryExpectation::new(LayoutRect::ReviewPanel, 1100.0, 0.0, 700.0, 1080.0),
 ];
 
-fn reference_cases() -> Vec<(SnapshotCase, SnapshotRoute, ThemePreference)> {
-    let mut cases = Vec::new();
+const ARTIFACTS_GEOMETRY: &[GeometryExpectation] = &[
+    GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
+    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 652.0, 70.0, 736.0, 772.0),
+    GeometryExpectation::new(LayoutRect::Composer, 652.0, 870.0, 736.0, 196.0),
+];
 
-    // Enable Linux and Windows Empty Task cases only after each platform's
-    // update-snapshots CI job has generated and reviewed its native goldens.
-    #[cfg(target_os = "macos")]
-    cases.extend([
-        (
-            SnapshotCase::new(
-                "empty-task-light-1800x1080",
-                1800,
-                1080,
-                1.0,
-                EMPTY_TASK_1800X1080,
-            ),
-            SnapshotRoute::Empty,
-            ThemePreference::Light,
-        ),
-        (
-            SnapshotCase::new(
-                "empty-task-dark-1800x1080",
-                1800,
-                1080,
-                1.0,
-                EMPTY_TASK_1800X1080,
-            ),
-            SnapshotRoute::Empty,
-            ThemePreference::Dark,
-        ),
-    ]);
+const ENVIRONMENT_GEOMETRY: &[GeometryExpectation] = &[
+    GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
+    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 652.0, 70.0, 736.0, 824.0),
+    GeometryExpectation::new(LayoutRect::Composer, 652.0, 922.0, 736.0, 144.0),
+    GeometryExpectation::new(LayoutRect::ContextPanel, 1484.0, 62.0, 300.0, 1002.0),
+];
 
-    cases.extend([
-        (
-            SnapshotCase::new(
-                "conversation-light-1221x992",
-                1221,
-                992,
-                1.0,
-                CONVERSATION_1221X992,
-            ),
-            SnapshotRoute::Conversation,
-            ThemePreference::Light,
-        ),
-        (
-            SnapshotCase::new(
-                "conversation-dark-1221x992",
-                1221,
-                992,
-                1.0,
-                CONVERSATION_1221X992,
-            ),
-            SnapshotRoute::Conversation,
-            ThemePreference::Dark,
-        ),
-        (
-            SnapshotCase::new(
-                "conversation-compact-900x700",
-                900,
-                700,
-                1.0,
-                CONVERSATION_900X700,
-            ),
-            SnapshotRoute::Conversation,
-            ThemePreference::Light,
-        ),
-        (
-            SnapshotCase::new(
-                "conversation-phone-640x900",
-                640,
-                900,
-                1.0,
-                CONVERSATION_640X900,
-            ),
-            SnapshotRoute::Conversation,
-            ThemePreference::Light,
-        ),
-        (
-            SnapshotCase::new(
-                "settings-1440x900-scale-1_25",
-                1440,
-                900,
-                1.25,
-                SETTINGS_1440X900,
-            ),
-            SnapshotRoute::Settings,
-            ThemePreference::Light,
-        ),
-        (
-            SnapshotCase::new(
-                "integrations-1728x1117-scale-2",
-                1728,
-                1117,
-                2.0,
-                INTEGRATIONS_1728X1117,
-            ),
-            SnapshotRoute::Integrations,
-            ThemePreference::Light,
-        ),
-        (
-            SnapshotCase::new(
-                "environment-1800x1080",
-                1800,
-                1080,
-                1.0,
-                ENVIRONMENT_1800X1080,
-            ),
-            SnapshotRoute::Environment,
-            ThemePreference::Light,
-        ),
-        (
-            SnapshotCase::new("review-1800x1080", 1800, 1080, 1.0, REVIEW_1800X1080),
-            SnapshotRoute::Review,
-            ThemePreference::Light,
-        ),
-    ]);
+fn case_for(name: &'static str) -> SnapshotCase {
+    let geometry = match name {
+        "empty-task" => EMPTY_TASK_GEOMETRY,
+        "integrations-catalog" => FULL_PAGE_GEOMETRY,
+        "settings-general" => SETTINGS_GEOMETRY,
+        "conversation-document-preview" => DOCUMENT_PREVIEW_GEOMETRY,
+        "conversation-artifacts" => ARTIFACTS_GEOMETRY,
+        "conversation-environment" => ENVIRONMENT_GEOMETRY,
+        _ => panic!("unregistered reference scene {name}"),
+    };
+    SnapshotCase::new(name, WIDTH, HEIGHT, SCALE, geometry)
+}
 
-    cases
+fn six_cases() -> Vec<(SnapshotCase, ReferenceScene)> {
+    reference_scenes(ThemePreference::Light, WIDTH)
+        .into_iter()
+        .map(|scene| (case_for(scene.name), scene))
+        .collect()
 }
 
 #[test]
-fn reference_snapshots_match_platform_goldens() {
-    for (case, route, theme) in reference_cases() {
-        let state = fixture_state(route, theme, case.width);
-        assert_platform_snapshot(case, &state);
+fn six_reference_scene_registry_has_required_landmarks() {
+    assert_eq!(scene_names(), REFERENCE_SCENE_NAMES);
+    assert_eq!(
+        scene_names(),
+        [
+            "empty-task",
+            "integrations-catalog",
+            "settings-general",
+            "conversation-document-preview",
+            "conversation-artifacts",
+            "conversation-environment",
+        ]
+    );
+
+    for (case, scene) in six_cases() {
+        assert_scene_landmarks(&scene);
+        assert_case_geometry(case, &scene.state);
     }
 }
 
 #[test]
-fn empty_route_keeps_workspace_context_without_an_active_session() {
-    let state = fixture_state(SnapshotRoute::Empty, ThemePreference::Light, 1800);
+fn six_reference_scenes() {
+    assert_eq!(scene_names(), REFERENCE_SCENE_NAMES);
+    for (case, scene) in six_cases() {
+        assert_scene_landmarks(&scene);
+        assert_platform_snapshot(case, &scene.state);
+    }
+}
 
-    assert!(state.current_session.is_none());
-    assert!(state.transcripts.is_empty());
-    assert!(state.active_workspace.is_some());
-    assert!(!state.projects.is_empty());
-    assert!(!state.threads.is_empty());
+fn assert_scene_landmarks(scene: &ReferenceScene) {
+    let snapshot =
+        WorkspaceSnapshot::build(&scene.state, WIDTH as f32, HEIGHT as f32, Insets::ZERO);
+    match scene.name {
+        "empty-task" => {
+            assert!(scene.state.current_session.is_none());
+            assert!(scene.state.transcripts.is_empty());
+            assert!(scene.state.active_workspace.is_some());
+            let input = Composer::layout(snapshot.layout.composer, &scene.state.composer).input;
+            let empty_height =
+                input.origin.y - TRANSCRIPT_COMPOSER_GAP - snapshot.layout.transcript.origin.y;
+            assert!((empty_height - 868.0).abs() <= 2.0);
+            let gap = 10.0;
+            let card_width = (snapshot.layout.transcript.width() - 24.0 - gap * 3.0) / 4.0;
+            let suggestion_cards = [card_width; 4];
+            assert_eq!(suggestion_cards.len(), 4);
+            assert!(suggestion_cards
+                .iter()
+                .all(|width| (*width - 172.0).abs() <= 4.0));
+            assert!((10.0..=12.0).contains(&gap));
+        }
+        "integrations-catalog" => {
+            let catalog = scene
+                .state
+                .presentation
+                .integrations
+                .ready()
+                .expect("integrations scene has a loaded local registry catalog");
+            assert!(catalog.installed.len() >= 8);
+            assert!(catalog.sections.len() >= 2);
+            assert!(catalog.all_entries().count() >= 10);
+            assert!(catalog
+                .all_entries()
+                .all(|entry| entry.source_id.is_some() || entry.fixture_only));
+        }
+        "settings-general" => {
+            let layout = SettingsPanel::layout(
+                snapshot.layout.sidebar,
+                snapshot.layout.primary_surface,
+                &scene.state,
+            );
+            assert!(layout.navigation.entries.len() >= 15);
+            assert!(layout.general.permission_presets.len() >= 3);
+            assert!(layout.general.general_rows.len() >= 8);
+        }
+        "conversation-document-preview" => {
+            assert!(scene.block_count() >= 12);
+            assert!(scene.visual_kinds().len() >= 5);
+            assert_eq!(
+                scene.state.presentation.secondary_pane,
+                Some(SecondaryPane::DocumentPreview)
+            );
+            assert!(matches!(
+                scene
+                    .state
+                    .current_session_presentation()
+                    .map(|state| &state.preview),
+                Some(PreviewState::Ready { .. })
+            ));
+            assert_eq!(snapshot.layout.review_panel.width(), 700.0);
+        }
+        "conversation-artifacts" => {
+            assert!(scene.block_count() >= 12);
+            assert!(scene.visual_kinds().len() >= 5);
+            assert!(!scene.state.composer.attachments.is_empty());
+            assert!(scene.state.composer.attachments.iter().all(|attachment| {
+                !attachment.media_type.starts_with("data:")
+                    && !attachment.display_name.contains("base64")
+            }));
+        }
+        "conversation-environment" => {
+            assert!(scene.block_count() >= 12);
+            assert!(scene.visual_kinds().len() >= 5);
+            assert_eq!(
+                scene.state.presentation.secondary_pane,
+                Some(SecondaryPane::Environment)
+            );
+            assert!(environment_sections(&scene.state).len() >= 5);
+            assert_eq!(snapshot.layout.context_panel.width(), 300.0);
+        }
+        _ => panic!("unregistered reference scene {}", scene.name),
+    }
+}
+
+/// Test-only rendering entry. It keeps rich fixtures unreachable from the
+/// production binary while still providing a stable command for visual review:
+///
+/// `ZODE_RENDER_SCENE=empty-task ZODE_RENDER_PATH=target/empty-task.png \
+///  cargo test -p zode-app --test snapshots render_named_test_scene -- --ignored --exact`
+#[test]
+#[ignore = "manual test-scene rendering entry"]
+fn render_named_test_scene() {
+    let name = std::env::var("ZODE_RENDER_SCENE").expect("ZODE_RENDER_SCENE is required");
+    let requested =
+        PathBuf::from(std::env::var("ZODE_RENDER_PATH").expect("ZODE_RENDER_PATH is required"));
+    let path = if requested.is_absolute() {
+        requested
+    } else {
+        workspace_root().join(requested)
+    };
+    let scene = named_scene(&name, ThemePreference::Light, WIDTH).unwrap_or_else(|| {
+        panic!("unknown scene {name}; expected one of {REFERENCE_SCENE_NAMES:?}")
+    });
+    let bytes = render_snapshot(&scene.state, WIDTH, HEIGHT, SCALE)
+        .unwrap_or_else(|error| panic!("could not render {name}: {error}"));
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|error| panic!("could not create {}: {error}", parent.display()));
+    }
+    std::fs::write(&path, bytes)
+        .unwrap_or_else(|error| panic!("could not write {}: {error}", path.display()));
+    println!("rendered {name} to {}", path.display());
+}
+
+/// Manual reference comparison entry used by compare-reference-snapshots.sh.
+#[test]
+#[ignore = "manual approved-reference comparison entry"]
+fn compare_reference_snapshots() {
+    let reference_root = required_directory("ZODE_REFERENCE_ROOT");
+    let actual_root = required_directory("ZODE_ACTUAL_ROOT");
+    let output_root = PathBuf::from(
+        std::env::var("ZODE_REFERENCE_DIFF_ROOT").expect("ZODE_REFERENCE_DIFF_ROOT is required"),
+    );
+    for (scene, reference) in [
+        ("empty-task", "06-empty-state.png"),
+        ("integrations-catalog", "05-integrations.png"),
+        ("settings-general", "04-settings.png"),
+        ("conversation-document-preview", "03-editor-split.png"),
+        ("conversation-artifacts", "02-artifacts-and-composer.png"),
+        ("conversation-environment", "01-main-conversation.png"),
+    ] {
+        let diff = compare_reference_images(
+            scene,
+            &reference_root.join(reference),
+            &actual_root.join(format!("{scene}.png")),
+            &output_root,
+        )
+        .unwrap_or_else(|error| panic!("could not compare {scene}: {error}"));
+        println!("{scene}: {diff:?}");
+    }
+}
+
+fn required_directory(variable: &str) -> PathBuf {
+    let path =
+        PathBuf::from(std::env::var(variable).unwrap_or_else(|_| panic!("{variable} is required")));
+    assert!(path.is_dir(), "{} must be a directory", path.display());
+    path
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("zode-app lives below the workspace root")
+        .to_path_buf()
 }
 
 #[test]
-fn empty_snapshot_cases_are_registered_only_with_platform_goldens() {
-    let empty_cases = reference_cases()
-        .into_iter()
-        .filter(|(case, _, _)| case.name.starts_with("empty-task-"))
-        .count();
+fn fixture_registry_is_test_only() {
+    let production_sources = [
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bootstrap_state.rs"),
+    ];
+    for source in production_sources.into_iter().filter(|path| path.is_file()) {
+        let text = std::fs::read_to_string(&source)
+            .unwrap_or_else(|error| panic!("could not read {}: {error}", source.display()));
+        assert!(!text.contains("snapshot_support"));
+        assert!(!text.contains("named_scene("));
+        assert!(!text.contains("REFERENCE_SCENE_NAMES"));
+    }
+}
 
-    #[cfg(target_os = "macos")]
-    assert_eq!(empty_cases, 2);
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    assert_eq!(empty_cases, 0);
+#[test]
+fn integration_scene_catalog_is_loaded_not_placeholder_state() {
+    let scene = named_scene("integrations-catalog", ThemePreference::Light, WIDTH)
+        .expect("integrations scene is registered");
+    assert!(matches!(
+        scene.state.presentation.integrations,
+        LoadState::Ready(_)
+    ));
 }

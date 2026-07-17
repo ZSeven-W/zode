@@ -1,30 +1,20 @@
 use std::collections::BTreeSet;
 
 use zode_app_model::{
-    demo_state, EnvironmentEntry, EnvironmentSnapshot, IntegrationsTab, LayoutClass, LoadState,
-    ProjectState, SecondaryPane, SessionDiffState, SessionPresentationState, SettingsCategory,
-    ShellRoute, ThemePreference, TranscriptItem, TranscriptState, ZodeAppState,
+    demo_state, EnvironmentEntry, EnvironmentSnapshot, LayoutClass, LoadState, ProjectState,
+    SessionDiffState, SessionPresentationState, ThemePreference, TranscriptItem, TranscriptState,
+    ZodeAppState,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, NodeCapability, RuntimeOptions, SandboxMode,
     SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus, UsageSnapshot, WorkspaceUri,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SnapshotRoute {
-    Empty,
-    Conversation,
-    Settings,
-    Integrations,
-    Environment,
-    Review,
-}
-
-pub fn fixture_state(
-    route: SnapshotRoute,
-    theme: ThemePreference,
-    viewport_width: u32,
-) -> ZodeAppState {
+/// Shared deterministic shell state used only by integration-test scene builders.
+///
+/// Production bootstrap never references this module. Individual reference scenes
+/// own their content and mutate this shell-only base at the test boundary.
+pub(crate) fn base_scene_state(theme: ThemePreference, viewport_width: u32) -> ZodeAppState {
     let mut state = demo_state();
     let node_id = state.host.node_id;
     let workspace = workspace_uri("file:///workspace/zode");
@@ -81,35 +71,27 @@ pub fn fixture_state(
     ];
     state.active_workspace = Some(workspace.clone());
     state.current_session = Some(session.clone());
-    state.transcripts.insert(
-        session.clone(),
-        TranscriptState {
-            items: vec![
-                TranscriptItem::UserText("照着参考界面完善 Zode 桌面端，并补齐截图回归。".into()),
-                TranscriptItem::Thinking(
-                    "已读取桌面端实施计划，正在核对真实状态与布局。".into(),
-                ),
-                TranscriptItem::Tool(ToolCall {
-                    id: "read-desktop-plan".into(),
-                    name: "read_file".into(),
-                    status: ToolStatus::Completed,
-                    summary: "已读取桌面端实施计划与界面组件".into(),
-                    detail: Some(
-                        "openpencil-docs/zode/desktop/plans/2026-07-10-zode-jian-desktop-app.md"
-                            .into(),
-                    ),
-                }),
-                TranscriptItem::AssistantText(
-                    "截图回归现在覆盖真实的本地状态：\n\n- 项目与任务来自会话索引\n- 环境信息展示当前分支与变更\n- 插件页只列出节点实际声明的能力"
+    set_transcript(
+        &mut state,
+        vec![
+            TranscriptItem::UserText("照着参考界面完善 Zode 桌面端，并补齐截图回归。".into()),
+            TranscriptItem::Thinking("已读取桌面端实施计划，正在核对真实状态与布局。".into()),
+            TranscriptItem::Tool(ToolCall {
+                id: "read-desktop-plan".into(),
+                name: "read_file".into(),
+                status: ToolStatus::Completed,
+                summary: "已读取桌面端实施计划与界面组件".into(),
+                detail: Some(
+                    "openpencil-docs/zode/desktop/plans/2026-07-12-zode-reference-first-visual-rebuild-plan.md"
                         .into(),
                 ),
-            ],
-            last_sequence: 4,
-            busy: false,
-            scroll_offset: 0.0,
-            follow_tail: false,
-            item_heights: Vec::new(),
-        },
+            }),
+            TranscriptItem::AssistantText(
+                "截图回归现在覆盖真实的本地状态：\n\n- 项目与任务来自会话索引\n- 环境信息展示当前分支与变更\n- 插件页只列出节点实际声明的能力"
+                    .into(),
+            ),
+        ],
+        false,
     );
     state.usage.insert(
         session.clone(),
@@ -154,17 +136,10 @@ pub fn fixture_state(
             "+++ b/crates/zode-app/tests/snapshots.rs\n",
             "@@ -0,0 +1,5 @@\n",
             "+#[test]\n",
-            "+fn reference_snapshots_match_platform_goldens() {\n",
+            "+fn six_reference_scenes() {\n",
             "+    assert_platform_snapshot();\n",
             "+}\n",
             "+\n",
-            "diff --git a/crates/zode-app-ui/src/widgets/composer.rs b/crates/zode-app-ui/src/widgets/composer.rs\n",
-            "--- a/crates/zode-app-ui/src/widgets/composer.rs\n",
-            "+++ b/crates/zode-app-ui/src/widgets/composer.rs\n",
-            "@@ -12,3 +12,3 @@\n",
-            "-    let label = \"main\";\n",
-            "+    let label = current_branch;\n",
-            "     paint_label(label);\n",
         )
         .into(),
     };
@@ -196,24 +171,27 @@ pub fn fixture_state(
             }),
         },
     );
-
-    let (shell_route, secondary_pane) = match route {
-        SnapshotRoute::Empty | SnapshotRoute::Conversation => (ShellRoute::Conversation, None),
-        SnapshotRoute::Settings => (ShellRoute::Settings(SettingsCategory::General), None),
-        SnapshotRoute::Integrations => (ShellRoute::Integrations(IntegrationsTab::Plugins), None),
-        SnapshotRoute::Environment => (ShellRoute::Conversation, Some(SecondaryPane::Environment)),
-        SnapshotRoute::Review => (ShellRoute::Conversation, Some(SecondaryPane::Review)),
-    };
-    state.presentation.route = shell_route;
-    state.presentation.secondary_pane = secondary_pane;
-    state.shell.page = shell_route.legacy_page();
-    if route == SnapshotRoute::Empty {
-        state.current_session = None;
-        state.transcripts.clear();
-    }
     state
 }
 
-fn workspace_uri(value: &str) -> WorkspaceUri {
+pub(crate) fn set_transcript(state: &mut ZodeAppState, items: Vec<TranscriptItem>, busy: bool) {
+    let session = state
+        .current_session
+        .clone()
+        .expect("reference conversation scene has a session");
+    state.transcripts.insert(
+        session,
+        TranscriptState {
+            last_sequence: items.len() as u64,
+            items,
+            busy,
+            scroll_offset: 0.0,
+            follow_tail: true,
+            item_heights: Vec::new(),
+        },
+    );
+}
+
+pub(crate) fn workspace_uri(value: &str) -> WorkspaceUri {
     WorkspaceUri::new(value).expect("snapshot workspace URI is valid")
 }
