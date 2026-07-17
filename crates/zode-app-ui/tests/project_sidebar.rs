@@ -131,14 +131,12 @@ fn wide_sidebar_reserves_titlebar_space_and_uses_navigation_icons() {
             _ => None,
         });
     assert!(brand_y.is_some_and(|y| y >= 48.0));
-    assert_eq!(
-        painter
-            .operations
-            .iter()
-            .filter(|operation| matches!(operation, PaintOp::Svg(..)))
-            .count(),
-        8
-    );
+    for item in ProjectSidebar::navigation_items() {
+        assert!(painter.operations.iter().any(|operation| matches!(
+            operation,
+            PaintOp::Svg(path, ..) if path == item.icon.path()
+        )));
+    }
     let new_task_x = painter
         .operations
         .iter()
