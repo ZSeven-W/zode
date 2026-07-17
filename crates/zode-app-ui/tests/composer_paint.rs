@@ -1,6 +1,6 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::ComposerState;
-use zode_app_ui::{Composer, ZodeTheme};
+use zode_app_ui::{Composer, ComposerController, ImeEvent, ZodeTheme};
 
 #[derive(Default)]
 struct TextCapture {
@@ -65,4 +65,28 @@ fn composer_uses_text_area_multiline_layout() {
         .texts
         .iter()
         .any(|text| text == "first line\nsecond line"));
+}
+
+#[test]
+fn composer_paints_live_ime_preedit() {
+    let state = ComposerState {
+        focused: true,
+        ..ComposerState::default()
+    };
+    let mut controller = ComposerController::fixture("prefix ");
+    controller.ime(ImeEvent::Update {
+        text: "中文".into(),
+        cursor: Some("中文".len()),
+    });
+    let mut painter = TextCapture::default();
+
+    Composer::paint_input(
+        &mut painter,
+        Rect::xywh(0.0, 0.0, 500.0, 120.0),
+        controller.input_state(),
+        &state,
+        &ZodeTheme::light(),
+    );
+
+    assert!(painter.texts.iter().any(|text| text.contains("中文")));
 }
