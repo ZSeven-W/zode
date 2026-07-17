@@ -25,7 +25,7 @@ fn conversation_matches_the_wide_reference_contract() {
 }
 
 #[test]
-fn environment_panel_preserves_the_centered_conversation() {
+fn environment_panel_recenters_the_conversation_in_the_remaining_column() {
     let conversation = WorkspaceLayout::compute_presentation(
         1800.0,
         1080.0,
@@ -41,8 +41,16 @@ fn environment_panel_preserves_the_centered_conversation() {
         Some(SecondaryPane::Environment),
     );
 
-    assert_eq!(environment.transcript, conversation.transcript);
-    assert_eq!(environment.composer, conversation.composer);
+    let remaining_width = environment.context_panel.min_x() - environment.primary_surface.min_x();
+    let expected_x = environment.primary_surface.min_x()
+        + (remaining_width - environment.transcript.width()) / 2.0;
+    assert_eq!(
+        environment.transcript.width(),
+        conversation.transcript.width()
+    );
+    assert_eq!(environment.composer.width(), conversation.composer.width());
+    assert!((environment.transcript.min_x() - expected_x).abs() <= EPSILON);
+    assert!((environment.composer.min_x() - expected_x).abs() <= EPSILON);
     assert_eq!(environment.context_panel.width(), 300.0);
     assert_eq!(environment.context_panel.max_x(), 1800.0 - 16.0);
     assert_eq!(environment.review_panel.width(), 0.0);
@@ -82,7 +90,9 @@ fn review_panel_creates_the_reference_split() {
     assert!((layout.review_panel.width() - constrained_width).abs() <= EPSILON);
     assert!((layout.divider.min_x() - (panel_x - 1.0)).abs() <= EPSILON);
     assert_eq!(layout.divider.width(), 1.0);
-    assert!((layout.transcript.min_x() - 336.5).abs() <= EPSILON);
+    let expected_content_x = layout.primary_surface.min_x()
+        + (layout.primary_surface.width() - layout.transcript.width()) / 2.0;
+    assert!((layout.transcript.min_x() - expected_content_x).abs() <= EPSILON);
     assert_eq!(layout.transcript.width(), 736.0);
     assert_eq!(layout.primary_surface.max_x(), layout.divider.min_x());
 }
@@ -164,8 +174,11 @@ fn docked_summary_recenters_the_conversation_in_the_remaining_column() {
         layout.context_panel,
         Rect::xywh(1_484.0, 62.0, 300.0, 1_002.0)
     );
-    assert_eq!(layout.composer.origin.x, 494.0);
-    assert_eq!(layout.transcript.origin.x, 494.0);
+    let remaining_width = layout.context_panel.min_x() - layout.primary_surface.min_x();
+    let expected_x =
+        layout.primary_surface.min_x() + (remaining_width - layout.composer.width()) / 2.0;
+    assert_eq!(layout.composer.origin.x, expected_x);
+    assert_eq!(layout.transcript.origin.x, expected_x);
     assert_eq!(layout.composer.size.x, 736.0);
 }
 
