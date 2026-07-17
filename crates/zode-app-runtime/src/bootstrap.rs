@@ -11,9 +11,9 @@ use zode_core::bootstrap::ResolvedBootstrap;
 use zode_core::config::ConfigManager;
 use zode_core::question::QuestionReceiver;
 use zode_node_protocol::{
-    AgentCommand, AgentCommandKind, AgentEndpoint, AgentEventKind, AgentQuery, AgentSnapshot,
-    ApprovalDecision, CapabilityManifest, EndpointError, EndpointErrorKind, NodeCapability, NodeId,
-    SessionLocator, TurnId,
+    AgentCommand, AgentCommandKind, AgentEventKind, AgentQuery, AgentSnapshot, ApprovalDecision,
+    CapabilityManifest, EndpointError, EndpointErrorKind, NodeCapability, NodeId, SessionLocator,
+    TurnId,
 };
 
 use crate::{

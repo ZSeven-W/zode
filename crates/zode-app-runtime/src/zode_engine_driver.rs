@@ -412,7 +412,7 @@ impl ZodeEngineDriver {
             None => PathBuf::from(self.repository.load(&session).await?.meta.cwd),
         };
         let unified = zode_core::diff::working_tree_diff(&cwd).await;
-        let files = zode_core::git_modified_files(&cwd)
+        let files = zode_core::git_stat::git_modified_files(&cwd)
             .await
             .unwrap_or_default()
             .into_iter()
