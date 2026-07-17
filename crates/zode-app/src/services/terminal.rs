@@ -21,6 +21,8 @@ const OUTPUT_CAPACITY: usize = 64;
 const READ_BUFFER_SIZE: usize = 8 * 1024;
 const WRITE_CHUNK_SIZE: usize = 8 * 1024;
 const IO_POLL_INTERVAL: Duration = Duration::from_millis(5);
+#[cfg(unix)]
+const SESSION_SWEEP_LIMIT: usize = 8;
 
 pub type TerminalOutputStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, TerminalError>> + Send>>;
 
@@ -60,7 +62,7 @@ struct Session {
     shutdown: Arc<AtomicBool>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     #[cfg(unix)]
-    process_group: Option<i32>,
+    session_id: Option<i32>,
     control_thread: JoinHandle<Result<(), TerminalError>>,
     writer_thread: JoinHandle<Result<(), TerminalError>>,
     reader_thread: JoinHandle<Result<(), TerminalError>>,
@@ -110,7 +112,7 @@ impl LocalTerminalService {
         let terminate_result = terminate_process_tree(
             &mut *session.killer,
             #[cfg(unix)]
-            session.process_group,
+            session.session_id,
         );
 
         let Session {
@@ -120,7 +122,7 @@ impl LocalTerminalService {
             shutdown: _,
             killer: _,
             #[cfg(unix)]
-                process_group: _,
+                session_id: _,
             control_thread,
             writer_thread,
             reader_thread,
@@ -158,7 +160,10 @@ impl TerminalService for LocalTerminalService {
         command.cwd(cwd.as_os_str());
         let mut child = pair.slave.spawn_command(command).map_err(platform_error)?;
         #[cfg(unix)]
-        let process_group = child.process_id().and_then(|pid| i32::try_from(pid).ok());
+        // portable-pty calls setsid(2) before exec, so the child PID is also
+        // the session ID. Background jobs may create additional process
+        // groups, but they remain members of this PTY session.
+        let session_id = child.process_id().and_then(|pid| i32::try_from(pid).ok());
         if let Err(error) = configure_nonblocking(&*pair.master) {
             let _ = stop_child(&mut *child);
             return Err(error);
@@ -185,7 +190,7 @@ impl TerminalService for LocalTerminalService {
                     control_shutdown,
                     control_exited,
                     #[cfg(unix)]
-                    process_group,
+                    session_id,
                 )
             }) {
             Ok(handle) => handle,
@@ -193,7 +198,7 @@ impl TerminalService for LocalTerminalService {
                 let _ = terminate_process_tree(
                     &mut *killer,
                     #[cfg(unix)]
-                    process_group,
+                    session_id,
                 );
                 return Err(TerminalError::Io(error));
             }
@@ -218,7 +223,7 @@ impl TerminalService for LocalTerminalService {
                 let _ = terminate_process_tree(
                     &mut *killer,
                     #[cfg(unix)]
-                    process_group,
+                    session_id,
                 );
                 drop(control_tx);
                 drop(input_tx);
@@ -237,7 +242,7 @@ impl TerminalService for LocalTerminalService {
                 let _ = terminate_process_tree(
                     &mut *killer,
                     #[cfg(unix)]
-                    process_group,
+                    session_id,
                 );
                 drop(control_tx);
                 drop(input_tx);
@@ -257,7 +262,7 @@ impl TerminalService for LocalTerminalService {
                 shutdown,
                 killer,
                 #[cfg(unix)]
-                process_group,
+                session_id,
                 control_thread,
                 writer_thread,
                 reader_thread,
@@ -337,7 +342,7 @@ fn control_loop(
     mut child: Box<dyn Child + Send + Sync>,
     shutdown: Arc<AtomicBool>,
     process_exited: Arc<AtomicBool>,
-    #[cfg(unix)] process_group: Option<i32>,
+    #[cfg(unix)] session_id: Option<i32>,
 ) -> Result<(), TerminalError> {
     let result = (|| {
         #[cfg(unix)]
@@ -369,8 +374,8 @@ fn control_loop(
         }
         #[cfg(unix)]
         if natural_exit {
-            if let Some(process_group) = process_group {
-                kill_process_group(process_group)?;
+            if let Some(session_id) = session_id {
+                kill_process_session(session_id)?;
             }
         }
         stop_child(&mut *child).map_err(TerminalError::Io)
@@ -529,13 +534,13 @@ fn configure_nonblocking(_master: &dyn MasterPty) -> Result<(), TerminalError> {
 
 fn terminate_process_tree(
     killer: &mut dyn ChildKiller,
-    #[cfg(unix)] process_group: Option<i32>,
+    #[cfg(unix)] session_id: Option<i32>,
 ) -> Result<(), TerminalError> {
     #[cfg(unix)]
-    if let Some(process_group) = process_group {
-        let group_result = kill_process_group(process_group);
+    if let Some(session_id) = session_id {
+        let session_result = kill_process_session(session_id);
         let _ = killer.kill();
-        return group_result;
+        return session_result;
     }
     #[cfg(windows)]
     {
@@ -551,27 +556,128 @@ fn terminate_process_tree(
 }
 
 #[cfg(unix)]
-fn kill_process_group(process_group: i32) -> Result<(), TerminalError> {
-    let target = format!("-{process_group}");
-    let result = std::process::Command::new("/bin/kill")
-        .args(["-KILL", &target])
-        .output()?;
-    if result.status.success() {
-        return Ok(());
+fn kill_process_session(session_id: i32) -> Result<(), TerminalError> {
+    use nix::{
+        errno::Errno,
+        sys::signal::{kill, Signal},
+        unistd::{getsid, Pid},
+    };
+
+    let session = Pid::from_raw(session_id);
+    let mut first_error = None;
+    for _ in 0..SESSION_SWEEP_LIMIT {
+        let scan = scan_live_session_members(session)?;
+        if first_error.is_none() {
+            first_error = scan.error;
+        }
+        let mut members = scan.members;
+        if members.is_empty() && first_error.is_none() {
+            return Ok(());
+        }
+        // Stop workers before the shell/session leader, then rescan to catch
+        // any child created after this process snapshot.
+        members.sort_by_key(|pid| pid.as_raw() == session_id);
+        for pid in members {
+            match getsid(Some(pid)) {
+                Ok(current) if current == session => {
+                    if let Err(error) = kill(pid, Signal::SIGKILL) {
+                        if error != Errno::ESRCH && first_error.is_none() {
+                            first_error = Some(format!(
+                                "failed to terminate process {} in PTY session {session_id}: {error}",
+                                pid.as_raw()
+                            ));
+                        }
+                    }
+                }
+                Ok(_) | Err(Errno::ESRCH) => {}
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(format!(
+                            "failed to revalidate process {} in PTY session {session_id}: {error}",
+                            pid.as_raw()
+                        ));
+                    }
+                }
+            }
+        }
+        thread::sleep(IO_POLL_INTERVAL);
     }
 
-    let still_exists = std::process::Command::new("/bin/kill")
-        .args(["-0", &target])
-        .status()?
-        .success();
-    if !still_exists {
+    let final_scan = scan_live_session_members(session)?;
+    if final_scan.members.is_empty() && final_scan.error.is_none() {
         return Ok(());
     }
-
+    if first_error.is_none() {
+        first_error = final_scan.error;
+    }
     Err(TerminalError::Platform(format!(
-        "failed to terminate PTY process group {process_group}: {}",
-        String::from_utf8_lossy(&result.stderr).trim()
+        "PTY session {session_id} cleanup incomplete after {SESSION_SWEEP_LIMIT} sweeps; survivors: {}; first error: {}",
+        final_scan
+            .members
+            .iter()
+            .map(|pid| pid.as_raw().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        first_error.as_deref().unwrap_or("none")
     )))
+}
+
+#[cfg(unix)]
+struct SessionScan {
+    members: Vec<nix::unistd::Pid>,
+    error: Option<String>,
+}
+
+#[cfg(unix)]
+fn scan_live_session_members(session: nix::unistd::Pid) -> Result<SessionScan, TerminalError> {
+    use nix::{
+        errno::Errno,
+        unistd::{getsid, Pid},
+    };
+
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-x", "-o", "pid=", "-o", "state="])
+        .output()?;
+    if !output.status.success() {
+        return Err(TerminalError::Platform(format!(
+            "failed to inspect PTY session {}: {}",
+            session.as_raw(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let mut members = Vec::new();
+    let mut first_error = None;
+    for pid in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_live_process)
+        .map(Pid::from_raw)
+    {
+        match getsid(Some(pid)) {
+            Ok(sid) if sid == session => members.push(pid),
+            Ok(_) | Err(Errno::ESRCH) => {}
+            Err(error) if first_error.is_none() => {
+                first_error = Some(format!(
+                    "failed to inspect process {} while scanning PTY session {}: {error}",
+                    pid.as_raw(),
+                    session.as_raw()
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(SessionScan {
+        members,
+        error: first_error,
+    })
+}
+
+#[cfg(unix)]
+fn parse_live_process(row: &str) -> Option<i32> {
+    let mut fields = row.split_whitespace();
+    let pid = fields.next()?.parse().ok()?;
+    let state = fields.next()?;
+    (!state.starts_with('Z')).then_some(pid)
 }
 
 fn receive_reply<T>(receiver: Receiver<Result<T, TerminalError>>) -> Result<T, TerminalError> {

@@ -333,10 +333,17 @@ fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
 
 #[cfg(unix)]
 fn process_is_alive(pid: i32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .is_ok_and(|status| status.success())
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-o", "state=", "-p", &pid.to_string()])
+        .output()
+        .expect("failed to inspect terminal descendant state");
+    output.status.success()
+        && output
+            .stdout
+            .iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            .is_some_and(|state| state != b'Z')
 }
 
 #[cfg(unix)]
