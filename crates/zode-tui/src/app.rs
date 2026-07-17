@@ -6316,6 +6316,30 @@ impl TuiApp {
                     }
                 }
             }
+            "desktop" => {
+                use zode_core::commands::desktop::{map_subcommand, DesktopCommand};
+                match map_subcommand(args) {
+                    Err(e) => self
+                        .active_tab_mut()
+                        .chat
+                        .push_system(&format!("/desktop: {e}")),
+                    Ok(DesktopCommand::Status) => {
+                        let session = self.active_tab().engine.desktop.clone();
+                        let lines = session.status_lines().await.join("\n");
+                        self.active_tab_mut().chat.push_system(&lines);
+                    }
+                    Ok(DesktopCommand::Attach { port }) => {
+                        let session = self.active_tab().engine.desktop.clone();
+                        let msg = match session.attach_cdp(port).await {
+                            Ok(()) => format!(
+                                "desktop: attached CDP on 127.0.0.1:{port} — desktop_eval enabled"
+                            ),
+                            Err(e) => format!("desktop attach failed: {e}"),
+                        };
+                        self.active_tab_mut().chat.push_system(&msg);
+                    }
+                }
+            }
             "sessions" | "resume" => self.open_session_picker(),
             "tab" => self.handle_tab_command(args),
             "connect" => self.open_connect_dialog(agent_tx),

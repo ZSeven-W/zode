@@ -5,22 +5,43 @@
 //! reads (see docs/superpowers/specs/2026-07-11-desktop-control-design.md).
 
 pub mod actor;
+#[cfg(target_os = "linux")]
+pub mod atspi;
+#[cfg(target_os = "macos")]
+pub mod ax;
 pub mod backend;
+pub mod cdp;
 pub mod gate;
 #[cfg(test)]
 pub mod mock;
 pub mod screenshot;
 pub mod session;
 pub mod tools;
+#[cfg(windows)]
+pub mod uia;
 
 pub use backend::{
     AppId, AppInfo, AppLaunchId, DesktopBackend, DesktopBackendFactory, DesktopError,
     ElementActionKind, ElementRef, Screenshot, SnapshotResult, WindowId, WindowInfo,
 };
 
-/// The platform backend factory for this build. Every platform currently
-/// returns the graceful `Unsupported` fallback; Task 12 flips macOS to the
-/// real AX factory (`ax::AxFactory`).
+/// The platform backend factory for this build: macOS → AX, Windows → UIA,
+/// Linux → AT-SPI2, else a graceful `Unsupported` fallback.
 pub fn platform_factory() -> std::sync::Arc<dyn DesktopBackendFactory> {
-    std::sync::Arc::new(backend::UnsupportedDesktopFactory)
+    #[cfg(target_os = "macos")]
+    {
+        std::sync::Arc::new(ax::AxFactory)
+    }
+    #[cfg(windows)]
+    {
+        std::sync::Arc::new(uia::UiaFactory)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::sync::Arc::new(atspi::AtspiFactory)
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    {
+        std::sync::Arc::new(backend::UnsupportedDesktopFactory)
+    }
 }

@@ -640,6 +640,9 @@ pub struct ZodeEngine {
     /// the `/browser` TUI panel). All tabs from the same `EngineTemplate`
     /// share one `Arc` — one browser process per zode run.
     pub browser: Arc<BrowserSession>,
+    /// Desktop control session (`/desktop` command; `desktop_*` tools). Built
+    /// per engine; carries the permission ladder, actor handle, and CDP slot.
+    pub desktop: Arc<crate::desktop::session::DesktopSession>,
     /// Per-engine browser target pin baked into this engine's `browser_*`
     /// tools at assembly (extension task engines pin `Bridge`). `None` means
     /// the tools follow the session-wide `/browser target` selection.
@@ -991,28 +994,35 @@ impl ZodeEngine {
         // (act/screenshot) are pre-wrapped in `desktop_gated` HERE, and their
         // names are collected into `desktop_mutating_names` so the derived
         // allow set below never double-gates them.
+        // Per-engine desktop session (built unconditionally so `/desktop` can
+        // report status / attach even when the tool group is disabled). Uses
+        // the platform factory: AX on macOS, UIA on Windows, AT-SPI2 on Linux,
+        // else a graceful Unsupported fallback.
+        let desktop_session = crate::desktop::session::DesktopSession::new(
+            cfg.desktop.clone(),
+            crate::desktop::platform_factory(),
+        );
         let mut desktop_mutating_names: Vec<String> = Vec::new();
         if cfg.desktop.enabled() {
-            // Per-engine session (M1: not shared across tabs — the /desktop
-            // panel is M4). Uses the platform factory (Unsupported until the
-            // macOS AX backend lands in M1 Task 12).
-            let desktop_session = crate::desktop::session::DesktopSession::new(
-                cfg.desktop.clone(),
-                crate::desktop::platform_factory(),
-            );
             let shots_dir = crate::config::ConfigManager::config_dir()
                 .unwrap_or_else(|_| PathBuf::from(".zode"))
                 .join("screenshots");
             let deps = crate::desktop::tools::DesktopToolDeps {
                 session: desktop_session.clone(),
                 shots_dir,
+                gate: gate.clone(),
             };
             base.register(Arc::new(crate::desktop::tools::DesktopReadTool::new(
                 deps.clone(),
             )));
             for tool in [
                 Arc::new(crate::desktop::tools::DesktopActTool::new(deps.clone())) as Arc<dyn Tool>,
-                Arc::new(crate::desktop::tools::DesktopScreenshotTool::new(deps)),
+                Arc::new(crate::desktop::tools::DesktopScreenshotTool::new(
+                    deps.clone(),
+                )),
+                // desktop_eval gets its own gate instance (independent always-
+                // allow flag) — higher risk than act; never share act's grant.
+                Arc::new(crate::desktop::tools::DesktopEvalTool::new(deps)),
             ] {
                 let gated = crate::desktop::gate::desktop_gated(
                     tool,
@@ -1378,6 +1388,7 @@ impl ZodeEngine {
             reminders,
             auto_loop_max_turns: cfg.auto_loop_max_turns,
             browser: browser_session,
+            desktop: desktop_session,
             browser_target_override,
         })
     }
@@ -3151,6 +3162,10 @@ mod tests {
                 crate::config::BrowserConfig::default(),
                 Arc::new(ManagedFactory),
             ),
+            desktop: crate::desktop::session::DesktopSession::new(
+                crate::config::DesktopConfig::default(),
+                crate::desktop::platform_factory(),
+            ),
         }
     }
 
@@ -4550,15 +4565,20 @@ mod tests {
         .await
         .unwrap();
         let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
-        for t in ["desktop_read", "desktop_act", "desktop_screenshot"] {
+        for t in [
+            "desktop_read",
+            "desktop_act",
+            "desktop_screenshot",
+            "desktop_eval",
+        ] {
             assert!(names.iter().any(|n| n == t), "missing {t}: {names:?}");
         }
         // desktop_read stays ReadOnly and un-gated (its own consent/allowlist
-        // checks run inside); the mutating pair is pre-wrapped via desktop_gated
-        // and NOT double-gated by wrap_mutating_tools.
+        // checks run inside); the mutating tools are pre-wrapped via
+        // desktop_gated and NOT double-gated by wrap_mutating_tools.
         let read = eng.tools.get("desktop_read").expect("desktop_read");
         assert_eq!(read.safety_class(), SafetyClass::ReadOnly);
-        for t in ["desktop_act", "desktop_screenshot"] {
+        for t in ["desktop_act", "desktop_screenshot", "desktop_eval"] {
             let tool = eng.tools.get(t).unwrap_or_else(|| panic!("missing {t}"));
             assert_eq!(tool.safety_class(), SafetyClass::Mutating);
         }

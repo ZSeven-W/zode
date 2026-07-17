@@ -46,7 +46,25 @@ windows = { version = "0.62", features = [
   "Win32_System_SystemServices",
   "Win32_System_Threading",
   "Win32_UI_WindowsAndMessaging",
+  # Desktop control (UIA backend): COM + UI Automation + input + GDI capture.
+  "Win32_System_Com",
+  "Win32_System_Variant",
+  "Win32_UI_Accessibility",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_Graphics_Gdi",
 ] }
+png = "0.17"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+accessibility-sys = "0.1"
+core-foundation = "0.10"
+core-graphics = { version = "0.24", features = ["elcapitan", "highsierra"] }
+png = "0.17"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Desktop control (AT-SPI2 backend). async D-Bus accessibility bus.
+atspi = { version = "0.26", default-features = false, features = ["tokio"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -70,6 +70,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         usage: "/browser [status|launch|close|pair|target <managed|bridge>|screenshot [path]]",
         action: CommandAction::Local,
     },
+    SlashCommand {
+        name: "desktop",
+        description: "Desktop control status and CDP attach (e.g. /desktop status)",
+        usage: "/desktop [status|attach <port>]",
+        action: CommandAction::Local,
+    },
     // Registered now, fully wired in later phases.
     SlashCommand {
         name: "theme",

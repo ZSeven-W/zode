@@ -79,6 +79,9 @@ pub struct DesktopSession {
     slot: Arc<tokio::sync::Mutex<()>>,
     perm_flags: StdMutex<Vec<(String, Arc<AtomicBool>)>>,
     window_seq: AtomicU64,
+    /// Optional CDP attachment (an Electron/Chromium instance attached over its
+    /// debug port). When present, `desktop_eval` and CDP-routed calls use it.
+    cdp: tokio::sync::Mutex<Option<Arc<super::cdp::CdpBackend>>>,
 }
 
 /// Holding a lease holds the global input/slot mutex: backend ops through a
@@ -94,6 +97,30 @@ impl TargetLease {
     }
 }
 
+/// The backend chosen for a given target app: the CDP attachment (for apps
+/// addressed by a `cdp#…` identity) or the platform backend (AX/UIA/AT-SPI2,
+/// held behind the global input lease). Unifies dispatch for the tools.
+pub enum ResolvedBackend {
+    /// Platform backend held behind the serializing input lease.
+    Platform(TargetLease),
+    /// CDP-attached Electron/Chromium instance (no input lease needed).
+    Cdp(Arc<super::cdp::CdpBackend>),
+}
+
+impl ResolvedBackend {
+    pub fn backend(&self) -> Arc<dyn DesktopBackend> {
+        match self {
+            ResolvedBackend::Platform(l) => l.backend(),
+            ResolvedBackend::Cdp(c) => c.clone(),
+        }
+    }
+}
+
+/// An executable identity refers to the CDP attachment when it starts `cdp`.
+pub fn is_cdp_identity(exe: &str) -> bool {
+    exe.starts_with("cdp")
+}
+
 impl DesktopSession {
     pub fn new(cfg: DesktopConfig, factory: Arc<dyn DesktopBackendFactory>) -> Arc<Self> {
         Arc::new(Self {
@@ -103,7 +130,21 @@ impl DesktopSession {
             slot: Arc::new(tokio::sync::Mutex::new(())),
             perm_flags: StdMutex::new(Vec::new()),
             window_seq: AtomicU64::new(0),
+            cdp: tokio::sync::Mutex::new(None),
         })
+    }
+
+    /// Attach a CDP backend to a running Electron/Chromium debug port (loopback
+    /// only). Replaces any existing attachment. Enables `desktop_eval`.
+    pub async fn attach_cdp(&self, port: u16) -> Result<(), DesktopError> {
+        let backend = super::cdp::CdpBackend::attach(port).await?;
+        *self.cdp.lock().await = Some(backend);
+        Ok(())
+    }
+
+    /// The current CDP attachment, if any.
+    pub async fn cdp(&self) -> Option<Arc<super::cdp::CdpBackend>> {
+        self.cdp.lock().await.clone()
     }
 
     pub fn enabled(&self) -> bool {
@@ -123,6 +164,25 @@ impl DesktopSession {
             backend,
             _guard: guard,
         })
+    }
+
+    /// Choose the backend for a target app: the CDP attachment when the app is
+    /// addressed by a `cdp#…` identity and one is attached, else the platform
+    /// backend (behind the input lease). This is how `desktop_read`/`desktop_act`
+    /// route Electron apps to CDP and native apps to AX/UIA/AT-SPI2.
+    pub async fn resolve_backend(
+        self: &Arc<Self>,
+        exe: &str,
+    ) -> Result<ResolvedBackend, DesktopError> {
+        if is_cdp_identity(exe) {
+            if let Some(cdp) = self.cdp().await {
+                return Ok(ResolvedBackend::Cdp(cdp));
+            }
+            return Err(DesktopError::NotFound(
+                "no CDP attachment; run `/desktop attach <port>` first".into(),
+            ));
+        }
+        Ok(ResolvedBackend::Platform(self.lease().await?))
     }
 
     /// Build a generation-bound AppId for an executable identity. M1: pid and

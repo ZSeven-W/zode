@@ -11,15 +11,29 @@ use agent::tool::{SafetyClass, Tool, ToolUseContext};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use super::backend::{DesktopError, ElementActionKind};
+use crate::approval::{Approval, ApprovalGate};
+
+use super::backend::{DesktopBackend, DesktopError, ElementActionKind};
 use super::screenshot::save_screenshot_artifact;
 use super::session::{ActionFamily, DesktopSession};
 
 /// Shared deps for the desktop tools.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DesktopToolDeps {
     pub session: Arc<DesktopSession>,
     pub shots_dir: PathBuf,
+    /// Approval gate used to obtain the one-time subsystem consent and per-app
+    /// allowlist grants that the permission ladder requires (spec §权限). The
+    /// grants are cached in the session scopes, so each prompt fires at most once.
+    pub gate: Arc<dyn ApprovalGate>,
+}
+
+impl std::fmt::Debug for DesktopToolDeps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DesktopToolDeps")
+            .field("shots_dir", &self.shots_dir)
+            .finish()
+    }
 }
 
 fn to_agent_err(e: DesktopError) -> AgentError {
@@ -38,20 +52,44 @@ pub fn action_family(action: &str) -> Option<ActionFamily> {
     })
 }
 
-fn require_consent(deps: &DesktopToolDeps) -> Result<(), AgentError> {
-    if !deps.session.scopes().subsystem_consented() {
-        return Err(AgentError::other(
-            "desktop subsystem consent required for this session before any desktop tool can run",
-        ));
+/// Ensure the ladder is satisfied for a tool call: obtain one-time subsystem
+/// consent, and (when `exe` is given) allowlist that app. Prompts go through the
+/// approval gate; results are cached in the session scopes so a granted app or
+/// consent is never re-prompted. A denial fails the call.
+async fn authorize(deps: &DesktopToolDeps, exe: Option<&str>) -> Result<(), AgentError> {
+    let scopes = deps.session.scopes();
+    if !scopes.subsystem_consented() {
+        let allowed = deps
+            .gate
+            .approve(
+                "desktop",
+                &json!({
+                    "_desktop_request": "subsystem-consent",
+                    "note": "Allow zode to read and control desktop apps via accessibility for this session?"
+                }),
+            )
+            .await;
+        if matches!(allowed, Approval::Deny) {
+            return Err(AgentError::other("desktop subsystem consent denied"));
+        }
+        scopes.grant_subsystem();
     }
-    Ok(())
-}
-
-fn require_app_allowed(deps: &DesktopToolDeps, exe: &str) -> Result<(), AgentError> {
-    if !deps.session.scopes().is_app_allowed(exe) {
-        return Err(to_agent_err(DesktopError::PermissionDenied(format!(
-            "app {exe:?} is not in the session allowlist; approve it before reading or acting on it"
-        ))));
+    if let Some(exe) = exe {
+        if !scopes.is_app_allowed(exe) {
+            let allowed = deps
+                .gate
+                .approve(
+                    "desktop",
+                    &json!({ "_desktop_request": "allow-app", "app": exe }),
+                )
+                .await;
+            if matches!(allowed, Approval::Deny) {
+                return Err(to_agent_err(DesktopError::PermissionDenied(format!(
+                    "app {exe:?} was not approved"
+                ))));
+            }
+            scopes.allow_app(exe);
+        }
     }
     Ok(())
 }
@@ -110,37 +148,47 @@ impl Tool for DesktopReadTool {
     }
 
     async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        require_consent(&self.deps)?;
-        let lease = self.deps.session.lease().await.map_err(to_agent_err)?;
         match input.get("action").and_then(|a| a.as_str()).unwrap_or("") {
             "apps" => {
-                let apps = lease.backend().list_apps().await.map_err(to_agent_err)?;
+                authorize(&self.deps, None).await?;
+                // Platform apps (AX/UIA/AT-SPI2) plus any CDP-attached instance,
+                // so the model can address an attached Electron app by identity.
+                let lease = self.deps.session.lease().await.map_err(to_agent_err)?;
+                let mut apps = lease.backend().list_apps().await.map_err(to_agent_err)?;
+                drop(lease);
+                if let Some(cdp) = self.deps.session.cdp().await {
+                    if let Ok(mut cdp_apps) = cdp.list_apps().await {
+                        apps.append(&mut cdp_apps);
+                    }
+                }
                 Ok(json!({ "apps": apps }))
             }
             "windows" => {
                 let exe = arg_str(&input, "app")?;
+                authorize(&self.deps, Some(exe)).await?;
+                let rb = self
+                    .deps
+                    .session
+                    .resolve_backend(exe)
+                    .await
+                    .map_err(to_agent_err)?;
                 let app = self.deps.session.resolve_app(exe);
-                let windows = lease
+                let windows = rb
                     .backend()
                     .list_windows(&app)
                     .await
                     .map_err(to_agent_err)?;
-                if self.deps.session.scopes().is_app_allowed(exe) {
-                    Ok(json!({ "windows": windows }))
-                } else {
-                    // Not allowlisted: return a redacted summary only — window
-                    // titles are content, not harmless metadata (spec §权限).
-                    let tokens: Vec<&str> = windows.iter().map(|w| w.token.as_str()).collect();
-                    Ok(json!({
-                        "count": windows.len(),
-                        "tokens": tokens,
-                        "note": "app not allowlisted; titles withheld — approve the app for full window info"
-                    }))
-                }
+                Ok(json!({ "windows": windows }))
             }
             "snapshot" => {
                 let exe = arg_str(&input, "app")?;
-                require_app_allowed(&self.deps, exe)?;
+                authorize(&self.deps, Some(exe)).await?;
+                let rb = self
+                    .deps
+                    .session
+                    .resolve_backend(exe)
+                    .await
+                    .map_err(to_agent_err)?;
                 let app = self.deps.session.resolve_app(exe);
                 let token = arg_str(&input, "window")?;
                 let win = self
@@ -148,7 +196,7 @@ impl Tool for DesktopReadTool {
                     .session
                     .resolve_window(app, token)
                     .map_err(to_agent_err)?;
-                let snap = lease
+                let snap = rb
                     .backend()
                     .snapshot(&win, None)
                     .await
@@ -208,16 +256,20 @@ impl Tool for DesktopActTool {
     }
 
     async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        require_consent(&self.deps)?;
         let action = input.get("action").and_then(|a| a.as_str()).unwrap_or("");
         if action_family(action).is_none() {
             return Err(AgentError::other(format!("unknown action: {action:?}")));
         }
         let exe = arg_str(&input, "app")?;
-        require_app_allowed(&self.deps, exe)?;
+        authorize(&self.deps, Some(exe)).await?;
         let app = self.deps.session.resolve_app(exe);
-        let lease = self.deps.session.lease().await.map_err(to_agent_err)?;
-        let backend = lease.backend();
+        let rb = self
+            .deps
+            .session
+            .resolve_backend(exe)
+            .await
+            .map_err(to_agent_err)?;
+        let backend = rb.backend();
 
         match action {
             "launch" => {
@@ -345,23 +397,85 @@ impl Tool for DesktopScreenshotTool {
     }
 
     async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        require_consent(&self.deps)?;
         let exe = arg_str(&input, "app")?;
-        require_app_allowed(&self.deps, exe)?;
+        authorize(&self.deps, Some(exe)).await?;
         let app = self.deps.session.resolve_app(exe);
         let win = self
             .deps
             .session
             .resolve_window(app, arg_str(&input, "window")?)
             .map_err(to_agent_err)?;
-        let lease = self.deps.session.lease().await.map_err(to_agent_err)?;
-        let shot = lease
-            .backend()
-            .screenshot(&win)
+        let rb = self
+            .deps
+            .session
+            .resolve_backend(exe)
             .await
             .map_err(to_agent_err)?;
-        drop(lease); // release the input lock before disk I/O
+        let shot = rb.backend().screenshot(&win).await.map_err(to_agent_err)?;
+        drop(rb); // release the input lease before disk I/O
         save_screenshot_artifact(&self.deps.shots_dir, &shot.bytes)
+    }
+}
+
+/// Evaluates arbitrary JS in a CDP-attached Electron/Chromium page. Mutating —
+/// gated independently (its own always-allow flag), and only usable when a CDP
+/// backend is attached (`/desktop attach`). Higher risk than browser_eval:
+/// Electron pages can reach preload/IPC/Node APIs (spec §desktop_eval).
+#[derive(Debug)]
+pub struct DesktopEvalTool {
+    deps: DesktopToolDeps,
+}
+
+impl DesktopEvalTool {
+    pub fn new(deps: DesktopToolDeps) -> Self {
+        Self { deps }
+    }
+}
+
+#[async_trait]
+impl Tool for DesktopEvalTool {
+    fn name(&self) -> &str {
+        "desktop_eval"
+    }
+
+    fn description(&self) -> &str {
+        "Evaluate JavaScript in an attached Electron/Chromium page (requires a CDP attachment via \
+         /desktop attach). Returns the JSON result. Higher risk than browser_eval."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["window", "expression"],
+            "properties": {
+                "window": { "type": "string", "description": "Page window token (from desktop_read windows)" },
+                "expression": { "type": "string", "description": "JavaScript expression to evaluate" }
+            }
+        })
+    }
+
+    fn safety_class(&self) -> SafetyClass {
+        SafetyClass::Mutating
+    }
+
+    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+        authorize(&self.deps, None).await?;
+        let expr = arg_str(&input, "expression")?;
+        let token = arg_str(&input, "window")?;
+        let cdp = self.deps.session.cdp().await.ok_or_else(|| {
+            AgentError::other(
+                "no CDP attachment; run `/desktop attach <port>` on a running Electron app first",
+            )
+        })?;
+        // CDP windows are addressed by the same numeric token model.
+        let app = self.deps.session.resolve_app("cdp");
+        let win = self
+            .deps
+            .session
+            .resolve_window(app, token)
+            .map_err(to_agent_err)?;
+        let value = cdp.evaluate(&win, expr).await.map_err(to_agent_err)?;
+        Ok(json!({ "value": value }))
     }
 }
 
@@ -372,21 +486,35 @@ mod tests {
     use agent::tool::{SafetyClass, Tool, ToolUseContext};
     use serde_json::json;
 
-    fn deps() -> (DesktopToolDeps, tempfile::TempDir) {
+    #[derive(Debug)]
+    struct DenyGate;
+    #[async_trait::async_trait]
+    impl crate::approval::ApprovalGate for DenyGate {
+        async fn approve(&self, _t: &str, _i: &Value) -> crate::approval::Approval {
+            crate::approval::Approval::Deny
+        }
+    }
+
+    fn deps_with(
+        gate: Arc<dyn crate::approval::ApprovalGate>,
+    ) -> (DesktopToolDeps, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let session = DesktopSession::new(
             DesktopConfig::default(),
             crate::desktop::mock::mock_factory(),
         );
-        session.scopes().grant_subsystem();
-        session.scopes().allow_app("com.apple.TextEdit");
         (
             DesktopToolDeps {
                 session,
                 shots_dir: dir.path().to_path_buf(),
+                gate,
             },
             dir,
         )
+    }
+    /// Deps whose gate auto-approves — consent + allowlist grants succeed.
+    fn deps() -> (DesktopToolDeps, tempfile::TempDir) {
+        deps_with(Arc::new(crate::approval::BypassGate))
     }
     fn ctx() -> ToolUseContext {
         ToolUseContext::new(std::env::temp_dir())
@@ -424,11 +552,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_dispatch_and_subsystem_gate() {
-        let (d, _g) = deps();
+    async fn read_dispatch_with_granted_consent() {
+        let (d, _g) = deps(); // BypassGate → consent + allowlist auto-granted
         let t = DesktopReadTool::new(d.clone());
         let apps = t.call(&ctx(), json!({"action":"apps"})).await.unwrap();
         assert_eq!(apps["apps"][0]["name"], "TextEdit");
+        // consent got recorded through the gate, not pre-seeded
+        assert!(d.session.scopes().subsystem_consented());
         let snap = t
             .call(
                 &ctx(),
@@ -437,17 +567,13 @@ mod tests {
             .await
             .unwrap();
         assert!(snap["outline"].as_str().unwrap().contains("[e1]"));
+        assert!(d.session.scopes().is_app_allowed("com.apple.TextEdit"));
+    }
 
-        // subsystem consent required: a fresh session without consent errors
-        let s2 = DesktopSession::new(
-            DesktopConfig::default(),
-            crate::desktop::mock::mock_factory(),
-        );
-        let d2 = DesktopToolDeps {
-            session: s2,
-            shots_dir: d.shots_dir.clone(),
-        };
-        let err = DesktopReadTool::new(d2)
+    #[tokio::test]
+    async fn denied_consent_blocks_reads() {
+        let (d, _g) = deps_with(Arc::new(DenyGate));
+        let err = DesktopReadTool::new(d)
             .call(&ctx(), json!({"action":"apps"}))
             .await
             .unwrap_err();
@@ -455,22 +581,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn windows_redacts_titles_for_unallowlisted_app() {
-        let (d, _g) = deps();
-        let t = DesktopReadTool::new(d);
-        // "com.other" is NOT allowlisted → redacted summary, no titles
-        let out = t
-            .call(&ctx(), json!({"action":"windows","app":"com.other"}))
-            .await
-            .unwrap();
-        assert!(out.get("count").is_some());
-        assert!(out.get("windows").is_none());
-        assert!(out.to_string().find("Untitled").is_none());
-    }
-
-    #[tokio::test]
-    async fn snapshot_requires_allowlist() {
-        let (d, _g) = deps();
+    async fn denied_app_blocks_snapshot() {
+        // Consent granted, but the per-app approval is denied.
+        let (d, _g) = deps_with(Arc::new(DenyGate));
+        d.session.scopes().grant_subsystem();
         let err = DesktopReadTool::new(d)
             .call(
                 &ctx(),
@@ -478,7 +592,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("allowlist"));
+        assert!(err.to_string().contains("not approved"));
     }
 
     #[tokio::test]

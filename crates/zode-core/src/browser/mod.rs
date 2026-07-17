@@ -12,7 +12,7 @@ pub mod managed;
 #[path = "managed-downloads.rs"]
 mod managed_downloads;
 pub mod session;
-mod snapshot_js;
+pub(crate) mod snapshot_js;
 pub mod tools;
 pub mod upload;
 
