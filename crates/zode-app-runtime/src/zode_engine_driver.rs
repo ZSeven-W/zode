@@ -428,26 +428,29 @@ impl ZodeEngineDriver {
             Some(cwd) => cwd.await?,
             None => PathBuf::from(self.repository.load(&session).await?.meta.cwd),
         };
-        let unified = zode_core::diff::working_tree_diff(&cwd).await;
-        let files = zode_core::git_stat::git_modified_files(&cwd)
+        let core = zode_core::diff::diff_snapshot(&cwd)
             .await
-            .unwrap_or_default()
+            .map_err(map_internal)?;
+        let files = core
+            .files
             .into_iter()
             .map(|file| DiffFile {
-                status: if file.added.is_none() && file.removed.is_none() {
-                    DiffFileStatus::Untracked
-                } else {
-                    DiffFileStatus::Modified
+                status: match file.status {
+                    zode_core::diff::CoreDiffFileStatus::Added => DiffFileStatus::Added,
+                    zode_core::diff::CoreDiffFileStatus::Modified => DiffFileStatus::Modified,
+                    zode_core::diff::CoreDiffFileStatus::Deleted => DiffFileStatus::Deleted,
+                    zode_core::diff::CoreDiffFileStatus::Renamed => DiffFileStatus::Renamed,
+                    zode_core::diff::CoreDiffFileStatus::Untracked => DiffFileStatus::Untracked,
                 },
                 path: file.path,
-                additions: file.added.unwrap_or(0),
-                deletions: file.removed.unwrap_or(0),
+                additions: file.additions,
+                deletions: file.deletions,
             })
             .collect();
         Ok(DiffSnapshot {
             session,
             files,
-            unified,
+            unified: core.unified,
         })
     }
 

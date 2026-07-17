@@ -73,6 +73,7 @@ pub mod workflows_js;
 
 pub use agent_tools_code::{TodoItem, TodoStatus};
 pub use config::{persist_allow_always, revoke_allow_always};
+pub use diff::{CoreDiffFile, CoreDiffFileStatus, CoreDiffSnapshot};
 pub use engine::{EngineTemplate, ToolAccessMode, ZodeEngine};
 pub use error::CoreError;
 pub use git_stat::GitFileStat;

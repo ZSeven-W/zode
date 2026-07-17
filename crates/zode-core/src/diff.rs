@@ -4,6 +4,31 @@
 
 use std::path::Path;
 
+use crate::CoreError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreDiffFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Untracked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreDiffFile {
+    pub path: String,
+    pub status: CoreDiffFileStatus,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoreDiffSnapshot {
+    pub files: Vec<CoreDiffFile>,
+    pub unified: String,
+}
+
 /// Run `git diff <args>` in `cwd`, returning stdout (empty string on any
 /// failure — callers treat "no diff" and "not a repo" the same).
 async fn git_diff(cwd: &Path, extra: &[&str]) -> String {
@@ -33,6 +58,127 @@ async fn untracked_files(cwd: &Path) -> String {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
         _ => String::new(),
     }
+}
+
+async fn git_status(cwd: &Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(cwd)
+        .output()
+        .await
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// One point-in-time working-tree projection owned by core. A non-repository
+/// directory is a valid empty snapshot so desktop review never crashes.
+pub async fn diff_snapshot(cwd: &Path) -> Result<CoreDiffSnapshot, CoreError> {
+    let Some(status) = git_status(cwd).await else {
+        return Ok(CoreDiffSnapshot::default());
+    };
+    let numstat = git_diff(cwd, &["--numstat", "HEAD"]).await;
+    let counts = parse_numstat(&numstat);
+    let files = parse_status(cwd, &status, &counts);
+
+    let mut unified = git_diff(cwd, &["HEAD"]).await;
+    if unified.is_empty() {
+        unified.push_str(&git_diff(cwd, &["--staged"]).await);
+        unified.push_str(&git_diff(cwd, &[]).await);
+    }
+    for file in files
+        .iter()
+        .filter(|file| file.status == CoreDiffFileStatus::Untracked)
+    {
+        unified.push_str(&untracked_patch(cwd, &file.path));
+    }
+
+    Ok(CoreDiffSnapshot { files, unified })
+}
+
+fn parse_status(
+    cwd: &Path,
+    status: &str,
+    counts: &std::collections::HashMap<String, (u32, u32)>,
+) -> Vec<CoreDiffFile> {
+    status
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let code = &line[..2];
+            let raw_path = &line[3..];
+            let path = raw_path
+                .rsplit(" -> ")
+                .next()
+                .unwrap_or(raw_path)
+                .trim_matches('"')
+                .to_owned();
+            let file_status = if code == "??" {
+                CoreDiffFileStatus::Untracked
+            } else if code.contains('R') {
+                CoreDiffFileStatus::Renamed
+            } else if code.contains('D') {
+                CoreDiffFileStatus::Deleted
+            } else if code.contains('A') {
+                CoreDiffFileStatus::Added
+            } else {
+                CoreDiffFileStatus::Modified
+            };
+            let (additions, deletions) = counts.get(&path).copied().unwrap_or_else(|| {
+                if file_status == CoreDiffFileStatus::Untracked {
+                    let additions = std::fs::read_to_string(cwd.join(&path))
+                        .map(|content| content.lines().count() as u32)
+                        .unwrap_or(0);
+                    (additions, 0)
+                } else {
+                    (0, 0)
+                }
+            });
+            Some(CoreDiffFile {
+                path,
+                status: file_status,
+                additions,
+                deletions,
+            })
+        })
+        .collect()
+}
+
+fn parse_numstat(output: &str) -> std::collections::HashMap<String, (u32, u32)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.splitn(3, '\t');
+            let additions = columns.next()?.parse().ok()?;
+            let deletions = columns.next()?.parse().ok()?;
+            let path = columns.next()?.trim_matches('"').to_owned();
+            Some((path, (additions, deletions)))
+        })
+        .collect()
+}
+
+fn untracked_patch(cwd: &Path, path: &str) -> String {
+    let Ok(bytes) = std::fs::read(cwd.join(path)) else {
+        return String::new();
+    };
+    let header = format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n"
+    );
+    let Ok(content) = String::from_utf8(bytes) else {
+        return format!("{header}Binary files /dev/null and b/{path} differ\n");
+    };
+    let count = content.lines().count();
+    let mut patch = format!("{header}@@ -0,0 +1,{count} @@\n");
+    for line in content.lines() {
+        patch.push('+');
+        patch.push_str(line);
+        patch.push('\n');
+    }
+    patch
 }
 
 /// Combined working-tree diff: staged changes first (what a commit would

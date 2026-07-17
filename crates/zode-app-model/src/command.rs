@@ -58,6 +58,10 @@ pub enum AppCommand {
         tool: String,
     },
     CopyText(String),
+    OpenWorkspaceFile {
+        workspace_uri: WorkspaceUri,
+        relative_path: String,
+    },
     ToggleSidebar,
     OpenReview,
     OpenTerminal,

@@ -1,6 +1,7 @@
 mod approval_card;
 mod composer;
 mod project_sidebar;
+mod review_panel;
 mod settings_panel;
 mod thread_header;
 mod tool_card;
@@ -21,6 +22,7 @@ pub use composer::{
 pub use project_sidebar::{
     group_sessions, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarItem,
 };
+pub use review_panel::{ReviewDraft, ReviewLine, ReviewLineKind, ReviewPanel, ReviewSelection};
 pub use settings_panel::{PermissionRow, SettingsPanel};
 pub use thread_header::ThreadHeader;
 pub use tool_card::{ToolCard, ToolTone};
