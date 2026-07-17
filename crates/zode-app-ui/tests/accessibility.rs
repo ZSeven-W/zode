@@ -11,7 +11,7 @@ use zode_app_model::{
 use zode_app_ui::{
     accessibility_tree, ApprovalCard, Composer, EnvironmentPanel, FocusDirection, Insets,
     InteractionNode, PinnedSummaryMode, RectExt, SettingsPanel, ThreadTranscript, WidgetId,
-    WorkspaceLayout, WorkspaceSnapshot, ENVIRONMENT_PANEL_ID,
+    WorkspaceLayout, WorkspaceSnapshot, ENVIRONMENT_PANEL_ID, HEADER_REVIEW_ID, PANEL_PICKER_ID,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary, ToolCall,
@@ -251,7 +251,11 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
         environment.node(WidgetId(60)).unwrap().name,
         "切换置顶摘要面板"
     );
-    assert!(environment.node(WidgetId(61)).is_some());
+    assert!(environment.node(HEADER_REVIEW_ID).is_none());
+    let panel_picker = environment
+        .node(PANEL_PICKER_ID)
+        .expect("unified panel control");
+    assert_eq!(panel_picker.name, "显示或隐藏侧边栏");
     assert!(environment
         .node(EnvironmentPanel::section_widget_id(
             &session,
@@ -322,7 +326,8 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
     ] {
         assert!(collapsed.node(id).is_some());
     }
-    assert!(collapsed.node(WidgetId(61)).is_some());
+    assert!(collapsed.node(HEADER_REVIEW_ID).is_none());
+    assert!(collapsed.node(PANEL_PICKER_ID).is_some());
 
     state.presentation.pinned_summary_overlay_open = false;
     state.presentation.secondary_sidebar_open = true;
@@ -336,7 +341,7 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
         collapsed.node(WidgetId(102)).unwrap().rect,
         zode_app_ui::ReviewPanel::layout(collapsed.layout.primary_surface).close_button
     );
-    for hidden in [WidgetId(20), WidgetId(21), WidgetId(60), WidgetId(61)] {
+    for hidden in [WidgetId(20), WidgetId(21), WidgetId(60), PANEL_PICKER_ID] {
         assert!(
             collapsed.node(hidden).is_none(),
             "review fallback must not expose hidden node {hidden:?}"
