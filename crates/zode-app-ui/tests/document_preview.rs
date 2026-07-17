@@ -6,7 +6,7 @@ use zode_app_model::{
     ShellRoute, TranscriptItem, TranscriptState,
 };
 use zode_app_ui::{
-    DocumentPreview, Insets, RectExt, ReviewPanel, ThreadTranscript, WorkspaceLayout,
+    DocumentPreview, Insets, RectExt, ReviewPanel, SemanticIcon, ThreadTranscript, WorkspaceLayout,
     WorkspaceSnapshot, ZodeTheme, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
 };
 use zode_node_protocol::{
@@ -484,16 +484,101 @@ fn selected_document_tab_tracks_ready_loading_and_failed_targets_without_overlap
     }
 }
 
+#[test]
+fn document_preview_controls_use_centered_semantic_icons() {
+    let (mut state, session, workspace_uri) = state_with_session();
+    state.presentation.secondary_pane = Some(SecondaryPane::DocumentPreview);
+    let target = PreviewTarget {
+        workspace_uri,
+        relative_path: "docs/report.md".into(),
+    };
+    state
+        .presentation
+        .sessions
+        .entry(session.clone())
+        .or_default()
+        .preview = PreviewState::Ready {
+        target: target.clone(),
+        title: "report.md".into(),
+        content: "ready".into(),
+        kind: PreviewKind::Markdown,
+    };
+    let rect = Rect::xywh(1_100.0, 0.0, 700.0, 1_080.0);
+    let layout = DocumentPreview::layout(rect, &state);
+    let mut ready = PaintCapture::default();
+
+    DocumentPreview::paint(&mut ready, rect, &state, &ZodeTheme::light());
+
+    for (icon, bounds) in [
+        (SemanticIcon::FileText, layout.tab),
+        (SemanticIcon::Close, layout.close_button),
+        (
+            SemanticIcon::ExternalOpen,
+            layout.external_button.expect("external button"),
+        ),
+    ] {
+        let svg = ready.svg(icon);
+        assert_close(
+            svg.top_left.y + svg.size / 2.0,
+            bounds.origin.y + bounds.size.y / 2.0,
+        );
+    }
+    let close = ready.svg(SemanticIcon::Close);
+    assert_close(
+        close.top_left.x + close.size / 2.0,
+        layout.close_button.origin.x + layout.close_button.size.x / 2.0,
+    );
+    assert!(!ready
+        .texts
+        .iter()
+        .any(|text| text.content == "▣" || text.content == "×"));
+
+    state
+        .presentation
+        .sessions
+        .get_mut(&session)
+        .expect("session presentation")
+        .preview = PreviewState::Failed {
+        target,
+        message: "offline".into(),
+    };
+    let failed_layout = DocumentPreview::layout(rect, &state);
+    let mut failed = PaintCapture::default();
+    DocumentPreview::paint(&mut failed, rect, &state, &ZodeTheme::light());
+    let refresh = failed.svg(SemanticIcon::Refresh);
+    let retry = failed_layout.retry_button.expect("retry button");
+    assert_close(
+        refresh.top_left.y + refresh.size / 2.0,
+        retry.origin.y + retry.size.y / 2.0,
+    );
+}
+
 #[derive(Default)]
 struct PaintCapture {
     clips: Vec<Rect>,
     texts: Vec<PaintedText>,
+    svgs: Vec<PaintedSvg>,
+}
+
+impl PaintCapture {
+    fn svg(&self, icon: SemanticIcon) -> &PaintedSvg {
+        self.svgs
+            .iter()
+            .find(|svg| svg.path == icon.path())
+            .unwrap_or_else(|| panic!("missing semantic icon: {icon:?}"))
+    }
 }
 
 struct PaintedText {
     content: String,
     origin: Point2D,
     font_size: f32,
+}
+
+struct PaintedSvg {
+    path: String,
+    top_left: Point2D,
+    size: f32,
 }
 
 impl Painter for PaintCapture {
@@ -524,12 +609,17 @@ impl Painter for PaintCapture {
     fn stroke_round_rect(&mut self, _rect: Rect, _radius: f32, _color: Color, _width: f32) {}
     fn stroke_svg_path(
         &mut self,
-        _d: &str,
-        _top_left: Point2D,
-        _size: f32,
+        d: &str,
+        top_left: Point2D,
+        size: f32,
         _color: Color,
         _width: f32,
     ) {
+        self.svgs.push(PaintedSvg {
+            path: d.to_owned(),
+            top_left,
+            size,
+        });
     }
     fn save(&mut self) {}
     fn restore(&mut self) {}
@@ -557,4 +647,11 @@ fn center(rect: jian_widgets::Rect) -> Point2D {
         rect.origin.x + rect.size.x / 2.0,
         rect.origin.y + rect.size.y / 2.0,
     )
+}
+
+fn assert_close(actual: f32, expected: f32) {
+    assert!(
+        (actual - expected).abs() <= 0.01,
+        "expected {actual} to be aligned with {expected}"
+    );
 }

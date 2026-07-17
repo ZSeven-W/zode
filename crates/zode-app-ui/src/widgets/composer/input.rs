@@ -1,8 +1,8 @@
 use jian_core::text_input::TextInputState;
-use jian_widgets::{components::text_area::TextArea, HorizontalAlign, Painter, Point2D, Rect};
+use jian_widgets::{components::text_area::TextArea, HorizontalAlign, Painter, Rect};
 use zode_app_model::ComposerState;
 
-use crate::{paint_single_line, RectExt, ZodeTheme};
+use crate::{paint_single_line, RectExt, SemanticIcon, ZodeTheme};
 
 pub(super) fn paint(
     painter: &mut dyn Painter,
@@ -56,11 +56,11 @@ pub(super) fn paint(
         16.0,
     );
     painter.stroke_svg_path(
-        "M4 12H20M12 4V20",
+        SemanticIcon::NewTask.path(),
         plus.origin,
-        16.0,
+        plus.size.x,
         theme.tokens.muted_foreground,
-        1.5,
+        SemanticIcon::NewTask.stroke_width(),
     );
     let model_x = (rect.max_x() - 190.0).max(rect.origin.x + 140.0);
     let effort_x = (rect.max_x() - 108.0).max(rect.origin.x + 220.0);
@@ -121,19 +121,20 @@ pub(super) fn paint(
         );
     }
     painter.stroke_svg_path(
-        "M9 5V12A3 3 0 0 0 15 12V5M6 11A6 6 0 0 0 18 11M12 17V21",
+        SemanticIcon::Microphone.path(),
         mic.origin,
-        16.0,
+        mic.size.x,
         theme.tokens.muted_foreground,
-        1.4,
+        SemanticIcon::Microphone.stroke_width(),
     );
     let send = Rect::xywh(rect.max_x() - 42.0, controls.origin.y, 28.0, 28.0);
     painter.fill_round_rect(send, 14.0, theme.zode_purple);
+    let send_icon = Rect::xywh(send.origin.x + 6.0, send.origin.y + 6.0, 16.0, 16.0);
     painter.stroke_svg_path(
-        "M7 13L12 8L17 13M12 8V18",
-        Point2D::new(send.origin.x + 6.0, send.origin.y + 6.0),
-        16.0,
+        SemanticIcon::Send.path(),
+        send_icon.origin,
+        send_icon.size.x,
         jian_widgets::Color::WHITE,
-        1.6,
+        SemanticIcon::Send.stroke_width(),
     );
 }

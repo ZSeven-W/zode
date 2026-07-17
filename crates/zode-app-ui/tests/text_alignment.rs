@@ -1,11 +1,10 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{demo_state, ComposerState, SettingsCategory, ShellPage, ShellRoute};
 use zode_app_ui::{
-    Composer, Insets, ProjectSidebar, SettingsPanel, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme,
+    Composer, Insets, ProjectSidebar, RectExt, SemanticIcon, SettingsPanel, ThreadHeader,
+    WorkspaceLayout, WorkspaceSnapshot, ZodeTheme,
 };
-
-const PLUS_PATH: &str = "M4 12H20M12 4V20";
-const MIC_PATH: &str = "M9 5V12A3 3 0 0 0 15 12V5M6 11A6 6 0 0 0 18 11M12 17V21";
+use zode_node_protocol::SessionLocator;
 
 #[derive(Debug, Clone)]
 struct TextCall {
@@ -50,6 +49,19 @@ impl CapturePainter {
             .iter()
             .find(|call| call.path == path)
             .unwrap_or_else(|| panic!("missing svg call: {path}"))
+    }
+
+    fn text_in_rect(&self, text: &str, rect: Rect) -> &TextCall {
+        self.texts
+            .iter()
+            .find(|call| {
+                call.text == text
+                    && call.origin.x >= rect.origin.x
+                    && call.origin.x <= rect.max_x()
+                    && call.origin.y >= rect.origin.y
+                    && call.origin.y + call.size <= rect.max_y()
+            })
+            .unwrap_or_else(|| panic!("missing text call in rect: {text}"))
     }
 }
 
@@ -133,7 +145,7 @@ fn settings_general_row_centers_both_line_boxes_on_the_row() {
     );
 
     let left = painter.text("语言");
-    let right = painter.text("中文（中国）");
+    let right = painter.text_in_rect("即将支持", frozen.general.general_rows[1].rect);
     let left_center = left.origin.y + left.size / 2.0;
     let right_center = right.origin.y + right.size / 2.0;
     assert_close(left_center, row_center, 1.0);
@@ -161,13 +173,53 @@ fn composer_bottom_controls_share_the_send_button_centerline() {
         .find(|fill| fill.size == Point2D::new(28.0, 28.0))
         .expect("send button fill");
     let center_y = send.origin.y + send.size.y / 2.0;
-    for svg in [painter.svg(PLUS_PATH), painter.svg(MIC_PATH)] {
+    for icon in [
+        SemanticIcon::NewTask,
+        SemanticIcon::Microphone,
+        SemanticIcon::Send,
+    ] {
+        let svg = painter.svg(icon.path());
         assert_close(svg.top_left.y + svg.size / 2.0, center_y, 1.0);
     }
     for label in ["工作区写入", "gpt-5", "高"] {
         let text = painter.text(label);
         assert_close(text.origin.y + text.size / 2.0, center_y, 1.0);
     }
+}
+
+#[test]
+fn thread_header_actions_use_centered_semantic_icons() {
+    let mut state = demo_state();
+    state.current_session = Some(SessionLocator::new(state.host.node_id, "semantic-header"));
+    let rect = Rect::xywh(240.0, 0.0, 1_560.0, 46.0);
+    let layout = ThreadHeader::layout(rect, &state);
+    let mut painter = CapturePainter::new(1.0);
+
+    ThreadHeader::paint(&mut painter, rect, &state, &ZodeTheme::light());
+
+    for (action, icon) in [
+        (
+            layout.environment.expect("environment action"),
+            SemanticIcon::Environment,
+        ),
+        (layout.review.expect("review action"), SemanticIcon::Diff),
+    ] {
+        let svg = painter.svg(icon.path());
+        assert_close(
+            svg.top_left.x + svg.size / 2.0,
+            action.rect.origin.x + action.rect.size.x / 2.0,
+            0.01,
+        );
+        assert_close(
+            svg.top_left.y + svg.size / 2.0,
+            action.rect.origin.y + action.rect.size.y / 2.0,
+            0.01,
+        );
+    }
+    assert!(!painter
+        .texts
+        .iter()
+        .any(|call| call.text == "环境" || call.text == "审查"));
 }
 
 #[test]

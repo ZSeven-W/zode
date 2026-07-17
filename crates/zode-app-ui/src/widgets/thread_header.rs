@@ -2,7 +2,8 @@ use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect};
 use zode_app_model::{AppCommand, SecondaryPane, ZodeAppState};
 
 use crate::{
-    paint_single_line, UsageChip, WidgetId, ZodeTheme, HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID,
+    paint_single_line, SemanticIcon, UsageChip, WidgetId, ZodeTheme, HEADER_ENVIRONMENT_ID,
+    HEADER_REVIEW_ID,
 };
 
 const ACTION_SIZE: f32 = 32.0;
@@ -134,21 +135,28 @@ impl ThreadHeader {
             theme.tokens.foreground,
             HorizontalAlign::Start,
         );
-        for (action, label) in [(header.environment, "环境"), (header.review, "审查")] {
+        for (action, icon) in [
+            (header.environment, SemanticIcon::Environment),
+            (header.review, SemanticIcon::Diff),
+        ] {
             let Some(action) = action else {
                 continue;
             };
             if action.selected {
                 painter.fill_round_rect(action.rect, 9.0, theme.tokens.row_selected);
             }
-            paint_single_line(
-                painter,
-                label,
-                action.rect,
-                11.0,
-                550,
+            let icon_rect = Rect::xywh(
+                action.rect.origin.x + (action.rect.size.x - 16.0).max(0.0) / 2.0,
+                action.rect.origin.y + (action.rect.size.y - 16.0).max(0.0) / 2.0,
+                16.0_f32.min(action.rect.size.x),
+                16.0_f32.min(action.rect.size.y),
+            );
+            painter.stroke_svg_path(
+                icon.path(),
+                icon_rect.origin,
+                icon_rect.size.x.min(icon_rect.size.y),
                 theme.tokens.muted_foreground,
-                HorizontalAlign::Center,
+                icon.stroke_width(),
             );
         }
         if let Some(usage) = state

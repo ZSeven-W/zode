@@ -4,7 +4,7 @@ use jian_widgets::{
 };
 use zode_app_model::{AppCommand, PreviewKind, PreviewState, ZodeAppState};
 
-use crate::{paint_single_line, RectExt, WidgetId, ZodeTheme};
+use crate::{paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme};
 
 pub const DOCUMENT_PREVIEW_CLOSE_ID: WidgetId = WidgetId(103);
 pub const DOCUMENT_PREVIEW_EXTERNAL_ID: WidgetId = WidgetId(104);
@@ -161,20 +161,18 @@ impl DocumentPreview {
         if layout.tab.size.x > 0.0 && layout.tab.size.y > 0.0 {
             painter.fill_round_rect(layout.tab, 8.0, theme.tokens.muted);
             painter.stroke_round_rect(layout.tab, 8.0, theme.tokens.border, 1.0);
-            let icon = Rect::xywh(
+            let icon_slot = Rect::xywh(
                 layout.tab.origin.x + 8.0,
                 layout.tab.origin.y,
                 14.0_f32.min(layout.tab.size.x),
                 layout.tab.size.y,
             );
-            paint_single_line(
+            let icon = paint_centered_icon(
                 painter,
-                "▣",
-                icon,
-                11.0,
-                500,
+                SemanticIcon::FileText,
+                icon_slot,
+                14.0,
                 theme.tokens.muted_foreground,
-                HorizontalAlign::Center,
             );
             let label_x = icon.max_x() + 6.0;
             paint_single_line(
@@ -192,38 +190,24 @@ impl DocumentPreview {
                 HorizontalAlign::Start,
             );
         }
-        paint_single_line(
+        paint_centered_icon(
             painter,
-            "×",
+            SemanticIcon::Close,
             layout.close_button,
-            15.0,
-            450,
+            14.0,
             theme.tokens.muted_foreground,
-            HorizontalAlign::Center,
         );
         if let Some(button) = layout.external_button {
-            painter.stroke_round_rect(button, 8.0, theme.tokens.border, 1.0);
-            paint_single_line(
+            paint_icon_button(
                 painter,
+                SemanticIcon::ExternalOpen,
                 "外部打开",
                 button,
-                11.0,
-                500,
-                theme.tokens.foreground,
-                HorizontalAlign::Center,
+                theme,
             );
         }
         if let Some(button) = layout.retry_button {
-            painter.stroke_round_rect(button, 8.0, theme.tokens.border, 1.0);
-            paint_single_line(
-                painter,
-                "重试",
-                button,
-                11.0,
-                500,
-                theme.tokens.foreground,
-                HorizontalAlign::Center,
-            );
+            paint_icon_button(painter, SemanticIcon::Refresh, "重试", button, theme);
         }
         painter.stroke_line(
             Point2D::new(layout.header.origin.x, layout.header.max_y()),
@@ -314,6 +298,68 @@ fn file_name(path: &str) -> &str {
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .unwrap_or(path)
+}
+
+fn paint_centered_icon(
+    painter: &mut dyn Painter,
+    icon: SemanticIcon,
+    bounds: Rect,
+    size: f32,
+    color: Color,
+) -> Rect {
+    let size = size.min(bounds.size.x.max(0.0)).min(bounds.size.y.max(0.0));
+    let icon_rect = Rect::xywh(
+        bounds.origin.x + (bounds.size.x - size).max(0.0) / 2.0,
+        bounds.origin.y + (bounds.size.y - size).max(0.0) / 2.0,
+        size,
+        size,
+    );
+    painter.stroke_svg_path(
+        icon.path(),
+        icon_rect.origin,
+        icon_rect.size.x,
+        color,
+        icon.stroke_width(),
+    );
+    icon_rect
+}
+
+fn paint_icon_button(
+    painter: &mut dyn Painter,
+    icon: SemanticIcon,
+    label: &str,
+    button: Rect,
+    theme: &ZodeTheme,
+) {
+    painter.stroke_round_rect(button, 8.0, theme.tokens.border, 1.0);
+    let icon_size = 12.0_f32.min(button.size.y.max(0.0));
+    let gap = 4.0;
+    let label_width = painter.measure_text_weighted(label, 11.0, 500);
+    let group_width = icon_size + gap + label_width;
+    let start_x = button.origin.x + (button.size.x - group_width).max(0.0) / 2.0;
+    let icon_bounds = Rect::xywh(start_x, button.origin.y, icon_size, button.size.y);
+    let icon_rect = paint_centered_icon(
+        painter,
+        icon,
+        icon_bounds,
+        icon_size,
+        theme.tokens.foreground,
+    );
+    let label_x = icon_rect.max_x() + gap;
+    paint_single_line(
+        painter,
+        label,
+        Rect::xywh(
+            label_x,
+            button.origin.y,
+            (button.max_x() - label_x).max(0.0),
+            button.size.y,
+        ),
+        11.0,
+        500,
+        theme.tokens.foreground,
+        HorizontalAlign::Start,
+    );
 }
 
 fn paint_path_and_title(
