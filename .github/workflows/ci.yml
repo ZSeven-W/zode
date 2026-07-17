@@ -75,6 +75,33 @@ jobs:
           name: zode-app-macos-arm64
           path: target/debug/zode-app
 
+  verify-snapshots:
+    name: verify-snapshots-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-24.04
+          - platform: macos
+            os: macos-15
+          - platform: windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: snapshot-verify-${{ matrix.platform }}
+      - name: Install Linux Skia text dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+      - name: Verify checked-in desktop screenshot goldens
+        run: cargo test --locked -p zode-app --test snapshots
+
   portable-core:
     name: portable-core-${{ matrix.platform }}
     strategy:
