@@ -1,3 +1,4 @@
+use jian_widgets::Rect;
 use zode_app_model::{IntegrationsTab, LayoutClass, SecondaryPane, SettingsCategory, ShellRoute};
 use zode_app_ui::{Insets, PinnedSummaryMode, RectExt, WorkspaceLayout};
 
