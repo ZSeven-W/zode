@@ -306,9 +306,17 @@ fn render_named_test_scene() {
     } else {
         workspace_root().join(requested)
     };
-    let scene = named_scene(&name, ThemePreference::Light, WIDTH).unwrap_or_else(|| {
+    let mut scene = named_scene(&name, ThemePreference::Light, WIDTH).unwrap_or_else(|| {
         panic!("unknown scene {name}; expected one of {REFERENCE_SCENE_NAMES:?}")
     });
+    if std::env::var_os("ZODE_RENDER_PROJECT_PICKER").is_some() {
+        scene.state.project_picker.open = true;
+    }
+    if std::env::var_os("ZODE_RENDER_PROJECTLESS").is_some() {
+        scene.state.current_session = None;
+        scene.state.active_workspace = None;
+        scene.state.project_picker.open = false;
+    }
     let bytes = render_snapshot(&scene.state, WIDTH, HEIGHT, SCALE)
         .unwrap_or_else(|error| panic!("could not render {name}: {error}"));
     if let Some(parent) = path

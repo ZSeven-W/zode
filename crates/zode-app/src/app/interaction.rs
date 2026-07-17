@@ -75,7 +75,7 @@ fn normalize_conversation_route(
 ) -> bool {
     if !matches!(
         command,
-        AppCommand::SelectSession(_) | AppCommand::NewSession { .. }
+        AppCommand::SelectSession(_) | AppCommand::NewSession { .. } | AppCommand::BeginTask { .. }
     ) {
         return false;
     }
@@ -245,6 +245,9 @@ impl DesktopApp {
         match input {
             UnifiedInputEvent::Keyboard(event) => self.handle_key_event(event),
             UnifiedInputEvent::Ime(event) => {
+                if self.handle_project_picker_ime(event.clone()) {
+                    return;
+                }
                 if self.app_state.presentation.route == ShellRoute::Terminal
                     && self.focused_widget == Some(TERMINAL_ID)
                 {
@@ -340,6 +343,18 @@ impl DesktopApp {
         let Some(clipboard) = self.clipboard.clone() else {
             return;
         };
+        if self.app_state.project_picker.open
+            && self.focused_widget == Some(zode_app_ui::PROJECT_PICKER_SEARCH_ID)
+        {
+            match clipboard.read_text() {
+                Ok(Some(text)) if !text.is_empty() => {
+                    let _ = self.paste_project_search_text(&text);
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("zode-app: clipboard read failed: {error}"),
+            }
+            return;
+        }
         if self.app_state.presentation.route == ShellRoute::Terminal
             && self.focused_widget == Some(TERMINAL_ID)
         {
@@ -412,7 +427,7 @@ impl DesktopApp {
                 };
                 self.apply_composer_outcome(outcome);
             }
-            COMPOSER_ID | TERMINAL_ID => {}
+            COMPOSER_ID | TERMINAL_ID | zode_app_ui::PROJECT_PICKER_SEARCH_ID => {}
             _ => {
                 if let Some(command) = widget_command(&self.app_state, id) {
                     let focus_composer =
@@ -447,6 +462,9 @@ impl DesktopApp {
             if self.frame_snapshot.node(id).is_none() {
                 continue;
             }
+            if !self.project_picker_allows_accessibility_action(id) {
+                continue;
+            }
             match request.action {
                 Action::Focus => self.set_focused_widget(Some(id)),
                 Action::Click => self.activate_widget(id),
@@ -454,6 +472,11 @@ impl DesktopApp {
                     if let Some(ActionData::Value(value)) = request.data {
                         self.composer.set_text(value.into_string());
                         self.apply_composer_outcome(zode_app_ui::ComposerOutcome::Edited);
+                    }
+                }
+                Action::SetValue if id == zode_app_ui::PROJECT_PICKER_SEARCH_ID => {
+                    if let Some(ActionData::Value(value)) = request.data {
+                        self.set_project_search_value(value.into_string());
                     }
                 }
                 Action::ScrollUp | Action::ScrollDown if id == zode_app_ui::SETTINGS_ROOT_ID => {
@@ -466,26 +489,6 @@ impl DesktopApp {
                 }
                 _ => {}
             }
-        }
-    }
-
-    pub(super) fn persist_ui_state(&self) {
-        let Some(store) = self.app_state_store.as_ref() else {
-            return;
-        };
-        let preferences = self.app_state.ui_preferences.clone();
-        let geometry = self.window_geometry;
-        let last_session = self
-            .app_state
-            .current_session
-            .as_ref()
-            .map(|session| session.session_id.clone());
-        if let Err(error) = store.update(move |state| {
-            state.ui_preferences = preferences;
-            state.window_geometry = geometry;
-            state.last_session = last_session;
-        }) {
-            eprintln!("zode-app: failed to persist UI state: {error}");
         }
     }
 
@@ -544,6 +547,15 @@ impl DesktopApp {
         if event.button != Some(PointerButton::Primary) {
             return;
         }
+        if self.app_state.project_picker.open {
+            if !self.project_picker_contains_point(event.position) {
+                self.close_project_picker_from_outside();
+                return;
+            }
+            if self.frame_snapshot.hit_test(event.position).is_none() {
+                return;
+            }
+        }
         if let Some(open) = self.app_state.composer.queue_menu {
             let menu = Composer::queue_layout(self.frame_snapshot.layout.composer, &self.app_state)
                 .and_then(|layout| layout.menu);
@@ -586,6 +598,9 @@ impl DesktopApp {
     }
 
     fn handle_key_event(&mut self, event: KeyEvent) {
+        if self.handle_project_picker_key(&event) {
+            return;
+        }
         if let Some(command) = terminal_shortcut_command(&event) {
             self.apply_terminal_command(command);
             return;
@@ -719,11 +734,16 @@ impl DesktopApp {
     fn apply_local_navigation_command(&mut self, command: &AppCommand) -> bool {
         let previous_session = self.app_state.current_session.clone();
         let previous_queue_edit = self.app_state.composer.editing_queued_message;
+        let project_picker_was_open = self.app_state.project_picker.open;
         let outcome = reduce_navigation_command(&mut self.app_state, command.clone());
         self.sync_queue_editor_after_state_change(previous_session.clone(), previous_queue_edit);
         self.prune_queued_payloads();
         let handled = match outcome {
             NavigationOutcome::Applied => true,
+            NavigationOutcome::NeedsEffect if matches!(command, AppCommand::CreateProject) => {
+                self.request_workspace_pick();
+                true
+            }
             NavigationOutcome::NeedsEffect
                 if matches!(
                     command,
@@ -741,10 +761,22 @@ impl DesktopApp {
             return false;
         }
         normalize_conversation_route(&mut self.app_state, command);
+        if matches!(
+            command,
+            AppCommand::BeginTask { .. } | AppCommand::SelectSession(_)
+        ) {
+            self.persist_ui_state();
+        }
+        let focus_after =
+            self.sync_project_picker_after_navigation(command, project_picker_was_open);
         self.refresh_if_session_changed(previous_session);
         self.sync_composer_busy();
         self.rebuild_frame_snapshot();
-        self.request_redraw();
+        if let Some(id) = focus_after {
+            self.set_focused_widget(Some(id));
+        } else {
+            self.request_redraw();
+        }
         true
     }
 }

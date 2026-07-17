@@ -115,8 +115,12 @@ impl SettingsPanel {
                     .current_session
                     .as_ref()
                     .and_then(|session| state.available_workspace_for_session(session))
+                    .filter(|workspace| !state.is_projectless_workspace(workspace))
             })
             .or_else(|| {
+                if state.projectless_workspace_root.is_some() {
+                    return None;
+                }
                 state
                     .projects
                     .iter()

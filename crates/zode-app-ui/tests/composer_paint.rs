@@ -1,12 +1,13 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
-    AttachmentMetadata, ComposerState, GoalProgress, ProjectState, TranscriptItem, TranscriptState,
+    AttachmentMetadata, ComposerState, EnvironmentSnapshot, GoalProgress, LoadState, ProjectState,
+    SessionPresentationState, TranscriptItem, TranscriptState,
 };
 use zode_app_ui::{
     Composer, ComposerController, ImeEvent, Insets, RectExt, WorkspaceShell, WorkspaceSnapshot,
     ZodeTheme, COMPOSER_ID,
 };
-use zode_node_protocol::{SessionLocator, WorkspaceUri};
+use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
 #[derive(Default)]
 struct TextCapture {
@@ -352,6 +353,93 @@ fn workspace_shell_omits_unknown_workspace_and_projects_the_real_available_label
         &ZodeTheme::light(),
     );
     assert!(painter.texts.iter().any(|text| text == "zode"));
+}
+
+#[test]
+fn ordinary_offscreen_shell_entry_paints_the_open_project_picker() {
+    let mut state = zode_app_model::demo_state();
+    let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
+    state.projects.push(ProjectState {
+        workspace_uri: workspace.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
+    });
+    state.active_workspace = Some(workspace);
+    state.project_picker.open = true;
+    state.project_picker.search = "zod".into();
+    let mut painter = TextCapture::default();
+
+    WorkspaceShell::paint(
+        &mut painter,
+        Rect::xywh(0.0, 0.0, 1_440.0, 1_080.0),
+        Insets::ZERO,
+        &state,
+        &ZodeTheme::light(),
+    );
+
+    for expected in [
+        "我们应该在 ",
+        " 中构建什么？",
+        "zod",
+        "zode",
+        "新建项目",
+        "不在项目中工作",
+    ] {
+        assert!(
+            painter.texts.iter().any(|text| text == expected),
+            "open picker paints {expected}"
+        );
+    }
+}
+
+#[test]
+fn projectless_session_hides_scratch_workspace_and_branch_from_composer() {
+    let mut state = zode_app_model::demo_state();
+    let scratch_root = WorkspaceUri::new("file:///private/tmp/zode-projectless").unwrap();
+    let scratch_child =
+        WorkspaceUri::new("file:///private/tmp/zode-projectless/task-session").unwrap();
+    let session = SessionLocator::new(state.host.node_id, "task-session");
+    state.projectless_workspace_root = Some(scratch_root);
+    state.current_session = Some(session.clone());
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: scratch_child.clone(),
+        title: "Task".into(),
+        updated_at_ms: 1,
+        status: ThreadStatus::Idle,
+    });
+    state
+        .transcripts
+        .insert(session.clone(), TranscriptState::default());
+    state.presentation.sessions.insert(
+        session,
+        SessionPresentationState {
+            context: LoadState::Ready(EnvironmentSnapshot {
+                workspace_uri: scratch_child,
+                branch: Some("main".into()),
+                subagents: Vec::new(),
+                background_processes: Vec::new(),
+                sources: Vec::new(),
+            }),
+            ..SessionPresentationState::default()
+        },
+    );
+    let mut painter = TextCapture::default();
+    WorkspaceShell::paint(
+        &mut painter,
+        Rect::xywh(0.0, 0.0, 1_440.0, 1_080.0),
+        Insets::ZERO,
+        &state,
+        &ZodeTheme::light(),
+    );
+
+    assert!(painter.texts.iter().any(|text| text == "本地"));
+    assert!(!painter.texts.iter().any(|text| text == "main"));
+    assert!(!painter
+        .texts
+        .iter()
+        .any(|text| text.contains("task-session") || text.contains("zode-projectless")));
 }
 
 #[test]

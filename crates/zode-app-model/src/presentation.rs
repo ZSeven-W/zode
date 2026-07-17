@@ -477,17 +477,21 @@ pub fn environment_sections(state: &crate::ZodeAppState) -> Vec<EnvironmentSecti
         value: Some(connection_label(state.host.connection).into()),
     }];
     let workspace = context
-        .map(|context| context.workspace_uri.as_str())
+        .map(|context| &context.workspace_uri)
         .or_else(|| {
             session.and_then(|session| {
                 state
                     .threads
                     .iter()
                     .find(|thread| &thread.session == session)
-                    .map(|thread| thread.workspace_uri.as_str())
+                    .map(|thread| &thread.workspace_uri)
             })
-        });
-    if let Some(workspace) = workspace.filter(|workspace| !workspace.trim().is_empty()) {
+        })
+        .filter(|workspace| !state.is_projectless_workspace(workspace));
+    if let Some(workspace) = workspace
+        .map(WorkspaceUri::as_str)
+        .filter(|workspace| !workspace.trim().is_empty())
+    {
         host_entries.push(EnvironmentEntry {
             id: "workspace".into(),
             label: "当前工作区".into(),

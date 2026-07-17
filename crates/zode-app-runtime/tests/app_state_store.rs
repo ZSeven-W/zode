@@ -1,5 +1,6 @@
 use zode_app_model::{ThemePreference, UiPreferences};
-use zode_app_runtime::{AppStateFile, AppStateStore, SessionUiState, WindowGeometry};
+use zode_app_runtime::{AppStateFile, AppStateStore, SessionUiState, TaskContext, WindowGeometry};
+use zode_node_protocol::WorkspaceUri;
 
 #[test]
 fn reconcile_drops_ui_metadata_for_deleted_sessions() {
@@ -79,6 +80,7 @@ fn missing_state_file_loads_default_version() {
     assert!(loaded.sessions.is_empty());
     assert_eq!(loaded.ui_preferences, UiPreferences::default());
     assert_eq!(loaded.window_geometry, None);
+    assert_eq!(loaded.task_context, None);
 }
 
 #[test]
@@ -101,6 +103,43 @@ fn legacy_v1_missing_appearance_and_window_fields_uses_defaults() {
     assert_eq!(loaded.last_session.as_deref(), Some("legacy-session"));
     assert_eq!(loaded.ui_preferences, UiPreferences::default());
     assert_eq!(loaded.window_geometry, None);
+    assert_eq!(loaded.task_context, None);
+}
+
+#[test]
+fn task_context_round_trips_unset_project_and_projectless_states() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = AppStateStore::new(directory.path());
+    let project = WorkspaceUri::new("file:///repo/zode").unwrap();
+    let contexts = [
+        None,
+        Some(TaskContext::Project {
+            workspace_uri: project.clone(),
+        }),
+        Some(TaskContext::Projectless),
+    ];
+
+    for expected in contexts {
+        let state = AppStateFile {
+            task_context: expected.clone(),
+            ..AppStateFile::default()
+        };
+        store.save(&state).unwrap();
+        assert_eq!(store.load().unwrap().task_context, expected);
+    }
+
+    let project_json = serde_json::to_value(AppStateFile {
+        task_context: Some(TaskContext::Project {
+            workspace_uri: project,
+        }),
+        ..AppStateFile::default()
+    })
+    .unwrap();
+    assert_eq!(project_json["taskContext"]["kind"], "project");
+    assert_eq!(
+        project_json["taskContext"]["workspaceUri"],
+        "file:///repo/zode"
+    );
 }
 
 #[test]
@@ -162,6 +201,7 @@ fn update_preserves_unrelated_state_fields() {
     original
         .collapsed_workspaces
         .insert("file:///repo/zode".into());
+    original.task_context = Some(TaskContext::Projectless);
     store.save(&original).unwrap();
 
     store
@@ -182,6 +222,7 @@ fn update_preserves_unrelated_state_fields() {
     assert_eq!(loaded.last_session, original.last_session);
     assert_eq!(loaded.sessions, original.sessions);
     assert_eq!(loaded.collapsed_workspaces, original.collapsed_workspaces);
+    assert_eq!(loaded.task_context, original.task_context);
     assert_eq!(loaded.ui_preferences.theme, ThemePreference::Light);
     assert!(loaded.ui_preferences.reduced_motion);
     assert_eq!(loaded.window_geometry.unwrap().width, 1221);

@@ -58,6 +58,8 @@ pub enum Key {
     Delete,
     ArrowLeft,
     ArrowRight,
+    ArrowUp,
+    ArrowDown,
     Home,
     End,
     PageUp,

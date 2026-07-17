@@ -88,6 +88,7 @@ pub struct SidebarNavigationRowLayout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarRowTarget {
     Project(WorkspaceUri),
+    Task(SessionLocator),
     Session(SessionLocator),
 }
 
@@ -213,7 +214,22 @@ impl ProjectSidebar {
             return Vec::new();
         }
         let mut rows = Vec::new();
+        for thread in projectless_tasks(state).into_iter().take(row_capacity) {
+            let session = thread.session;
+            rows.push(SidebarRowLayout {
+                id: Self::session_widget_id(&session),
+                rect: dynamic_row_rect(rect, project_y, rows.len()),
+                label: thread.title,
+                target: SidebarRowTarget::Task(session.clone()),
+                actionable: true,
+                selected: state.presentation.route == ShellRoute::Conversation
+                    && state.current_session.as_ref() == Some(&session),
+            });
+        }
         for project in dynamic_projects(state) {
+            if rows.len() >= row_capacity {
+                break;
+            }
             let workspace = project.workspace_uri;
             rows.push(SidebarRowLayout {
                 id: Self::project_widget_id(&workspace),
@@ -253,6 +269,11 @@ impl ProjectSidebar {
     }
 
     pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+        for thread in projectless_tasks(state) {
+            if Self::session_widget_id(&thread.session) == id {
+                return Some(AppCommand::SelectSession(thread.session));
+            }
+        }
         for project in dynamic_projects(state) {
             if project.toggleable && Self::project_widget_id(&project.workspace_uri) == id {
                 return Some(AppCommand::ToggleProject(project.workspace_uri));
@@ -331,10 +352,14 @@ impl ProjectSidebar {
             let project_y = rect.origin.y + HEADER_H + NAVIGATION.len() as f32 * ROW_H + 18.0;
             draw_label(
                 painter,
-                if state.projects.is_empty() {
+                if state.projects.is_empty() && projectless_tasks(state).is_empty() {
                     "项目"
-                } else {
+                } else if state.projects.is_empty() {
+                    "任务"
+                } else if projectless_tasks(state).is_empty() {
                     "最近项目"
+                } else {
+                    "任务与项目"
                 },
                 Rect::xywh(rect.origin.x + 16.0, project_y, rect.size.x - 32.0, 24.0),
                 11.0,
@@ -362,6 +387,19 @@ impl ProjectSidebar {
                             SemanticIcon::Folder.stroke_width(),
                         );
                         600
+                    }
+                    SidebarRowTarget::Task(_) => {
+                        painter.stroke_svg_path(
+                            SemanticIcon::NewTask.path(),
+                            Point2D::new(
+                                row.rect.origin.x + 8.0,
+                                row.rect.origin.y + (row.rect.size.y - ICON_SIZE) / 2.0,
+                            ),
+                            ICON_SIZE,
+                            theme.sidebar_foreground,
+                            SemanticIcon::NewTask.stroke_width(),
+                        );
+                        500
                     }
                     SidebarRowTarget::Session(_) => 400,
                 };
@@ -450,11 +488,13 @@ struct DynamicProject {
 fn dynamic_projects(state: &ZodeAppState) -> Vec<DynamicProject> {
     let mut sessions = group_sessions(state.threads.clone())
         .into_iter()
+        .filter(|group| !state.is_projectless_workspace(&group.workspace_uri))
         .map(|group| (group.workspace_uri, group.sessions))
         .collect::<BTreeMap<_, _>>();
     let known_projects = state
         .projects
         .iter()
+        .filter(|project| !state.is_projectless_workspace(&project.workspace_uri))
         .map(|project| (project.workspace_uri.clone(), project))
         .collect::<BTreeMap<_, _>>();
     let mut projects = known_projects
@@ -498,6 +538,22 @@ fn dynamic_projects(state: &ZodeAppState) -> Vec<DynamicProject> {
             .then_with(|| left.workspace_uri.cmp(&right.workspace_uri))
     });
     projects
+}
+
+fn projectless_tasks(state: &ZodeAppState) -> Vec<ThreadSummary> {
+    let mut tasks = state
+        .threads
+        .iter()
+        .filter(|thread| state.is_projectless_workspace(&thread.workspace_uri))
+        .cloned()
+        .collect::<Vec<_>>();
+    tasks.sort_by(|left, right| {
+        right
+            .updated_at_ms
+            .cmp(&left.updated_at_ms)
+            .then_with(|| left.session.cmp(&right.session))
+    });
+    tasks
 }
 
 fn dynamic_row_rect(rect: Rect, project_y: f32, index: usize) -> Rect {

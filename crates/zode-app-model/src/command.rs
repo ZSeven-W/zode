@@ -9,6 +9,14 @@ use crate::{
 /// User intent emitted by widgets for the application controller to handle.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppCommand {
+    BeginTask {
+        workspace_uri: Option<WorkspaceUri>,
+    },
+    ToggleProjectPicker,
+    CloseProjectPicker,
+    SetProjectSearch(String),
+    SetProjectPickerActive(usize),
+    CreateProject,
     NewSession {
         workspace_uri: WorkspaceUri,
     },

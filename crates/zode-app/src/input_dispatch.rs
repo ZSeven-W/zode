@@ -3,7 +3,7 @@ use jian_widgets::{Point2D, Rect};
 use zode_app_model::ShellPage;
 use zode_app_ui::{
     FocusDirection, Key, KeyEvent, TouchEvent, TouchPhase, WidgetId, WorkspaceSnapshot,
-    COMPOSER_ID, TERMINAL_ID,
+    COMPOSER_ID, PROJECT_PICKER_SEARCH_ID, TERMINAL_ID,
 };
 
 use crate::event_map::{route_key_event, InputRoute};
@@ -140,7 +140,7 @@ pub fn ime_allowed_for_focus(
         ShellPage::Terminal => focused == Some(TERMINAL_ID),
         ShellPage::Settings => false,
         ShellPage::Conversation | ShellPage::Review | ShellPage::ComingSoon => {
-            focused == Some(COMPOSER_ID)
+            focused == Some(COMPOSER_ID) || focused == Some(PROJECT_PICKER_SEARCH_ID)
         }
     }
 }

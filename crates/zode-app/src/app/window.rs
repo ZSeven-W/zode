@@ -81,6 +81,7 @@ impl DesktopApp {
                     .map_err(|error| error.to_string())?,
             );
         }
+        let project_picker = self.project_picker_view_state();
         let raster = self.raster.as_mut().expect("raster initialized");
         let canvas = raster.canvas();
         canvas.reset_matrix();
@@ -96,13 +97,15 @@ impl DesktopApp {
         let theme = crate::preferences::theme_for_state(&self.app_state);
         {
             let mut painter = FramePainter::new(&mut self.renderer, canvas);
-            WorkspaceShell::paint_snapshot_with_hovered_widget(
+            WorkspaceShell::paint_snapshot_with_project_picker(
                 &mut painter,
                 &self.frame_snapshot,
                 &self.app_state,
                 self.composer.input_state(),
                 &self.terminal_grid,
                 self.terminal_controller.selection(),
+                &project_picker,
+                self.project_picker_controller.input_state(),
                 self.hovered_widget,
                 &theme,
             );
@@ -162,11 +165,13 @@ impl DesktopApp {
 
     pub(super) fn rebuild_frame_snapshot(&mut self) {
         let (width, height) = self.window_state.logical_size();
-        let mut snapshot = WorkspaceSnapshot::build(
+        let project_picker = self.project_picker_view_state();
+        let mut snapshot = WorkspaceSnapshot::build_with_project_picker(
             &self.app_state,
             width,
             height,
             self.window_state.safe_area_insets,
+            &project_picker,
         );
         snapshot.focused = self
             .focused_widget

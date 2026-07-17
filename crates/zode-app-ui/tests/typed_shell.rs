@@ -157,7 +157,7 @@ fn typed_settings_route_wins_over_stale_legacy_page() {
     assert!(text.contains("常规"));
     assert!(text.contains("权限"));
     assert!(text.contains("只读"));
-    assert!(!text.contains("我们在 Zode 中构建什么？"));
+    assert!(!text.contains("我们应该构建什么？"));
     assert!(!text.contains("向 Zode 描述一个任务"));
 }
 
@@ -192,7 +192,7 @@ fn typed_conversation_route_restores_chat_when_legacy_page_is_stale() {
     let (painter, _) = paint_shell(&state, 1_800.0);
     let text = text(&painter);
 
-    assert!(text.contains("我们在 Zode 中构建什么？"));
+    assert!(text.contains("我们应该构建什么？"));
     assert!(text.contains("向 Zode 描述一个任务"));
     assert!(!text.contains("本地运行状态"));
 }
@@ -356,7 +356,7 @@ fn wide_review_is_a_real_split_and_narrow_review_falls_back_to_the_primary_surfa
     assert_eq!(narrow_layout.review_panel.size.x, 0.0);
     assert!(narrow_text.contains("workspace_shell.rs"));
     assert!(narrow_text.contains("typed route"));
-    assert!(!narrow_text.contains("我们在 Zode 中构建什么？"));
+    assert!(!narrow_text.contains("我们应该构建什么？"));
     assert!(!narrow_text.contains("向 Zode 描述一个任务"));
     assert!(narrow.clips.contains(&narrow_layout.primary_surface));
 }

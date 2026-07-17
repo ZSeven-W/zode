@@ -30,6 +30,7 @@ pub struct LocalSessionRepository {
     node_id: NodeId,
     inner: CoreSessionRepository,
     app_state: AppStateStore,
+    task_workspaces_root: PathBuf,
 }
 
 impl LocalSessionRepository {
@@ -38,7 +39,8 @@ impl LocalSessionRepository {
         Self {
             node_id,
             inner: CoreSessionRepository::new(config_dir.clone()),
-            app_state: AppStateStore::new(config_dir),
+            app_state: AppStateStore::new(&config_dir),
+            task_workspaces_root: config_dir.join("task-workspaces"),
         }
     }
 
@@ -120,7 +122,9 @@ impl LocalSessionRepository {
 
     pub async fn delete(&self, session: &SessionLocator) -> Result<(), EndpointError> {
         let id = self.local_session_id(session)?;
+        let workspace = PathBuf::from(self.find_meta(id)?.cwd);
         self.inner.delete(id).await.map_err(map_core_error)?;
+        cleanup_task_workspace(&self.task_workspaces_root, &workspace, id)?;
         let remaining = self.inner.list().map_err(map_core_error)?;
         self.reconcile_app_state(remaining.iter().map(|meta| meta.id.as_str()))
     }
@@ -215,6 +219,32 @@ impl LocalSessionRepository {
             status: ThreadStatus::Idle,
         })
     }
+}
+
+fn cleanup_task_workspace(
+    root: &Path,
+    workspace: &Path,
+    session_id: &str,
+) -> Result<(), EndpointError> {
+    if !workspace.exists() {
+        return Ok(());
+    }
+    let (Ok(root), Ok(workspace)) = (root.canonicalize(), workspace.canonicalize()) else {
+        return Ok(());
+    };
+    let owned = workspace.parent() == Some(root.as_path())
+        && workspace
+            .file_name()
+            .is_some_and(|name| name == std::ffi::OsStr::new(session_id));
+    if owned {
+        std::fs::remove_dir_all(workspace).map_err(|_| {
+            endpoint_error(
+                EndpointErrorKind::Internal,
+                "projectless task workspace cleanup failed",
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn project_history(store: &MessageStore) -> Vec<HistoryItem> {
@@ -525,5 +555,30 @@ mod tests {
             platform_path_string("/C:/Users/Fini Zhang/设计".to_string(), true),
             "C:/Users/Fini Zhang/设计"
         );
+    }
+
+    #[test]
+    fn cleanup_removes_only_the_owned_task_workspace() {
+        let base = std::env::temp_dir().join(format!(
+            "zode-task-cleanup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = base.join("task-workspaces");
+        let owned = root.join("session-1");
+        let unrelated = base.join("project");
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+
+        cleanup_task_workspace(&root, &unrelated, "session-1").unwrap();
+        assert!(unrelated.exists());
+        cleanup_task_workspace(&root, &owned, "session-1").unwrap();
+        assert!(!owned.exists());
+        assert!(unrelated.exists());
+
+        let _ = std::fs::remove_dir_all(base);
     }
 }

@@ -1,8 +1,10 @@
-use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{Color, HorizontalAlign, Painter, Point2D, Rect, TextLayout};
 
-use crate::{BrandMark, RectExt, SemanticIcon, ZodeTheme};
+use crate::{
+    paint_single_line, BrandMark, ProjectPicker, RectExt, SemanticIcon, WelcomeTitleLayout,
+    ZodeTheme,
+};
 
-const TITLE: &str = "我们在 Zode 中构建什么？";
 const SUGGESTIONS: [(&str, SemanticIcon); 4] = [
     ("探索并理解代码", SemanticIcon::ExploreCode),
     ("构建新功能、应用或工具", SemanticIcon::BuildFeature),
@@ -149,6 +151,34 @@ pub struct EmptyState;
 
 impl EmptyState {
     pub fn paint(painter: &mut dyn Painter, rect: Rect, theme: &ZodeTheme) {
+        Self::paint_with_workspace(painter, rect, None, false, false, theme);
+    }
+
+    pub fn welcome_title_layout(
+        rect: Rect,
+        workspace_label: Option<&str>,
+    ) -> Option<WelcomeTitleLayout> {
+        let layout = EmptyStateLayout::compute(rect);
+        if layout.mode == EmptyStateMode::Omitted {
+            return None;
+        }
+        let compact = layout.mode == EmptyStateMode::Compact;
+        Some(ProjectPicker::welcome_title_layout(
+            layout.title,
+            workspace_label,
+            ProjectPicker::title_font_size(compact),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_with_workspace(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        workspace_label: Option<&str>,
+        project_focused: bool,
+        project_hovered: bool,
+        theme: &ZodeTheme,
+    ) {
         if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
             return;
         }
@@ -171,30 +201,14 @@ impl EmptyState {
             );
         }
 
-        let (title_size, title_floor) = match layout.mode {
-            EmptyStateMode::Wide => (27.0, 27.0),
-            EmptyStateMode::Compact => (20.0, 16.0),
-            EmptyStateMode::Omitted => unreachable!(),
-        };
-        let title_size = fitted_font_size_at_floor(
-            painter,
-            TITLE,
-            title_size,
-            title_floor,
-            layout.title.width(),
-        );
-        let title_width = painter.measure_text_weighted(TITLE, title_size, 500);
-        if title_size > 0.0 && title_size <= layout.title.height() {
-            draw_text(
+        if let Some(title) = Self::welcome_title_layout(rect, workspace_label) {
+            paint_welcome_title(
                 painter,
-                TITLE,
-                Point2D::new(
-                    layout.title.min_x() + (layout.title.width() - title_width) / 2.0,
-                    layout.title.min_y(),
-                ),
-                title_size,
-                500,
-                theme.tokens.foreground,
+                title,
+                workspace_label,
+                project_focused,
+                project_hovered,
+                theme,
             );
         }
 
@@ -287,29 +301,6 @@ fn anchored_y(rect: Rect, ratio: f32, height: f32) -> f32 {
     preferred.clamp(rect.min_y(), rect.max_y() - height)
 }
 
-fn fitted_font_size_at_floor(
-    painter: &mut dyn Painter,
-    text: &str,
-    maximum: f32,
-    minimum: f32,
-    available_width: f32,
-) -> f32 {
-    if maximum <= 0.0 || available_width <= 0.0 {
-        return 0.0;
-    }
-    let measured = painter.measure_text_weighted(text, maximum, 500);
-    if measured <= available_width || measured <= 0.0 {
-        maximum
-    } else {
-        let fitted = maximum * available_width / measured;
-        if fitted >= minimum {
-            fitted
-        } else {
-            0.0
-        }
-    }
-}
-
 fn split_text_lines(
     painter: &mut dyn Painter,
     text: &str,
@@ -371,6 +362,71 @@ fn suggestion_color(index: usize) -> Color {
         2 => Color::rgb_u8(34, 197, 94),
         _ => Color::rgb_u8(249, 115, 22),
     }
+}
+
+fn paint_welcome_title(
+    painter: &mut dyn Painter,
+    layout: WelcomeTitleLayout,
+    workspace_label: Option<&str>,
+    project_focused: bool,
+    project_hovered: bool,
+    theme: &ZodeTheme,
+) {
+    let Some(project) = workspace_label.filter(|label| !label.trim().is_empty()) else {
+        paint_single_line(
+            painter,
+            "我们应该构建什么？",
+            layout.prefix,
+            layout.font_size,
+            500,
+            theme.tokens.foreground,
+            HorizontalAlign::Start,
+        );
+        return;
+    };
+    paint_single_line(
+        painter,
+        "我们应该在 ",
+        layout.prefix,
+        layout.font_size,
+        500,
+        theme.tokens.foreground,
+        HorizontalAlign::Start,
+    );
+    if let Some(project_rect) = layout.project {
+        paint_single_line(
+            painter,
+            project,
+            project_rect,
+            layout.font_size,
+            500,
+            if project_focused || project_hovered {
+                theme.tokens.foreground
+            } else {
+                theme.tokens.muted_foreground
+            },
+            HorizontalAlign::Start,
+        );
+        let underline_y = project_rect.max_y() - 3.0;
+        painter.stroke_line(
+            Point2D::new(project_rect.min_x(), underline_y),
+            Point2D::new(project_rect.max_x(), underline_y),
+            theme.tokens.muted_foreground,
+            if project_focused { 1.5 } else { 1.0 },
+        );
+        if project_focused {
+            painter.stroke_round_rect(project_rect, 3.0, theme.tokens.ring, 1.5);
+        }
+    }
+    paint_single_line(
+        painter,
+        " 中构建什么？",
+        layout.suffix,
+        layout.font_size,
+        500,
+        theme.tokens.foreground,
+        HorizontalAlign::Start,
+    );
 }
 
 fn draw_text(

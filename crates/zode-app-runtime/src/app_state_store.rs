@@ -10,6 +10,7 @@ use zode_core::{
     persistence::{write_atomic, AdvisoryFileLock},
     CoreError,
 };
+use zode_node_protocol::WorkspaceUri;
 
 const APP_STATE_VERSION: u32 = 1;
 
@@ -33,6 +34,17 @@ pub struct WindowGeometry {
     pub maximized: bool,
 }
 
+/// Persisted scope for the new-task composer. `None` means no explicit choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TaskContext {
+    Project {
+        #[serde(rename = "workspaceUri")]
+        workspace_uri: WorkspaceUri,
+    },
+    Projectless,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppStateFile {
@@ -43,6 +55,8 @@ pub struct AppStateFile {
     #[serde(deserialize_with = "deserialize_ui_preferences")]
     pub ui_preferences: UiPreferences,
     pub window_geometry: Option<WindowGeometry>,
+    #[serde(default)]
+    pub task_context: Option<TaskContext>,
 }
 
 impl Default for AppStateFile {
@@ -54,6 +68,7 @@ impl Default for AppStateFile {
             collapsed_workspaces: BTreeSet::new(),
             ui_preferences: UiPreferences::default(),
             window_geometry: None,
+            task_context: None,
         }
     }
 }

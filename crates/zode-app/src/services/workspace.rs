@@ -13,8 +13,7 @@ impl WorkspaceService for LocalWorkspaceService {
             return Ok(None);
         };
         let path = handle.path().canonicalize()?;
-        let value = format!("file://{}", path.to_string_lossy());
-        WorkspaceUri::new(value)
+        zode_app_runtime::path_to_workspace_uri(&path)
             .map(Some)
             .map_err(|error| ServiceError::Platform(error.to_string()))
     }

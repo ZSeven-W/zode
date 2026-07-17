@@ -111,6 +111,8 @@ impl TerminalPanelController {
                 Key::Enter => b"\r".to_vec(),
                 Key::Backspace => vec![0x7f],
                 Key::Delete => b"\x1b[3~".to_vec(),
+                Key::ArrowUp => b"\x1b[A".to_vec(),
+                Key::ArrowDown => b"\x1b[B".to_vec(),
                 Key::ArrowLeft => b"\x1b[D".to_vec(),
                 Key::ArrowRight => b"\x1b[C".to_vec(),
                 Key::Home => b"\x1b[H".to_vec(),

@@ -6,8 +6,9 @@ use zode_app_model::{
     SettingsCommandOutcome, ShellRoute, TranscriptState,
 };
 use zode_app_ui::{
-    ComposerController, ComposerOutcome, ComposerSubmission, Insets, Key, Modifiers, SettingsPanel,
-    WidgetId, WorkspaceSnapshot,
+    ComposerController, ComposerOutcome, ComposerSubmission, Insets, Key, Modifiers, ProjectPicker,
+    SettingsPanel, WidgetId, WorkspaceSnapshot, PROJECT_DETACH_ID, PROJECT_PICKER_NEW_ID,
+    PROJECT_PICKER_PROJECTLESS_ID, PROJECT_PICKER_TRIGGER_ID,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
@@ -25,6 +26,41 @@ use crate::{command_bridge::prepare_dispatch, event_map::composer_outcome_comman
 struct FakeExternalOpen {
     calls: Mutex<Vec<(WorkspaceUri, String)>>,
     fail: bool,
+}
+
+#[test]
+fn empty_task_project_controls_map_to_task_context_commands() {
+    let (mut state, _, workspace_uri) = state_with_session();
+    state.current_session = None;
+
+    assert_eq!(
+        widget_command(&state, PROJECT_PICKER_TRIGGER_ID),
+        Some(AppCommand::ToggleProjectPicker)
+    );
+    assert_eq!(
+        widget_command(&state, PROJECT_DETACH_ID),
+        Some(AppCommand::BeginTask {
+            workspace_uri: None,
+        })
+    );
+
+    state.project_picker.open = true;
+    assert_eq!(
+        widget_command(&state, ProjectPicker::project_widget_id(&workspace_uri)),
+        Some(AppCommand::BeginTask {
+            workspace_uri: Some(workspace_uri),
+        })
+    );
+    assert_eq!(
+        widget_command(&state, PROJECT_PICKER_NEW_ID),
+        Some(AppCommand::CreateProject)
+    );
+    assert_eq!(
+        widget_command(&state, PROJECT_PICKER_PROJECTLESS_ID),
+        Some(AppCommand::BeginTask {
+            workspace_uri: None,
+        })
+    );
 }
 
 impl ExternalOpenService for FakeExternalOpen {
@@ -76,8 +112,8 @@ fn static_sidebar_ids_map_to_typed_commands() {
     let expected = [
         (
             2,
-            AppCommand::NewSession {
-                workspace_uri: workspace_uri.clone(),
+            AppCommand::BeginTask {
+                workspace_uri: Some(workspace_uri.clone()),
             },
         ),
         (
@@ -232,7 +268,12 @@ fn session_and_new_task_commands_normalize_to_conversation() {
     assert!(!state.review.open);
 
     state.presentation.route = ShellRoute::ComingSoon(ComingSoonFeature::Sites);
-    normalize_conversation_route(&mut state, &AppCommand::NewSession { workspace_uri });
+    normalize_conversation_route(
+        &mut state,
+        &AppCommand::BeginTask {
+            workspace_uri: Some(workspace_uri),
+        },
+    );
     assert_eq!(state.presentation.route, ShellRoute::Conversation);
 }
 

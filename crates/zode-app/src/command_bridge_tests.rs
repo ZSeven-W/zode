@@ -523,6 +523,36 @@ async fn allow_always_persistence_fallback_removes_stale_card_and_reports_allow_
     ));
 }
 
+#[test]
+fn projectless_allow_always_is_scoped_to_one_use() {
+    let mut state = fixture();
+    let session = state.current_session.clone().unwrap();
+    let root = WorkspaceUri::new("file:///tmp/zode-task-workspaces").unwrap();
+    let scratch = WorkspaceUri::new("file:///tmp/zode-task-workspaces/session").unwrap();
+    state.projectless_workspace_root = Some(root);
+    state.active_workspace = None;
+    state.threads[0].workspace_uri = scratch;
+    add_pending_approval(&mut state, &session);
+
+    let dispatch = approval_dispatch(&mut state, ApprovalDecision::AllowAlways);
+
+    assert!(matches!(
+        dispatch.commands[0].kind,
+        AgentCommandKind::Approve {
+            decision: ApprovalDecision::AllowOnce,
+            ..
+        }
+    ));
+    assert!(state.transcripts[&session]
+        .items
+        .iter()
+        .any(|item| matches!(
+            item,
+            TranscriptItem::Status { code, message }
+                if code == "approval.projectless_allow_once" && message.contains("仅允许一次")
+        )));
+}
+
 #[tokio::test]
 async fn approval_preflight_failure_keeps_the_card_retryable() {
     let endpoint = FakeEndpoint::failing_at(0);

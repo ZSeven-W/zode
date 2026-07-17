@@ -1,6 +1,7 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
-    demo_state, integration_catalog, AppCommand, IntegrationsTab, LoadState, ShellRoute,
+    demo_state, integration_catalog, AppCommand, IntegrationsTab, LoadState, ProjectState,
+    ShellRoute,
 };
 use zode_app_ui::{Insets, IntegrationsPage, RectExt, WorkspaceSnapshot, ZodeTheme};
 use zode_node_protocol::{
@@ -79,6 +80,13 @@ fn catalog_state(tab: IntegrationsTab) -> zode_app_model::ZodeAppState {
     let mut state = demo_state();
     state.presentation.route = ShellRoute::Integrations(tab);
     let workspace_uri = WorkspaceUri::new("file:///repo/zode").unwrap();
+    state.projects.push(ProjectState {
+        workspace_uri: workspace_uri.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
+    });
+    state.active_workspace = Some(workspace_uri.clone());
     let mut entries = [
         "filesystem",
         "search",

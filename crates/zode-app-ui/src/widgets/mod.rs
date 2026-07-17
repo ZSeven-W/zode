@@ -5,6 +5,7 @@ mod document_preview;
 mod empty_state;
 mod environment;
 mod integrations;
+mod project_picker;
 mod project_sidebar;
 mod review_panel;
 mod settings;
@@ -21,8 +22,9 @@ mod workspace_shell;
 pub use approval_card::{ApprovalAction, ApprovalButtonLayout, ApprovalCard};
 pub use coming_soon_page::ComingSoonPage;
 pub use composer::{
-    Composer, ComposerController, ComposerLayout, ComposerOutcome, ComposerQueueLayout,
-    ComposerQueueMenuLayout, ComposerQueueRowLayout, ComposerSubmission, SandboxSelection,
+    Composer, ComposerContextLayout, ComposerController, ComposerLayout, ComposerOutcome,
+    ComposerQueueLayout, ComposerQueueMenuLayout, ComposerQueueRowLayout, ComposerSubmission,
+    SandboxSelection, PROJECT_DETACH_ID,
 };
 pub use document_preview::{
     DocumentPreview, DocumentPreviewLayout, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
@@ -37,6 +39,12 @@ pub use integrations::{
     CatalogSectionLayout, InstalledIconLayout, IntegrationRowLayout, IntegrationTabLayout,
     IntegrationsPage, IntegrationsPageLayout, INTEGRATIONS_PLUGINS_TAB_ID,
     INTEGRATIONS_SKILLS_TAB_ID,
+};
+pub use project_picker::{
+    ProjectChoice, ProjectPicker, ProjectPickerController, ProjectPickerLayout,
+    ProjectPickerRowLayout, ProjectPickerTarget, ProjectPickerViewState, ProjectSearchOutcome,
+    WelcomeTitleLayout, PROJECT_PICKER_NEW_ID, PROJECT_PICKER_PROJECTLESS_ID,
+    PROJECT_PICKER_SEARCH_ID, PROJECT_PICKER_SURFACE_ID, PROJECT_PICKER_TRIGGER_ID,
 };
 pub use project_sidebar::{
     group_sessions, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarItem,

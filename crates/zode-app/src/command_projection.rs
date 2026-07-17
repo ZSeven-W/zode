@@ -9,6 +9,15 @@ pub(super) fn project_global_error(state: &mut ZodeAppState, message: String) {
         .first()
         .map(|project| project.workspace_uri.clone())
         .unwrap_or_else(|| WorkspaceUri::new("file:///").expect("root file URI is valid"));
+    project_workspace_error(state, workspace_uri, message, true);
+}
+
+pub(super) fn project_workspace_error(
+    state: &mut ZodeAppState,
+    workspace_uri: WorkspaceUri,
+    message: String,
+    focus: bool,
+) {
     let session = SessionLocator::new(
         state.host.node_id,
         format!("local-error-{}", uuid::Uuid::new_v4()),
@@ -33,7 +42,9 @@ pub(super) fn project_global_error(state: &mut ZodeAppState, message: String) {
             ..TranscriptState::default()
         },
     );
-    state.current_session = Some(session);
+    if focus {
+        state.current_session = Some(session);
+    }
 }
 
 pub(super) fn replace_threads(state: &mut ZodeAppState, threads: Vec<ThreadSummary>) {

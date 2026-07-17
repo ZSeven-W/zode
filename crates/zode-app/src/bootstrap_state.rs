@@ -14,6 +14,7 @@ pub(super) async fn load_initial_state(
     endpoint: &dyn AgentEndpoint,
     capabilities: CapabilityManifest,
     startup_workspace: WorkspaceUri,
+    projectless_workspace_root: WorkspaceUri,
 ) -> Result<ZodeAppState, Box<dyn std::error::Error>> {
     let threads = match endpoint.query(AgentQuery::Threads).await? {
         AgentSnapshot::Threads(threads) => threads,
@@ -24,17 +25,20 @@ pub(super) async fn load_initial_state(
         _ => return Err("the endpoint returned the wrong runtime-options snapshot".into()),
     };
     let mut state = zode_app_model::demo_state();
+    state.projectless_workspace_root = Some(projectless_workspace_root);
     state.host.node_id = capabilities.node_id;
     state.host.capabilities = capabilities;
     state.composer.model = runtime_options.active_model;
     state.composer.effort = runtime_options.effort;
     state.threads = threads;
+    restore_projectless_workspaces(&state);
     state.transcripts = load_transcripts(endpoint, &state.threads).await;
-    state.projects = projects_from_threads(&state.threads, &startup_workspace);
-    if !state
-        .projects
-        .iter()
-        .any(|project| project.workspace_uri == startup_workspace)
+    state.projects = projects_from_threads(&state, &startup_workspace);
+    if !state.is_projectless_workspace(&startup_workspace)
+        && !state
+            .projects
+            .iter()
+            .any(|project| project.workspace_uri == startup_workspace)
     {
         state.projects.push(ProjectState {
             workspace_uri: startup_workspace,
@@ -43,19 +47,22 @@ pub(super) async fn load_initial_state(
             last_opened_ms: 0,
         });
     }
-    state.current_session = newest_available_session(&state.threads, &state.projects);
-    state.active_workspace = state
-        .current_session
-        .as_ref()
-        .and_then(|session| state.available_workspace_for_session(session))
-        .cloned()
-        .or_else(|| {
-            state
-                .projects
-                .iter()
-                .find(|project| project.available)
-                .map(|project| project.workspace_uri.clone())
-        });
+    state.current_session = newest_available_session(&state);
+    state.active_workspace = match state.current_session.as_ref() {
+        Some(session) => state
+            .threads
+            .iter()
+            .find(|thread| &thread.session == session)
+            .map(|thread| &thread.workspace_uri)
+            .filter(|workspace_uri| !state.is_projectless_workspace(workspace_uri))
+            .filter(|workspace_uri| state.available_workspace(workspace_uri))
+            .cloned(),
+        None => state
+            .projects
+            .iter()
+            .find(|project| project.available)
+            .map(|project| project.workspace_uri.clone()),
+    };
     load_integrations(endpoint, &mut state).await;
     load_session_runtime_options(endpoint, &mut state).await;
     for workspace_uri in state
@@ -92,6 +99,42 @@ pub(super) async fn load_initial_state(
         }
     }
     Ok(state)
+}
+
+fn restore_projectless_workspaces(state: &ZodeAppState) {
+    let Some(root_uri) = state.projectless_workspace_root.as_ref() else {
+        return;
+    };
+    let Ok(root) = workspace_uri_to_path(root_uri) else {
+        return;
+    };
+    let Ok(canonical_root) = root.canonicalize() else {
+        return;
+    };
+    for thread in &state.threads {
+        if !state.is_projectless_workspace(&thread.workspace_uri) {
+            continue;
+        }
+        let Ok(workspace) = workspace_uri_to_path(&thread.workspace_uri) else {
+            continue;
+        };
+        let owned = workspace
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .as_deref()
+            == Some(canonical_root.as_path())
+            && workspace
+                .file_name()
+                .is_some_and(|name| name == std::ffi::OsStr::new(&thread.session.session_id));
+        if owned && std::fs::create_dir_all(&workspace).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+    }
 }
 
 async fn load_integrations(endpoint: &dyn AgentEndpoint, state: &mut ZodeAppState) {
@@ -177,16 +220,15 @@ async fn load_session_runtime_options(endpoint: &dyn AgentEndpoint, state: &mut 
     }
 }
 
-fn newest_available_session(
-    threads: &[ThreadSummary],
-    projects: &[ProjectState],
-) -> Option<SessionLocator> {
-    threads
+fn newest_available_session(state: &ZodeAppState) -> Option<SessionLocator> {
+    state
+        .threads
         .iter()
         .filter(|thread| {
-            projects
-                .iter()
-                .any(|project| project.available && project.workspace_uri == thread.workspace_uri)
+            state.is_projectless_workspace(&thread.workspace_uri)
+                || state.projects.iter().any(|project| {
+                    project.available && project.workspace_uri == thread.workspace_uri
+                })
         })
         .max_by_key(|thread| thread.updated_at_ms)
         .map(|thread| thread.session.clone())
@@ -251,11 +293,14 @@ fn transcript_from_history(history: ThreadHistory) -> TranscriptState {
 }
 
 fn projects_from_threads(
-    threads: &[ThreadSummary],
+    state: &ZodeAppState,
     startup_workspace: &WorkspaceUri,
 ) -> Vec<ProjectState> {
     let mut projects = BTreeMap::<WorkspaceUri, i64>::new();
-    for thread in threads {
+    for thread in &state.threads {
+        if state.is_projectless_workspace(&thread.workspace_uri) {
+            continue;
+        }
         projects
             .entry(thread.workspace_uri.clone())
             .and_modify(|updated| *updated = (*updated).max(thread.updated_at_ms))
@@ -420,15 +465,21 @@ mod tests {
         let regular_file_uri = path_to_workspace_uri(&regular_file).unwrap();
         let startup_uri = path_to_workspace_uri(&startup).unwrap();
         let remote_uri = WorkspaceUri::new("zode-node://remote/workspace").unwrap();
+        let projectless_root = root.join("task-workspaces");
+        let projectless_uri = path_to_workspace_uri(&projectless_root.join("session-1")).unwrap();
         let threads = vec![
             thread(existing_uri.clone(), "existing", 5),
             thread(missing_uri.clone(), "missing", 4),
             thread(regular_file_uri.clone(), "file", 3),
             thread(remote_uri.clone(), "remote", 2),
             thread(startup_uri.clone(), "startup", 1),
+            thread(projectless_uri.clone(), "projectless", 6),
         ];
 
-        let projects = projects_from_threads(&threads, &startup_uri);
+        let mut state = zode_app_model::demo_state();
+        state.projectless_workspace_root = Some(path_to_workspace_uri(&projectless_root).unwrap());
+        state.threads = threads;
+        let projects = projects_from_threads(&state, &startup_uri);
         let available = |uri: &WorkspaceUri| {
             projects
                 .iter()
@@ -441,6 +492,9 @@ mod tests {
         assert!(!available(&regular_file_uri));
         assert!(!available(&remote_uri));
         assert!(available(&startup_uri));
+        assert!(projects
+            .iter()
+            .all(|project| project.workspace_uri != projectless_uri));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -466,12 +520,46 @@ mod tests {
             },
         ];
 
+        let mut state = zode_app_model::demo_state();
+        state.threads = vec![newest_missing, older_available, newer_available.clone()];
+        state.projects = projects;
+
         assert_eq!(
-            newest_available_session(
-                &[newest_missing, older_available, newer_available.clone()],
-                &projects,
-            ),
+            newest_available_session(&state),
             Some(newer_available.session)
+        );
+    }
+
+    #[test]
+    fn startup_recognizes_projectless_sessions_without_exposing_a_project() {
+        let root = std::env::temp_dir().join(format!(
+            "zode-bootstrap-projectless-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let projectless_root = path_to_workspace_uri(&root.join("task-workspaces")).unwrap();
+        let projectless = path_to_workspace_uri(&root.join("task-workspaces/session-1")).unwrap();
+        let project = path_to_workspace_uri(&root.join("project")).unwrap();
+        let project_session = thread(project.clone(), "project", 10);
+        let projectless_session = thread(projectless.clone(), "projectless", 20);
+        let mut state = zode_app_model::demo_state();
+        state.projectless_workspace_root = Some(projectless_root);
+        state.threads = vec![project_session, projectless_session.clone()];
+        state.projects = vec![ProjectState {
+            workspace_uri: project,
+            expanded: true,
+            available: true,
+            last_opened_ms: 10,
+        }];
+
+        assert_eq!(
+            newest_available_session(&state),
+            Some(projectless_session.session)
+        );
+        assert!(
+            projects_from_threads(&state, &WorkspaceUri::new("file:///startup").unwrap())
+                .iter()
+                .all(|candidate| candidate.workspace_uri != projectless)
         );
     }
 
@@ -517,6 +605,7 @@ mod tests {
                 capabilities: BTreeSet::new(),
             },
             workspace.clone(),
+            WorkspaceUri::new("file:///tmp/zode-bootstrap-task-workspaces").unwrap(),
         )
         .await
         .unwrap();
@@ -537,6 +626,56 @@ mod tests {
             state.project_permissions[&workspace],
             LoadState::Ready(Vec::new())
         );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_restores_projectless_session_without_exposing_its_scratch_project() {
+        let node_id = NodeId::new();
+        let startup = WorkspaceUri::new("file:///repo/bootstrap-startup").unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "zode-bootstrap-restore-projectless-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let projectless_root_path = base.join("task-workspaces");
+        std::fs::create_dir_all(&projectless_root_path).unwrap();
+        let scratch_path = projectless_root_path.join("projectless-session");
+        let projectless_root = path_to_workspace_uri(&projectless_root_path).unwrap();
+        let scratch = path_to_workspace_uri(&scratch_path).unwrap();
+        let session = SessionLocator::new(node_id, "projectless-session");
+        let options = default_bootstrap_runtime_options();
+        let endpoint = BootstrapEndpoint {
+            threads: vec![ThreadSummary {
+                session: session.clone(),
+                workspace_uri: scratch.clone(),
+                title: "projectless".into(),
+                updated_at_ms: 20,
+                status: ThreadStatus::Idle,
+            }],
+            good_session: session.clone(),
+            options,
+            integrations: Vec::new(),
+        };
+
+        let state = load_initial_state(
+            &endpoint,
+            CapabilityManifest {
+                node_id,
+                capabilities: BTreeSet::new(),
+            },
+            startup.clone(),
+            projectless_root.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.current_session.as_ref(), Some(&session));
+        assert_eq!(state.active_workspace, None);
+        assert_eq!(state.projectless_workspace_root, Some(projectless_root));
+        assert!(state.is_projectless_workspace(&scratch));
+        assert_eq!(state.projects.len(), 1);
+        assert_eq!(state.projects[0].workspace_uri, startup);
+        assert!(scratch_path.is_dir());
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[tokio::test]
@@ -601,6 +740,7 @@ mod tests {
                 capabilities: BTreeSet::new(),
             },
             workspace,
+            WorkspaceUri::new("file:///tmp/zode-bootstrap-task-workspaces").unwrap(),
         )
         .await
         .unwrap();

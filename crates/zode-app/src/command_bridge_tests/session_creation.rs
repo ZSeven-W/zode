@@ -1,6 +1,7 @@
 use zode_app_model::{
-    reduce_agent_event, reduce_queue_command, AppCommand, LoadState, ProjectState,
-    QueueCommandOutcome, ReduceOutcome, TranscriptItem, TranscriptState,
+    reduce_agent_event, reduce_navigation_command, reduce_queue_command, AppCommand, LoadState,
+    NavigationOutcome, ProjectState, QueueCommandOutcome, ReduceOutcome, TranscriptItem,
+    TranscriptState,
 };
 use zode_node_protocol::{
     AgentCommandKind, AgentEvent, AgentEventKind, SessionLocator, ThreadStatus, ThreadSummary,
@@ -10,17 +11,45 @@ use zode_node_protocol::{
 use super::{empty_fixture, first_submit, wait_for_commands, wait_for_result, FakeEndpoint};
 use crate::command_bridge::{prepare_dispatch, CommandBridge};
 
+struct TempTaskRoot(std::path::PathBuf);
+
+impl TempTaskRoot {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "zode-projectless-submit-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        Self(path)
+    }
+
+    fn uri(&self) -> WorkspaceUri {
+        zode_app_runtime::path_to_workspace_uri(&self.0).unwrap()
+    }
+}
+
+impl Drop for TempTaskRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[tokio::test]
-async fn zero_history_submit_creates_session_before_starting_turn() {
+async fn selected_project_submit_uses_exact_active_workspace_before_starting_turn() {
     let endpoint = FakeEndpoint::success(Vec::new());
     let bridge = CommandBridge::spawn_with_wake(endpoint.clone(), || {});
     let mut state = zode_app_model::demo_state();
-    state.projects.push(ProjectState {
-        workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
-        expanded: true,
-        available: true,
-        last_opened_ms: 0,
-    });
+    let unselected = WorkspaceUri::new("file:///repo/first").unwrap();
+    let selected = WorkspaceUri::new("file:///repo/zode").unwrap();
+    for workspace_uri in [unselected, selected.clone()] {
+        state.projects.push(ProjectState {
+            workspace_uri,
+            expanded: true,
+            available: true,
+            last_opened_ms: 0,
+        });
+    }
+    state.active_workspace = Some(selected.clone());
     let dispatch = prepare_dispatch(
         &mut state,
         AppCommand::Submit(vec![UserContent::Text {
@@ -31,7 +60,7 @@ async fn zero_history_submit_creates_session_before_starting_turn() {
     .unwrap();
     assert!(matches!(
         dispatch.commands[0].kind,
-        AgentCommandKind::CreateSession { .. }
+        AgentCommandKind::CreateSession { ref workspace_uri, .. } if workspace_uri == &selected
     ));
     assert!(matches!(
         dispatch.commands[1].kind,
@@ -50,6 +79,33 @@ async fn zero_history_submit_creates_session_before_starting_turn() {
         commands[1].kind,
         AgentCommandKind::StartTurn { .. }
     ));
+}
+
+#[test]
+fn projectless_submit_uses_a_session_scratch_workspace_without_project_fallback() {
+    let task_root = TempTaskRoot::new();
+    let mut state = zode_app_model::demo_state();
+    state.projects.push(ProjectState {
+        workspace_uri: WorkspaceUri::new("file:///repo/must-not-be-selected").unwrap(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 0,
+    });
+    state.projectless_workspace_root = Some(task_root.uri());
+
+    let dispatch = first_submit(&mut state);
+    let session = dispatch.commands[0].session.clone();
+    let workspace_uri = match &dispatch.commands[0].kind {
+        AgentCommandKind::CreateSession { workspace_uri, .. } => workspace_uri,
+        other => panic!("expected CreateSession, got {other:?}"),
+    };
+    let workspace_path = zode_app_runtime::workspace_uri_to_path(workspace_uri).unwrap();
+
+    assert_eq!(workspace_path, task_root.0.join(&session.session_id));
+    assert!(workspace_path.is_dir());
+    assert_eq!(state.active_workspace, None);
+    assert_eq!(state.threads[0].workspace_uri, *workspace_uri);
+    assert!(state.is_projectless_workspace(workspace_uri));
 }
 
 #[test]
@@ -135,6 +191,49 @@ async fn first_command_failure_rolls_back_uncreated_session_and_retry_recreates_
         retry.commands[0].kind,
         AgentCommandKind::CreateSession { .. }
     ));
+}
+
+#[tokio::test]
+async fn projectless_create_failure_cleans_scratch_without_hijacking_newer_navigation() {
+    let endpoint = FakeEndpoint::failing_at(0);
+    let mut bridge = CommandBridge::spawn_with_wake(endpoint.clone(), || {});
+    let task_root = TempTaskRoot::new();
+    std::fs::create_dir_all(&task_root.0).unwrap();
+    let mut state = zode_app_model::demo_state();
+    state.projectless_workspace_root = Some(task_root.uri());
+    let dispatch = first_submit(&mut state);
+    let failed_session = state.current_session.clone().unwrap();
+    let scratch = zode_app_runtime::workspace_uri_to_path(&state.threads[0].workspace_uri).unwrap();
+    assert!(scratch.is_dir());
+    assert!(bridge.dispatch(dispatch).is_ok());
+    wait_for_commands(&endpoint, 1).await;
+
+    let selected = WorkspaceUri::new("file:///repo/newer-selection").unwrap();
+    state.projects.push(ProjectState {
+        workspace_uri: selected.clone(),
+        expanded: true,
+        available: true,
+        last_opened_ms: 1,
+    });
+    assert_eq!(
+        reduce_navigation_command(
+            &mut state,
+            AppCommand::BeginTask {
+                workspace_uri: Some(selected.clone()),
+            },
+        ),
+        NavigationOutcome::Applied
+    );
+    wait_for_result(&mut bridge, &mut state).await;
+
+    assert_eq!(state.current_session, None);
+    assert_eq!(state.active_workspace, Some(selected));
+    assert!(!scratch.exists());
+    assert!(!state.transcripts.contains_key(&failed_session));
+    assert!(state.threads.iter().any(|thread| {
+        thread.session.session_id.starts_with("local-error-")
+            && state.is_projectless_workspace(&thread.workspace_uri)
+    }));
 }
 
 #[tokio::test]

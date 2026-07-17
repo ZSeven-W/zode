@@ -6,6 +6,7 @@ mod message_queue;
 mod presentation;
 mod reducer;
 mod state;
+mod task_navigation;
 mod transcript;
 
 pub use command::AppCommand;

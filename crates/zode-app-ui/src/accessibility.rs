@@ -7,21 +7,27 @@ use zode_app_model::{
 
 use crate::{
     composer_queue_reserved_height, Composer, DocumentPreview, EnvironmentPanel, Insets,
-    IntegrationsPage, ProjectSidebar, RectExt, ReviewPanel, SettingsPanel, SidebarRowTarget,
-    ThreadHeader, ThreadTranscript, WorkspaceLayout, COMPOSER_ATTACHMENT_H, COMPOSER_H,
+    IntegrationsPage, ProjectPickerViewState, RectExt, ReviewPanel, SettingsPanel, ThreadHeader,
+    ThreadTranscript, WorkspaceLayout, COMPOSER_ATTACHMENT_H, COMPOSER_H,
     DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID, DOCUMENT_PREVIEW_EXTERNAL_ID,
     DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID,
     INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
 };
 
 mod ids;
+mod project_picker;
 mod queue;
 mod settings;
+mod sidebar;
 mod transcript;
 
 pub(crate) use ids::stable_widget_id;
+use project_picker::{
+    append_composer_detach, append_picker_overlay, append_welcome_project_trigger,
+};
 use queue::{append_queue_menu_nodes, append_queue_nodes};
 use settings::append_settings_nodes;
+use sidebar::append_sidebar_nodes;
 use transcript::append_transcript_nodes;
 
 pub const SIDEBAR_ID: WidgetId = WidgetId(1);
@@ -81,6 +87,30 @@ pub struct WorkspaceSnapshot {
 
 impl WorkspaceSnapshot {
     pub fn build(state: &ZodeAppState, width: f32, height: f32, insets: Insets) -> Self {
+        let picker = ProjectPickerViewState {
+            open: state.project_picker.open,
+            query: state.project_picker.search.clone(),
+        };
+        Self::build_internal(state, width, height, insets, Some(&picker))
+    }
+
+    pub fn build_with_project_picker(
+        state: &ZodeAppState,
+        width: f32,
+        height: f32,
+        insets: Insets,
+        project_picker: &ProjectPickerViewState,
+    ) -> Self {
+        Self::build_internal(state, width, height, insets, Some(project_picker))
+    }
+
+    fn build_internal(
+        state: &ZodeAppState,
+        width: f32,
+        height: f32,
+        insets: Insets,
+        project_picker: Option<&ProjectPickerViewState>,
+    ) -> Self {
         let route = state.presentation.route;
         let queue_count = state
             .current_session
@@ -173,6 +203,7 @@ impl WorkspaceSnapshot {
                 } else {
                     append_header_nodes(&mut nodes, &layout, &mut focus_order, state);
                     append_transcript_nodes(&mut nodes, &layout, &mut focus_order, state);
+                    append_welcome_project_trigger(&mut nodes, &layout, &mut focus_order, state);
                     let composer_layout = Composer::layout_for_state(layout.composer, state);
                     append_queue_nodes(&mut nodes, &layout, &mut focus_order, state);
                     if let Some(attachment_strip) = composer_layout.attachments {
@@ -206,6 +237,7 @@ impl WorkspaceSnapshot {
                             ));
                         }
                     }
+                    append_composer_detach(&mut nodes, &layout, &mut focus_order, state);
                     if visible_rect(composer_layout.input) {
                         nodes.push(node(
                             COMPOSER_ID,
@@ -250,7 +282,7 @@ impl WorkspaceSnapshot {
             }
         };
         append_secondary_nodes(&mut nodes, &layout, &mut focus_order, state);
-        let focused = if split_fallback {
+        let mut focused = if split_fallback {
             let close_id = match state.presentation.secondary_pane {
                 Some(SecondaryPane::DocumentPreview) => DOCUMENT_PREVIEW_CLOSE_ID,
                 Some(SecondaryPane::Review | SecondaryPane::Environment) | None => REVIEW_CLOSE_ID,
@@ -262,6 +294,13 @@ impl WorkspaceSnapshot {
         } else {
             focused
         };
+        if let Some(project_picker) = project_picker {
+            if let Some(picker_focus) =
+                append_picker_overlay(&mut nodes, &layout, &mut focus_order, state, project_picker)
+            {
+                focused = Some(picker_focus);
+            }
+        }
 
         Self {
             layout,
@@ -320,90 +359,6 @@ fn current_session_busy(state: &ZodeAppState) -> bool {
         .as_ref()
         .and_then(|session| state.transcripts.get(session))
         .is_some_and(|transcript| transcript.busy)
-}
-
-fn append_sidebar_nodes(
-    nodes: &mut Vec<InteractionNode>,
-    layout: &WorkspaceLayout,
-    focus_order: &mut u32,
-    state: &ZodeAppState,
-) {
-    nodes.push(node(
-        SIDEBAR_ID,
-        layout.sidebar,
-        Role::Navigation,
-        "项目",
-        None,
-        Vec::new(),
-        None,
-        CursorHint::Default,
-    ));
-    for (row, id) in ProjectSidebar::navigation_row_layout(layout.sidebar)
-        .into_iter()
-        .zip([
-            NEW_SESSION_ID,
-            SCHEDULED_NAV_ID,
-            PLUGINS_NAV_ID,
-            SITES_NAV_ID,
-            PULL_REQUESTS_NAV_ID,
-            CHATS_NAV_ID,
-        ])
-    {
-        let Some(rect) = ThreadTranscript::clip_to_viewport(row.rect, layout.sidebar) else {
-            continue;
-        };
-        nodes.push(node(
-            id,
-            rect,
-            Role::Button,
-            row.item.label,
-            None,
-            vec![Action::Click, Action::Focus],
-            next_order(focus_order),
-            CursorHint::Pointer,
-        ));
-    }
-    for row in ProjectSidebar::dynamic_row_layout(layout.sidebar, state) {
-        let name = match &row.target {
-            SidebarRowTarget::Project(_) => format!("项目 {}", row.label),
-            SidebarRowTarget::Session(_) => row.label.clone(),
-        };
-        nodes.push(node(
-            row.id,
-            row.rect,
-            Role::Button,
-            &name,
-            None,
-            if row.actionable {
-                vec![Action::Click, Action::Focus]
-            } else {
-                Vec::new()
-            },
-            if row.actionable {
-                next_order(focus_order)
-            } else {
-                None
-            },
-            if row.actionable {
-                CursorHint::Pointer
-            } else {
-                CursorHint::Default
-            },
-        ));
-    }
-    let footer = ProjectSidebar::footer_rect(layout.sidebar);
-    if visible_rect(footer) {
-        nodes.push(node(
-            SETTINGS_NAV_ID,
-            footer,
-            Role::Button,
-            ProjectSidebar::footer_item().label,
-            None,
-            vec![Action::Click, Action::Focus],
-            next_order(focus_order),
-            CursorHint::Pointer,
-        ));
-    }
 }
 
 fn append_header_nodes(

@@ -5,8 +5,8 @@ use zode_app_model::{ConnectionState, SecondaryPane, ShellRoute, ZodeAppState};
 use super::project_sidebar::workspace_label;
 use super::{
     ComingSoonPage, Composer, DocumentPreview, EmptyState, EnvironmentPanel, IntegrationsPage,
-    ProjectSidebar, ReviewPanel, SettingsPanel, TerminalGrid, TerminalPanel, TerminalSelection,
-    ThreadHeader, ThreadTranscript, WindowChrome,
+    ProjectPicker, ProjectPickerViewState, ProjectSidebar, ReviewPanel, SettingsPanel,
+    TerminalGrid, TerminalPanel, TerminalSelection, ThreadHeader, ThreadTranscript, WindowChrome,
 };
 use crate::TRANSCRIPT_COMPOSER_GAP;
 use crate::{Insets, RectExt, WidgetId, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme};
@@ -23,7 +23,22 @@ impl WorkspaceShell {
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
         let input = TextInputState::with_text(state.composer.draft.clone());
-        Self::paint_snapshot_content(painter, snapshot, state, &input, None, None, None, theme)
+        let project_picker = ProjectPickerViewState {
+            open: state.project_picker.open,
+            query: state.project_picker.search.clone(),
+        };
+        let project_search = TextInputState::with_text(project_picker.query.clone());
+        Self::paint_snapshot_content(
+            painter,
+            snapshot,
+            state,
+            &input,
+            None,
+            None,
+            None,
+            Some((&project_picker, &project_search)),
+            theme,
+        )
     }
 
     pub fn paint(
@@ -54,6 +69,7 @@ impl WorkspaceShell {
             None,
             None,
             None,
+            None,
             theme,
         )
     }
@@ -76,6 +92,7 @@ impl WorkspaceShell {
             &input,
             Some(terminal_grid),
             terminal_selection,
+            None,
             None,
             theme,
         )
@@ -122,6 +139,7 @@ impl WorkspaceShell {
             Some(terminal_grid),
             terminal_selection,
             None,
+            None,
             theme,
         )
     }
@@ -145,6 +163,36 @@ impl WorkspaceShell {
             Some(terminal_grid),
             terminal_selection,
             hovered,
+            None,
+            theme,
+        )
+    }
+
+    /// Paints the normal workspace plus the transient project picker overlay.
+    /// The host owns both editable buffers and supplies the exact input state
+    /// used for caret, selection and IME painting.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_snapshot_with_project_picker(
+        painter: &mut dyn Painter,
+        snapshot: &WorkspaceSnapshot,
+        state: &ZodeAppState,
+        composer_input: &TextInputState,
+        terminal_grid: &TerminalGrid,
+        terminal_selection: Option<TerminalSelection>,
+        project_picker: &ProjectPickerViewState,
+        project_search_input: &TextInputState,
+        hovered: Option<WidgetId>,
+        theme: &ZodeTheme,
+    ) -> WorkspaceLayout {
+        Self::paint_snapshot_content(
+            painter,
+            snapshot,
+            state,
+            composer_input,
+            Some(terminal_grid),
+            terminal_selection,
+            hovered,
+            Some((project_picker, project_search_input)),
             theme,
         )
     }
@@ -158,6 +206,7 @@ impl WorkspaceShell {
         terminal_grid: Option<&TerminalGrid>,
         terminal_selection: Option<TerminalSelection>,
         hovered: Option<WidgetId>,
+        project_picker: Option<(&ProjectPickerViewState, &TextInputState)>,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
         let snapshot = snapshot.clone();
@@ -211,9 +260,15 @@ impl WorkspaceShell {
                 }
                 Some(SecondaryPane::Environment) | None => {}
             },
-            ShellRoute::Conversation => {
-                paint_conversation(painter, &snapshot, state, composer_input, hovered, theme)
-            }
+            ShellRoute::Conversation => paint_conversation(
+                painter,
+                &snapshot,
+                state,
+                composer_input,
+                hovered,
+                project_picker,
+                theme,
+            ),
         }
 
         if state.presentation.route == ShellRoute::Conversation {
@@ -248,9 +303,12 @@ fn paint_conversation(
     state: &ZodeAppState,
     composer_input: &TextInputState,
     hovered: Option<WidgetId>,
+    project_picker: Option<(&ProjectPickerViewState, &TextInputState)>,
     theme: &ZodeTheme,
 ) {
     let geometry = snapshot.layout;
+    let workspace_label = current_workspace_label(state);
+    let mut welcome_title = None;
     if state.current_session.is_none() {
         // Keep the reference empty-task composition anchored above the input
         // surface. Context/attachment strips may occupy the gap, but the
@@ -259,14 +317,19 @@ fn paint_conversation(
         let empty_bottom = (input.origin.y - TRANSCRIPT_COMPOSER_GAP)
             .max(geometry.transcript.origin.y)
             .min(geometry.primary_surface.max_y());
-        EmptyState::paint(
+        let empty_rect = Rect::xywh(
+            geometry.transcript.origin.x,
+            geometry.transcript.origin.y,
+            geometry.transcript.size.x,
+            empty_bottom - geometry.transcript.origin.y,
+        );
+        welcome_title = EmptyState::welcome_title_layout(empty_rect, workspace_label.as_deref());
+        EmptyState::paint_with_workspace(
             painter,
-            Rect::xywh(
-                geometry.transcript.origin.x,
-                geometry.transcript.origin.y,
-                geometry.transcript.size.x,
-                empty_bottom - geometry.transcript.origin.y,
-            ),
+            empty_rect,
+            workspace_label.as_deref(),
+            snapshot.focused == Some(crate::PROJECT_PICKER_TRIGGER_ID),
+            hovered == Some(crate::PROJECT_PICKER_TRIGGER_ID),
             theme,
         );
     } else {
@@ -278,7 +341,6 @@ fn paint_conversation(
         ConnectionState::Connecting => "连接中",
         ConnectionState::Unavailable => "不可用",
     };
-    let workspace_label = current_workspace_label(state);
     let goal = current_goal_progress(state);
     Composer::paint_input_with_workspace_app_context(
         painter,
@@ -293,6 +355,21 @@ fn paint_conversation(
         hovered,
         theme,
     );
+    if let (Some((picker, search_input)), Some(trigger)) = (
+        project_picker,
+        welcome_title.and_then(|title| title.project),
+    ) {
+        if let Some(layout) = ProjectPicker::layout(geometry.viewport, trigger, state, picker) {
+            ProjectPicker::paint(
+                painter,
+                &layout,
+                search_input,
+                snapshot.focused,
+                hovered,
+                theme,
+            );
+        }
+    }
 }
 
 fn current_goal_progress(state: &ZodeAppState) -> Option<&zode_app_model::GoalProgress> {
@@ -316,6 +393,9 @@ fn current_goal_progress(state: &ZodeAppState) -> Option<&zode_app_model::GoalPr
 fn current_branch(state: &ZodeAppState) -> Option<&str> {
     if let Some(session) = state.current_session.as_ref() {
         let workspace = state.available_workspace_for_session(session)?;
+        if state.is_projectless_workspace(workspace) {
+            return None;
+        }
         let context = state.presentation.sessions.get(session)?.context.ready()?;
         return verified_branch(context, workspace);
     }
@@ -358,6 +438,9 @@ fn current_workspace_label(state: &ZodeAppState) -> Option<String> {
         .as_ref()
         .and_then(|session| state.available_workspace_for_session(session))
         .or_else(|| state.active_available_workspace())?;
+    if state.is_projectless_workspace(workspace) {
+        return None;
+    }
     Some(workspace_label(workspace, true))
 }
 

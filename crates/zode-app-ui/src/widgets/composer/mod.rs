@@ -13,7 +13,10 @@ mod context;
 mod input;
 mod queue;
 
+pub use context::ComposerContextLayout;
 pub use queue::{ComposerQueueLayout, ComposerQueueMenuLayout, ComposerQueueRowLayout};
+
+pub const PROJECT_DETACH_ID: WidgetId = WidgetId(125);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposerSubmission {
@@ -215,9 +218,13 @@ impl ComposerController {
                 self.input.insert_str(&character, self.now_ms);
                 ComposerOutcome::Edited
             }
-            Key::PageUp | Key::PageDown | Key::Tab | Key::Escape | Key::Character(_) => {
-                ComposerOutcome::Ignored
-            }
+            Key::ArrowUp
+            | Key::ArrowDown
+            | Key::PageUp
+            | Key::PageDown
+            | Key::Tab
+            | Key::Escape
+            | Key::Character(_) => ComposerOutcome::Ignored,
         }
     }
 
@@ -480,7 +487,27 @@ impl Composer {
     }
 
     pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+        if id == PROJECT_DETACH_ID
+            && state.current_session.is_none()
+            && state.active_available_workspace().is_some()
+        {
+            return Some(AppCommand::BeginTask {
+                workspace_uri: None,
+            });
+        }
         queue::command_for_widget(state, id)
+    }
+
+    pub fn context_layout(
+        rect: Rect,
+        state: &ZodeAppState,
+        workspace_label: Option<&str>,
+    ) -> ComposerContextLayout {
+        let context = Self::layout_for_state(rect, state).context;
+        context::layout(
+            context,
+            state.current_session.is_none() && workspace_label.is_some(),
+        )
     }
 
     pub(crate) fn attachment_layouts(
@@ -667,13 +694,16 @@ impl Composer {
         theme: &ZodeTheme,
     ) {
         let layout = Self::layout_for_state(rect, state);
-        context::paint(
+        context::paint_interactive(
             painter,
             layout.context,
             workspace_label,
             connection_label,
             branch,
             goal,
+            state.current_session.is_none() && workspace_label.is_some(),
+            focused,
+            hovered,
             theme,
         );
         if let Some(attachment_rect) = layout.attachments {

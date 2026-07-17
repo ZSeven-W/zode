@@ -12,8 +12,14 @@ use zode_node_protocol::{
     UserContent, WorkspaceUri, PROTOCOL_VERSION,
 };
 
-use crate::command_projection::{now_ms, project_global_error, replace_threads};
+use crate::command_projection::{
+    now_ms, project_global_error, project_workspace_error, replace_threads,
+};
 use crate::window_state::AppWake;
+
+mod approval;
+mod first_submit;
+use first_submit::prepare_first_submit;
 
 #[derive(Debug)]
 pub struct CommandDispatch {
@@ -329,6 +335,7 @@ pub fn prepare_dispatch(
                 .cloned()
                 .ok_or_else(|| "the approval is no longer pending".to_owned())?;
             let turn_id = state.active_turns.get(&session).copied();
+            let decision = approval::scoped_decision(state, &session, decision);
             (
                 session,
                 turn_id,
@@ -474,64 +481,6 @@ fn validate_target_session(state: &ZodeAppState, session: &SessionLocator) -> Re
         && state.available_workspace_for_session(session).is_some();
     live.then_some(())
         .ok_or_else(|| "the target session is unavailable".to_owned())
-}
-
-fn prepare_first_submit(
-    state: &mut ZodeAppState,
-    input: Vec<UserContent>,
-) -> Result<CommandDispatch, String> {
-    let workspace_uri = state
-        .active_available_workspace()
-        .cloned()
-        .or_else(|| {
-            state
-                .projects
-                .iter()
-                .find(|project| project.available)
-                .map(|project| project.workspace_uri.clone())
-        })
-        .ok_or_else(|| "there is no workspace available for a new session".to_owned())?;
-    let session = SessionLocator::new(state.host.node_id, uuid::Uuid::new_v4().to_string());
-    let turn_id = TurnId::new();
-    let model = state.composer.model.clone();
-    let create = AgentCommand {
-        version: PROTOCOL_VERSION,
-        session: session.clone(),
-        turn_id: None,
-        kind: AgentCommandKind::CreateSession {
-            workspace_uri: workspace_uri.clone(),
-            model,
-        },
-    };
-    let start = AgentCommand {
-        version: PROTOCOL_VERSION,
-        session: session.clone(),
-        turn_id: Some(turn_id),
-        kind: AgentCommandKind::StartTurn {
-            input: input.clone(),
-        },
-    };
-    let mut transcript = TranscriptState::default();
-    append_user_content(&mut transcript, &input);
-    transcript.busy = true;
-    state.threads.insert(
-        0,
-        ThreadSummary {
-            session: session.clone(),
-            workspace_uri: workspace_uri.clone(),
-            title: "新任务".into(),
-            updated_at_ms: now_ms(),
-            status: ThreadStatus::Running,
-        },
-    );
-    state.transcripts.insert(session.clone(), transcript);
-    state.active_turns.insert(session.clone(), turn_id);
-    state.active_workspace = Some(workspace_uri);
-    state.current_session = Some(session.clone());
-    Ok(CommandDispatch {
-        commands: vec![create, start],
-        completion: Completion::RefreshRuntimeOptions { session },
-    })
 }
 
 fn current_session(state: &ZodeAppState) -> Result<SessionLocator, String> {
@@ -739,18 +688,57 @@ fn apply_batch_failure(
         && matches!(failed_command.kind, AgentCommandKind::CreateSession { .. })
         && matches!(recovery_command.kind, AgentCommandKind::StartTurn { .. });
     if create_never_succeeded {
+        let failed_workspace = match &failed_command.kind {
+            AgentCommandKind::CreateSession { workspace_uri, .. } => Some(workspace_uri.clone()),
+            _ => None,
+        };
+        let focus_error = state.current_session.as_ref() == Some(&recovery_command.session);
         state.active_turns.remove(&recovery_command.session);
         state
             .threads
             .retain(|thread| thread.session != recovery_command.session);
         state.transcripts.remove(&recovery_command.session);
         state.message_queues.remove(&recovery_command.session);
-        if state.current_session.as_ref() == Some(&recovery_command.session) {
+        if focus_error {
             state.current_session = None;
         }
-        project_global_error(state, message);
+        if let Some(workspace_uri) = failed_workspace {
+            cleanup_failed_projectless_workspace(state, &workspace_uri, &recovery_command.session);
+            project_workspace_error(state, workspace_uri, message, focus_error);
+        } else {
+            project_global_error(state, message);
+        }
     } else {
         apply_failure(state, recovery_command, message);
+    }
+}
+
+fn cleanup_failed_projectless_workspace(
+    state: &ZodeAppState,
+    workspace_uri: &WorkspaceUri,
+    session: &SessionLocator,
+) {
+    if !state.is_projectless_workspace(workspace_uri) {
+        return;
+    }
+    let Some(root_uri) = state.projectless_workspace_root.as_ref() else {
+        return;
+    };
+    let (Ok(root), Ok(workspace)) = (
+        zode_app_runtime::workspace_uri_to_path(root_uri),
+        zode_app_runtime::workspace_uri_to_path(workspace_uri),
+    ) else {
+        return;
+    };
+    let (Ok(root), Ok(workspace)) = (root.canonicalize(), workspace.canonicalize()) else {
+        return;
+    };
+    let direct_child = workspace.parent() == Some(root.as_path())
+        && workspace
+            .file_name()
+            .is_some_and(|name| name == std::ffi::OsStr::new(&session.session_id));
+    if direct_child {
+        let _ = std::fs::remove_dir_all(workspace);
     }
 }
 

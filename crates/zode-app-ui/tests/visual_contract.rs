@@ -350,7 +350,7 @@ fn empty_conversation_exposes_zode_guidance_and_full_composer_chrome() {
     let (painter, geometry) = paint_empty_wide();
     let text = painter.texts().concat();
 
-    assert!(text.contains("我们在 Zode 中构建什么？"));
+    assert!(text.contains("我们应该构建什么？"));
     for suggestion in [
         "探索并理解代码",
         "构建新功能、应用或工具",
@@ -378,13 +378,13 @@ fn empty_conversation_exposes_zode_guidance_and_full_composer_chrome() {
 #[test]
 fn empty_conversation_title_is_centered_in_the_main_surface() {
     let (painter, geometry) = paint_empty_wide();
-    let title = "我们在 Zode 中构建什么？";
+    let title = "我们应该构建什么？";
     let (origin, font_size) = painter.text(title).expect("empty-state title is painted");
     let title_center = origin.x + estimated_text_width(title, font_size) / 2.0;
     let main_center = geometry.transcript.min_x() + geometry.transcript.width() / 2.0;
 
     assert_close(title_center, main_center, 2.0, "empty title center x");
-    assert_close(origin.y, 498.0, 2.0, "empty title top y");
+    assert_close(origin.y, 501.0, 2.0, "empty title top y");
 }
 
 #[test]

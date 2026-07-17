@@ -499,6 +499,9 @@ pub fn reduce_navigation_command(
     state: &mut ZodeAppState,
     command: AppCommand,
 ) -> NavigationOutcome {
+    if let Some(outcome) = crate::task_navigation::reduce_task_navigation(state, &command) {
+        return outcome;
+    }
     match command {
         AppCommand::SelectSession(session) => {
             let Some(workspace_uri) = state
@@ -519,6 +522,7 @@ pub fn reduce_navigation_command(
                 state.composer.queue_menu = None;
                 state.composer.finish_queue_edit();
             }
+            state.project_picker = crate::ProjectPickerState::default();
             state.current_session = Some(session.clone());
             if let Some(options) = state.presentation.sessions[&session]
                 .runtime_options
@@ -530,7 +534,9 @@ pub fn reduce_navigation_command(
             state.review.dirty = state.presentation.sessions[&session].diff.dirty;
             state.review.open =
                 state.presentation.secondary_pane == Some(crate::SecondaryPane::Review);
-            if state.available_workspace(&workspace_uri) {
+            if state.is_projectless_workspace(&workspace_uri) {
+                state.active_workspace = None;
+            } else if state.available_workspace(&workspace_uri) {
                 state.active_workspace = Some(workspace_uri);
             }
             NavigationOutcome::Applied

@@ -131,6 +131,8 @@ pub fn map_key(
         WinitKey::Named(NamedKey::Delete) => Key::Delete,
         WinitKey::Named(NamedKey::ArrowLeft) => Key::ArrowLeft,
         WinitKey::Named(NamedKey::ArrowRight) => Key::ArrowRight,
+        WinitKey::Named(NamedKey::ArrowUp) => Key::ArrowUp,
+        WinitKey::Named(NamedKey::ArrowDown) => Key::ArrowDown,
         WinitKey::Named(NamedKey::Home) => Key::Home,
         WinitKey::Named(NamedKey::End) => Key::End,
         WinitKey::Named(NamedKey::PageUp) => Key::PageUp,

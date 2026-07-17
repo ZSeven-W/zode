@@ -12,7 +12,9 @@ mod runtime_policy;
 mod session_repository;
 mod zode_engine_driver;
 
-pub use app_state_store::{AppStateFile, AppStateStore, SessionUiState, WindowGeometry};
+pub use app_state_store::{
+    AppStateFile, AppStateStore, SessionUiState, TaskContext, WindowGeometry,
+};
 pub use bootstrap::LocalAppRuntime;
 pub use engine_backend::{
     persist_project_allow, DriverEventStream, EngineBackend, EngineDriver, EventNormalizer,

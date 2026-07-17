@@ -136,6 +136,14 @@ pub struct ProjectState {
     pub last_opened_ms: i64,
 }
 
+/// Transient state for the project switcher shown on a new-task surface.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectPickerState {
+    pub open: bool,
+    pub search: String,
+    pub active_index: usize,
+}
+
 /// Responsive shell state shared by all pages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellState {
@@ -150,6 +158,9 @@ pub struct ZodeAppState {
     pub host: HostState,
     pub projects: Vec<ProjectState>,
     pub active_workspace: Option<WorkspaceUri>,
+    pub project_picker: ProjectPickerState,
+    /// Hidden local cwd used by sessions that are not attached to a user project.
+    pub projectless_workspace_root: Option<WorkspaceUri>,
     pub current_session: Option<SessionLocator>,
     pub pending_session_delete: Option<SessionLocator>,
     pub threads: Vec<ThreadSummary>,
@@ -184,7 +195,16 @@ impl ZodeAppState {
             .iter()
             .find(|thread| &thread.session == session)
             .map(|thread| &thread.workspace_uri)
-            .filter(|workspace_uri| self.available_workspace(workspace_uri))
+            .filter(|workspace_uri| {
+                self.available_workspace(workspace_uri)
+                    || self.is_projectless_workspace(workspace_uri)
+            })
+    }
+
+    pub fn is_projectless_workspace(&self, workspace_uri: &WorkspaceUri) -> bool {
+        self.projectless_workspace_root
+            .as_ref()
+            .is_some_and(|root| uri_is_same_or_descendant(root, workspace_uri))
     }
 
     pub fn active_available_workspace(&self) -> Option<&WorkspaceUri> {
@@ -197,6 +217,38 @@ impl ZodeAppState {
         self.current_session
             .as_ref()
             .and_then(|session| self.presentation.sessions.get(session))
+    }
+}
+
+fn uri_is_same_or_descendant(root: &WorkspaceUri, candidate: &WorkspaceUri) -> bool {
+    let root = normalized_workspace_uri(root.as_str());
+    let candidate = normalized_workspace_uri(candidate.as_str());
+    if has_ambiguous_path_segment(root) || has_ambiguous_path_segment(candidate) {
+        return false;
+    }
+    candidate == root
+        || if root.ends_with('/') {
+            candidate.starts_with(root)
+        } else {
+            candidate
+                .strip_prefix(root)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        }
+}
+
+fn has_ambiguous_path_segment(uri: &str) -> bool {
+    let lower = uri.to_ascii_lowercase();
+    lower.contains("%2e")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+        || uri.split('/').any(|segment| matches!(segment, "." | ".."))
+}
+
+fn normalized_workspace_uri(uri: &str) -> &str {
+    if uri == "file:///" {
+        uri
+    } else {
+        uri.trim_end_matches('/')
     }
 }
 
@@ -217,6 +269,8 @@ pub fn demo_state() -> ZodeAppState {
         },
         projects: Vec::new(),
         active_workspace: None,
+        project_picker: ProjectPickerState::default(),
+        projectless_workspace_root: None,
         current_session: None,
         pending_session_delete: None,
         threads: Vec::new(),

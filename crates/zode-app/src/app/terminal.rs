@@ -1,6 +1,7 @@
 use jian_widgets::Rect;
 use zode_app_model::{reduce_terminal_command, AppCommand, ShellPage, TerminalCommandOutcome};
 use zode_app_ui::{KeyEvent, TerminalPanel, TerminalPanelController, TERMINAL_ID};
+use zode_node_protocol::NodeCapability;
 
 use super::DesktopApp;
 use crate::event_map::terminal_shortcut_command;
@@ -9,19 +10,52 @@ impl DesktopApp {
     pub(super) fn apply_terminal_command(&mut self, command: AppCommand) {
         if command == AppCommand::OpenTerminal {
             let _ = reduce_terminal_command(&mut self.app_state, command);
-            if self.terminal_runtime.active_id().is_none()
-                && self.app_state.terminal.unavailable_reason.is_none()
+            if !self
+                .app_state
+                .host
+                .capabilities
+                .capabilities
+                .contains(&NodeCapability::Terminal)
             {
-                let cwd = self.terminal_cwd();
+                self.app_state.terminal.unavailable_reason =
+                    Some("Terminal is unavailable on this node.".into());
+                self.rebuild_frame_snapshot();
+                self.set_focused_widget(Some(TERMINAL_ID));
+                return;
+            }
+            let target = self.terminal_target();
+            let target_workspace = target.as_ref().map(|(workspace, _)| workspace);
+            if self.terminal_runtime.active_id().is_some()
+                && self.terminal_workspace.as_ref() != target_workspace
+            {
+                if let Some(id) = self.terminal_runtime.active_id() {
+                    let _ = self.terminal_runtime.close(id);
+                }
+                self.app_state.terminal.active_id = None;
+                self.terminal_workspace = None;
+            }
+            if self.terminal_runtime.active_id().is_none() {
                 let (cols, rows) = self.terminal_grid.size();
-                match self.terminal_runtime.open(
-                    &cwd,
-                    u16::try_from(cols).unwrap_or(u16::MAX),
-                    u16::try_from(rows).unwrap_or(u16::MAX),
-                ) {
-                    Ok(id) => self.app_state.terminal.active_id = Some(id),
-                    Err(error) => {
-                        self.app_state.terminal.unavailable_reason = Some(error.to_string())
+                match target {
+                    Some((workspace, cwd)) => {
+                        self.app_state.terminal.unavailable_reason = None;
+                        match self.terminal_runtime.open(
+                            &cwd,
+                            u16::try_from(cols).unwrap_or(u16::MAX),
+                            u16::try_from(rows).unwrap_or(u16::MAX),
+                        ) {
+                            Ok(id) => {
+                                self.app_state.terminal.active_id = Some(id);
+                                self.terminal_workspace = Some(workspace);
+                            }
+                            Err(error) => {
+                                self.app_state.terminal.unavailable_reason = Some(error.to_string())
+                            }
+                        }
+                    }
+                    None => {
+                        self.app_state.terminal.unavailable_reason =
+                            Some("当前任务没有可用工作目录。".into());
                     }
                 }
             }
@@ -41,6 +75,7 @@ impl DesktopApp {
                             let result = self.terminal_runtime.close(id);
                             if result.is_ok() {
                                 self.app_state.terminal.active_id = None;
+                                self.terminal_workspace = None;
                                 self.app_state.terminal.open = false;
                                 self.app_state.terminal.focused = false;
                             }
@@ -62,12 +97,18 @@ impl DesktopApp {
         }
     }
 
-    fn terminal_cwd(&self) -> std::path::PathBuf {
-        self.app_state
-            .active_available_workspace()
-            .and_then(|workspace| crate::services::workspace_root(workspace).ok())
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    fn terminal_target(&self) -> Option<(zode_node_protocol::WorkspaceUri, std::path::PathBuf)> {
+        let workspace = terminal_workspace(&self.app_state)?;
+        let cwd = crate::services::workspace_root(workspace).ok()?;
+        if cwd.is_dir() {
+            return Some((workspace.clone(), cwd));
+        }
+        if !self.app_state.is_projectless_workspace(workspace) {
+            return None;
+        }
+        let root = self.app_state.projectless_workspace_root.as_ref()?;
+        let cwd = crate::services::workspace_root(root).ok()?;
+        cwd.is_dir().then(|| (root.clone(), cwd))
     }
 
     pub(super) fn drain_terminal_output(&mut self) {
@@ -90,6 +131,7 @@ impl DesktopApp {
         match self.terminal_runtime.reap_finished() {
             Ok(Some(id)) if self.app_state.terminal.active_id == Some(id) => {
                 self.app_state.terminal.active_id = None;
+                self.terminal_workspace = None;
                 self.app_state.terminal.open = false;
                 self.app_state.terminal.focused = false;
             }
@@ -150,5 +192,59 @@ impl DesktopApp {
                 rows: u16::try_from(rows).unwrap_or(u16::MAX),
             });
         }
+    }
+}
+
+fn terminal_workspace(
+    state: &zode_app_model::ZodeAppState,
+) -> Option<&zode_node_protocol::WorkspaceUri> {
+    state
+        .current_session
+        .as_ref()
+        .and_then(|session| state.available_workspace_for_session(session))
+        .or_else(|| state.active_available_workspace())
+        .or(state.projectless_workspace_root.as_ref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_workspace;
+    use zode_app_model::{demo_state, ProjectState, TranscriptState};
+    use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
+
+    #[test]
+    fn terminal_workspace_never_falls_back_to_the_process_directory() {
+        let mut state = demo_state();
+        assert_eq!(terminal_workspace(&state), None);
+
+        let root = WorkspaceUri::new("file:///tmp/zode-task-workspaces").unwrap();
+        state.projectless_workspace_root = Some(root.clone());
+        assert_eq!(terminal_workspace(&state), Some(&root));
+
+        let child = WorkspaceUri::new("file:///tmp/zode-task-workspaces/task-1").unwrap();
+        let session = SessionLocator::new(state.host.node_id, "task-1");
+        state.threads.push(ThreadSummary {
+            session: session.clone(),
+            workspace_uri: child.clone(),
+            title: "task".into(),
+            updated_at_ms: 1,
+            status: ThreadStatus::Idle,
+        });
+        state
+            .transcripts
+            .insert(session.clone(), TranscriptState::default());
+        state.current_session = Some(session);
+        assert_eq!(terminal_workspace(&state), Some(&child));
+
+        let project = WorkspaceUri::new("file:///repo/zode").unwrap();
+        state.current_session = None;
+        state.projects.push(ProjectState {
+            workspace_uri: project.clone(),
+            expanded: true,
+            available: true,
+            last_opened_ms: 1,
+        });
+        state.active_workspace = Some(project.clone());
+        assert_eq!(terminal_workspace(&state), Some(&project));
     }
 }

@@ -56,10 +56,13 @@ impl IntegrationsPage {
         paint_tabs(painter, &layout, theme);
         paint_header(painter, &layout, tab, theme);
         match &state.presentation.integrations {
-            LoadState::Ready(catalog) => {
+            LoadState::Ready(catalog)
+                if state.active_available_workspace() == Some(&catalog.workspace_uri) =>
+            {
                 installed::paint(painter, &layout, state, theme);
                 catalog::paint(painter, &layout, state, catalog, theme);
             }
+            LoadState::Ready(_) => paint_load_state(painter, &layout, "当前任务未绑定项目", theme),
             LoadState::Idle => paint_load_state(painter, &layout, "尚未加载本机集成", theme),
             LoadState::Loading => paint_load_state(painter, &layout, "正在读取本机集成…", theme),
             LoadState::Failed(message) => paint_load_state(painter, &layout, message, theme),
@@ -151,10 +154,16 @@ impl IntegrationsPage {
     }
 
     pub fn installed_icon_layout(rect: Rect, state: &ZodeAppState) -> Vec<InstalledIconLayout> {
+        if !catalog_matches_active_workspace(state) {
+            return Vec::new();
+        }
         installed::layout(&Self::layout(rect, state), state)
     }
 
     pub fn catalog_section_layout(rect: Rect, state: &ZodeAppState) -> Vec<CatalogSectionLayout> {
+        if !catalog_matches_active_workspace(state) {
+            return Vec::new();
+        }
         catalog::layout(&Self::layout(rect, state), state)
     }
 
@@ -173,6 +182,14 @@ impl IntegrationsPage {
             _ => None,
         }
     }
+}
+
+fn catalog_matches_active_workspace(state: &ZodeAppState) -> bool {
+    matches!(
+        &state.presentation.integrations,
+        LoadState::Ready(catalog)
+            if state.active_available_workspace() == Some(&catalog.workspace_uri)
+    )
 }
 
 fn paint_tabs(painter: &mut dyn Painter, layout: &IntegrationsPageLayout, theme: &ZodeTheme) {
