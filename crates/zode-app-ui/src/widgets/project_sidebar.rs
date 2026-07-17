@@ -6,7 +6,7 @@ use zode_app_model::{
 };
 use zode_node_protocol::{SessionLocator, ThreadSummary, WorkspaceUri};
 
-use crate::{paint_single_line, stable_widget_id, RectExt, WidgetId, ZodeTheme};
+use crate::{paint_single_line, stable_widget_id, RectExt, SemanticIcon, WidgetId, ZodeTheme};
 
 const TITLEBAR_H: f32 = 38.0;
 const BRAND_H: f32 = 46.0;
@@ -15,8 +15,6 @@ const ROW_H: f32 = 32.0;
 const ROW_INSET: f32 = 12.0;
 const FOOTER_BOTTOM: f32 = 8.0;
 const ICON_SIZE: f32 = 16.0;
-const FOLDER_ICON: &str = "M3 6H9L11 8H21V19H3Z";
-const SETTINGS_ICON: &str = "M4 7H20M4 17H20M8 4V10M16 14V20";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarAction {
@@ -27,7 +25,7 @@ pub enum SidebarAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SidebarItem {
     pub label: &'static str,
-    pub icon: &'static str,
+    pub icon: SemanticIcon,
     pub action: SidebarAction,
     pub implemented: bool,
 }
@@ -35,37 +33,37 @@ pub struct SidebarItem {
 const NAVIGATION: [SidebarItem; 6] = [
     SidebarItem {
         label: "新建任务",
-        icon: "M12 5V19M5 12H19",
+        icon: SemanticIcon::NewTask,
         action: SidebarAction::NewSession,
         implemented: true,
     },
     SidebarItem {
         label: "已安排",
-        icon: "M12 7V12L15 14M21 12A9 9 0 1 1 12 3",
+        icon: SemanticIcon::Scheduled,
         action: SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::ScheduledTasks)),
         implemented: false,
     },
     SidebarItem {
         label: "插件",
-        icon: "M8 9H16V12A4 4 0 0 1 12 16V21M10 9V4M14 9V4",
+        icon: SemanticIcon::Integrations,
         action: SidebarAction::Navigate(ShellRoute::Integrations(IntegrationsTab::Plugins)),
         implemented: true,
     },
     SidebarItem {
         label: "站点",
-        icon: "M4 4H10V10H4ZM14 4H20V10H14ZM4 14H10V20H4ZM14 14H20V20H14Z",
+        icon: SemanticIcon::Sites,
         action: SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::Sites)),
         implemented: false,
     },
     SidebarItem {
         label: "拉取请求",
-        icon: "M6 4V16M18 8V20M6 16C12 16 12 8 18 8",
+        icon: SemanticIcon::PullRequest,
         action: SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::PullRequests)),
         implemented: false,
     },
     SidebarItem {
         label: "聊天",
-        icon: "M4 5H20V16H8L4 20Z",
+        icon: SemanticIcon::Chat,
         action: SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::Chats)),
         implemented: false,
     },
@@ -73,7 +71,7 @@ const NAVIGATION: [SidebarItem; 6] = [
 
 const SETTINGS_FOOTER: SidebarItem = SidebarItem {
     label: "本地设置",
-    icon: SETTINGS_ICON,
+    icon: SemanticIcon::Settings,
     action: SidebarAction::Navigate(ShellRoute::Settings(SettingsCategory::General)),
     implemented: true,
 };
@@ -303,14 +301,14 @@ impl ProjectSidebar {
                 theme.tokens.muted_foreground
             };
             painter.stroke_svg_path(
-                row.item.icon,
+                row.item.icon.path(),
                 Point2D::new(
                     icon_x,
                     row.rect.origin.y + (row.rect.size.y - ICON_SIZE) / 2.0,
                 ),
                 ICON_SIZE,
                 color,
-                1.5,
+                row.item.icon.stroke_width(),
             );
             if !compact {
                 draw_label(
@@ -354,14 +352,14 @@ impl ProjectSidebar {
                 let weight = match row.target {
                     SidebarRowTarget::Project(_) => {
                         painter.stroke_svg_path(
-                            FOLDER_ICON,
+                            SemanticIcon::Folder.path(),
                             Point2D::new(
                                 row.rect.origin.x + 8.0,
                                 row.rect.origin.y + (row.rect.size.y - ICON_SIZE) / 2.0,
                             ),
                             ICON_SIZE,
                             theme.sidebar_foreground,
-                            1.5,
+                            SemanticIcon::Folder.stroke_width(),
                         );
                         600
                     }
@@ -397,14 +395,14 @@ impl ProjectSidebar {
             footer.origin.x + 8.0
         };
         painter.stroke_svg_path(
-            SETTINGS_FOOTER.icon,
+            SETTINGS_FOOTER.icon.path(),
             Point2D::new(
                 footer_icon_x,
                 footer.origin.y + (footer.size.y - ICON_SIZE) / 2.0,
             ),
             ICON_SIZE,
             theme.sidebar_foreground,
-            1.5,
+            SETTINGS_FOOTER.icon.stroke_width(),
         );
         if compact {
             return;

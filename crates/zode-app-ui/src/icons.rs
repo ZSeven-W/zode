@@ -37,10 +37,15 @@ pub enum SemanticIcon {
     Host,
     Diff,
     Compare,
+    Back,
+    FileText,
+    Close,
+    Refresh,
+    ExternalOpen,
 }
 
 impl SemanticIcon {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 38] = [
         Self::NewTask,
         Self::Scheduled,
         Self::Settings,
@@ -74,6 +79,11 @@ impl SemanticIcon {
         Self::Host,
         Self::Diff,
         Self::Compare,
+        Self::Back,
+        Self::FileText,
+        Self::Close,
+        Self::Refresh,
+        Self::ExternalOpen,
     ];
 
     pub const fn path(self) -> &'static str {
@@ -113,6 +123,11 @@ impl SemanticIcon {
             Self::Host => "M3 5H21V17H3ZM8 21H16M12 17V21",
             Self::Diff => "M5 7H11M8 4V10M14 7H20M5 17H11M14 17H20M17 14V20",
             Self::Compare => "M7 7H19M16 4L19 7L16 10M17 17H5M8 14L5 17L8 20",
+            Self::Back => "M15 18L9 12L15 6",
+            Self::FileText => "M6 3H14L19 8V21H6ZM14 3V8H19M9 13H16M9 17H16",
+            Self::Close => "M6 6L18 18M18 6L6 18",
+            Self::Refresh => "M20 7V12H15M4 17V12H9M6.1 8A7 7 0 0 1 18 7M17.9 16A7 7 0 0 1 6 17",
+            Self::ExternalOpen => "M14 4H20V10M20 4L11 13M18 13V20H4V6H11",
         }
     }
 
