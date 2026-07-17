@@ -45,7 +45,11 @@ enum CommandResult {
         command: AgentCommand,
         completion: CompletionResult,
     },
-    Failed {
+    CompletionFailed {
+        command: AgentCommand,
+        message: String,
+    },
+    CommandFailed {
         failed_command: AgentCommand,
         recovery_command: AgentCommand,
         executed_prefix: usize,
@@ -116,7 +120,7 @@ impl CommandBridge {
                     }
                 }
                 let result = if let Some((failed_command, kind, message)) = failure {
-                    CommandResult::Failed {
+                    CommandResult::CommandFailed {
                         failed_command,
                         recovery_command: command,
                         executed_prefix,
@@ -124,19 +128,13 @@ impl CommandBridge {
                         message,
                     }
                 } else {
-                    complete(&*endpoint, dispatch.completion)
-                        .await
-                        .map(|completion| CommandResult::Succeeded {
-                            command: command.clone(),
+                    match complete(&*endpoint, dispatch.completion).await {
+                        Ok(completion) => CommandResult::Succeeded {
+                            command,
                             completion,
-                        })
-                        .unwrap_or_else(|message| CommandResult::Failed {
-                            failed_command: command.clone(),
-                            recovery_command: command,
-                            executed_prefix,
-                            kind: None,
-                            message,
-                        })
+                        },
+                        Err(message) => CommandResult::CompletionFailed { command, message },
+                    }
                 };
                 if result_sender.send(result).is_ok() {
                     wake();
@@ -158,7 +156,10 @@ impl CommandBridge {
                     command,
                     completion,
                 } => apply_success(state, &command, completion),
-                CommandResult::Failed {
+                CommandResult::CompletionFailed { command, message } => {
+                    apply_completion_failure(state, &command, message)
+                }
+                CommandResult::CommandFailed {
                     failed_command,
                     recovery_command,
                     executed_prefix,
@@ -305,38 +306,11 @@ pub fn prepare_dispatch(
             let Some(session) = session else {
                 return prepare_first_submit(state, input).map(Some);
             };
-            let turn_id = TurnId::new();
-            state.active_turns.insert(session.clone(), turn_id);
-            if let Some(transcript) = state.transcripts.get_mut(&session) {
-                append_user_content(transcript, &input);
-                transcript.busy = true;
-            }
-            if let Some(thread) = state
-                .threads
-                .iter_mut()
-                .find(|thread| thread.session == session)
-            {
-                thread.status = ThreadStatus::Running;
-            }
-            (
-                session,
-                Some(turn_id),
-                AgentCommandKind::StartTurn { input },
-                Completion::None,
-            )
+            return prepare_queued_start(state, session, input).map(Some);
         }
         AppCommand::Steer(input) => {
             let session = current_session(state)?;
-            let turn_id = active_turn(state, &session)?;
-            if let Some(transcript) = state.transcripts.get_mut(&session) {
-                append_user_content(transcript, &input);
-            }
-            (
-                session,
-                Some(turn_id),
-                AgentCommandKind::SteerTurn { input },
-                Completion::None,
-            )
+            return prepare_queued_steer(state, session, input).map(Some);
         }
         AppCommand::Interrupt => {
             let session = current_session(state)?;
@@ -425,6 +399,81 @@ pub fn prepare_dispatch(
         }],
         completion,
     }))
+}
+
+/// Targets the queue owner and claims its busy slot before endpoint dispatch.
+pub(crate) fn prepare_queued_start(
+    state: &mut ZodeAppState,
+    session: SessionLocator,
+    input: Vec<UserContent>,
+) -> Result<CommandDispatch, String> {
+    validate_target_session(state, &session)?;
+    let transcript_busy = state
+        .transcripts
+        .get(&session)
+        .is_some_and(|transcript| transcript.busy);
+    if transcript_busy || state.active_turns.contains_key(&session) {
+        return Err("the target session already has an active turn".into());
+    }
+
+    let turn_id = TurnId::new();
+    state.active_turns.insert(session.clone(), turn_id);
+    let transcript = state
+        .transcripts
+        .get_mut(&session)
+        .expect("the target session was validated before preparing its turn");
+    append_user_content(transcript, &input);
+    transcript.busy = true;
+    if let Some(thread) = state
+        .threads
+        .iter_mut()
+        .find(|thread| thread.session == session)
+    {
+        thread.status = ThreadStatus::Running;
+    }
+
+    Ok(CommandDispatch {
+        commands: vec![AgentCommand {
+            version: PROTOCOL_VERSION,
+            session,
+            turn_id: Some(turn_id),
+            kind: AgentCommandKind::StartTurn { input },
+        }],
+        completion: Completion::None,
+    })
+}
+
+/// Targets an explicit queued-message guide at its owning active turn.
+pub(crate) fn prepare_queued_steer(
+    state: &mut ZodeAppState,
+    session: SessionLocator,
+    input: Vec<UserContent>,
+) -> Result<CommandDispatch, String> {
+    validate_target_session(state, &session)?;
+    let turn_id = active_turn(state, &session)?;
+    let transcript = state
+        .transcripts
+        .get_mut(&session)
+        .expect("the target session was validated before preparing its steer");
+    append_user_content(transcript, &input);
+
+    Ok(CommandDispatch {
+        commands: vec![AgentCommand {
+            version: PROTOCOL_VERSION,
+            session,
+            turn_id: Some(turn_id),
+            kind: AgentCommandKind::SteerTurn { input },
+        }],
+        completion: Completion::None,
+    })
+}
+
+fn validate_target_session(state: &ZodeAppState, session: &SessionLocator) -> Result<(), String> {
+    let live = !session.session_id.starts_with("local-error-")
+        && state.transcripts.contains_key(session)
+        && state.available_workspace_for_session(session).is_some();
+    live.then_some(())
+        .ok_or_else(|| "the target session is unavailable".to_owned())
 }
 
 fn prepare_first_submit(
@@ -609,8 +658,41 @@ fn apply_failure(state: &mut ZodeAppState, command: &AgentCommand, message: Stri
             thread.status = ThreadStatus::Failed;
         }
     }
-    let target_session = if state.transcripts.contains_key(&command.session) {
-        Some(command.session.clone())
+    project_retryable_error(state, &command.session, format!("命令执行失败：{message}"));
+}
+
+fn apply_completion_failure(state: &mut ZodeAppState, command: &AgentCommand, message: String) {
+    let runtime_sync = matches!(
+        command.kind,
+        AgentCommandKind::StartTurn { .. }
+            | AgentCommandKind::SetModel { .. }
+            | AgentCommandKind::SetEffort { .. }
+            | AgentCommandKind::SetSandbox { .. }
+    );
+    let summary = if runtime_sync {
+        let runtime_options = &mut state
+            .presentation
+            .sessions
+            .entry(command.session.clone())
+            .or_default()
+            .runtime_options;
+        if !matches!(runtime_options, LoadState::Ready(_)) {
+            *runtime_options = LoadState::Failed(message.clone());
+        }
+        format!("运行设置同步失败：{message}")
+    } else {
+        format!("状态同步失败：{message}")
+    };
+    project_retryable_error(state, &command.session, summary);
+}
+
+fn project_retryable_error(
+    state: &mut ZodeAppState,
+    command_session: &SessionLocator,
+    message: String,
+) {
+    let target_session = if state.transcripts.contains_key(command_session) {
+        Some(command_session.clone())
     } else {
         state
             .current_session
@@ -621,7 +703,7 @@ fn apply_failure(state: &mut ZodeAppState, command: &AgentCommand, message: Stri
     if let Some(transcript) = target_session.and_then(|session| state.transcripts.get_mut(&session))
     {
         transcript.items.push(TranscriptItem::Error {
-            message: format!("命令执行失败：{message}"),
+            message,
             retryable: true,
         });
     } else {
@@ -662,6 +744,7 @@ fn apply_batch_failure(
             .threads
             .retain(|thread| thread.session != recovery_command.session);
         state.transcripts.remove(&recovery_command.session);
+        state.message_queues.remove(&recovery_command.session);
         if state.current_session.as_ref() == Some(&recovery_command.session) {
             state.current_session = None;
         }

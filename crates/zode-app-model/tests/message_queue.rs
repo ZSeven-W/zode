@@ -340,7 +340,6 @@ fn queue_menu_and_edit_state_are_current_session_ephemeral_state() {
     assert_eq!(state.composer.editing_queued_message, None);
     assert_eq!(state.composer.draft, "original draft");
     assert_eq!(state.composer.draft_before_queue_edit, None);
-    assert!(!state.composer.send_hovered);
 }
 
 #[test]
@@ -372,4 +371,41 @@ fn removing_an_edited_message_closes_its_ephemeral_ui() {
     assert_eq!(state.composer.draft, "original draft");
 
     assert_eq!(state.message_queues[&session].items[0].id, first);
+}
+
+#[test]
+fn retargeting_queue_edit_keeps_the_original_draft_backup() {
+    let mut state = demo_state();
+    let session = add_session(&mut state, "current");
+    state.current_session = Some(session.clone());
+    state.composer.draft = "original draft".into();
+    let mut queue = MessageQueueState::default();
+    let first = queue.enqueue("first".into(), Vec::new()).unwrap();
+    let second = queue.enqueue("second".into(), Vec::new()).unwrap();
+    state.message_queues.insert(session.clone(), queue);
+
+    for id in [first, second] {
+        assert_eq!(
+            reduce_queue_command(
+                &mut state,
+                &AppCommand::BeginEditQueuedMessage {
+                    session: session.clone(),
+                    id,
+                },
+            ),
+            QueueCommandOutcome::Applied,
+        );
+    }
+    assert_eq!(state.composer.editing_queued_message, Some(second));
+    assert_eq!(state.composer.draft, "second");
+    assert_eq!(
+        state.composer.draft_before_queue_edit.as_deref(),
+        Some("original draft")
+    );
+
+    assert_eq!(
+        reduce_queue_command(&mut state, &AppCommand::CancelQueuedMessageEdit { session },),
+        QueueCommandOutcome::Applied,
+    );
+    assert_eq!(state.composer.draft, "original draft");
 }

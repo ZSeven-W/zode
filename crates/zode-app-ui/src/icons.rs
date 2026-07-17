@@ -37,6 +37,12 @@ pub enum SemanticIcon {
     Folder,
     Send,
     Stop,
+    Queue,
+    Guide,
+    Delete,
+    More,
+    Edit,
+    CloseQueue,
     Branch,
     Host,
     Diff,
@@ -49,7 +55,7 @@ pub enum SemanticIcon {
 }
 
 impl SemanticIcon {
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 48] = [
         Self::NewTask,
         Self::Scheduled,
         Self::Settings,
@@ -83,6 +89,12 @@ impl SemanticIcon {
         Self::Folder,
         Self::Send,
         Self::Stop,
+        Self::Queue,
+        Self::Guide,
+        Self::Delete,
+        Self::More,
+        Self::Edit,
+        Self::CloseQueue,
         Self::Branch,
         Self::Host,
         Self::Diff,
@@ -133,6 +145,12 @@ impl SemanticIcon {
             Self::Folder => "M3 6H10L12 8H21V19H3Z",
             Self::Send => "M12 19V5M6 11L12 5L18 11",
             Self::Stop => "M7 7H17V17H7Z",
+            Self::Queue => "M4 5V10C4 12.2 5.8 14 8 14H20M16 10L20 14L16 18",
+            Self::Guide => "M9 6L4 11L9 16M4 11H14C18 11 20 13 20 17",
+            Self::Delete => "M5 7H19M9 7V4H15V7M7 7L8 20H16L17 7M10 11V16M14 11V16",
+            Self::More => "M5 12H5.1M12 12H12.1M19 12H19.1",
+            Self::Edit => "M4 20L8 19L19 8L16 5L5 16ZM14 7L17 10",
+            Self::CloseQueue => "M4 5V10C4 12.2 5.8 14 8 14H20M16 10L20 14L16 18",
             Self::Branch => "M6 3A2 2 0 1 0 6 7A2 2 0 1 0 6 3M18 17A2 2 0 1 0 18 21A2 2 0 1 0 18 17M6 7V13C6 16 8 19 12 19H16M18 5V17M15 8L18 5L21 8",
             Self::Host => "M3 5H21V17H3ZM8 21H16M12 17V21",
             Self::Diff => "M5 7H11M8 4V10M14 7H20M5 17H11M14 17H20M17 14V20",
@@ -167,5 +185,13 @@ mod tests {
             assert_eq!(icon.viewbox(), 24.0);
             assert_eq!(icon.stroke_width(), 1.75);
         }
+    }
+
+    #[test]
+    fn queue_icons_share_the_reference_turn_marker() {
+        const TURN_MARKER: &str = "M4 5V10C4 12.2 5.8 14 8 14H20M16 10L20 14L16 18";
+
+        assert_eq!(SemanticIcon::Queue.path(), TURN_MARKER);
+        assert_eq!(SemanticIcon::CloseQueue.path(), TURN_MARKER);
     }
 }

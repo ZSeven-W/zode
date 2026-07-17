@@ -6,7 +6,8 @@ use zode_app_model::{
     SettingsCommandOutcome, ShellRoute, TranscriptState,
 };
 use zode_app_ui::{
-    ComposerOutcome, ComposerSubmission, Insets, SettingsPanel, WidgetId, WorkspaceSnapshot,
+    ComposerController, ComposerOutcome, ComposerSubmission, Insets, Key, Modifiers, SettingsPanel,
+    WidgetId, WorkspaceSnapshot,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
@@ -279,6 +280,59 @@ fn applying_composer_outcome_projects_attachment_metadata() {
     );
 
     assert_eq!(state.composer.attachments, vec![metadata]);
+}
+
+#[test]
+fn busy_composer_queues_without_emitting_a_steer_command() {
+    let mut composer = ComposerController::new("排到当前任务后面");
+    composer.set_busy(true);
+
+    let mut outcome = composer.key(Key::Enter, Modifiers::NONE);
+
+    let ComposerOutcome::Queue(submission) = &outcome else {
+        panic!("busy Enter must produce an explicit queue outcome, got {outcome:?}");
+    };
+    assert!(matches!(
+        submission.content.as_slice(),
+        [UserContent::Text { text }] if text == "排到当前任务后面"
+    ));
+    assert_eq!(composer_outcome_command(&mut outcome), None);
+}
+
+#[test]
+fn queue_edit_restores_the_original_draft_and_attachment_payload() {
+    let mut composer = ComposerController::new("尚未发送的原草稿");
+    let added = composer.paste_image("image/png", "cHJpdmF0ZS1pbWFnZQ==", "reference.png");
+    let ComposerOutcome::AttachmentsChanged(original_metadata) = added else {
+        panic!("image paste must project attachment metadata");
+    };
+
+    assert!(composer.begin_queue_edit("队列里的旧文字"));
+    assert_eq!(composer.text(), "队列里的旧文字");
+    assert!(composer.attachment_metadata().is_empty());
+    composer.set_text("队列里的新文字");
+    assert_eq!(
+        composer.paste_image("image/png", "bmV3LWltYWdl", "ignored.png"),
+        ComposerOutcome::Ignored,
+        "queue editing is text-only so it cannot replace the private payload"
+    );
+
+    assert!(composer.finish_queue_edit());
+    assert_eq!(composer.text(), "尚未发送的原草稿");
+    assert_eq!(composer.attachment_metadata(), original_metadata);
+
+    let ComposerOutcome::Send(restored) = composer.key(Key::Enter, Modifiers::NONE) else {
+        panic!("restored draft should remain independently sendable");
+    };
+    assert!(matches!(
+        restored.content.first(),
+        Some(UserContent::Text { text }) if text == "尚未发送的原草稿"
+    ));
+    assert!(matches!(
+        restored.content.get(1),
+        Some(UserContent::Image { data_base64, display_name, .. })
+            if data_base64 == "cHJpdmF0ZS1pbWFnZQ==" && display_name == "reference.png"
+    ));
 }
 
 #[test]

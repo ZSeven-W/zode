@@ -392,6 +392,19 @@ fn interrupt_command(session: SessionLocator, turn_id: TurnId) -> AgentCommand {
     }
 }
 
+fn steer_command(session: SessionLocator, turn_id: TurnId) -> AgentCommand {
+    AgentCommand {
+        version: PROTOCOL_VERSION,
+        session,
+        turn_id: Some(turn_id),
+        kind: AgentCommandKind::SteerTurn {
+            input: vec![UserContent::Text {
+                text: "follow up".into(),
+            }],
+        },
+    }
+}
+
 fn create_command(session: SessionLocator) -> AgentCommand {
     AgentCommand {
         version: PROTOCOL_VERSION,
@@ -538,6 +551,55 @@ async fn normal_turn_persists_before_diff_and_finishes_exactly_once() {
             interrupted: false,
         }]
     );
+}
+
+#[tokio::test]
+async fn turn_finished_releases_the_session_before_the_event_is_observable() {
+    let node_id = NodeId::new();
+    let session = test_session(node_id, "immediate-follow-up");
+    let first_turn = TurnId::new();
+    let second_turn = TurnId::new();
+    let (first_sender, first_stream) = driver_stream();
+    let (second_sender, second_stream) = driver_stream();
+    let driver = Arc::new(FakeDriver::new(vec![first_stream, second_stream]));
+    let backend = EngineBackend::new(node_id, driver.clone());
+    let (events, mut receiver) = event_sink();
+
+    backend
+        .command(start_command(session.clone(), first_turn), events.clone())
+        .await
+        .unwrap();
+    consume_permit(&driver.start_seen, "first turn start").await;
+    drop(first_sender);
+
+    let first_events = collect_until_finished(&mut receiver).await;
+    assert!(matches!(
+        first_events.last().map(|event| &event.kind),
+        Some(AgentEventKind::TurnFinished { interrupted: false })
+    ));
+
+    let stale_steer = backend
+        .command(steer_command(session.clone(), first_turn), events.clone())
+        .await
+        .expect_err("a completed turn cannot accept stale guidance");
+    assert_eq!(stale_steer.kind, EndpointErrorKind::NotFound);
+
+    backend
+        .command(start_command(session.clone(), second_turn), events.clone())
+        .await
+        .expect("TurnFinished makes the same session immediately startable");
+    consume_permit(&driver.start_seen, "immediate follow-up start").await;
+    assert_eq!(driver.starts.lock().unwrap().len(), 2);
+
+    second_sender
+        .send(Err(AgentError::Aborted("cleanup".into())))
+        .unwrap();
+    drop(second_sender);
+    let second_events = collect_until_finished(&mut receiver).await;
+    assert!(matches!(
+        second_events.last().map(|event| &event.kind),
+        Some(AgentEventKind::TurnFinished { interrupted: true })
+    ));
 }
 
 #[tokio::test]

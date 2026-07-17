@@ -1,16 +1,19 @@
 use jian_core::text_input::{prev_char_boundary, TextInputState};
 use jian_widgets::{Painter, Rect};
-use zode_app_model::{AttachmentMetadata, ComposerState, GoalProgress};
+use zode_app_model::{AppCommand, AttachmentMetadata, ComposerState, GoalProgress, ZodeAppState};
 use zode_node_protocol::{SandboxMode, UserContent};
 
 use crate::{
-    stable_widget_id, ImeEvent, Key, Modifiers, RectExt, WidgetId, ZodeTheme,
-    COMPOSER_ATTACHMENT_H, COMPOSER_CONTEXT_H, COMPOSER_INPUT_H,
+    composer_queue_reserved_height, stable_widget_id, ImeEvent, Key, Modifiers, RectExt, WidgetId,
+    ZodeTheme, COMPOSER_ATTACHMENT_H, COMPOSER_CONTEXT_H, COMPOSER_INPUT_H,
 };
 
 mod attachments;
 mod context;
 mod input;
+mod queue;
+
+pub use queue::{ComposerQueueLayout, ComposerQueueMenuLayout, ComposerQueueRowLayout};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposerSubmission {
@@ -46,6 +49,7 @@ pub enum ComposerOutcome {
     Edited,
     AttachmentsChanged(Vec<AttachmentMetadata>),
     Send(ComposerSubmission),
+    Queue(ComposerSubmission),
     Steer(ComposerSubmission),
     Stop,
     SetModel(String),
@@ -61,6 +65,15 @@ pub struct ComposerController {
     next_attachment_id: u64,
     busy: bool,
     now_ms: u64,
+    queue_edit_backup: Option<QueueEditBackup>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct QueueEditBackup {
+    input: TextInputState,
+    attachment_payloads: Vec<UserContent>,
+    attachment_metadata: Vec<AttachmentMetadata>,
+    target_has_attachments: bool,
 }
 
 impl ComposerController {
@@ -72,6 +85,7 @@ impl ComposerController {
             next_attachment_id: 1,
             busy: false,
             now_ms: 0,
+            queue_edit_backup: None,
         }
     }
 
@@ -104,6 +118,49 @@ impl ComposerController {
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.input.set_text(text.into());
         self.input.clear_composition();
+    }
+
+    /// Temporarily edits one queued message without destroying the current draft.
+    /// Queue editing is text-only; pending attachments are restored on finish.
+    pub fn begin_queue_edit(&mut self, text: impl Into<String>) -> bool {
+        self.begin_queue_edit_for_message(text, false)
+    }
+
+    /// Starts or retargets queue editing while retaining the original draft backup.
+    pub fn begin_queue_edit_for_message(
+        &mut self,
+        text: impl Into<String>,
+        target_has_attachments: bool,
+    ) -> bool {
+        let input = TextInputState::with_text(text.into());
+        if let Some(backup) = self.queue_edit_backup.as_mut() {
+            self.input = input;
+            backup.target_has_attachments = target_has_attachments;
+            return true;
+        }
+        self.queue_edit_backup = Some(QueueEditBackup {
+            input: std::mem::replace(&mut self.input, input),
+            attachment_payloads: std::mem::take(&mut self.attachment_payloads),
+            attachment_metadata: std::mem::take(&mut self.attachment_metadata),
+            target_has_attachments,
+        });
+        true
+    }
+
+    /// Leaves queue-edit mode and restores the exact draft and attachments that
+    /// were present before editing began.
+    pub fn finish_queue_edit(&mut self) -> bool {
+        let Some(backup) = self.queue_edit_backup.take() else {
+            return false;
+        };
+        self.input = backup.input;
+        self.attachment_payloads = backup.attachment_payloads;
+        self.attachment_metadata = backup.attachment_metadata;
+        true
+    }
+
+    pub fn queue_editing(&self) -> bool {
+        self.queue_edit_backup.is_some()
     }
 
     pub fn key(&mut self, key: Key, modifiers: Modifiers) -> ComposerOutcome {
@@ -219,6 +276,9 @@ impl ComposerController {
         data_base64: impl Into<String>,
         mut metadata: AttachmentMetadata,
     ) -> ComposerOutcome {
+        if self.queue_edit_backup.is_some() {
+            return ComposerOutcome::Ignored;
+        }
         let mime_type = mime_type.into();
         metadata.id = format!("attachment-{}", self.next_attachment_id);
         self.next_attachment_id = self.next_attachment_id.saturating_add(1);
@@ -266,7 +326,14 @@ impl ComposerController {
     }
 
     fn submit(&mut self) -> ComposerOutcome {
-        if self.input.text().trim().is_empty() && self.attachment_payloads.is_empty() {
+        let queued_attachments_remain = self
+            .queue_edit_backup
+            .as_ref()
+            .is_some_and(|backup| backup.target_has_attachments);
+        if self.input.text().trim().is_empty()
+            && self.attachment_payloads.is_empty()
+            && !queued_attachments_remain
+        {
             return ComposerOutcome::Ignored;
         }
         let mut content = Vec::with_capacity(1 + self.attachment_payloads.len());
@@ -283,7 +350,7 @@ impl ComposerController {
             attachments,
         };
         if self.busy {
-            ComposerOutcome::Steer(submission)
+            ComposerOutcome::Queue(submission)
         } else {
             ComposerOutcome::Send(submission)
         }
@@ -311,6 +378,7 @@ pub struct Composer;
 pub struct ComposerLayout {
     pub context: Rect,
     pub attachments: Option<Rect>,
+    pub queue: Option<Rect>,
     pub input: Rect,
 }
 
@@ -322,28 +390,97 @@ pub(crate) struct ComposerAttachmentLayout {
 
 impl Composer {
     pub fn layout(rect: Rect, state: &ComposerState) -> ComposerLayout {
+        Self::layout_with_queue_count(rect, state, 0)
+    }
+
+    pub fn layout_for_state(rect: Rect, state: &ZodeAppState) -> ComposerLayout {
+        let queue_count = queue::current_queue(state).map_or(0, |(_, items)| items.len());
+        Self::layout_with_queue_count(rect, &state.composer, queue_count)
+    }
+
+    fn layout_with_queue_count(
+        rect: Rect,
+        state: &ComposerState,
+        queue_count: usize,
+    ) -> ComposerLayout {
+        if queue_count == 0 {
+            let context_height = COMPOSER_CONTEXT_H.min(rect.size.y.max(0.0));
+            let input_height = COMPOSER_INPUT_H.min((rect.size.y - context_height).max(0.0));
+            let input = Rect::xywh(
+                rect.origin.x,
+                rect.max_y() - input_height,
+                rect.size.x,
+                input_height,
+            );
+            let attachments = (!state.attachments.is_empty()).then(|| {
+                let available = (input.origin.y - rect.origin.y - context_height).max(0.0);
+                Rect::xywh(
+                    rect.origin.x,
+                    rect.origin.y + context_height,
+                    rect.size.x,
+                    COMPOSER_ATTACHMENT_H.min(available),
+                )
+            });
+            return ComposerLayout {
+                context: Rect::xywh(rect.origin.x, rect.origin.y, rect.size.x, context_height),
+                attachments,
+                queue: None,
+                input,
+            };
+        }
         let context_height = COMPOSER_CONTEXT_H.min(rect.size.y.max(0.0));
-        let input_height = COMPOSER_INPUT_H.min((rect.size.y - context_height).max(0.0));
+        let input_height = COMPOSER_INPUT_H.min(rect.size.y.max(0.0));
         let input = Rect::xywh(
             rect.origin.x,
             rect.max_y() - input_height,
             rect.size.x,
             input_height,
         );
-        let attachments = (!state.attachments.is_empty()).then(|| {
-            let available = (input.origin.y - rect.origin.y - context_height).max(0.0);
-            Rect::xywh(
-                rect.origin.x,
-                rect.origin.y + context_height,
-                rect.size.x,
-                COMPOSER_ATTACHMENT_H.min(available),
-            )
+        let mut cursor = input.origin.y;
+        let queue_height =
+            composer_queue_reserved_height(queue_count).min((cursor - rect.origin.y).max(0.0));
+        let queue = (queue_height > 0.0).then(|| {
+            cursor -= queue_height;
+            Rect::xywh(rect.origin.x, cursor, rect.size.x, queue_height)
         });
+        let attachment_height = if state.attachments.is_empty() {
+            0.0
+        } else {
+            COMPOSER_ATTACHMENT_H.min((cursor - rect.origin.y).max(0.0))
+        };
+        let attachments = (attachment_height > 0.0).then(|| {
+            cursor -= attachment_height;
+            Rect::xywh(rect.origin.x, cursor, rect.size.x, attachment_height)
+        });
+        let context_height = context_height.min((cursor - rect.origin.y).max(0.0));
         ComposerLayout {
-            context: Rect::xywh(rect.origin.x, rect.origin.y, rect.size.x, context_height),
+            context: Rect::xywh(
+                rect.origin.x,
+                (cursor - context_height).max(rect.origin.y),
+                rect.size.x,
+                context_height,
+            ),
             attachments,
+            queue,
             input,
         }
+    }
+
+    pub fn queue_layout(rect: Rect, state: &ZodeAppState) -> Option<ComposerQueueLayout> {
+        Self::queue_layout_in_viewport(rect, rect, state)
+    }
+
+    pub(crate) fn queue_layout_in_viewport(
+        rect: Rect,
+        viewport: Rect,
+        state: &ZodeAppState,
+    ) -> Option<ComposerQueueLayout> {
+        let slot = Self::layout_for_state(rect, state).queue?;
+        queue::layout(slot, viewport, state)
+    }
+
+    pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+        queue::command_for_widget(state, id)
     }
 
     pub(crate) fn attachment_layouts(
@@ -499,6 +636,80 @@ impl Composer {
                 theme,
             );
         }
-        input::paint(painter, layout.input, text_input, state, theme);
+        input::paint(painter, layout.input, text_input, state, false, theme);
     }
+
+    pub fn paint_input_with_app_context(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        text_input: &TextInputState,
+        state: &ZodeAppState,
+        hovered: Option<WidgetId>,
+        theme: &ZodeTheme,
+    ) {
+        Self::paint_input_with_workspace_app_context(
+            painter, rect, text_input, state, None, None, None, None, None, hovered, theme,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_input_with_workspace_app_context(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        text_input: &TextInputState,
+        state: &ZodeAppState,
+        workspace_label: Option<&str>,
+        connection_label: Option<&str>,
+        branch: Option<&str>,
+        goal: Option<&GoalProgress>,
+        focused: Option<WidgetId>,
+        hovered: Option<WidgetId>,
+        theme: &ZodeTheme,
+    ) {
+        let layout = Self::layout_for_state(rect, state);
+        context::paint(
+            painter,
+            layout.context,
+            workspace_label,
+            connection_label,
+            branch,
+            goal,
+            theme,
+        );
+        if let Some(attachment_rect) = layout.attachments {
+            let attachment_layouts = Self::attachment_layouts(attachment_rect, &state.composer);
+            attachments::paint(
+                painter,
+                attachment_rect,
+                &attachment_layouts,
+                &state.composer.attachments,
+                theme,
+            );
+        }
+        let queue_layout = Self::queue_layout(rect, state);
+        if let (Some(queue_layout), Some((_, messages))) =
+            (queue_layout.as_ref(), queue::current_queue(state))
+        {
+            queue::paint_rows(painter, queue_layout, messages, focused, hovered, theme);
+        }
+        input::paint(
+            painter,
+            layout.input,
+            text_input,
+            &state.composer,
+            current_session_busy(state),
+            theme,
+        );
+        if let Some(queue_layout) = queue_layout.as_ref() {
+            queue::paint_overlays(painter, queue_layout, focused, hovered, theme);
+        }
+    }
+}
+
+fn current_session_busy(state: &ZodeAppState) -> bool {
+    state
+        .current_session
+        .as_ref()
+        .and_then(|session| state.transcripts.get(session))
+        .is_some_and(|transcript| transcript.busy)
 }

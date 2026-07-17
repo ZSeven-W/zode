@@ -1,5 +1,3 @@
-use std::hash::{Hash, Hasher};
-
 use accesskit::{Action, Node, NodeId, Role, Toggled, Tree, TreeId, TreeUpdate};
 use jian_core::CursorHint;
 use jian_widgets::{Point2D, Rect};
@@ -8,15 +6,22 @@ use zode_app_model::{
 };
 
 use crate::{
-    Composer, DocumentPreview, EnvironmentPanel, Insets, IntegrationsPage, ProjectSidebar, RectExt,
-    ReviewPanel, SettingsPanel, SidebarRowTarget, ThreadHeader, ThreadTranscript, WorkspaceLayout,
+    composer_queue_reserved_height, Composer, DocumentPreview, EnvironmentPanel, Insets,
+    IntegrationsPage, ProjectSidebar, RectExt, ReviewPanel, SettingsPanel, SidebarRowTarget,
+    ThreadHeader, ThreadTranscript, WorkspaceLayout, COMPOSER_ATTACHMENT_H, COMPOSER_H,
     DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID, DOCUMENT_PREVIEW_EXTERNAL_ID,
     DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_REVIEW_ID,
-    INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID, SETTINGS_BACK_ID,
+    INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
 };
 
+mod ids;
+mod queue;
+mod settings;
 mod transcript;
 
+pub(crate) use ids::stable_widget_id;
+use queue::{append_queue_menu_nodes, append_queue_nodes};
+use settings::append_settings_nodes;
 use transcript::append_transcript_nodes;
 
 pub const SIDEBAR_ID: WidgetId = WidgetId(1);
@@ -77,13 +82,29 @@ pub struct WorkspaceSnapshot {
 impl WorkspaceSnapshot {
     pub fn build(state: &ZodeAppState, width: f32, height: f32, insets: Insets) -> Self {
         let route = state.presentation.route;
-        let layout = WorkspaceLayout::compute_presentation_with_attachments(
+        let queue_count = state
+            .current_session
+            .as_ref()
+            .and_then(|session| state.message_queues.get(session))
+            .map_or(0, |queue| queue.items.len());
+        let composer_height = COMPOSER_H
+            + if route == ShellRoute::Conversation && !state.composer.attachments.is_empty() {
+                COMPOSER_ATTACHMENT_H
+            } else {
+                0.0
+            }
+            + if route == ShellRoute::Conversation {
+                composer_queue_reserved_height(queue_count)
+            } else {
+                0.0
+            };
+        let layout = WorkspaceLayout::compute_presentation_with_composer_height(
             width,
             height,
             insets,
             route,
             state.presentation.secondary_pane,
-            route == ShellRoute::Conversation && !state.composer.attachments.is_empty(),
+            composer_height,
         );
         let mut nodes = Vec::new();
         let mut focus_order = 0;
@@ -152,7 +173,8 @@ impl WorkspaceSnapshot {
                 } else {
                     append_header_nodes(&mut nodes, &layout, &mut focus_order, state);
                     append_transcript_nodes(&mut nodes, &layout, &mut focus_order, state);
-                    let composer_layout = Composer::layout(layout.composer, &state.composer);
+                    let composer_layout = Composer::layout_for_state(layout.composer, state);
+                    append_queue_nodes(&mut nodes, &layout, &mut focus_order, state);
                     if let Some(attachment_strip) = composer_layout.attachments {
                         for attachment_layout in
                             Composer::attachment_layouts(attachment_strip, &state.composer)
@@ -208,13 +230,18 @@ impl WorkspaceSnapshot {
                                 SEND_ID,
                                 send_rect,
                                 Role::Button,
-                                "发送",
+                                if current_session_busy(state) {
+                                    "停止当前运行"
+                                } else {
+                                    "发送"
+                                },
                                 None,
                                 vec![Action::Click, Action::Focus],
                                 next_order(&mut focus_order),
                                 CursorHint::Pointer,
                             ));
                         }
+                        append_queue_menu_nodes(&mut nodes, &layout, &mut focus_order, state);
                         Some(COMPOSER_ID)
                     } else {
                         None
@@ -285,6 +312,14 @@ impl WorkspaceSnapshot {
         };
         Some(order[index])
     }
+}
+
+fn current_session_busy(state: &ZodeAppState) -> bool {
+    state
+        .current_session
+        .as_ref()
+        .and_then(|session| state.transcripts.get(session))
+        .is_some_and(|transcript| transcript.busy)
 }
 
 fn append_sidebar_nodes(
@@ -660,37 +695,6 @@ fn preview_accessibility_excerpt(content: &str) -> String {
     }
 }
 
-/// Stable FNV-1a IDs occupy a namespace byte plus a deterministic 56-bit
-/// payload. This never depends on `RandomState` or process entropy.
-pub(crate) fn stable_widget_id<T: Hash + ?Sized>(namespace: u8, key: &T) -> WidgetId {
-    let mut hasher = StableFnvHasher::new();
-    namespace.hash(&mut hasher);
-    key.hash(&mut hasher);
-    let payload = hasher.finish() & 0x00ff_ffff_ffff_ffff;
-    WidgetId((u64::from(namespace) << 56) | payload)
-}
-
-struct StableFnvHasher(u64);
-
-impl StableFnvHasher {
-    const fn new() -> Self {
-        Self(0xcbf2_9ce4_8422_2325)
-    }
-}
-
-impl Hasher for StableFnvHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-}
-
 pub fn accessibility_tree(snapshot: &WorkspaceSnapshot, physical_scale: f64) -> TreeUpdate {
     let scale = if physical_scale.is_finite() && physical_scale > 0.0 {
         physical_scale
@@ -770,182 +774,6 @@ fn next_order(order: &mut u32) -> Option<u32> {
     let current = *order;
     *order = (*order).saturating_add(1);
     Some(current)
-}
-
-fn append_settings_nodes(
-    nodes: &mut Vec<InteractionNode>,
-    layout: &WorkspaceLayout,
-    focus_order: &mut u32,
-    state: &ZodeAppState,
-) {
-    let settings = SettingsPanel::layout(layout.sidebar, layout.primary_surface, state);
-    if visible_rect(layout.sidebar) {
-        nodes.push(node(
-            SIDEBAR_ID,
-            layout.sidebar,
-            Role::Navigation,
-            "设置分类",
-            None,
-            Vec::new(),
-            None,
-            CursorHint::Default,
-        ));
-        nodes.push(node(
-            SETTINGS_BACK_ID,
-            settings.navigation.title,
-            Role::Button,
-            "返回应用",
-            None,
-            vec![Action::Click, Action::Focus],
-            next_order(focus_order),
-            CursorHint::Pointer,
-        ));
-        for entry in &settings.navigation.entries {
-            let Some(visible) = ThreadTranscript::clip_to_viewport(entry.rect, layout.sidebar)
-            else {
-                continue;
-            };
-            let mut category = node(
-                entry.id,
-                visible,
-                Role::Button,
-                entry.label,
-                None,
-                if entry.enabled {
-                    vec![Action::Click, Action::Focus]
-                } else {
-                    Vec::new()
-                },
-                entry.enabled.then(|| next_order(focus_order)).flatten(),
-                if entry.enabled {
-                    CursorHint::Pointer
-                } else {
-                    CursorHint::NotAllowed
-                },
-            );
-            category.toggled = Some(Toggled::from(entry.selected));
-            category.disabled = !entry.enabled;
-            nodes.push(category);
-        }
-    }
-    let content = settings.content;
-    if visible_rect(content) {
-        let max_scroll = SettingsPanel::max_scroll_offset(content, state);
-        let mut actions = Vec::new();
-        if settings.scroll_offset > 0.0 {
-            actions.push(Action::ScrollUp);
-        }
-        if settings.scroll_offset < max_scroll {
-            actions.push(Action::ScrollDown);
-        }
-        nodes.push(node(
-            SETTINGS_ROOT_ID,
-            content,
-            Role::ScrollView,
-            "设置内容",
-            None,
-            actions,
-            None,
-            CursorHint::Default,
-        ));
-    }
-
-    if SettingsPanel::active_category(state) == zode_app_model::SettingsCategory::General {
-        for preset in &settings.general.permission_presets {
-            let Some(visible_rect) = preset.visible_rect else {
-                continue;
-            };
-            let mut control = node(
-                preset.id,
-                visible_rect,
-                Role::RadioButton,
-                preset.label,
-                Some(preset.description.into()),
-                if preset.enabled {
-                    vec![Action::Click, Action::Focus]
-                } else {
-                    Vec::new()
-                },
-                preset.enabled.then(|| next_order(focus_order)).flatten(),
-                if preset.enabled {
-                    CursorHint::Pointer
-                } else {
-                    CursorHint::NotAllowed
-                },
-            );
-            control.toggled = Some(Toggled::from(preset.selected));
-            control.disabled = !preset.enabled;
-            nodes.push(control);
-        }
-        for row in &settings.general.general_rows {
-            let Some(visible_rect) = row.visible_rect else {
-                continue;
-            };
-            let mut setting = node(
-                row.id,
-                visible_rect,
-                Role::Button,
-                row.label,
-                Some(row.value.clone()),
-                if row.enabled {
-                    vec![Action::Click, Action::Focus]
-                } else {
-                    Vec::new()
-                },
-                row.enabled.then(|| next_order(focus_order)).flatten(),
-                if row.enabled {
-                    CursorHint::Pointer
-                } else {
-                    CursorHint::NotAllowed
-                },
-            );
-            setting.disabled = !row.enabled;
-            nodes.push(setting);
-        }
-    }
-
-    for control_layout in SettingsPanel::appearance_control_layout(content, state) {
-        let role = if matches!(
-            control_layout.id,
-            THEME_SYSTEM_ID | THEME_LIGHT_ID | THEME_DARK_ID
-        ) {
-            Role::RadioButton
-        } else {
-            Role::Switch
-        };
-        let mut control = node(
-            control_layout.id,
-            control_layout.visible_rect,
-            role,
-            &control_layout.control.label,
-            None,
-            vec![Action::Click, Action::Focus],
-            next_order(focus_order),
-            CursorHint::Pointer,
-        );
-        control.toggled = Some(if control_layout.control.selected {
-            Toggled::True
-        } else {
-            Toggled::False
-        });
-        nodes.push(control);
-    }
-
-    let Some(workspace_uri) = SettingsPanel::active_workspace_uri(state) else {
-        return;
-    };
-    for row in SettingsPanel::permission_row_layout(content, state, workspace_uri) {
-        nodes.push(node(
-            row.id,
-            row.visible_rect,
-            Role::Button,
-            &format!("撤销 {} 权限", row.tool),
-            None,
-            vec![Action::Click, Action::Focus],
-            next_order(focus_order),
-            CursorHint::Pointer,
-        ));
-    }
 }
 
 fn physical_rect(rect: Rect, scale: f64) -> accesskit::Rect {

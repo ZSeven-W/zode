@@ -9,6 +9,11 @@ pub const COMPOSER_CONTEXT_H: f32 = 44.0;
 pub const COMPOSER_ATTACHMENT_H: f32 = 52.0;
 pub const COMPOSER_INPUT_H: f32 = 100.0;
 pub const COMPOSER_H: f32 = COMPOSER_CONTEXT_H + COMPOSER_INPUT_H;
+pub const COMPOSER_QUEUE_MAX_VISIBLE: usize = 4;
+pub const COMPOSER_QUEUE_ROW_H: f32 = 29.0;
+pub const COMPOSER_QUEUE_PAD_Y: f32 = 5.0;
+pub const COMPOSER_QUEUE_INSET_X: f32 = 20.0;
+pub const COMPOSER_QUEUE_OVERLAP: f32 = 16.0;
 pub const COMPOSER_BOTTOM: f32 = 14.0;
 pub const CONTENT_GUTTER: f32 = 16.0;
 pub const TRANSCRIPT_TOP_GAP: f32 = 24.0;
@@ -110,7 +115,7 @@ impl WorkspaceLayout {
             insets,
             ShellRoute::Conversation,
             SecondaryLayout::None,
-            false,
+            COMPOSER_H,
         )
     }
 
@@ -132,7 +137,7 @@ impl WorkspaceLayout {
             insets,
             ShellRoute::Conversation,
             secondary,
-            false,
+            COMPOSER_H,
         )
     }
 
@@ -149,7 +154,7 @@ impl WorkspaceLayout {
             Some(SecondaryPane::Review | SecondaryPane::DocumentPreview) => SecondaryLayout::Review,
             None => SecondaryLayout::None,
         };
-        Self::compute_internal(width, height, insets, route, secondary, false)
+        Self::compute_internal(width, height, insets, route, secondary, COMPOSER_H)
     }
 
     /// Computes the state-dependent composer stack while keeping the rest of
@@ -167,7 +172,31 @@ impl WorkspaceLayout {
             Some(SecondaryPane::Review | SecondaryPane::DocumentPreview) => SecondaryLayout::Review,
             None => SecondaryLayout::None,
         };
-        Self::compute_internal(width, height, insets, route, secondary, has_attachments)
+        let composer_height = COMPOSER_H
+            + if has_attachments {
+                COMPOSER_ATTACHMENT_H
+            } else {
+                0.0
+            };
+        Self::compute_internal(width, height, insets, route, secondary, composer_height)
+    }
+
+    /// Computes the shell around an already measured state-dependent composer.
+    /// The composer remains bottom anchored while queue/attachment rows grow upward.
+    pub fn compute_presentation_with_composer_height(
+        width: f32,
+        height: f32,
+        insets: Insets,
+        route: ShellRoute,
+        secondary_pane: Option<SecondaryPane>,
+        composer_height: f32,
+    ) -> Self {
+        let secondary = match secondary_pane {
+            Some(SecondaryPane::Environment) => SecondaryLayout::Environment(ENVIRONMENT_PANEL_W),
+            Some(SecondaryPane::Review | SecondaryPane::DocumentPreview) => SecondaryLayout::Review,
+            None => SecondaryLayout::None,
+        };
+        Self::compute_internal(width, height, insets, route, secondary, composer_height)
     }
 
     fn compute_internal(
@@ -176,7 +205,7 @@ impl WorkspaceLayout {
         insets: Insets,
         route: ShellRoute,
         secondary: SecondaryLayout,
-        has_attachments: bool,
+        desired_composer_h: f32,
     ) -> Self {
         let width = finite_non_negative(width);
         let height = finite_non_negative(height);
@@ -234,13 +263,7 @@ impl WorkspaceLayout {
 
         let top_bar_h = TOP_BAR_H.min(available_h);
         let top_bar = Rect::xywh(main_x, insets.top, primary_w, top_bar_h);
-        let desired_composer_h = COMPOSER_H
-            + if has_attachments {
-                COMPOSER_ATTACHMENT_H
-            } else {
-                0.0
-            };
-        let composer_h = desired_composer_h
+        let composer_h = finite_non_negative(desired_composer_h)
             .min((available_h - top_bar_h - COMPOSER_BOTTOM - TRANSCRIPT_TOP_GAP).max(0.0));
         let composer_bottom_gap = COMPOSER_BOTTOM.min((safe_bottom - top_bar.max_y()).max(0.0));
         let composer_y = (safe_bottom - composer_bottom_gap - composer_h).max(top_bar.max_y());
@@ -286,6 +309,15 @@ impl WorkspaceLayout {
             divider,
             review_panel,
         }
+    }
+}
+
+pub fn composer_queue_reserved_height(item_count: usize) -> f32 {
+    let visible = item_count.min(COMPOSER_QUEUE_MAX_VISIBLE);
+    if visible == 0 {
+        0.0
+    } else {
+        COMPOSER_QUEUE_PAD_Y * 2.0 + COMPOSER_QUEUE_ROW_H * visible as f32
     }
 }
 

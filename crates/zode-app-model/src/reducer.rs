@@ -517,7 +517,6 @@ pub fn reduce_navigation_command(
             let changing_session = state.current_session.as_ref() != Some(&session);
             if changing_session {
                 state.composer.queue_menu = None;
-                state.composer.send_hovered = false;
                 state.composer.finish_queue_edit();
             }
             state.current_session = Some(session.clone());
@@ -691,9 +690,6 @@ pub fn reduce_agent_event(state: &mut ZodeAppState, event: AgentEvent) -> Reduce
             transcript
                 .items
                 .push(TranscriptItem::Error { message, retryable });
-            if !retryable {
-                transcript.busy = false;
-            }
         }
         AgentEventKind::Unknown => {
             transcript.items.push(TranscriptItem::Status {

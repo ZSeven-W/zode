@@ -9,6 +9,7 @@ pub(super) fn paint(
     rect: Rect,
     input: &TextInputState,
     state: &ComposerState,
+    busy: bool,
     theme: &ZodeTheme,
 ) {
     if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
@@ -128,13 +129,24 @@ pub(super) fn paint(
         SemanticIcon::Microphone.stroke_width(),
     );
     let send = Rect::xywh(rect.max_x() - 42.0, controls.origin.y, 28.0, 28.0);
-    painter.fill_round_rect(send, 14.0, theme.zode_purple);
-    let send_icon = Rect::xywh(send.origin.x + 6.0, send.origin.y + 6.0, 16.0, 16.0);
-    painter.stroke_svg_path(
-        SemanticIcon::Send.path(),
-        send_icon.origin,
-        send_icon.size.x,
-        jian_widgets::Color::WHITE,
-        SemanticIcon::Send.stroke_width(),
-    );
+    if busy {
+        painter.fill_round_rect(send, 14.0, theme.tokens.foreground);
+        let stop = Rect::xywh(
+            send.origin.x + (send.size.x - 8.0) / 2.0,
+            send.origin.y + (send.size.y - 8.0) / 2.0,
+            8.0,
+            8.0,
+        );
+        painter.fill_round_rect(stop, 1.5, theme.tokens.background);
+    } else {
+        painter.fill_round_rect(send, 14.0, theme.zode_purple);
+        let send_icon = Rect::xywh(send.origin.x + 6.0, send.origin.y + 6.0, 16.0, 16.0);
+        painter.stroke_svg_path(
+            SemanticIcon::Send.path(),
+            send_icon.origin,
+            send_icon.size.x,
+            jian_widgets::Color::WHITE,
+            SemanticIcon::Send.stroke_width(),
+        );
+    }
 }

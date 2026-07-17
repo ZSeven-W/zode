@@ -489,6 +489,21 @@ async fn drive_turn(
     let _ = events
         .send(session.clone(), turn_id, AgentEventKind::DiffInvalidated)
         .await;
+
+    // `TurnFinished` is the public hand-off edge for the next turn. Release
+    // this exact generation before publishing that edge so a consumer can
+    // immediately start another turn for the same session without racing the
+    // backend's stale busy slot.
+    {
+        let mut active = lock_active(&active);
+        if active
+            .get(&session)
+            .is_some_and(|turn| turn.turn_id == turn_id && turn.generation == generation)
+        {
+            active.remove(&session);
+        }
+    }
+
     let _ = events
         .send(
             session.clone(),
@@ -496,14 +511,6 @@ async fn drive_turn(
             AgentEventKind::TurnFinished { interrupted },
         )
         .await;
-
-    let mut active = lock_active(&active);
-    if active
-        .get(&session)
-        .is_some_and(|turn| turn.turn_id == turn_id && turn.generation == generation)
-    {
-        active.remove(&session);
-    }
 }
 
 fn lock_active(

@@ -21,7 +21,6 @@ pub struct ComposerState {
     pub queue_menu: Option<crate::QueuedMessageId>,
     pub editing_queued_message: Option<crate::QueuedMessageId>,
     pub draft_before_queue_edit: Option<String>,
-    pub send_hovered: bool,
 }
 
 impl ComposerState {

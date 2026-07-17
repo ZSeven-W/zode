@@ -21,8 +21,8 @@ mod workspace_shell;
 pub use approval_card::{ApprovalAction, ApprovalButtonLayout, ApprovalCard};
 pub use coming_soon_page::ComingSoonPage;
 pub use composer::{
-    Composer, ComposerController, ComposerLayout, ComposerOutcome, ComposerSubmission,
-    SandboxSelection,
+    Composer, ComposerController, ComposerLayout, ComposerOutcome, ComposerQueueLayout,
+    ComposerQueueMenuLayout, ComposerQueueRowLayout, ComposerSubmission, SandboxSelection,
 };
 pub use document_preview::{
     DocumentPreview, DocumentPreviewLayout, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,

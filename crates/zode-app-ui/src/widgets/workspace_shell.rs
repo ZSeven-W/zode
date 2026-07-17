@@ -9,7 +9,7 @@ use super::{
     ThreadHeader, ThreadTranscript, WindowChrome,
 };
 use crate::TRANSCRIPT_COMPOSER_GAP;
-use crate::{Insets, RectExt, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme};
+use crate::{Insets, RectExt, WidgetId, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme};
 
 /// Paints the complete platform-neutral workbench shell in stable z-order.
 pub struct WorkspaceShell;
@@ -23,7 +23,7 @@ impl WorkspaceShell {
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
         let input = TextInputState::with_text(state.composer.draft.clone());
-        Self::paint_snapshot_content(painter, snapshot, state, &input, None, None, theme)
+        Self::paint_snapshot_content(painter, snapshot, state, &input, None, None, None, theme)
     }
 
     pub fn paint(
@@ -46,7 +46,16 @@ impl WorkspaceShell {
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
         let snapshot = WorkspaceSnapshot::build(state, viewport.size.x, viewport.size.y, insets);
-        Self::paint_snapshot_content(painter, &snapshot, state, composer_input, None, None, theme)
+        Self::paint_snapshot_content(
+            painter,
+            &snapshot,
+            state,
+            composer_input,
+            None,
+            None,
+            None,
+            theme,
+        )
     }
 
     pub fn paint_with_terminal(
@@ -67,6 +76,7 @@ impl WorkspaceShell {
             &input,
             Some(terminal_grid),
             terminal_selection,
+            None,
             theme,
         )
     }
@@ -111,6 +121,30 @@ impl WorkspaceShell {
             composer_input,
             Some(terminal_grid),
             terminal_selection,
+            None,
+            theme,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_snapshot_with_hovered_widget(
+        painter: &mut dyn Painter,
+        snapshot: &WorkspaceSnapshot,
+        state: &ZodeAppState,
+        composer_input: &TextInputState,
+        terminal_grid: &TerminalGrid,
+        terminal_selection: Option<TerminalSelection>,
+        hovered: Option<WidgetId>,
+        theme: &ZodeTheme,
+    ) -> WorkspaceLayout {
+        Self::paint_snapshot_content(
+            painter,
+            snapshot,
+            state,
+            composer_input,
+            Some(terminal_grid),
+            terminal_selection,
+            hovered,
             theme,
         )
     }
@@ -123,6 +157,7 @@ impl WorkspaceShell {
         composer_input: &TextInputState,
         terminal_grid: Option<&TerminalGrid>,
         terminal_selection: Option<TerminalSelection>,
+        hovered: Option<WidgetId>,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
         let snapshot = snapshot.clone();
@@ -177,7 +212,7 @@ impl WorkspaceShell {
                 Some(SecondaryPane::Environment) | None => {}
             },
             ShellRoute::Conversation => {
-                paint_conversation(painter, &snapshot, state, composer_input, theme)
+                paint_conversation(painter, &snapshot, state, composer_input, hovered, theme)
             }
         }
 
@@ -212,6 +247,7 @@ fn paint_conversation(
     snapshot: &WorkspaceSnapshot,
     state: &ZodeAppState,
     composer_input: &TextInputState,
+    hovered: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
     let geometry = snapshot.layout;
@@ -219,7 +255,7 @@ fn paint_conversation(
         // Keep the reference empty-task composition anchored above the input
         // surface. Context/attachment strips may occupy the gap, but the
         // guidance itself never reaches that lower area.
-        let input = Composer::layout(geometry.composer, &state.composer).input;
+        let input = Composer::layout_for_state(geometry.composer, state).input;
         let empty_bottom = (input.origin.y - TRANSCRIPT_COMPOSER_GAP)
             .max(geometry.transcript.origin.y)
             .min(geometry.primary_surface.max_y());
@@ -244,15 +280,17 @@ fn paint_conversation(
     };
     let workspace_label = current_workspace_label(state);
     let goal = current_goal_progress(state);
-    Composer::paint_input_with_workspace_context(
+    Composer::paint_input_with_workspace_app_context(
         painter,
         geometry.composer,
         composer_input,
-        &state.composer,
+        state,
         workspace_label.as_deref(),
         Some(connection_label),
         branch,
         goal,
+        snapshot.focused,
+        hovered,
         theme,
     );
 }

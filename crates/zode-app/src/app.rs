@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use winit::{
     application::ApplicationHandler,
@@ -33,10 +33,12 @@ use crate::{
 };
 use zode_app_runtime::{path_to_workspace_uri, AppStateStore, LocalAppRuntime};
 use zode_core::{bootstrap::AppBootstrap, config::ConfigManager};
-use zode_node_protocol::{AgentEndpoint, NodeCapability};
+use zode_node_protocol::{AgentEndpoint, NodeCapability, UserContent};
 
 mod interaction;
 mod presentation;
+mod queue;
+mod queue_focus;
 mod terminal;
 mod window;
 
@@ -80,6 +82,14 @@ pub struct DesktopApp {
     proxy: EventLoopProxy<AppWake>,
     agent_events: Option<AgentEventBridge>,
     composer: ComposerController,
+    /// Full queued payloads stay controller-private so immutable UI snapshots
+    /// never retain image base64. `ZodeAppState` stores only lightweight queue
+    /// previews keyed by the same session-local message id.
+    queued_payloads: queue::QueuedPayloadStore,
+    /// Sessions created optimistically by a first composer submit stay
+    /// provisional until the command pump confirms their runtime options.
+    /// Explicit queue guidance must not race ahead of that Create+Start batch.
+    provisional_sessions: BTreeSet<zode_node_protocol::SessionLocator>,
     terminal_grid: TerminalGrid,
     terminal_controller: TerminalPanelController,
     terminal_runtime: TerminalRuntime,
@@ -89,6 +99,7 @@ pub struct DesktopApp {
     settings_touch: crate::input_dispatch::SettingsTouchTracker,
     frame_snapshot: WorkspaceSnapshot,
     focused_widget: Option<WidgetId>,
+    hovered_widget: Option<WidgetId>,
     window_focused: bool,
     clipboard: Option<Arc<dyn ClipboardService>>,
     external_open: Arc<dyn ExternalOpenService>,
@@ -190,6 +201,8 @@ impl DesktopApp {
             proxy,
             agent_events: None,
             composer,
+            queued_payloads: queue::QueuedPayloadStore::default(),
+            provisional_sessions: BTreeSet::new(),
             terminal_grid: TerminalGrid::new(80, 24),
             terminal_controller: TerminalPanelController::default(),
             terminal_runtime,
@@ -199,6 +212,7 @@ impl DesktopApp {
             settings_touch: crate::input_dispatch::SettingsTouchTracker::default(),
             frame_snapshot,
             focused_widget,
+            hovered_widget: None,
             window_focused: false,
             clipboard,
             external_open: Arc::new(LocalExternalOpenService),
@@ -239,8 +253,62 @@ impl DesktopApp {
 
     fn apply_composer_outcome(&mut self, mut outcome: zode_app_ui::ComposerOutcome) {
         self.app_state.composer.draft = self.composer.text().to_owned();
-        if let Some(command) = composer_outcome_command(&mut outcome) {
+
+        let editing = self
+            .app_state
+            .current_session
+            .clone()
+            .zip(self.app_state.composer.editing_queued_message);
+        let edited_submission = match &outcome {
+            zode_app_ui::ComposerOutcome::Send(submission)
+            | zode_app_ui::ComposerOutcome::Queue(submission) => Some(submission),
+            _ => None,
+        };
+        if let (Some((session, id)), Some(submission)) = (editing, edited_submission) {
+            self.enqueue_command(zode_app_model::AppCommand::EditQueuedMessageText {
+                session,
+                id,
+                text: submission_text(&submission.content),
+            });
+            return;
+        }
+
+        if let Some(session) = submission_queue_session(&self.app_state, &outcome) {
+            let submission = match &mut outcome {
+                zode_app_ui::ComposerOutcome::Send(submission)
+                | zode_app_ui::ComposerOutcome::Queue(submission) => submission,
+                _ => unreachable!("only sendable composer outcomes can enter a message queue"),
+            };
+            let command = zode_app_model::AppCommand::EnqueueMessage {
+                session,
+                content: std::mem::take(&mut submission.content),
+                attachments: submission.attachments.clone(),
+            };
+            // A regular Send can arrive while the session is idle even though
+            // it already owns pending queue items. Project it like Queue so it
+            // cannot appear in the transcript ahead of the existing head.
+            self.app_state.composer.attachments.clear();
             self.enqueue_command(command);
+            return;
+        }
+
+        if matches!(outcome, zode_app_ui::ComposerOutcome::Queue(_)) {
+            crate::command_bridge::project_command_error(
+                &mut self.app_state,
+                "cannot queue a message without an active session".into(),
+            );
+            self.rebuild_frame_snapshot();
+            self.request_redraw();
+            return;
+        }
+
+        if let Some(command) = composer_outcome_command(&mut outcome) {
+            let first_submit = matches!(&command, zode_app_model::AppCommand::Submit(_))
+                && !has_dispatchable_current_session(&self.app_state);
+            self.enqueue_command(command);
+            if first_submit {
+                self.mark_provisional_first_submit();
+            }
         }
         interaction::project_composer_outcome(&mut self.app_state, &outcome);
         self.rebuild_frame_snapshot();
@@ -249,6 +317,49 @@ impl DesktopApp {
             window.request_redraw();
         }
     }
+}
+
+fn submission_text(content: &[UserContent]) -> String {
+    content
+        .iter()
+        .filter_map(|item| match item {
+            UserContent::Text { text } => Some(text.as_str()),
+            UserContent::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn submission_queue_session(
+    state: &ZodeAppState,
+    outcome: &zode_app_ui::ComposerOutcome,
+) -> Option<zode_node_protocol::SessionLocator> {
+    let session = state.current_session.clone()?;
+    if session.session_id.starts_with("local-error-")
+        || state.available_workspace_for_session(&session).is_none()
+    {
+        return None;
+    }
+    match outcome {
+        zode_app_ui::ComposerOutcome::Queue(_) => Some(session),
+        zode_app_ui::ComposerOutcome::Send(_)
+            if state
+                .message_queues
+                .get(&session)
+                .is_some_and(|queue| !queue.items.is_empty()) =>
+        {
+            Some(session)
+        }
+        _ => None,
+    }
+}
+
+fn has_dispatchable_current_session(state: &ZodeAppState) -> bool {
+    state
+        .current_session
+        .as_ref()
+        .filter(|session| !session.session_id.starts_with("local-error-"))
+        .is_some_and(|session| state.available_workspace_for_session(session).is_some())
 }
 
 impl ApplicationHandler<AppWake> for DesktopApp {
@@ -270,10 +381,20 @@ impl ApplicationHandler<AppWake> for DesktopApp {
                         events.drain_into(&mut self.app_state)
                     });
                 let previous_session = self.app_state.current_session.clone();
+                let previous_queue_edit = self.app_state.composer.editing_queued_message;
                 let commands_applied = self
                     .command_bridge
                     .as_mut()
                     .map_or(0, |commands| commands.drain_into(&mut self.app_state));
+                self.reconcile_provisional_sessions();
+                self.sync_queue_editor_after_state_change(
+                    previous_session.clone(),
+                    previous_queue_edit,
+                );
+                self.prune_queued_payloads();
+                for command in event_drain.queue_dispatch_commands() {
+                    self.enqueue_command(command);
+                }
                 if previous_session != self.app_state.current_session {
                     self.request_presentation_refresh(
                         presentation::PresentationRefresh::SessionChanged,
@@ -380,6 +501,10 @@ impl ApplicationHandler<AppWake> for DesktopApp {
                     self.window_state.scale_factor,
                 ));
             }
+            WindowEvent::CursorLeft { .. } => {
+                self.hovered_widget = None;
+                self.request_redraw();
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.handle_unified_input(map_pointer_button(
                     button,
@@ -420,5 +545,135 @@ impl ApplicationHandler<AppWake> for DesktopApp {
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
         self.record_window_geometry();
         self.persist_ui_state();
+    }
+}
+
+#[cfg(test)]
+mod queue_policy_tests {
+    use zode_app_model::{
+        demo_state, reduce_agent_event, reduce_queue_command, AppCommand, ProjectState,
+        ReduceOutcome, TranscriptState,
+    };
+    use zode_app_ui::{ComposerController, ComposerOutcome, ComposerSubmission, Key, Modifiers};
+    use zode_node_protocol::{
+        AgentEvent, AgentEventKind, SessionLocator, ThreadStatus, ThreadSummary, TurnId,
+        UserContent, WorkspaceUri, PROTOCOL_VERSION,
+    };
+
+    use super::{has_dispatchable_current_session, submission_queue_session};
+
+    fn state_with_session() -> (zode_app_model::ZodeAppState, SessionLocator) {
+        let mut state = demo_state();
+        let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
+        let session = SessionLocator::new(state.host.node_id, "session");
+        state.projects.push(ProjectState {
+            workspace_uri: workspace.clone(),
+            expanded: true,
+            available: true,
+            last_opened_ms: 0,
+        });
+        state.threads.push(ThreadSummary {
+            session: session.clone(),
+            workspace_uri: workspace.clone(),
+            title: "session".into(),
+            updated_at_ms: 0,
+            status: ThreadStatus::Idle,
+        });
+        state
+            .transcripts
+            .insert(session.clone(), TranscriptState::default());
+        state.current_session = Some(session.clone());
+        state.active_workspace = Some(workspace);
+        (state, session)
+    }
+
+    fn send(text: &str) -> ComposerOutcome {
+        ComposerOutcome::Send(ComposerSubmission {
+            content: vec![UserContent::Text { text: text.into() }],
+            attachments: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn idle_send_joins_an_existing_session_queue_instead_of_bypassing_its_head() {
+        let (mut state, session) = state_with_session();
+        let head = state
+            .message_queues
+            .entry(session.clone())
+            .or_default()
+            .enqueue("existing head".into(), Vec::new())
+            .unwrap();
+
+        assert!(has_dispatchable_current_session(&state));
+        assert_eq!(
+            submission_queue_session(&state, &send("new tail")),
+            Some(session.clone())
+        );
+        let _ = reduce_queue_command(
+            &mut state,
+            &AppCommand::EnqueueMessage {
+                session,
+                content: vec![UserContent::Text {
+                    text: "new tail".into(),
+                }],
+                attachments: Vec::new(),
+            },
+        );
+        assert_eq!(
+            state
+                .message_queues
+                .values()
+                .next()
+                .and_then(|queue| queue.items.first())
+                .map(|message| message.id),
+            Some(head)
+        );
+        assert_eq!(
+            state.message_queues.values().next().map(|queue| queue
+                .items
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>()),
+            Some(vec!["existing head", "new tail"])
+        );
+    }
+
+    #[test]
+    fn idle_send_without_pending_messages_keeps_the_direct_submit_path() {
+        let (state, _) = state_with_session();
+
+        assert_eq!(submission_queue_session(&state, &send("direct")), None);
+    }
+
+    #[test]
+    fn fatal_error_window_still_queues_composer_input_until_turn_finished() {
+        let (mut state, session) = state_with_session();
+        let turn_id = TurnId::new();
+        state.transcripts.get_mut(&session).unwrap().busy = true;
+        state.active_turns.insert(session.clone(), turn_id);
+
+        assert_eq!(
+            reduce_agent_event(
+                &mut state,
+                AgentEvent {
+                    version: PROTOCOL_VERSION,
+                    session: session.clone(),
+                    turn_id,
+                    sequence: 1,
+                    kind: AgentEventKind::Error {
+                        message: "provider failed".into(),
+                        retryable: false,
+                    },
+                },
+            ),
+            ReduceOutcome::Applied,
+        );
+
+        let mut composer = ComposerController::new("follow up after failure");
+        composer.set_busy(state.transcripts[&session].busy);
+        let outcome = composer.key(Key::Enter, Modifiers::NONE);
+
+        assert!(matches!(outcome, ComposerOutcome::Queue(_)));
+        assert_eq!(submission_queue_session(&state, &outcome), Some(session));
     }
 }

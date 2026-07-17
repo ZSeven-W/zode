@@ -2,15 +2,13 @@ use accesskit::{Action, ActionData};
 use zode_app_model::{
     reduce_navigation_command, reduce_presentation_command, reduce_settings_command,
     reduce_tool_command, reduce_transcript_command, AppCommand, NavigationOutcome, PreviewState,
-    PreviewTarget, SettingsCommandOutcome, ShellRoute, ThemePreference, ToolCommandOutcome,
+    PreviewTarget, SettingsCommandOutcome, ShellRoute, ToolCommandOutcome,
     TranscriptCommandOutcome, ZodeAppState,
 };
 use zode_app_ui::{
-    DocumentPreview, EnvironmentPanel, IntegrationsPage, Key, KeyEvent, PointerButton,
-    PointerEvent, PointerEventKind, ProjectSidebar, ReviewPanel, SettingsPanel, SidebarAction,
-    ThreadHeader, ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId,
-    WorkspaceSnapshot, COMPOSER_ID, HIGH_CONTRAST_ID, REDUCED_MOTION_ID, SEND_ID, TERMINAL_ID,
-    THEME_DARK_ID, THEME_LIGHT_ID, THEME_SYSTEM_ID,
+    Composer, Key, KeyEvent, PointerButton, PointerEvent, PointerEventKind, SettingsPanel,
+    ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId, WorkspaceSnapshot,
+    COMPOSER_ID, SEND_ID, TERMINAL_ID,
 };
 
 use super::DesktopApp;
@@ -30,6 +28,10 @@ use crate::{
 #[path = "interaction_tests.rs"]
 mod tests;
 
+#[path = "widget_commands.rs"]
+mod widget_commands;
+use widget_commands::widget_command;
+
 pub(super) fn project_composer_outcome(
     state: &mut ZodeAppState,
     outcome: &zode_app_ui::ComposerOutcome,
@@ -37,6 +39,9 @@ pub(super) fn project_composer_outcome(
     match outcome {
         zode_app_ui::ComposerOutcome::AttachmentsChanged(attachments) => {
             state.composer.attachments.clone_from(attachments);
+        }
+        zode_app_ui::ComposerOutcome::Queue(_) => {
+            state.composer.attachments.clear();
         }
         zode_app_ui::ComposerOutcome::Send(submission)
         | zode_app_ui::ComposerOutcome::Steer(submission) => {
@@ -61,67 +66,6 @@ pub(super) fn project_composer_outcome(
         | zode_app_ui::ComposerOutcome::SetModel(_)
         | zode_app_ui::ComposerOutcome::SetEffort(_)
         | zode_app_ui::ComposerOutcome::SetSandbox(_) => {}
-    }
-}
-
-fn widget_command(state: &zode_app_model::ZodeAppState, id: WidgetId) -> Option<AppCommand> {
-    static_sidebar_command(state, id)
-        .or_else(|| ProjectSidebar::command_for_widget(state, id))
-        .or_else(|| ThreadHeader::command_for_widget(state, id))
-        .or_else(|| IntegrationsPage::command_for_widget(id))
-        .or_else(|| SettingsPanel::command_for_widget(state, id))
-        .or_else(|| EnvironmentPanel::command_for_widget(state, id))
-        .or_else(|| ReviewPanel::command_for_widget(state, id))
-        .or_else(|| DocumentPreview::command_for_widget(state, id))
-        .or_else(|| appearance_command(state, id))
-        .or_else(|| ThreadTranscript::command_for_widget(state, id))
-}
-
-fn static_sidebar_command(
-    state: &zode_app_model::ZodeAppState,
-    id: WidgetId,
-) -> Option<AppCommand> {
-    let action = match id.0 {
-        2..=7 => {
-            ProjectSidebar::navigation_items()
-                .get((id.0 - 2) as usize)?
-                .action
-        }
-        9 => ProjectSidebar::footer_item().action,
-        _ => return None,
-    };
-    match action {
-        SidebarAction::NewSession => new_session_command(state),
-        SidebarAction::Navigate(route) => Some(AppCommand::Navigate(route)),
-    }
-}
-
-fn new_session_command(state: &zode_app_model::ZodeAppState) -> Option<AppCommand> {
-    state
-        .active_available_workspace()
-        .cloned()
-        .or_else(|| {
-            state
-                .projects
-                .iter()
-                .find(|project| project.available)
-                .map(|project| project.workspace_uri.clone())
-        })
-        .map(|workspace_uri| AppCommand::NewSession { workspace_uri })
-}
-
-fn appearance_command(state: &zode_app_model::ZodeAppState, id: WidgetId) -> Option<AppCommand> {
-    match id {
-        THEME_SYSTEM_ID => Some(AppCommand::SetThemePreference(ThemePreference::System)),
-        THEME_LIGHT_ID => Some(AppCommand::SetThemePreference(ThemePreference::Light)),
-        THEME_DARK_ID => Some(AppCommand::SetThemePreference(ThemePreference::Dark)),
-        REDUCED_MOTION_ID => Some(AppCommand::SetReducedMotion(
-            !state.ui_preferences.reduced_motion,
-        )),
-        HIGH_CONTRAST_ID => Some(AppCommand::SetHighContrast(
-            !state.ui_preferences.high_contrast,
-        )),
-        _ => None,
     }
 }
 
@@ -238,6 +182,10 @@ impl DesktopApp {
             }
             return;
         }
+        let command = match self.apply_queue_intent(command) {
+            super::queue::QueueIntentResult::Handled => return,
+            super::queue::QueueIntentResult::Continue(command) => command,
+        };
         if self.apply_presentation_command(command.clone()) {
             return;
         }
@@ -450,13 +398,39 @@ impl DesktopApp {
         match id {
             SEND_ID => {
                 self.set_focused_widget(Some(COMPOSER_ID));
-                let outcome = self.composer.key(Key::Enter, zode_app_ui::Modifiers::NONE);
+                let busy = self
+                    .app_state
+                    .current_session
+                    .as_ref()
+                    .and_then(|session| self.app_state.transcripts.get(session))
+                    .is_some_and(|transcript| transcript.busy);
+                self.composer.set_busy(busy);
+                let outcome = if busy {
+                    self.composer.stop()
+                } else {
+                    self.composer.key(Key::Enter, zode_app_ui::Modifiers::NONE)
+                };
                 self.apply_composer_outcome(outcome);
             }
             COMPOSER_ID | TERMINAL_ID => {}
             _ => {
                 if let Some(command) = widget_command(&self.app_state, id) {
+                    let focus_composer =
+                        matches!(command, AppCommand::BeginEditQueuedMessage { .. });
+                    let opening_queue_menu = match &command {
+                        AppCommand::ToggleQueuedMessageMenu { id, .. }
+                            if self.app_state.composer.queue_menu != Some(*id) =>
+                        {
+                            Some(*id)
+                        }
+                        _ => None,
+                    };
                     self.enqueue_command(command);
+                    if focus_composer {
+                        self.set_focused_widget(Some(COMPOSER_ID));
+                    } else if let Some(message_id) = opening_queue_menu {
+                        self.focus_open_queue_menu(message_id);
+                    }
                 }
             }
         }
@@ -538,6 +512,11 @@ impl DesktopApp {
     fn handle_pointer_event(&mut self, event: PointerEvent) {
         self.window_state.cursor_logical = event.position;
         if event.kind == PointerEventKind::Move {
+            let hovered = self.frame_snapshot.hit_test(event.position);
+            if self.hovered_widget != hovered {
+                self.hovered_widget = hovered;
+                self.request_redraw();
+            }
             if let Some(window) = self.window.as_ref() {
                 window.set_cursor(cursor_icon_for_hint(cursor_hint_at(
                     &self.frame_snapshot,
@@ -564,6 +543,26 @@ impl DesktopApp {
         }
         if event.button != Some(PointerButton::Primary) {
             return;
+        }
+        if let Some(open) = self.app_state.composer.queue_menu {
+            let menu = Composer::queue_layout(self.frame_snapshot.layout.composer, &self.app_state)
+                .and_then(|layout| layout.menu);
+            let inside_menu = menu
+                .as_ref()
+                .is_some_and(|menu| menu.rect.contains(event.position));
+            if !inside_menu {
+                if let Some(session) = self.app_state.current_session.clone() {
+                    self.close_queue_menu_and_restore_focus(session, open);
+                }
+                return;
+            }
+            let actionable = self
+                .frame_snapshot
+                .hit_test(event.position)
+                .is_some_and(|id| Composer::command_for_widget(&self.app_state, id).is_some());
+            if !actionable {
+                return;
+            }
         }
         if self.app_state.presentation.route == ShellRoute::Terminal
             && self.frame_snapshot.hit_test(event.position) == Some(TERMINAL_ID)
@@ -596,6 +595,30 @@ impl DesktopApp {
         if is_paste_shortcut(&event, terminal_focused) {
             self.handle_paste();
             return;
+        }
+        if event.pressed && event.key == Key::Escape {
+            if let (Some(session), Some(id)) = (
+                self.app_state.current_session.clone(),
+                self.app_state.composer.queue_menu,
+            ) {
+                self.close_queue_menu_and_restore_focus(session, id);
+                return;
+            }
+            if let Some(session) = self
+                .app_state
+                .current_session
+                .clone()
+                .filter(|_| self.app_state.composer.editing_queued_message.is_some())
+            {
+                self.enqueue_command(AppCommand::CancelQueuedMessageEdit { session });
+                return;
+            }
+        }
+        if event.pressed && event.key == Key::Tab && self.app_state.composer.queue_menu.is_some() {
+            let backwards = event.modifiers.contains(zode_app_ui::Modifiers::SHIFT);
+            if self.trap_queue_menu_tab(backwards) {
+                return;
+            }
         }
         if event.pressed
             && event.key == Key::Escape
@@ -695,7 +718,10 @@ impl DesktopApp {
 
     fn apply_local_navigation_command(&mut self, command: &AppCommand) -> bool {
         let previous_session = self.app_state.current_session.clone();
+        let previous_queue_edit = self.app_state.composer.editing_queued_message;
         let outcome = reduce_navigation_command(&mut self.app_state, command.clone());
+        self.sync_queue_editor_after_state_change(previous_session.clone(), previous_queue_edit);
+        self.prune_queued_payloads();
         let handled = match outcome {
             NavigationOutcome::Applied => true,
             NavigationOutcome::NeedsEffect

@@ -181,7 +181,8 @@ pub fn composer_outcome_command(outcome: &mut ComposerOutcome) -> Option<AppComm
     match outcome {
         ComposerOutcome::Ignored
         | ComposerOutcome::Edited
-        | ComposerOutcome::AttachmentsChanged(_) => None,
+        | ComposerOutcome::AttachmentsChanged(_)
+        | ComposerOutcome::Queue(_) => None,
         ComposerOutcome::Send(submission) => {
             Some(AppCommand::Submit(std::mem::take(&mut submission.content)))
         }

@@ -1,6 +1,7 @@
 use zode_app_model::AttachmentMetadata;
 use zode_app_ui::{
-    ComposerController, ComposerOutcome, ImeEvent, Key, Modifiers, SandboxSelection,
+    ComposerController, ComposerOutcome, ComposerSubmission, ImeEvent, Key, Modifiers,
+    SandboxSelection,
 };
 use zode_node_protocol::{SandboxMode, UserContent};
 
@@ -127,14 +128,84 @@ fn same_named_attachments_receive_distinct_stable_ids() {
 }
 
 #[test]
-fn busy_composer_steers_and_exposes_stop() {
+fn busy_composer_queues_and_exposes_stop() {
     let mut composer = ComposerController::fixture("change course");
     composer.set_busy(true);
     assert!(matches!(
         composer.key(Key::Enter, Modifiers::NONE),
-        ComposerOutcome::Steer(_)
+        ComposerOutcome::Queue(_)
     ));
     assert_eq!(composer.stop(), ComposerOutcome::Stop);
+}
+
+#[test]
+fn queue_edit_restores_the_unsubmitted_draft_and_attachments() {
+    let mut composer = ComposerController::fixture("unsubmitted draft");
+    assert!(matches!(
+        composer.paste_image("image/png", "aGVsbG8=", "draft.png"),
+        ComposerOutcome::AttachmentsChanged(_)
+    ));
+    let before = composer.attachment_metadata().to_vec();
+
+    assert!(composer.begin_queue_edit("queued text"));
+    assert!(composer.queue_editing());
+    assert_eq!(composer.text(), "queued text");
+    assert!(composer.attachment_metadata().is_empty());
+    assert_eq!(
+        composer.paste_image("image/png", "d29ybGQ=", "blocked.png"),
+        ComposerOutcome::Ignored,
+    );
+
+    assert!(composer.finish_queue_edit());
+    assert!(!composer.queue_editing());
+    assert_eq!(composer.text(), "unsubmitted draft");
+    assert_eq!(composer.attachment_metadata(), before);
+
+    let ComposerOutcome::Send(submission) = composer.key(Key::Enter, Modifiers::NONE) else {
+        panic!("restored draft should remain submit-ready");
+    };
+    assert!(matches!(
+        submission.content.as_slice(),
+        [UserContent::Text { text }, UserContent::Image { display_name, .. }]
+            if text == "unsubmitted draft" && display_name == "draft.png"
+    ));
+}
+
+#[test]
+fn queue_edit_can_save_empty_text_for_an_attachment_only_message() {
+    let mut composer = ComposerController::fixture("unsubmitted draft");
+    composer.set_busy(true);
+    assert!(composer.begin_queue_edit_for_message("queued caption", true));
+    composer.set_text("");
+
+    let ComposerOutcome::Queue(submission) = composer.key(Key::Enter, Modifiers::NONE) else {
+        panic!("queue edit should emit an update even when only the queued attachments remain");
+    };
+    assert!(submission.content.is_empty());
+}
+
+#[test]
+fn queue_edit_retargets_without_losing_the_original_draft_backup() {
+    let mut composer = ComposerController::fixture("unsubmitted draft");
+    assert!(matches!(
+        composer.paste_image("image/png", "aGVsbG8=", "draft.png"),
+        ComposerOutcome::AttachmentsChanged(_)
+    ));
+    let original_attachments = composer.attachment_metadata().to_vec();
+
+    assert!(composer.begin_queue_edit_for_message("first queued message", false));
+    composer.set_text("unsaved first edit");
+    assert!(composer.begin_queue_edit_for_message("second queued message", true));
+    assert_eq!(composer.text(), "second queued message");
+    composer.set_text("");
+    assert!(matches!(
+        composer.key(Key::Enter, Modifiers::NONE),
+        ComposerOutcome::Send(ComposerSubmission { content, .. }) if content.is_empty()
+    ));
+
+    assert!(composer.finish_queue_edit());
+    assert_eq!(composer.text(), "unsubmitted draft");
+    assert_eq!(composer.attachment_metadata(), original_attachments);
 }
 
 #[test]

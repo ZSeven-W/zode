@@ -96,13 +96,14 @@ impl DesktopApp {
         let theme = crate::preferences::theme_for_state(&self.app_state);
         {
             let mut painter = FramePainter::new(&mut self.renderer, canvas);
-            WorkspaceShell::paint_snapshot_with_composer_and_terminal_input(
+            WorkspaceShell::paint_snapshot_with_hovered_widget(
                 &mut painter,
                 &self.frame_snapshot,
                 &self.app_state,
                 self.composer.input_state(),
                 &self.terminal_grid,
                 self.terminal_controller.selection(),
+                self.hovered_widget,
                 &theme,
             );
         }
@@ -172,6 +173,7 @@ impl DesktopApp {
             .filter(|focused| snapshot.node(*focused).is_some())
             .or(snapshot.focused);
         self.focused_widget = snapshot.focused;
+        self.hovered_widget = snapshot.hit_test(self.window_state.cursor_logical);
         self.frame_snapshot = snapshot;
     }
 

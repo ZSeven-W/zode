@@ -595,7 +595,7 @@ fn retryable_error_keeps_the_turn_busy() {
 }
 
 #[test]
-fn non_retryable_error_ends_busy_until_turn_finished_arrives() {
+fn non_retryable_error_keeps_turn_busy_until_turn_finished_arrives() {
     let (mut state, session, turn_id) = active_state();
 
     reduce_agent_event(
@@ -611,7 +611,7 @@ fn non_retryable_error_ends_busy_until_turn_finished_arrives() {
         ),
     );
 
-    assert!(!state.transcripts[&session].busy);
+    assert!(state.transcripts[&session].busy);
     assert_eq!(state.active_turns.get(&session), Some(&turn_id));
 }
 
