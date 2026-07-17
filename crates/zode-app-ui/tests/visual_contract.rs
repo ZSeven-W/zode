@@ -368,6 +368,7 @@ fn empty_conversation_exposes_zode_guidance_and_full_composer_chrome() {
         assert!(!text.contains(superseded_copy));
     }
     assert!(text.contains("本地"));
+    assert!(!painter.texts().contains(&"新任务"));
     assert!(!painter.texts().contains(&"zode"));
     assert!(!painter.texts().contains(&"main"));
     assert!(!painter.texts().contains(&"完全访问"));

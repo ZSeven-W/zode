@@ -124,17 +124,18 @@ impl ThreadHeader {
                     .iter()
                     .find(|thread| &thread.session == session)
             })
-            .map(|thread| thread.title.as_str())
-            .unwrap_or("新任务");
-        paint_single_line(
-            painter,
-            title,
-            header.title,
-            13.0,
-            600,
-            theme.tokens.foreground,
-            HorizontalAlign::Start,
-        );
+            .map(|thread| thread.title.as_str());
+        if let Some(title) = title {
+            paint_single_line(
+                painter,
+                title,
+                header.title,
+                13.0,
+                600,
+                theme.tokens.foreground,
+                HorizontalAlign::Start,
+            );
+        }
         for (action, icon) in [
             (header.environment, SemanticIcon::Environment),
             (header.review, SemanticIcon::Diff),
