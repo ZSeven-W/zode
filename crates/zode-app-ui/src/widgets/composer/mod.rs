@@ -354,7 +354,7 @@ impl Composer {
             return Vec::new();
         }
         let available = (rect.size.x - 24.0).max(0.0);
-        let desired: f32 = 180.0;
+        let desired: f32 = 240.0;
         let gap: f32 = 8.0;
         state
             .attachments

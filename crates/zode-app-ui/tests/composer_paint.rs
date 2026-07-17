@@ -194,6 +194,16 @@ fn composer_attachment_strip_appears_only_with_metadata() {
     assert!(with.attachments.is_some());
     assert!((with.context.size.y - 44.0).abs() <= 4.0);
     assert!((with.input.size.y - 100.0).abs() <= 2.0);
+
+    let mut shell_state = zode_app_model::demo_state();
+    shell_state.composer = state;
+    let snapshot = WorkspaceSnapshot::build(&shell_state, 1_440.0, 1_080.0, Insets::ZERO);
+    let attachment = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.name == "附件 reference.png")
+        .expect("attachment metadata node");
+    assert_eq!(attachment.rect.size.x, 240.0);
 }
 
 #[test]
