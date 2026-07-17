@@ -18,12 +18,21 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: install skia text dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+      - name: render desktop reference
+        run: cargo run -p zode-app -- --render-snapshot target/zode-shell-reference.png
+      - name: upload desktop reference
+        uses: actions/upload-artifact@v4
+        with:
+          name: zode-shell-reference
+          path: target/zode-shell-reference.png
   deny:
     runs-on: ubuntu-latest
     steps:
