@@ -53,7 +53,7 @@ fn accessibility_adapter_is_installed_before_the_window_is_visible() {
     assert!(helper.contains("window.set_maximized(true)"));
     assert!(helper.contains("window.set_visible(true)"));
     assert!(window_source.contains(".with_visible(false)"));
-    assert!(include_str!("../src/app.rs").contains("AccessibilityHost::install_before_show"));
+    assert!(include_str!("../src/app/window.rs").contains("AccessibilityHost::install_before_show"));
 }
 
 #[test]

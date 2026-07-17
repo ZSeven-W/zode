@@ -21,7 +21,6 @@ use crate::{
         dispatch_key, ime_allowed_for_focus, settings_scroll_delta_for_action,
         settings_scroll_delta_for_key, KeyDispatch, SettingsTouchOutcome,
     },
-    window_state::{update_window_geometry, WindowGeometry},
 };
 
 impl DesktopApp {
@@ -325,40 +324,6 @@ impl DesktopApp {
         }
     }
 
-    pub(super) fn record_window_geometry(&mut self) {
-        let Some(window) = self.window.as_ref() else {
-            return;
-        };
-        let size = window.inner_size();
-        let minimized = window.is_minimized().unwrap_or(false);
-        if minimized || size.width == 0 || size.height == 0 {
-            return;
-        }
-        let fallback = self.window_geometry.unwrap_or(WindowGeometry {
-            x: 0,
-            y: 0,
-            width: size.width,
-            height: size.height,
-            maximized: false,
-        });
-        let position = window
-            .outer_position()
-            .unwrap_or(winit::dpi::PhysicalPosition::new(fallback.x, fallback.y));
-        let maximized = window.is_maximized();
-        let reported = WindowGeometry {
-            x: position.x,
-            y: position.y,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            maximized,
-        };
-        if let Some(saved) = self.window_geometry.as_mut() {
-            update_window_geometry(saved, reported, maximized, minimized);
-        } else {
-            self.window_geometry = Some(reported);
-        }
-    }
-
     pub(super) fn persist_ui_state(&self) {
         let Some(store) = self.app_state_store.as_ref() else {
             return;
@@ -376,19 +341,6 @@ impl DesktopApp {
             state.last_session = last_session;
         }) {
             eprintln!("zode-app: failed to persist UI state: {error}");
-        }
-    }
-
-    pub(super) fn request_redraw(&mut self) {
-        self.window_state.dirty = true;
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-        }
-    }
-
-    pub(super) fn update_accessibility_window_bounds(&mut self) {
-        if let (Some(a11y), Some(window)) = (self.a11y.as_mut(), self.window.as_ref()) {
-            a11y.update_window_bounds(window);
         }
     }
 

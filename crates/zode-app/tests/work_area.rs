@@ -74,7 +74,7 @@ fn no_saved_geometry_does_not_require_a_platform_query() {
 
 #[test]
 fn desktop_startup_does_not_mislabel_winit_monitor_bounds_as_work_areas() {
-    let source = include_str!("../src/app.rs");
+    let source = include_str!("../src/app/window.rs");
     let platform = include_str!("../src/platform_work_area.rs");
     let manifest = include_str!("../Cargo.toml");
     let casement_windows = include_str!("../../../vendor/casement/src/platform/windows.rs");

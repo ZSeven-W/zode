@@ -149,14 +149,16 @@ fn cursor_hint_comes_from_the_shared_snapshot_hit_target() {
 #[test]
 fn terminal_copy_uses_the_local_clipboard_command_gateway() {
     let app = include_str!("../src/app.rs");
+    let terminal = include_str!("../src/app/terminal.rs");
     let interaction = include_str!("../src/app/interaction.rs");
-    let copy_branch = app
+    let copy_branch = terminal
         .split("TerminalPanelController::is_copy_shortcut")
         .nth(1)
         .expect("terminal copy shortcut branch");
 
     assert!(copy_branch.contains("self.enqueue_command(command)"));
     assert!(!app.contains("pending_commands.push_back"));
+    assert!(!terminal.contains("pending_commands.push_back"));
     assert!(!interaction.contains("pending_commands.push_back"));
     assert!(interaction.contains("prepare_dispatch"));
     assert!(app.contains("CommandBridge::spawn"));

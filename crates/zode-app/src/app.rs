@@ -1,6 +1,5 @@
-use std::{num::NonZeroU32, sync::Arc};
+use std::sync::Arc;
 
-use jian_widgets::Rect;
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, WindowEvent},
@@ -8,16 +7,11 @@ use winit::{
     keyboard::ModifiersState,
     window::{Window, WindowId},
 };
-use zode_app_model::{
-    reduce_terminal_command, AppCommand, ShellPage, TerminalCommandOutcome, ZodeAppState,
-};
+use zode_app_model::ZodeAppState;
 use zode_app_ui::{
-    accessibility_tree, ComposerController, Insets, TerminalGrid, TerminalPanel,
-    TerminalPanelController, WidgetId, WorkspaceShell, WorkspaceSnapshot, TERMINAL_ID,
+    ComposerController, Insets, TerminalGrid, TerminalPanelController, WidgetId, WorkspaceSnapshot,
 };
 
-#[cfg(not(target_os = "macos"))]
-use crate::event_map::resize_direction;
 use crate::{
     accessibility_host::{AccessibilityBridge, AccessibilityHost},
     bootstrap_state::load_initial_state,
@@ -25,23 +19,23 @@ use crate::{
     command_bridge::CommandBridge,
     event_bridge::AgentEventBridge,
     event_map::{
-        composer_outcome_command, is_drag_region, map_ime_input, map_keyboard, map_pointer_button,
-        map_pointer_move, map_system_theme, map_touch, map_wheel, terminal_shortcut_command,
+        composer_outcome_command, map_ime_input, map_keyboard, map_pointer_button,
+        map_pointer_move, map_touch, map_wheel,
     },
-    render::{FramePainter, NativeBackend, RasterSurface},
+    render::{NativeBackend, RasterSurface},
     services::LocalTerminalService,
     terminal_runtime::TerminalRuntime,
-    window_bootstrap::hidden_window_attributes_for_placement,
     window_state::{
         AppWake, WindowGeometry, WindowState, DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH,
     },
-    work_area::{resolve_startup_placement, PlatformWorkAreaProvider},
 };
 use zode_app_runtime::{path_to_workspace_uri, AppStateStore, LocalAppRuntime};
 use zode_core::{bootstrap::AppBootstrap, config::ConfigManager};
 use zode_node_protocol::{AgentEndpoint, NodeCapability};
 
 mod interaction;
+mod terminal;
+mod window;
 
 pub fn run_demo() -> Result<(), Box<dyn std::error::Error>> {
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -220,164 +214,6 @@ impl DesktopApp {
         self.command_bridge = Some(CommandBridge::spawn(endpoint, self.proxy.clone()));
     }
 
-    fn open_window(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
-        if self.window.is_some() {
-            return Ok(());
-        }
-        let provider = PlatformWorkAreaProvider::from_event_loop(event_loop);
-        let (placement, work_area_warning) =
-            resolve_startup_placement(self.window_geometry, &provider);
-        if let Some(error) = work_area_warning {
-            eprintln!(
-                "zode-app: saved window position was not restored because work-area discovery is unavailable: {error}"
-            );
-        }
-        let attributes = hidden_window_attributes_for_placement(placement);
-
-        let window = Arc::new(
-            event_loop
-                .create_window(attributes)
-                .map_err(|error| error.to_string())?,
-        );
-        window.set_ime_allowed(false);
-        self.app_state.host.system_theme = map_system_theme(window.theme());
-        let size = window.inner_size();
-        self.window_state = WindowState::new(size.width, size.height, window.scale_factor());
-        self.renderer = NativeBackend::new(self.window_state.scale_factor as f32);
-        self.rebuild_frame_snapshot();
-        self.resize_terminal_grid();
-
-        let wake_proxy = self.proxy.clone();
-        let wake = Arc::new(move || {
-            let _ = wake_proxy.send_event(AppWake::Redraw);
-        });
-        let a11y = AccessibilityHost::install_before_show(
-            &window,
-            &self.frame_snapshot,
-            self.window_state.scale_factor,
-            wake,
-            placement.maximized(),
-        )
-        .map_err(|error| error.to_string())?;
-        let context =
-            softbuffer::Context::new(window.clone()).map_err(|error| error.to_string())?;
-        let presenter = softbuffer::Surface::new(&context, window.clone())
-            .map_err(|error| error.to_string())?;
-        self.presenter = Some(presenter);
-        self.a11y = Some(a11y);
-        self.window = Some(window.clone());
-        self.record_window_geometry();
-        window.request_redraw();
-        Ok(())
-    }
-
-    fn redraw(&mut self) -> Result<(), String> {
-        let (physical_width, physical_height) = (
-            self.window_state.physical_width.max(1),
-            self.window_state.physical_height.max(1),
-        );
-        self.rebuild_frame_snapshot();
-        let required = (physical_width, physical_height);
-        if self.raster.as_ref().map(RasterSurface::size) != Some(required) {
-            self.raster = Some(
-                RasterSurface::new(physical_width, physical_height)
-                    .map_err(|error| error.to_string())?,
-            );
-        }
-        let raster = self.raster.as_mut().expect("raster initialized");
-        let canvas = raster.canvas();
-        canvas.reset_matrix();
-        canvas.clear(skia_safe::Color::WHITE);
-        let scale = self.window_state.scale_factor as f32;
-        if let Some(a11y) = self.a11y.as_mut() {
-            a11y.push(accessibility_tree(
-                &self.frame_snapshot,
-                self.window_state.scale_factor,
-            ));
-        }
-        canvas.scale((scale, scale));
-        let theme = crate::preferences::theme_for_state(&self.app_state);
-        {
-            let mut painter = FramePainter::new(&mut self.renderer, canvas);
-            WorkspaceShell::paint_snapshot_with_composer_and_terminal_input(
-                &mut painter,
-                &self.frame_snapshot,
-                &self.app_state,
-                self.composer.input_state(),
-                &self.terminal_grid,
-                self.terminal_controller.selection(),
-                &theme,
-            );
-        }
-
-        let mut rgba = vec![0_u8; physical_width as usize * physical_height as usize * 4];
-        if !raster.read_rgba8(&mut rgba) {
-            return Err("Skia framebuffer read failed".into());
-        }
-        let presenter = self
-            .presenter
-            .as_mut()
-            .ok_or_else(|| "presenter is not initialized".to_owned())?;
-        presenter
-            .resize(
-                NonZeroU32::new(physical_width).expect("positive width"),
-                NonZeroU32::new(physical_height).expect("positive height"),
-            )
-            .map_err(|error| error.to_string())?;
-        let mut buffer = presenter.buffer_mut().map_err(|error| error.to_string())?;
-        for (index, pixel) in buffer.iter_mut().enumerate() {
-            let offset = index * 4;
-            *pixel = (u32::from(rgba[offset]) << 16)
-                | (u32::from(rgba[offset + 1]) << 8)
-                | u32::from(rgba[offset + 2]);
-        }
-        if let Some(window) = self.window.as_ref() {
-            window.pre_present_notify();
-        }
-        buffer.present().map_err(|error| error.to_string())?;
-        self.window_state.dirty = false;
-        Ok(())
-    }
-
-    fn begin_window_gesture(&self) {
-        let Some(window) = self.window.as_ref() else {
-            return;
-        };
-        #[cfg(not(target_os = "macos"))]
-        {
-            let (width, height) = self.window_state.logical_size();
-            if let Some(direction) = resize_direction(
-                self.window_state.cursor_logical.x,
-                self.window_state.cursor_logical.y,
-                width,
-                height,
-            ) {
-                let _ = window.drag_resize_window(direction);
-                return;
-            }
-        }
-        let geometry = self.frame_snapshot.layout;
-        if is_drag_region(self.window_state.cursor_logical, &geometry) {
-            let _ = window.drag_window();
-        }
-    }
-
-    fn rebuild_frame_snapshot(&mut self) {
-        let (width, height) = self.window_state.logical_size();
-        let mut snapshot = WorkspaceSnapshot::build(
-            &self.app_state,
-            width,
-            height,
-            self.window_state.safe_area_insets,
-        );
-        snapshot.focused = self
-            .focused_widget
-            .filter(|focused| snapshot.node(*focused).is_some())
-            .or(snapshot.focused);
-        self.focused_widget = snapshot.focused;
-        self.frame_snapshot = snapshot;
-    }
-
     fn sync_composer_busy(&mut self) {
         let busy = self
             .app_state
@@ -396,152 +232,6 @@ impl DesktopApp {
         self.window_state.dirty = true;
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
-        }
-    }
-
-    fn apply_terminal_command(&mut self, command: AppCommand) {
-        if command == AppCommand::OpenTerminal {
-            let _ = reduce_terminal_command(&mut self.app_state, command);
-            if self.terminal_runtime.active_id().is_none()
-                && self.app_state.terminal.unavailable_reason.is_none()
-            {
-                let cwd = self.terminal_cwd();
-                let (cols, rows) = self.terminal_grid.size();
-                match self.terminal_runtime.open(
-                    &cwd,
-                    u16::try_from(cols).unwrap_or(u16::MAX),
-                    u16::try_from(rows).unwrap_or(u16::MAX),
-                ) {
-                    Ok(id) => self.app_state.terminal.active_id = Some(id),
-                    Err(error) => {
-                        self.app_state.terminal.unavailable_reason = Some(error.to_string())
-                    }
-                }
-            }
-            self.rebuild_frame_snapshot();
-            self.set_focused_widget(Some(TERMINAL_ID));
-        } else {
-            match reduce_terminal_command(&mut self.app_state, command.clone()) {
-                TerminalCommandOutcome::NeedsEffect => {
-                    let result = match command {
-                        AppCommand::WriteTerminal { id, bytes } => {
-                            self.terminal_runtime.write(id, bytes)
-                        }
-                        AppCommand::ResizeTerminal { id, cols, rows } => {
-                            self.terminal_runtime.resize(id, cols, rows)
-                        }
-                        AppCommand::CloseTerminal(id) => {
-                            let result = self.terminal_runtime.close(id);
-                            if result.is_ok() {
-                                self.app_state.terminal.active_id = None;
-                                self.app_state.terminal.open = false;
-                                self.app_state.terminal.focused = false;
-                            }
-                            result
-                        }
-                        _ => Ok(()),
-                    };
-                    if let Err(error) = result {
-                        self.app_state.terminal.unavailable_reason = Some(error.to_string());
-                    }
-                }
-                TerminalCommandOutcome::Applied => {}
-                TerminalCommandOutcome::Ignored => return,
-            }
-        }
-        self.window_state.dirty = true;
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-        }
-    }
-
-    fn terminal_cwd(&self) -> std::path::PathBuf {
-        self.app_state
-            .active_available_workspace()
-            .and_then(|workspace| crate::services::workspace_root(workspace).ok())
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-    }
-
-    fn drain_terminal_output(&mut self) {
-        let mut changed = false;
-        for output in self.terminal_runtime.drain_output() {
-            match output {
-                Ok(bytes) => {
-                    self.terminal_grid.feed(&bytes);
-                    changed = true;
-                }
-                Err(error) => self.app_state.terminal.unavailable_reason = Some(error.to_string()),
-            }
-        }
-        if changed && self.app_state.terminal.follow_tail {
-            self.app_state.terminal.scroll_offset = TerminalPanel::tail_offset(
-                self.terminal_grid.line_count(),
-                self.terminal_rect().size.y,
-            );
-        }
-        match self.terminal_runtime.reap_finished() {
-            Ok(Some(id)) if self.app_state.terminal.active_id == Some(id) => {
-                self.app_state.terminal.active_id = None;
-                self.app_state.terminal.open = false;
-                self.app_state.terminal.focused = false;
-            }
-            Ok(_) => {}
-            Err(error) => self.app_state.terminal.unavailable_reason = Some(error.to_string()),
-        }
-    }
-
-    fn terminal_rect(&self) -> Rect {
-        let geometry = self.frame_snapshot.layout;
-        Rect::xywh(
-            geometry.transcript.origin.x,
-            geometry.transcript.origin.y,
-            geometry.transcript.size.x,
-            geometry.composer.origin.y + geometry.composer.size.y - geometry.transcript.origin.y,
-        )
-    }
-
-    fn handle_terminal_key(&mut self, event: &zode_app_ui::KeyEvent) -> bool {
-        if let Some(command) = terminal_shortcut_command(event) {
-            self.apply_terminal_command(command);
-            return true;
-        }
-        if self.app_state.shell.page != ShellPage::Terminal || !self.app_state.terminal.focused {
-            return false;
-        }
-        if TerminalPanelController::is_copy_shortcut(event) {
-            if let Some(command) = self.terminal_controller.copy_command(&self.terminal_grid) {
-                self.enqueue_command(command);
-            }
-            return true;
-        }
-        if let Some(command) = self
-            .terminal_controller
-            .key_command(&self.app_state.terminal, event)
-        {
-            self.apply_terminal_command(command);
-        }
-        true
-    }
-
-    fn resize_terminal_grid(&mut self) {
-        let rect = self.terminal_rect();
-        let cols = ((rect.size.x - 16.0).max(8.0) / 8.0).floor() as usize;
-        let rows = (rect.size.y.max(20.0) / 20.0).floor() as usize;
-        if self.terminal_grid.size() == (cols, rows) {
-            return;
-        }
-        self.terminal_grid.resize(cols, rows);
-        if self.app_state.terminal.follow_tail {
-            self.app_state.terminal.scroll_offset =
-                TerminalPanel::tail_offset(self.terminal_grid.line_count(), rect.size.y);
-        }
-        if let Some(id) = self.app_state.terminal.active_id {
-            self.apply_terminal_command(AppCommand::ResizeTerminal {
-                id,
-                cols: u16::try_from(cols).unwrap_or(u16::MAX),
-                rows: u16::try_from(rows).unwrap_or(u16::MAX),
-            });
         }
     }
 }
