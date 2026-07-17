@@ -1,3 +1,4 @@
+mod chrome;
 mod footer;
 mod layout;
 mod menu;
@@ -34,6 +35,8 @@ pub const SIDEBAR_PROJECTS_SECTION_ID: WidgetId = WidgetId(9_100);
 pub const SIDEBAR_PROJECTS_MORE_ID: WidgetId = WidgetId(9_101);
 pub const SIDEBAR_PROJECTS_NEW_ID: WidgetId = WidgetId(9_102);
 pub const SIDEBAR_TASKS_SECTION_ID: WidgetId = WidgetId(9_103);
+pub const SIDEBAR_SEARCH_ID: WidgetId = WidgetId(9_104);
+pub const SIDEBAR_TOGGLE_ID: WidgetId = WidgetId(9_105);
 
 const PIN_NAMESPACE: u8 = 0x42;
 const ARCHIVE_NAMESPACE: u8 = 0x43;
@@ -208,6 +211,14 @@ impl ProjectSidebar {
         layout::footer_rect(rect)
     }
 
+    pub fn titlebar_toggle_rect(rect: Rect) -> Rect {
+        layout::titlebar_toggle_rect(rect)
+    }
+
+    pub fn brand_search_rect(rect: Rect) -> Rect {
+        layout::brand_search_rect(rect)
+    }
+
     pub fn help_rect(rect: Rect) -> Rect {
         layout::help_rect(Self::footer_rect(rect))
     }
@@ -313,6 +324,12 @@ impl ProjectSidebar {
     }
 
     pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+        if id == SIDEBAR_TOGGLE_ID {
+            return Some(AppCommand::TogglePrimarySidebar);
+        }
+        if id == SIDEBAR_SEARCH_ID {
+            return Some(AppCommand::ToggleSidebarProjectPicker);
+        }
         if id == SIDEBAR_TASKS_TOGGLE_ID || id == SIDEBAR_TASKS_SECTION_ID {
             return Some(AppCommand::ToggleSidebarTasks);
         }

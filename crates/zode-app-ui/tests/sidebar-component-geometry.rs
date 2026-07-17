@@ -1,6 +1,8 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
-use zode_app_model::{demo_state, ProjectState, ShellRoute};
-use zode_app_ui::{ProjectSidebar, SemanticIcon, SidebarRowTarget, ZodeTheme};
+use zode_app_model::{demo_state, AppCommand, ProjectPickerAnchor, ProjectState, ShellRoute};
+use zode_app_ui::{
+    ProjectSidebar, SemanticIcon, SidebarRowTarget, ZodeTheme, SIDEBAR_SEARCH_ID, SIDEBAR_TOGGLE_ID,
+};
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,10 +70,14 @@ fn sidebar_state() -> zode_app_model::ZodeAppState {
 
 #[test]
 fn sidebar_uses_reference_vertical_rhythm_and_edge_insets() {
-    let rect = Rect::xywh(0.0, 0.0, 292.0, 800.0);
+    let rect = Rect::xywh(0.0, 0.0, 293.0, 800.0);
     let layout = ProjectSidebar::layout(rect, &sidebar_state());
 
-    assert_eq!(layout.brand, Rect::xywh(16.0, 38.0, 260.0, 47.0));
+    assert_eq!(layout.titlebar_toggle, Rect::xywh(88.0, 11.0, 24.0, 24.0));
+    assert_eq!(layout.titlebar_back, Rect::xywh(123.0, 11.0, 24.0, 24.0));
+    assert_eq!(layout.titlebar_forward, Rect::xywh(157.0, 11.0, 24.0, 24.0));
+    assert_eq!(layout.brand, Rect::xywh(16.0, 38.0, 261.0, 47.0));
+    assert_eq!(layout.brand_search, Rect::xywh(257.0, 48.0, 28.0, 28.0));
     assert_eq!(layout.navigation_rows[0].rect.origin.y, 86.0);
     assert_eq!(layout.navigation_rows[0].rect.size.y, 30.0);
     for pair in layout.navigation_rows.windows(2) {
@@ -79,8 +85,79 @@ fn sidebar_uses_reference_vertical_rhythm_and_edge_insets() {
     }
     assert_eq!(
         layout.sections[0].rect,
-        Rect::xywh(16.0, 283.0, 260.0, 28.0)
+        Rect::xywh(16.0, 283.0, 261.0, 28.0)
     );
+}
+
+#[test]
+fn sidebar_chrome_uses_real_commands_and_reference_icon_geometry() {
+    let rect = Rect::xywh(0.0, 0.0, 293.0, 800.0);
+    let mut state = sidebar_state();
+    let layout = ProjectSidebar::layout(rect, &state);
+    let theme = ZodeTheme::light();
+
+    assert_eq!(
+        ProjectSidebar::command_for_widget(&state, SIDEBAR_TOGGLE_ID),
+        Some(AppCommand::TogglePrimarySidebar)
+    );
+    assert_eq!(
+        ProjectSidebar::command_for_widget(&state, SIDEBAR_SEARCH_ID),
+        Some(AppCommand::ToggleSidebarProjectPicker)
+    );
+
+    let mut painter = CapturePainter::default();
+    ProjectSidebar::paint_with_interaction(
+        &mut painter,
+        rect,
+        &state,
+        None,
+        Some(SIDEBAR_SEARCH_ID),
+        false,
+        &theme,
+    );
+    assert!(painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::Svg(path, origin, 14.0, width)
+            if path == SemanticIcon::Sidebar.path()
+                && *origin == Point2D::new(93.0, 16.0)
+                && *width == SemanticIcon::Sidebar.stroke_width()
+    )));
+    assert!(painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::Svg(path, origin, 14.0, width)
+            if path == SemanticIcon::Back.path()
+                && *origin == Point2D::new(128.0, 16.0)
+                && *width == SemanticIcon::Back.stroke_width()
+    )));
+    assert!(painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::Svg(path, origin, 14.0, width)
+            if path == SemanticIcon::Forward.path()
+                && *origin == Point2D::new(162.0, 16.0)
+                && *width == SemanticIcon::Forward.stroke_width()
+    )));
+    assert!(painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::Svg(path, origin, 14.0, width)
+            if path == SemanticIcon::Search.path()
+                && *origin == Point2D::new(264.0, 55.0)
+                && *width == SemanticIcon::Search.stroke_width()
+    )));
+    assert!(painter.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::FillRound(hovered, 6.0, color)
+            if *hovered == layout.brand_search && *color == theme.sidebar_row_hover
+    )));
+
+    state.project_picker.open = true;
+    state.project_picker.anchor = ProjectPickerAnchor::Sidebar;
+    let mut active = CapturePainter::default();
+    ProjectSidebar::paint(&mut active, rect, &state, &theme);
+    assert!(active.operations.iter().any(|operation| matches!(
+        operation,
+        PaintOp::FillRound(selected, 6.0, color)
+            if *selected == layout.brand_search && *color == theme.sidebar_row_selected
+    )));
 }
 
 #[test]

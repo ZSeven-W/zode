@@ -26,7 +26,7 @@ pub(super) fn paint(
         return;
     }
     let layout = ProjectSidebar::layout(rect, state);
-    paint_brand(painter, layout.brand, layout.compact, theme);
+    super::chrome::paint(painter, &layout, state, focused, hovered, theme);
 
     if let Some(new_task) = layout.navigation_rows.first() {
         paint_navigation_row(
@@ -74,17 +74,6 @@ pub(super) fn paint(
     painter.restore();
 
     super::footer::paint_footer(painter, &layout, state, focused, hovered, theme);
-}
-
-fn paint_brand(painter: &mut dyn Painter, rect: Rect, compact: bool, theme: &ZodeTheme) {
-    draw_label(
-        painter,
-        if compact { "Z" } else { "Zode" },
-        rect,
-        if compact { 14.0 } else { 17.0 },
-        600,
-        theme.sidebar_foreground,
-    );
 }
 
 fn paint_navigation_row(

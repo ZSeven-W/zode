@@ -17,6 +17,7 @@ pub enum AppCommand {
     },
     ToggleProjectPicker,
     ToggleComposerProjectPicker,
+    ToggleSidebarProjectPicker,
     CloseProjectPicker,
     SetProjectSearch(String),
     SetProjectPickerActive(usize),

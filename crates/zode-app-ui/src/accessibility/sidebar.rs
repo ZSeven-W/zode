@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     ProjectSidebar, SidebarControlTarget, SidebarRowTarget, SidebarSection, ThreadTranscript,
-    WidgetId, WorkspaceLayout,
+    WidgetId, WorkspaceLayout, SIDEBAR_SEARCH_ID, SIDEBAR_TOGGLE_ID,
 };
 
 pub(super) fn append_sidebar_nodes(
@@ -36,6 +36,29 @@ pub(super) fn append_sidebar_nodes(
         None,
         CursorHint::Default,
     ));
+
+    if !sidebar.compact {
+        nodes.push(node(
+            SIDEBAR_TOGGLE_ID,
+            sidebar.titlebar_toggle,
+            Role::Button,
+            "隐藏侧边栏",
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        ));
+        nodes.push(node(
+            SIDEBAR_SEARCH_ID,
+            sidebar.brand_search,
+            Role::Button,
+            "搜索项目",
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        ));
+    }
 
     for row in &sidebar.navigation_rows {
         let Some(rect) = ThreadTranscript::clip_to_viewport(

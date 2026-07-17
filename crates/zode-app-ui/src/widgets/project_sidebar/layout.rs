@@ -78,7 +78,11 @@ pub struct SidebarLabelLayout {
 pub struct SidebarLayout {
     pub rect: Rect,
     pub compact: bool,
+    pub titlebar_toggle: Rect,
+    pub titlebar_back: Rect,
+    pub titlebar_forward: Rect,
     pub brand: Rect,
+    pub brand_search: Rect,
     pub scroll_viewport: Rect,
     pub footer: Rect,
     pub profile: Rect,
@@ -114,11 +118,19 @@ pub(super) fn build(rect: Rect, state: &ZodeAppState) -> SidebarLayout {
         (rect.size.x - 32.0).max(0.0),
         BRAND_H,
     );
+    let titlebar_toggle = titlebar_toggle_rect(rect);
+    let titlebar_back = titlebar_back_rect(rect);
+    let titlebar_forward = titlebar_forward_rect(rect);
+    let brand_search = brand_search_rect(rect);
     if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
         return SidebarLayout {
             rect,
             compact,
+            titlebar_toggle,
+            titlebar_back,
+            titlebar_forward,
             brand,
+            brand_search,
             scroll_viewport: viewport,
             footer,
             profile: profile_rect(footer),
@@ -154,7 +166,11 @@ pub(super) fn build(rect: Rect, state: &ZodeAppState) -> SidebarLayout {
     SidebarLayout {
         rect,
         compact,
+        titlebar_toggle,
+        titlebar_back,
+        titlebar_forward,
         brand,
+        brand_search,
         scroll_viewport: viewport,
         footer,
         profile: profile_rect(footer),
@@ -184,6 +200,27 @@ pub(super) fn build(rect: Rect, state: &ZodeAppState) -> SidebarLayout {
         max_scroll,
         scroll_offset: offset,
     }
+}
+
+pub(super) fn titlebar_toggle_rect(rect: Rect) -> Rect {
+    Rect::xywh(rect.origin.x + 88.0, rect.origin.y + 11.0, 24.0, 24.0)
+}
+
+pub(super) fn titlebar_back_rect(rect: Rect) -> Rect {
+    Rect::xywh(rect.origin.x + 123.0, rect.origin.y + 11.0, 24.0, 24.0)
+}
+
+pub(super) fn titlebar_forward_rect(rect: Rect) -> Rect {
+    Rect::xywh(rect.origin.x + 157.0, rect.origin.y + 11.0, 24.0, 24.0)
+}
+
+pub(super) fn brand_search_rect(rect: Rect) -> Rect {
+    Rect::xywh(
+        rect.max_x() - 36.0,
+        rect.origin.y + TITLEBAR_H + 10.0,
+        28.0,
+        28.0,
+    )
 }
 
 fn build_raw(rect: Rect, state: &ZodeAppState, compact: bool) -> RawContent {

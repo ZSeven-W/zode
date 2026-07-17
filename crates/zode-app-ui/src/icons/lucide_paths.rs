@@ -18,6 +18,11 @@ pub(super) const CLOCK: &str = "M22 12A10 10 0 1 1 2 12A10 10 0 1 1 22 12Z M12 6
 
 pub(super) const SEARCH: &str = "M21 21L16.66 16.66 M19 11A8 8 0 1 1 3 11A8 8 0 1 1 19 11Z";
 
+pub(super) const PANEL_LEFT: &str = concat!(
+    "M5 3H19A2 2 0 0 1 21 5V19A2 2 0 0 1 19 21H5A2 2 0 0 1 3 19V5A2 2 0 0 1 5 3Z ",
+    "M9 3V21"
+);
+
 pub(super) const AT_SIGN: &str = concat!(
     "M16 12A4 4 0 1 1 8 12A4 4 0 1 1 16 12Z ",
     "M16 8V13A3 3 0 0 0 22 13V12A10 10 0 1 0 18 20"

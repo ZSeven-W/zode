@@ -57,6 +57,10 @@ pub(crate) fn reduce_task_navigation(
             toggle_project_picker(state, ProjectPickerAnchor::Composer);
             Some(NavigationOutcome::Applied)
         }
+        AppCommand::ToggleSidebarProjectPicker => {
+            toggle_project_picker(state, ProjectPickerAnchor::Sidebar);
+            Some(NavigationOutcome::Applied)
+        }
         AppCommand::CloseProjectPicker => {
             close_project_picker(state);
             Some(NavigationOutcome::Applied)

@@ -7,6 +7,7 @@ use zode_app_ui::{
     ImeEvent, Key, KeyEvent, Modifiers, ProjectPicker, ProjectSearchOutcome, WidgetId, COMPOSER_ID,
     COMPOSER_PROJECT_ID, PROJECT_PICKER_NEW_ID, PROJECT_PICKER_PROJECTLESS_ID,
     PROJECT_PICKER_SEARCH_ID, PROJECT_PICKER_SURFACE_ID, PROJECT_PICKER_TRIGGER_ID,
+    SIDEBAR_SEARCH_ID,
 };
 use zode_node_protocol::{SessionLocator, WorkspaceUri};
 
@@ -74,9 +75,16 @@ impl DesktopApp {
                 self.project_picker_controller.set_text("");
                 Some(PROJECT_PICKER_SEARCH_ID)
             }
-            AppCommand::ToggleProjectPicker | AppCommand::CloseProjectPicker => {
-                Some(project_picker_trigger(previous_anchor))
+            AppCommand::ToggleSidebarProjectPicker
+                if self.app_state.project_picker.open
+                    && (!was_open || previous_anchor != ProjectPickerAnchor::Sidebar) =>
+            {
+                self.project_picker_controller.set_text("");
+                Some(PROJECT_PICKER_SEARCH_ID)
             }
+            AppCommand::ToggleProjectPicker
+            | AppCommand::ToggleSidebarProjectPicker
+            | AppCommand::CloseProjectPicker => Some(project_picker_trigger(previous_anchor)),
             AppCommand::ToggleComposerProjectPicker => Some(COMPOSER_PROJECT_ID),
             AppCommand::BeginTask { .. } => Some(COMPOSER_ID),
             _ => None,
@@ -95,7 +103,10 @@ impl DesktopApp {
         }
         matches!(
             id,
-            PROJECT_PICKER_SEARCH_ID | PROJECT_PICKER_NEW_ID | PROJECT_PICKER_PROJECTLESS_ID
+            PROJECT_PICKER_SEARCH_ID
+                | PROJECT_PICKER_NEW_ID
+                | PROJECT_PICKER_PROJECTLESS_ID
+                | SIDEBAR_SEARCH_ID
         ) || ProjectPicker::choices(&self.app_state, self.project_picker_controller.text())
             .into_iter()
             .take(5)
@@ -275,6 +286,7 @@ fn project_picker_trigger(anchor: ProjectPickerAnchor) -> WidgetId {
     match anchor {
         ProjectPickerAnchor::Welcome => PROJECT_PICKER_TRIGGER_ID,
         ProjectPickerAnchor::Composer => COMPOSER_PROJECT_ID,
+        ProjectPickerAnchor::Sidebar => SIDEBAR_SEARCH_ID,
     }
 }
 

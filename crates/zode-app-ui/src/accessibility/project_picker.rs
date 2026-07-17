@@ -8,8 +8,8 @@ use zode_app_model::{
 
 use super::{next_order, node, visible_rect, InteractionNode};
 use crate::{
-    Composer, ComposerContextMenu, EmptyState, ProjectPicker, ProjectPickerViewState, RectExt,
-    WorkspaceLayout, COMPOSER_BRANCH_ID, COMPOSER_BRANCH_SEARCH_ID,
+    Composer, ComposerContextMenu, EmptyState, ProjectPicker, ProjectPickerViewState,
+    ProjectSidebar, RectExt, WorkspaceLayout, COMPOSER_BRANCH_ID, COMPOSER_BRANCH_SEARCH_ID,
     COMPOSER_CONTEXT_MENU_SURFACE_ID, COMPOSER_LOCATION_ID, COMPOSER_PROJECT_ID, PROJECT_DETACH_ID,
     PROJECT_PICKER_SEARCH_ID, PROJECT_PICKER_TRIGGER_ID, TRANSCRIPT_COMPOSER_GAP,
 };
@@ -120,6 +120,7 @@ pub(super) fn append_picker_overlay(
     let trigger = match state.project_picker.anchor {
         ProjectPickerAnchor::Welcome => welcome_project_trigger(layout, state)?.1,
         ProjectPickerAnchor::Composer => composer_project_trigger(layout, state)?,
+        ProjectPickerAnchor::Sidebar => ProjectSidebar::brand_search_rect(layout.sidebar),
     };
     let picker_layout = ProjectPicker::layout(layout.viewport, trigger, state, picker)?;
     nodes.push(node(

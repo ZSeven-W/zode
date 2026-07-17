@@ -295,6 +295,7 @@ pub enum ProjectPickerAnchor {
     #[default]
     Welcome,
     Composer,
+    Sidebar,
 }
 
 /// Transient state for the project switcher shown on a new-task surface.

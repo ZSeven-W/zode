@@ -45,6 +45,13 @@ fn project_picker_anchors_and_context_menus_are_mutually_exclusive() {
     assert_eq!(state.project_picker.anchor, ProjectPickerAnchor::Composer);
 
     assert_eq!(
+        reduce_navigation_command(&mut state, AppCommand::ToggleSidebarProjectPicker),
+        NavigationOutcome::Applied,
+    );
+    assert!(state.project_picker.open);
+    assert_eq!(state.project_picker.anchor, ProjectPickerAnchor::Sidebar);
+
+    assert_eq!(
         reduce_navigation_command(
             &mut state,
             AppCommand::ToggleComposerContextMenu(ComposerContextMenu::Location),

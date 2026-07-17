@@ -347,6 +347,24 @@ impl WorkspaceShell {
             }
         }
 
+        if state.project_picker.anchor == ProjectPickerAnchor::Sidebar {
+            if let Some((picker, search_input)) = project_picker {
+                let trigger = ProjectSidebar::brand_search_rect(geometry.sidebar);
+                if let Some(layout) =
+                    ProjectPicker::layout(geometry.viewport, trigger, state, picker)
+                {
+                    ProjectPicker::paint(
+                        painter,
+                        &layout,
+                        search_input,
+                        snapshot.focused,
+                        hovered,
+                        theme,
+                    );
+                }
+            }
+        }
+
         if state.presentation.route == ShellRoute::Conversation {
             if geometry.pinned_summary != PinnedSummaryMode::Hidden
                 && geometry.context_panel.size.x > 0.0
@@ -545,6 +563,7 @@ fn paint_conversation(
         )
         .project
         .map(|chip| chip.rect),
+        ProjectPickerAnchor::Sidebar => None,
     };
     if let (Some((picker, search_input)), Some(trigger)) = (project_picker, picker_trigger) {
         if let Some(layout) = ProjectPicker::layout(geometry.viewport, trigger, state, picker) {

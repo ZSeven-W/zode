@@ -29,6 +29,7 @@ pub enum SemanticIcon {
     Connect,
     Git,
     Environment,
+    Sidebar,
     Panel,
     Terminal,
     Worktree,
@@ -54,6 +55,7 @@ pub enum SemanticIcon {
     Diff,
     Compare,
     Back,
+    Forward,
     FileText,
     Close,
     Check,
@@ -68,7 +70,7 @@ pub enum SemanticIcon {
 }
 
 impl SemanticIcon {
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 59] = [
         Self::NewTask,
         Self::Scheduled,
         Self::Settings,
@@ -90,6 +92,7 @@ impl SemanticIcon {
         Self::Connect,
         Self::Git,
         Self::Environment,
+        Self::Sidebar,
         Self::Panel,
         Self::Terminal,
         Self::Worktree,
@@ -115,6 +118,7 @@ impl SemanticIcon {
         Self::Diff,
         Self::Compare,
         Self::Back,
+        Self::Forward,
         Self::FileText,
         Self::Close,
         Self::Check,
@@ -151,6 +155,7 @@ impl SemanticIcon {
             Self::Connect => "M8 12H16M5 9L2 12L5 15M19 9L22 12L19 15M8 5H16M8 19H16",
             Self::Git => "M7 3A2 2 0 1 0 7 7A2 2 0 1 0 7 3M17 17A2 2 0 1 0 17 21A2 2 0 1 0 17 17M7 7V13C7 16 9 19 13 19H15M17 5V17M14 8L17 5L20 8",
             Self::Environment => "M4 5H20V19H4ZM7 9L10 12L7 15M12 15H17",
+            Self::Sidebar => lucide::PANEL_LEFT,
             Self::Panel => "M3 4H21V20H3ZM15 4V20M18 8H18.1M18 12H18.1M18 16H18.1",
             Self::Terminal => "M4 5H20V19H4ZM7 9L10 12L7 15M12 15H17",
             Self::Worktree => "M6 4V18M18 6V20M6 9H12C15 9 18 7 18 4M6 15H12C15 15 18 17 18 20",
@@ -178,6 +183,7 @@ impl SemanticIcon {
             Self::Diff => "M5 7H11M8 4V10M14 7H20M5 17H11M14 17H20M17 14V20",
             Self::Compare => "M7 7H19M16 4L19 7L16 10M17 17H5M8 14L5 17L8 20",
             Self::Back => "M15 18L9 12L15 6",
+            Self::Forward => "M9 18L15 12L9 6",
             Self::FileText => "M6 3H14L19 8V21H6ZM14 3V8H19M9 13H16M9 17H16",
             Self::Close => lucide::X,
             Self::Check => lucide::CHECK,
@@ -230,6 +236,7 @@ mod tests {
             (SemanticIcon::NewTask, lucide::SQUARE_PEN),
             (SemanticIcon::Scheduled, lucide::CLOCK),
             (SemanticIcon::Search, lucide::SEARCH),
+            (SemanticIcon::Sidebar, lucide::PANEL_LEFT),
             (SemanticIcon::Integrations, lucide::AT_SIGN),
             (SemanticIcon::Sites, lucide::BLOCKS),
             (SemanticIcon::PullRequest, lucide::GIT_PULL_REQUEST),
