@@ -1,72 +1,70 @@
-use jian_widgets::{centered_text_baseline_y, Painter, Point2D, Rect, TextLayout};
+use jian_widgets::{Painter, Point2D, Rect, TextLayout, centered_text_baseline_y};
 use std::collections::BTreeMap;
 
-use zode_app_model::{AppCommand, ShellPage, ZodeAppState};
+use zode_app_model::{
+    AppCommand, ComingSoonFeature, IntegrationsTab, SettingsCategory, ShellRoute, ZodeAppState,
+};
 use zode_node_protocol::{SessionLocator, ThreadSummary, WorkspaceUri};
 
-use crate::{stable_widget_id, RectExt, WidgetId, ZodeTheme};
+use crate::{RectExt, WidgetId, ZodeTheme, stable_widget_id};
 
 const FONT: &str = "system-ui";
 const HEADER_H: f32 = 46.0;
 const ROW_H: f32 = 32.0;
 const ROW_INSET: f32 = 12.0;
+const FOOTER_BOTTOM: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarAction {
     NewSession,
-    Navigate {
-        page: ShellPage,
-        feature: Option<&'static str>,
-    },
+    Navigate(ShellRoute),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SidebarItem {
     pub label: &'static str,
     pub action: SidebarAction,
+    pub implemented: bool,
 }
 
 const NAVIGATION: [SidebarItem; 6] = [
     SidebarItem {
         label: "新建任务",
         action: SidebarAction::NewSession,
+        implemented: true,
     },
     SidebarItem {
-        label: "工作流",
-        action: SidebarAction::Navigate {
-            page: ShellPage::ComingSoon,
-            feature: Some("工作流"),
-        },
+        label: "已安排",
+        action: SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::ScheduledTasks)),
+        implemented: false,
     },
     SidebarItem {
         label: "插件",
-        action: SidebarAction::Navigate {
-            page: ShellPage::ComingSoon,
-            feature: Some("插件"),
-        },
+        action: SidebarAction::Navigate(ShellRoute::Integrations(IntegrationsTab::Plugins)),
+        implemented: true,
     },
     SidebarItem {
-        label: "OpenPencil",
-        action: SidebarAction::Navigate {
-            page: ShellPage::ComingSoon,
-            feature: Some("OpenPencil"),
-        },
+        label: "站点",
+        action: SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::Sites)),
+        implemented: false,
     },
     SidebarItem {
-        label: "浏览器",
-        action: SidebarAction::Navigate {
-            page: ShellPage::ComingSoon,
-            feature: Some("浏览器"),
-        },
+        label: "拉取请求",
+        action: SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::PullRequests)),
+        implemented: false,
     },
     SidebarItem {
-        label: "账户与设置",
-        action: SidebarAction::Navigate {
-            page: ShellPage::Settings,
-            feature: None,
-        },
+        label: "聊天",
+        action: SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::Chats)),
+        implemented: false,
     },
 ];
+
+const SETTINGS_FOOTER: SidebarItem = SidebarItem {
+    label: "本地设置",
+    action: SidebarAction::Navigate(ShellRoute::Settings(SettingsCategory::General)),
+    implemented: true,
+};
 
 pub struct ProjectSidebar;
 
@@ -90,6 +88,7 @@ pub struct SidebarRowLayout {
     pub label: String,
     pub target: SidebarRowTarget,
     pub actionable: bool,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +136,33 @@ impl ProjectSidebar {
         &NAVIGATION
     }
 
+    pub const fn footer_item() -> SidebarItem {
+        SETTINGS_FOOTER
+    }
+
+    pub fn footer_rect(rect: Rect) -> Rect {
+        let footer_height = if rect.size.y >= FOOTER_BOTTOM + ROW_H {
+            ROW_H
+        } else {
+            0.0
+        };
+        let footer_y = if footer_height > 0.0 {
+            rect.max_y() - FOOTER_BOTTOM - footer_height
+        } else {
+            rect.max_y()
+        };
+        Rect::xywh(
+            rect.origin.x + 8.0,
+            footer_y,
+            (rect.size.x - 16.0).max(0.0),
+            footer_height,
+        )
+    }
+
+    pub fn footer_selected(state: &ZodeAppState) -> bool {
+        matches!(state.presentation.route, ShellRoute::Settings(_))
+    }
+
     pub fn navigation_row_layout(rect: Rect) -> Vec<SidebarNavigationRowLayout> {
         NAVIGATION
             .iter()
@@ -171,7 +197,8 @@ impl ProjectSidebar {
         }
         let project_y = rect.origin.y + HEADER_H + NAVIGATION.len() as f32 * ROW_H + 18.0;
         let first_row_y = project_y + 28.0;
-        let row_capacity = ((rect.max_y() - first_row_y) / ROW_H).floor().max(0.0) as usize;
+        let rows_bottom = Self::footer_rect(rect).origin.y;
+        let row_capacity = ((rows_bottom - first_row_y) / ROW_H).floor().max(0.0) as usize;
         if row_capacity == 0 {
             return Vec::new();
         }
@@ -182,8 +209,11 @@ impl ProjectSidebar {
                 id: Self::project_widget_id(&workspace),
                 rect: dynamic_row_rect(rect, project_y, rows.len()),
                 label: workspace_label(&workspace, project.available),
-                target: SidebarRowTarget::Project(workspace),
+                target: SidebarRowTarget::Project(workspace.clone()),
                 actionable: project.toggleable,
+                selected: state.presentation.route == ShellRoute::Conversation
+                    && state.current_session.is_none()
+                    && state.active_workspace.as_ref() == Some(&workspace),
             });
             if rows.len() >= row_capacity {
                 break;
@@ -195,8 +225,10 @@ impl ProjectSidebar {
                         id: Self::session_widget_id(&session),
                         rect: dynamic_row_rect(rect, project_y, rows.len()),
                         label: thread.title,
-                        target: SidebarRowTarget::Session(session),
+                        target: SidebarRowTarget::Session(session.clone()),
                         actionable: true,
+                        selected: state.presentation.route == ShellRoute::Conversation
+                            && state.current_session.as_ref() == Some(&session),
                     });
                     if rows.len() >= row_capacity {
                         break;
@@ -244,12 +276,9 @@ impl ProjectSidebar {
 
         let compact = rect.size.x < 100.0;
         for row in Self::navigation_row_layout(rect) {
-            if row.index == 0 {
-                painter.fill_round_rect(
-                    row.rect,
-                    theme.tokens.radius,
-                    theme.tokens.row_selected_primary,
-                );
+            let selected = navigation_item_selected(state, row.item);
+            if selected {
+                painter.fill_round_rect(row.rect, theme.tokens.radius, theme.tokens.row_selected);
             }
             let label = if compact {
                 row.item.label.chars().next().unwrap_or(' ').to_string()
@@ -266,8 +295,12 @@ impl ProjectSidebar {
                     row.rect.size.y,
                 ),
                 13.0,
-                if row.index == 0 { 600 } else { 400 },
-                theme.sidebar_foreground,
+                if selected { 600 } else { 400 },
+                if row.item.implemented {
+                    theme.sidebar_foreground
+                } else {
+                    theme.tokens.muted_foreground
+                },
             );
         }
 
@@ -286,6 +319,13 @@ impl ProjectSidebar {
                 theme.tokens.muted_foreground,
             );
             for row in Self::dynamic_row_layout(rect, state) {
+                if row.selected {
+                    painter.fill_round_rect(
+                        row.rect,
+                        theme.tokens.radius,
+                        theme.tokens.row_selected,
+                    );
+                }
                 let (left_inset, weight) = match row.target {
                     SidebarRowTarget::Project(_) => (8.0, 600),
                     SidebarRowTarget::Session(_) => (20.0, 400),
@@ -305,6 +345,46 @@ impl ProjectSidebar {
                 );
             }
         }
+
+        let footer = Self::footer_rect(rect);
+        if footer.size.y <= 0.0 {
+            return;
+        }
+        let footer_selected = Self::footer_selected(state);
+        if footer_selected {
+            painter.fill_round_rect(footer, theme.tokens.radius, theme.tokens.row_selected);
+        }
+        draw_label(
+            painter,
+            if compact {
+                "设"
+            } else {
+                SETTINGS_FOOTER.label
+            },
+            Rect::xywh(
+                footer.origin.x + 8.0,
+                footer.origin.y,
+                (footer.size.x - 16.0).max(0.0),
+                footer.size.y,
+            ),
+            12.0,
+            if footer_selected { 600 } else { 500 },
+            theme.sidebar_foreground,
+        );
+    }
+}
+
+fn navigation_item_selected(state: &ZodeAppState, item: SidebarItem) -> bool {
+    match item.action {
+        SidebarAction::NewSession => {
+            state.presentation.route == ShellRoute::Conversation
+                && state.current_session.is_none()
+                && state.active_workspace.is_none()
+        }
+        SidebarAction::Navigate(ShellRoute::Integrations(_)) => {
+            matches!(state.presentation.route, ShellRoute::Integrations(_))
+        }
+        SidebarAction::Navigate(route) => state.presentation.route == route,
     }
 }
 

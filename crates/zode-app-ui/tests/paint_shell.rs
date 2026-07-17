@@ -1,5 +1,7 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
-use zode_app_model::{demo_state, ShellPage};
+use zode_app_model::{
+    ComingSoonFeature, IntegrationsTab, SettingsCategory, ShellPage, ShellRoute, demo_state,
+};
 use zode_app_ui::{
     Insets, ProjectSidebar, RectExt, SidebarAction, TerminalGrid, WorkspaceLayout, WorkspaceShell,
     ZodeTheme,
@@ -68,15 +70,22 @@ fn workspace_shell_paints_the_shared_geometry_boundaries() {
 
     WorkspaceShell::paint(&mut painter, viewport, Insets::ZERO, &state, &theme);
 
-    assert!(painter
-        .operations
-        .contains(&PaintOp::Fill(viewport, theme.tokens.background)));
-    assert!(painter
-        .operations
-        .contains(&PaintOp::Fill(geometry.sidebar, theme.sidebar)));
-    assert!(painter
-        .operations
-        .contains(&PaintOp::Fill(geometry.top_bar, theme.tokens.background)));
+    assert!(
+        painter
+            .operations
+            .contains(&PaintOp::Fill(viewport, theme.tokens.background))
+    );
+    assert!(
+        painter
+            .operations
+            .contains(&PaintOp::Fill(geometry.sidebar, theme.sidebar))
+    );
+    assert_eq!(geometry.sidebar.size.x, 240.0);
+    assert!(
+        painter
+            .operations
+            .contains(&PaintOp::Fill(geometry.top_bar, theme.tokens.background))
+    );
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
         PaintOp::FillRound(rect, _, color)
@@ -86,37 +95,48 @@ fn workspace_shell_paints_the_shared_geometry_boundaries() {
 }
 
 #[test]
-fn sidebar_has_no_dead_navigation_entries() {
+fn sidebar_uses_the_reference_navigation_order() {
     let items = ProjectSidebar::navigation_items();
     let labels = items.iter().map(|item| item.label).collect::<Vec<_>>();
     assert_eq!(
         labels,
+        vec!["新建任务", "已安排", "插件", "站点", "拉取请求", "聊天",]
+    );
+}
+
+#[test]
+fn sidebar_navigation_actions_name_typed_routes() {
+    let actions = ProjectSidebar::navigation_items()
+        .iter()
+        .map(|item| item.action)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        actions,
         vec![
-            "新建任务",
-            "工作流",
-            "插件",
-            "OpenPencil",
-            "浏览器",
-            "账户与设置",
+            SidebarAction::NewSession,
+            SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::ScheduledTasks,)),
+            SidebarAction::Navigate(ShellRoute::Integrations(IntegrationsTab::Plugins)),
+            SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::Sites)),
+            SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::PullRequests)),
+            SidebarAction::Navigate(ShellRoute::ComingSoon(ComingSoonFeature::Chats)),
         ]
     );
-    assert!(matches!(items[0].action, SidebarAction::NewSession));
-    for item in &items[1..5] {
-        assert!(matches!(
-            item.action,
-            SidebarAction::Navigate {
-                page: ShellPage::ComingSoon,
-                feature: Some(_),
-            }
-        ));
-    }
-    assert!(matches!(
-        items[5].action,
-        SidebarAction::Navigate {
-            page: ShellPage::Settings,
-            feature: None,
-        }
-    ));
+    assert_eq!(
+        ProjectSidebar::footer_item().action,
+        SidebarAction::Navigate(ShellRoute::Settings(SettingsCategory::General))
+    );
+}
+
+#[test]
+fn sidebar_items_distinguish_implemented_destinations_from_coming_soon_routes() {
+    let implemented = ProjectSidebar::navigation_items()
+        .iter()
+        .map(|item| item.implemented)
+        .collect::<Vec<_>>();
+
+    assert_eq!(implemented, vec![true, false, true, false, false, false]);
+    assert!(ProjectSidebar::footer_item().implemented);
 }
 
 #[test]
