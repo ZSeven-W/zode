@@ -53,7 +53,7 @@ fn settings_nodes_expose_current_toggle_state_and_full_visual_hit_width() {
 }
 
 #[test]
-fn settings_scroll_view_exposes_accessibility_scroll_actions() {
+fn settings_scroll_view_exposes_only_the_scroll_directions_that_can_move() {
     let mut state = zode_app_model::demo_state();
     let conversation = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
     assert_eq!(
@@ -66,7 +66,7 @@ fn settings_scroll_view_exposes_accessibility_scroll_actions() {
 
     state.shell.page = zode_app_model::ShellPage::Settings;
     state.presentation.route = ShellRoute::Settings(SettingsCategory::General);
-    let settings = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    let settings = WorkspaceSnapshot::build(&state, 900.0, 480.0, Insets::ZERO);
     assert!(settings.node(zode_app_ui::SETTINGS_NAV_ID).is_none());
     let scroll_view = settings.node(SETTINGS_ROOT_ID).unwrap();
     assert_eq!(scroll_view.role, Role::ScrollView);
@@ -74,9 +74,20 @@ fn settings_scroll_view_exposes_accessibility_scroll_actions() {
         scroll_view.rect,
         SettingsPanel::page_layout(settings.layout.primary_surface).0
     );
-    assert!(scroll_view.actions.contains(&Action::ScrollUp));
+    assert!(!scroll_view.actions.contains(&Action::ScrollUp));
     assert!(scroll_view.actions.contains(&Action::ScrollDown));
     assert_ne!(zode_app_ui::SETTINGS_NAV_ID, SETTINGS_ROOT_ID);
+
+    let content = SettingsPanel::page_layout(settings.layout.primary_surface).0;
+    let command = SettingsPanel::scroll_command(content, &state, 10_000.0);
+    assert_eq!(
+        reduce_settings_command(&mut state, command),
+        SettingsCommandOutcome::Applied
+    );
+    let bottom = WorkspaceSnapshot::build(&state, 900.0, 480.0, Insets::ZERO);
+    let scroll_view = bottom.node(SETTINGS_ROOT_ID).unwrap();
+    assert!(scroll_view.actions.contains(&Action::ScrollUp));
+    assert!(!scroll_view.actions.contains(&Action::ScrollDown));
 }
 
 #[test]
@@ -91,9 +102,10 @@ fn project_permission_revoke_uses_shared_visible_action_geometry() {
         .unwrap()
         .workspace_uri
         .clone();
-    state
-        .project_permissions
-        .insert(workspace.clone(), vec!["write_file".into()]);
+    state.project_permissions.insert(
+        workspace.clone(),
+        zode_app_model::LoadState::Ready(vec!["write_file".into()]),
+    );
     let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
     let content = SettingsPanel::page_layout(snapshot.layout.primary_surface).0;
     let row = SettingsPanel::permission_row_layout(content, &state, &workspace)
@@ -123,9 +135,10 @@ fn zero_thread_startup_project_permissions_remain_visible_and_actionable() {
         available: true,
         last_opened_ms: 0,
     });
-    state
-        .project_permissions
-        .insert(workspace.clone(), vec!["write_file".into()]);
+    state.project_permissions.insert(
+        workspace.clone(),
+        zode_app_model::LoadState::Ready(vec!["write_file".into()]),
+    );
     let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
     let id = SettingsPanel::permission_widget_id(&workspace, "write_file");
     let node = snapshot
@@ -156,7 +169,7 @@ fn many_permissions_never_expose_controls_beyond_a_480px_root() {
         .clone();
     state.project_permissions.insert(
         workspace,
-        (0..40).map(|index| format!("tool-{index}")).collect(),
+        zode_app_model::LoadState::Ready((0..40).map(|index| format!("tool-{index}")).collect()),
     );
     let snapshot = WorkspaceSnapshot::build(&state, 900.0, 480.0, Insets::ZERO);
     assert!(snapshot

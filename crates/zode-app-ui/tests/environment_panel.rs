@@ -121,6 +121,7 @@ fn ready_presentation(session: &SessionLocator) -> SessionPresentationState {
             }),
         },
         preview: PreviewState::Idle,
+        runtime_options: LoadState::Idle,
     }
 }
 
@@ -205,6 +206,7 @@ fn current_session_load_states_are_explicit_and_keep_the_real_workspace() {
                 context,
                 diff: SessionDiffState::default(),
                 preview: PreviewState::Idle,
+                runtime_options: LoadState::Idle,
             },
         );
         let text = paint(&state, Rect::xywh(0.0, 0.0, 300.0, 600.0))
@@ -295,6 +297,7 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
                 }),
             },
             preview: PreviewState::Idle,
+            runtime_options: LoadState::Idle,
         },
     );
     state.transcripts.entry(session).or_default().items.clear();
@@ -340,6 +343,7 @@ fn diff_idle_loading_and_failure_are_honest_and_do_not_open_review() {
                 context: LoadState::Idle,
                 diff: SessionDiffState { dirty: true, load },
                 preview: PreviewState::Idle,
+                runtime_options: LoadState::Idle,
             },
         );
         let painter = paint(&state, Rect::xywh(0.0, 0.0, 300.0, 600.0));
@@ -502,6 +506,7 @@ fn real_sections_drive_content_hug_geometry_and_footer_availability() {
                 }),
             },
             preview: PreviewState::Idle,
+            runtime_options: LoadState::Idle,
         },
     );
     state.transcripts.entry(session).or_default().items.clear();

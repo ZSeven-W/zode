@@ -2,6 +2,7 @@
 
 mod accessibility;
 mod brand;
+mod icons;
 mod input;
 mod layout;
 mod text;
@@ -9,6 +10,7 @@ mod theme;
 mod virtual_list;
 mod widgets;
 
+pub use icons::SemanticIcon;
 pub use input::{
     ImeEvent, Key, KeyEvent, Modifiers, PointerButton, PointerEvent, PointerEventKind, TouchEvent,
     TouchPhase, UnifiedInputEvent, WheelDeltaMode, WheelEvent,
@@ -24,11 +26,13 @@ pub use widgets::{
     group_sessions, ApprovalAction, ApprovalButtonLayout, ApprovalCard, CapabilityCard,
     CapabilityCardLayout, CellPosition, ComingSoonPage, Composer, ComposerController,
     ComposerLayout, ComposerOutcome, ComposerSubmission, DocumentPreview, DocumentPreviewLayout,
-    EnvironmentPanel, EnvironmentPanelLayout, EnvironmentSectionLayout, HeaderActionLayout,
-    IntegrationTabLayout, IntegrationsPage, IntegrationsPageLayout, PermissionRow,
-    PermissionRowLayout, ProjectSessionGroup, ProjectSidebar, ReviewDraft, ReviewFileRowLayout,
-    ReviewLine, ReviewLineKind, ReviewPanel, ReviewPanelLayout, ReviewSelection, SandboxSelection,
-    SettingControl, SettingControlLayout, SettingsPanel, SidebarAction, SidebarItem,
+    EnvironmentPanel, EnvironmentPanelLayout, EnvironmentSectionLayout, GeneralSettingsLayout,
+    HeaderActionLayout, IntegrationTabLayout, IntegrationsPage, IntegrationsPageLayout,
+    PermissionPresetLayout, PermissionRow, PermissionRowLayout, ProjectSessionGroup,
+    ProjectSidebar, ReviewDraft, ReviewFileRowLayout, ReviewLine, ReviewLineKind, ReviewPanel,
+    ReviewPanelLayout, ReviewSelection, SandboxSelection, SettingControl, SettingControlLayout,
+    SettingRowLayout, SettingsNavigationEntryLayout, SettingsNavigationGroupLayout,
+    SettingsNavigationLayout, SettingsPanel, SettingsPanelLayout, SidebarAction, SidebarItem,
     SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget, TerminalCell, TerminalColor,
     TerminalGrid, TerminalLine, TerminalPanel, TerminalPanelController, TerminalSelection,
     ThreadHeader, ThreadHeaderLayout, ThreadTranscript, ToolCard, ToolTone, TranscriptItemLayout,

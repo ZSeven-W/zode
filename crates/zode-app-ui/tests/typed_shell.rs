@@ -90,6 +90,7 @@ fn state_with_ready_session() -> (zode_app_model::ZodeAppState, SessionLocator) 
                 load: LoadState::Ready(ready_diff(&session)),
             },
             preview: PreviewState::Idle,
+            runtime_options: LoadState::Idle,
         },
     );
     (state, session)
@@ -146,7 +147,8 @@ fn typed_settings_route_wins_over_stale_legacy_page() {
 
     assert_eq!(layout.page_content.size.x, 768.0);
     assert!(text.contains("常规"));
-    assert!(text.contains("本地运行状态"));
+    assert!(text.contains("权限"));
+    assert!(text.contains("只读"));
     assert!(!text.contains("我们在 Zode 中构建什么？"));
     assert!(!text.contains("向 Zode 描述一个任务"));
 }

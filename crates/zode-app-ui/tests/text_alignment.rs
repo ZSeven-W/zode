@@ -1,7 +1,5 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
-use zode_app_model::{
-    demo_state, ComposerState, ConnectionState, SettingsCategory, ShellPage, ShellRoute,
-};
+use zode_app_model::{demo_state, ComposerState, SettingsCategory, ShellPage, ShellRoute};
 use zode_app_ui::{
     Composer, Insets, ProjectSidebar, SettingsPanel, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme,
 };
@@ -110,11 +108,10 @@ fn sidebar_row_uses_a_vertically_centered_13px_line_box() {
 }
 
 #[test]
-fn settings_value_row_centers_both_line_boxes_on_the_row() {
+fn settings_general_row_centers_both_line_boxes_on_the_row() {
     let mut state = demo_state();
     state.shell.page = ShellPage::Settings;
     state.presentation.route = ShellRoute::Settings(SettingsCategory::General);
-    state.host.connection = ConnectionState::Unavailable;
     let layout = WorkspaceLayout::compute_presentation(
         1_800.0,
         1_080.0,
@@ -122,8 +119,9 @@ fn settings_value_row_centers_both_line_boxes_on_the_row() {
         state.presentation.route,
         None,
     );
-    let (_, card) = SettingsPanel::page_layout(layout.primary_surface);
-    let row_center = card.origin.y + 26.0;
+    let frozen = SettingsPanel::layout(layout.sidebar, layout.primary_surface, &state);
+    let row_center = frozen.general.general_rows[1].rect.origin.y
+        + frozen.general.general_rows[1].rect.size.y / 2.0;
     let mut painter = CapturePainter::new(1.0);
 
     SettingsPanel::paint_page(
@@ -134,8 +132,8 @@ fn settings_value_row_centers_both_line_boxes_on_the_row() {
         &ZodeTheme::light(),
     );
 
-    let left = painter.text("主机连接");
-    let right = painter.text("不可用");
+    let left = painter.text("语言");
+    let right = painter.text("中文（中国）");
     let left_center = left.origin.y + left.size / 2.0;
     let right_center = right.origin.y + right.size / 2.0;
     assert_close(left_center, row_center, 1.0);

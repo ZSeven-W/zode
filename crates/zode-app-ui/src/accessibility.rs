@@ -57,6 +57,7 @@ pub struct InteractionNode {
     pub focus_order: Option<u32>,
     pub cursor: CursorHint,
     pub toggled: Option<Toggled>,
+    pub disabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -687,6 +688,9 @@ pub fn accessibility_tree(snapshot: &WorkspaceSnapshot, physical_scale: f64) -> 
         if let Some(toggled) = source.toggled {
             target.set_toggled(toggled);
         }
+        if source.disabled {
+            target.set_disabled();
+        }
         nodes.push((NodeId(source.id.0), target));
     }
 
@@ -723,6 +727,7 @@ fn node(
         focus_order,
         cursor,
         toggled: None,
+        disabled: false,
     }
 }
 
@@ -738,6 +743,7 @@ fn append_settings_nodes(
     focus_order: &mut u32,
     state: &ZodeAppState,
 ) {
+    let settings = SettingsPanel::layout(layout.sidebar, layout.primary_surface, state);
     if visible_rect(layout.sidebar) {
         nodes.push(node(
             SIDEBAR_ID,
@@ -749,47 +755,110 @@ fn append_settings_nodes(
             None,
             CursorHint::Default,
         ));
-        for (id, rect, _, label, selected, available) in
-            SettingsPanel::category_rows(layout.sidebar, state)
-        {
-            let Some(visible) = ThreadTranscript::clip_to_viewport(rect, layout.sidebar) else {
+        for entry in &settings.navigation.entries {
+            let Some(visible) = ThreadTranscript::clip_to_viewport(entry.rect, layout.sidebar)
+            else {
                 continue;
             };
             let mut category = node(
-                id,
+                entry.id,
                 visible,
                 Role::Button,
-                label,
+                entry.label,
                 None,
-                if available {
+                if entry.enabled {
                     vec![Action::Click, Action::Focus]
                 } else {
                     Vec::new()
                 },
-                available.then(|| next_order(focus_order)).flatten(),
-                if available {
+                entry.enabled.then(|| next_order(focus_order)).flatten(),
+                if entry.enabled {
                     CursorHint::Pointer
                 } else {
                     CursorHint::NotAllowed
                 },
             );
-            category.toggled = Some(Toggled::from(selected));
+            category.toggled = Some(Toggled::from(entry.selected));
+            category.disabled = !entry.enabled;
             nodes.push(category);
         }
     }
-    let content = SettingsPanel::page_layout(layout.primary_surface).0;
+    let content = settings.content;
     if visible_rect(content) {
+        let max_scroll = SettingsPanel::max_scroll_offset(content, state);
+        let mut actions = Vec::new();
+        if settings.scroll_offset > 0.0 {
+            actions.push(Action::ScrollUp);
+        }
+        if settings.scroll_offset < max_scroll {
+            actions.push(Action::ScrollDown);
+        }
         nodes.push(node(
             SETTINGS_ROOT_ID,
             content,
             Role::ScrollView,
             "设置内容",
             None,
-            vec![Action::ScrollUp, Action::ScrollDown],
+            actions,
             None,
             CursorHint::Default,
         ));
     }
+
+    if SettingsPanel::active_category(state) == zode_app_model::SettingsCategory::General {
+        for preset in &settings.general.permission_presets {
+            let Some(visible_rect) = preset.visible_rect else {
+                continue;
+            };
+            let mut control = node(
+                preset.id,
+                visible_rect,
+                Role::RadioButton,
+                preset.label,
+                Some(preset.description.into()),
+                if preset.enabled {
+                    vec![Action::Click, Action::Focus]
+                } else {
+                    Vec::new()
+                },
+                preset.enabled.then(|| next_order(focus_order)).flatten(),
+                if preset.enabled {
+                    CursorHint::Pointer
+                } else {
+                    CursorHint::NotAllowed
+                },
+            );
+            control.toggled = Some(Toggled::from(preset.selected));
+            control.disabled = !preset.enabled;
+            nodes.push(control);
+        }
+        for row in &settings.general.general_rows {
+            let Some(visible_rect) = row.visible_rect else {
+                continue;
+            };
+            let mut setting = node(
+                row.id,
+                visible_rect,
+                Role::Button,
+                row.label,
+                Some(row.value.clone()),
+                if row.enabled {
+                    vec![Action::Click, Action::Focus]
+                } else {
+                    Vec::new()
+                },
+                row.enabled.then(|| next_order(focus_order)).flatten(),
+                if row.enabled {
+                    CursorHint::Pointer
+                } else {
+                    CursorHint::NotAllowed
+                },
+            );
+            setting.disabled = !row.enabled;
+            nodes.push(setting);
+        }
+    }
+
     for control_layout in SettingsPanel::appearance_control_layout(content, state) {
         let role = if matches!(
             control_layout.id,

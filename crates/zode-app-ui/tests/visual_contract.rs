@@ -324,6 +324,7 @@ fn snapshot_paint_uses_the_full_stack_not_an_input_node_override() {
             focus_order: Some(0),
             cursor: CursorHint::Text,
             toggled: None,
+            disabled: false,
         }],
         focused: Some(composer_id),
     };
@@ -634,7 +635,7 @@ fn settings_routes_expose_real_local_categories_without_cloud_login() {
 
     let (general, _) = paint_settings(SettingsCategory::General);
     let general = general.texts().join("\n");
-    for label in ["常规", "本地运行状态", "主机连接", "活动工作区"] {
+    for label in ["常规", "权限", "只读", "工作区写入", "默认文件打开目标"] {
         assert!(general.contains(label), "missing general label: {label}");
     }
     assert!(!general.contains("登录"));

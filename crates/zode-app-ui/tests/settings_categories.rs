@@ -1,9 +1,9 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
-    demo_state, AppCommand, ConnectionState, SettingsCategory, ShellPage, ShellRoute,
+    demo_state, AppCommand, IntegrationsTab, SettingsCategory, ShellPage, ShellRoute,
 };
 use zode_app_ui::{Insets, SettingsPanel, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme};
-use zode_node_protocol::{NodeCapability, WorkspaceUri};
+use zode_node_protocol::WorkspaceUri;
 
 #[derive(Default)]
 struct PaintCapture {
@@ -61,46 +61,47 @@ fn category_rail_has_stable_rows_typed_commands_and_honest_placeholders() {
     state.presentation.route = ShellRoute::Settings(SettingsCategory::Appearance);
     state.shell.page = ShellPage::Settings;
 
-    let rows = SettingsPanel::category_rows(Rect::xywh(0.0, 0.0, 240.0, 1_080.0), &state);
+    let rows = SettingsPanel::navigation_entries(Rect::xywh(0.0, 0.0, 240.0, 1_080.0), &state);
 
-    assert_eq!(
-        rows.iter().map(|row| row.0).collect::<Vec<_>>(),
-        vec![
-            SettingsPanel::category_widget_id(SettingsCategory::General),
-            SettingsPanel::category_widget_id(SettingsCategory::Appearance),
-            SettingsPanel::category_widget_id(SettingsCategory::Permissions),
-            SettingsPanel::category_widget_id(SettingsCategory::KeyboardShortcuts),
-            SettingsPanel::category_widget_id(SettingsCategory::Environment),
-        ]
-    );
-    assert_eq!(
-        rows.iter().map(|row| row.3).collect::<Vec<_>>(),
-        vec!["常规", "外观", "权限", "键盘快捷键", "环境"]
-    );
-    assert_eq!(rows.iter().filter(|row| row.4).count(), 1);
-    assert!(rows[1].4);
-    assert!(rows[0].5 && rows[1].5 && rows[2].5);
-    assert!(!rows[3].5 && !rows[4].5);
-    assert_eq!(rows[0].1, Rect::xywh(8.0, 154.0, 224.0, 30.0));
-    assert_eq!(rows[4].1, Rect::xywh(8.0, 274.0, 224.0, 30.0));
+    assert_eq!(rows.len(), 20);
+    assert_eq!(rows.iter().filter(|row| row.selected).count(), 1);
+    assert!(rows.iter().any(|row| row.label == "外观" && row.selected));
+    assert_eq!(rows.iter().filter(|row| row.enabled).count(), 3);
+    assert!(rows.iter().any(|row| row.label == "常规" && row.enabled));
+    assert!(rows.iter().any(|row| row.label == "插件" && row.enabled));
+    assert!(rows
+        .iter()
+        .any(|row| row.label == "键盘快捷键" && !row.enabled));
+    assert_eq!(rows[0].rect, Rect::xywh(8.0, 150.0, 224.0, 28.0));
+    assert_eq!(rows[19].rect, Rect::xywh(8.0, 766.0, 224.0, 28.0));
 
     for row in rows {
         assert_eq!(
-            SettingsPanel::command_for_widget(&state, row.0),
-            Some(AppCommand::SelectSettingsCategory(row.2))
+            SettingsPanel::command_for_widget(&state, row.id),
+            row.command
         );
     }
+    let plugins = SettingsPanel::navigation_entries(Rect::xywh(0.0, 0.0, 240.0, 1_080.0), &state)
+        .into_iter()
+        .find(|row| row.label == "插件")
+        .unwrap();
+    assert_eq!(
+        plugins.command,
+        Some(AppCommand::Navigate(ShellRoute::Integrations(
+            IntegrationsTab::Plugins
+        )))
+    );
 
     let painter = paint_settings(&state);
     let text = painter.texts.join("\n");
-    assert!(text.contains("搜索即将支持"));
+    assert!(text.contains("搜索设置…"));
     assert_eq!(
         painter
             .texts
             .iter()
             .filter(|text| text.as_str() == "即将支持")
             .count(),
-        2
+        17
     );
 }
 
@@ -119,7 +120,7 @@ fn settings_page_centers_a_768px_grouped_card_column() {
     let page = SettingsPanel::page_layout(layout.primary_surface);
 
     assert_eq!(page.0, Rect::xywh(636.0, 70.0, 768.0, 1_010.0));
-    assert_eq!(page.1, Rect::xywh(636.0, 154.0, 768.0, 156.0));
+    assert_eq!(page.1, Rect::xywh(636.0, 154.0, 768.0, 192.0));
 
     let mut painter = PaintCapture::default();
     let snapshot = snapshot(layout);
@@ -130,55 +131,38 @@ fn settings_page_centers_a_768px_grouped_card_column() {
         .any(|(rect, radius, width)| *rect == page.1
             && (10.0..=16.0).contains(radius)
             && *width == 1.0));
-    assert_eq!(painter.dividers.len(), 2);
+    assert_eq!(painter.dividers.len(), 11);
 }
 
 #[test]
-fn general_page_projects_only_real_local_host_workspace_and_capability_state() {
+fn general_page_exposes_permissions_and_honest_disabled_local_settings() {
     let mut state = demo_state();
     state.presentation.route = ShellRoute::Settings(SettingsCategory::General);
     state.shell.page = ShellPage::Settings;
-    state.host.connection = ConnectionState::Local;
-    state
-        .host
-        .capabilities
-        .capabilities
-        .extend([NodeCapability::Agent, NodeCapability::Terminal]);
-    let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
-    state.projects.push(zode_app_model::ProjectState {
-        workspace_uri: workspace.clone(),
-        expanded: true,
-        available: true,
-        last_opened_ms: 1,
-    });
-    state.active_workspace = Some(workspace);
 
     let painter = paint_settings(&state);
     let text = painter.texts.join("\n");
 
     for expected in [
         "常规",
-        "本地运行状态",
-        "主机连接",
-        "本地",
-        "活动工作区",
-        "file:///repo/zode",
-        "可用能力",
-        "2 项",
+        "权限",
+        "只读",
+        "工作区写入",
+        "完全访问",
+        "默认文件打开目标",
+        "语言",
+        "默认终端位置",
+        "打开源许可证",
+        "选择任务后加载运行时权限",
     ] {
         assert!(text.contains(expected), "missing real state: {expected}");
     }
-    for fabricated in ["账户", "登录", "默认权限", "自动审批", "完全访问权限"] {
+    for fabricated in ["登录", "自动审批", "已启用", "已连接"] {
         assert!(
             !text.contains(fabricated),
             "fabricated setting: {fabricated}"
         );
     }
-
-    state.active_workspace = None;
-    let unselected = paint_settings(&state).texts.join("\n");
-    assert!(unselected.contains("未选择"));
-    assert!(!unselected.contains("file:///repo/zode"));
 }
 
 #[test]
@@ -193,9 +177,10 @@ fn appearance_and_permissions_are_isolated_typed_categories() {
         last_opened_ms: 1,
     });
     state.active_workspace = Some(workspace.clone());
-    state
-        .project_permissions
-        .insert(workspace.clone(), vec!["write_file".into()]);
+    state.project_permissions.insert(
+        workspace.clone(),
+        zode_app_model::LoadState::Ready(vec!["write_file".into()]),
+    );
 
     state.presentation.route = ShellRoute::Settings(SettingsCategory::Appearance);
     let appearance = paint_settings(&state).texts.join("\n");

@@ -7,7 +7,7 @@ mod environment;
 mod integrations_page;
 mod project_sidebar;
 mod review_panel;
-mod settings_panel;
+mod settings;
 mod terminal_controller;
 mod terminal_grid;
 mod terminal_panel;
@@ -45,8 +45,10 @@ pub use review_panel::{
     ReviewDraft, ReviewFileRowLayout, ReviewLine, ReviewLineKind, ReviewPanel, ReviewPanelLayout,
     ReviewSelection,
 };
-pub use settings_panel::{
-    PermissionRow, PermissionRowLayout, SettingControl, SettingControlLayout, SettingsPanel,
+pub use settings::{
+    GeneralSettingsLayout, PermissionPresetLayout, PermissionRow, PermissionRowLayout,
+    SettingControl, SettingControlLayout, SettingRowLayout, SettingsNavigationEntryLayout,
+    SettingsNavigationGroupLayout, SettingsNavigationLayout, SettingsPanel, SettingsPanelLayout,
 };
 pub use terminal_controller::TerminalPanelController;
 pub use terminal_grid::{

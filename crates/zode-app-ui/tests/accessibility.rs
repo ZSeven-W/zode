@@ -43,6 +43,7 @@ fn interaction_fixture() -> WorkspaceSnapshot {
                 focus_order: Some(0),
                 cursor: CursorHint::Default,
                 toggled: None,
+                disabled: false,
             },
             InteractionNode {
                 id: COMPOSER_ID,
@@ -54,6 +55,7 @@ fn interaction_fixture() -> WorkspaceSnapshot {
                 focus_order: Some(1),
                 cursor: CursorHint::Text,
                 toggled: None,
+                disabled: false,
             },
             InteractionNode {
                 id: SEND_ID,
@@ -70,6 +72,7 @@ fn interaction_fixture() -> WorkspaceSnapshot {
                 focus_order: Some(2),
                 cursor: CursorHint::Pointer,
                 toggled: None,
+                disabled: false,
             },
         ],
         focused: Some(COMPOSER_ID),

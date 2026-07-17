@@ -42,9 +42,10 @@ fn unknown_workspace_has_no_stale_permission_rows() {
 fn revoke_reducer_removes_only_the_requested_tool() {
     let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
     let mut state = demo_state();
-    state
-        .project_permissions
-        .insert(workspace.clone(), vec!["Bash".into(), "FileEdit".into()]);
+    state.project_permissions.insert(
+        workspace.clone(),
+        zode_app_model::LoadState::Ready(vec!["Bash".into(), "FileEdit".into()]),
+    );
 
     assert_eq!(
         reduce_settings_command(
@@ -56,5 +57,8 @@ fn revoke_reducer_removes_only_the_requested_tool() {
         ),
         SettingsCommandOutcome::Applied,
     );
-    assert_eq!(state.project_permissions[&workspace], ["FileEdit"]);
+    assert_eq!(
+        state.project_permissions[&workspace].ready().unwrap(),
+        &["FileEdit"]
+    );
 }
