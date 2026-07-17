@@ -80,10 +80,57 @@ pub async fn working_tree_diff(cwd: &Path) -> String {
 mod tests {
     use super::*;
 
+    fn git(cwd: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn fixture_git_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-q"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test"]);
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        git(repo.path(), &["add", "a.txt"]);
+        git(repo.path(), &["commit", "-qm", "initial"]);
+        repo
+    }
+
     #[tokio::test]
     async fn non_repo_dir_reports_clean() {
         let dir = tempfile::tempdir().unwrap();
         let out = working_tree_diff(dir.path()).await;
         assert!(out.contains("working tree clean"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn diff_query_returns_files_and_unified_hunks() {
+        let repo = fixture_git_repo();
+        std::fs::write(repo.path().join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(repo.path().join("new.txt"), "new\n").unwrap();
+
+        let snapshot = diff_snapshot(repo.path()).await.unwrap();
+
+        assert_eq!(snapshot.files[0].path, "a.txt");
+        assert_eq!(snapshot.files[0].status, CoreDiffFileStatus::Modified);
+        assert_eq!(snapshot.files[0].additions, 1);
+        assert!(snapshot
+            .files
+            .iter()
+            .any(|file| file.path == "new.txt" && file.status == CoreDiffFileStatus::Untracked));
+        assert!(snapshot.unified.contains("+two"), "{}", snapshot.unified);
+        assert!(snapshot.unified.contains("+new"), "{}", snapshot.unified);
+    }
+
+    #[tokio::test]
+    async fn non_repo_returns_an_empty_structured_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = diff_snapshot(dir.path()).await.unwrap();
+        assert!(snapshot.files.is_empty());
+        assert!(snapshot.unified.is_empty());
     }
 }
