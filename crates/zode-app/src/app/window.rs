@@ -401,7 +401,7 @@ enum SnapshotUse {
 }
 
 fn snapshot_requires_rebuild(valid: bool, scroll_only_invalid: bool, use_: SnapshotUse) -> bool {
-    !valid && !(scroll_only_invalid && use_ == SnapshotUse::ScrollGeometry)
+    !(valid || scroll_only_invalid && use_ == SnapshotUse::ScrollGeometry)
 }
 
 #[cfg(test)]

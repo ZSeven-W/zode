@@ -279,7 +279,9 @@ mod tests {
         terminal_workspace,
     };
     use zode_app_model::{demo_state, ProjectState, SecondaryPane, TranscriptState};
-    use zode_app_ui::{Insets, TerminalGrid, TerminalPanel, WorkspaceSnapshot, TERMINAL_ID};
+    use zode_app_ui::{
+        Insets, TerminalGrid, TerminalPanel, TerminalSecondaryPanel, WorkspaceSnapshot, TERMINAL_ID,
+    };
     use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
     #[test]
@@ -326,16 +328,12 @@ mod tests {
         state.terminal.follow_tail = true;
         let before = WorkspaceSnapshot::build(&state, 1_000.0, 700.0, Insets::ZERO);
         let rect = terminal_rect_for_layout(&state, before.layout);
-        assert_eq!(
-            rect,
-            jian_widgets::Rect::xywh(
-                before.layout.transcript.origin.x,
-                before.layout.transcript.origin.y,
-                before.layout.transcript.size.x,
-                before.layout.composer.origin.y + before.layout.composer.size.y
-                    - before.layout.transcript.origin.y,
-            )
-        );
+        let panel = if before.layout.review_panel.size.x > 0.0 {
+            before.layout.review_panel
+        } else {
+            before.layout.primary_surface
+        };
+        assert_eq!(rect, TerminalSecondaryPanel::layout(panel).content);
 
         let mut grid = TerminalGrid::new(8, 2);
         for _ in 0..80 {
