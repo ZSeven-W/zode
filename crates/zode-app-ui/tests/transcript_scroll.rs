@@ -1,4 +1,4 @@
-use zode_app_ui::{visible_range, MeasuredItem, VirtualListState};
+use zode_app_ui::{visible_range, MeasuredItem, MeasurementCache, VirtualListState};
 
 #[test]
 fn visible_range_keeps_one_overscan_item_above_viewport() {
@@ -38,4 +38,28 @@ fn user_scroll_controls_follow_tail_state() {
     list.scroll_by(200.0, 200.0);
     assert_eq!(list.offset(), 200.0);
     assert!(list.follows_tail());
+}
+
+#[test]
+fn measurement_cache_reflows_offsets_after_a_height_update() {
+    let mut cache = MeasurementCache::with_estimate(3, 40.0);
+    assert_eq!(
+        cache.items(),
+        vec![
+            MeasuredItem::new(0.0, 40.0),
+            MeasuredItem::new(40.0, 80.0),
+            MeasuredItem::new(80.0, 120.0),
+        ],
+    );
+
+    assert_eq!(cache.update(1, 70.0), Some(30.0));
+    assert_eq!(
+        cache.items(),
+        vec![
+            MeasuredItem::new(0.0, 40.0),
+            MeasuredItem::new(40.0, 110.0),
+            MeasuredItem::new(110.0, 150.0),
+        ],
+    );
+    assert_eq!(cache.total_height(), 150.0);
 }
