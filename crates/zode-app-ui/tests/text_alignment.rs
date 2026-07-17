@@ -4,7 +4,7 @@ use zode_app_ui::{
     Composer, Insets, ProjectSidebar, RectExt, SemanticIcon, SettingsPanel, ThreadHeader,
     WorkspaceLayout, WorkspaceSnapshot, ZodeTheme,
 };
-use zode_node_protocol::SessionLocator;
+use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
 #[derive(Debug, Clone)]
 struct TextCall {
@@ -18,6 +18,8 @@ struct SvgCall {
     path: String,
     top_left: Point2D,
     size: f32,
+    color: Color,
+    width: f32,
 }
 
 struct CapturePainter {
@@ -89,13 +91,15 @@ impl Painter for CapturePainter {
         path: &str,
         top_left: Point2D,
         size: f32,
-        _color: Color,
-        _width: f32,
+        color: Color,
+        width: f32,
     ) {
         self.svgs.push(SvgCall {
             path: path.to_owned(),
             top_left,
             size,
+            color,
+            width,
         });
     }
     fn save(&mut self) {}
@@ -190,7 +194,15 @@ fn composer_bottom_controls_share_the_send_button_centerline() {
 #[test]
 fn thread_header_actions_use_centered_semantic_icons() {
     let mut state = demo_state();
-    state.current_session = Some(SessionLocator::new(state.host.node_id, "semantic-header"));
+    let session = SessionLocator::new(state.host.node_id, "semantic-header");
+    state.threads.push(ThreadSummary {
+        session: session.clone(),
+        workspace_uri: WorkspaceUri::new("file:///repo/zode").expect("workspace uri"),
+        title: "zode desktop".into(),
+        updated_at_ms: 1,
+        status: ThreadStatus::Idle,
+    });
+    state.current_session = Some(session);
     let rect = Rect::xywh(240.0, 0.0, 1_560.0, 46.0);
     let layout = ThreadHeader::layout(rect, &state);
     let mut painter = CapturePainter::new(1.0);
@@ -198,6 +210,7 @@ fn thread_header_actions_use_centered_semantic_icons() {
     ThreadHeader::paint(&mut painter, rect, &state, &ZodeTheme::light());
 
     for (action, icon) in [
+        (layout.more.expect("task menu action"), SemanticIcon::More),
         (
             layout.environment.expect("environment action"),
             SemanticIcon::Environment,
@@ -215,6 +228,11 @@ fn thread_header_actions_use_centered_semantic_icons() {
             action.rect.origin.y + action.rect.size.y / 2.0,
             0.01,
         );
+        if icon == SemanticIcon::More {
+            assert_eq!(svg.color, ZodeTheme::light().tokens.foreground);
+            assert!(svg.width >= 2.0);
+            assert_eq!(svg.size, 18.0);
+        }
     }
     assert!(!painter
         .texts

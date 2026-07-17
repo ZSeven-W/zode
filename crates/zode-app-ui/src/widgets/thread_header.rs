@@ -439,18 +439,23 @@ impl ThreadHeader {
             if action.selected {
                 painter.fill_round_rect(action.rect, 9.0, theme.tokens.row_selected);
             }
+            let (icon_size, icon_color, stroke_width) = if icon == SemanticIcon::More {
+                (18.0, theme.tokens.foreground, 2.25)
+            } else {
+                (16.0, theme.tokens.muted_foreground, icon.stroke_width())
+            };
             let icon_rect = Rect::xywh(
-                action.rect.origin.x + (action.rect.size.x - 16.0).max(0.0) / 2.0,
-                action.rect.origin.y + (action.rect.size.y - 16.0).max(0.0) / 2.0,
-                16.0_f32.min(action.rect.size.x),
-                16.0_f32.min(action.rect.size.y),
+                action.rect.origin.x + (action.rect.size.x - icon_size).max(0.0) / 2.0,
+                action.rect.origin.y + (action.rect.size.y - icon_size).max(0.0) / 2.0,
+                icon_size.min(action.rect.size.x),
+                icon_size.min(action.rect.size.y),
             );
             painter.stroke_svg_path(
                 icon.path(),
                 icon_rect.origin,
                 icon_rect.size.x.min(icon_rect.size.y),
-                theme.tokens.muted_foreground,
-                icon.stroke_width(),
+                icon_color,
+                stroke_width,
             );
         }
         if let Some(usage) = state

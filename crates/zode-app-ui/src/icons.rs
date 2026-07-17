@@ -164,7 +164,7 @@ impl SemanticIcon {
             Self::Queue => "M4 5V10C4 12.2 5.8 14 8 14H20M16 10L20 14L16 18",
             Self::Guide => "M9 6L4 11L9 16M4 11H14C18 11 20 13 20 17",
             Self::Delete => "M5 7H19M9 7V4H15V7M7 7L8 20H16L17 7M10 11V16M14 11V16",
-            Self::More => "M5 12H5.1M12 12H12.1M19 12H19.1",
+            Self::More => "M5 12H6M11.5 12H12.5M18 12H19",
             Self::Edit => "M4 20L8 19L19 8L16 5L5 16ZM14 7L17 10",
             Self::CloseQueue => "M4 5V10C4 12.2 5.8 14 8 14H20M16 10L20 14L16 18",
             Self::Branch => "M6 3A2 2 0 1 0 6 7A2 2 0 1 0 6 3M18 17A2 2 0 1 0 18 21A2 2 0 1 0 18 17M6 7V13C6 16 8 19 12 19H16M18 5V17M15 8L18 5L21 8",
