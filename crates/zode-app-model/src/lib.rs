@@ -8,7 +8,9 @@ mod transcript;
 
 pub use command::AppCommand;
 pub use layout::LayoutClass;
-pub use reducer::{reduce_agent_event, ReduceOutcome};
+pub use reducer::{
+    reduce_agent_event, reduce_navigation_command, NavigationOutcome, ReduceOutcome,
+};
 pub use state::*;
 pub use transcript::{TranscriptItem, TranscriptState};
 

@@ -1,4 +1,4 @@
-use crate::{TranscriptItem, TranscriptState, ZodeAppState};
+use crate::{AppCommand, TranscriptItem, TranscriptState, ZodeAppState};
 use zode_node_protocol::{AgentEvent, AgentEventKind, ToolCall};
 
 const UNKNOWN_EVENT_CODE: &str = "agent.event.unknown";
@@ -9,6 +9,88 @@ const UNKNOWN_EVENT_MESSAGE: &str = "Ignored an unknown agent event";
 pub enum ReduceOutcome {
     Applied,
     IgnoredStale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavigationOutcome {
+    Applied,
+    NeedsEffect,
+    Ignored,
+}
+
+/// Applies navigation-local state immediately and identifies commands whose
+/// durable session/app-state mutation must also be executed by the controller.
+pub fn reduce_navigation_command(
+    state: &mut ZodeAppState,
+    command: AppCommand,
+) -> NavigationOutcome {
+    match command {
+        AppCommand::SelectSession(session) => {
+            if !state.threads.iter().any(|thread| thread.session == session) {
+                return NavigationOutcome::Ignored;
+            }
+            state.current_session = Some(session);
+            NavigationOutcome::Applied
+        }
+        AppCommand::RenameSession { session, title } => {
+            let Some(thread) = state
+                .threads
+                .iter_mut()
+                .find(|thread| thread.session == session)
+            else {
+                return NavigationOutcome::Ignored;
+            };
+            thread.title = title;
+            NavigationOutcome::NeedsEffect
+        }
+        AppCommand::SetSessionPinned { session, .. } => {
+            if state.threads.iter().any(|thread| thread.session == session) {
+                NavigationOutcome::NeedsEffect
+            } else {
+                NavigationOutcome::Ignored
+            }
+        }
+        AppCommand::RequestDeleteSession(session) => {
+            if !state.threads.iter().any(|thread| thread.session == session) {
+                return NavigationOutcome::Ignored;
+            }
+            state.pending_session_delete = Some(session);
+            NavigationOutcome::NeedsEffect
+        }
+        AppCommand::CancelDeleteSession => {
+            state.pending_session_delete = None;
+            NavigationOutcome::Applied
+        }
+        AppCommand::DeleteSession(session) => {
+            if state.pending_session_delete.as_ref() != Some(&session) {
+                return NavigationOutcome::Ignored;
+            }
+            state.threads.retain(|thread| thread.session != session);
+            state.transcripts.remove(&session);
+            state.active_turns.remove(&session);
+            state.usage.remove(&session);
+            state
+                .approvals
+                .retain(|_, approval_session| approval_session != &session);
+            if state.current_session.as_ref() == Some(&session) {
+                state.current_session = None;
+            }
+            state.pending_session_delete = None;
+            NavigationOutcome::NeedsEffect
+        }
+        AppCommand::ToggleProject(workspace_uri) => {
+            let Some(project) = state
+                .projects
+                .iter_mut()
+                .find(|project| project.workspace_uri == workspace_uri)
+            else {
+                return NavigationOutcome::Ignored;
+            };
+            project.expanded = !project.expanded;
+            NavigationOutcome::NeedsEffect
+        }
+        _ => NavigationOutcome::Ignored,
+    }
 }
 
 /// Applies a current-turn event while rejecting unknown or stale event streams.
