@@ -254,6 +254,14 @@ pub enum AgentCommandKind {
         workspace_uri: WorkspaceUri,
         tool: String,
     },
+    /// Enables or disables one entry that the workspace integration registry
+    /// has already discovered. This is not an install command and cannot
+    /// create arbitrary plugin ids.
+    SetIntegrationEnabled {
+        workspace_uri: WorkspaceUri,
+        source_id: String,
+        enabled: bool,
+    },
     SetModel {
         model: String,
     },

@@ -1,7 +1,7 @@
 use jian_widgets::{HorizontalAlign, Painter, Rect};
 use zode_app_model::{
-    IntegrationCatalog, IntegrationCategory, IntegrationSection, IntegrationsTab, LoadState,
-    ShellRoute, ZodeAppState,
+    IntegrationCatalog, IntegrationCategory, IntegrationEntry, IntegrationMutationState,
+    IntegrationScope, IntegrationsTab, LoadState, ShellRoute, ZodeAppState,
 };
 
 use crate::{paint_single_line, ZodeTheme};
@@ -34,7 +34,7 @@ pub(super) fn layout(
         ShellRoute::Integrations(tab) => tab,
         _ => return Vec::new(),
     };
-    let sections = visible_sections(catalog, tab);
+    let sections = visible_sections(catalog, tab, state);
     let columns = if page.catalog.size.x < 600.0 { 1 } else { 2 };
     let column_gap = if columns == 1 { 0.0 } else { COLUMN_GAP };
     let column_width = ((page.catalog.size.x - column_gap) / columns as f32).max(0.0);
@@ -68,6 +68,7 @@ pub(super) fn layout(
                             column_width,
                             ROW_HEIGHT,
                         ),
+                        state,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -92,14 +93,24 @@ pub(super) fn paint(
     catalog: &IntegrationCatalog,
     theme: &ZodeTheme,
 ) {
-    if let Some(error) = catalog.directory_error.as_deref() {
+    let status = match &state.presentation.integration_mutation {
+        IntegrationMutationState::Failed { message, .. } => {
+            Some((message.as_str(), theme.tokens.destructive))
+        }
+        IntegrationMutationState::Updating { .. } => Some(("正在保存插件状态…", theme.warning)),
+        IntegrationMutationState::Idle => catalog
+            .directory_error
+            .as_deref()
+            .map(|message| (message, theme.warning)),
+    };
+    if let Some((message, color)) = status {
         paint_single_line(
             painter,
-            error,
+            message,
             page.directory_status,
             12.0,
             400,
-            theme.warning,
+            color,
             HorizontalAlign::Start,
         );
     }
@@ -107,8 +118,16 @@ pub(super) fn paint(
     if sections.is_empty() {
         paint_single_line(
             painter,
-            match state.presentation.route {
-                ShellRoute::Integrations(IntegrationsTab::Skills) => "未发现已安装技能",
+            match (
+                state.presentation.integration_scope,
+                state.presentation.route,
+                state.presentation.integration_search.trim().is_empty(),
+            ) {
+                (IntegrationScope::Public, _, true) => {
+                    "公开目录不可用；当前节点没有可验证的可安装项目"
+                }
+                (_, _, false) => "没有匹配的插件或技能",
+                (_, ShellRoute::Integrations(IntegrationsTab::Skills), true) => "未发现已安装技能",
                 _ => "当前工作区未发现可展示的集成",
             },
             Rect::xywh(
@@ -140,16 +159,36 @@ pub(super) fn paint(
     }
 }
 
-fn visible_sections(
-    catalog: &IntegrationCatalog,
+struct VisibleSection<'a> {
+    category: IntegrationCategory,
+    rows: Vec<&'a IntegrationEntry>,
+}
+
+fn visible_sections<'a>(
+    catalog: &'a IntegrationCatalog,
     tab: IntegrationsTab,
-) -> Vec<&IntegrationSection> {
+    state: &ZodeAppState,
+) -> Vec<VisibleSection<'a>> {
     catalog
         .sections
         .iter()
-        .filter(|section| match tab {
-            IntegrationsTab::Plugins => section.category != IntegrationCategory::Skills,
-            IntegrationsTab::Skills => section.category == IntegrationCategory::Skills,
+        .filter_map(|section| {
+            let tab_matches = match tab {
+                IntegrationsTab::Plugins => section.category != IntegrationCategory::Skills,
+                IntegrationsTab::Skills => section.category == IntegrationCategory::Skills,
+            };
+            if !tab_matches {
+                return None;
+            }
+            let rows = section
+                .rows
+                .iter()
+                .filter(|entry| super::entry_visible(state, entry))
+                .collect::<Vec<_>>();
+            (!rows.is_empty()).then_some(VisibleSection {
+                category: section.category,
+                rows,
+            })
         })
         .collect()
 }

@@ -7,7 +7,7 @@ use zode_app_model::{
 use zode_app_ui::{
     Composer, EmptyState, Key, KeyEvent, PointerButton, PointerEvent, PointerEventKind,
     ThreadHeader, ThreadTranscript, TouchPhase, UnifiedInputEvent, WheelDeltaMode, WidgetId,
-    COMPOSER_ID, SEND_ID, SETTINGS_SEARCH_ID, TERMINAL_ID,
+    COMPOSER_ID, INTEGRATIONS_SEARCH_ID, SEND_ID, SETTINGS_SEARCH_ID, TERMINAL_ID,
 };
 
 use super::{
@@ -200,6 +200,9 @@ impl DesktopApp {
                 if self.handle_session_rename_ime(event.clone()) {
                     return;
                 }
+                if self.handle_integration_search_ime(&event) {
+                    return;
+                }
                 if self.handle_settings_search_ime(&event) {
                     return;
                 }
@@ -334,6 +337,16 @@ impl DesktopApp {
             }
             return;
         }
+        if self.focused_widget == Some(INTEGRATIONS_SEARCH_ID) {
+            match clipboard.read_text() {
+                Ok(Some(text)) if !text.is_empty() => {
+                    let _ = self.paste_integration_search_text(&text);
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("zode-app: clipboard read failed: {error}"),
+            }
+            return;
+        }
         if self.app_state.terminal_surface_visible() && self.focused_widget == Some(TERMINAL_ID) {
             match clipboard.read_text() {
                 Ok(Some(text)) if !text.is_empty() => {
@@ -426,6 +439,7 @@ impl DesktopApp {
             }
             COMPOSER_ID
             | TERMINAL_ID
+            | INTEGRATIONS_SEARCH_ID
             | SETTINGS_SEARCH_ID
             | zode_app_ui::PROJECT_PICKER_SEARCH_ID
             | zode_app_ui::HEADER_RENAME_INPUT_ID => {}
@@ -483,6 +497,11 @@ impl DesktopApp {
                 Action::SetValue if id == SETTINGS_SEARCH_ID => {
                     if let Some(ActionData::Value(value)) = request.data {
                         self.set_settings_search_value(value.into_string());
+                    }
+                }
+                Action::SetValue if id == INTEGRATIONS_SEARCH_ID => {
+                    if let Some(ActionData::Value(value)) = request.data {
+                        self.set_integration_search_value(value.into_string());
                     }
                 }
                 Action::SetValue if id == zode_app_ui::HEADER_RENAME_INPUT_ID => {
@@ -631,6 +650,9 @@ impl DesktopApp {
             return;
         }
         if self.handle_project_picker_key(&event) {
+            return;
+        }
+        if self.handle_integration_search_key(&event) {
             return;
         }
         if self.handle_settings_search_key(&event) {

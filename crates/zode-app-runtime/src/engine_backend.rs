@@ -382,6 +382,7 @@ impl NodeBackend for EngineBackend {
                 | AgentCommandKind::SetModel { .. }
                 | AgentCommandKind::SetEffort { .. }
                 | AgentCommandKind::SetSandbox { .. }
+                | AgentCommandKind::SetIntegrationEnabled { .. }
         ) {
             self.ensure_idle(&command.session)?;
         }

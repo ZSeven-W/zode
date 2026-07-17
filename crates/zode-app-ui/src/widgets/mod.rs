@@ -43,8 +43,9 @@ pub use environment::{
     ENVIRONMENT_REVIEW_ID,
 };
 pub use integrations::{
-    CatalogSectionLayout, InstalledIconLayout, IntegrationRowLayout, IntegrationTabLayout,
-    IntegrationsPage, IntegrationsPageLayout, INTEGRATIONS_PLUGINS_TAB_ID,
+    CatalogSectionLayout, InstalledIconLayout, IntegrationRowLayout, IntegrationScopeLayout,
+    IntegrationTabLayout, IntegrationsPage, IntegrationsPageLayout, INTEGRATIONS_PERSONAL_SCOPE_ID,
+    INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_PUBLIC_SCOPE_ID, INTEGRATIONS_SEARCH_ID,
     INTEGRATIONS_SKILLS_TAB_ID,
 };
 pub use panel_picker::{

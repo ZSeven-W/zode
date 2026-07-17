@@ -1,10 +1,10 @@
 use zode_app_model::{
     apply_session_runtime_options, demo_state, environment_sections, reduce_agent_event,
     reduce_navigation_command, reduce_presentation_command, AppCommand, AttachmentMetadata,
-    ComingSoonFeature, EnvironmentSectionKind, EnvironmentSnapshot, FileArtifact, IntegrationsTab,
-    LoadState, NavigationOutcome, PresentationCommandOutcome, PreviewState, PreviewTarget,
-    SecondaryPane, SessionDiffState, SessionPresentationState, SettingsCategory, ShellPage,
-    ShellRoute, TranscriptItem, TranscriptState,
+    ComingSoonFeature, EnvironmentSectionKind, EnvironmentSnapshot, FileArtifact, IntegrationScope,
+    IntegrationsTab, LoadState, NavigationOutcome, PresentationCommandOutcome, PreviewState,
+    PreviewTarget, SecondaryPane, SessionDiffState, SessionPresentationState, SettingsCategory,
+    ShellPage, ShellRoute, TranscriptItem, TranscriptState,
 };
 use zode_node_protocol::{
     AgentEvent, AgentEventKind, DiffFile, DiffFileStatus, DiffSnapshot, RuntimeOptions,
@@ -113,6 +113,42 @@ fn routes_carry_their_selected_destination() {
     assert_eq!(
         state.presentation.route,
         ShellRoute::ComingSoon(ComingSoonFeature::Sites)
+    );
+}
+
+#[test]
+fn integration_search_and_scope_are_typed_route_local_state() {
+    let mut state = demo_state();
+    assert_eq!(
+        reduce_presentation_command(
+            &mut state,
+            AppCommand::SetIntegrationSearch("review".into()),
+        ),
+        PresentationCommandOutcome::Ignored,
+    );
+
+    reduce_presentation_command(
+        &mut state,
+        AppCommand::Navigate(ShellRoute::Integrations(IntegrationsTab::Plugins)),
+    );
+    assert_eq!(
+        reduce_presentation_command(
+            &mut state,
+            AppCommand::SetIntegrationSearch("review".into()),
+        ),
+        PresentationCommandOutcome::Applied,
+    );
+    assert_eq!(
+        reduce_presentation_command(
+            &mut state,
+            AppCommand::SetIntegrationScope(IntegrationScope::Public),
+        ),
+        PresentationCommandOutcome::Applied,
+    );
+    assert_eq!(state.presentation.integration_search, "review");
+    assert_eq!(
+        state.presentation.integration_scope,
+        IntegrationScope::Public
     );
 }
 

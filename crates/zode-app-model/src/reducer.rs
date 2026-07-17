@@ -61,6 +61,20 @@ pub fn reduce_presentation_command(
         AppCommand::Navigate(route) => Some(route),
         AppCommand::SelectSettingsCategory(category) => Some(crate::ShellRoute::Settings(category)),
         AppCommand::SelectIntegrationsTab(tab) => Some(crate::ShellRoute::Integrations(tab)),
+        AppCommand::SetIntegrationSearch(search) => {
+            if !matches!(state.presentation.route, crate::ShellRoute::Integrations(_)) {
+                return PresentationCommandOutcome::Ignored;
+            }
+            state.presentation.integration_search = search;
+            return PresentationCommandOutcome::Applied;
+        }
+        AppCommand::SetIntegrationScope(scope) => {
+            if !matches!(state.presentation.route, crate::ShellRoute::Integrations(_)) {
+                return PresentationCommandOutcome::Ignored;
+            }
+            state.presentation.integration_scope = scope;
+            return PresentationCommandOutcome::Applied;
+        }
         AppCommand::ToggleSecondaryMenu => {
             if state.presentation.route != crate::ShellRoute::Conversation {
                 return PresentationCommandOutcome::Ignored;

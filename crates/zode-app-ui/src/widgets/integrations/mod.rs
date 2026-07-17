@@ -2,8 +2,12 @@ mod catalog;
 mod installed;
 mod row;
 
-use jian_widgets::{HorizontalAlign, Painter, Rect};
-use zode_app_model::{AppCommand, IntegrationsTab, LoadState, ShellRoute, ZodeAppState};
+use jian_core::text_input::TextInputState;
+use jian_widgets::{components::input::Input, HorizontalAlign, Painter, Rect};
+use zode_app_model::{
+    AppCommand, Availability, IntegrationEntry, IntegrationInstallState, IntegrationScope,
+    IntegrationsTab, LoadState, ShellRoute, ZodeAppState,
+};
 
 use crate::{paint_single_line, SemanticIcon, WidgetId, ZodeTheme};
 
@@ -13,6 +17,9 @@ pub use row::IntegrationRowLayout;
 
 pub const INTEGRATIONS_PLUGINS_TAB_ID: WidgetId = WidgetId(70);
 pub const INTEGRATIONS_SKILLS_TAB_ID: WidgetId = WidgetId(71);
+pub const INTEGRATIONS_SEARCH_ID: WidgetId = WidgetId(190);
+pub const INTEGRATIONS_PUBLIC_SCOPE_ID: WidgetId = WidgetId(191);
+pub const INTEGRATIONS_PERSONAL_SCOPE_ID: WidgetId = WidgetId(192);
 
 const CONTENT_WIDTH: f32 = 736.0;
 const CONTENT_TOP: f32 = 46.0;
@@ -31,11 +38,21 @@ pub struct IntegrationTabLayout {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IntegrationScopeLayout {
+    pub id: WidgetId,
+    pub rect: Rect,
+    pub scope: IntegrationScope,
+    pub label: &'static str,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IntegrationsPageLayout {
     pub content: Rect,
     pub title: Rect,
     pub subtitle: Rect,
     pub search: Rect,
+    pub scopes: [IntegrationScopeLayout; 2],
     pub installed_title: Rect,
     pub installed_strip: Rect,
     pub directory_status: Rect,
@@ -47,6 +64,16 @@ pub struct IntegrationsPage;
 
 impl IntegrationsPage {
     pub fn paint(painter: &mut dyn Painter, rect: Rect, state: &ZodeAppState, theme: &ZodeTheme) {
+        Self::paint_with_focus(painter, rect, state, None, theme);
+    }
+
+    pub fn paint_with_focus(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        state: &ZodeAppState,
+        focused: Option<WidgetId>,
+        theme: &ZodeTheme,
+    ) {
         let ShellRoute::Integrations(tab) = state.presentation.route else {
             return;
         };
@@ -54,7 +81,7 @@ impl IntegrationsPage {
         painter.save();
         painter.clip_rect(rect);
         paint_tabs(painter, &layout, theme);
-        paint_header(painter, &layout, tab, theme);
+        paint_header(painter, &layout, tab, state, focused, theme);
         match &state.presentation.integrations {
             LoadState::Ready(catalog)
                 if state.active_available_workspace() == Some(&catalog.workspace_uri) =>
@@ -104,6 +131,23 @@ impl IntegrationsPage {
                 selected: selected == IntegrationsTab::Skills,
             },
         ];
+        let scope_y = content.origin.y + 144.0;
+        let scopes = [
+            IntegrationScopeLayout {
+                id: INTEGRATIONS_PUBLIC_SCOPE_ID,
+                rect: Rect::xywh(content.origin.x, scope_y, 52.0, 28.0),
+                scope: IntegrationScope::Public,
+                label: "公开",
+                selected: state.presentation.integration_scope == IntegrationScope::Public,
+            },
+            IntegrationScopeLayout {
+                id: INTEGRATIONS_PERSONAL_SCOPE_ID,
+                rect: Rect::xywh(content.origin.x + 56.0, scope_y, 52.0, 28.0),
+                scope: IntegrationScope::Personal,
+                label: "个人",
+                selected: state.presentation.integration_scope == IntegrationScope::Personal,
+            },
+        ];
 
         IntegrationsPageLayout {
             title: Rect::xywh(
@@ -126,29 +170,30 @@ impl IntegrationsPage {
             ),
             installed_title: Rect::xywh(
                 content.origin.x,
-                content.origin.y + 158.0,
+                content.origin.y + 190.0,
                 content.size.x,
                 24.0,
             ),
             installed_strip: Rect::xywh(
                 content.origin.x,
-                content.origin.y + 190.0,
+                content.origin.y + 222.0,
                 content.size.x,
                 44.0,
             ),
             directory_status: Rect::xywh(
                 content.origin.x,
-                content.origin.y + 246.0,
+                content.origin.y + 278.0,
                 content.size.x,
                 22.0,
             ),
             catalog: Rect::xywh(
                 content.origin.x,
-                content.origin.y + 282.0,
+                content.origin.y + 314.0,
                 content.size.x,
-                (content.size.y - 282.0).max(0.0),
+                (content.size.y - 314.0).max(0.0),
             ),
             content,
+            scopes,
             tabs,
         }
     }
@@ -171,17 +216,75 @@ impl IntegrationsPage {
         row::widget_id(source_id)
     }
 
-    pub const fn command_for_widget(id: WidgetId) -> Option<AppCommand> {
+    pub fn row_action_widget_id(source_id: &str) -> WidgetId {
+        row::action_widget_id(source_id)
+    }
+
+    pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
         match id {
             INTEGRATIONS_PLUGINS_TAB_ID => {
-                Some(AppCommand::SelectIntegrationsTab(IntegrationsTab::Plugins))
+                return Some(AppCommand::SelectIntegrationsTab(IntegrationsTab::Plugins));
             }
             INTEGRATIONS_SKILLS_TAB_ID => {
-                Some(AppCommand::SelectIntegrationsTab(IntegrationsTab::Skills))
+                return Some(AppCommand::SelectIntegrationsTab(IntegrationsTab::Skills));
             }
-            _ => None,
+            INTEGRATIONS_PUBLIC_SCOPE_ID => {
+                return Some(AppCommand::SetIntegrationScope(IntegrationScope::Public));
+            }
+            INTEGRATIONS_PERSONAL_SCOPE_ID => {
+                return Some(AppCommand::SetIntegrationScope(IntegrationScope::Personal));
+            }
+            INTEGRATIONS_SEARCH_ID => return None,
+            _ => {}
         }
+        let LoadState::Ready(catalog) = &state.presentation.integrations else {
+            return None;
+        };
+        let entry = catalog
+            .all_entries()
+            .filter(|entry| entry_visible(state, entry))
+            .find(|entry| {
+                entry
+                    .source_id
+                    .as_deref()
+                    .is_some_and(|source_id| row::action_widget_id(source_id) == id)
+            })?;
+        let action = row::action_state(entry, state);
+        if !action.enabled {
+            return None;
+        }
+        Some(AppCommand::SetIntegrationEnabled {
+            workspace_uri: catalog.workspace_uri.clone(),
+            source_id: entry.source_id.clone()?,
+            enabled: entry.availability == Availability::Disabled,
+        })
     }
+}
+
+pub(super) fn entry_visible(state: &ZodeAppState, entry: &IntegrationEntry) -> bool {
+    let tab_matches = match state.presentation.route {
+        ShellRoute::Integrations(IntegrationsTab::Plugins) => {
+            entry.category != zode_app_model::IntegrationCategory::Skills
+        }
+        ShellRoute::Integrations(IntegrationsTab::Skills) => {
+            entry.category == zode_app_model::IntegrationCategory::Skills
+        }
+        _ => false,
+    };
+    let scope_matches = match state.presentation.integration_scope {
+        IntegrationScope::Public => entry.install_state == IntegrationInstallState::Available,
+        IntegrationScope::Personal => entry.install_state != IntegrationInstallState::Available,
+    };
+    let query = state.presentation.integration_search.trim().to_lowercase();
+    let query_matches = query.is_empty()
+        || entry.name.to_lowercase().contains(&query)
+        || entry.description.to_lowercase().contains(&query)
+        || entry.category.title().to_lowercase().contains(&query)
+        || entry
+            .source_id
+            .as_deref()
+            .is_some_and(|source_id| source_id.to_lowercase().contains(&query));
+    tab_matches && scope_matches && query_matches
 }
 
 fn catalog_matches_active_workspace(state: &ZodeAppState) -> bool {
@@ -217,6 +320,8 @@ fn paint_header(
     painter: &mut dyn Painter,
     layout: &IntegrationsPageLayout,
     tab: IntegrationsTab,
+    state: &ZodeAppState,
+    focused: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
     paint_single_line(
@@ -244,33 +349,34 @@ fn paint_header(
         HorizontalAlign::Start,
     );
 
-    painter.fill_round_rect(layout.search, 17.0, theme.tokens.muted);
-    painter.stroke_round_rect(layout.search, 17.0, theme.tokens.border, 1.0);
-    let icon_size = 16.0;
-    painter.stroke_svg_path(
-        SemanticIcon::Search.path(),
-        jian_widgets::Point2D::new(
-            layout.search.origin.x + 12.0,
-            layout.search.origin.y + (layout.search.size.y - icon_size) / 2.0,
-        ),
-        icon_size,
-        theme.tokens.muted_foreground,
-        SemanticIcon::Search.stroke_width(),
-    );
-    paint_single_line(
-        painter,
-        "搜索本机集成（即将支持）",
-        Rect::xywh(
-            layout.search.origin.x + 38.0,
-            layout.search.origin.y,
-            (layout.search.size.x - 50.0).max(0.0),
-            layout.search.size.y,
-        ),
-        13.0,
-        400,
-        theme.tokens.muted_foreground,
-        HorizontalAlign::Start,
-    );
+    let search = TextInputState::with_text(state.presentation.integration_search.clone());
+    Input {
+        state: &search,
+        placeholder: "搜索插件或技能",
+        focused: focused == Some(INTEGRATIONS_SEARCH_ID),
+        font_size: 13.0,
+        now_ms: 0,
+        icon_d: Some(SemanticIcon::Search.path()),
+    }
+    .paint(painter, layout.search, &theme.tokens);
+    for scope in layout.scopes {
+        if scope.selected {
+            painter.fill_round_rect(scope.rect, 9.0, theme.tokens.row_selected);
+        }
+        paint_single_line(
+            painter,
+            scope.label,
+            scope.rect,
+            13.0,
+            if scope.selected { 600 } else { 450 },
+            if scope.selected {
+                theme.tokens.foreground
+            } else {
+                theme.tokens.muted_foreground
+            },
+            HorizontalAlign::Center,
+        );
+    }
 }
 
 fn paint_load_state(
@@ -281,7 +387,7 @@ fn paint_load_state(
 ) {
     let panel = Rect::xywh(
         layout.content.origin.x,
-        layout.content.origin.y + 158.0,
+        layout.content.origin.y + 190.0,
         layout.content.size.x,
         112.0,
     );

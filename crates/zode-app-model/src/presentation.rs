@@ -62,6 +62,15 @@ pub enum IntegrationsTab {
     Skills,
 }
 
+/// Catalog ownership filter. Public entries require a verified directory
+/// source; personal entries are capabilities discovered on this machine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IntegrationScope {
+    Public,
+    #[default]
+    Personal,
+}
+
 /// Explicit placeholders for shell destinations that have no implementation yet.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ComingSoonFeature {
@@ -201,6 +210,35 @@ pub enum IntegrationInstallState {
     BuiltIn,
     Installed,
     Configured,
+    /// A verified directory offer that is not installed yet. The local
+    /// registry never manufactures this state when no directory is available.
+    Available,
+}
+
+impl IntegrationInstallState {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "已内置",
+            Self::Installed => "已安装",
+            Self::Configured => "已配置",
+            Self::Available => "可安装",
+        }
+    }
+}
+
+/// In-flight mutation state for a locally discovered plugin entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum IntegrationMutationState {
+    #[default]
+    Idle,
+    Updating {
+        source_id: String,
+        enabled: bool,
+    },
+    Failed {
+        source_id: String,
+        message: String,
+    },
 }
 
 /// Auditable icon fallback. Repository-backed branded assets can be added as
@@ -461,6 +499,9 @@ pub struct PresentationState {
     pub secondary_menu_open: bool,
     pub sessions: BTreeMap<SessionLocator, SessionPresentationState>,
     pub integrations: LoadState<IntegrationCatalog>,
+    pub integration_search: String,
+    pub integration_scope: IntegrationScope,
+    pub integration_mutation: IntegrationMutationState,
 }
 
 /// Builds the inspector vocabulary from the selected session's canonical state.

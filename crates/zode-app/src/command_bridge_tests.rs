@@ -8,12 +8,15 @@ use zode_app_model::{
 };
 use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentEndpoint, AgentEventStream, AgentQuery, AgentSnapshot,
-    ApprovalDecision, EndpointError, EndpointErrorKind, RuntimeOptions, SandboxMode,
-    SessionLocator, ThreadStatus, ThreadSummary, UserContent, WorkspaceUri,
+    ApprovalDecision, EndpointError, EndpointErrorKind, IntegrationRegistryEntry,
+    IntegrationRegistryKind, IntegrationRegistrySnapshot, IntegrationRegistryState, RuntimeOptions,
+    SandboxMode, SessionLocator, ThreadStatus, ThreadSummary, UserContent, WorkspaceUri,
 };
 
 use super::{prepare_dispatch, reject_dispatch, CommandBridge};
 
+#[path = "command_bridge_tests/integrations.rs"]
+mod integrations;
 #[path = "command_bridge_tests/queue.rs"]
 mod queue;
 #[path = "command_bridge_tests/session_creation.rs"]
@@ -158,6 +161,37 @@ impl AgentEndpoint for FakeEndpoint {
                     session: self.runtime_snapshot_session.clone().unwrap_or(session),
                     options: self.runtime_options.clone(),
                 })
+            }
+            AgentQuery::Integrations { workspace_uri } => {
+                let state = self
+                    .commands
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find_map(|command| match &command.kind {
+                        AgentCommandKind::SetIntegrationEnabled {
+                            source_id, enabled, ..
+                        } if source_id == "tools:git" => Some(if *enabled {
+                            IntegrationRegistryState::Ready
+                        } else {
+                            IntegrationRegistryState::Disabled
+                        }),
+                        _ => None,
+                    })
+                    .unwrap_or(IntegrationRegistryState::Ready);
+                Ok(AgentSnapshot::Integrations(IntegrationRegistrySnapshot {
+                    workspace_uri,
+                    entries: vec![IntegrationRegistryEntry {
+                        source_id: "tools:git".into(),
+                        name: "git".into(),
+                        description: "Git tools".into(),
+                        kind: IntegrationRegistryKind::ToolGroup,
+                        state,
+                        installed: true,
+                    }],
+                    directory_error: Some("directory unavailable".into()),
+                }))
             }
             _ => Err(EndpointError {
                 kind: EndpointErrorKind::InvalidRequest,

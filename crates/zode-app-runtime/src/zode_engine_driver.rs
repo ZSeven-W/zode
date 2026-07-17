@@ -477,6 +477,30 @@ impl ZodeEngineDriver {
         Ok(())
     }
 
+    async fn set_integration_enabled(
+        &self,
+        session: &SessionLocator,
+        workspace_uri: zode_node_protocol::WorkspaceUri,
+        source_id: String,
+        enabled: bool,
+    ) -> Result<(), EndpointError> {
+        let disabled = crate::integrations::set_registry_entry_enabled(
+            workspace_uri,
+            self.config_dir.as_deref(),
+            &self.capabilities,
+            &source_id,
+            enabled,
+        )
+        .map_err(map_internal)?;
+        if self.runtime_engine(session).is_some() {
+            self.reassemble(session, move |template, _| {
+                Ok(template.with_plugins_disabled(disabled))
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn diff(&self, session: SessionLocator) -> Result<DiffSnapshot, EndpointError> {
         self.ensure_local(&session)?;
         let cwd = self
@@ -568,6 +592,14 @@ impl EngineDriver for ZodeEngineDriver {
                 tool,
             } => {
                 self.revoke_project_permission(&command.session, &workspace_uri, &tool)
+                    .await
+            }
+            AgentCommandKind::SetIntegrationEnabled {
+                workspace_uri,
+                source_id,
+                enabled,
+            } => {
+                self.set_integration_enabled(&command.session, workspace_uri, source_id, enabled)
                     .await
             }
             AgentCommandKind::SetModel { model } => self.set_model(&command.session, model).await,

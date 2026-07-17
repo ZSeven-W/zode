@@ -1,7 +1,7 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
-    demo_state, integration_catalog, AppCommand, IntegrationsTab, LoadState, ProjectState,
-    ShellRoute,
+    demo_state, integration_catalog, AppCommand, IntegrationScope, IntegrationsTab, LoadState,
+    ProjectState, ShellRoute,
 };
 use zode_app_ui::{Insets, IntegrationsPage, RectExt, WorkspaceSnapshot, ZodeTheme};
 use zode_node_protocol::{
@@ -169,7 +169,7 @@ fn wide_page_freezes_reference_column_and_exposes_real_tab_commands() {
     assert!(layout.tabs[0].selected);
     assert_eq!(layout.tabs[1].label, "技能");
     assert_eq!(
-        IntegrationsPage::command_for_widget(layout.tabs[1].id),
+        IntegrationsPage::command_for_widget(&state, layout.tabs[1].id),
         Some(AppCommand::SelectIntegrationsTab(IntegrationsTab::Skills)),
     );
 }
@@ -240,7 +240,8 @@ fn paint_renders_installed_categories_and_honest_states_without_marketplace_clai
     for expected in [
         "插件",
         "在常用工具与 Zode 协作",
-        "搜索本机集成（即将支持）",
+        "搜索插件或技能",
+        "个人",
         "已安装",
         "内置工具",
         "节点能力",
@@ -272,7 +273,7 @@ fn skills_tab_filters_rows_but_keeps_the_real_installed_strip() {
 }
 
 #[test]
-fn accessibility_uses_the_same_catalog_row_rects_and_keeps_rows_non_actionable() {
+fn accessibility_uses_row_rects_and_exposes_only_real_actions() {
     let state = catalog_state(IntegrationsTab::Plugins);
     let snapshot = WorkspaceSnapshot::build(&state, 1_800.0, 1_080.0, Insets::ZERO);
     let sections =
@@ -294,6 +295,52 @@ fn accessibility_uses_the_same_catalog_row_rects_and_keeps_rows_non_actionable()
             first.rect.origin.y + first.rect.size.y / 2.0,
         )),
         None
+    );
+
+    let action = snapshot
+        .node(first.action_id)
+        .expect("toggle action is accessible");
+    assert!(action.actions.contains(&accesskit::Action::Click));
+    assert!(!action.disabled);
+    assert_eq!(
+        IntegrationsPage::command_for_widget(&state, first.action_id),
+        Some(AppCommand::SetIntegrationEnabled {
+            workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+            source_id: first.source_id.clone(),
+            enabled: false,
+        })
+    );
+}
+
+#[test]
+fn search_and_public_personal_filters_never_invent_directory_entries() {
+    let mut state = catalog_state(IntegrationsTab::Plugins);
+    let surface = Rect::xywh(240.0, 0.0, 1_560.0, 1_080.0);
+
+    state.presentation.integration_search = "github".into();
+    let sections = IntegrationsPage::catalog_section_layout(surface, &state);
+    assert_eq!(
+        sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .map(|row| row.source_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["mcp:github"]
+    );
+
+    state.presentation.integration_search.clear();
+    state.presentation.integration_scope = IntegrationScope::Public;
+    assert!(IntegrationsPage::catalog_section_layout(surface, &state).is_empty());
+    let mut painter = PaintCapture::default();
+    IntegrationsPage::paint(&mut painter, surface, &state, &ZodeTheme::light());
+    assert!(painter
+        .texts
+        .join("\n")
+        .contains("当前节点没有可验证的可安装项目"));
+
+    assert_eq!(
+        IntegrationsPage::command_for_widget(&state, zode_app_ui::INTEGRATIONS_PERSONAL_SCOPE_ID,),
+        Some(AppCommand::SetIntegrationScope(IntegrationScope::Personal))
     );
 }
 
@@ -337,4 +384,24 @@ fn narrow_layout_never_produces_negative_or_overlapping_row_columns() {
             assert!(pair[0].rect.max_y() <= pair[1].rect.min_y());
         }
     }
+}
+
+#[test]
+fn integration_static_ids_do_not_overlap_adjacent_shell_components() {
+    let integration_ids = [
+        zode_app_ui::INTEGRATIONS_SEARCH_ID,
+        zode_app_ui::INTEGRATIONS_PUBLIC_SCOPE_ID,
+        zode_app_ui::INTEGRATIONS_PERSONAL_SCOPE_ID,
+    ];
+    let reserved = [
+        zode_app_ui::PANEL_PICKER_ID,
+        zode_app_ui::PANEL_PICKER_MENU_ID,
+        zode_app_ui::EMPTY_SUGGESTION_IDS[0],
+        zode_app_ui::EMPTY_SUGGESTION_IDS[1],
+        zode_app_ui::EMPTY_SUGGESTION_IDS[2],
+        zode_app_ui::EMPTY_SUGGESTION_IDS[3],
+    ];
+    assert!(integration_ids
+        .iter()
+        .all(|id| !reserved.iter().any(|reserved| reserved == id)));
 }

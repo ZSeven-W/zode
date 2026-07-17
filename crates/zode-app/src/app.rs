@@ -39,6 +39,7 @@ use zode_node_protocol::{AgentEndpoint, NodeCapability, UserContent, WorkspaceUr
 
 #[path = "app/external-preview.rs"]
 mod external_preview;
+mod integrations;
 mod interaction;
 mod navigation_persistence;
 mod navigation_state;

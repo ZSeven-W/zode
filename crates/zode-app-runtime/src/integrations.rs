@@ -40,6 +40,51 @@ pub(crate) fn discover_registry(
     ))
 }
 
+/// Persists the enabled state of one entry that the local registry has
+/// already discovered. This intentionally does not install anything: the
+/// current core exposes no verified marketplace or installer contract.
+pub(crate) fn set_registry_entry_enabled(
+    workspace_uri: WorkspaceUri,
+    config_dir: Option<&Path>,
+    capabilities: &CapabilityManifest,
+    source_id: &str,
+    enabled: bool,
+) -> Result<Vec<String>, String> {
+    let cwd = workspace_uri_to_path(&workspace_uri).map_err(|error| error.to_string())?;
+    let snapshot = discover_registry(workspace_uri, config_dir, capabilities)?;
+    let entry = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.source_id == source_id)
+        .ok_or_else(|| "integration is not present in the local registry".to_owned())?;
+    if entry.kind == IntegrationRegistryKind::NodeCapability {
+        return Err("node capabilities cannot be changed from the plugin page".into());
+    }
+
+    let config_dir = config_dir
+        .map(Path::to_path_buf)
+        .map(Ok)
+        .unwrap_or_else(ConfigManager::config_dir)
+        .map_err(|error| error.to_string())?;
+    let original = ConfigManager::load_global_in(&config_dir).map_err(|error| error.to_string())?;
+    let mut updated = original.clone();
+    let mut manager = PluginManager::from_config(&updated);
+    manager.set_enabled(source_id, enabled);
+    updated.plugins.disabled = manager.disabled_ids();
+    ConfigManager::save_global_in(&config_dir, &updated).map_err(|error| error.to_string())?;
+
+    let effective =
+        ConfigManager::load_in(&cwd, &config_dir, false).map_err(|error| error.to_string())?;
+    if PluginManager::from_config(&effective).is_enabled(source_id) != enabled {
+        let _ = ConfigManager::save_global_in(&config_dir, &original);
+        return Err(
+            "project configuration overrides this plugin; edit the project config explicitly"
+                .into(),
+        );
+    }
+    Ok(effective.plugins.disabled)
+}
+
 fn registry_from_discovery(
     workspace_uri: WorkspaceUri,
     cfg: &ZodeConfig,
@@ -271,5 +316,41 @@ mod tests {
                     IntegrationRegistryState::Configured | IntegrationRegistryState::Disabled
                 )
         }));
+    }
+
+    #[test]
+    fn local_registry_toggle_persists_only_a_discovered_plugin() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace_uri = crate::path_to_workspace_uri(&workspace).unwrap();
+
+        let disabled = set_registry_entry_enabled(
+            workspace_uri.clone(),
+            Some(&config_dir),
+            &manifest(),
+            "tools:git",
+            false,
+        )
+        .unwrap();
+        assert_eq!(disabled, vec!["tools:git"]);
+        assert_eq!(
+            ConfigManager::load_global_in(&config_dir)
+                .unwrap()
+                .plugins
+                .disabled,
+            vec!["tools:git"]
+        );
+
+        assert!(set_registry_entry_enabled(
+            workspace_uri,
+            Some(&config_dir),
+            &manifest(),
+            "directory:invented",
+            true,
+        )
+        .unwrap_err()
+        .contains("not present"));
     }
 }

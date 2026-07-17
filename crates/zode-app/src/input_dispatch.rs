@@ -3,7 +3,8 @@ use jian_widgets::{Point2D, Rect};
 use zode_app_model::ShellPage;
 use zode_app_ui::{
     FocusDirection, Key, KeyEvent, TouchEvent, TouchPhase, WidgetId, WorkspaceSnapshot,
-    COMPOSER_ID, HEADER_RENAME_INPUT_ID, PROJECT_PICKER_SEARCH_ID, TERMINAL_ID,
+    COMPOSER_ID, HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID, PROJECT_PICKER_SEARCH_ID,
+    TERMINAL_ID,
 };
 
 use crate::event_map::{route_key_event, InputRoute};
@@ -143,6 +144,7 @@ pub fn ime_allowed_for_focus(
             focused == Some(COMPOSER_ID)
                 || focused == Some(PROJECT_PICKER_SEARCH_ID)
                 || focused == Some(HEADER_RENAME_INPUT_ID)
+                || focused == Some(INTEGRATIONS_SEARCH_ID)
         }
     }
 }
@@ -150,7 +152,7 @@ pub fn ime_allowed_for_focus(
 #[cfg(test)]
 mod tests {
     use zode_app_model::ShellPage;
-    use zode_app_ui::{WidgetId, HEADER_RENAME_INPUT_ID};
+    use zode_app_ui::{WidgetId, HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID};
 
     use super::ime_allowed_for_focus;
 
@@ -170,6 +172,20 @@ mod tests {
             ShellPage::Settings,
             Some(WidgetId(HEADER_RENAME_INPUT_ID.0)),
             true,
+        ));
+    }
+
+    #[test]
+    fn integration_search_enables_ime_on_the_typed_catalog_route() {
+        assert!(ime_allowed_for_focus(
+            ShellPage::ComingSoon,
+            Some(INTEGRATIONS_SEARCH_ID),
+            true,
+        ));
+        assert!(!ime_allowed_for_focus(
+            ShellPage::ComingSoon,
+            Some(INTEGRATIONS_SEARCH_ID),
+            false,
         ));
     }
 }

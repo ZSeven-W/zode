@@ -7,9 +7,9 @@ use zode_app_model::{
 
 use crate::{
     composer_queue_reserved_height, Composer, DocumentPreview, EnvironmentPanel, Insets,
-    IntegrationsPage, ProjectPickerViewState, RectExt, ReviewPanel, SettingsPanel,
-    TerminalSecondaryPanel, ThreadTranscript, UnavailableSecondaryPanel, WorkspaceLayout,
-    COMPOSER_ATTACHMENT_H, COMPOSER_H, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
+    ProjectPickerViewState, RectExt, ReviewPanel, SettingsPanel, TerminalSecondaryPanel,
+    ThreadTranscript, UnavailableSecondaryPanel, WorkspaceLayout, COMPOSER_ATTACHMENT_H,
+    COMPOSER_H, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
     DOCUMENT_PREVIEW_EXTERNAL_ID, DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID,
     ENVIRONMENT_REVIEW_ID, INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
     TERMINAL_SECONDARY_CLOSE_ID, UNAVAILABLE_SECONDARY_CLOSE_ID,
@@ -18,6 +18,7 @@ use crate::{
 mod empty_state;
 mod header;
 mod ids;
+mod integrations;
 mod project_picker;
 mod queue;
 mod settings;
@@ -27,6 +28,7 @@ mod transcript;
 use empty_state::append_empty_suggestion_nodes;
 use header::{append_header_menu_nodes, append_header_nodes, append_panel_picker_nodes};
 pub(crate) use ids::stable_widget_id;
+use integrations::append_integration_nodes;
 use project_picker::{
     append_composer_detach, append_picker_overlay, append_welcome_project_trigger,
 };
@@ -387,67 +389,6 @@ fn current_session_busy(state: &ZodeAppState) -> bool {
         .as_ref()
         .and_then(|session| state.transcripts.get(session))
         .is_some_and(|transcript| transcript.busy)
-}
-
-fn append_integration_nodes(
-    nodes: &mut Vec<InteractionNode>,
-    layout: &WorkspaceLayout,
-    focus_order: &mut u32,
-    state: &ZodeAppState,
-) {
-    for tab in IntegrationsPage::layout(layout.primary_surface, state).tabs {
-        let Some(rect) = ThreadTranscript::clip_to_viewport(tab.rect, layout.primary_surface)
-        else {
-            continue;
-        };
-        let mut tab_node = node(
-            tab.id,
-            rect,
-            Role::Tab,
-            tab.label,
-            None,
-            vec![Action::Click, Action::Focus],
-            next_order(focus_order),
-            CursorHint::Pointer,
-        );
-        tab_node.toggled = Some(Toggled::from(tab.selected));
-        nodes.push(tab_node);
-    }
-    for icon in IntegrationsPage::installed_icon_layout(layout.primary_surface, state) {
-        let Some(rect) = ThreadTranscript::clip_to_viewport(icon.rect, layout.primary_surface)
-        else {
-            continue;
-        };
-        nodes.push(node(
-            icon.id,
-            rect,
-            Role::Image,
-            &format!("已安装 {}", icon.name),
-            Some(icon.status.into()),
-            Vec::new(),
-            None,
-            CursorHint::Default,
-        ));
-    }
-    for row in IntegrationsPage::catalog_section_layout(layout.primary_surface, state)
-        .into_iter()
-        .flat_map(|section| section.rows)
-    {
-        let Some(rect) = ThreadTranscript::clip_to_viewport(row.rect, layout.primary_surface)
-        else {
-            continue;
-        };
-        nodes.push(node(
-            row.id,
-            rect,
-            Role::ListItem,
-            &format!("{}，{}", row.name, row.status),
-            Some(row.description),
-            Vec::new(),
-            None,
-            CursorHint::Default,
-        ));
-    }
 }
 
 fn append_secondary_nodes(

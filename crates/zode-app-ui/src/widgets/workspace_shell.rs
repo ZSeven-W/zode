@@ -261,7 +261,13 @@ impl WorkspaceShell {
                 SettingsPanel::paint_page(painter, &snapshot, state, workspace, theme);
             }
             ShellRoute::Integrations(_) => {
-                IntegrationsPage::paint(painter, geometry.primary_surface, state, theme);
+                IntegrationsPage::paint_with_focus(
+                    painter,
+                    geometry.primary_surface,
+                    state,
+                    snapshot.focused,
+                    theme,
+                );
             }
             ShellRoute::ComingSoon(feature) => {
                 ComingSoonPage::paint(painter, geometry.primary_surface, feature, theme);

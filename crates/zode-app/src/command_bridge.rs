@@ -19,6 +19,7 @@ use crate::window_state::AppWake;
 
 mod approval;
 mod first_submit;
+mod integrations;
 use first_submit::prepare_first_submit;
 
 #[derive(Debug)]
@@ -42,6 +43,9 @@ enum Completion {
     },
     RefreshRuntimeOptions {
         session: SessionLocator,
+    },
+    RefreshIntegrations {
+        workspace_uri: WorkspaceUri,
     },
     RefreshThreads,
 }
@@ -82,19 +86,17 @@ enum CompletionResult {
         session: SessionLocator,
         options: RuntimeOptions,
     },
+    Integrations(zode_node_protocol::IntegrationRegistrySnapshot),
     Threads(Vec<ThreadSummary>),
 }
 
-/// Sequential endpoint command pump. Keeping one worker preserves user intent
-/// order (for example, CreateSession before a later StartTurn) without ever
-/// blocking winit's main thread.
+/// Sequential endpoint command pump preserving user-intent order off the window thread.
 pub struct CommandBridge {
     sender: mpsc::UnboundedSender<CommandDispatch>,
     results: mpsc::UnboundedReceiver<CommandResult>,
 }
 
 impl CommandBridge {
-    /// Must be called while a Tokio runtime is entered.
     pub fn spawn(endpoint: Arc<dyn AgentEndpoint>, proxy: EventLoopProxy<AppWake>) -> Self {
         Self::spawn_with_wake(endpoint, move || {
             let _ = proxy.send_event(AppWake::Redraw);
@@ -234,6 +236,9 @@ async fn complete(
             let options = query_session_runtime_options(endpoint, &session).await?;
             Ok(CompletionResult::RuntimeOptions { session, options })
         }
+        Completion::RefreshIntegrations { workspace_uri } => {
+            integrations::complete(endpoint, workspace_uri).await
+        }
         Completion::RefreshThreads => match endpoint
             .query(AgentQuery::Threads)
             .await
@@ -368,6 +373,14 @@ pub fn prepare_dispatch(
                 Completion::RefreshPermissions { workspace_uri },
             )
         }
+        AppCommand::SetIntegrationEnabled {
+            workspace_uri,
+            source_id,
+            enabled,
+        } => {
+            let parts = integrations::prepare(state, workspace_uri, source_id, enabled)?;
+            (parts.session, None, parts.kind, parts.completion)
+        }
         AppCommand::SetModel(model) => {
             let session = current_session(state)?;
             (
@@ -408,7 +421,6 @@ pub fn prepare_dispatch(
     }))
 }
 
-/// Targets the queue owner and claims its busy slot before endpoint dispatch.
 pub(crate) fn prepare_queued_start(
     state: &mut ZodeAppState,
     session: SessionLocator,
@@ -450,7 +462,6 @@ pub(crate) fn prepare_queued_start(
     })
 }
 
-/// Targets an explicit queued-message guide at its owning active turn.
 pub(crate) fn prepare_queued_steer(
     state: &mut ZodeAppState,
     session: SessionLocator,
@@ -504,8 +515,6 @@ fn append_user_content(transcript: &mut TranscriptState, input: &[UserContent]) 
             UserContent::Text { text } => transcript
                 .items
                 .push(TranscriptItem::UserText(text.clone())),
-            // The desktop controller appends the real lightweight attachment metadata
-            // after this payload is prepared. Do not downgrade it to a fabricated status.
             UserContent::Image { .. } => {}
         }
     }
@@ -589,6 +598,7 @@ fn apply_success(state: &mut ZodeAppState, _command: &AgentCommand, completion: 
         CompletionResult::RuntimeOptions { session, options } => {
             let _ = apply_session_runtime_options(state, session, options);
         }
+        CompletionResult::Integrations(snapshot) => integrations::apply_success(state, snapshot),
         CompletionResult::Threads(threads) => replace_threads(state, threads),
     }
 }
@@ -607,10 +617,12 @@ fn apply_failure(state: &mut ZodeAppState, command: &AgentCommand, message: Stri
             thread.status = ThreadStatus::Failed;
         }
     }
+    integrations::mark_failure(state, command, &message);
     project_retryable_error(state, &command.session, format!("命令执行失败：{message}"));
 }
 
 fn apply_completion_failure(state: &mut ZodeAppState, command: &AgentCommand, message: String) {
+    integrations::mark_failure(state, command, &message);
     let runtime_sync = matches!(
         command.kind,
         AgentCommandKind::StartTurn { .. }

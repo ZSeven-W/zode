@@ -11,7 +11,7 @@ pub(super) fn widget_command(state: &ZodeAppState, id: WidgetId) -> Option<AppCo
     static_sidebar_command(state, id)
         .or_else(|| ProjectSidebar::command_for_widget(state, id))
         .or_else(|| ThreadHeader::command_for_widget(state, id))
-        .or_else(|| IntegrationsPage::command_for_widget(id))
+        .or_else(|| IntegrationsPage::command_for_widget(state, id))
         .or_else(|| SettingsPanel::command_for_widget(state, id))
         .or_else(|| EnvironmentPanel::command_for_widget(state, id))
         .or_else(|| ReviewPanel::command_for_widget(state, id))
