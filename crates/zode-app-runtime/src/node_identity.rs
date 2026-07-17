@@ -4,8 +4,8 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
+use zode_core::persistence::{write_atomic, AdvisoryFileLock};
 use zode_core::CoreError;
-use zode_core::persistence::{AdvisoryFileLock, write_atomic};
 use zode_node_protocol::NodeId;
 
 const IDENTITY_VERSION: u64 = 1;
