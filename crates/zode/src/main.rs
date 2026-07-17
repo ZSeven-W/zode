@@ -19,6 +19,7 @@ use args::{Args, OutputFormat, PermissionModeArg};
 use clap::Parser;
 use session_setup::{attach_session, prepare_headless_session, resolve_resume_target, resume_dir};
 use zode_core::approval::{AcceptEditsGate, ApprovalGate, BypassGate, DenyGate, StdinGate};
+use zode_core::bootstrap::BootstrapOverrides;
 use zode_core::config::ConfigManager;
 use zode_core::session_meta::SessionMeta;
 use zode_core::{EngineTemplate, ZodeEngine};
@@ -92,6 +93,34 @@ fn launches_full_tui(args: &Args, stdout_is_tty: bool) -> bool {
         && !args.no_tui
         && !args.browser_native_host
         && stdout_is_tty
+}
+
+/// Map CLI flags onto the embedder-shared bootstrap overrides. Desktop
+/// embedders build the same struct directly; keeping the mapping here (and
+/// tested below) pins the flag semantics the app runtime relies on.
+fn bootstrap_overrides(args: &Args) -> BootstrapOverrides {
+    BootstrapOverrides {
+        provider: args.provider.clone(),
+        model: args.model.clone(),
+        yolo: args.yolo,
+        sandbox_enabled: if args.no_sandbox {
+            Some(false)
+        } else if args.sandbox {
+            Some(true)
+        } else {
+            None
+        },
+        sandbox_read_only: args.sandbox_read_only,
+        sandbox_allow_network: args.sandbox_allow_network,
+        sandbox_strict_read: args.sandbox_strict_read,
+        browser_enabled: if args.no_browser {
+            Some(false)
+        } else if args.browser {
+            Some(true)
+        } else {
+            None
+        },
+    }
 }
 
 async fn run(args: Args) -> i32 {

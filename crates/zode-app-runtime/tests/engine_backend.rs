@@ -14,7 +14,7 @@ use zode_app_runtime::{
 use zode_node_protocol::{
     AgentCommand, AgentCommandKind, AgentEvent, AgentEventKind, AgentQuery, AgentSnapshot,
     EndpointError, EndpointErrorKind, NodeId, RuntimeOptions, SandboxMode, SessionLocator,
-    ToolStatus, TurnId, UsageSnapshot, UserContent, WorkspaceUri, PROTOCOL_VERSION,
+    ToolStatus, TurnId, UserContent, WorkspaceUri, PROTOCOL_VERSION,
 };
 
 fn normalize(normalizer: &mut EventNormalizer, event: Event) -> Option<AgentEventKind> {
