@@ -736,6 +736,7 @@ fn secondary_sidebar_width_is_clamped_to_product_limits() {
 fn primary_sidebar_visibility_and_width_are_reduced_independently() {
     let mut state = demo_state();
     assert!(state.shell.sidebar_open);
+    assert!(!state.presentation.secondary_sidebar_open);
     assert_eq!(state.ui_preferences.primary_sidebar_width, 293);
 
     assert_eq!(
@@ -754,7 +755,7 @@ fn primary_sidebar_visibility_and_width_are_reduced_independently() {
     );
     assert!(!state.shell.sidebar_open);
     assert!(!state.ui_preferences.primary_sidebar_open);
-    assert!(state.presentation.secondary_sidebar_open);
+    assert!(!state.presentation.secondary_sidebar_open);
 }
 
 #[test]
