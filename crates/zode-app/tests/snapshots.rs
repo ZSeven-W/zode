@@ -33,6 +33,16 @@ const CONVERSATION_640X900: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Composer, 16.0, 786.0, 608.0, 100.0),
 ];
 
+#[cfg(target_os = "macos")]
+const EMPTY_TASK_1800X1080: &[GeometryExpectation] = &[
+    GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1800.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::TopBar, 240.0, 0.0, 1560.0, 46.0),
+    GeometryExpectation::new(LayoutRect::PrimarySurface, 240.0, 0.0, 1560.0, 1080.0),
+    GeometryExpectation::new(LayoutRect::Transcript, 652.0, 70.0, 736.0, 868.0),
+    GeometryExpectation::new(LayoutRect::Composer, 652.0, 966.0, 736.0, 100.0),
+];
+
 const SETTINGS_1440X900: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::Viewport, 0.0, 0.0, 1440.0, 900.0),
     GeometryExpectation::new(LayoutRect::Sidebar, 0.0, 0.0, 240.0, 900.0),
@@ -70,9 +80,38 @@ const REVIEW_1800X1080: &[GeometryExpectation] = &[
     GeometryExpectation::new(LayoutRect::ReviewPanel, 1100.0, 0.0, 700.0, 1080.0),
 ];
 
-#[test]
-fn reference_snapshots_match_platform_goldens() {
-    let cases = [
+fn reference_cases() -> Vec<(SnapshotCase, SnapshotRoute, ThemePreference)> {
+    let mut cases = Vec::new();
+
+    // Enable Linux and Windows Empty Task cases only after each platform's
+    // update-snapshots CI job has generated and reviewed its native goldens.
+    #[cfg(target_os = "macos")]
+    cases.extend([
+        (
+            SnapshotCase::new(
+                "empty-task-light-1800x1080",
+                1800,
+                1080,
+                1.0,
+                EMPTY_TASK_1800X1080,
+            ),
+            SnapshotRoute::Empty,
+            ThemePreference::Light,
+        ),
+        (
+            SnapshotCase::new(
+                "empty-task-dark-1800x1080",
+                1800,
+                1080,
+                1.0,
+                EMPTY_TASK_1800X1080,
+            ),
+            SnapshotRoute::Empty,
+            ThemePreference::Dark,
+        ),
+    ]);
+
+    cases.extend([
         (
             SnapshotCase::new(
                 "conversation-light-1221x992",
@@ -155,10 +194,39 @@ fn reference_snapshots_match_platform_goldens() {
             SnapshotRoute::Review,
             ThemePreference::Light,
         ),
-    ];
+    ]);
 
-    for (case, route, theme) in cases {
+    cases
+}
+
+#[test]
+fn reference_snapshots_match_platform_goldens() {
+    for (case, route, theme) in reference_cases() {
         let state = fixture_state(route, theme, case.width);
         assert_platform_snapshot(case, &state);
     }
+}
+
+#[test]
+fn empty_route_keeps_workspace_context_without_an_active_session() {
+    let state = fixture_state(SnapshotRoute::Empty, ThemePreference::Light, 1800);
+
+    assert!(state.current_session.is_none());
+    assert!(state.transcripts.is_empty());
+    assert!(state.active_workspace.is_some());
+    assert!(!state.projects.is_empty());
+    assert!(!state.threads.is_empty());
+}
+
+#[test]
+fn empty_snapshot_cases_are_registered_only_with_platform_goldens() {
+    let empty_cases = reference_cases()
+        .into_iter()
+        .filter(|(case, _, _)| case.name.starts_with("empty-task-"))
+        .count();
+
+    #[cfg(target_os = "macos")]
+    assert_eq!(empty_cases, 2);
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    assert_eq!(empty_cases, 0);
 }

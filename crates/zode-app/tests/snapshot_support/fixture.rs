@@ -12,6 +12,7 @@ use zode_node_protocol::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotRoute {
+    Empty,
     Conversation,
     Settings,
     Integrations,
@@ -187,7 +188,7 @@ pub fn fixture_state(
     );
 
     let (shell_route, secondary_pane) = match route {
-        SnapshotRoute::Conversation => (ShellRoute::Conversation, None),
+        SnapshotRoute::Empty | SnapshotRoute::Conversation => (ShellRoute::Conversation, None),
         SnapshotRoute::Settings => (ShellRoute::Settings(SettingsCategory::General), None),
         SnapshotRoute::Integrations => (ShellRoute::Integrations(IntegrationsTab::Plugins), None),
         SnapshotRoute::Environment => (ShellRoute::Conversation, Some(SecondaryPane::Environment)),
@@ -196,6 +197,10 @@ pub fn fixture_state(
     state.presentation.route = shell_route;
     state.presentation.secondary_pane = secondary_pane;
     state.shell.page = shell_route.legacy_page();
+    if route == SnapshotRoute::Empty {
+        state.current_session = None;
+        state.transcripts.clear();
+    }
     state
 }
 

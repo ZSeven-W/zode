@@ -28,6 +28,9 @@ enum PaintOp {
         encoded: Vec<u8>,
         mode: ImageDrawMode,
     },
+    Clip(Rect),
+    Save,
+    Restore,
 }
 
 #[derive(Default)]
@@ -55,6 +58,19 @@ impl CapturePainter {
                     origin,
                     font_size,
                 } if content == expected => Some((*origin, *font_size)),
+                _ => None,
+            })
+    }
+
+    fn text_operations(&self) -> impl Iterator<Item = (&str, Point2D, f32)> + '_ {
+        self.operations
+            .iter()
+            .filter_map(|operation| match operation {
+                PaintOp::Text {
+                    content,
+                    origin,
+                    font_size,
+                } => Some((content.as_str(), *origin, *font_size)),
                 _ => None,
             })
     }
@@ -105,7 +121,9 @@ impl Painter for CapturePainter {
                 .unwrap_or_default(),
         });
     }
-    fn clip_rect(&mut self, _rect: Rect) {}
+    fn clip_rect(&mut self, rect: Rect) {
+        self.operations.push(PaintOp::Clip(rect));
+    }
     fn stroke_line(&mut self, _from: Point2D, _to: Point2D, _color: Color, _width: f32) {}
     fn fill_round_rect(&mut self, rect: Rect, radius: f32, color: Color) {
         self.operations
@@ -143,8 +161,12 @@ impl Painter for CapturePainter {
             mode,
         });
     }
-    fn save(&mut self) {}
-    fn restore(&mut self) {}
+    fn save(&mut self) {
+        self.operations.push(PaintOp::Save);
+    }
+    fn restore(&mut self) {
+        self.operations.push(PaintOp::Restore);
+    }
     fn translate(&mut self, _offset: Point2D) {}
     fn resize(&mut self, _width: u32, _height: u32) {}
     fn dpi_scale(&self) -> f32 {
@@ -162,6 +184,20 @@ fn paint_empty_wide_with_theme(theme: &ZodeTheme) -> (CapturePainter, WorkspaceL
 
 fn paint_empty_wide() -> (CapturePainter, WorkspaceLayout) {
     paint_empty_wide_with_theme(&ZodeTheme::light())
+}
+
+fn paint_empty_compact() -> (CapturePainter, WorkspaceLayout) {
+    let viewport = Rect::xywh(0.0, 0.0, 352.0, 480.0);
+    let geometry = WorkspaceLayout::compute(352.0, 480.0, Insets::ZERO);
+    let mut painter = CapturePainter::default();
+    WorkspaceShell::paint(
+        &mut painter,
+        viewport,
+        Insets::ZERO,
+        &demo_state(),
+        &ZodeTheme::light(),
+    );
+    (painter, geometry)
 }
 
 fn repository_asset(filename: &str) -> Vec<u8> {
@@ -183,6 +219,54 @@ fn estimated_text_width(text: &str, font_size: f32) -> f32 {
             }
         })
         .sum()
+}
+
+fn assert_close(actual: f32, expected: f32, tolerance: f32, label: &str) {
+    assert!(
+        (actual - expected).abs() <= tolerance,
+        "{label}: expected {expected} ± {tolerance}, got {actual}"
+    );
+}
+
+fn assert_rect_close(actual: Rect, expected: Rect, tolerance: f32, label: &str) {
+    assert_close(
+        actual.min_x(),
+        expected.min_x(),
+        tolerance,
+        &format!("{label}.x"),
+    );
+    assert_close(
+        actual.min_y(),
+        expected.min_y(),
+        tolerance,
+        &format!("{label}.y"),
+    );
+    assert_close(
+        actual.width(),
+        expected.width(),
+        tolerance,
+        &format!("{label}.width"),
+    );
+    assert_close(
+        actual.height(),
+        expected.height(),
+        tolerance,
+        &format!("{label}.height"),
+    );
+}
+
+fn contained_by(inner: Rect, outer: Rect) -> bool {
+    inner.min_x() >= outer.min_x()
+        && inner.min_y() >= outer.min_y()
+        && inner.max_x() <= outer.max_x()
+        && inner.max_y() <= outer.max_y()
+}
+
+fn overlaps(left: Rect, right: Rect) -> bool {
+    left.min_x() < right.max_x()
+        && left.max_x() > right.min_x()
+        && left.min_y() < right.max_y()
+        && left.max_y() > right.min_y()
 }
 
 #[test]
@@ -256,11 +340,24 @@ fn snapshot_paint_uses_the_composer_interaction_rect() {
 #[test]
 fn empty_conversation_exposes_zode_guidance_and_full_composer_chrome() {
     let (painter, geometry) = paint_empty_wide();
-    let text = painter.texts().join("\n");
+    let text = painter.texts().concat();
 
     assert!(text.contains("我们在 Zode 中构建什么？"));
-    for suggestion in ["探索代码", "构建功能", "审查变更", "修复问题"] {
+    for suggestion in [
+        "探索并理解代码",
+        "构建新功能、应用或工具",
+        "审查代码并提出修改建议",
+        "修复问题和失败",
+    ] {
         assert!(text.contains(suggestion));
+    }
+    for superseded_copy in [
+        "理解现有项目",
+        "实现应用或工具",
+        "检查代码并提出建议",
+        "诊断失败并修复",
+    ] {
+        assert!(!text.contains(superseded_copy));
     }
     for composer_chrome in ["zode", "本地"] {
         assert!(text.contains(composer_chrome));
@@ -276,11 +373,10 @@ fn empty_conversation_title_is_centered_in_the_main_surface() {
     let title = "我们在 Zode 中构建什么？";
     let (origin, font_size) = painter.text(title).expect("empty-state title is painted");
     let title_center = origin.x + estimated_text_width(title, font_size) / 2.0;
-    let main_center =
-        geometry.sidebar.max_x() + (geometry.viewport.max_x() - geometry.sidebar.max_x()) / 2.0;
+    let main_center = geometry.transcript.min_x() + geometry.transcript.width() / 2.0;
 
-    assert!((title_center - main_center).abs() <= 32.0);
-    assert!((380.0..=560.0).contains(&origin.y));
+    assert_close(title_center, main_center, 2.0, "empty title center x");
+    assert_close(origin.y, 498.0, 2.0, "empty title top y");
 }
 
 #[test]
@@ -289,18 +385,27 @@ fn empty_conversation_paints_four_distinct_suggestion_cards() {
     let cards = painter
         .rounded_rects()
         .filter(|(rect, radius)| {
-            rect.min_x() >= geometry.transcript.min_x() - 32.0
-                && rect.max_x() <= geometry.transcript.max_x() + 32.0
-                && (420.0..=800.0).contains(&rect.min_y())
-                && (120.0..=220.0).contains(&rect.width())
-                && (72.0..=144.0).contains(&rect.height())
+            rect.min_x() >= geometry.transcript.min_x()
+                && rect.max_x() <= geometry.transcript.max_x()
+                && (540.0..=700.0).contains(&rect.min_y())
+                && (150.0..=190.0).contains(&rect.width())
+                && (90.0..=120.0).contains(&rect.height())
                 && (10.0..=16.0).contains(radius)
         })
         .collect::<Vec<_>>();
 
     assert_eq!(cards.len(), 4);
-    for pair in cards.windows(2) {
-        assert!(pair[0].0.max_x() < pair[1].0.min_x());
+    for (index, (card, _)) in cards.iter().enumerate() {
+        let expected = Rect::xywh(664.0 + index as f32 * 180.5, 563.0, 170.5, 106.0);
+        assert_rect_close(*card, expected, 2.0, &format!("suggestion card {index}"));
+    }
+    for (index, pair) in cards.windows(2).enumerate() {
+        assert_close(
+            pair[1].0.min_x() - pair[0].0.max_x(),
+            10.0,
+            1.0,
+            &format!("suggestion card gap {index}"),
+        );
     }
 }
 
@@ -332,10 +437,16 @@ fn empty_conversation_uses_the_theme_specific_repository_brand_mark() {
         assert_eq!(image_id, expected_image_id);
         assert_eq!(encoded, repository_asset(filename));
         assert_eq!(mode, ImageDrawMode::Fit);
+        assert_rect_close(
+            rect,
+            Rect::xywh(996.0, 418.0, 48.0, 48.0),
+            2.0,
+            "empty brand mark",
+        );
 
         let image_center = rect.min_x() + rect.width() / 2.0;
-        let main_center = geometry.primary_surface.min_x() + geometry.primary_surface.width() / 2.0;
-        assert!((image_center - main_center).abs() <= f32::EPSILON);
+        let main_center = geometry.transcript.min_x() + geometry.transcript.width() / 2.0;
+        assert_close(image_center, main_center, 2.0, "empty brand center x");
     }
 }
 
@@ -354,6 +465,120 @@ fn empty_conversation_only_uses_svg_paths_for_the_four_suggestions() {
         .count();
 
     assert_eq!(suggestion_glyphs, 4);
+}
+
+#[test]
+fn wide_suggestion_copy_wraps_without_shrinking_below_the_reference_size() {
+    let (painter, geometry) = paint_empty_wide();
+    let cards = painter
+        .rounded_rects()
+        .filter(|(rect, _)| {
+            contained_by(*rect, geometry.transcript)
+                && (150.0..=190.0).contains(&rect.width())
+                && (90.0..=120.0).contains(&rect.height())
+        })
+        .map(|(rect, _)| rect)
+        .collect::<Vec<_>>();
+    assert_eq!(cards.len(), 4);
+
+    for (index, (expected, expected_y)) in [
+        ("探索并理解代码", &[641.0][..]),
+        ("构建新功能、应用或工具", &[619.0, 637.0][..]),
+        ("审查代码并提出修改建议", &[619.0, 637.0][..]),
+        ("修复问题和失败", &[641.0][..]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let lines = painter
+            .text_operations()
+            .filter(|(_, origin, _)| cards[index].contains(*origin))
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), expected_y.len(), "card {index} line count");
+        assert_eq!(
+            lines
+                .iter()
+                .map(|(content, _, _)| *content)
+                .collect::<String>(),
+            expected,
+        );
+        for ((content, origin, font_size), expected_y) in lines.into_iter().zip(expected_y) {
+            assert!(font_size >= 12.9, "card {index} shrank to {font_size}px");
+            assert_close(origin.y, *expected_y, 2.0, &format!("card {index} text y"));
+            assert!(
+                estimated_text_width(content, font_size) <= cards[index].width() - 28.0 + 0.5,
+                "card {index} line exceeds its content width"
+            );
+        }
+    }
+}
+
+#[test]
+fn compact_empty_state_uses_a_clipped_readable_two_by_two_grid() {
+    let (painter, geometry) = paint_empty_compact();
+    assert_eq!(geometry.transcript.size, Point2D::new(320.0, 268.0));
+    let cards = painter
+        .rounded_rects()
+        .filter(|(rect, _)| {
+            contained_by(*rect, geometry.transcript) && rect.width() > 80.0 && rect.height() > 60.0
+        })
+        .map(|(rect, _)| rect)
+        .collect::<Vec<_>>();
+    assert_eq!(cards.len(), 4);
+    assert_close(cards[0].min_y(), cards[1].min_y(), 0.1, "compact row 1");
+    assert_close(cards[2].min_y(), cards[3].min_y(), 0.1, "compact row 2");
+    assert_close(
+        cards[1].min_x() - cards[0].max_x(),
+        10.0,
+        0.1,
+        "compact x gap",
+    );
+    assert_close(
+        cards[2].min_y() - cards[0].max_y(),
+        10.0,
+        0.1,
+        "compact y gap",
+    );
+    for (index, card) in cards.iter().enumerate() {
+        assert!(contained_by(*card, geometry.transcript));
+        for other in cards.iter().skip(index + 1) {
+            assert!(!overlaps(*card, *other));
+        }
+        let text = painter
+            .text_operations()
+            .filter(|(_, origin, _)| card.contains(*origin))
+            .collect::<Vec<_>>();
+        assert!(!text.is_empty(), "card {index} keeps readable copy");
+        assert!(text.iter().all(|(_, _, size)| *size >= 10.0));
+        assert!(
+            painter.operations.contains(&PaintOp::Clip(*card)),
+            "card {index} is clipped"
+        );
+    }
+    assert_eq!(
+        painter
+            .images()
+            .filter(|(rect, _, _, _)| contained_by(*rect, geometry.transcript))
+            .count(),
+        0,
+        "compact layout hides the brand mark",
+    );
+    assert!(
+        painter
+            .operations
+            .iter()
+            .filter(|operation| matches!(operation, PaintOp::Save))
+            .count()
+            >= 4
+    );
+    assert!(
+        painter
+            .operations
+            .iter()
+            .filter(|operation| matches!(operation, PaintOp::Restore))
+            .count()
+            >= 4
+    );
 }
 
 fn paint_settings(category: SettingsCategory) -> (CapturePainter, WorkspaceLayout) {
