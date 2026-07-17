@@ -31,6 +31,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
 uuid = { workspace = true }
+time = "0.3"
 reqwest = { workspace = true }
 chromiumoxide = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

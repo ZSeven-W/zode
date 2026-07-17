@@ -1524,14 +1524,22 @@ impl ConfigManager {
         Ok(home.join(".zode"))
     }
 
-    fn global_path() -> Result<PathBuf, CoreError> {
-        Ok(Self::config_dir()?.join("config.json"))
+    /// Global config path beneath an explicitly selected config directory.
+    ///
+    /// Desktop/runtime embedders use this to isolate their state without
+    /// mutating the process-wide `ZODE_CONFIG_DIR` environment.
+    pub fn global_path_in(config_dir: &Path) -> PathBuf {
+        config_dir.join("config.json")
     }
 
     /// Load only the global config (missing file -> defaults).
     pub fn load_global() -> Result<ZodeConfig, CoreError> {
-        let path = Self::global_path()?;
-        Self::load_file(&path)
+        Self::load_global_in(&Self::config_dir()?)
+    }
+
+    /// Load only the global config from an explicit config directory.
+    pub fn load_global_in(config_dir: &Path) -> Result<ZodeConfig, CoreError> {
+        Self::load_file(&Self::global_path_in(config_dir))
     }
 
     /// Persist the browser target selected from the interactive `/browser`
@@ -1564,14 +1572,19 @@ impl ConfigManager {
     /// file was written, `Ok(false)` when one already existed. Callers treat
     /// this as best-effort — a read-only home must never block startup.
     pub fn ensure_default_global() -> Result<bool, CoreError> {
-        let path = Self::global_path()?;
+        Self::ensure_default_global_in(&Self::config_dir()?)
+    }
+
+    /// Ensure the starter config exists beneath an explicit config directory.
+    pub fn ensure_default_global_in(config_dir: &Path) -> Result<bool, CoreError> {
+        let path = Self::global_path_in(config_dir);
         if path.exists() {
             return Ok(false);
         }
         let mut cfg = ZodeConfig::default();
         cfg.provider.r#type = Some(ProviderKind::Anthropic);
         cfg.provider.model = Some(DEFAULT_STARTER_MODEL.to_string());
-        Self::save_global(&cfg)?;
+        Self::save_global_in(config_dir, &cfg)?;
         Ok(true)
     }
 
@@ -1587,7 +1600,21 @@ impl ConfigManager {
     /// project STATE (`<cwd>/.zode/state.json`, machine-managed) + env api-key
     /// fallback. Later layers override / accumulate over earlier ones.
     pub fn load(cwd: &Path) -> Result<ZodeConfig, CoreError> {
-        let mut cfg = Self::load_global()?;
+        Self::load_in(cwd, &Self::config_dir()?, true)
+    }
+
+    /// Effective config using an explicit global config directory.
+    ///
+    /// `apply_env_fallbacks` is false for deterministic embedded/test
+    /// bootstraps that must not inherit host credentials. Production callers
+    /// pass true, preserving the normal global -> project -> state -> env
+    /// precedence without changing process environment.
+    pub fn load_in(
+        cwd: &Path,
+        config_dir: &Path,
+        apply_env_fallbacks: bool,
+    ) -> Result<ZodeConfig, CoreError> {
+        let mut cfg = Self::load_global_in(config_dir)?;
         let project = cwd.join(".zode").join("config.json");
         if project.exists() {
             cfg.merge_from(Self::load_file(&project)?);
@@ -1605,7 +1632,9 @@ impl ConfigManager {
         // early-return, stranding the session without the provider's base URL /
         // dialect / context window.
         cfg.resolve_provider_from_map();
-        cfg.apply_env_fallbacks();
+        if apply_env_fallbacks {
+            cfg.apply_env_fallbacks();
+        }
         Ok(cfg)
     }
 
@@ -1651,10 +1680,14 @@ impl ConfigManager {
     /// temp name is process-unique so concurrent writers don't clobber each
     /// other's temp; the rename then atomically publishes one complete file.
     pub fn save_global(cfg: &ZodeConfig) -> Result<(), CoreError> {
-        let dir = Self::config_dir()?;
-        std::fs::create_dir_all(&dir)?;
+        Self::save_global_in(&Self::config_dir()?, cfg)
+    }
+
+    /// Persist global config beneath an explicit config directory.
+    pub fn save_global_in(config_dir: &Path, cfg: &ZodeConfig) -> Result<(), CoreError> {
+        std::fs::create_dir_all(config_dir)?;
         let json = serde_json::to_string_pretty(cfg)?;
-        write_atomic(&dir.join("config.json"), json.as_bytes())?;
+        write_atomic(&Self::global_path_in(config_dir), json.as_bytes())?;
         Ok(())
     }
 }
