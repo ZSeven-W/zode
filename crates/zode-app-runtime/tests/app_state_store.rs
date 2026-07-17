@@ -32,8 +32,10 @@ fn reconcile_drops_ui_metadata_for_deleted_sessions() {
 fn store_round_trips_versioned_state_atomically() {
     let directory = tempfile::tempdir().unwrap();
     let store = AppStateStore::new(directory.path());
-    let mut state = AppStateFile::default();
-    state.last_session = Some("session-1".into());
+    let mut state = AppStateFile {
+        last_session: Some("session-1".into()),
+        ..AppStateFile::default()
+    };
     state.sessions.insert(
         "session-1".into(),
         SessionUiState {
