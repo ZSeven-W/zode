@@ -63,8 +63,7 @@ fn enqueue(
     proxy: &EventLoopProxy<AppWake>,
     item: BridgeItem,
 ) {
-    let queue_was_empty = sender.is_empty();
-    if sender.send(item).is_ok() && queue_was_empty {
+    if sender.send(item).is_ok() {
         let _ = proxy.send_event(AppWake::Redraw);
     }
 }

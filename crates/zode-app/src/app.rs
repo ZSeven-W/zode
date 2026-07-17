@@ -11,9 +11,11 @@ use winit::{
 use zode_app_model::{SystemTheme, ZodeAppState};
 use zode_app_ui::{Insets, WorkspaceLayout, WorkspaceShell, ZodeTheme};
 
+#[cfg(not(target_os = "macos"))]
+use crate::event_map::resize_direction;
 use crate::{
     event_bridge::AgentEventBridge,
-    event_map::{is_drag_region, resize_direction},
+    event_map::is_drag_region,
     render::{FramePainter, NativeBackend, RasterSurface},
     window_state::{AppWake, WindowState},
 };
