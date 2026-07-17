@@ -1,5 +1,5 @@
 use jian_widgets::{HorizontalAlign, Painter, Rect};
-use zode_app_model::ZodeAppState;
+use zode_app_model::{AppCommand, ZodeAppState};
 
 use super::{
     permissions::{
@@ -15,6 +15,7 @@ use crate::{paint_single_line, RectExt, WidgetId, ZodeTheme};
 
 const GENERAL_SECTION_GAP: f32 = 52.0;
 const GENERAL_ROW_COUNT: usize = 10;
+const SPEED_SETTING_ID: WidgetId = WidgetId(8_306);
 
 pub(super) const fn content_height() -> f32 {
     SECTION_TOP
@@ -70,22 +71,28 @@ pub(super) fn layout(content: Rect, state: &ZodeAppState, offset: f32) -> Genera
             _ => effort.to_owned(),
         },
     );
-    let descriptors: [(&'static str, String); GENERAL_ROW_COUNT] = [
-        ("默认文件打开目标", "即将支持".into()),
-        ("语言", "中文（中国）".into()),
-        ("在菜单栏中显示", "即将支持".into()),
-        ("底部面板", "即将支持".into()),
-        ("默认终端位置", "即将支持".into()),
-        ("运行时防止系统休眠", "即将支持".into()),
-        ("速度", speed),
-        ("建议提示", "即将支持".into()),
-        ("从其他 AI 应用导入工作内容", "导入即将支持".into()),
-        ("打开源许可证", "查看即将支持".into()),
+    let speed_command = next_effort(state).map(|effort| AppCommand::SetEffort(effort.into()));
+    let descriptors: [(&'static str, String, bool, Option<AppCommand>); GENERAL_ROW_COUNT] = [
+        ("默认文件打开目标", "即将支持".into(), false, None),
+        ("语言", "即将支持".into(), false, None),
+        ("在菜单栏中显示", "即将支持".into(), false, None),
+        ("底部面板", "即将支持".into(), false, None),
+        ("默认终端位置", "即将支持".into(), false, None),
+        ("运行时防止系统休眠", "即将支持".into(), false, None),
+        ("速度", speed, speed_command.is_some(), speed_command),
+        ("建议提示", "即将支持".into(), false, None),
+        (
+            "从其他 AI 应用导入工作内容",
+            "导入即将支持".into(),
+            false,
+            None,
+        ),
+        ("打开源许可证", "查看即将支持".into(), false, None),
     ];
     let general_rows = descriptors
         .into_iter()
         .enumerate()
-        .map(|(index, (label, value))| {
+        .map(|(index, (label, value, enabled, command))| {
             setting_row(
                 WidgetId(8_300 + index as u64),
                 Rect::xywh(
@@ -97,8 +104,8 @@ pub(super) fn layout(content: Rect, state: &ZodeAppState, offset: f32) -> Genera
                 content,
                 label,
                 value,
-                false,
-                None,
+                enabled,
+                command,
             )
         })
         .collect();
@@ -112,6 +119,27 @@ pub(super) fn layout(content: Rect, state: &ZodeAppState, offset: f32) -> Genera
         general_rows,
         content_height,
     }
+}
+
+pub(super) fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
+    (id == SPEED_SETTING_ID)
+        .then(|| next_effort(state))
+        .flatten()
+        .map(|effort| AppCommand::SetEffort(effort.into()))
+}
+
+fn next_effort(state: &ZodeAppState) -> Option<&'static str> {
+    if !super::permissions::runtime_options_available(state)
+        || !super::permissions::current_session_is_idle(state)
+    {
+        return None;
+    }
+    Some(match runtime_effort(state)?.to_ascii_lowercase().as_str() {
+        "minimal" | "low" => "medium",
+        "medium" | "standard" => "high",
+        "high" => "low",
+        _ => "medium",
+    })
 }
 
 pub(super) fn paint(

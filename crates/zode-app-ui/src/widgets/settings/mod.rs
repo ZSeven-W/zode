@@ -243,6 +243,7 @@ impl SettingsPanel {
     pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
         navigation::command_for_widget(id)
             .or_else(|| permissions::command_for_preset(state, id))
+            .or_else(|| general::command_for_widget(state, id))
             .or_else(|| {
                 (Self::active_category(state) == SettingsCategory::Appearance).then_some(())?;
                 [

@@ -204,7 +204,11 @@ fn active_runtime_options(state: &ZodeAppState) -> Option<&RuntimeOptions> {
         .ready()
 }
 
-fn current_session_is_idle(state: &ZodeAppState) -> bool {
+pub(super) fn runtime_options_available(state: &ZodeAppState) -> bool {
+    active_runtime_options(state).is_some()
+}
+
+pub(super) fn current_session_is_idle(state: &ZodeAppState) -> bool {
     state
         .current_session
         .as_ref()

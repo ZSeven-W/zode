@@ -98,6 +98,11 @@ fn sandbox_radios_use_session_runtime_state_and_preserve_network() {
     assert!(workspace_write.selected);
     assert!(workspace_write.enabled);
     assert_eq!(layout.general.general_rows[6].value, "标准");
+    assert!(layout.general.general_rows[6].enabled);
+    assert_eq!(
+        SettingsPanel::command_for_widget(&state, layout.general.general_rows[6].id),
+        Some(AppCommand::SetEffort("high".into()))
+    );
     assert_eq!(
         SettingsPanel::command_for_widget(&state, read_only.id),
         Some(AppCommand::SetSandbox {
