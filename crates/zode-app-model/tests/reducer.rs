@@ -1,7 +1,9 @@
+use std::time::{Duration, Instant};
+
 use zode_app_model::{
-    demo_state, reduce_agent_event, reduce_settings_command, reduce_tool_command, AppCommand,
-    LoadState, ReduceOutcome, SettingsCommandOutcome, ToolCommandOutcome, TranscriptItem,
-    TranscriptState, ZodeAppState,
+    demo_state, reduce_agent_event, reduce_agent_event_at, reduce_settings_command,
+    reduce_tool_command, AppCommand, LoadState, ReduceOutcome, SettingsCommandOutcome,
+    ToolCommandOutcome, TranscriptItem, TranscriptState, TranscriptTurnStatus, ZodeAppState,
 };
 use zode_node_protocol::{
     AgentEvent, AgentEventKind, SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus,
@@ -9,6 +11,10 @@ use zode_node_protocol::{
 };
 
 fn active_state() -> (ZodeAppState, SessionLocator, TurnId) {
+    active_state_at(Instant::now())
+}
+
+fn active_state_at(started_at: Instant) -> (ZodeAppState, SessionLocator, TurnId) {
     let mut state = demo_state();
     let session = SessionLocator::new(state.host.node_id, "s1");
     let turn_id = TurnId::parse("00000000-0000-0000-0000-000000000002").unwrap();
@@ -19,13 +25,9 @@ fn active_state() -> (ZodeAppState, SessionLocator, TurnId) {
         updated_at_ms: 1,
         status: ThreadStatus::Running,
     });
-    state.transcripts.insert(
-        session.clone(),
-        TranscriptState {
-            busy: true,
-            ..TranscriptState::default()
-        },
-    );
+    let mut transcript = TranscriptState::default();
+    assert!(transcript.begin_turn_at(turn_id, 0, 0, started_at));
+    state.transcripts.insert(session.clone(), transcript);
     state.active_turns.insert(session.clone(), turn_id);
     (state, session, turn_id)
 }
@@ -637,6 +639,36 @@ fn turn_finished_clears_busy_and_active_turn_but_keeps_items() {
         state.transcripts[&session].items,
         vec![TranscriptItem::AssistantText("partial".into())],
     );
+    assert_eq!(
+        state.transcripts[&session].turns[0].status,
+        TranscriptTurnStatus::Interrupted
+    );
+    assert_eq!(state.transcripts[&session].turns[0].end_item_index, Some(1));
+    assert!(state.transcripts[&session].turns[0].elapsed.is_some());
+}
+
+#[test]
+fn turn_finished_records_deterministic_monotonic_elapsed() {
+    let started_at = Instant::now();
+    let (mut state, session, turn_id) = active_state_at(started_at);
+    state.transcripts.get_mut(&session).unwrap().items =
+        vec![TranscriptItem::AssistantText("done".into())];
+
+    reduce_agent_event_at(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            1,
+            AgentEventKind::TurnFinished { interrupted: false },
+        ),
+        started_at + Duration::from_millis(42_125),
+    );
+
+    let turn = &state.transcripts[&session].turns[0];
+    assert_eq!(turn.status, TranscriptTurnStatus::Completed);
+    assert_eq!(turn.end_item_index, Some(1));
+    assert_eq!(turn.elapsed, Some(Duration::from_millis(42_125)));
 }
 
 #[test]
@@ -689,96 +721,73 @@ fn non_retryable_error_keeps_turn_busy_until_turn_finished_arrives() {
 }
 
 #[test]
-fn unknown_event_records_diagnostics_without_finishing_the_turn() {
+fn non_retryable_error_makes_the_eventual_turn_finish_failed() {
+    let started_at = Instant::now();
+    let (mut state, session, turn_id) = active_state_at(started_at);
+
+    reduce_agent_event_at(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            1,
+            AgentEventKind::Error {
+                message: "provider stopped".into(),
+                retryable: false,
+            },
+        ),
+        started_at + Duration::from_secs(1),
+    );
+    reduce_agent_event_at(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            2,
+            AgentEventKind::TurnFinished { interrupted: false },
+        ),
+        started_at + Duration::from_secs(2),
+    );
+
+    let transcript = &state.transcripts[&session];
+    assert!(!transcript.busy);
+    assert!(!state.active_turns.contains_key(&session));
+    assert_eq!(transcript.turns[0].status, TranscriptTurnStatus::Failed);
+    assert_eq!(transcript.turns[0].end_item_index, Some(1));
+    assert_eq!(transcript.turns[0].elapsed, Some(Duration::from_secs(2)));
+}
+
+#[test]
+fn terminal_error_takes_precedence_over_an_interrupted_finish_edge() {
     let (mut state, session, turn_id) = active_state();
 
     reduce_agent_event(
         &mut state,
-        event(&session, turn_id, 1, AgentEventKind::Unknown),
-    );
-
-    assert_eq!(
-        state.transcripts[&session].items,
-        vec![TranscriptItem::Status {
-            code: "agent.event.unknown".into(),
-            message: "Ignored an unknown agent event".into(),
-        }],
-    );
-    assert!(state.transcripts[&session].busy);
-    assert_eq!(state.active_turns.get(&session), Some(&turn_id));
-}
-
-#[test]
-fn event_for_unknown_session_is_ignored_without_mutation() {
-    let (mut state, _, turn_id) = active_state();
-    let missing = SessionLocator::new(state.host.node_id, "missing");
-    state.transcripts.insert(
-        missing.clone(),
-        TranscriptState {
-            busy: true,
-            ..TranscriptState::default()
-        },
-    );
-    state.active_turns.insert(missing.clone(), turn_id);
-    let before = state.clone();
-
-    let outcome = reduce_agent_event(
-        &mut state,
         event(
-            &missing,
+            &session,
             turn_id,
             1,
-            AgentEventKind::TextDelta {
-                delta: "late".into(),
+            AgentEventKind::Error {
+                message: "persistence failed after interrupt".into(),
+                retryable: false,
             },
         ),
     );
-
-    assert_eq!(outcome, ReduceOutcome::IgnoredStale);
-    assert_eq!(state, before);
-}
-
-#[test]
-fn event_for_wrong_turn_is_ignored_without_mutation() {
-    let (mut state, session, _) = active_state();
-    let wrong_turn = TurnId::parse("00000000-0000-0000-0000-000000000003").unwrap();
-    let before = state.clone();
-
-    let outcome = reduce_agent_event(
+    reduce_agent_event(
         &mut state,
         event(
             &session,
-            wrong_turn,
-            1,
-            AgentEventKind::TextDelta {
-                delta: "late".into(),
-            },
+            turn_id,
+            2,
+            AgentEventKind::TurnFinished { interrupted: true },
         ),
     );
 
-    assert_eq!(outcome, ReduceOutcome::IgnoredStale);
-    assert_eq!(state, before);
+    assert_eq!(
+        state.transcripts[&session].turns[0].status,
+        TranscriptTurnStatus::Failed
+    );
 }
 
-#[test]
-fn duplicate_or_out_of_order_sequence_is_ignored_without_mutation() {
-    let (mut state, session, turn_id) = active_state();
-    state.transcripts.get_mut(&session).unwrap().last_sequence = 2;
-    let before = state.clone();
-
-    for sequence in [2, 1] {
-        let outcome = reduce_agent_event(
-            &mut state,
-            event(
-                &session,
-                turn_id,
-                sequence,
-                AgentEventKind::TextDelta {
-                    delta: "late".into(),
-                },
-            ),
-        );
-        assert_eq!(outcome, ReduceOutcome::IgnoredStale);
-        assert_eq!(state, before);
-    }
-}
+#[path = "reducer/stale-event-tests.rs"]
+mod stale_event_tests;

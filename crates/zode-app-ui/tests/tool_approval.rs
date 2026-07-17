@@ -170,11 +170,7 @@ fn card_controls_share_their_visual_centerline() {
     let tool_rect = Rect::xywh(0.0, 120.0, 260.0, 64.0);
     let painted_tool = tool("centered", "read_file", ToolStatus::Running);
     ToolCard::paint(&mut painter, tool_rect, &painted_tool, false, &theme);
-    assert_close(
-        painter.center_y("read_file"),
-        tool_rect.origin.y + 17.5,
-        1.0,
-    );
+    assert_close(painter.center_y("已读取"), tool_rect.origin.y + 17.5, 1.0);
 }
 
 #[derive(Default)]

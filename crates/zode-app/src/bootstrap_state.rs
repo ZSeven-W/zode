@@ -286,10 +286,12 @@ fn transcript_from_history(history: ThreadHistory) -> TranscriptState {
             }
         })
         .collect();
-    TranscriptState {
+    let mut transcript = TranscriptState {
         items,
         ..TranscriptState::default()
-    }
+    };
+    transcript.restore_historical_turns();
+    transcript
 }
 
 fn projects_from_threads(
@@ -325,7 +327,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
 
-    use zode_app_model::TranscriptItem;
+    use zode_app_model::{TranscriptItem, TranscriptTurnStatus};
     use zode_app_runtime::path_to_workspace_uri;
     use zode_node_protocol::{
         AgentEventStream, EndpointError, EndpointErrorKind, HistoryItem, NodeId, RuntimeOptions,
@@ -442,6 +444,13 @@ mod tests {
         );
         assert!(!transcript.busy);
         assert!(transcript.follow_tail);
+        assert_eq!(transcript.turns.len(), 1);
+        assert_eq!(transcript.turns[0].turn_id, None);
+        assert_eq!(transcript.turns[0].start_item_index, 0);
+        assert_eq!(transcript.turns[0].response_item_index, 1);
+        assert_eq!(transcript.turns[0].end_item_index, Some(5));
+        assert_eq!(transcript.turns[0].status, TranscriptTurnStatus::Restored);
+        assert_eq!(transcript.turns[0].elapsed, None);
     }
 
     #[test]

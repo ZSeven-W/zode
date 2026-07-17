@@ -90,7 +90,6 @@ enum CompletionResult {
     Threads(Vec<ThreadSummary>),
 }
 
-/// Sequential endpoint command pump preserving user-intent order off the window thread.
 pub struct CommandBridge {
     sender: mpsc::UnboundedSender<CommandDispatch>,
     results: mpsc::UnboundedReceiver<CommandResult>,
@@ -434,15 +433,19 @@ pub(crate) fn prepare_queued_start(
     if transcript_busy || state.active_turns.contains_key(&session) {
         return Err("the target session already has an active turn".into());
     }
-
     let turn_id = TurnId::new();
-    state.active_turns.insert(session.clone(), turn_id);
     let transcript = state
         .transcripts
         .get_mut(&session)
         .expect("the target session was validated before preparing its turn");
+    let start_item_index = transcript.items.len();
     append_user_content(transcript, &input);
-    transcript.busy = true;
+    let response_item_index = transcript.items.len();
+    if !transcript.begin_turn(turn_id, start_item_index, response_item_index) {
+        transcript.items.truncate(start_item_index);
+        return Err("the target session could not record its active turn".into());
+    }
+    state.active_turns.insert(session.clone(), turn_id);
     if let Some(thread) = state
         .threads
         .iter_mut()
@@ -578,9 +581,7 @@ fn apply_success(state: &mut ZodeAppState, _command: &AgentCommand, completion: 
             if let Some(transcript) =
                 session.and_then(|session| state.transcripts.get_mut(&session))
             {
-                transcript.items.retain(
-                    |item| !matches!(item, TranscriptItem::Approval { id, .. } if id == &approval_id),
-                );
+                let _ = transcript.remove_approval(&approval_id);
             }
         }
         CompletionResult::ProjectPermissions {
@@ -607,6 +608,9 @@ fn apply_failure(state: &mut ZodeAppState, command: &AgentCommand, message: Stri
     if matches!(command.kind, AgentCommandKind::StartTurn { .. }) {
         state.active_turns.remove(&command.session);
         if let Some(transcript) = state.transcripts.get_mut(&command.session) {
+            if let Some(turn_id) = command.turn_id {
+                let _ = transcript.fail_turn(turn_id);
+            }
             transcript.busy = false;
         }
         if let Some(thread) = state
@@ -764,9 +768,7 @@ fn apply_expired_approval(
         .remove(approval_id)
         .unwrap_or_else(|| command_session.clone());
     if let Some(transcript) = state.transcripts.get_mut(&session) {
-        transcript.items.retain(
-            |item| !matches!(item, TranscriptItem::Approval { id, .. } if id == approval_id),
-        );
+        let _ = transcript.remove_approval(approval_id);
         transcript.items.push(TranscriptItem::Status {
             code: "approval.request_expired".into(),
             message: "批准请求已失效；请重新触发该操作。".into(),
@@ -785,9 +787,7 @@ fn apply_approval_fallback(
         .remove(approval_id)
         .unwrap_or_else(|| command_session.clone());
     if let Some(transcript) = state.transcripts.get_mut(&session) {
-        transcript.items.retain(
-            |item| !matches!(item, TranscriptItem::Approval { id, .. } if id == approval_id),
-        );
+        let _ = transcript.remove_approval(approval_id);
         transcript.items.push(TranscriptItem::Status {
             code: "approval.allow_always_fallback".into(),
             message: format!("已仅允许一次，记忆失败：{detail}"),

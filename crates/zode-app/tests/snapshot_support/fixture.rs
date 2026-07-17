@@ -1,4 +1,7 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
 
 use zode_app_model::{
     demo_state, EnvironmentEntry, EnvironmentSnapshot, LayoutClass, LoadState, ProjectState,
@@ -7,7 +10,8 @@ use zode_app_model::{
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, NodeCapability, RuntimeOptions, SandboxMode,
-    SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus, UsageSnapshot, WorkspaceUri,
+    SessionLocator, ThreadStatus, ThreadSummary, ToolCall, ToolStatus, TurnId, UsageSnapshot,
+    WorkspaceUri,
 };
 
 /// Shared deterministic shell state used only by integration-test scene builders.
@@ -208,17 +212,37 @@ pub(crate) fn set_transcript(state: &mut ZodeAppState, items: Vec<TranscriptItem
         .current_session
         .clone()
         .expect("reference conversation scene has a session");
-    state.transcripts.insert(
-        session,
-        TranscriptState {
-            last_sequence: items.len() as u64,
-            items,
-            busy,
-            scroll_offset: 0.0,
-            follow_tail: true,
-            item_heights: Vec::new(),
-        },
-    );
+    let user_starts = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| matches!(item, TranscriptItem::UserText(_)).then_some(index))
+        .collect::<Vec<_>>();
+    let mut transcript = TranscriptState {
+        last_sequence: items.len() as u64,
+        items,
+        turns: Vec::new(),
+        busy: false,
+        scroll_offset: 0.0,
+        follow_tail: true,
+        item_heights: Vec::new(),
+    };
+    for (group_index, start) in user_starts.iter().copied().enumerate() {
+        let turn_id = TurnId::parse(&format!("00000000-0000-0000-0000-{:012}", group_index + 1))
+            .expect("snapshot turn id is valid");
+        let started_at = Instant::now();
+        assert!(transcript.begin_turn_at(turn_id, start, start + 1, started_at));
+        let is_live_tail = busy && group_index + 1 == user_starts.len();
+        if !is_live_tail {
+            let elapsed = match group_index {
+                0 => Duration::from_secs(20 * 60 + 51),
+                1 => Duration::from_secs(39),
+                _ => Duration::from_secs(58),
+            };
+            assert!(transcript.finish_turn_at(turn_id, false, started_at + elapsed));
+        }
+    }
+    transcript.busy = busy;
+    state.transcripts.insert(session, transcript);
 }
 
 pub(crate) fn workspace_uri(value: &str) -> WorkspaceUri {

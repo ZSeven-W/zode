@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use zode_app_model::{
     reduce_queue_command, AppCommand, MessageQueueState, QueueCommandOutcome, QueuedMessage,
-    QueuedMessageId, TranscriptItem,
+    QueuedMessageId, TranscriptItem, TranscriptState,
 };
-use zode_node_protocol::{SessionLocator, UserContent};
+use zode_node_protocol::{SessionLocator, TurnId, UserContent};
 
 use super::DesktopApp;
 use crate::command_bridge::{
@@ -306,7 +306,8 @@ impl DesktopApp {
                 .transcripts
                 .get(&session)
                 .is_some_and(|transcript| transcript.busy);
-        let prepared = if explicit_guide && active {
+        let prepared_as_steer = explicit_guide && active;
+        let prepared = if prepared_as_steer {
             prepare_queued_steer(&mut self.app_state, session.clone(), payload)
         } else {
             prepare_queued_start(&mut self.app_state, session.clone(), payload)
@@ -321,6 +322,9 @@ impl DesktopApp {
                 return;
             }
         };
+        let optimistic_turn_id = (!prepared_as_steer)
+            .then(|| self.app_state.active_turns.get(&session).copied())
+            .flatten();
 
         let accepted = self
             .command_bridge
@@ -328,10 +332,10 @@ impl DesktopApp {
             .expect("the bridge was checked before preparing the queue dispatch")
             .dispatch(dispatch);
         match accepted {
-            Ok(()) => self.accept_queued_message(&session, preview),
+            Ok(()) => self.accept_queued_message(&session, preview, !prepared_as_steer),
             Err(dispatch) => {
                 if let Some(transcript) = self.app_state.transcripts.get_mut(&session) {
-                    transcript.items.truncate(transcript_len);
+                    rollback_queued_transcript(transcript, transcript_len, optimistic_turn_id);
                 }
                 reject_dispatch(
                     &mut self.app_state,
@@ -361,17 +365,28 @@ impl DesktopApp {
         })
     }
 
-    fn accept_queued_message(&mut self, session: &SessionLocator, preview: QueuedMessage) {
+    fn accept_queued_message(
+        &mut self,
+        session: &SessionLocator,
+        preview: QueuedMessage,
+        advance_user_boundary: bool,
+    ) {
         let was_editing = self.app_state.current_session.as_ref() == Some(session)
             && self.app_state.composer.editing_queued_message == Some(preview.id);
         if let Some(transcript) = self.app_state.transcripts.get_mut(session) {
-            transcript.items.extend(
-                preview
-                    .attachments
-                    .iter()
-                    .cloned()
-                    .map(TranscriptItem::Attachment),
-            );
+            let attachments = preview
+                .attachments
+                .iter()
+                .cloned()
+                .map(TranscriptItem::Attachment)
+                .collect::<Vec<_>>();
+            if advance_user_boundary {
+                if !transcript.insert_latest_turn_user_items(attachments.clone()) {
+                    transcript.items.extend(attachments);
+                }
+            } else {
+                transcript.items.extend(attachments);
+            }
         }
         let remove = AppCommand::RemoveQueuedMessage {
             session: session.clone(),
@@ -445,6 +460,18 @@ impl DesktopApp {
         self.window_state.dirty = true;
         self.request_redraw();
     }
+}
+
+fn rollback_queued_transcript(
+    transcript: &mut TranscriptState,
+    transcript_len: usize,
+    turn_id: Option<TurnId>,
+) {
+    if let Some(turn_id) = turn_id {
+        let _ = transcript.discard_turn(turn_id);
+    }
+    transcript.items.truncate(transcript_len);
+    transcript.item_heights.truncate(transcript_len);
 }
 
 fn select_queued_preview(
@@ -539,7 +566,7 @@ mod tests {
 
     use super::{
         projected_first_submit_is_provisional, provisional_session_is_pending,
-        select_queued_preview, QueuedPayloadStore,
+        rollback_queued_transcript, select_queued_preview, QueuedPayloadStore,
     };
 
     #[test]
@@ -693,5 +720,51 @@ mod tests {
             sandbox_network: false,
         });
         assert!(!provisional_session_is_pending(&state, &session));
+    }
+
+    #[test]
+    fn rejected_queued_start_rolls_back_its_user_items_and_turn_boundary() {
+        let turn_id = TurnId::parse("00000000-0000-0000-0000-000000000333").unwrap();
+        let mut transcript = TranscriptState {
+            items: vec![zode_app_model::TranscriptItem::UserText("queued".into())],
+            item_heights: vec![40.0],
+            ..TranscriptState::default()
+        };
+        assert!(transcript.begin_turn(turn_id, 0, 1));
+
+        rollback_queued_transcript(&mut transcript, 0, Some(turn_id));
+
+        assert!(transcript.items.is_empty());
+        assert!(transcript.item_heights.is_empty());
+        assert!(transcript.turns.is_empty());
+        assert!(!transcript.busy);
+    }
+
+    #[test]
+    fn rejected_queued_guide_keeps_the_live_turn_and_rolls_back_only_guide_items() {
+        let turn_id = TurnId::parse("00000000-0000-0000-0000-000000000334").unwrap();
+        let mut transcript = TranscriptState {
+            items: vec![zode_app_model::TranscriptItem::UserText("original".into())],
+            item_heights: vec![40.0],
+            ..TranscriptState::default()
+        };
+        assert!(transcript.begin_turn(turn_id, 0, 1));
+        let transcript_len = transcript.items.len();
+        transcript
+            .items
+            .push(zode_app_model::TranscriptItem::UserText("guide".into()));
+        transcript.item_heights.push(40.0);
+
+        rollback_queued_transcript(&mut transcript, transcript_len, None);
+
+        assert_eq!(transcript.items.len(), 1);
+        assert_eq!(transcript.item_heights, vec![40.0]);
+        assert_eq!(transcript.turns.len(), 1);
+        assert_eq!(transcript.turns[0].turn_id, Some(turn_id));
+        assert_eq!(
+            transcript.turns[0].status,
+            zode_app_model::TranscriptTurnStatus::Running
+        );
+        assert!(transcript.busy);
     }
 }

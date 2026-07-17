@@ -1,7 +1,7 @@
 use zode_app_model::{
     reduce_agent_event, reduce_navigation_command, reduce_queue_command, AppCommand, LoadState,
     NavigationOutcome, ProjectState, QueueCommandOutcome, ReduceOutcome, TranscriptItem,
-    TranscriptState,
+    TranscriptState, TranscriptTurnStatus,
 };
 use zode_node_protocol::{
     AgentCommandKind, AgentEvent, AgentEventKind, SessionLocator, ThreadStatus, ThreadSummary,
@@ -68,6 +68,13 @@ async fn selected_project_submit_uses_exact_active_workspace_before_starting_tur
     ));
     assert_eq!(dispatch.commands[0].session, dispatch.commands[1].session);
     assert!(state.current_session.is_some());
+    let session = state.current_session.as_ref().unwrap();
+    let turn = &state.transcripts[session].turns[0];
+    assert_eq!(turn.turn_id, dispatch.commands[1].turn_id);
+    assert_eq!(turn.start_item_index, 0);
+    assert_eq!(turn.response_item_index, 1);
+    assert_eq!(turn.status, TranscriptTurnStatus::Running);
+    assert!(turn.elapsed.is_none());
     assert!(bridge.dispatch(dispatch).is_ok());
     wait_for_commands(&endpoint, 2).await;
     let commands = endpoint.commands.lock().unwrap();
@@ -249,6 +256,11 @@ async fn second_command_failure_keeps_created_session_retryable() {
 
     assert!(state.transcripts.contains_key(&created));
     assert!(!state.transcripts[&created].busy);
+    assert_eq!(
+        state.transcripts[&created].turns[0].status,
+        TranscriptTurnStatus::Failed
+    );
+    assert!(state.transcripts[&created].turns[0].elapsed.is_some());
     let retry = prepare_dispatch(
         &mut state,
         AppCommand::Submit(vec![UserContent::Text {

@@ -3,7 +3,7 @@ use jian_core::CursorHint;
 use std::collections::BTreeMap;
 use zode_app_model::{TranscriptItem, ZodeAppState};
 
-use crate::widgets::transcript::preview_available;
+use crate::widgets::transcript::{item_has_turn_divider, preview_available, turn_label};
 use crate::{ApprovalCard, ThreadTranscript, ToolCard, WorkspaceLayout};
 
 use super::{next_order, node, InteractionNode};
@@ -29,16 +29,23 @@ pub(super) fn append_transcript_nodes(
     ) {
         let item = &transcript.items[item_layout.index];
         match item {
-            TranscriptItem::UserText(text) => nodes.push(node(
-                ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
-                item_layout.visible_rect,
-                Role::Paragraph,
-                &format!("你：{text}"),
-                None,
-                Vec::new(),
-                None,
-                CursorHint::Default,
-            )),
+            TranscriptItem::UserText(text) => {
+                let label = if item_has_turn_divider(transcript, item_layout.index) {
+                    format!("你：{text}；{}", turn_label(transcript, item_layout.index))
+                } else {
+                    format!("你：{text}")
+                };
+                nodes.push(node(
+                    ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
+                    item_layout.visible_rect,
+                    Role::Paragraph,
+                    &label,
+                    None,
+                    Vec::new(),
+                    None,
+                    CursorHint::Default,
+                ));
+            }
             TranscriptItem::AssistantText(text) => nodes.push(node(
                 ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
                 item_layout.visible_rect,
@@ -164,6 +171,14 @@ pub(super) fn append_transcript_nodes(
             }
             TranscriptItem::Attachment(attachment) => {
                 let actionable = attachment.path.is_some() && preview_available(state, session);
+                let mut label = format!(
+                    "附件：{}，{}",
+                    attachment.display_name, attachment.media_type
+                );
+                if item_has_turn_divider(transcript, item_layout.index) {
+                    label.push('；');
+                    label.push_str(&turn_label(transcript, item_layout.index));
+                }
                 nodes.push(node(
                     ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
                     item_layout.visible_rect,
@@ -172,10 +187,7 @@ pub(super) fn append_transcript_nodes(
                     } else {
                         Role::Image
                     },
-                    &format!(
-                        "附件：{}，{}",
-                        attachment.display_name, attachment.media_type
-                    ),
+                    &label,
                     None,
                     if actionable {
                         vec![Action::Click, Action::Focus]

@@ -117,7 +117,7 @@ impl ZodeTheme {
             tokens,
             sidebar: Color::rgb_u8(238, 237, 234),
             sidebar_foreground: Color::rgb_u8(45, 45, 43),
-            user_bubble: Color::rgb_u8(239, 239, 237),
+            user_bubble: Color::rgb_u8(245, 245, 246),
             success: Color::rgb_u8(22, 163, 74),
             warning: Color::rgb_u8(217, 119, 6),
             zode_purple: ZODE_PURPLE,

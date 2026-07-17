@@ -1,11 +1,11 @@
 use jian_widgets::{Painter, Point2D, Rect};
 use zode_app_model::AttachmentMetadata;
 
-use crate::{RectExt, ZodeTheme};
+use crate::{RectExt, SemanticIcon, ZodeTheme};
 
-use super::draw_text;
+use super::{draw_text, file_card::paint_icon_tile};
 
-pub(super) const HEIGHT: f32 = 68.0;
+pub(super) const HEIGHT: f32 = 64.0;
 
 pub(super) fn paint(
     painter: &mut dyn Painter,
@@ -13,13 +13,19 @@ pub(super) fn paint(
     attachment: &AttachmentMetadata,
     theme: &ZodeTheme,
 ) {
-    painter.fill_round_rect(rect, 10.0, theme.tokens.card);
-    painter.stroke_round_rect(rect, 10.0, theme.tokens.border, 1.0);
+    painter.fill_round_rect(rect, 12.0, theme.tokens.card);
+    painter.stroke_round_rect(rect, 12.0, theme.tokens.border, 1.0);
+    let icon = if attachment.media_type.starts_with("image/") {
+        SemanticIcon::Snapshot
+    } else {
+        SemanticIcon::FileText
+    };
+    paint_icon_tile(painter, rect, icon, theme);
     draw_text(
         painter,
         &attachment.display_name,
-        Point2D::new(rect.origin.x + 14.0, rect.origin.y + 25.0),
-        12.0,
+        Point2D::new(rect.origin.x + 64.0, rect.origin.y + 14.0),
+        13.0,
         600,
         theme.tokens.foreground,
     );
@@ -40,7 +46,7 @@ pub(super) fn paint(
     draw_text(
         painter,
         &details,
-        Point2D::new(rect.origin.x + 14.0, rect.origin.y + 47.0),
+        Point2D::new(rect.origin.x + 64.0, rect.origin.y + 36.0),
         11.0,
         400,
         theme.tokens.muted_foreground,
@@ -48,11 +54,11 @@ pub(super) fn paint(
     if attachment.path.is_some() {
         draw_text(
             painter,
-            "文件",
-            Point2D::new(rect.max_x() - 42.0, rect.origin.y + 25.0),
+            "打开",
+            Point2D::new(rect.max_x() - 42.0, rect.origin.y + 14.0),
             10.0,
             600,
-            theme.zode_purple,
+            theme.tokens.muted_foreground,
         );
     }
 }

@@ -1,5 +1,6 @@
 use zode_app_model::{
     reduce_queue_command, AppCommand, QueueCommandOutcome, TranscriptItem, TranscriptState,
+    TranscriptTurnStatus,
 };
 use zode_node_protocol::{
     AgentCommandKind, SessionLocator, ThreadStatus, ThreadSummary, UserContent,
@@ -42,6 +43,11 @@ fn queued_start_targets_its_owner_after_the_current_session_changes() {
         state.transcripts[&session_a].items.last(),
         Some(TranscriptItem::UserText(text)) if text == "queued for A"
     ));
+    let turn = &state.transcripts[&session_a].turns[0];
+    assert_eq!(turn.turn_id, dispatch.commands[0].turn_id);
+    assert_eq!(turn.start_item_index, 0);
+    assert_eq!(turn.response_item_index, 1);
+    assert_eq!(turn.status, TranscriptTurnStatus::Running);
     assert!(state.transcripts[&session_b].items.is_empty());
 }
 

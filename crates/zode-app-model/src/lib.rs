@@ -19,17 +19,18 @@ pub use layout::LayoutClass;
 pub use message_queue::{MessageQueueState, QueuedMessage, QueuedMessageId};
 pub use presentation::*;
 pub use reducer::{
-    apply_session_runtime_options, reduce_agent_event, reduce_navigation_command,
-    reduce_presentation_command, reduce_queue_command, reduce_terminal_command,
-    reduce_tool_command, reduce_transcript_command, NavigationOutcome, PresentationCommandOutcome,
-    QueueCommandOutcome, ReduceOutcome, TerminalCommandOutcome, ToolCommandOutcome,
-    TranscriptCommandOutcome,
+    apply_session_runtime_options, reduce_agent_event, reduce_agent_event_at,
+    reduce_navigation_command, reduce_presentation_command, reduce_queue_command,
+    reduce_terminal_command, reduce_tool_command, reduce_transcript_command, NavigationOutcome,
+    PresentationCommandOutcome, QueueCommandOutcome, ReduceOutcome, TerminalCommandOutcome,
+    ToolCommandOutcome, TranscriptCommandOutcome,
 };
 pub use settings_reducer::{reduce_settings_command, SettingsCommandOutcome};
 pub use state::*;
 pub use transcript::{
     default_tool_expanded, tool_category, ActivityEntry, AttachmentMetadata, FileArtifact,
-    GoalProgress, ToolCategory, TranscriptItem, TranscriptState, TranscriptVisualKind,
+    GoalProgress, ToolCategory, TranscriptItem, TranscriptState, TranscriptTurnStatus,
+    TranscriptVisualKind, TurnSummary,
 };
 
 pub const CRATE_READY: bool = true;

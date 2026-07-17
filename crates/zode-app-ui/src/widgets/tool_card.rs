@@ -1,8 +1,8 @@
-use jian_widgets::{HorizontalAlign, Painter, Rect};
+use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect};
 use zode_app_model::default_tool_expanded;
 use zode_node_protocol::{ToolCall, ToolStatus};
 
-use crate::{paint_single_line, ZodeTheme};
+use crate::{paint_single_line, SemanticIcon, ZodeTheme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolTone {
@@ -34,52 +34,147 @@ impl ToolCard {
         theme: &ZodeTheme,
     ) {
         let tone = Self::tone(tool);
-        let accent = match tone {
-            ToolTone::Running => theme.tokens.muted_foreground,
-            ToolTone::Success => theme.success,
+        let icon_color = match tone {
+            ToolTone::Running | ToolTone::Success => theme.tokens.muted_foreground,
             ToolTone::Failure => theme.tokens.destructive,
         };
-        painter.fill_round_rect(rect, 8.0, theme.tokens.muted);
-        painter.stroke_round_rect(rect, 8.0, accent.with_alpha(0.55), 1.0);
-        let header = Rect::xywh(rect.origin.x, rect.origin.y, rect.size.x, 35.0);
-        painter.fill_oval(
-            Rect::xywh(
-                rect.origin.x + 10.0,
-                header.origin.y + (header.size.y - 7.0) / 2.0,
-                7.0,
-                7.0,
+        let header_height = rect.size.y.min(35.0);
+        let header = Rect::xywh(rect.origin.x, rect.origin.y, rect.size.x, header_height);
+        let (label, icon) = action_presentation(&tool.name, tone);
+        painter.stroke_svg_path(
+            icon.path(),
+            Point2D::new(
+                rect.origin.x,
+                header.origin.y + (header.size.y - 15.0) / 2.0,
             ),
-            accent,
+            15.0,
+            icon_color,
+            icon.stroke_width(),
         );
         paint_single_line(
             painter,
-            &tool.name,
+            label,
             Rect::xywh(
-                rect.origin.x + 26.0,
+                rect.origin.x + 23.0,
                 header.origin.y,
-                (rect.size.x - 38.0).max(0.0),
+                (rect.size.x - 23.0).max(0.0),
                 header.size.y,
             ),
-            12.0,
-            600,
-            theme.tokens.foreground,
+            14.0,
+            500,
+            theme.tokens.muted_foreground,
             HorizontalAlign::Start,
         );
         if expanded {
+            let detail = if tool.summary.trim().is_empty() {
+                tool.detail.as_deref().unwrap_or("")
+            } else {
+                &tool.summary
+            };
             paint_single_line(
                 painter,
-                &tool.summary,
+                detail,
                 Rect::xywh(
-                    rect.origin.x + 12.0,
-                    rect.origin.y + 35.0,
-                    (rect.size.x - 24.0).max(0.0),
-                    (rect.size.y - 35.0).max(0.0),
+                    rect.origin.x + 23.0,
+                    rect.origin.y + header_height,
+                    (rect.size.x - 23.0).max(0.0),
+                    (rect.size.y - header_height).max(0.0),
                 ),
-                11.0,
+                13.0,
                 400,
-                theme.tokens.muted_foreground,
+                theme.tokens.muted_foreground.with_alpha(0.72),
                 HorizontalAlign::Start,
             );
         }
+    }
+}
+
+fn action_presentation(name: &str, tone: ToolTone) -> (&'static str, SemanticIcon) {
+    let name = name.to_ascii_lowercase();
+    if [
+        "read", "list", "search", "find", "get", "export", "snapshot",
+    ]
+    .iter()
+    .any(|needle| name.contains(needle))
+    {
+        (
+            match tone {
+                ToolTone::Running => "正在读取",
+                ToolTone::Success => "已读取",
+                ToolTone::Failure => "读取失败",
+            },
+            SemanticIcon::FileText,
+        )
+    } else if [
+        "shell", "exec", "command", "terminal", "bash", "zsh", "cargo",
+    ]
+    .iter()
+    .any(|needle| name.contains(needle))
+    {
+        (
+            match tone {
+                ToolTone::Running => "正在运行命令",
+                ToolTone::Success => "运行了命令",
+                ToolTone::Failure => "命令运行失败",
+            },
+            SemanticIcon::Terminal,
+        )
+    } else if ["edit", "write", "patch", "update", "insert", "move", "copy"]
+        .iter()
+        .any(|needle| name.contains(needle))
+    {
+        (
+            match tone {
+                ToolTone::Running => "正在编辑",
+                ToolTone::Success => "已编辑",
+                ToolTone::Failure => "编辑失败",
+            },
+            SemanticIcon::Edit,
+        )
+    } else if name.contains("create") {
+        (
+            match tone {
+                ToolTone::Running => "正在创建",
+                ToolTone::Success => "已创建",
+                ToolTone::Failure => "创建失败",
+            },
+            SemanticIcon::Plus,
+        )
+    } else if name.contains("delete") || name.contains("remove") {
+        (
+            match tone {
+                ToolTone::Running => "正在删除",
+                ToolTone::Success => "已删除",
+                ToolTone::Failure => "删除失败",
+            },
+            SemanticIcon::Delete,
+        )
+    } else if name.contains("agent") || name.contains("task") {
+        (
+            match tone {
+                ToolTone::Running => "正在运行子任务",
+                ToolTone::Success => "已运行子任务",
+                ToolTone::Failure => "子任务失败",
+            },
+            SemanticIcon::Sparkles,
+        )
+    } else if name.contains("browser") || name.contains("web") {
+        (
+            match tone {
+                ToolTone::Running => "正在浏览网页",
+                ToolTone::Success => "已浏览网页",
+                ToolTone::Failure => "浏览失败",
+            },
+            SemanticIcon::Browser,
+        )
+    } else {
+        (
+            match tone {
+                ToolTone::Running => "正在使用工具",
+                ToolTone::Success => "已使用工具",
+                ToolTone::Failure => "工具运行失败",
+            },
+            SemanticIcon::Hook,
+        )
     }
 }

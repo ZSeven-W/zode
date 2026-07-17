@@ -695,6 +695,11 @@ fn first_attachment_submit_creates_session_before_metadata_projection() {
         state.transcripts[&session].items.last(),
         Some(zode_app_model::TranscriptItem::Attachment(projected)) if projected == &attachment
     ));
+    assert_eq!(
+        state.transcripts[&session].turns[0].response_item_index,
+        state.transcripts[&session].items.len(),
+        "the turn divider belongs after the complete user attachment projection"
+    );
 }
 
 #[test]

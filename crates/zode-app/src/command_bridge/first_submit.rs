@@ -33,8 +33,11 @@ pub(super) fn prepare_first_submit(
         },
     };
     let mut transcript = TranscriptState::default();
+    let start_item_index = transcript.items.len();
     append_user_content(&mut transcript, &input);
-    transcript.busy = true;
+    let response_item_index = transcript.items.len();
+    let started = transcript.begin_turn(turn_id, start_item_index, response_item_index);
+    debug_assert!(started, "a fresh transcript accepts its first turn");
     state.threads.insert(
         0,
         ThreadSummary {

@@ -1,4 +1,5 @@
 use crate::{default_tool_expanded, AppCommand, TranscriptItem, TranscriptState, ZodeAppState};
+use std::time::Instant;
 use zode_node_protocol::{
     AgentEvent, AgentEventKind, RuntimeOptions, SandboxMode, SessionLocator, ToolCall,
 };
@@ -604,6 +605,15 @@ pub fn reduce_navigation_command(
 
 /// Applies a current-turn event while rejecting unknown or stale event streams.
 pub fn reduce_agent_event(state: &mut ZodeAppState, event: AgentEvent) -> ReduceOutcome {
+    reduce_agent_event_at(state, event, Instant::now())
+}
+
+/// Deterministic-clock variant used by the event bridge and model tests.
+pub fn reduce_agent_event_at(
+    state: &mut ZodeAppState,
+    event: AgentEvent,
+    received_at: Instant,
+) -> ReduceOutcome {
     let session_exists = state
         .threads
         .iter()
@@ -621,6 +631,7 @@ pub fn reduce_agent_event(state: &mut ZodeAppState, event: AgentEvent) -> Reduce
 
     let AgentEvent {
         session,
+        turn_id,
         sequence,
         kind,
         ..
@@ -677,11 +688,15 @@ pub fn reduce_agent_event(state: &mut ZodeAppState, event: AgentEvent) -> Reduce
                 .items
                 .push(TranscriptItem::Status { code, message });
         }
-        AgentEventKind::TurnFinished { interrupted: _ } => {
+        AgentEventKind::TurnFinished { interrupted } => {
+            let _ = transcript.finish_turn_at(turn_id, interrupted, received_at);
             transcript.busy = false;
             state.active_turns.remove(&session);
         }
         AgentEventKind::Error { message, retryable } => {
+            if !retryable {
+                let _ = transcript.record_terminal_error(turn_id);
+            }
             transcript
                 .items
                 .push(TranscriptItem::Error { message, retryable });
