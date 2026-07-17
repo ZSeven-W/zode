@@ -345,6 +345,7 @@ fn partially_visible_transcript_controls_are_clipped_to_the_viewport() {
         .collect();
     transcript.item_heights = vec![72.0; transcript.items.len()];
     transcript.scroll_offset = 36.0;
+    transcript.follow_tail = false;
     let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 600.0, Insets::ZERO);
     let tool_node = snapshot
         .nodes
@@ -541,7 +542,7 @@ fn dynamic_sidebar_rows_are_capped_by_available_height() {
             last_opened_ms: index,
         });
     }
-    let snapshot = WorkspaceSnapshot::build(&state, 900.0, 480.0, Insets::ZERO);
+    let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 480.0, Insets::ZERO);
     let rows = ProjectSidebar::dynamic_row_layout(snapshot.layout.sidebar, &state);
     assert!(!rows.is_empty());
     assert!(rows
