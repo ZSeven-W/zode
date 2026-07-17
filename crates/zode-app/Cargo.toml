@@ -39,3 +39,6 @@ accesskit_windows = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 accesskit_unix = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }

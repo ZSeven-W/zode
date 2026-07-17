@@ -97,6 +97,7 @@ accesskit_unix = "0.22"
 image = { version = "=0.25.8", default-features = false, features = ["png"] }
 futures-core = "0.3"
 fs2 = "0.4"
+nix = { version = "0.28", features = ["fs"] }
 portable-pty = "0.9"
 vte = "0.13"
 rfd = "0.15"

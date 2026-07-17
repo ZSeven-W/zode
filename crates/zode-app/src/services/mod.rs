@@ -1,6 +1,7 @@
 mod external_open;
 mod file;
 mod notification;
+mod terminal;
 mod window;
 mod workspace;
 
@@ -11,6 +12,7 @@ use zode_node_protocol::WorkspaceUri;
 pub use external_open::LocalExternalOpenService;
 pub use file::LocalFileService;
 pub use notification::LocalNotificationService;
+pub use terminal::{LocalTerminalService, TerminalError, TerminalOutputStream, TerminalService};
 pub use window::NativeWindowService;
 pub use workspace::LocalWorkspaceService;
 

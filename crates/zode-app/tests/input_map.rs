@@ -2,7 +2,7 @@ use winit::{
     event::Ime,
     keyboard::{Key as WinitKey, ModifiersState, NamedKey},
 };
-use zode_app::event_map::{composer_outcome_command, map_ime, map_key};
+use zode_app::event_map::{composer_outcome_command, map_ime, map_key, terminal_shortcut_command};
 use zode_app_model::AppCommand;
 use zode_app_ui::{ComposerOutcome, ImeEvent, Key, KeyEvent, Modifiers};
 use zode_node_protocol::UserContent;
@@ -79,4 +79,16 @@ fn composer_outcomes_map_to_controller_commands() {
         Some(AppCommand::Interrupt),
     );
     assert_eq!(composer_outcome_command(ComposerOutcome::Edited), None,);
+}
+
+#[test]
+fn terminal_shortcut_routes_to_the_terminal_page() {
+    assert_eq!(
+        terminal_shortcut_command(&KeyEvent {
+            key: Key::Character("`".into()),
+            modifiers: Modifiers::SUPER,
+            pressed: true,
+        }),
+        Some(AppCommand::OpenTerminal),
+    );
 }

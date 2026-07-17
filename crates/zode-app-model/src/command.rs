@@ -65,4 +65,19 @@ pub enum AppCommand {
     ToggleSidebar,
     OpenReview,
     OpenTerminal,
+    SetTerminalFocus(bool),
+    SetTerminalScroll {
+        offset: f32,
+        follow_tail: bool,
+    },
+    WriteTerminal {
+        id: zode_node_protocol::TerminalId,
+        bytes: Vec<u8>,
+    },
+    ResizeTerminal {
+        id: zode_node_protocol::TerminalId,
+        cols: u16,
+        rows: u16,
+    },
+    CloseTerminal(zode_node_protocol::TerminalId),
 }

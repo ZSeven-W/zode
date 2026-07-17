@@ -17,11 +17,12 @@ pub use layout::{
 pub use theme::{ZodeTheme, ZODE_PURPLE};
 pub use virtual_list::{visible_range, MeasuredItem, MeasurementCache, VirtualListState};
 pub use widgets::{
-    group_sessions, ApprovalAction, ApprovalCard, Composer, ComposerController, ComposerOutcome,
-    ComposerSubmission, PermissionRow, ProjectSessionGroup, ProjectSidebar, ReviewDraft,
-    ReviewLine, ReviewLineKind, ReviewPanel, ReviewSelection, SandboxSelection, SettingsPanel,
-    SidebarAction, SidebarItem, ThreadHeader, ThreadTranscript, ToolCard, ToolTone, UsageChip,
-    UsageDisplay, WindowChrome, WorkspaceShell,
+    group_sessions, ApprovalAction, ApprovalCard, CellPosition, Composer, ComposerController,
+    ComposerOutcome, ComposerSubmission, PermissionRow, ProjectSessionGroup, ProjectSidebar,
+    ReviewDraft, ReviewLine, ReviewLineKind, ReviewPanel, ReviewSelection, SandboxSelection,
+    SettingsPanel, SidebarAction, SidebarItem, TerminalCell, TerminalColor, TerminalGrid,
+    TerminalLine, TerminalPanel, TerminalPanelController, TerminalSelection, ThreadHeader,
+    ThreadTranscript, ToolCard, ToolTone, UsageChip, UsageDisplay, WindowChrome, WorkspaceShell,
 };
 
 pub const CRATE_READY: bool = true;

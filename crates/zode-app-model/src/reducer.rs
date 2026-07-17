@@ -30,6 +30,49 @@ pub enum ToolCommandOutcome {
     Ignored,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalCommandOutcome {
+    Applied,
+    NeedsEffect,
+    Ignored,
+}
+
+/// Applies terminal-only UI state and identifies commands that must be
+/// forwarded to the platform terminal service.
+pub fn reduce_terminal_command(
+    state: &mut ZodeAppState,
+    command: AppCommand,
+) -> TerminalCommandOutcome {
+    match command {
+        AppCommand::OpenTerminal => {
+            state.terminal.open = true;
+            state.terminal.focused = true;
+            state.shell.page = crate::ShellPage::Terminal;
+            TerminalCommandOutcome::Applied
+        }
+        AppCommand::SetTerminalFocus(focused) => {
+            state.terminal.focused = focused;
+            TerminalCommandOutcome::Applied
+        }
+        AppCommand::SetTerminalScroll {
+            offset,
+            follow_tail,
+        } if offset.is_finite() => {
+            state.terminal.scroll_offset = offset.max(0.0);
+            state.terminal.follow_tail = follow_tail;
+            TerminalCommandOutcome::Applied
+        }
+        AppCommand::WriteTerminal { id, .. }
+        | AppCommand::ResizeTerminal { id, .. }
+        | AppCommand::CloseTerminal(id)
+            if state.terminal.active_id == Some(id) =>
+        {
+            TerminalCommandOutcome::NeedsEffect
+        }
+        _ => TerminalCommandOutcome::Ignored,
+    }
+}
+
 pub fn reduce_tool_command(state: &mut ZodeAppState, command: AppCommand) -> ToolCommandOutcome {
     let AppCommand::SetToolExpanded { tool_id, expanded } = command else {
         return ToolCommandOutcome::Ignored;

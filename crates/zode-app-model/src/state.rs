@@ -24,10 +24,27 @@ pub struct ReviewState {
 }
 
 /// Terminal panel availability and visibility.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TerminalState {
     pub open: bool,
     pub unavailable_reason: Option<String>,
+    pub active_id: Option<zode_node_protocol::TerminalId>,
+    pub focused: bool,
+    pub scroll_offset: f32,
+    pub follow_tail: bool,
+}
+
+impl Default for TerminalState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            unavailable_reason: None,
+            active_id: None,
+            focused: false,
+            scroll_offset: 0.0,
+            follow_tail: true,
+        }
+    }
 }
 
 /// Top-level shell destinations.

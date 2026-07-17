@@ -1,7 +1,8 @@
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{demo_state, ShellPage};
 use zode_app_ui::{
-    Insets, ProjectSidebar, RectExt, SidebarAction, WorkspaceLayout, WorkspaceShell, ZodeTheme,
+    Insets, ProjectSidebar, RectExt, SidebarAction, TerminalGrid, WorkspaceLayout, WorkspaceShell,
+    ZodeTheme,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,4 +129,29 @@ fn shell_uses_theme_tokens_for_both_color_schemes() {
     assert_eq!(light.zode_purple, dark.zode_purple);
     assert_ne!(light.user_bubble, dark.user_bubble);
     assert!(light.success != light.warning && dark.success != dark.warning);
+}
+
+#[test]
+fn workspace_shell_routes_the_terminal_page_through_terminal_panel() {
+    let mut state = demo_state();
+    state.shell.page = ShellPage::Terminal;
+    state.terminal.open = true;
+    state.terminal.unavailable_reason = Some("Terminal unavailable on this node".into());
+    let grid = TerminalGrid::new(80, 24);
+    let mut painter = CapturePainter::default();
+
+    WorkspaceShell::paint_with_terminal(
+        &mut painter,
+        Rect::xywh(0.0, 0.0, 1221.0, 992.0),
+        Insets::ZERO,
+        &state,
+        &grid,
+        None,
+        &ZodeTheme::light(),
+    );
+
+    assert!(painter
+        .operations
+        .iter()
+        .any(|operation| matches!(operation, PaintOp::Text(text) if text == "Terminal unavailable on this node")));
 }

@@ -12,3 +12,4 @@ zode-node-protocol = { path = "../zode-node-protocol" }
 jian-core = { workspace = true }
 jian-widgets = { workspace = true }
 accesskit = { workspace = true }
+vte = { workspace = true }

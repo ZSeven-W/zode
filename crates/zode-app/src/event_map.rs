@@ -81,6 +81,13 @@ pub fn composer_outcome_command(outcome: ComposerOutcome) -> Option<AppCommand> 
     }
 }
 
+pub fn terminal_shortcut_command(event: &KeyEvent) -> Option<AppCommand> {
+    (event.pressed
+        && event.modifiers.primary()
+        && matches!(&event.key, Key::Character(value) if value == "`"))
+    .then_some(AppCommand::OpenTerminal)
+}
+
 pub fn resize_direction(x: f32, y: f32, width: f32, height: f32) -> Option<ResizeDirection> {
     if ![x, y, width, height].iter().all(|value| value.is_finite())
         || width <= RESIZE_RING * 2.0
