@@ -70,7 +70,7 @@ fn desktop_reference_geometry_keeps_the_existing_visual_rhythm() {
 }
 
 #[test]
-fn optional_context_panel_does_not_squeeze_the_centered_wide_conversation() {
+fn optional_context_panel_preserves_width_and_recenters_the_wide_conversation() {
     let without_panel = WorkspaceLayout::compute(1800.0, 1080.0, Insets::ZERO);
     let with_panel = WorkspaceLayout::compute_with_options(
         1800.0,
@@ -84,9 +84,17 @@ fn optional_context_panel_does_not_squeeze_the_centered_wide_conversation() {
 
     assert_eq!(without_panel.sidebar.width(), PRIMARY_SIDEBAR_DEFAULT_W);
     assert_eq!(without_panel.transcript.width(), 736.0);
-    assert_eq!(with_panel.transcript, without_panel.transcript);
-    assert_eq!(with_panel.composer, without_panel.composer);
+    assert_eq!(
+        with_panel.transcript.width(),
+        without_panel.transcript.width()
+    );
+    assert_eq!(with_panel.composer.width(), without_panel.composer.width());
     assert_eq!(with_panel.context_panel.width(), 300.0);
+    let remaining_width = with_panel.context_panel.min_x() - with_panel.primary_surface.min_x();
+    let expected_x = with_panel.primary_surface.min_x()
+        + (remaining_width - with_panel.transcript.width()) / 2.0;
+    assert_eq!(with_panel.transcript.min_x(), expected_x);
+    assert_eq!(with_panel.composer.min_x(), expected_x);
     assert!(with_panel.context_panel.min_x() >= with_panel.composer.max_x());
 }
 
