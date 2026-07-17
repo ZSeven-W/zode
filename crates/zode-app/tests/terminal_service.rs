@@ -11,10 +11,17 @@ use std::{
 use futures_util::StreamExt;
 use zode_app::services::{LocalTerminalService, TerminalService};
 
+fn terminal_service() -> LocalTerminalService {
+    #[cfg(unix)]
+    return LocalTerminalService::with_shell("/bin/sh");
+    #[cfg(windows)]
+    LocalTerminalService::new()
+}
+
 #[test]
 fn terminal_service_resize_reaches_the_native_pty_master() {
     let cwd = std::env::current_dir().unwrap();
-    let service = LocalTerminalService::new();
+    let service = terminal_service();
     let terminal = service.spawn(&cwd).unwrap();
 
     service.resize(terminal, 120, 40).unwrap();
@@ -26,7 +33,7 @@ fn terminal_service_resize_reaches_the_native_pty_master() {
 #[tokio::test]
 async fn terminal_service_shell_output_streams_and_close_joins_the_session() {
     let cwd = std::env::current_dir().unwrap();
-    let service = LocalTerminalService::new();
+    let service = terminal_service();
     let terminal = service.spawn(&cwd).unwrap();
     let mut output = service.subscribe(terminal).unwrap();
     service
@@ -54,7 +61,7 @@ async fn terminal_service_shell_output_streams_and_close_joins_the_session() {
 #[tokio::test]
 async fn terminal_service_process_exit_ends_output_without_an_io_error() {
     let cwd = std::env::current_dir().unwrap();
-    let service = LocalTerminalService::new();
+    let service = terminal_service();
     let terminal = service.spawn(&cwd).unwrap();
     let mut output = service.subscribe(terminal).unwrap();
     service.write(terminal, b"exit\r\n".to_vec()).unwrap();
@@ -76,7 +83,7 @@ async fn terminal_service_process_exit_ends_output_without_an_io_error() {
 #[tokio::test]
 async fn terminal_service_process_exit_cancels_reader_when_a_descendant_retains_the_pty() {
     let cwd = std::env::current_dir().unwrap();
-    let service = LocalTerminalService::new();
+    let service = terminal_service();
     let terminal = service.spawn(&cwd).unwrap();
     let mut output = service.subscribe(terminal).unwrap();
     service
@@ -99,7 +106,7 @@ async fn terminal_service_process_exit_cancels_reader_when_a_descendant_retains_
 #[tokio::test]
 async fn terminal_service_natural_exit_drains_final_pty_bytes() {
     let cwd = std::env::current_dir().unwrap();
-    let service = LocalTerminalService::new();
+    let service = terminal_service();
     let terminal = service.spawn(&cwd).unwrap();
     let mut output = service.subscribe(terminal).unwrap();
     service
@@ -128,7 +135,7 @@ async fn terminal_service_natural_exit_drains_final_pty_bytes() {
 #[test]
 fn terminal_service_windows_close_watchdog_interrupts_conpty_io() {
     let cwd = std::env::current_dir().unwrap();
-    let service = std::sync::Arc::new(LocalTerminalService::new());
+    let service = std::sync::Arc::new(terminal_service());
     let terminal = service.spawn(&cwd).unwrap();
     service
         .write(terminal, b"ping -n 31 127.0.0.1 >nul\r\n".to_vec())
@@ -156,7 +163,7 @@ fn terminal_service_windows_close_watchdog_interrupts_conpty_io() {
 #[test]
 fn terminal_service_close_interrupts_a_large_write_to_a_child_that_is_not_reading() {
     let cwd = std::env::current_dir().unwrap();
-    let service = Arc::new(LocalTerminalService::new());
+    let service = Arc::new(terminal_service());
     let terminal = service.spawn(&cwd).unwrap();
     let shell_pid_file = unique_pid_file("blocked-write-shell");
     service
@@ -197,7 +204,7 @@ fn terminal_service_close_interrupts_a_large_write_to_a_child_that_is_not_readin
 #[test]
 fn terminal_service_close_stops_a_descendant_that_retains_the_pty() {
     let cwd = std::env::current_dir().unwrap();
-    let service = LocalTerminalService::new();
+    let service = terminal_service();
     let terminal = service.spawn(&cwd).unwrap();
     let shell_pid_file = unique_pid_file("descendant-shell");
     let descendant_pid_file = unique_pid_file("descendant-child");
@@ -244,7 +251,7 @@ async fn terminal_service_caps_output_when_the_subscriber_is_stalled() {
     const MAX_BUFFERED_BYTES: usize = 1024 * 1024;
 
     let cwd = std::env::current_dir().unwrap();
-    let service = LocalTerminalService::new();
+    let service = terminal_service();
     let terminal = service.spawn(&cwd).unwrap();
     let mut output = service.subscribe(terminal).unwrap();
     let shell_pid_file = unique_pid_file("bounded-output-shell");

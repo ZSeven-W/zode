@@ -5,8 +5,8 @@ use zode_app_model::{
     ShellPage, ShellRoute,
 };
 use zode_app_ui::{
-    EnvironmentPanel, Insets, ReviewPanel, ThreadHeader, WorkspaceShell, ZodeTheme,
-    HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID, PANEL_PICKER_ID, REVIEW_CLOSE_ID,
+    EnvironmentPanel, Insets, PinnedSummaryMode, ReviewPanel, ThreadHeader, WorkspaceShell,
+    ZodeTheme, HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID, PANEL_PICKER_ID, REVIEW_CLOSE_ID,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
@@ -301,7 +301,7 @@ fn header_actions_are_stable_real_commands_and_picker_survives_without_a_session
     assert!(!selected.review.unwrap().selected);
 
     let narrow = ThreadHeader::layout(Rect::xywh(240.0, 0.0, 960.0, 46.0), &state);
-    assert!(narrow.environment.is_none());
+    assert!(narrow.environment.is_some());
     assert_eq!(
         narrow.review.unwrap().rect,
         Rect::xywh(1_120.0, 7.0, 32.0, 32.0),
@@ -332,12 +332,82 @@ fn environment_secondary_pane_paints_the_real_current_session_context() {
     let text = text(&painter);
 
     assert_eq!(layout.context_panel.size.x, 300.0);
+    assert!(text.contains("置顶摘要"));
     assert!(text.contains("环境信息"));
     assert!(text.contains("file:///repo/zode"));
     assert!(text.contains("codex/typed-shell"));
     assert!(painter
         .rounded_fills
         .contains(&EnvironmentPanel::layout(layout.context_panel, &state).card));
+}
+
+#[test]
+fn pinned_summary_auto_docks_only_when_conversation_space_is_available() {
+    let (mut state, _) = state_with_ready_session();
+    state.presentation.route = ShellRoute::Conversation;
+    state.presentation.secondary_pane = None;
+
+    let (wide, wide_layout) = paint_shell(&state, 1_800.0);
+    assert_eq!(wide_layout.pinned_summary, PinnedSummaryMode::Docked);
+    assert_eq!(wide_layout.context_panel.size.x, 300.0);
+    assert!(text(&wide).contains("置顶摘要"));
+    assert!(
+        ThreadHeader::layout_with_pinned_summary(
+            wide_layout.top_bar,
+            &state,
+            wide_layout.pinned_summary,
+        )
+        .environment
+        .unwrap()
+        .selected
+    );
+
+    for width in [1_399.0, 1_250.0] {
+        let (narrow, narrow_layout) = paint_shell(&state, width);
+        assert_eq!(narrow_layout.pinned_summary, PinnedSummaryMode::Hidden);
+        assert_eq!(narrow_layout.context_panel.size.x, 0.0);
+        assert!(!text(&narrow).contains("置顶摘要"));
+        assert!(
+            !ThreadHeader::layout_with_pinned_summary(
+                narrow_layout.top_bar,
+                &state,
+                narrow_layout.pinned_summary,
+            )
+            .environment
+            .unwrap()
+            .selected
+        );
+    }
+
+    state.presentation.secondary_pane = Some(SecondaryPane::Environment);
+    let (overlay, overlay_layout) = paint_shell(&state, 1_200.0);
+    assert_eq!(overlay_layout.pinned_summary, PinnedSummaryMode::Overlay);
+    assert_eq!(overlay_layout.context_panel.size.x, 300.0);
+    assert!(text(&overlay).contains("置顶摘要"));
+    assert!(
+        ThreadHeader::layout_with_pinned_summary(
+            overlay_layout.top_bar,
+            &state,
+            overlay_layout.pinned_summary,
+        )
+        .environment
+        .unwrap()
+        .selected
+    );
+}
+
+#[test]
+fn explicit_review_has_priority_over_the_automatic_summary() {
+    let (mut state, _) = state_with_ready_session();
+    state.presentation.route = ShellRoute::Conversation;
+    state.presentation.secondary_pane = Some(SecondaryPane::Review);
+
+    let (painter, layout) = paint_shell(&state, 1_800.0);
+
+    assert_eq!(layout.pinned_summary, PinnedSummaryMode::Hidden);
+    assert_eq!(layout.context_panel.size.x, 0.0);
+    assert!(layout.review_panel.size.x > 0.0);
+    assert!(!text(&painter).contains("置顶摘要"));
 }
 
 #[test]

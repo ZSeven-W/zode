@@ -1,17 +1,16 @@
 use jian_core::text_input::TextInputState;
-use jian_widgets::{HorizontalAlign, Painter, Point2D, Rect};
+use jian_widgets::{components::tooltip::Tooltip, HorizontalAlign, Painter, Point2D, Rect};
 use zode_app_model::{AppCommand, SecondaryPane, ZodeAppState};
 use zode_node_protocol::{SessionLocator, ThreadSummary};
 
 use crate::{
-    paint_single_line, PanelPicker, RectExt, SemanticIcon, UsageChip, WidgetId, ZodeTheme,
-    HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID,
+    paint_single_line, PanelPicker, PinnedSummaryMode, RectExt, SemanticIcon, UsageChip, WidgetId,
+    ZodeTheme, HEADER_ENVIRONMENT_ID, HEADER_REVIEW_ID,
 };
 
 const ACTION_SIZE: f32 = 32.0;
 const ACTION_GAP: f32 = 4.0;
 const ACTION_RIGHT: f32 = 12.0;
-const ENVIRONMENT_MIN_HEADER_WIDTH: f32 = 1_160.0;
 const TITLE_FONT_SIZE: f32 = 13.0;
 const MENU_WIDTH: f32 = 224.0;
 const MENU_PADDING: f32 = 4.0;
@@ -20,6 +19,8 @@ const MENU_SEPARATOR_HEIGHT: f32 = 1.0;
 const COPY_MENU_WIDTH: f32 = 190.0;
 const RENAME_WIDTH: f32 = 380.0;
 const RENAME_HEIGHT: f32 = 144.0;
+const SUMMARY_TOOLTIP_WIDTH: f32 = 126.0;
+const SUMMARY_TOOLTIP_HEIGHT: f32 = 28.0;
 
 pub const HEADER_MORE_ID: WidgetId = WidgetId(62);
 pub const HEADER_MENU_ID: WidgetId = WidgetId(63);
@@ -102,6 +103,20 @@ pub struct ThreadHeader;
 
 impl ThreadHeader {
     pub fn layout(rect: Rect, state: &ZodeAppState) -> ThreadHeaderLayout {
+        let pinned_summary =
+            if state.presentation.secondary_pane == Some(SecondaryPane::Environment) {
+                PinnedSummaryMode::Overlay
+            } else {
+                PinnedSummaryMode::Hidden
+            };
+        Self::layout_with_pinned_summary(rect, state, pinned_summary)
+    }
+
+    pub fn layout_with_pinned_summary(
+        rect: Rect,
+        state: &ZodeAppState,
+        pinned_summary: PinnedSummaryMode,
+    ) -> ThreadHeaderLayout {
         let panel_picker = (rect.size.x > 0.0 && rect.size.y > 0.0).then(|| {
             let action_size = ACTION_SIZE
                 .min(rect.size.x.max(0.0))
@@ -126,18 +141,16 @@ impl ThreadHeader {
                 selected: state.presentation.secondary_pane == Some(SecondaryPane::Review),
             })
         });
-        let environment = review
-            .filter(|_| rect.size.x >= ENVIRONMENT_MIN_HEADER_WIDTH)
-            .map(|review| HeaderActionLayout {
-                id: HEADER_ENVIRONMENT_ID,
-                rect: Rect::xywh(
-                    (review.rect.origin.x - ACTION_GAP - review.rect.size.x).max(rect.origin.x),
-                    review.rect.origin.y,
-                    review.rect.size.x,
-                    review.rect.size.y,
-                ),
-                selected: state.presentation.secondary_pane == Some(SecondaryPane::Environment),
-            });
+        let environment = review.map(|review| HeaderActionLayout {
+            id: HEADER_ENVIRONMENT_ID,
+            rect: Rect::xywh(
+                (review.rect.origin.x - ACTION_GAP - review.rect.size.x).max(rect.origin.x),
+                review.rect.origin.y,
+                review.rect.size.x,
+                review.rect.size.y,
+            ),
+            selected: pinned_summary != PinnedSummaryMode::Hidden,
+        });
         let title_right = environment
             .or(review)
             .or(panel_picker)
@@ -344,7 +357,13 @@ impl ThreadHeader {
                     title: rename.draft.trim().to_owned(),
                 })
             }
-            HEADER_ENVIRONMENT_ID => Some(AppCommand::OpenSecondary(SecondaryPane::Environment)),
+            HEADER_ENVIRONMENT_ID => {
+                if state.presentation.secondary_pane == Some(SecondaryPane::Environment) {
+                    Some(AppCommand::CloseSecondary)
+                } else {
+                    Some(AppCommand::OpenSecondary(SecondaryPane::Environment))
+                }
+            }
             HEADER_REVIEW_ID => Some(AppCommand::OpenReview),
             _ => None,
         }
@@ -383,7 +402,23 @@ impl ThreadHeader {
     }
 
     pub fn paint(painter: &mut dyn Painter, rect: Rect, state: &ZodeAppState, theme: &ZodeTheme) {
-        Self::paint_internal(painter, rect, state, true, theme);
+        let pinned_summary =
+            if state.presentation.secondary_pane == Some(SecondaryPane::Environment) {
+                PinnedSummaryMode::Overlay
+            } else {
+                PinnedSummaryMode::Hidden
+            };
+        Self::paint_internal(painter, rect, state, true, pinned_summary, theme);
+    }
+
+    pub fn paint_with_pinned_summary(
+        painter: &mut dyn Painter,
+        rect: Rect,
+        state: &ZodeAppState,
+        pinned_summary: PinnedSummaryMode,
+        theme: &ZodeTheme,
+    ) {
+        Self::paint_internal(painter, rect, state, true, pinned_summary, theme);
     }
 
     pub fn paint_title_only(
@@ -392,7 +427,14 @@ impl ThreadHeader {
         state: &ZodeAppState,
         theme: &ZodeTheme,
     ) {
-        Self::paint_internal(painter, rect, state, false, theme);
+        Self::paint_internal(
+            painter,
+            rect,
+            state,
+            false,
+            PinnedSummaryMode::Hidden,
+            theme,
+        );
     }
 
     fn paint_internal(
@@ -400,9 +442,10 @@ impl ThreadHeader {
         rect: Rect,
         state: &ZodeAppState,
         show_actions: bool,
+        pinned_summary: PinnedSummaryMode,
         theme: &ZodeTheme,
     ) {
-        let mut header = Self::layout(rect, state);
+        let mut header = Self::layout_with_pinned_summary(rect, state, pinned_summary);
         if !show_actions {
             header.title = Rect::xywh(
                 rect.origin.x + 20.0,
@@ -548,6 +591,23 @@ impl ThreadHeader {
         if let Some(anchor) = Self::layout(rect, state).panel_picker {
             if let Some(menu) = PanelPicker::menu_layout(anchor.rect, viewport, state) {
                 PanelPicker::paint(painter, &menu, focused, hovered, theme);
+            }
+        }
+        if hovered == Some(HEADER_ENVIRONMENT_ID) {
+            if let Some(anchor) = Self::layout(rect, state).environment {
+                let min_x = viewport.origin.x + 8.0;
+                let max_x = (viewport.max_x() - SUMMARY_TOOLTIP_WIDTH - 8.0).max(min_x);
+                let tooltip = Rect::xywh(
+                    (anchor.rect.origin.x + anchor.rect.size.x / 2.0 - SUMMARY_TOOLTIP_WIDTH / 2.0)
+                        .clamp(min_x, max_x),
+                    anchor.rect.max_y() + 5.0,
+                    SUMMARY_TOOLTIP_WIDTH,
+                    SUMMARY_TOOLTIP_HEIGHT,
+                );
+                Tooltip {
+                    label: "切换置顶摘要",
+                }
+                .paint(painter, tooltip, &theme.tokens);
             }
         }
     }

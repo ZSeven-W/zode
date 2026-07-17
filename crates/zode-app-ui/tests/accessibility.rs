@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use accesskit::{Action, NodeId, Role};
+use accesskit::{Action, NodeId, Role, Toggled};
 use jian_core::CursorHint;
 use jian_widgets::{Point2D, Rect};
 use zode_app_model::{
@@ -172,6 +172,27 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
             ..SessionPresentationState::default()
         },
     );
+    state.presentation.secondary_pane = None;
+    let automatic = WorkspaceSnapshot::build(&state, 1800.0, 1080.0, Insets::ZERO);
+    let automatic_close = automatic
+        .node(WidgetId(100))
+        .expect("automatic pinned summary exposes its close action");
+    assert_eq!(
+        automatic.hit_test(rect_center(automatic_close.rect)),
+        Some(WidgetId(100))
+    );
+    assert_eq!(
+        automatic.node(WidgetId(60)).unwrap().toggled,
+        Some(Toggled::True)
+    );
+
+    let automatic_hidden = WorkspaceSnapshot::build(&state, 1399.0, 900.0, Insets::ZERO);
+    assert!(automatic_hidden.node(WidgetId(100)).is_none());
+    assert_eq!(
+        automatic_hidden.node(WidgetId(60)).unwrap().toggled,
+        Some(Toggled::False)
+    );
+
     state.presentation.secondary_pane = Some(SecondaryPane::Environment);
 
     let environment = WorkspaceSnapshot::build(&state, 1800.0, 1080.0, Insets::ZERO);
@@ -196,7 +217,10 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
     assert!(commit.disabled);
     assert!(commit.actions.is_empty());
     assert_eq!(commit.value.as_deref(), Some("没有安全写入契约"));
-    assert!(environment.node(WidgetId(60)).is_some());
+    assert_eq!(
+        environment.node(WidgetId(60)).unwrap().name,
+        "切换置顶摘要面板"
+    );
     assert!(environment.node(WidgetId(61)).is_some());
     assert!(environment
         .node(EnvironmentPanel::section_widget_id(
@@ -257,7 +281,7 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
     }
 
     let collapsed = WorkspaceSnapshot::build(&state, 1399.0, 900.0, Insets::ZERO);
-    assert_eq!(collapsed.layout.context_panel.width(), 0.0);
+    assert_eq!(collapsed.layout.context_panel.width(), 300.0);
     for id in [
         WidgetId(60),
         WidgetId(100),
@@ -266,7 +290,7 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
         WidgetId(201),
         WidgetId(202),
     ] {
-        assert!(collapsed.node(id).is_none());
+        assert!(collapsed.node(id).is_some());
     }
     assert!(collapsed.node(WidgetId(61)).is_some());
 

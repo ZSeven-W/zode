@@ -32,11 +32,16 @@ impl DesktopApp {
     }
 
     pub(super) fn handle_sidebar_shortcut(&mut self, event: &KeyEvent) -> bool {
-        if !event.pressed
-            || !event.modifiers.primary()
-            || self.app_state.project_picker.open
-            || matches!(self.app_state.presentation.route, ShellRoute::Settings(_))
-        {
+        if !event.pressed || !event.modifiers.primary() || self.app_state.project_picker.open {
+            return false;
+        }
+        if is_new_task_shortcut(event) {
+            self.enqueue_command(AppCommand::BeginTask {
+                workspace_uri: self.app_state.active_available_workspace().cloned(),
+            });
+            return true;
+        }
+        if matches!(self.app_state.presentation.route, ShellRoute::Settings(_)) {
             return false;
         }
         let Some(number) = shortcut_number(event) else {
@@ -147,6 +152,12 @@ fn shortcut_number(event: &KeyEvent) -> Option<usize> {
         .filter(|value| (1..=5).contains(value))
 }
 
+fn is_new_task_shortcut(event: &KeyEvent) -> bool {
+    event.pressed
+        && event.modifiers.primary()
+        && matches!(&event.key, Key::Character(value) if value.eq_ignore_ascii_case("n"))
+}
+
 #[cfg(test)]
 mod tests {
     use jian_widgets::{Point2D, Rect};
@@ -156,7 +167,10 @@ mod tests {
     use zode_app_ui::{Key, KeyEvent, Modifiers, ProjectSidebar};
     use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
-    use super::{shortcut_number, sidebar_accepts_scroll, sidebar_hover_environment_query};
+    use super::{
+        is_new_task_shortcut, shortcut_number, sidebar_accepts_scroll,
+        sidebar_hover_environment_query,
+    };
     use crate::presentation_bridge::PresentationQuery;
 
     #[test]
@@ -193,6 +207,20 @@ mod tests {
         assert_eq!(shortcut_number(&event("5")), Some(5));
         assert_eq!(shortcut_number(&event("0")), None);
         assert_eq!(shortcut_number(&event("12")), None);
+    }
+
+    #[test]
+    fn command_n_is_the_global_new_task_shortcut() {
+        let event = |value: &str, modifiers: Modifiers, pressed: bool| KeyEvent {
+            key: Key::Character(value.into()),
+            modifiers,
+            pressed,
+        };
+
+        assert!(is_new_task_shortcut(&event("n", Modifiers::SUPER, true)));
+        assert!(is_new_task_shortcut(&event("N", Modifiers::SUPER, true)));
+        assert!(!is_new_task_shortcut(&event("n", Modifiers::NONE, true)));
+        assert!(!is_new_task_shortcut(&event("n", Modifiers::SUPER, false)));
     }
 
     #[test]

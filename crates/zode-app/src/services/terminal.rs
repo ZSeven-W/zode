@@ -70,12 +70,21 @@ struct Session {
 
 pub struct LocalTerminalService {
     sessions: Mutex<HashMap<TerminalId, Session>>,
+    shell: std::ffi::OsString,
 }
 
 impl LocalTerminalService {
     pub fn new() -> Self {
+        Self::with_shell(user_shell())
+    }
+
+    /// Creates a terminal service for an explicit shell executable.
+    ///
+    /// The value is an executable path, not a command line with arguments.
+    pub fn with_shell(shell: impl Into<std::ffi::OsString>) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            shell: shell.into(),
         }
     }
 
@@ -156,7 +165,7 @@ impl TerminalService for LocalTerminalService {
         let pair = pty_system
             .openpty(PtySize::default())
             .map_err(platform_error)?;
-        let mut command = CommandBuilder::new(user_shell());
+        let mut command = CommandBuilder::new(self.shell.clone());
         command.cwd(cwd.as_os_str());
         let mut child = pair.slave.spawn_command(command).map_err(platform_error)?;
         #[cfg(unix)]

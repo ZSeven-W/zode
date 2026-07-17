@@ -3,8 +3,9 @@ use zode_node_protocol::{
 };
 
 use crate::{
-    EnvironmentActionKind, IntegrationScope, IntegrationsTab, QueuedMessageId, SecondaryPane,
-    SettingsCategory, ShellRoute, ThemePreference,
+    EnvironmentActionKind, IntegrationScope, IntegrationsTab, ProjectDisplayMode, ProjectSortMode,
+    QueuedMessageId, SecondaryPane, SettingsCategory, ShellRoute, SidebarSectionMenu,
+    ThemePreference,
 };
 
 /// User intent emitted by widgets for the application controller to handle.
@@ -61,6 +62,22 @@ pub enum AppCommand {
     SetSidebarScroll {
         offset: f32,
     },
+    ToggleProjectMenu {
+        workspace_uri: WorkspaceUri,
+    },
+    ToggleSidebarSectionMenu(SidebarSectionMenu),
+    SetProjectPinned {
+        workspace_uri: WorkspaceUri,
+        pinned: bool,
+    },
+    OpenProjectInFinder {
+        workspace_uri: WorkspaceUri,
+    },
+    ArchiveProjectTasks {
+        workspace_uri: WorkspaceUri,
+    },
+    SetProjectDisplayMode(ProjectDisplayMode),
+    SetProjectSortMode(ProjectSortMode),
     ToggleSidebarTasks,
     ShowAllProjects,
     ShowAllProjectSessions {
@@ -168,6 +185,7 @@ pub enum AppCommand {
     CloseSecondaryMenu,
     OpenSecondary(SecondaryPane),
     CloseSecondary,
+    SetPinnedSummaryAutoHidden(bool),
     SelectSettingsCategory(SettingsCategory),
     SelectIntegrationsTab(IntegrationsTab),
     SetIntegrationSearch(String),

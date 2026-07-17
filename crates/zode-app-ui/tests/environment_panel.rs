@@ -344,8 +344,8 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
             .find_map(|(text, origin)| (text == needle).then_some(origin.y))
             .expect("text is painted")
     };
-    assert!(text_y("变更") < text_y("本地"));
-    assert!(text_y("本地") < text_y("分支"));
+    assert!(text_y("变更") < text_y("环境信息"));
+    assert!(text_y("环境信息") < text_y("分支"));
     assert!(
         (text_y("当前工作区") - text_y("file:///repo/zode")).abs() <= 0.5,
         "the label and value must share one vertically centered row",

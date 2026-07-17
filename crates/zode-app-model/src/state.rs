@@ -173,6 +173,32 @@ pub struct ProjectPickerState {
     pub active_index: usize,
 }
 
+/// Sidebar section whose overflow menu is currently visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarSectionMenu {
+    Projects,
+    Tasks,
+}
+
+/// Whether project tasks are nested beneath their workspace or shown together.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectDisplayMode {
+    #[default]
+    Grouped,
+    Flat,
+}
+
+/// Ordering applied to projects and their task projections in the sidebar.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectSortMode {
+    #[default]
+    Priority,
+    RecentlyUpdated,
+    Manual,
+}
+
 /// Transient navigation state for the desktop sidebar.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SidebarState {
@@ -180,6 +206,11 @@ pub struct SidebarState {
     pub tasks_expanded: bool,
     pub show_all_projects: bool,
     pub show_all_project_sessions: BTreeSet<WorkspaceUri>,
+    pub project_menu: Option<WorkspaceUri>,
+    pub section_menu: Option<SidebarSectionMenu>,
+    pub project_display_mode: ProjectDisplayMode,
+    pub project_sort_mode: ProjectSortMode,
+    pub pinned_projects: BTreeSet<WorkspaceUri>,
 }
 
 impl Default for SidebarState {
@@ -189,6 +220,11 @@ impl Default for SidebarState {
             tasks_expanded: true,
             show_all_projects: false,
             show_all_project_sessions: BTreeSet::new(),
+            project_menu: None,
+            section_menu: None,
+            project_display_mode: ProjectDisplayMode::default(),
+            project_sort_mode: ProjectSortMode::default(),
+            pinned_projects: BTreeSet::new(),
         }
     }
 }
@@ -286,6 +322,8 @@ impl ZodeAppState {
         self.session_menu = None;
         self.session_copy_menu = None;
         self.session_rename = None;
+        self.sidebar.project_menu = None;
+        self.sidebar.section_menu = None;
     }
 
     pub fn available_workspace(&self, workspace_uri: &WorkspaceUri) -> bool {

@@ -483,6 +483,7 @@ fn projectless_session_hides_scratch_workspace_and_branch_from_composer() {
             ..SessionPresentationState::default()
         },
     );
+    let snapshot = WorkspaceSnapshot::build(&state, 1_440.0, 1_080.0, Insets::ZERO);
     let mut painter = TextCapture::default();
     WorkspaceShell::paint(
         &mut painter,
@@ -492,10 +493,15 @@ fn projectless_session_hides_scratch_workspace_and_branch_from_composer() {
         &ZodeTheme::light(),
     );
 
-    assert!(painter.texts.iter().any(|text| text == "本地"));
-    assert!(!painter.texts.iter().any(|text| text == "main"));
-    assert!(!painter
-        .texts
+    let composer_texts = painter
+        .text_lines
+        .iter()
+        .filter(|(_, origin, _)| snapshot.layout.composer.contains(*origin))
+        .map(|(text, _, _)| text)
+        .collect::<Vec<_>>();
+    assert!(composer_texts.iter().any(|text| text.as_str() == "本地"));
+    assert!(!composer_texts.iter().any(|text| text.as_str() == "main"));
+    assert!(!composer_texts
         .iter()
         .any(|text| text.contains("task-session") || text.contains("zode-projectless")));
 }

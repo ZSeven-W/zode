@@ -4,7 +4,7 @@ use std::{
 };
 
 use serde::{Deserialize, Deserializer, Serialize};
-use zode_app_model::{ThemePreference, UiPreferences};
+use zode_app_model::{ProjectDisplayMode, ProjectSortMode, ThemePreference, UiPreferences};
 use zode_core::{
     config::ConfigManager,
     persistence::{write_atomic, AdvisoryFileLock},
@@ -54,6 +54,9 @@ pub struct AppStateFile {
     pub last_session: Option<String>,
     pub sessions: BTreeMap<String, SessionUiState>,
     pub collapsed_workspaces: BTreeSet<String>,
+    pub pinned_workspaces: BTreeSet<WorkspaceUri>,
+    pub project_display_mode: ProjectDisplayMode,
+    pub project_sort_mode: ProjectSortMode,
     #[serde(deserialize_with = "deserialize_ui_preferences")]
     pub ui_preferences: UiPreferences,
     pub window_geometry: Option<WindowGeometry>,
@@ -68,6 +71,9 @@ impl Default for AppStateFile {
             last_session: None,
             sessions: BTreeMap::new(),
             collapsed_workspaces: BTreeSet::new(),
+            pinned_workspaces: BTreeSet::new(),
+            project_display_mode: ProjectDisplayMode::default(),
+            project_sort_mode: ProjectSortMode::default(),
             ui_preferences: UiPreferences::default(),
             window_geometry: None,
             task_context: None,

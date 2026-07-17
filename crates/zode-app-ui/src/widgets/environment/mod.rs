@@ -316,7 +316,7 @@ fn status_messages(state: &ZodeAppState) -> Vec<String> {
 fn paint_header(painter: &mut dyn Painter, layout: &EnvironmentPanelLayout, theme: &ZodeTheme) {
     paint_single_line(
         painter,
-        "环境信息",
+        "置顶摘要",
         Rect::xywh(
             layout.header.origin.x + PANEL_INSET,
             layout.header.origin.y,

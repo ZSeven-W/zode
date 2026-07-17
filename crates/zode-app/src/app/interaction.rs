@@ -36,7 +36,9 @@ mod tests;
 
 #[path = "widget_commands.rs"]
 mod widget_commands;
+#[cfg(test)]
 use widget_commands::widget_command;
+use widget_commands::widget_command_for_snapshot;
 
 #[path = "interaction-routing.rs"]
 mod routing;
@@ -415,7 +417,9 @@ impl DesktopApp {
             | zode_app_ui::PROJECT_PICKER_SEARCH_ID
             | zode_app_ui::HEADER_RENAME_INPUT_ID => {}
             _ => {
-                if let Some(command) = widget_command(&self.app_state, id) {
+                if let Some(command) =
+                    widget_command_for_snapshot(&self.app_state, &self.frame_snapshot, id)
+                {
                     let focus_composer =
                         matches!(command, AppCommand::BeginEditQueuedMessage { .. });
                     let opening_queue_menu = match &command {
@@ -563,6 +567,9 @@ impl DesktopApp {
             self.enqueue_command(command);
             return;
         }
+        if self.handle_sidebar_menu_pointer(event.position) {
+            return;
+        }
         if self.handle_panel_menu_pointer(event.position) {
             return;
         }
@@ -618,6 +625,9 @@ impl DesktopApp {
 
     fn handle_key_event(&mut self, event: KeyEvent) {
         if self.handle_session_action_key(&event) {
+            return;
+        }
+        if self.handle_sidebar_menu_key(&event) {
             return;
         }
         if self.handle_project_picker_key(&event) {
@@ -723,10 +733,18 @@ impl DesktopApp {
         self.sync_queue_editor_after_state_change(previous_session.clone(), previous_queue_edit);
         self.prune_queued_payloads();
         let handled = match outcome {
-            NavigationOutcome::Applied => true,
+            NavigationOutcome::Applied => {
+                let _ = self.persist_local_navigation_effect(command);
+                true
+            }
             NavigationOutcome::NeedsEffect if matches!(command, AppCommand::CreateProject) => {
                 self.request_workspace_pick();
                 true
+            }
+            NavigationOutcome::NeedsEffect
+                if matches!(command, AppCommand::OpenProjectInFinder { .. }) =>
+            {
+                self.apply_project_action_command(command)
             }
             NavigationOutcome::NeedsEffect
                 if matches!(
@@ -734,6 +752,7 @@ impl DesktopApp {
                     AppCommand::ToggleProject(_)
                         | AppCommand::SetSessionPinned { .. }
                         | AppCommand::SetSessionArchived { .. }
+                        | AppCommand::ArchiveProjectTasks { .. }
                         | AppCommand::RequestDeleteSession(_)
                 ) =>
             {
@@ -751,6 +770,7 @@ impl DesktopApp {
             AppCommand::BeginTask { .. }
                 | AppCommand::SelectSession(_)
                 | AppCommand::SetSessionArchived { archived: true, .. }
+                | AppCommand::ArchiveProjectTasks { .. }
                 | AppCommand::ToggleSidebarTasks
         ) {
             self.persist_ui_state();

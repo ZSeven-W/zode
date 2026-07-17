@@ -79,7 +79,12 @@ pub(super) fn presentation_queries_for_refresh(
     let Some(workspace_uri) = state.available_workspace_for_session(&session).cloned() else {
         return Vec::new();
     };
-    let Some(pane) = state.presentation.secondary_pane else {
+    let pane = state.presentation.secondary_pane.or_else(|| {
+        (state.presentation.route == ShellRoute::Conversation
+            && !state.presentation.pinned_summary_auto_hidden)
+            .then_some(SecondaryPane::Environment)
+    });
+    let Some(pane) = pane else {
         return Vec::new();
     };
     match (pane, refresh) {
@@ -320,6 +325,22 @@ mod tests {
 
         assert_eq!(
             presentation_queries_for_refresh(&state, PresentationRefresh::PaneOpened),
+            vec![
+                PresentationQuery::Environment {
+                    session: session.clone(),
+                    workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
+                },
+                PresentationQuery::Diff { session },
+            ]
+        );
+    }
+
+    #[test]
+    fn automatic_summary_prefetches_current_session_context() {
+        let (state, session) = state_with_session(true);
+
+        assert_eq!(
+            presentation_queries_for_refresh(&state, PresentationRefresh::SessionChanged),
             vec![
                 PresentationQuery::Environment {
                     session: session.clone(),

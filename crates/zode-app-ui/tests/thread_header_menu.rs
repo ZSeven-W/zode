@@ -3,8 +3,8 @@ use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{AppCommand, ProjectState, SessionRenameState};
 use zode_app_ui::{
     Insets, RectExt, SemanticIcon, ThreadHeader, WorkspaceSnapshot, ZodeTheme,
-    HEADER_COPY_TITLE_ID, HEADER_MENU_COPY_ID, HEADER_MENU_NEW_WINDOW_ID, HEADER_MENU_RENAME_ID,
-    HEADER_RENAME_INPUT_ID, HEADER_RENAME_SAVE_ID,
+    HEADER_COPY_TITLE_ID, HEADER_ENVIRONMENT_ID, HEADER_MENU_COPY_ID, HEADER_MENU_NEW_WINDOW_ID,
+    HEADER_MENU_RENAME_ID, HEADER_RENAME_INPUT_ID, HEADER_RENAME_SAVE_ID,
 };
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
@@ -106,6 +106,25 @@ fn title_more_button_opens_real_pin_and_archive_commands() {
             archived: true,
         })
     );
+}
+
+#[test]
+fn pinned_summary_toggle_paints_its_product_tooltip() {
+    let (state, _) = state_with_session();
+    let rect = Rect::xywh(240.0, 0.0, 1_560.0, 46.0);
+    let mut painter = PaintCapture::default();
+
+    ThreadHeader::paint_overlays(
+        &mut painter,
+        rect,
+        Rect::xywh(0.0, 0.0, 1_800.0, 1_080.0),
+        &state,
+        None,
+        Some(HEADER_ENVIRONMENT_ID),
+        &ZodeTheme::light(),
+    );
+
+    assert!(painter.texts.iter().any(|text| text == "切换置顶摘要"));
 }
 
 #[test]

@@ -60,10 +60,15 @@ pub use project_picker::{
 };
 pub use project_sidebar::{
     group_sessions, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarControlLayout,
-    SidebarControlTarget, SidebarItem, SidebarLabelLayout, SidebarLayout,
-    SidebarNavigationRowLayout, SidebarRowLayout, SidebarRowTarget, SidebarSection,
-    SidebarSectionLayout, SIDEBAR_SHOW_ALL_PROJECTS_ID, SIDEBAR_TASKS_MORE_ID,
-    SIDEBAR_TASKS_NEW_ID, SIDEBAR_TASKS_TOGGLE_ID,
+    SidebarControlTarget, SidebarItem, SidebarLabelLayout, SidebarLayout, SidebarMenuItemLayout,
+    SidebarMenuKind, SidebarMenuLayout, SidebarNavigationRowLayout, SidebarRowLayout,
+    SidebarRowTarget, SidebarSection, SidebarSectionLayout, SIDEBAR_PROJECTS_MENU_FLAT_ID,
+    SIDEBAR_PROJECTS_MENU_GROUPED_ID, SIDEBAR_PROJECTS_MENU_MANUAL_ID,
+    SIDEBAR_PROJECTS_MENU_PRIORITY_ID, SIDEBAR_PROJECTS_MENU_RECENT_ID, SIDEBAR_PROJECTS_MORE_ID,
+    SIDEBAR_PROJECTS_NEW_ID, SIDEBAR_PROJECTS_SECTION_ID, SIDEBAR_PROJECT_MENU_ARCHIVE_ID,
+    SIDEBAR_PROJECT_MENU_FINDER_ID, SIDEBAR_PROJECT_MENU_PIN_ID, SIDEBAR_PROJECT_MENU_TOGGLE_ID,
+    SIDEBAR_SHOW_ALL_PROJECTS_ID, SIDEBAR_TASKS_MENU_NEW_ID, SIDEBAR_TASKS_MENU_TOGGLE_ID,
+    SIDEBAR_TASKS_MORE_ID, SIDEBAR_TASKS_NEW_ID, SIDEBAR_TASKS_SECTION_ID, SIDEBAR_TASKS_TOGGLE_ID,
 };
 pub use review_panel::{
     ReviewDraft, ReviewFileRowLayout, ReviewLine, ReviewLineKind, ReviewPanel, ReviewPanelLayout,

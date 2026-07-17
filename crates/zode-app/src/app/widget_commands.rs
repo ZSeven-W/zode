@@ -1,11 +1,38 @@
-use zode_app_model::{AppCommand, ThemePreference, ZodeAppState};
+use zode_app_model::{AppCommand, SecondaryPane, ThemePreference, ZodeAppState};
 use zode_app_ui::{
-    Composer, DocumentPreview, EnvironmentPanel, IntegrationsPage, ProjectPicker, ProjectSidebar,
-    ReviewPanel, SettingsPanel, SidebarAction, TerminalSecondaryPanel, ThreadHeader,
-    ThreadTranscript, UnavailableSecondaryPanel, WidgetId, HIGH_CONTRAST_ID, PROJECT_PICKER_NEW_ID,
-    PROJECT_PICKER_PROJECTLESS_ID, PROJECT_PICKER_TRIGGER_ID, REDUCED_MOTION_ID, THEME_DARK_ID,
-    THEME_LIGHT_ID, THEME_SYSTEM_ID,
+    Composer, DocumentPreview, EnvironmentPanel, IntegrationsPage, PinnedSummaryMode,
+    ProjectPicker, ProjectSidebar, ReviewPanel, SettingsPanel, SidebarAction,
+    TerminalSecondaryPanel, ThreadHeader, ThreadTranscript, UnavailableSecondaryPanel, WidgetId,
+    WorkspaceSnapshot, ENVIRONMENT_CLOSE_ID, HEADER_ENVIRONMENT_ID, HIGH_CONTRAST_ID,
+    PROJECT_PICKER_NEW_ID, PROJECT_PICKER_PROJECTLESS_ID, PROJECT_PICKER_TRIGGER_ID,
+    REDUCED_MOTION_ID, SECONDARY_PANE_BREAKPOINT, THEME_DARK_ID, THEME_LIGHT_ID, THEME_SYSTEM_ID,
 };
+
+pub(super) fn widget_command_for_snapshot(
+    state: &ZodeAppState,
+    snapshot: &WorkspaceSnapshot,
+    id: WidgetId,
+) -> Option<AppCommand> {
+    if matches!(id, HEADER_ENVIRONMENT_ID | ENVIRONMENT_CLOSE_ID) && state.current_session.is_some()
+    {
+        return match snapshot.layout.pinned_summary {
+            PinnedSummaryMode::Docked => Some(AppCommand::SetPinnedSummaryAutoHidden(true)),
+            PinnedSummaryMode::Overlay => Some(AppCommand::CloseSecondary),
+            PinnedSummaryMode::Hidden if snapshot.layout.viewport.size.x > 0.0 => {
+                if state.presentation.secondary_pane.is_none()
+                    && snapshot.layout.viewport.size.x >= SECONDARY_PANE_BREAKPOINT
+                    && state.presentation.pinned_summary_auto_hidden
+                {
+                    Some(AppCommand::SetPinnedSummaryAutoHidden(false))
+                } else {
+                    Some(AppCommand::OpenSecondary(SecondaryPane::Environment))
+                }
+            }
+            PinnedSummaryMode::Hidden => None,
+        };
+    }
+    widget_command(state, id)
+}
 
 pub(super) fn widget_command(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
     static_sidebar_command(state, id)

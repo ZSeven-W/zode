@@ -6,12 +6,13 @@ use zode_app_model::{
 };
 
 use crate::{
-    composer_queue_reserved_height, Composer, DocumentPreview, Insets, ProjectPickerViewState,
-    RectExt, ReviewPanel, SettingsPanel, TerminalSecondaryPanel, ThreadTranscript,
-    UnavailableSecondaryPanel, WorkspaceLayout, COMPOSER_ATTACHMENT_H, COMPOSER_H,
-    DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID, DOCUMENT_PREVIEW_EXTERNAL_ID,
-    DOCUMENT_PREVIEW_RETRY_ID, INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_SKILLS_TAB_ID,
-    TERMINAL_SECONDARY_CLOSE_ID, UNAVAILABLE_SECONDARY_CLOSE_ID,
+    composer_queue_reserved_height, Composer, DocumentPreview, Insets, PinnedSummaryMode,
+    ProjectPickerViewState, RectExt, ReviewPanel, SettingsPanel, TerminalSecondaryPanel,
+    ThreadTranscript, UnavailableSecondaryPanel, WorkspaceLayout, COMPOSER_ATTACHMENT_H,
+    COMPOSER_H, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_CONTENT_ID,
+    DOCUMENT_PREVIEW_EXTERNAL_ID, DOCUMENT_PREVIEW_RETRY_ID, INTEGRATIONS_PLUGINS_TAB_ID,
+    INTEGRATIONS_SKILLS_TAB_ID, SECONDARY_PANE_BREAKPOINT, TERMINAL_SECONDARY_CLOSE_ID,
+    UNAVAILABLE_SECONDARY_CLOSE_ID,
 };
 
 mod empty_state;
@@ -35,7 +36,7 @@ use project_picker::{
 };
 use queue::{append_queue_menu_nodes, append_queue_nodes};
 use settings::append_settings_nodes;
-use sidebar::append_sidebar_nodes;
+use sidebar::{append_sidebar_menu_nodes, append_sidebar_nodes};
 use transcript::append_transcript_nodes;
 
 pub const SIDEBAR_ID: WidgetId = WidgetId(1);
@@ -137,12 +138,22 @@ impl WorkspaceSnapshot {
             } else {
                 0.0
             };
+        let auto_pinned_summary = route == ShellRoute::Conversation
+            && state.current_session.is_some()
+            && state.presentation.secondary_pane.is_none()
+            && !state.presentation.pinned_summary_auto_hidden
+            && width >= SECONDARY_PANE_BREAKPOINT;
+        let layout_secondary = if auto_pinned_summary {
+            Some(SecondaryPane::Environment)
+        } else {
+            state.presentation.secondary_pane
+        };
         let layout = WorkspaceLayout::compute_presentation_with_composer_height(
             width,
             height,
             insets,
             route,
-            state.presentation.secondary_pane,
+            layout_secondary,
             composer_height,
         );
         let mut nodes = Vec::new();
@@ -299,6 +310,9 @@ impl WorkspaceSnapshot {
             }
         };
         append_secondary_nodes(&mut nodes, &layout, &mut focus_order, state);
+        if visible_rect(layout.sidebar) && !matches!(route, ShellRoute::Settings(_)) {
+            append_sidebar_menu_nodes(&mut nodes, &layout, &mut focus_order, state);
+        }
         let header_overlay_focus = if route == ShellRoute::Conversation {
             let focus = append_header_menu_nodes(&mut nodes, &layout, &mut focus_order, state);
             append_panel_picker_nodes(&mut nodes, &layout, &mut focus_order, state);
@@ -579,6 +593,11 @@ fn append_secondary_nodes(
                 None,
                 CursorHint::Default,
             ));
+        }
+        None if layout.pinned_summary != PinnedSummaryMode::Hidden
+            && visible_rect(layout.context_panel) =>
+        {
+            append_environment_nodes(nodes, layout, focus_order, state);
         }
         Some(SecondaryPane::Environment) | None => {}
     }

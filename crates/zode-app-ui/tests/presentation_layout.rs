@@ -1,5 +1,5 @@
 use zode_app_model::{IntegrationsTab, LayoutClass, SecondaryPane, SettingsCategory, ShellRoute};
-use zode_app_ui::{Insets, RectExt, WorkspaceLayout};
+use zode_app_ui::{Insets, PinnedSummaryMode, RectExt, WorkspaceLayout};
 
 const EPSILON: f32 = 0.01;
 
@@ -105,7 +105,7 @@ fn full_page_routes_use_their_reference_content_widths() {
 }
 
 #[test]
-fn presentation_breakpoints_hide_secondary_panes_and_collapse_the_rail() {
+fn presentation_breakpoints_float_the_summary_and_collapse_the_rail() {
     let medium = WorkspaceLayout::compute_presentation(
         1399.0,
         900.0,
@@ -134,9 +134,13 @@ fn presentation_breakpoints_hide_secondary_panes_and_collapse_the_rail() {
     assert_eq!(medium.divider.width(), 0.0);
     assert_eq!(compact.class, LayoutClass::Compact);
     assert_eq!(compact.sidebar.width(), 64.0);
-    assert_eq!(compact.context_panel.width(), 0.0);
+    assert_eq!(compact.context_panel.width(), 300.0);
+    assert_eq!(compact.pinned_summary, PinnedSummaryMode::Overlay);
+    assert!(compact.context_panel.min_x() > compact.composer.min_x());
     assert_eq!(phone.class, LayoutClass::Phone);
     assert_eq!(phone.sidebar.width(), 0.0);
+    assert_eq!(phone.context_panel.width(), 300.0);
+    assert_eq!(phone.pinned_summary, PinnedSummaryMode::Overlay);
 }
 
 #[test]

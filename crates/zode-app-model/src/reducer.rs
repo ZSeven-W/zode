@@ -99,6 +99,18 @@ pub fn reduce_presentation_command(
             close_secondary(state);
             return PresentationCommandOutcome::Applied;
         }
+        AppCommand::SetPinnedSummaryAutoHidden(hidden) => {
+            if state.presentation.route != crate::ShellRoute::Conversation {
+                return PresentationCommandOutcome::Ignored;
+            }
+            state.presentation.pinned_summary_auto_hidden = hidden;
+            if hidden
+                && state.presentation.secondary_pane == Some(crate::SecondaryPane::Environment)
+            {
+                close_secondary(state);
+            }
+            return PresentationCommandOutcome::Applied;
+        }
         AppCommand::OpenReview => {
             open_secondary(state, crate::SecondaryPane::Review);
             return PresentationCommandOutcome::Applied;
@@ -153,6 +165,9 @@ fn open_secondary(state: &mut ZodeAppState, pane: crate::SecondaryPane) {
     state.presentation.secondary_menu_open = false;
     state.presentation.route = crate::ShellRoute::Conversation;
     state.presentation.secondary_pane = Some(pane);
+    if pane == crate::SecondaryPane::Environment {
+        state.presentation.pinned_summary_auto_hidden = false;
+    }
     state.shell.page = crate::ShellPage::Conversation;
     state.review.open = pane == crate::SecondaryPane::Review;
     state.terminal.open = pane == crate::SecondaryPane::Terminal;
@@ -580,6 +595,7 @@ pub fn reduce_navigation_command(
                 return NavigationOutcome::Ignored;
             };
             project.expanded = !project.expanded;
+            state.close_session_action_surfaces();
             NavigationOutcome::NeedsEffect
         }
         _ => NavigationOutcome::Ignored,

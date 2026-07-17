@@ -20,14 +20,15 @@ fn platform_accessibility_host_has_update_and_focus_action_hooks() {
 fn linux_adapter_receives_initial_move_and_resize_bounds() {
     let host = include_str!("../src/accessibility_host.rs");
     let app = include_str!("../src/app.rs");
+    let window = include_str!("../src/app/window.rs");
 
     assert!(host.contains("adapter.set_root_window_bounds"));
     assert!(host.contains("host.update_window_bounds(window)"));
-    assert!(
-        app.matches("self.update_accessibility_window_bounds()")
-            .count()
-            >= 3
-    );
+    assert!(app.contains("WindowEvent::Moved(_)"));
+    assert!(app.contains("self.update_accessibility_window_bounds()"));
+    assert!(app.contains("self.window_metrics_update_pending = true"));
+    assert!(window.contains("if self.window_metrics_update_pending"));
+    assert!(window.contains("self.update_accessibility_window_bounds()"));
 }
 
 #[test]

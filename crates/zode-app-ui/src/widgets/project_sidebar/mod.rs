@@ -1,11 +1,14 @@
+mod footer;
 mod layout;
+mod menu;
 mod paint;
 
 use std::collections::BTreeMap;
 
 use jian_widgets::{Painter, Rect};
 use zode_app_model::{
-    AppCommand, ComingSoonFeature, IntegrationsTab, SettingsCategory, ShellRoute, ZodeAppState,
+    AppCommand, ComingSoonFeature, IntegrationsTab, ProjectSortMode, SettingsCategory, ShellRoute,
+    SidebarSectionMenu, ZodeAppState,
 };
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
@@ -15,15 +18,28 @@ pub use layout::{
     SidebarControlLayout, SidebarControlTarget, SidebarLabelLayout, SidebarLayout,
     SidebarNavigationRowLayout, SidebarSection, SidebarSectionLayout,
 };
+pub use menu::{
+    SidebarMenuItemLayout, SidebarMenuKind, SidebarMenuLayout, SIDEBAR_PROJECTS_MENU_FLAT_ID,
+    SIDEBAR_PROJECTS_MENU_GROUPED_ID, SIDEBAR_PROJECTS_MENU_MANUAL_ID,
+    SIDEBAR_PROJECTS_MENU_PRIORITY_ID, SIDEBAR_PROJECTS_MENU_RECENT_ID,
+    SIDEBAR_PROJECT_MENU_ARCHIVE_ID, SIDEBAR_PROJECT_MENU_FINDER_ID, SIDEBAR_PROJECT_MENU_PIN_ID,
+    SIDEBAR_PROJECT_MENU_TOGGLE_ID, SIDEBAR_TASKS_MENU_NEW_ID, SIDEBAR_TASKS_MENU_TOGGLE_ID,
+};
 
 pub const SIDEBAR_TASKS_TOGGLE_ID: WidgetId = WidgetId(140);
 pub const SIDEBAR_TASKS_MORE_ID: WidgetId = WidgetId(141);
 pub const SIDEBAR_TASKS_NEW_ID: WidgetId = WidgetId(142);
 pub const SIDEBAR_SHOW_ALL_PROJECTS_ID: WidgetId = WidgetId(143);
+pub const SIDEBAR_PROJECTS_SECTION_ID: WidgetId = WidgetId(9_100);
+pub const SIDEBAR_PROJECTS_MORE_ID: WidgetId = WidgetId(9_101);
+pub const SIDEBAR_PROJECTS_NEW_ID: WidgetId = WidgetId(9_102);
+pub const SIDEBAR_TASKS_SECTION_ID: WidgetId = WidgetId(9_103);
 
 const PIN_NAMESPACE: u8 = 0x42;
 const ARCHIVE_NAMESPACE: u8 = 0x43;
 const SHOW_PROJECT_SESSIONS_NAMESPACE: u8 = 0x44;
+const PROJECT_MORE_NAMESPACE: u8 = 0x45;
+const PROJECT_NEW_NAMESPACE: u8 = 0x46;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarAction {
@@ -109,6 +125,8 @@ pub struct SidebarRowLayout {
     pub shortcut: Option<usize>,
     pub pin_id: Option<WidgetId>,
     pub archive_id: Option<WidgetId>,
+    pub more_id: Option<WidgetId>,
+    pub new_id: Option<WidgetId>,
     pub workspace_uri: Option<WorkspaceUri>,
 }
 
@@ -135,6 +153,8 @@ pub(super) struct DynamicProject {
     pub available: bool,
     pub sort_key_ms: i64,
     pub toggleable: bool,
+    pub pinned: bool,
+    pub manual_index: usize,
 }
 
 pub fn group_sessions(sessions: Vec<ThreadSummary>) -> Vec<ProjectSessionGroup> {
@@ -249,12 +269,34 @@ impl ProjectSidebar {
 
     pub fn session_pin_rect(row: &SidebarRowLayout) -> Option<Rect> {
         row.pin_id
-            .map(|_| Rect::xywh(row.rect.max_x() - 46.0, row.rect.origin.y + 4.0, 22.0, 22.0))
+            .map(|_| Rect::xywh(row.rect.max_x() - 49.0, row.rect.origin.y + 3.0, 24.0, 24.0))
     }
 
     pub fn session_archive_rect(row: &SidebarRowLayout) -> Option<Rect> {
         row.archive_id
-            .map(|_| Rect::xywh(row.rect.max_x() - 23.0, row.rect.origin.y + 4.0, 22.0, 22.0))
+            .map(|_| Rect::xywh(row.rect.max_x() - 24.0, row.rect.origin.y + 3.0, 24.0, 24.0))
+    }
+
+    pub fn project_more_widget_id(workspace: &WorkspaceUri) -> WidgetId {
+        stable_widget_id(PROJECT_MORE_NAMESPACE, workspace)
+    }
+
+    pub fn project_new_widget_id(workspace: &WorkspaceUri) -> WidgetId {
+        stable_widget_id(PROJECT_NEW_NAMESPACE, workspace)
+    }
+
+    pub fn project_more_rect(row: &SidebarRowLayout) -> Option<Rect> {
+        row.more_id
+            .map(|_| Rect::xywh(row.rect.max_x() - 49.0, row.rect.origin.y + 3.0, 24.0, 24.0))
+    }
+
+    pub fn project_new_rect(row: &SidebarRowLayout) -> Option<Rect> {
+        row.new_id
+            .map(|_| Rect::xywh(row.rect.max_x() - 24.0, row.rect.origin.y + 3.0, 24.0, 24.0))
+    }
+
+    pub fn menu_layout(rect: Rect, state: &ZodeAppState) -> Option<SidebarMenuLayout> {
+        menu::layout(rect, state)
     }
 
     pub fn show_all_project_sessions_widget_id(workspace: &WorkspaceUri) -> WidgetId {
@@ -271,13 +313,26 @@ impl ProjectSidebar {
     }
 
     pub fn command_for_widget(state: &ZodeAppState, id: WidgetId) -> Option<AppCommand> {
-        if id == SIDEBAR_TASKS_TOGGLE_ID {
+        if id == SIDEBAR_TASKS_TOGGLE_ID || id == SIDEBAR_TASKS_SECTION_ID {
             return Some(AppCommand::ToggleSidebarTasks);
         }
         if id == SIDEBAR_TASKS_NEW_ID {
             return Some(AppCommand::BeginTask {
                 workspace_uri: None,
             });
+        }
+        if id == SIDEBAR_TASKS_MORE_ID {
+            return Some(AppCommand::ToggleSidebarSectionMenu(
+                SidebarSectionMenu::Tasks,
+            ));
+        }
+        if id == SIDEBAR_PROJECTS_MORE_ID {
+            return Some(AppCommand::ToggleSidebarSectionMenu(
+                SidebarSectionMenu::Projects,
+            ));
+        }
+        if id == SIDEBAR_PROJECTS_NEW_ID {
+            return Some(AppCommand::CreateProject);
         }
         if id == SIDEBAR_SHOW_ALL_PROJECTS_ID {
             return Some(AppCommand::ShowAllProjects);
@@ -305,6 +360,16 @@ impl ProjectSidebar {
             }
         }
         for project in dynamic_projects(state) {
+            if Self::project_more_widget_id(&project.workspace_uri) == id {
+                return Some(AppCommand::ToggleProjectMenu {
+                    workspace_uri: project.workspace_uri,
+                });
+            }
+            if Self::project_new_widget_id(&project.workspace_uri) == id {
+                return Some(AppCommand::BeginTask {
+                    workspace_uri: Some(project.workspace_uri),
+                });
+            }
             if Self::show_all_project_sessions_widget_id(&project.workspace_uri) == id {
                 return Some(AppCommand::ShowAllProjectSessions {
                     workspace_uri: project.workspace_uri,
@@ -314,7 +379,7 @@ impl ProjectSidebar {
                 return Some(AppCommand::ToggleProject(project.workspace_uri));
             }
         }
-        None
+        menu::command_for_widget(state, id)
     }
 
     pub fn paint(painter: &mut dyn Painter, rect: Rect, state: &ZodeAppState, theme: &ZodeTheme) {
@@ -347,10 +412,11 @@ impl ProjectSidebar {
         painter: &mut dyn Painter,
         rect: Rect,
         state: &ZodeAppState,
+        focused: Option<WidgetId>,
         hovered: Option<WidgetId>,
         theme: &ZodeTheme,
     ) {
-        paint::paint_hover_overlay(painter, rect, state, hovered, theme);
+        paint::paint_hover_overlay(painter, rect, state, focused, hovered, theme);
     }
 }
 
@@ -373,12 +439,13 @@ pub(super) fn dynamic_projects(state: &ZodeAppState) -> Vec<DynamicProject> {
     let known_projects = state
         .projects
         .iter()
-        .filter(|project| !state.is_projectless_workspace(&project.workspace_uri))
-        .map(|project| (project.workspace_uri.clone(), project))
+        .enumerate()
+        .filter(|(_, project)| !state.is_projectless_workspace(&project.workspace_uri))
+        .map(|(index, project)| (project.workspace_uri.clone(), (index, project)))
         .collect::<BTreeMap<_, _>>();
     let mut projects = known_projects
         .into_values()
-        .map(|project| {
+        .map(|(manual_index, project)| {
             let project_sessions = sessions.remove(&project.workspace_uri).unwrap_or_default();
             let newest_session = project_sessions
                 .first()
@@ -390,6 +457,11 @@ pub(super) fn dynamic_projects(state: &ZodeAppState) -> Vec<DynamicProject> {
                 available: project.available,
                 sort_key_ms: project.last_opened_ms.max(newest_session),
                 toggleable: true,
+                pinned: state
+                    .sidebar
+                    .pinned_projects
+                    .contains(&project.workspace_uri),
+                manual_index,
             }
         })
         .collect::<Vec<_>>();
@@ -400,6 +472,7 @@ pub(super) fn dynamic_projects(state: &ZodeAppState) -> Vec<DynamicProject> {
                 let newest_session = project_sessions
                     .first()
                     .map_or(i64::MIN, |thread| thread.updated_at_ms);
+                let pinned = state.sidebar.pinned_projects.contains(&workspace_uri);
                 DynamicProject {
                     workspace_uri,
                     sessions: project_sessions,
@@ -407,14 +480,25 @@ pub(super) fn dynamic_projects(state: &ZodeAppState) -> Vec<DynamicProject> {
                     available: true,
                     sort_key_ms: newest_session,
                     toggleable: false,
+                    pinned,
+                    manual_index: usize::MAX,
                 }
             }),
     );
-    projects.sort_by(|left, right| {
-        right
+    projects.sort_by(|left, right| match state.sidebar.project_sort_mode {
+        ProjectSortMode::Priority => right
+            .pinned
+            .cmp(&left.pinned)
+            .then_with(|| right.sort_key_ms.cmp(&left.sort_key_ms))
+            .then_with(|| left.workspace_uri.cmp(&right.workspace_uri)),
+        ProjectSortMode::RecentlyUpdated => right
             .sort_key_ms
             .cmp(&left.sort_key_ms)
-            .then_with(|| left.workspace_uri.cmp(&right.workspace_uri))
+            .then_with(|| left.workspace_uri.cmp(&right.workspace_uri)),
+        ProjectSortMode::Manual => left
+            .manual_index
+            .cmp(&right.manual_index)
+            .then_with(|| left.workspace_uri.cmp(&right.workspace_uri)),
     });
     projects
 }

@@ -1,16 +1,17 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use jian_widgets::{components::tooltip::Tooltip, HorizontalAlign, Painter, Point2D, Rect};
-use zode_app_model::ZodeAppState;
+use zode_app_model::{SidebarSectionMenu, ZodeAppState};
 use zode_node_protocol::ThreadStatus;
 
 use super::layout::{ICON_SIZE, ROW_H};
 use super::{
     navigation_item_selected, ProjectSidebar, SidebarControlLayout, SidebarControlTarget,
-    SidebarRowLayout, SidebarRowTarget, SidebarSection, SIDEBAR_TASKS_NEW_ID,
-    SIDEBAR_TASKS_TOGGLE_ID,
+    SidebarRowLayout, SidebarRowTarget, SidebarSection, SIDEBAR_PROJECTS_MORE_ID,
+    SIDEBAR_PROJECTS_NEW_ID, SIDEBAR_PROJECTS_SECTION_ID, SIDEBAR_TASKS_MORE_ID,
+    SIDEBAR_TASKS_NEW_ID, SIDEBAR_TASKS_SECTION_ID, SIDEBAR_TASKS_TOGGLE_ID,
 };
-use crate::{paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme, HELP_ID};
+use crate::{paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme};
 
 pub(super) fn paint(
     painter: &mut dyn Painter,
@@ -28,13 +29,21 @@ pub(super) fn paint(
     paint_brand(painter, layout.brand, layout.compact, theme);
 
     if let Some(new_task) = layout.navigation_rows.first() {
-        paint_navigation_row(painter, new_task, layout.compact, state, theme);
+        paint_navigation_row(
+            painter,
+            new_task,
+            layout.compact,
+            state,
+            focused,
+            hovered,
+            theme,
+        );
     }
 
     painter.save();
     painter.clip_rect(layout.scroll_viewport);
     for row in layout.navigation_rows.iter().skip(1) {
-        paint_navigation_row(painter, row, layout.compact, state, theme);
+        paint_navigation_row(painter, row, layout.compact, state, focused, hovered, theme);
     }
     if !layout.compact {
         for section in &layout.sections {
@@ -56,7 +65,7 @@ pub(super) fn paint(
             );
         }
         for row in &layout.rows {
-            paint_dynamic_row(painter, row, focused, hovered, show_shortcuts, theme);
+            paint_dynamic_row(painter, row, state, focused, hovered, show_shortcuts, theme);
         }
         for control in &layout.controls {
             paint_control(painter, control, state, focused, hovered, theme);
@@ -64,7 +73,7 @@ pub(super) fn paint(
     }
     painter.restore();
 
-    paint_footer(painter, &layout, state, focused, hovered, theme);
+    super::footer::paint_footer(painter, &layout, state, focused, hovered, theme);
 }
 
 fn paint_brand(painter: &mut dyn Painter, rect: Rect, compact: bool, theme: &ZodeTheme) {
@@ -83,10 +92,14 @@ fn paint_navigation_row(
     row: &super::SidebarNavigationRowLayout,
     compact: bool,
     state: &ZodeAppState,
+    focused: Option<WidgetId>,
+    hovered: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
     let selected = navigation_item_selected(state, row.item);
-    if selected {
+    let interactive = focused == Some(navigation_widget_id(row.index))
+        || hovered == Some(navigation_widget_id(row.index));
+    if selected || interactive {
         painter.fill_round_rect(row.rect, 8.0, theme.tokens.row_selected);
     }
     let icon_x = if compact {
@@ -113,13 +126,40 @@ fn paint_navigation_row(
         Rect::xywh(
             row.rect.origin.x + 32.0,
             row.rect.origin.y,
-            (row.rect.size.x - 40.0).max(0.0),
+            (row.rect.size.x
+                - if row.index == 0 && interactive {
+                    72.0
+                } else {
+                    40.0
+                })
+            .max(0.0),
             row.rect.size.y,
         ),
         13.0,
         if selected { 500 } else { 400 },
         theme.sidebar_foreground,
     );
+    if row.index == 0 && interactive {
+        let keycap = Rect::xywh(
+            row.rect.max_x() - 43.0,
+            row.rect.origin.y + (row.rect.size.y - 20.0) / 2.0,
+            35.0,
+            20.0,
+        );
+        painter.fill_round_rect(keycap, 10.0, theme.tokens.muted.with_alpha(0.78));
+        draw_label(
+            painter,
+            "⌘N",
+            keycap,
+            10.0,
+            400,
+            theme.tokens.muted_foreground,
+        );
+    }
+}
+
+fn navigation_widget_id(index: usize) -> WidgetId {
+    WidgetId(2 + index as u64)
 }
 
 fn paint_section(
@@ -158,12 +198,14 @@ fn paint_section(
 fn paint_dynamic_row(
     painter: &mut dyn Painter,
     row: &SidebarRowLayout,
+    state: &ZodeAppState,
     focused: Option<WidgetId>,
     hovered: Option<WidgetId>,
     show_shortcuts: bool,
     theme: &ZodeTheme,
 ) {
-    let action_active = row_interaction_active(row, focused, hovered);
+    let action_active = row_interaction_active(row, focused, hovered)
+        || matches!(&row.target, SidebarRowTarget::Project(workspace) if state.sidebar.project_menu.as_ref() == Some(workspace));
     if row.selected {
         painter.fill_round_rect(row.rect, 8.0, theme.tokens.row_selected);
     } else if hovered == Some(row.id) || action_active {
@@ -202,7 +244,7 @@ fn paint_dynamic_row(
     );
 
     if action_active {
-        paint_session_actions(painter, row, focused, hovered, theme);
+        paint_row_actions(painter, row, focused, hovered, theme);
     } else {
         paint_row_trailing(painter, row, show_shortcuts, theme);
     }
@@ -286,6 +328,39 @@ fn paint_session_actions(
     }
 }
 
+fn paint_row_actions(
+    painter: &mut dyn Painter,
+    row: &SidebarRowLayout,
+    focused: Option<WidgetId>,
+    hovered: Option<WidgetId>,
+    theme: &ZodeTheme,
+) {
+    if row.session().is_some() {
+        paint_session_actions(painter, row, focused, hovered, theme);
+        return;
+    }
+    if let (Some(id), Some(rect)) = (row.more_id, ProjectSidebar::project_more_rect(row)) {
+        paint_icon_button(
+            painter,
+            rect,
+            SemanticIcon::More,
+            focused == Some(id),
+            hovered == Some(id),
+            theme,
+        );
+    }
+    if let (Some(id), Some(rect)) = (row.new_id, ProjectSidebar::project_new_rect(row)) {
+        paint_icon_button(
+            painter,
+            rect,
+            SemanticIcon::NewTask,
+            focused == Some(id),
+            hovered == Some(id),
+            theme,
+        );
+    }
+}
+
 fn paint_control(
     painter: &mut dyn Painter,
     control: &SidebarControlLayout,
@@ -295,22 +370,53 @@ fn paint_control(
     theme: &ZodeTheme,
 ) {
     match control.target {
-        SidebarControlTarget::MoreDecoration => paint_icon_button(
-            painter,
-            control.rect,
-            SemanticIcon::More,
-            false,
-            false,
-            theme,
-        ),
-        SidebarControlTarget::NewProjectlessTask => paint_icon_button(
-            painter,
-            control.rect,
-            SemanticIcon::Edit,
-            focused == Some(SIDEBAR_TASKS_NEW_ID),
-            hovered == Some(SIDEBAR_TASKS_NEW_ID),
-            theme,
-        ),
+        SidebarControlTarget::ProjectsMenu
+        | SidebarControlTarget::NewProject
+        | SidebarControlTarget::TasksMenu
+        | SidebarControlTarget::NewProjectlessTask => {
+            let projects = matches!(
+                control.target,
+                SidebarControlTarget::ProjectsMenu | SidebarControlTarget::NewProject
+            );
+            let active = if projects {
+                state.sidebar.section_menu == Some(SidebarSectionMenu::Projects)
+                    || [
+                        SIDEBAR_PROJECTS_SECTION_ID,
+                        SIDEBAR_PROJECTS_MORE_ID,
+                        SIDEBAR_PROJECTS_NEW_ID,
+                    ]
+                    .into_iter()
+                    .any(|id| focused == Some(id) || hovered == Some(id))
+            } else {
+                state.sidebar.section_menu == Some(SidebarSectionMenu::Tasks)
+                    || [
+                        SIDEBAR_TASKS_TOGGLE_ID,
+                        SIDEBAR_TASKS_SECTION_ID,
+                        SIDEBAR_TASKS_MORE_ID,
+                        SIDEBAR_TASKS_NEW_ID,
+                    ]
+                    .into_iter()
+                    .any(|id| focused == Some(id) || hovered == Some(id))
+            };
+            if !active {
+                return;
+            }
+            paint_icon_button(
+                painter,
+                control.rect,
+                if matches!(
+                    control.target,
+                    SidebarControlTarget::ProjectsMenu | SidebarControlTarget::TasksMenu
+                ) {
+                    SemanticIcon::More
+                } else {
+                    SemanticIcon::Plus
+                },
+                focused == Some(control.id),
+                hovered == Some(control.id),
+                theme,
+            );
+        }
         SidebarControlTarget::ToggleTasks => {
             let _ = state;
             if focused == Some(SIDEBAR_TASKS_TOGGLE_ID) {
@@ -338,100 +444,7 @@ fn paint_control(
     }
 }
 
-fn paint_footer(
-    painter: &mut dyn Painter,
-    layout: &super::SidebarLayout,
-    state: &ZodeAppState,
-    focused: Option<WidgetId>,
-    hovered: Option<WidgetId>,
-    theme: &ZodeTheme,
-) {
-    if layout.footer.size.y <= 0.0 {
-        return;
-    }
-    painter.fill_rect(
-        Rect::xywh(
-            layout.footer.origin.x,
-            layout.footer.origin.y,
-            layout.footer.size.x,
-            1.0,
-        ),
-        theme.tokens.border.with_alpha(0.72),
-    );
-    if ProjectSidebar::footer_selected(state) {
-        painter.fill_round_rect(layout.profile, 0.0, theme.tokens.row_selected);
-    }
-    if layout.compact {
-        paint_avatar(
-            painter,
-            Rect::xywh(
-                layout.profile.origin.x + (layout.profile.size.x - 20.0) / 2.0,
-                layout.profile.origin.y + (layout.profile.size.y - 20.0) / 2.0,
-                20.0,
-                20.0,
-            ),
-            &state.local_profile.display_name,
-            theme,
-        );
-        paint_icon_button(
-            painter,
-            layout.help,
-            SemanticIcon::Help,
-            focused == Some(HELP_ID),
-            hovered == Some(HELP_ID),
-            theme,
-        );
-        return;
-    }
-    let avatar = Rect::xywh(
-        layout.profile.origin.x + 16.0,
-        layout.profile.origin.y + (layout.profile.size.y - 20.0) / 2.0,
-        20.0,
-        20.0,
-    );
-    paint_avatar(painter, avatar, &state.local_profile.display_name, theme);
-    draw_label(
-        painter,
-        state.local_profile.display_name.as_str(),
-        Rect::xywh(
-            layout.profile.origin.x + 44.0,
-            layout.profile.origin.y,
-            (layout.profile.size.x - 52.0).max(0.0),
-            layout.profile.size.y,
-        ),
-        12.0,
-        500,
-        theme.sidebar_foreground,
-    );
-    paint_icon_button(
-        painter,
-        layout.help,
-        SemanticIcon::Help,
-        focused == Some(HELP_ID),
-        hovered == Some(HELP_ID),
-        theme,
-    );
-}
-
-fn paint_avatar(painter: &mut dyn Painter, rect: Rect, display_name: &str, theme: &ZodeTheme) {
-    painter.fill_round_rect(rect, rect.size.x / 2.0, theme.zode_purple);
-    let initial = display_name
-        .chars()
-        .next()
-        .map(|value| value.to_uppercase().collect::<String>())
-        .unwrap_or_else(|| "Z".into());
-    paint_single_line(
-        painter,
-        &initial,
-        rect,
-        10.0,
-        600,
-        theme.tokens.primary_foreground,
-        HorizontalAlign::Center,
-    );
-}
-
-fn paint_icon_button(
+pub(super) fn paint_icon_button(
     painter: &mut dyn Painter,
     rect: Rect,
     icon: SemanticIcon,
@@ -463,20 +476,30 @@ fn row_interaction_active(
     focused: Option<WidgetId>,
     hovered: Option<WidgetId>,
 ) -> bool {
-    row.session().is_some()
-        && [Some(row.id), row.pin_id, row.archive_id]
-            .into_iter()
-            .flatten()
-            .any(|id| focused == Some(id) || hovered == Some(id))
+    [
+        Some(row.id),
+        row.pin_id,
+        row.archive_id,
+        row.more_id,
+        row.new_id,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|id| focused == Some(id) || hovered == Some(id))
 }
 
 pub(super) fn paint_hover_overlay(
     painter: &mut dyn Painter,
     sidebar: Rect,
     state: &ZodeAppState,
+    focused: Option<WidgetId>,
     hovered: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
+    if let Some(menu) = super::menu::layout(sidebar, state) {
+        super::menu::paint(painter, &menu, focused, hovered, theme);
+        return;
+    }
     let Some(hovered) = hovered else {
         return;
     };
@@ -737,7 +760,7 @@ fn end_ellipsize(
     format!("{}{}", value[..boundaries[lower]].trim_end(), ELLIPSIS)
 }
 
-fn draw_label(
+pub(super) fn draw_label(
     painter: &mut dyn Painter,
     text: &str,
     rect: Rect,

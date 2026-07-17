@@ -37,7 +37,7 @@ pub(super) fn append_environment_nodes(
         ENVIRONMENT_CLOSE_ID,
         panel.close_button,
         Role::Button,
-        "关闭环境信息",
+        "关闭置顶摘要面板",
         None,
         vec![Action::Click, Action::Focus],
         next_order(focus_order),

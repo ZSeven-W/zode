@@ -1,11 +1,12 @@
 use jian_widgets::Rect;
-use zode_app_model::ZodeAppState;
+use zode_app_model::{ProjectDisplayMode, ZodeAppState};
 use zode_node_protocol::{SessionLocator, ThreadSummary, WorkspaceUri};
 
 use super::{
     dynamic_projects, pinned_tasks, projectless_tasks, workspace_label, ProjectSidebar,
-    SidebarItem, SidebarRowLayout, SidebarRowTarget, NAVIGATION, SIDEBAR_SHOW_ALL_PROJECTS_ID,
-    SIDEBAR_TASKS_MORE_ID, SIDEBAR_TASKS_NEW_ID, SIDEBAR_TASKS_TOGGLE_ID,
+    SidebarItem, SidebarRowLayout, SidebarRowTarget, NAVIGATION, SIDEBAR_PROJECTS_MORE_ID,
+    SIDEBAR_PROJECTS_NEW_ID, SIDEBAR_PROJECTS_SECTION_ID, SIDEBAR_SHOW_ALL_PROJECTS_ID,
+    SIDEBAR_TASKS_MORE_ID, SIDEBAR_TASKS_NEW_ID, SIDEBAR_TASKS_SECTION_ID, SIDEBAR_TASKS_TOGGLE_ID,
 };
 use crate::{RectExt, WidgetId};
 
@@ -35,6 +36,7 @@ pub enum SidebarSection {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SidebarSectionLayout {
+    pub id: WidgetId,
     pub section: SidebarSection,
     pub rect: Rect,
     pub label: &'static str,
@@ -45,8 +47,10 @@ pub enum SidebarControlTarget {
     ShowAllProjects,
     ShowAllProjectSessions(WorkspaceUri),
     ToggleTasks,
+    ProjectsMenu,
+    NewProject,
+    TasksMenu,
     NewProjectlessTask,
-    MoreDecoration,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,7 +63,7 @@ pub struct SidebarControlLayout {
 
 impl SidebarControlLayout {
     pub fn actionable(&self) -> bool {
-        !matches!(self.target, SidebarControlTarget::MoreDecoration)
+        true
     }
 }
 
@@ -201,78 +205,108 @@ fn build_raw(rect: Rect, state: &ZodeAppState, compact: bool) -> RawContent {
     if !pinned.is_empty() {
         raw.push_section(rect, SidebarSection::Pinned, "置顶");
         for thread in pinned {
-            raw.push_thread(rect, state, thread, true);
+            raw.push_thread(rect, state, thread, true, false);
         }
         raw.y += 10.0;
     }
 
+    let projects_header_y = raw.y;
     raw.push_section(rect, SidebarSection::Projects, "项目");
+    raw.controls.extend([
+        SidebarControlLayout {
+            id: SIDEBAR_PROJECTS_MORE_ID,
+            rect: Rect::xywh(rect.max_x() - 58.0, projects_header_y + 2.0, 24.0, 24.0),
+            label: "项目菜单".into(),
+            target: SidebarControlTarget::ProjectsMenu,
+        },
+        SidebarControlLayout {
+            id: SIDEBAR_PROJECTS_NEW_ID,
+            rect: Rect::xywh(rect.max_x() - 32.0, projects_header_y + 2.0, 24.0, 24.0),
+            label: "新建项目".into(),
+            target: SidebarControlTarget::NewProject,
+        },
+    ]);
     let projects = dynamic_projects(state);
-    let project_limit = if state.sidebar.show_all_projects {
-        projects.len()
+    if state.sidebar.project_display_mode == ProjectDisplayMode::Flat {
+        for project in &projects {
+            for thread in project.sessions.iter().cloned() {
+                raw.push_thread(rect, state, thread, false, false);
+            }
+        }
     } else {
-        MAX_PROJECTS
-    };
-    for project in projects.iter().take(project_limit) {
-        raw.rows.push(SidebarRowLayout {
-            id: ProjectSidebar::project_widget_id(&project.workspace_uri),
-            rect: raw_row_rect(rect, raw.y),
-            label: workspace_label(&project.workspace_uri, project.available),
-            target: SidebarRowTarget::Project(project.workspace_uri.clone()),
-            actionable: project.toggleable,
-            selected: state.presentation.route == zode_app_model::ShellRoute::Conversation
-                && state.current_session.is_none()
-                && state.active_workspace.as_ref() == Some(&project.workspace_uri),
-            status: None,
-            pinned: false,
-            shortcut: None,
-            pin_id: None,
-            archive_id: None,
-            workspace_uri: Some(project.workspace_uri.clone()),
-        });
-        raw.y += ROW_SLOT_H;
-        if !project.expanded {
-            continue;
-        }
-        if project.sessions.is_empty() {
-            raw.labels.push(SidebarLabelLayout {
-                rect: raw_nested_row_rect(rect, raw.y),
-                label: "无任务",
-                nested: true,
-            });
-            raw.y += ROW_SLOT_H;
-            continue;
-        }
-        let show_all = state
-            .sidebar
-            .show_all_project_sessions
-            .contains(&project.workspace_uri);
-        let session_limit = if show_all {
-            project.sessions.len()
+        let project_limit = if state.sidebar.show_all_projects {
+            projects.len()
         } else {
-            MAX_PROJECT_SESSIONS
+            MAX_PROJECTS
         };
-        for thread in project.sessions.iter().take(session_limit).cloned() {
-            raw.push_thread(rect, state, thread, false);
+        for project in projects.iter().take(project_limit) {
+            raw.rows.push(SidebarRowLayout {
+                id: ProjectSidebar::project_widget_id(&project.workspace_uri),
+                rect: raw_row_rect(rect, raw.y),
+                label: workspace_label(&project.workspace_uri, project.available),
+                target: SidebarRowTarget::Project(project.workspace_uri.clone()),
+                actionable: project.toggleable,
+                selected: state.presentation.route == zode_app_model::ShellRoute::Conversation
+                    && state.current_session.is_none()
+                    && state.active_workspace.as_ref() == Some(&project.workspace_uri),
+                status: None,
+                pinned: false,
+                shortcut: None,
+                pin_id: None,
+                archive_id: None,
+                more_id: project
+                    .toggleable
+                    .then(|| ProjectSidebar::project_more_widget_id(&project.workspace_uri)),
+                new_id: (project.toggleable && project.available)
+                    .then(|| ProjectSidebar::project_new_widget_id(&project.workspace_uri)),
+                workspace_uri: Some(project.workspace_uri.clone()),
+            });
+            raw.y += ROW_SLOT_H;
+            if !project.expanded {
+                continue;
+            }
+            if project.sessions.is_empty() {
+                raw.labels.push(SidebarLabelLayout {
+                    rect: raw_nested_row_rect(rect, raw.y),
+                    label: "无任务",
+                    nested: true,
+                });
+                raw.y += ROW_SLOT_H;
+                continue;
+            }
+            let show_all = state
+                .sidebar
+                .show_all_project_sessions
+                .contains(&project.workspace_uri);
+            let session_limit = if show_all {
+                project.sessions.len()
+            } else {
+                MAX_PROJECT_SESSIONS
+            };
+            for thread in project.sessions.iter().take(session_limit).cloned() {
+                raw.push_thread(rect, state, thread, false, true);
+            }
+            if !show_all && project.sessions.len() > MAX_PROJECT_SESSIONS {
+                raw.controls.push(SidebarControlLayout {
+                    id: ProjectSidebar::show_all_project_sessions_widget_id(&project.workspace_uri),
+                    rect: raw_nested_row_rect(rect, raw.y),
+                    label: "展开显示".into(),
+                    target: SidebarControlTarget::ShowAllProjectSessions(
+                        project.workspace_uri.clone(),
+                    ),
+                });
+                raw.y += ROW_SLOT_H;
+            }
         }
-        if !show_all && project.sessions.len() > MAX_PROJECT_SESSIONS {
+        if !state.sidebar.show_all_projects && projects.len() > MAX_PROJECTS {
             raw.controls.push(SidebarControlLayout {
-                id: ProjectSidebar::show_all_project_sessions_widget_id(&project.workspace_uri),
-                rect: raw_nested_row_rect(rect, raw.y),
+                id: SIDEBAR_SHOW_ALL_PROJECTS_ID,
+                rect: raw_row_rect(rect, raw.y),
                 label: "展开显示".into(),
-                target: SidebarControlTarget::ShowAllProjectSessions(project.workspace_uri.clone()),
+                target: SidebarControlTarget::ShowAllProjects,
             });
             raw.y += ROW_SLOT_H;
         }
-    }
-    if !state.sidebar.show_all_projects && projects.len() > MAX_PROJECTS {
-        raw.controls.push(SidebarControlLayout {
-            id: SIDEBAR_SHOW_ALL_PROJECTS_ID,
-            rect: raw_row_rect(rect, raw.y),
-            label: "展开显示".into(),
-            target: SidebarControlTarget::ShowAllProjects,
-        });
-        raw.y += ROW_SLOT_H;
     }
 
     raw.y += 10.0;
@@ -293,7 +327,7 @@ fn build_raw(rect: Rect, state: &ZodeAppState, compact: bool) -> RawContent {
             id: SIDEBAR_TASKS_MORE_ID,
             rect: Rect::xywh(rect.max_x() - 58.0, header_y + 2.0, 24.0, 24.0),
             label: "任务菜单".into(),
-            target: SidebarControlTarget::MoreDecoration,
+            target: SidebarControlTarget::TasksMenu,
         },
         SidebarControlLayout {
             id: SIDEBAR_TASKS_NEW_ID,
@@ -304,7 +338,7 @@ fn build_raw(rect: Rect, state: &ZodeAppState, compact: bool) -> RawContent {
     ]);
     if state.sidebar.tasks_expanded {
         for thread in projectless_tasks(state) {
-            raw.push_thread(rect, state, thread, false);
+            raw.push_thread(rect, state, thread, false, false);
         }
     }
     raw
@@ -313,6 +347,11 @@ fn build_raw(rect: Rect, state: &ZodeAppState, compact: bool) -> RawContent {
 impl RawContent {
     fn push_section(&mut self, rect: Rect, section: SidebarSection, label: &'static str) {
         self.sections.push(SidebarSectionLayout {
+            id: match section {
+                SidebarSection::Pinned => WidgetId(9_099),
+                SidebarSection::Projects => SIDEBAR_PROJECTS_SECTION_ID,
+                SidebarSection::Tasks => SIDEBAR_TASKS_SECTION_ID,
+            },
             section,
             rect: Rect::xywh(rect.origin.x + 16.0, self.y, rect.size.x - 32.0, SECTION_H),
             label,
@@ -326,6 +365,7 @@ impl RawContent {
         state: &ZodeAppState,
         thread: ThreadSummary,
         pinned: bool,
+        nested: bool,
     ) {
         self.shortcut += 1;
         let shortcut = (self.shortcut <= 5).then_some(self.shortcut);
@@ -333,10 +373,10 @@ impl RawContent {
         let session = thread.session;
         self.rows.push(SidebarRowLayout {
             id: ProjectSidebar::session_widget_id(&session),
-            rect: if pinned || projectless {
-                raw_row_rect(rect, self.y)
-            } else {
+            rect: if nested && !pinned && !projectless {
                 raw_nested_row_rect(rect, self.y)
+            } else {
+                raw_row_rect(rect, self.y)
             },
             label: thread.title,
             target: if projectless {
@@ -352,6 +392,8 @@ impl RawContent {
             shortcut,
             pin_id: Some(ProjectSidebar::session_pin_widget_id(&session)),
             archive_id: Some(ProjectSidebar::session_archive_widget_id(&session)),
+            more_id: None,
+            new_id: None,
             workspace_uri: Some(thread.workspace_uri),
         });
         self.y += ROW_SLOT_H;
@@ -364,31 +406,40 @@ pub(super) fn ordered_sessions(state: &ZodeAppState) -> std::vec::IntoIter<Sessi
         .map(|thread| thread.session)
         .collect::<Vec<_>>();
     let projects = dynamic_projects(state);
-    let project_limit = if state.sidebar.show_all_projects {
-        projects.len()
-    } else {
-        MAX_PROJECTS
-    };
-    for project in projects.into_iter().take(project_limit) {
-        if !project.expanded {
-            continue;
-        }
-        let session_limit = if state
-            .sidebar
-            .show_all_project_sessions
-            .contains(&project.workspace_uri)
-        {
-            project.sessions.len()
-        } else {
-            MAX_PROJECT_SESSIONS
-        };
+    if state.sidebar.project_display_mode == ProjectDisplayMode::Flat {
         sessions.extend(
-            project
-                .sessions
+            projects
                 .into_iter()
-                .take(session_limit)
+                .flat_map(|project| project.sessions)
                 .map(|thread| thread.session),
         );
+    } else {
+        let project_limit = if state.sidebar.show_all_projects {
+            projects.len()
+        } else {
+            MAX_PROJECTS
+        };
+        for project in projects.into_iter().take(project_limit) {
+            if !project.expanded {
+                continue;
+            }
+            let session_limit = if state
+                .sidebar
+                .show_all_project_sessions
+                .contains(&project.workspace_uri)
+            {
+                project.sessions.len()
+            } else {
+                MAX_PROJECT_SESSIONS
+            };
+            sessions.extend(
+                project
+                    .sessions
+                    .into_iter()
+                    .take(session_limit)
+                    .map(|thread| thread.session),
+            );
+        }
     }
     if state.sidebar.tasks_expanded {
         sessions.extend(

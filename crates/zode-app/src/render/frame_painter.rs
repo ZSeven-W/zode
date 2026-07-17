@@ -1,7 +1,7 @@
 use jian_widgets::{
     Color, ImageAdjustments, ImageDrawMode, Painter, Point2D, Rect, TextLayout, TextMetrics,
 };
-use skia_safe::PaintStyle;
+use skia_safe::{paint, PaintStyle};
 
 use super::native_backend::{skia_paint, to_sk_rect};
 use super::NativeBackend;
@@ -99,7 +99,7 @@ impl Painter for FramePainter<'_> {
             .svg_path_with_viewbox(d, rect, STROKE_ICON_VIEWBOX)
         {
             self.canvas
-                .draw_path(&path, &skia_paint(color, PaintStyle::Stroke, width));
+                .draw_path(&path, &icon_stroke_paint(color, width));
         }
     }
 
@@ -352,4 +352,36 @@ fn polygon(points: &[Point2D]) -> Option<skia_safe::Path> {
     }
     path.close();
     Some(path.detach())
+}
+
+fn icon_stroke_paint(color: Color, width: f32) -> skia_safe::Paint {
+    let mut paint = skia_paint(color, PaintStyle::Stroke, width);
+    paint.set_stroke_cap(paint::Cap::Round);
+    paint.set_stroke_join(paint::Join::Round);
+    paint
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zode_app_ui::SemanticIcon;
+
+    #[test]
+    fn icon_strokes_use_lucide_round_caps_and_joins() {
+        let paint = icon_stroke_paint(Color::BLACK, 1.75);
+
+        assert_eq!(paint.stroke_cap(), paint::Cap::Round);
+        assert_eq!(paint.stroke_join(), paint::Join::Round);
+        assert_eq!(paint.stroke_width(), 1.75);
+    }
+
+    #[test]
+    fn every_semantic_icon_is_valid_skia_path_data() {
+        for icon in SemanticIcon::ALL {
+            assert!(
+                skia_safe::utils::parse_path::from_svg(icon.path()).is_some(),
+                "failed to parse {icon:?}"
+            );
+        }
+    }
 }

@@ -48,12 +48,16 @@ mod navigation_state;
 mod panel_menu;
 mod persistence;
 mod presentation;
+#[path = "app/project-actions.rs"]
+mod project_actions;
 mod project_picker;
 mod queue;
 mod queue_focus;
 mod session_menu;
 mod settings;
 mod sidebar;
+#[path = "app/sidebar-menu.rs"]
+mod sidebar_menu;
 mod startup;
 mod terminal;
 mod window;
@@ -134,11 +138,6 @@ impl DesktopApp {
             app_state.ui_preferences = persisted.ui_preferences.clone();
             app_state.sidebar.tasks_expanded = app_state.ui_preferences.sidebar_tasks_expanded;
             navigation_state::hydrate_session_navigation(&mut app_state, persisted);
-            for project in &mut app_state.projects {
-                project.expanded = !persisted
-                    .collapsed_workspaces
-                    .contains(project.workspace_uri.as_str());
-            }
             match persisted.task_context.as_ref() {
                 Some(TaskContext::Project { workspace_uri })
                     if app_state.is_projectless_workspace(workspace_uri) =>
@@ -181,6 +180,7 @@ impl DesktopApp {
                     persisted.last_session.as_deref(),
                 ),
             }
+            navigation_state::hydrate_project_navigation(&mut app_state, persisted);
         }
         app_state.composer.focused = false;
         app_state.terminal.focused = false;

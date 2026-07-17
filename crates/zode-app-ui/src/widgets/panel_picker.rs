@@ -206,7 +206,7 @@ fn descriptors() -> [PanelDescriptor; 7] {
     [
         PanelDescriptor {
             pane: SecondaryPane::Environment,
-            label: "环境信息",
+            label: "置顶摘要",
             icon: SemanticIcon::Environment,
         },
         PanelDescriptor {

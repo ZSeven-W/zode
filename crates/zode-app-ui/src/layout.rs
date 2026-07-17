@@ -24,6 +24,15 @@ pub const REVIEW_PANEL_W: f32 = 700.0;
 pub const SECONDARY_PANE_BREAKPOINT: f32 = 1400.0;
 pub const SPLIT_DIVIDER_W: f32 = 1.0;
 
+/// Responsive presentation used by the pinned summary panel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PinnedSummaryMode {
+    #[default]
+    Hidden,
+    Docked,
+    Overlay,
+}
+
 /// Insets supplied by the platform host in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Insets {
@@ -90,6 +99,7 @@ pub struct WorkspaceLayout {
     pub composer: Rect,
     pub page_content: Rect,
     pub context_panel: Rect,
+    pub pinned_summary: PinnedSummaryMode,
     pub divider: Rect,
     pub review_panel: Rect,
 }
@@ -228,21 +238,38 @@ impl WorkspaceLayout {
         let primary_w = (primary_right - main_x).max(0.0);
         let primary_surface = Rect::xywh(main_x, insets.top, primary_w, available_h);
 
-        let environment_frame = if secondary_visible {
-            match secondary {
-                SecondaryLayout::Environment(requested_w) => {
-                    let panel_right = (safe_right - CONTENT_GUTTER.min(main_w)).max(main_x);
-                    let panel_w = requested_w.min((panel_right - main_x).max(0.0));
-                    Some((panel_right - panel_w, panel_w))
-                }
-                SecondaryLayout::None | SecondaryLayout::Review => None,
+        let pinned_summary = match secondary {
+            SecondaryLayout::Environment(_) if secondary_visible => PinnedSummaryMode::Docked,
+            SecondaryLayout::Environment(_)
+                if route == ShellRoute::Conversation && main_w > 0.0 =>
+            {
+                PinnedSummaryMode::Overlay
             }
-        } else {
-            None
+            SecondaryLayout::None | SecondaryLayout::Environment(_) | SecondaryLayout::Review => {
+                PinnedSummaryMode::Hidden
+            }
         };
-        let content_right = environment_frame
-            .map(|(panel_x, _)| panel_x - CONTENT_GUTTER.min((panel_x - main_x).max(0.0)))
-            .unwrap_or(primary_right);
+        let environment_frame = match (secondary, pinned_summary) {
+            (SecondaryLayout::Environment(requested_w), PinnedSummaryMode::Docked) => {
+                let panel_right = (safe_right - CONTENT_GUTTER.min(main_w)).max(main_x);
+                let panel_w = requested_w.min((panel_right - main_x).max(0.0));
+                Some((panel_right - panel_w, panel_w))
+            }
+            (SecondaryLayout::Environment(requested_w), PinnedSummaryMode::Overlay) => {
+                let horizontal_gutter = CONTENT_GUTTER.min(main_w / 2.0);
+                let panel_right = (safe_right - horizontal_gutter).max(main_x);
+                let panel_w = requested_w.min((main_w - horizontal_gutter * 2.0).max(0.0));
+                Some((panel_right - panel_w, panel_w))
+            }
+            _ => None,
+        };
+        let content_right = if pinned_summary == PinnedSummaryMode::Docked {
+            environment_frame
+                .map(|(panel_x, _)| panel_x - CONTENT_GUTTER.min((panel_x - main_x).max(0.0)))
+                .unwrap_or(primary_right)
+        } else {
+            primary_right
+        };
         let content_region_w = (content_right - main_x).max(0.0);
         let content_gutters = (CONTENT_GUTTER * 2.0).min(content_region_w);
         let content_w = CONTENT_W.min((content_region_w - content_gutters).max(0.0));
@@ -294,6 +321,7 @@ impl WorkspaceLayout {
             composer: Rect::xywh(content_x, composer_y, content_w, composer_h),
             page_content,
             context_panel,
+            pinned_summary,
             divider,
             review_panel,
         }

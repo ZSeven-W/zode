@@ -8,8 +8,9 @@ use zode_app_model::{
 };
 use zode_app_ui::{
     ComposerController, ComposerOutcome, ComposerSubmission, Insets, Key, Modifiers, ProjectPicker,
-    SettingsPanel, ThreadHeader, WidgetId, WorkspaceSnapshot, PROJECT_DETACH_ID,
-    PROJECT_PICKER_NEW_ID, PROJECT_PICKER_PROJECTLESS_ID, PROJECT_PICKER_TRIGGER_ID,
+    SettingsPanel, ThreadHeader, WidgetId, WorkspaceSnapshot, ENVIRONMENT_CLOSE_ID,
+    HEADER_ENVIRONMENT_ID, PROJECT_DETACH_ID, PROJECT_PICKER_NEW_ID, PROJECT_PICKER_PROJECTLESS_ID,
+    PROJECT_PICKER_TRIGGER_ID,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
@@ -22,6 +23,7 @@ use super::super::session_menu::{
 use super::{
     consume_external_preview_command, normalize_conversation_route, project_composer_outcome,
     reduce_local_settings_command, settings_interaction_viewport, widget_command,
+    widget_command_for_snapshot,
 };
 use crate::services::{ExternalOpenService, ServiceError};
 use crate::{command_bridge::prepare_dispatch, event_map::composer_outcome_command};
@@ -64,6 +66,45 @@ fn empty_task_project_controls_map_to_task_context_commands() {
         Some(AppCommand::BeginTask {
             workspace_uri: None,
         })
+    );
+}
+
+#[test]
+fn pinned_summary_toggle_is_responsive_to_the_current_snapshot() {
+    let (mut state, _, _) = state_with_session();
+    let wide = WorkspaceSnapshot::build(&state, 1_800.0, 900.0, Insets::ZERO);
+    assert_eq!(
+        widget_command_for_snapshot(&state, &wide, HEADER_ENVIRONMENT_ID),
+        Some(AppCommand::SetPinnedSummaryAutoHidden(true))
+    );
+    assert_eq!(
+        widget_command_for_snapshot(&state, &wide, ENVIRONMENT_CLOSE_ID),
+        Some(AppCommand::SetPinnedSummaryAutoHidden(true))
+    );
+
+    state.presentation.pinned_summary_auto_hidden = true;
+    let dismissed = WorkspaceSnapshot::build(&state, 1_800.0, 900.0, Insets::ZERO);
+    assert_eq!(
+        widget_command_for_snapshot(&state, &dismissed, HEADER_ENVIRONMENT_ID),
+        Some(AppCommand::SetPinnedSummaryAutoHidden(false))
+    );
+
+    state.presentation.pinned_summary_auto_hidden = false;
+    let narrow = WorkspaceSnapshot::build(&state, 1_200.0, 900.0, Insets::ZERO);
+    assert_eq!(
+        widget_command_for_snapshot(&state, &narrow, HEADER_ENVIRONMENT_ID),
+        Some(AppCommand::OpenSecondary(SecondaryPane::Environment))
+    );
+
+    state.presentation.secondary_pane = Some(SecondaryPane::Environment);
+    let overlay = WorkspaceSnapshot::build(&state, 1_200.0, 900.0, Insets::ZERO);
+    assert_eq!(
+        widget_command_for_snapshot(&state, &overlay, HEADER_ENVIRONMENT_ID),
+        Some(AppCommand::CloseSecondary)
+    );
+    assert_eq!(
+        widget_command_for_snapshot(&state, &overlay, ENVIRONMENT_CLOSE_ID),
+        Some(AppCommand::CloseSecondary)
     );
 }
 
@@ -453,7 +494,8 @@ fn interaction_source_has_no_direct_settings_page_mutation() {
                 .next()
         })
         .expect("activate_widget source is present");
-    assert!(activation.contains("widget_command(&self.app_state, id)"));
+    assert!(activation
+        .contains("widget_command_for_snapshot(&self.app_state, &self.frame_snapshot, id)"));
     assert!(activation.contains("self.enqueue_command(command)"));
 }
 

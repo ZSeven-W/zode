@@ -10,7 +10,9 @@ use super::{
     ThreadTranscript, UnavailableSecondaryPanel, WindowChrome,
 };
 use crate::TRANSCRIPT_COMPOSER_GAP;
-use crate::{Insets, RectExt, WidgetId, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme};
+use crate::{
+    Insets, PinnedSummaryMode, RectExt, WidgetId, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme,
+};
 
 /// Paints the complete platform-neutral workbench shell in stable z-order.
 pub struct WorkspaceShell;
@@ -243,7 +245,13 @@ impl WorkspaceShell {
         }
         match state.presentation.route {
             ShellRoute::Conversation => {
-                ThreadHeader::paint(painter, geometry.top_bar, state, theme);
+                ThreadHeader::paint_with_pinned_summary(
+                    painter,
+                    geometry.top_bar,
+                    state,
+                    geometry.pinned_summary,
+                    theme,
+                );
             }
             ShellRoute::Terminal => {
                 ThreadHeader::paint_title_only(painter, geometry.top_bar, state, theme);
@@ -324,10 +332,13 @@ impl WorkspaceShell {
         }
 
         if state.presentation.route == ShellRoute::Conversation {
+            if geometry.pinned_summary != PinnedSummaryMode::Hidden
+                && geometry.context_panel.size.x > 0.0
+            {
+                EnvironmentPanel::paint(painter, geometry.context_panel, state, theme);
+            }
             match state.presentation.secondary_pane {
-                Some(SecondaryPane::Environment) if geometry.context_panel.size.x > 0.0 => {
-                    EnvironmentPanel::paint(painter, geometry.context_panel, state, theme);
-                }
+                Some(SecondaryPane::Environment) => {}
                 Some(SecondaryPane::Review) if geometry.review_panel.size.x > 0.0 => {
                     painter.fill_rect(geometry.divider, theme.tokens.border);
                     ReviewPanel::paint_state(painter, geometry.review_panel, state, theme);
@@ -355,8 +366,7 @@ impl WorkspaceShell {
                     UnavailableSecondaryPanel::paint(painter, geometry.review_panel, pane, theme);
                 }
                 Some(
-                    SecondaryPane::Environment
-                    | SecondaryPane::Review
+                    SecondaryPane::Review
                     | SecondaryPane::DocumentPreview
                     | SecondaryPane::Terminal
                     | SecondaryPane::Browser
@@ -367,7 +377,14 @@ impl WorkspaceShell {
             }
         }
         if !matches!(state.presentation.route, ShellRoute::Settings(_)) {
-            ProjectSidebar::paint_hover_overlay(painter, geometry.sidebar, state, hovered, theme);
+            ProjectSidebar::paint_hover_overlay(
+                painter,
+                geometry.sidebar,
+                state,
+                snapshot.focused,
+                hovered,
+                theme,
+            );
         }
         if state.presentation.route == ShellRoute::Conversation {
             if let Some(rename_input) = session_rename_input {

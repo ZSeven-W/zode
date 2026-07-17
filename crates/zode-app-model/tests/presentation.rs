@@ -179,6 +179,30 @@ fn secondary_panes_are_mutually_exclusive() {
 }
 
 #[test]
+fn automatic_pinned_summary_can_be_explicitly_suppressed_and_restored() {
+    let mut state = demo_state();
+
+    assert_eq!(
+        reduce_presentation_command(&mut state, AppCommand::SetPinnedSummaryAutoHidden(true),),
+        PresentationCommandOutcome::Applied
+    );
+    assert!(state.presentation.pinned_summary_auto_hidden);
+
+    reduce_presentation_command(
+        &mut state,
+        AppCommand::OpenSecondary(SecondaryPane::Environment),
+    );
+    assert!(!state.presentation.pinned_summary_auto_hidden);
+    assert_eq!(
+        state.presentation.secondary_pane,
+        Some(SecondaryPane::Environment)
+    );
+
+    reduce_presentation_command(&mut state, AppCommand::SetPinnedSummaryAutoHidden(true));
+    assert_eq!(state.presentation.secondary_pane, None);
+}
+
+#[test]
 fn leaving_conversation_closes_the_secondary_pane() {
     let mut state = demo_state();
     let routes = [

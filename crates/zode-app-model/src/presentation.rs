@@ -190,7 +190,7 @@ impl EnvironmentSectionKind {
     pub const fn title(self) -> &'static str {
         match self {
             Self::Changes => "变更",
-            Self::Host => "本地",
+            Self::Host => "环境信息",
             Self::Branch => "分支",
             Self::RepositoryActions => "仓库操作",
             Self::Comparisons => "比较分支",
@@ -359,6 +359,10 @@ pub struct SessionPresentationState {
 pub struct PresentationState {
     pub route: ShellRoute,
     pub secondary_pane: Option<SecondaryPane>,
+    /// Explicitly suppresses the otherwise automatic wide-screen summary.
+    /// Narrow overlays continue to use `secondary_pane` so resizing alone
+    /// never opens a floating panel.
+    pub pinned_summary_auto_hidden: bool,
     pub secondary_menu_open: bool,
     pub sessions: BTreeMap<SessionLocator, SessionPresentationState>,
     pub integrations: LoadState<IntegrationCatalog>,

@@ -1,6 +1,9 @@
 use jian_widgets::{Point2D, Rect};
 use zode_app_model::AppCommand;
-use zode_app_ui::{Insets, ProjectSidebar, RectExt, WidgetId, WorkspaceSnapshot};
+use zode_app_ui::{
+    Insets, ProjectSidebar, RectExt, WidgetId, WorkspaceSnapshot, SIDEBAR_PROJECTS_MORE_ID,
+    SIDEBAR_PROJECTS_NEW_ID, SIDEBAR_PROJECT_MENU_FINDER_ID, SIDEBAR_PROJECT_MENU_PIN_ID,
+};
 use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
 #[test]
@@ -145,6 +148,42 @@ fn dynamic_sidebar_rows_are_capped_by_available_height() {
         .all(|row| row.rect.max_y() <= snapshot.layout.sidebar.max_y()));
     for row in rows {
         assert!(snapshot.node(row.id).is_some());
+    }
+}
+
+#[test]
+fn project_and_section_actions_and_open_menu_are_real_accessible_hit_targets() {
+    let mut state = zode_app_model::demo_state();
+    let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
+    state.projects.push(zode_app_model::ProjectState {
+        workspace_uri: workspace.clone(),
+        expanded: false,
+        available: true,
+        last_opened_ms: 1,
+    });
+    let snapshot = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    let project = ProjectSidebar::dynamic_row_layout(snapshot.layout.sidebar, &state)
+        .into_iter()
+        .find(|row| matches!(row.target, zode_app_ui::SidebarRowTarget::Project(_)))
+        .unwrap();
+    for (id, name) in [
+        (project.more_id.unwrap(), "项目菜单"),
+        (project.new_id.unwrap(), "在项目中新建任务"),
+        (SIDEBAR_PROJECTS_MORE_ID, "项目菜单"),
+        (SIDEBAR_PROJECTS_NEW_ID, "新建项目"),
+    ] {
+        let node = snapshot.node(id).expect("sidebar action is accessible");
+        assert_eq!(node.name, name);
+        assert_eq!(snapshot.hit_test(rect_center(node.rect)), Some(id));
+    }
+
+    state.sidebar.project_menu = Some(workspace);
+    let menu_snapshot = WorkspaceSnapshot::build(&state, 1221.0, 992.0, Insets::ZERO);
+    for id in [SIDEBAR_PROJECT_MENU_PIN_ID, SIDEBAR_PROJECT_MENU_FINDER_ID] {
+        let node = menu_snapshot
+            .node(id)
+            .expect("open menu item is accessible");
+        assert_eq!(menu_snapshot.hit_test(rect_center(node.rect)), Some(id));
     }
 }
 

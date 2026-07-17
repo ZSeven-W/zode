@@ -1,4 +1,4 @@
-use zode_app_model::{ThemePreference, UiPreferences};
+use zode_app_model::{ProjectDisplayMode, ProjectSortMode, ThemePreference, UiPreferences};
 use zode_app_runtime::{AppStateFile, AppStateStore, SessionUiState, TaskContext, WindowGeometry};
 use zode_node_protocol::WorkspaceUri;
 
@@ -52,6 +52,11 @@ fn store_round_trips_versioned_state_atomically() {
     state
         .collapsed_workspaces
         .insert("file:///repo/zode".into());
+    state
+        .pinned_workspaces
+        .insert(WorkspaceUri::new("file:///repo/zode").unwrap());
+    state.project_display_mode = ProjectDisplayMode::Flat;
+    state.project_sort_mode = ProjectSortMode::RecentlyUpdated;
     state.ui_preferences = UiPreferences {
         theme: ThemePreference::Dark,
         reduced_motion: true,
@@ -86,6 +91,9 @@ fn missing_state_file_loads_default_version() {
     assert_eq!(loaded.ui_preferences, UiPreferences::default());
     assert_eq!(loaded.window_geometry, None);
     assert_eq!(loaded.task_context, None);
+    assert!(loaded.pinned_workspaces.is_empty());
+    assert_eq!(loaded.project_display_mode, ProjectDisplayMode::Grouped);
+    assert_eq!(loaded.project_sort_mode, ProjectSortMode::Priority);
 }
 
 #[test]
@@ -116,6 +124,9 @@ fn legacy_v1_missing_appearance_and_window_fields_uses_defaults() {
     assert_eq!(loaded.ui_preferences, UiPreferences::default());
     assert_eq!(loaded.window_geometry, None);
     assert_eq!(loaded.task_context, None);
+    assert!(loaded.pinned_workspaces.is_empty());
+    assert_eq!(loaded.project_display_mode, ProjectDisplayMode::Grouped);
+    assert_eq!(loaded.project_sort_mode, ProjectSortMode::Priority);
 }
 
 #[test]

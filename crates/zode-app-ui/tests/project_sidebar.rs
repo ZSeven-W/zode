@@ -134,7 +134,7 @@ fn wide_sidebar_reserves_titlebar_space_and_uses_navigation_icons() {
             .iter()
             .filter(|operation| matches!(operation, PaintOp::Svg(..)))
             .count(),
-        10
+        8
     );
     let new_task_x = painter
         .operations
@@ -609,7 +609,7 @@ fn action_hover_keeps_row_active_and_matches_the_reference_preview_card() {
         false,
         &theme,
     );
-    ProjectSidebar::paint_hover_overlay(&mut painter, rect, &state, Some(pin), &theme);
+    ProjectSidebar::paint_hover_overlay(&mut painter, rect, &state, None, Some(pin), &theme);
 
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
@@ -646,40 +646,6 @@ fn action_hover_keeps_row_active_and_matches_the_reference_preview_card() {
 }
 
 #[test]
-fn project_row_keeps_its_hover_background() {
-    let mut state = demo_state();
-    state.projects.push(ProjectState {
-        workspace_uri: WorkspaceUri::new("file:///repo/zode").unwrap(),
-        expanded: false,
-        available: true,
-        last_opened_ms: 1,
-    });
-    let rect = Rect::xywh(0.0, 0.0, 240.0, 800.0);
-    let project = ProjectSidebar::dynamic_row_layout(rect, &state)
-        .into_iter()
-        .find(|row| matches!(row.target, SidebarRowTarget::Project(_)))
-        .unwrap();
-    let theme = ZodeTheme::light();
-    let mut painter = CapturePainter::default();
-
-    ProjectSidebar::paint_with_interaction(
-        &mut painter,
-        rect,
-        &state,
-        None,
-        Some(project.id),
-        false,
-        &theme,
-    );
-
-    assert!(painter.operations.iter().any(|operation| matches!(
-        operation,
-        PaintOp::FillRound(active, color)
-            if *active == project.rect && *color == theme.tokens.muted.with_alpha(0.72)
-    )));
-}
-
-#[test]
 fn action_tooltips_follow_pin_state_and_archive_action() {
     let mut state = demo_state();
     let workspace = WorkspaceUri::new("file:///repo/openpencil").unwrap();
@@ -704,7 +670,14 @@ fn action_tooltips_follow_pin_state_and_archive_action() {
         .find(|row| row.session() == Some(&session))
         .unwrap();
     let mut archive_painter = CapturePainter::default();
-    ProjectSidebar::paint_hover_overlay(&mut archive_painter, rect, &state, row.archive_id, &theme);
+    ProjectSidebar::paint_hover_overlay(
+        &mut archive_painter,
+        rect,
+        &state,
+        None,
+        row.archive_id,
+        &theme,
+    );
     assert!(painted_labels(&archive_painter).contains(&"归档任务"));
 
     state.pinned_sessions.insert(session.clone());
@@ -713,7 +686,7 @@ fn action_tooltips_follow_pin_state_and_archive_action() {
         .find(|row| row.session() == Some(&session))
         .unwrap();
     let mut pin_painter = CapturePainter::default();
-    ProjectSidebar::paint_hover_overlay(&mut pin_painter, rect, &state, row.pin_id, &theme);
+    ProjectSidebar::paint_hover_overlay(&mut pin_painter, rect, &state, None, row.pin_id, &theme);
     assert!(painted_labels(&pin_painter).contains(&"取消置顶"));
 }
 
@@ -758,6 +731,7 @@ fn hover_card_never_leaks_a_branch_from_another_workspace() {
         &mut painter,
         rect,
         &state,
+        None,
         Some(row.id),
         &ZodeTheme::light(),
     );

@@ -50,6 +50,17 @@ pub(super) fn hydrate_session_navigation(state: &mut ZodeAppState, persisted: &A
     }
 }
 
+pub(super) fn hydrate_project_navigation(state: &mut ZodeAppState, persisted: &AppStateFile) {
+    for project in &mut state.projects {
+        project.expanded = !persisted
+            .collapsed_workspaces
+            .contains(project.workspace_uri.as_str());
+    }
+    state.sidebar.pinned_projects = persisted.pinned_workspaces.clone();
+    state.sidebar.project_display_mode = persisted.project_display_mode;
+    state.sidebar.project_sort_mode = persisted.project_sort_mode;
+}
+
 pub(super) fn restore_last_session(state: &mut ZodeAppState, last_session: Option<&str>) {
     let Some(last_session) = last_session else {
         return;
@@ -74,11 +85,14 @@ pub(super) fn restore_last_session(state: &mut ZodeAppState, last_session: Optio
 
 #[cfg(test)]
 mod tests {
-    use zode_app_model::{demo_state, ProjectState};
+    use zode_app_model::{demo_state, ProjectDisplayMode, ProjectSortMode, ProjectState};
     use zode_app_runtime::{AppStateFile, SessionUiState};
     use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
-    use super::{display_name_from_candidates, hydrate_session_navigation, restore_last_session};
+    use super::{
+        display_name_from_candidates, hydrate_project_navigation, hydrate_session_navigation,
+        restore_last_session,
+    };
 
     #[test]
     fn local_profile_uses_first_available_username_and_capitalizes_it() {
@@ -129,5 +143,31 @@ mod tests {
 
         restore_last_session(&mut state, Some("real"));
         assert_eq!(state.current_session, None);
+    }
+
+    #[test]
+    fn persisted_project_preferences_are_hydrated_on_launch() {
+        let mut state = demo_state();
+        let workspace = WorkspaceUri::new("file:///repo/zode").unwrap();
+        state.projects.push(ProjectState {
+            workspace_uri: workspace.clone(),
+            expanded: true,
+            available: true,
+            last_opened_ms: 0,
+        });
+        let mut persisted = AppStateFile::default();
+        persisted
+            .collapsed_workspaces
+            .insert(workspace.as_str().into());
+        persisted.pinned_workspaces.insert(workspace.clone());
+        persisted.project_display_mode = ProjectDisplayMode::Flat;
+        persisted.project_sort_mode = ProjectSortMode::Manual;
+
+        hydrate_project_navigation(&mut state, &persisted);
+
+        assert!(!state.projects[0].expanded);
+        assert_eq!(state.sidebar.pinned_projects, [workspace].into());
+        assert_eq!(state.sidebar.project_display_mode, ProjectDisplayMode::Flat);
+        assert_eq!(state.sidebar.project_sort_mode, ProjectSortMode::Manual);
     }
 }

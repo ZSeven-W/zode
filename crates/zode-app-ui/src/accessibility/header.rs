@@ -22,10 +22,15 @@ pub(super) fn append_header_nodes(
     focus_order: &mut u32,
     state: &ZodeAppState,
 ) {
-    let header = ThreadHeader::layout(layout.top_bar, state);
+    let header =
+        ThreadHeader::layout_with_pinned_summary(layout.top_bar, state, layout.pinned_summary);
     for (action, id, label) in [
         (header.more, HEADER_MORE_ID, "任务操作"),
-        (header.environment, HEADER_ENVIRONMENT_ID, "环境信息"),
+        (
+            header.environment,
+            HEADER_ENVIRONMENT_ID,
+            "切换置顶摘要面板",
+        ),
         (header.review, HEADER_REVIEW_ID, "审查变更"),
         (header.panel_picker, PANEL_PICKER_ID, "选择侧边面板"),
     ] {
@@ -33,7 +38,7 @@ pub(super) fn append_header_nodes(
             continue;
         };
         debug_assert_eq!(action.id, id);
-        nodes.push(node(
+        let mut interaction = node(
             id,
             action.rect,
             Role::Button,
@@ -42,7 +47,9 @@ pub(super) fn append_header_nodes(
             vec![Action::Click, Action::Focus],
             next_order(focus_order),
             CursorHint::Pointer,
-        ));
+        );
+        interaction.toggled = Some(action.selected.into());
+        nodes.push(interaction);
     }
 }
 
