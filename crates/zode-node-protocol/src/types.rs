@@ -415,7 +415,8 @@ pub struct AgentEvent {
     pub session: SessionLocator,
     pub turn_id: TurnId,
 
-    /// A monotonically increasing sequence number within this turn.
+    /// A monotonically increasing sequence number for this `SessionLocator`
+    /// across all of its turns.
     pub sequence: u64,
 
     #[serde(flatten)]
