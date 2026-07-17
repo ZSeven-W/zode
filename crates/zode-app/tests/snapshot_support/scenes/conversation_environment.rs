@@ -51,8 +51,21 @@ pub fn conversation_environment_scene(
                 message: "GitHub Actions 三平台快照正在等待最终 golden".into(),
             },
             TranscriptItem::AssistantText(
-                "当前工作区有 2 个文件变更，分支与比较范围已经投影到右侧。".into(),
+                concat!(
+                    "当前工作区有 2 个文件变更，分支与比较范围已经投影到右侧。\n\n",
+                    "- 变更：2 个文件\n",
+                    "- 分支：codex/zode-jian-desktop\n",
+                    "- 后台：1 个确定性离屏渲染"
+                )
+                .into(),
             ),
+            TranscriptItem::FileArtifact(FileArtifact {
+                id: "environment-scene".into(),
+                path: "crates/zode-app/tests/snapshot_support/scenes/conversation_environment.rs"
+                    .into(),
+                summary: "补齐环境场景的会话与检查器密度".into(),
+                change_summary: Some("+58 -4".into()),
+            }),
             TranscriptItem::GoalProgress(GoalProgress {
                 id: "environment-goal".into(),
                 title: "完成 reference-first 视觉重构".into(),

@@ -1,6 +1,6 @@
 use zode_app_model::{
-    ActivityEntry, AttachmentMetadata, FileArtifact, GoalProgress, SecondaryPane, ShellRoute,
-    ThemePreference, TranscriptItem,
+    ActivityEntry, AttachmentMetadata, EnvironmentEntry, FileArtifact, GoalProgress, LoadState,
+    SecondaryPane, ShellRoute, ThemePreference, TranscriptItem,
 };
 use zode_node_protocol::{ToolCall, ToolStatus};
 
@@ -98,6 +98,29 @@ pub fn conversation_artifacts_scene(theme: ThemePreference, viewport_width: u32)
         ],
         true,
     );
+    let session = state
+        .current_session
+        .clone()
+        .expect("artifact scene has a session");
+    let presentation = state
+        .presentation
+        .sessions
+        .get_mut(&session)
+        .expect("artifact scene has presentation state");
+    let context = match &mut presentation.context {
+        LoadState::Ready(context) => context,
+        _ => panic!("artifact scene starts with loaded context"),
+    };
+    context.subagents = vec![EnvironmentEntry {
+        id: "artifact-visual-audit".into(),
+        label: "视觉完成度审查".into(),
+        value: Some("已完成".into()),
+    }];
+    context.background_processes = vec![EnvironmentEntry {
+        id: "artifact-snapshot-render".into(),
+        label: "参考场景渲染".into(),
+        value: Some("进行中".into()),
+    }];
     state.composer.attachments = vec![composer_attachment];
     state.composer.draft = "继续检查六张完整画布的文字对齐和视觉密度".into();
     state.presentation.route = ShellRoute::Conversation;
