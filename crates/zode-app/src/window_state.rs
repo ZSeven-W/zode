@@ -144,6 +144,7 @@ pub struct WindowState {
     pub safe_area_insets: Insets,
     pub primary_sidebar_resize_active: bool,
     pub secondary_sidebar_resize_active: bool,
+    pub snapshot_scroll_only_invalid: bool,
     pub dirty: bool,
 }
 
@@ -157,6 +158,7 @@ impl WindowState {
             safe_area_insets: Insets::ZERO,
             primary_sidebar_resize_active: false,
             secondary_sidebar_resize_active: false,
+            snapshot_scroll_only_invalid: false,
             dirty: true,
         }
     }

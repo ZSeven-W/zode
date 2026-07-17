@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use jian_core::text_input::TextInputState;
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout, TextMetrics};
 
@@ -14,14 +16,22 @@ pub(super) fn cursor_area(
     if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
         return None;
     }
-    let mut caret_state = input.clone();
-    caret_state.set_caret(input.caret(), 0);
+    let caret_state = caret_probe_input(input);
     let mut probe = CaretProbe {
         metrics,
         caret: None,
     };
-    text_area(&caret_state, true).paint(&mut probe, text_area_rect(rect), &theme.tokens);
+    text_area(caret_state.as_ref(), true).paint(&mut probe, text_area_rect(rect), &theme.tokens);
     probe.caret
+}
+
+fn caret_probe_input(input: &TextInputState) -> Cow<'_, TextInputState> {
+    if input.highlight_range().is_none() {
+        return Cow::Borrowed(input);
+    }
+    let mut state = input.clone();
+    state.set_caret(input.caret(), 0);
+    Cow::Owned(state)
 }
 
 struct CaretProbe<'a> {
@@ -81,5 +91,30 @@ impl Painter for CaretProbe<'_> {
     ) -> TextMetrics {
         self.metrics
             .measure_text_metrics_family_styled(text, font_size, family, weight, italic)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caret_probe_borrows_the_common_collapsed_input() {
+        let input = TextInputState::with_text("中文 draft");
+
+        assert!(matches!(caret_probe_input(&input), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn caret_probe_collapses_a_copied_selection_without_mutating_the_input() {
+        let mut input = TextInputState::with_text("selected");
+        input.select_all();
+
+        let Cow::Owned(probe) = caret_probe_input(&input) else {
+            panic!("selected input should use an isolated caret probe");
+        };
+        assert_eq!(probe.caret(), input.caret());
+        assert!(probe.highlight_range().is_none());
+        assert_eq!(input.highlight_range(), Some((0, "selected".len())));
     }
 }

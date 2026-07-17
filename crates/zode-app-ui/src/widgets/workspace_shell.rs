@@ -241,7 +241,6 @@ impl WorkspaceShell {
         session_rename_input: Option<&TextInputState>,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
-        let snapshot = snapshot.clone();
         let geometry = snapshot.layout;
         painter.begin_frame();
         WindowChrome::paint(painter, geometry.viewport, &geometry, theme);
@@ -279,7 +278,7 @@ impl WorkspaceShell {
             ShellRoute::Settings(_) => {
                 let workspace = SettingsPanel::active_workspace_uri(state);
                 SettingsPanel::paint_page_with_hovered(
-                    painter, &snapshot, state, workspace, hovered, theme,
+                    painter, snapshot, state, workspace, hovered, theme,
                 );
             }
             ShellRoute::Integrations(_) => {
@@ -334,7 +333,7 @@ impl WorkspaceShell {
                     TextInputState::with_text(state.composer.branch_picker.query.clone());
                 paint_conversation(
                     painter,
-                    &snapshot,
+                    snapshot,
                     state,
                     ConversationPaintContext {
                         composer_input,

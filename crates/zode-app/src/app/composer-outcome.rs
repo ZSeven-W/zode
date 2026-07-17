@@ -51,3 +51,35 @@ pub(crate) fn project_composer_outcome(state: &mut ZodeAppState, outcome: &Compo
         | ComposerOutcome::SetSandbox(_) => {}
     }
 }
+
+/// Mirrors the controller's committed text into presentation state while
+/// retaining the draft allocation across keystrokes and ignoring preedit-only
+/// updates that leave the committed text unchanged.
+pub(crate) fn sync_draft(state: &mut ZodeAppState, text: &str) -> bool {
+    if state.composer.draft == text {
+        return false;
+    }
+    state.composer.draft.clear();
+    state.composer.draft.push_str(text);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn draft_sync_skips_unchanged_preedit_text_and_reuses_storage_for_commits() {
+        let mut state = zode_app_model::demo_state();
+        state.composer.draft = String::with_capacity(64);
+        state.composer.draft.push_str("existing");
+        let capacity = state.composer.draft.capacity();
+
+        assert!(!sync_draft(&mut state, "existing"));
+        assert_eq!(state.composer.draft.capacity(), capacity);
+
+        assert!(sync_draft(&mut state, "committed"));
+        assert_eq!(state.composer.draft, "committed");
+        assert_eq!(state.composer.draft.capacity(), capacity);
+    }
+}

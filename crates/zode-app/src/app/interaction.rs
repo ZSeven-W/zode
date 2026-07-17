@@ -19,7 +19,7 @@ use super::{
 use crate::{
     accessibility_host::AccessibilityBridge,
     clipboard::{execute_clipboard_command, paste_from_clipboard},
-    cursor::{cursor_hint_at, cursor_icon_for_hint},
+    cursor::cursor_hint_for_hit,
     event_map::{is_paste_shortcut, terminal_shortcut_command},
     input_dispatch::{
         dispatch_key, ime_allowed_for_focus, settings_scroll_delta_for_action,
@@ -44,7 +44,7 @@ pub(super) use routing::normalize_conversation_route;
 
 #[path = "composer-outcome.rs"]
 mod composer_outcome;
-pub(super) use composer_outcome::project_composer_outcome;
+pub(super) use composer_outcome::{project_composer_outcome, sync_draft};
 
 impl DesktopApp {
     pub(super) fn enqueue_command(&mut self, command: AppCommand) {
@@ -180,6 +180,7 @@ impl DesktopApp {
             }
             UnifiedInputEvent::Pointer(event) => self.handle_pointer_event(event),
             UnifiedInputEvent::Wheel(event) => {
+                self.ensure_scroll_geometry_snapshot();
                 let multiplier = match event.mode {
                     WheelDeltaMode::Line => 20.0,
                     WheelDeltaMode::Pixel => 1.0,
@@ -221,7 +222,7 @@ impl DesktopApp {
                         if reduce_transcript_command(&mut self.app_state, command)
                             == TranscriptCommandOutcome::Applied
                         {
-                            self.rebuild_frame_snapshot();
+                            self.invalidate_frame_snapshot_for_scroll();
                             self.request_redraw();
                         }
                     }
@@ -230,6 +231,7 @@ impl DesktopApp {
                 }
             }
             UnifiedInputEvent::Touch(event) => {
+                self.ensure_scroll_geometry_snapshot();
                 if self.handle_integrations_touch(event) {
                     return;
                 }
@@ -342,6 +344,7 @@ impl DesktopApp {
     }
 
     pub(super) fn set_focused_widget(&mut self, focused: Option<WidgetId>) {
+        self.ensure_frame_snapshot();
         let focused = focused.filter(|id| self.frame_snapshot.node(*id).is_some());
         if self.focused_widget != focused {
             self.ime.invalidate_native();
@@ -463,6 +466,7 @@ impl DesktopApp {
             .map(AccessibilityBridge::drain_actions)
             .unwrap_or_default();
         for request in requests {
+            self.ensure_frame_snapshot();
             let id = WidgetId(request.target_node.0);
             if self.frame_snapshot.node(id).is_none() {
                 continue;
@@ -532,8 +536,10 @@ impl DesktopApp {
     }
 
     pub(super) fn sync_window_focus(&mut self, focused: bool) {
+        self.ensure_frame_snapshot();
         if !focused {
             self.cancel_primary_sidebar_resize();
+            self.cancel_secondary_sidebar_resize();
         }
         if self.window_focused != focused {
             self.ime.invalidate_native();
@@ -553,6 +559,7 @@ impl DesktopApp {
 
     pub(super) fn handle_pointer_event(&mut self, event: PointerEvent) {
         self.window_state.cursor_logical = event.position;
+        self.ensure_frame_snapshot();
         if self.handle_primary_sidebar_resize_pointer(event) {
             return;
         }
@@ -561,17 +568,13 @@ impl DesktopApp {
         }
         if event.kind == PointerEventKind::Move {
             let hovered = self.frame_snapshot.hit_test(event.position);
+            let cursor = cursor_hint_for_hit(&self.frame_snapshot, hovered);
             if self.hovered_widget != hovered {
                 self.hovered_widget = hovered;
                 self.request_sidebar_hover_context(hovered);
                 self.request_redraw();
             }
-            if let Some(window) = self.window.as_ref() {
-                window.set_cursor(cursor_icon_for_hint(cursor_hint_at(
-                    &self.frame_snapshot,
-                    event.position,
-                )));
-            }
+            self.update_native_cursor(cursor);
             if self.app_state.terminal_surface_visible()
                 && self.terminal_controller.pointer_move(
                     self.terminal_rect(),
@@ -673,6 +676,7 @@ impl DesktopApp {
     }
 
     fn handle_key_event(&mut self, event: KeyEvent) {
+        self.ensure_frame_snapshot();
         if self.handle_open_with_key(&event) {
             return;
         }

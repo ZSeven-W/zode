@@ -1,4 +1,3 @@
-use winit::window::CursorIcon;
 use zode_app_model::{reduce_presentation_command, AppCommand, PresentationCommandOutcome};
 use zode_app_ui::{
     constrained_primary_sidebar_width, PointerButton, PointerEvent, PointerEventKind,
@@ -6,6 +5,7 @@ use zode_app_ui::{
 };
 
 use super::DesktopApp;
+use crate::cursor::CursorHint;
 
 const PRIMARY_SIDEBAR_RESIZE_HIT_W: f32 = 8.0;
 
@@ -50,17 +50,16 @@ impl DesktopApp {
         }
     }
 
-    fn set_primary_sidebar_resize_cursor(&self, resize: bool) {
-        if let Some(window) = self.window.as_ref() {
-            window.set_cursor(if resize {
-                CursorIcon::EwResize
-            } else {
-                CursorIcon::Default
-            });
-        }
+    fn set_primary_sidebar_resize_cursor(&mut self, resize: bool) {
+        self.update_native_cursor(if resize {
+            CursorHint::ResizeEw
+        } else {
+            CursorHint::Default
+        });
     }
 
     pub(super) fn cancel_primary_sidebar_resize(&mut self) {
+        self.ensure_frame_snapshot();
         if finish_primary_sidebar_resize(&mut self.window_state.primary_sidebar_resize_active) {
             self.persist_ui_state();
         }

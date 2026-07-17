@@ -24,7 +24,7 @@ impl DesktopApp {
         if let Some(command) = ProjectSidebar::scroll_command(sidebar, &self.app_state, delta) {
             if reduce_navigation_command(&mut self.app_state, command) == NavigationOutcome::Applied
             {
-                self.rebuild_frame_snapshot();
+                self.invalidate_frame_snapshot_for_scroll();
                 self.request_redraw();
             }
         }
@@ -74,7 +74,7 @@ impl DesktopApp {
         ) {
             if reduce_navigation_command(&mut self.app_state, command) == NavigationOutcome::Applied
             {
-                self.rebuild_frame_snapshot();
+                self.invalidate_frame_snapshot_for_scroll();
                 self.request_redraw();
             }
         }

@@ -6,9 +6,9 @@ use winit::{
     window::Theme as WinitTheme,
 };
 use zode_app::event_map::{
-    composer_outcome_command, is_paste_shortcut_for, map_ime, map_ime_input, map_key, map_keyboard,
-    map_pointer_button, map_pointer_move, map_system_theme, map_touch, map_wheel, route_key_event,
-    terminal_shortcut_command, InputRoute, ShortcutPlatform,
+    composer_outcome_command, is_paste_shortcut_for, map_ime, map_ime_input, map_ime_input_owned,
+    map_key, map_keyboard, map_pointer_button, map_pointer_move, map_system_theme, map_touch,
+    map_wheel, route_key_event, terminal_shortcut_command, InputRoute, ShortcutPlatform,
 };
 use zode_app::input_dispatch::{
     ime_allowed_for_focus, settings_scroll_delta_for_action, settings_scroll_delta_for_key,
@@ -303,6 +303,10 @@ fn keyboard_and_ime_mappers_also_emit_unified_events() {
     );
     assert_eq!(
         map_ime_input(&Ime::Commit("中文".into())),
+        UnifiedInputEvent::Ime(ImeEvent::Commit("中文".into())),
+    );
+    assert_eq!(
+        map_ime_input_owned(Ime::Commit("中文".into())),
         UnifiedInputEvent::Ime(ImeEvent::Commit("中文".into())),
     );
 }

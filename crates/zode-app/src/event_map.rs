@@ -96,6 +96,18 @@ pub fn map_ime_input(event: &Ime) -> UnifiedInputEvent {
     UnifiedInputEvent::Ime(map_ime(event))
 }
 
+pub fn map_ime_input_owned(event: Ime) -> UnifiedInputEvent {
+    UnifiedInputEvent::Ime(match event {
+        Ime::Enabled => ImeEvent::Start,
+        Ime::Preedit(text, cursor) => ImeEvent::Update {
+            text,
+            cursor: cursor.map(|(_, end)| end),
+        },
+        Ime::Commit(text) => ImeEvent::Commit(text),
+        Ime::Disabled => ImeEvent::End,
+    })
+}
+
 pub fn route_key_event(event: &KeyEvent, terminal_focused: bool) -> InputRoute {
     if event.pressed && event.key == Key::Tab {
         if event.modifiers.contains(Modifiers::SHIFT) {

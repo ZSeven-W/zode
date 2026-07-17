@@ -42,6 +42,7 @@ impl DesktopApp {
         );
         window.set_ime_allowed(false);
         self.ime.invalidate_native();
+        self.cursor.invalidate();
         self.app_state.host.system_theme = map_system_theme(window.theme());
         let size = window.inner_size();
         self.window_state = WindowState::new(size.width, size.height, window.scale_factor());
@@ -73,15 +74,10 @@ impl DesktopApp {
     pub(super) fn redraw(&mut self) -> Result<(), String> {
         // Layout-affecting paths explicitly invalidate the immutable snapshot.
         // Paint-only wakes (hover, focus, expose) keep using the last valid tree.
-        if !self.frame_snapshot_valid {
-            self.rebuild_frame_snapshot();
-        }
+        self.ensure_frame_snapshot();
         if self.terminal_grid_resize_pending {
             self.terminal_grid_resize_pending = false;
             self.resize_terminal_grid();
-            if !self.frame_snapshot_valid {
-                self.rebuild_frame_snapshot();
-            }
         }
         if self.window_metrics_update_pending {
             self.window_metrics_update_pending = false;
@@ -252,12 +248,48 @@ impl DesktopApp {
         self.hovered_widget = snapshot.hit_test(self.window_state.cursor_logical);
         self.frame_snapshot = snapshot;
         self.frame_snapshot_valid = true;
+        self.window_state.snapshot_scroll_only_invalid = false;
         self.accessibility_tree_dirty = true;
         self.ime.mark_area_dirty();
     }
 
+    pub(super) fn ensure_frame_snapshot(&mut self) {
+        if snapshot_requires_rebuild(
+            self.frame_snapshot_valid,
+            self.window_state.snapshot_scroll_only_invalid,
+            SnapshotUse::Current,
+        ) {
+            self.rebuild_frame_snapshot();
+        }
+    }
+
+    pub(super) fn ensure_scroll_geometry_snapshot(&mut self) {
+        if snapshot_requires_rebuild(
+            self.frame_snapshot_valid,
+            self.window_state.snapshot_scroll_only_invalid,
+            SnapshotUse::ScrollGeometry,
+        ) {
+            self.rebuild_frame_snapshot();
+        }
+    }
+
     pub(super) fn invalidate_frame_snapshot(&mut self) {
         self.frame_snapshot_valid = false;
+        self.window_state.snapshot_scroll_only_invalid = false;
+        self.accessibility_tree_dirty = true;
+        self.ime.mark_area_dirty();
+        self.ime.invalidate_native();
+    }
+
+    /// Scroll offsets move interaction nodes within an otherwise stable shell
+    /// viewport. Keep the last viewport geometry until the next redraw so a
+    /// burst of trackpad events results in one snapshot rebuild.
+    pub(super) fn invalidate_frame_snapshot_for_scroll(&mut self) {
+        if !self.frame_snapshot_valid {
+            return;
+        }
+        self.frame_snapshot_valid = false;
+        self.window_state.snapshot_scroll_only_invalid = true;
         self.accessibility_tree_dirty = true;
         self.ime.mark_area_dirty();
         self.ime.invalidate_native();
@@ -334,6 +366,15 @@ impl DesktopApp {
         }
     }
 
+    pub(super) fn update_native_cursor(&mut self, hint: crate::cursor::CursorHint) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        if let Some(icon) = self.cursor.changed_icon(hint) {
+            window.set_cursor(icon);
+        }
+    }
+
     pub(super) fn update_accessibility_window_bounds(&mut self) {
         if let (Some(a11y), Some(window)) = (self.a11y.as_mut(), self.window.as_ref()) {
             a11y.update_window_bounds(window);
@@ -353,11 +394,21 @@ fn update_composer_snapshot_value(snapshot: &mut WorkspaceSnapshot, value: &str)
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotUse {
+    Current,
+    ScrollGeometry,
+}
+
+fn snapshot_requires_rebuild(valid: bool, scroll_only_invalid: bool, use_: SnapshotUse) -> bool {
+    !valid && !(scroll_only_invalid && use_ == SnapshotUse::ScrollGeometry)
+}
+
 #[cfg(test)]
 mod tests {
     use zode_app_ui::{Insets, WorkspaceSnapshot, COMPOSER_ID};
 
-    use super::update_composer_snapshot_value;
+    use super::{snapshot_requires_rebuild, update_composer_snapshot_value, SnapshotUse};
 
     #[test]
     fn composer_value_refresh_preserves_layout_and_hit_geometry() {
@@ -377,5 +428,25 @@ mod tests {
         let composer = snapshot.node(COMPOSER_ID).unwrap();
         assert_eq!(composer.rect, composer_rect);
         assert_eq!(composer.value.as_deref(), Some("incremental draft"));
+    }
+
+    #[test]
+    fn scroll_geometry_can_coalesce_but_interaction_requires_current_nodes() {
+        assert!(!snapshot_requires_rebuild(
+            false,
+            true,
+            SnapshotUse::ScrollGeometry
+        ));
+        assert!(snapshot_requires_rebuild(false, true, SnapshotUse::Current));
+        assert!(snapshot_requires_rebuild(
+            false,
+            false,
+            SnapshotUse::ScrollGeometry
+        ));
+        assert!(!snapshot_requires_rebuild(
+            true,
+            false,
+            SnapshotUse::Current
+        ));
     }
 }

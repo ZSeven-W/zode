@@ -1,7 +1,11 @@
 use jian_widgets::Rect;
-use zode_app_model::{reduce_terminal_command, AppCommand, SecondaryPane, TerminalCommandOutcome};
+use zode_app_model::{
+    reduce_terminal_command, AppCommand, SecondaryPane, TerminalCommandOutcome, TerminalState,
+    ZodeAppState,
+};
 use zode_app_ui::{
-    KeyEvent, TerminalPanel, TerminalPanelController, TerminalSecondaryPanel, TERMINAL_ID,
+    KeyEvent, TerminalGrid, TerminalPanel, TerminalPanelController, TerminalSecondaryPanel,
+    WorkspaceLayout, TERMINAL_ID,
 };
 use zode_node_protocol::NodeCapability;
 
@@ -10,11 +14,9 @@ use crate::event_map::terminal_shortcut_command;
 
 impl DesktopApp {
     pub(super) fn apply_terminal_command(&mut self, command: AppCommand) {
-        let invalidates_snapshot = matches!(
-            &command,
-            AppCommand::SetTerminalScroll { .. } | AppCommand::CloseTerminal(_)
-        );
-        let redraw_immediately = !matches!(
+        let scrolls_snapshot = matches!(&command, AppCommand::SetTerminalScroll { .. });
+        let mut invalidates_snapshot = matches!(&command, AppCommand::CloseTerminal(_));
+        let mut redraw_immediately = !matches!(
             &command,
             AppCommand::WriteTerminal { .. } | AppCommand::ResizeTerminal { .. }
         );
@@ -46,15 +48,21 @@ impl DesktopApp {
                         }
                         _ => Ok(()),
                     };
-                    if let Err(error) = result {
-                        self.app_state.terminal.unavailable_reason = Some(error.to_string());
+                    if record_terminal_effect_failure(
+                        &mut self.app_state.terminal,
+                        result.err().map(|error| error.to_string()),
+                    ) {
+                        invalidates_snapshot = true;
+                        redraw_immediately = true;
                     }
                 }
                 TerminalCommandOutcome::Applied => {}
                 TerminalCommandOutcome::Ignored => return,
             }
         }
-        if invalidates_snapshot {
+        if scrolls_snapshot {
+            self.invalidate_frame_snapshot_for_scroll();
+        } else if invalidates_snapshot {
             self.invalidate_frame_snapshot();
         }
         if redraw_immediately {
@@ -166,21 +174,7 @@ impl DesktopApp {
     }
 
     pub(super) fn terminal_rect(&self) -> Rect {
-        let geometry = self.frame_snapshot.layout;
-        if self.app_state.presentation.secondary_pane == Some(SecondaryPane::Terminal) {
-            let panel = if geometry.review_panel.size.x > 0.0 {
-                geometry.review_panel
-            } else {
-                geometry.primary_surface
-            };
-            return TerminalSecondaryPanel::layout(panel).content;
-        }
-        Rect::xywh(
-            geometry.transcript.origin.x,
-            geometry.transcript.origin.y,
-            geometry.transcript.size.x,
-            geometry.composer.origin.y + geometry.composer.size.y - geometry.transcript.origin.y,
-        )
+        terminal_rect_for_layout(&self.app_state, self.frame_snapshot.layout)
     }
 
     pub(super) fn handle_terminal_key(&mut self, event: &KeyEvent) -> bool {
@@ -208,17 +202,13 @@ impl DesktopApp {
 
     pub(super) fn resize_terminal_grid(&mut self) {
         let rect = self.terminal_rect();
-        let cols = ((rect.size.x - 16.0).max(8.0) / 8.0).floor() as usize;
-        let rows = (rect.size.y.max(20.0) / 20.0).floor() as usize;
-        if self.terminal_grid.size() == (cols, rows) {
+        let Some((cols, rows)) = resize_terminal_grid_to_rect(
+            &mut self.terminal_grid,
+            &mut self.app_state.terminal,
+            rect,
+        ) else {
             return;
-        }
-        self.terminal_grid.resize(cols, rows);
-        self.invalidate_frame_snapshot();
-        if self.app_state.terminal.follow_tail {
-            self.app_state.terminal.scroll_offset =
-                TerminalPanel::tail_offset(self.terminal_grid.line_count(), rect.size.y);
-        }
+        };
         if let Some(id) = self.app_state.terminal.active_id {
             self.apply_terminal_command(AppCommand::ResizeTerminal {
                 id,
@@ -227,6 +217,48 @@ impl DesktopApp {
             });
         }
     }
+}
+
+fn terminal_rect_for_layout(state: &ZodeAppState, geometry: WorkspaceLayout) -> Rect {
+    if state.presentation.secondary_pane == Some(SecondaryPane::Terminal) {
+        let panel = if geometry.review_panel.size.x > 0.0 {
+            geometry.review_panel
+        } else {
+            geometry.primary_surface
+        };
+        return TerminalSecondaryPanel::layout(panel).content;
+    }
+    Rect::xywh(
+        geometry.transcript.origin.x,
+        geometry.transcript.origin.y,
+        geometry.transcript.size.x,
+        geometry.composer.origin.y + geometry.composer.size.y - geometry.transcript.origin.y,
+    )
+}
+
+fn resize_terminal_grid_to_rect(
+    grid: &mut TerminalGrid,
+    terminal: &mut TerminalState,
+    rect: Rect,
+) -> Option<(usize, usize)> {
+    let cols = ((rect.size.x - 16.0).max(8.0) / 8.0).floor() as usize;
+    let rows = (rect.size.y.max(20.0) / 20.0).floor() as usize;
+    if grid.size() == (cols, rows) {
+        return None;
+    }
+    grid.resize(cols, rows);
+    if terminal.follow_tail {
+        terminal.scroll_offset = TerminalPanel::tail_offset(grid.line_count(), rect.size.y);
+    }
+    Some((cols, rows))
+}
+
+fn record_terminal_effect_failure(terminal: &mut TerminalState, error: Option<String>) -> bool {
+    let Some(error) = error else {
+        return false;
+    };
+    terminal.unavailable_reason = Some(error);
+    true
 }
 
 fn terminal_workspace(
@@ -242,8 +274,12 @@ fn terminal_workspace(
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_workspace;
-    use zode_app_model::{demo_state, ProjectState, TranscriptState};
+    use super::{
+        record_terminal_effect_failure, resize_terminal_grid_to_rect, terminal_rect_for_layout,
+        terminal_workspace,
+    };
+    use zode_app_model::{demo_state, ProjectState, SecondaryPane, TranscriptState};
+    use zode_app_ui::{Insets, TerminalGrid, TerminalPanel, WorkspaceSnapshot, TERMINAL_ID};
     use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
     #[test]
@@ -280,5 +316,78 @@ mod tests {
         });
         state.active_workspace = Some(project.clone());
         assert_eq!(terminal_workspace(&state), Some(&project));
+    }
+
+    #[test]
+    fn terminal_resize_updates_paint_state_without_changing_the_interaction_snapshot() {
+        let mut state = demo_state();
+        state.presentation.secondary_pane = Some(SecondaryPane::Terminal);
+        state.presentation.secondary_sidebar_open = true;
+        state.terminal.follow_tail = true;
+        let before = WorkspaceSnapshot::build(&state, 1_000.0, 700.0, Insets::ZERO);
+        let rect = terminal_rect_for_layout(&state, before.layout);
+        assert_eq!(
+            rect,
+            jian_widgets::Rect::xywh(
+                before.layout.transcript.origin.x,
+                before.layout.transcript.origin.y,
+                before.layout.transcript.size.x,
+                before.layout.composer.origin.y + before.layout.composer.size.y
+                    - before.layout.transcript.origin.y,
+            )
+        );
+
+        let mut grid = TerminalGrid::new(8, 2);
+        for _ in 0..80 {
+            grid.feed(b"line\r\n");
+        }
+        let resized = resize_terminal_grid_to_rect(&mut grid, &mut state.terminal, rect)
+            .expect("resized viewport changes terminal dimensions");
+        let expected = (
+            ((rect.size.x - 16.0).max(8.0) / 8.0).floor() as usize,
+            (rect.size.y.max(20.0) / 20.0).floor() as usize,
+        );
+        assert_eq!(resized, expected);
+        assert_eq!(grid.size(), expected);
+        assert_eq!(
+            state.terminal.scroll_offset,
+            TerminalPanel::tail_offset(grid.line_count(), rect.size.y)
+        );
+        assert!(state.terminal.scroll_offset > 0.0);
+
+        let after = WorkspaceSnapshot::build(&state, 1_000.0, 700.0, Insets::ZERO);
+        assert_eq!(after, before);
+        assert_eq!(
+            resize_terminal_grid_to_rect(&mut grid, &mut state.terminal, rect),
+            None
+        );
+    }
+
+    #[test]
+    fn terminal_effect_failure_changes_the_accessible_terminal_snapshot() {
+        let mut state = demo_state();
+        state.presentation.secondary_pane = Some(SecondaryPane::Terminal);
+        state.presentation.secondary_sidebar_open = true;
+        let before = WorkspaceSnapshot::build(&state, 1_000.0, 700.0, Insets::ZERO);
+        assert_eq!(
+            before
+                .node(TERMINAL_ID)
+                .and_then(|node| node.value.as_deref()),
+            None
+        );
+
+        assert!(record_terminal_effect_failure(
+            &mut state.terminal,
+            Some("resize failed".into()),
+        ));
+        let after = WorkspaceSnapshot::build(&state, 1_000.0, 700.0, Insets::ZERO);
+        assert_eq!(
+            after
+                .node(TERMINAL_ID)
+                .and_then(|node| node.value.as_deref()),
+            Some("resize failed")
+        );
+        assert_ne!(after, before);
+        assert!(!record_terminal_effect_failure(&mut state.terminal, None));
     }
 }

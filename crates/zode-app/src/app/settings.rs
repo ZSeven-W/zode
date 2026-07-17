@@ -148,7 +148,7 @@ impl DesktopApp {
         );
         if reduce_settings_command(&mut self.app_state, command) == SettingsCommandOutcome::Applied
         {
-            self.rebuild_frame_snapshot();
+            self.invalidate_frame_snapshot_for_scroll();
             self.request_redraw();
         }
     }

@@ -1,4 +1,3 @@
-use winit::window::CursorIcon;
 use zode_app_model::{
     reduce_presentation_command, AppCommand, LoadState, PresentationCommandOutcome, PreviewState,
     SecondaryPane, ShellRoute, ZodeAppState,
@@ -10,7 +9,7 @@ use zode_app_ui::{
 use zode_node_protocol::SessionLocator;
 
 use super::DesktopApp;
-use crate::presentation_bridge::PresentationQuery;
+use crate::{cursor::CursorHint, presentation_bridge::PresentationQuery};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PresentationRefresh {
@@ -278,14 +277,19 @@ impl DesktopApp {
         }
     }
 
-    fn set_secondary_sidebar_resize_cursor(&self, resize: bool) {
-        if let Some(window) = self.window.as_ref() {
-            window.set_cursor(if resize {
-                CursorIcon::EwResize
-            } else {
-                CursorIcon::Default
-            });
+    fn set_secondary_sidebar_resize_cursor(&mut self, resize: bool) {
+        self.update_native_cursor(if resize {
+            CursorHint::ResizeEw
+        } else {
+            CursorHint::Default
+        });
+    }
+
+    pub(super) fn cancel_secondary_sidebar_resize(&mut self) {
+        if finish_secondary_sidebar_resize(&mut self.window_state.secondary_sidebar_resize_active) {
+            self.persist_ui_state();
         }
+        self.set_secondary_sidebar_resize_cursor(false);
     }
 
     pub(super) fn request_presentation_refresh(&mut self, refresh: PresentationRefresh) {
@@ -382,6 +386,10 @@ fn secondary_sidebar_width_at_pointer(layout: WorkspaceLayout, pointer_x: f32) -
     width.clamp(0.0, f32::from(u16::MAX)) as u16
 }
 
+fn finish_secondary_sidebar_resize(active: &mut bool) -> bool {
+    std::mem::replace(active, false)
+}
+
 #[cfg(test)]
 mod tests {
     use zode_app_model::{
@@ -391,8 +399,8 @@ mod tests {
     use zode_node_protocol::{SessionLocator, ThreadStatus, ThreadSummary, WorkspaceUri};
 
     use super::{
-        mark_presentation_query_failed, presentation_queries_for_refresh,
-        reduce_local_presentation_command, PresentationRefresh,
+        finish_secondary_sidebar_resize, mark_presentation_query_failed,
+        presentation_queries_for_refresh, reduce_local_presentation_command, PresentationRefresh,
     };
     use crate::presentation_bridge::PresentationQuery;
 
@@ -441,6 +449,14 @@ mod tests {
             AppCommand::SetModel("model".into()),
         )
         .is_none());
+    }
+
+    #[test]
+    fn cursor_exit_or_focus_loss_clears_the_secondary_drag_latch() {
+        let mut active = true;
+        assert!(finish_secondary_sidebar_resize(&mut active));
+        assert!(!active);
+        assert!(!finish_secondary_sidebar_resize(&mut active));
     }
 
     #[test]

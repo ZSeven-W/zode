@@ -24,7 +24,7 @@ use crate::{
     command_bridge::CommandBridge,
     event_bridge::AgentEventBridge,
     event_map::{
-        composer_outcome_command, map_ime_input, map_keyboard, map_pointer_button,
+        composer_outcome_command, map_ime_input_owned, map_keyboard, map_pointer_button,
         map_pointer_move, map_touch, map_wheel,
     },
     presentation_bridge::PresentationQueryBridge,
@@ -113,6 +113,7 @@ pub struct DesktopApp {
     frame_snapshot_valid: bool,
     accessibility_tree_dirty: bool,
     ime: crate::ime::ImeState,
+    cursor: crate::cursor::NativeCursorState,
     terminal_grid_resize_pending: bool,
     window_metrics_update_pending: bool,
     focused_widget: Option<WidgetId>,
@@ -278,6 +279,7 @@ impl DesktopApp {
             frame_snapshot_valid: true,
             accessibility_tree_dirty: true,
             ime: crate::ime::ImeState::default(),
+            cursor: crate::cursor::NativeCursorState::default(),
             terminal_grid_resize_pending: false,
             window_metrics_update_pending: false,
             focused_widget,
@@ -347,8 +349,7 @@ impl DesktopApp {
     fn apply_composer_outcome(&mut self, mut outcome: zode_app_ui::ComposerOutcome) {
         let incremental_edit = matches!(outcome, zode_app_ui::ComposerOutcome::Edited);
         let ignored = matches!(outcome, zode_app_ui::ComposerOutcome::Ignored);
-        let draft_changed = self.app_state.composer.draft != self.composer.text();
-        self.app_state.composer.draft = self.composer.text().to_owned();
+        let draft_changed = interaction::sync_draft(&mut self.app_state, self.composer.text());
 
         if self.redirect_unconfigured_submission(&outcome) {
             return;
@@ -611,7 +612,7 @@ impl ApplicationHandler<AppWake> for DesktopApp {
                 }
             }
             WindowEvent::Ime(event) => {
-                self.handle_unified_input(map_ime_input(&event));
+                self.handle_unified_input(map_ime_input_owned(event));
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.handle_unified_input(map_pointer_move(
@@ -621,6 +622,7 @@ impl ApplicationHandler<AppWake> for DesktopApp {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cancel_primary_sidebar_resize();
+                self.cancel_secondary_sidebar_resize();
                 self.hovered_widget = None;
                 self.request_redraw();
             }
