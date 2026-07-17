@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Zode
+GenericName=AI coding workspace
+Comment=Local AI coding workspace
+Exec=zode-app
+Icon=dev.zseven.zode
+Terminal=false
+Categories=Development;Utility;
+Keywords=AI;Code;Developer;Terminal;
+StartupNotify=true
+StartupWMClass=Zode

@@ -272,3 +272,72 @@ jobs:
           fail_on_unmatched_files: true
           # Title/body/prerelease are set by the create-release job (once);
           # this step ONLY uploads assets to that existing release.
+
+  build-desktop:
+    needs: create-release
+    name: desktop-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - platform: linux-x64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - platform: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-release-${{ matrix.target }}
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libfontconfig1-dev libfreetype6-dev
+      - name: Install NASM (x64 Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+      - name: Install WiX Toolset v4
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 4.0.6
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Build native desktop package
+        shell: bash
+        run: >-
+          ./scripts/build-app-release.sh
+          --target "${{ matrix.target }}"
+          --out dist-app
+          --version "${GITHUB_REF_NAME#v}"
+      - name: Collect release assets
+        shell: bash
+        run: |
+          mkdir release-assets
+          case "${{ matrix.target }}" in
+            *-apple-darwin)
+              cp dist-app/zode-desktop-*.tar.gz release-assets/
+              ;;
+            *-pc-windows-msvc)
+              cp dist-app/zode-desktop-*.zip dist-app/zode-desktop-*.msi release-assets/
+              ;;
+            *-unknown-linux-gnu)
+              cp dist-app/zode-desktop-*.AppImage dist-app/zode-desktop-*.tar.gz release-assets/
+              ;;
+          esac
+      - name: Publish desktop assets to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          fail_on_unmatched_files: true

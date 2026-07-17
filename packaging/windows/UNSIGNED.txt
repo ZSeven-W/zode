@@ -1,0 +1,6 @@
+Zode Windows release artifacts are unsigned.
+
+This portable archive and its companion MSI do not carry an Authenticode
+signature. Verify release checksums from the official ZSeven-W/zode release
+before running them. Identity-backed signing can be added later as a separate,
+auditable release stage.

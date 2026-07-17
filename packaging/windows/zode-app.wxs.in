@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <!--
+    WiX v4 source rendered by scripts/build-app-release.sh.
+    MSI ProductVersion supports three numeric fields only, so prerelease and
+    build metadata are intentionally normalized to @@VERSION@@. Keeping
+    AllowSameVersionUpgrades enabled lets successive prereleases sharing the
+    numeric base replace one another without changing the stable UpgradeCode.
+  -->
+  <Package
+      Name="Zode"
+      Manufacturer="ZSeven-W"
+      Version="@@VERSION@@"
+      UpgradeCode="@@UPGRADE_CODE@@"
+      Language="1033"
+      Scope="perMachine">
+    <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of Zode is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="Main" Title="Zode" Level="1">
+      <ComponentRef Id="ZodeExecutable" />
+    </Feature>
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="Zode">
+        <Component Id="ZodeExecutable" Guid="*">
+          <File Id="ZodeExe" Source="@@BINARY_PATH@@" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Icon Id="ZodeIcon" SourceFile="@@ICON_PATH@@" />
+    <Property Id="ARPPRODUCTICON" Value="ZodeIcon" />
+  </Package>
+</Wix>

@@ -1,6 +1,6 @@
 use winit::{
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
-    window::{Window, WindowAttributes},
+    window::{Icon, Window, WindowAttributes},
 };
 
 use crate::window_state::{
@@ -42,6 +42,7 @@ pub fn hidden_window_attributes_for_placement(
 ) -> WindowAttributes {
     let mut attributes = Window::default_attributes()
         .with_title("Zode")
+        .with_window_icon(zode_window_icon())
         .with_min_inner_size(LogicalSize::new(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT))
         .with_visible(false);
     attributes = match placement {
@@ -73,4 +74,26 @@ pub fn hidden_window_attributes_for_placement(
         attributes = attributes.with_decorations(false);
     }
     attributes
+}
+
+fn zode_window_icon() -> Option<Icon> {
+    let image = image::load_from_memory_with_format(
+        include_bytes!("../../../assets/brand/zode-512.png"),
+        image::ImageFormat::Png,
+    )
+    .ok()?
+    .into_rgba8();
+    let (width, height) = image.dimensions();
+    Icon::from_rgba(image.into_raw(), width, height).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hidden_window_attributes;
+
+    #[test]
+    fn native_window_uses_the_zode_brand_icon() {
+        let attributes = hidden_window_attributes(None);
+        assert!(attributes.window_icon.is_some());
+    }
 }

@@ -3,18 +3,25 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      update_snapshots:
+        description: Generate platform desktop screenshot goldens as artifacts
+        required: false
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -23,9 +30,11 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test --workspace
+        env:
+          ZODE_UPDATE_SNAPSHOTS: ${{ github.event_name == 'workflow_dispatch' && inputs.update_snapshots && '1' || '0' }}
+        run: cargo test --locked --workspace
       - name: render desktop reference
         run: cargo run -p zode-app -- --render-snapshot target/zode-shell-reference.png
       - name: upload desktop reference
@@ -34,32 +43,96 @@ jobs:
           name: zode-shell-reference
           path: target/zode-shell-reference.png
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
       - uses: EmbarkStudios/cargo-deny-action@v2
-
   macos-app:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - name: verify arm64 runner
         run: test "$(uname -m)" = arm64
       - name: test desktop app
-        run: cargo test -p zode-app --all-targets
+        run: cargo test --locked -p zode-app --all-targets
       - name: build desktop app
-        run: cargo build -p zode-app
+        run: cargo build --locked -p zode-app
       - name: upload desktop app
         uses: actions/upload-artifact@v4
         with:
           name: zode-app-macos-arm64
           path: target/debug/zode-app
+
+  portable-core:
+    name: portable-core-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ios
+            os: macos-15
+            target: aarch64-apple-ios
+          - platform: android
+            os: ubuntu-24.04
+            target: aarch64-linux-android
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: portable-${{ matrix.target }}
+      - name: Check portable protocol, model, and UI crates
+        run: >-
+          cargo check --locked
+          -p zode-node-protocol -p zode-app-model -p zode-app-ui
+          --target ${{ matrix.target }}
+
+  update-snapshots:
+    if: github.event_name == 'workflow_dispatch' && inputs.update_snapshots
+    name: update-snapshots-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-24.04
+          - platform: macos
+            os: macos-15
+          - platform: windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: snapshot-${{ matrix.platform }}
+      - name: Install Linux Skia text dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+      - name: Generate platform screenshot goldens
+        env:
+          ZODE_UPDATE_SNAPSHOTS: "1"
+        run: cargo test --locked -p zode-app --test snapshots
+      - name: Upload platform screenshot goldens
+        uses: actions/upload-artifact@v4
+        with:
+          name: zode-app-snapshots-${{ matrix.platform }}
+          path: crates/zode-app/tests/snapshots/${{ matrix.platform }}/*.png
+          if-no-files-found: error
 
   sdk:
     runs-on: ubuntu-latest
