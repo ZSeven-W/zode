@@ -1,5 +1,8 @@
 use jian_widgets::{centered_text_baseline_y, Painter, Point2D, Rect, TextLayout};
+use std::collections::BTreeMap;
+
 use zode_app_model::{ShellPage, ZodeAppState};
+use zode_node_protocol::{ThreadSummary, WorkspaceUri};
 
 use crate::ZodeTheme;
 
@@ -66,6 +69,46 @@ const NAVIGATION: [SidebarItem; 6] = [
 ];
 
 pub struct ProjectSidebar;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectSessionGroup {
+    pub workspace_uri: WorkspaceUri,
+    pub sessions: Vec<ThreadSummary>,
+}
+
+pub fn group_sessions(sessions: Vec<ThreadSummary>) -> Vec<ProjectSessionGroup> {
+    let mut by_workspace: BTreeMap<WorkspaceUri, Vec<ThreadSummary>> = BTreeMap::new();
+    for session in sessions {
+        by_workspace
+            .entry(session.workspace_uri.clone())
+            .or_default()
+            .push(session);
+    }
+    let mut groups: Vec<_> = by_workspace
+        .into_iter()
+        .map(|(workspace_uri, mut sessions)| {
+            sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at_ms));
+            ProjectSessionGroup {
+                workspace_uri,
+                sessions,
+            }
+        })
+        .collect();
+    groups.sort_by(|left, right| {
+        let left_newest = left
+            .sessions
+            .first()
+            .map_or(i64::MIN, |session| session.updated_at_ms);
+        let right_newest = right
+            .sessions
+            .first()
+            .map_or(i64::MIN, |session| session.updated_at_ms);
+        right_newest
+            .cmp(&left_newest)
+            .then_with(|| left.workspace_uri.cmp(&right.workspace_uri))
+    });
+    groups
+}
 
 impl ProjectSidebar {
     pub const fn navigation_items() -> &'static [SidebarItem] {
@@ -139,22 +182,65 @@ impl ProjectSidebar {
                 600,
                 theme.tokens.muted_foreground,
             );
-            for (index, thread) in state.threads.iter().take(8).enumerate() {
+            let mut row_index = 0_usize;
+            for group in group_sessions(state.threads.clone()) {
+                let project = state
+                    .projects
+                    .iter()
+                    .find(|project| project.workspace_uri == group.workspace_uri);
+                let expanded = project.is_none_or(|project| project.expanded);
+                let available = project.is_none_or(|project| project.available);
+                let workspace_label = workspace_label(&group.workspace_uri, available);
                 draw_label(
                     painter,
-                    &thread.title,
+                    &workspace_label,
                     Rect::xywh(
                         rect.origin.x + 16.0,
-                        project_y + 28.0 + index as f32 * ROW_H,
+                        project_y + 28.0 + row_index as f32 * ROW_H,
                         rect.size.x - 32.0,
                         ROW_H,
                     ),
                     12.0,
-                    400,
+                    600,
                     theme.sidebar_foreground,
                 );
+                row_index += 1;
+                if expanded {
+                    for thread in group.sessions {
+                        if row_index >= 8 {
+                            break;
+                        }
+                        draw_label(
+                            painter,
+                            &thread.title,
+                            Rect::xywh(
+                                rect.origin.x + 28.0,
+                                project_y + 28.0 + row_index as f32 * ROW_H,
+                                rect.size.x - 44.0,
+                                ROW_H,
+                            ),
+                            12.0,
+                            400,
+                            theme.sidebar_foreground,
+                        );
+                        row_index += 1;
+                    }
+                }
+                if row_index >= 8 {
+                    break;
+                }
             }
         }
+    }
+}
+
+fn workspace_label(workspace: &WorkspaceUri, available: bool) -> String {
+    let value = workspace.as_str().trim_end_matches('/');
+    let name = value.rsplit('/').next().unwrap_or(value);
+    if available {
+        name.to_owned()
+    } else {
+        format!("{name} · unavailable")
     }
 }
 

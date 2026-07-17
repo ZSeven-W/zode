@@ -70,6 +70,7 @@ pub struct HostState {
 pub struct ProjectState {
     pub workspace_uri: WorkspaceUri,
     pub expanded: bool,
+    pub available: bool,
     pub last_opened_ms: i64,
 }
 

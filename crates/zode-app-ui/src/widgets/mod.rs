@@ -10,7 +10,9 @@ use zode_app_model::ZodeAppState;
 use crate::{Insets, WorkspaceLayout, ZodeTheme};
 
 pub use composer::Composer;
-pub use project_sidebar::{ProjectSidebar, SidebarAction, SidebarItem};
+pub use project_sidebar::{
+    group_sessions, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarItem,
+};
 pub use thread_header::ThreadHeader;
 pub use transcript::ThreadTranscript;
 pub use window_chrome::WindowChrome;

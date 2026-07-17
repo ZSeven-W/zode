@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod app_state_store;
 mod bootstrap;
 mod engine_backend;
 mod event_sink;
@@ -9,6 +10,7 @@ mod node_identity;
 mod session_repository;
 mod zode_engine_driver;
 
+pub use app_state_store::{AppStateFile, AppStateStore, SessionUiState};
 pub use bootstrap::LocalAppRuntime;
 pub use engine_backend::{DriverEventStream, EngineBackend, EngineDriver, EventNormalizer};
 pub use event_sink::EventSink;

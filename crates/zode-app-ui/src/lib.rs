@@ -10,8 +10,8 @@ pub use layout::{
 };
 pub use theme::{ZodeTheme, ZODE_PURPLE};
 pub use widgets::{
-    Composer, ProjectSidebar, SidebarAction, SidebarItem, ThreadHeader, ThreadTranscript,
-    WindowChrome, WorkspaceShell,
+    group_sessions, Composer, ProjectSessionGroup, ProjectSidebar, SidebarAction, SidebarItem,
+    ThreadHeader, ThreadTranscript, WindowChrome, WorkspaceShell,
 };
 
 pub const CRATE_READY: bool = true;

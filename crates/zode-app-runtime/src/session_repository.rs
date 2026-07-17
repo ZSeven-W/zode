@@ -15,6 +15,8 @@ use zode_node_protocol::{
     WorkspaceUri,
 };
 
+use crate::AppStateStore;
+
 /// A transcript and its persisted metadata loaded as one runtime value.
 #[derive(Debug, Clone)]
 pub struct LoadedSession {
@@ -27,21 +29,24 @@ pub struct LoadedSession {
 pub struct LocalSessionRepository {
     node_id: NodeId,
     inner: CoreSessionRepository,
+    app_state: AppStateStore,
 }
 
 impl LocalSessionRepository {
     pub fn new(config_dir: impl AsRef<Path>, node_id: NodeId) -> Self {
+        let config_dir = config_dir.as_ref().to_path_buf();
         Self {
             node_id,
-            inner: CoreSessionRepository::new(config_dir.as_ref().to_path_buf()),
+            inner: CoreSessionRepository::new(config_dir.clone()),
+            app_state: AppStateStore::new(config_dir),
         }
     }
 
     /// List local sessions newest first as transport-neutral summaries.
     pub fn list(&self) -> Result<Vec<ThreadSummary>, EndpointError> {
-        self.inner
-            .list()
-            .map_err(map_core_error)?
+        let sessions = self.inner.list().map_err(map_core_error)?;
+        self.reconcile_app_state(sessions.iter().map(|meta| meta.id.as_str()))?;
+        sessions
             .into_iter()
             .map(|meta| self.thread_summary(meta))
             .collect()
@@ -106,7 +111,9 @@ impl LocalSessionRepository {
 
     pub async fn delete(&self, session: &SessionLocator) -> Result<(), EndpointError> {
         let id = self.local_session_id(session)?;
-        self.inner.delete(id).await.map_err(map_core_error)
+        self.inner.delete(id).await.map_err(map_core_error)?;
+        let remaining = self.inner.list().map_err(map_core_error)?;
+        self.reconcile_app_state(remaining.iter().map(|meta| meta.id.as_str()))
     }
 
     /// Reserve a generation and persist a complete in-memory snapshot.
@@ -175,6 +182,19 @@ impl LocalSessionRepository {
             .map_err(map_core_error)?
             .iter()
             .any(|meta| meta.id == id))
+    }
+
+    fn reconcile_app_state<'a>(
+        &self,
+        existing: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), EndpointError> {
+        let mut state = self.app_state.load().map_err(map_core_error)?;
+        let original = state.clone();
+        state.reconcile(existing);
+        if state != original {
+            self.app_state.save(&state).map_err(map_core_error)?;
+        }
+        Ok(())
     }
 
     fn thread_summary(&self, meta: SessionMeta) -> Result<ThreadSummary, EndpointError> {
