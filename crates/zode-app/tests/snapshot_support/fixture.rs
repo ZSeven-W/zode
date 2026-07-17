@@ -18,9 +18,13 @@ pub(crate) fn base_scene_state(theme: ThemePreference, viewport_width: u32) -> Z
     let mut state = demo_state();
     let node_id = state.host.node_id;
     let workspace = workspace_uri("file:///workspace/zode");
+    let opentt_workspace = workspace_uri("file:///workspace/opentt");
+    let codex_workspace = workspace_uri("file:///workspace/codex");
     let openpencil_workspace = workspace_uri("file:///workspace/openpencil");
+    let website_workspace = workspace_uri("file:///workspace/openpencil-website");
     let session = SessionLocator::new(node_id, "desktop-snapshot-session");
     let earlier_session = SessionLocator::new(node_id, "desktop-plan-session");
+    let opentt_session = SessionLocator::new(node_id, "opentt-apk-session");
     let openpencil_session = SessionLocator::new(node_id, "openpencil-alignment-session");
 
     state.host.capabilities.capabilities = BTreeSet::from([
@@ -40,10 +44,28 @@ pub(crate) fn base_scene_state(theme: ThemePreference, viewport_width: u32) -> Z
             last_opened_ms: 1_720_670_400_000,
         },
         ProjectState {
+            workspace_uri: opentt_workspace.clone(),
+            expanded: true,
+            available: true,
+            last_opened_ms: 1_720_627_200_000,
+        },
+        ProjectState {
+            workspace_uri: codex_workspace,
+            expanded: true,
+            available: true,
+            last_opened_ms: 1_720_620_000_000,
+        },
+        ProjectState {
             workspace_uri: openpencil_workspace.clone(),
             expanded: true,
             available: true,
             last_opened_ms: 1_720_584_000_000,
+        },
+        ProjectState {
+            workspace_uri: website_workspace,
+            expanded: true,
+            available: true,
+            last_opened_ms: 1_720_540_800_000,
         },
     ];
     state.threads = vec![
@@ -59,6 +81,13 @@ pub(crate) fn base_scene_state(theme: ThemePreference, viewport_width: u32) -> Z
             workspace_uri: workspace.clone(),
             title: "梳理桌面端实施计划".into(),
             updated_at_ms: 1_720_584_000_000,
+            status: ThreadStatus::Idle,
+        },
+        ThreadSummary {
+            session: opentt_session,
+            workspace_uri: opentt_workspace,
+            title: "安装 APK 到电视".into(),
+            updated_at_ms: 1_720_627_200_000,
             status: ThreadStatus::Idle,
         },
         ThreadSummary {
