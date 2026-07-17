@@ -27,14 +27,15 @@ pub(super) fn append_header_nodes(
         ThreadHeader::layout_with_pinned_summary(layout.top_bar, state, layout.pinned_summary);
     append_header_action(nodes, focus_order, header.more, HEADER_MORE_ID, "任务操作");
     if let Some(open_with) = header.open_with {
+        let open_label = format!(
+            "使用 {} 打开项目",
+            state.open_with.primary_application().label()
+        );
         nodes.push(node(
             OPEN_WITH_PRIMARY_ID,
             open_with.primary,
             Role::Button,
-            format!(
-                "使用 {} 打开项目",
-                state.open_with.primary_application().label()
-            ),
+            &open_label,
             None,
             vec![Action::Click, Action::Focus],
             next_order(focus_order),

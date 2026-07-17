@@ -40,6 +40,10 @@ const COMPACT_TITLE_GAP: f32 = 10.0;
 const WIDE_TEXT_BOTTOM_INSET: f32 = 14.0;
 const WIDE_SINGLE_LINE_BLOCK_HEIGHT: f32 = 14.0;
 const WIDE_TEXT_LINE_HEIGHT: f32 = 18.0;
+const WELCOME_TEXT_WEIGHT: u16 = 400;
+const SUGGESTION_TEXT_WEIGHT: u16 = 400;
+const CARD_SHADOW_OFFSET_Y: f32 = 2.0;
+const CARD_SHADOW_BLUR: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmptyStateMode {
@@ -267,6 +271,17 @@ impl EmptyState {
             if card.width() <= 0.0 || card.height() <= 0.0 {
                 continue;
             }
+            painter.fill_drop_shadow(
+                Rect::xywh(
+                    card.origin.x,
+                    card.origin.y + CARD_SHADOW_OFFSET_Y,
+                    card.size.x,
+                    card.size.y,
+                ),
+                12.0,
+                CARD_SHADOW_BLUR,
+                theme.tokens.foreground.with_alpha(0.045),
+            );
             painter.fill_round_rect(card, 12.0, theme.tokens.card);
             painter.stroke_round_rect(card, 12.0, theme.tokens.border, 1.0);
             painter.save();
@@ -315,7 +330,7 @@ impl EmptyState {
                                 text_y + line_index as f32 * line_height,
                             ),
                             text_size,
-                            500,
+                            SUGGESTION_TEXT_WEIGHT,
                             theme.tokens.foreground,
                         );
                     }
@@ -361,7 +376,7 @@ fn split_text_lines(
     if available_width <= 0.0 {
         return None;
     }
-    if painter.measure_text_weighted(text, font_size, 500) <= available_width {
+    if painter.measure_text_weighted(text, font_size, SUGGESTION_TEXT_WEIGHT) <= available_width {
         return Some(vec![text.to_owned()]);
     }
 
@@ -370,8 +385,10 @@ fn split_text_lines(
         .filter(|split| {
             let first = characters[..*split].iter().collect::<String>();
             let second = characters[*split..].iter().collect::<String>();
-            painter.measure_text_weighted(&first, font_size, 500) <= available_width
-                && painter.measure_text_weighted(&second, font_size, 500) <= available_width
+            painter.measure_text_weighted(&first, font_size, SUGGESTION_TEXT_WEIGHT)
+                <= available_width
+                && painter.measure_text_weighted(&second, font_size, SUGGESTION_TEXT_WEIGHT)
+                    <= available_width
         })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
@@ -429,7 +446,7 @@ fn paint_welcome_title(
             "我们应该构建什么？",
             layout.prefix,
             layout.font_size,
-            500,
+            WELCOME_TEXT_WEIGHT,
             theme.tokens.foreground,
             HorizontalAlign::Start,
         );
@@ -440,7 +457,7 @@ fn paint_welcome_title(
         "我们应该在 ",
         layout.prefix,
         layout.font_size,
-        500,
+        WELCOME_TEXT_WEIGHT,
         theme.tokens.foreground,
         HorizontalAlign::Start,
     );
@@ -450,7 +467,7 @@ fn paint_welcome_title(
             project,
             project_rect,
             layout.font_size,
-            500,
+            WELCOME_TEXT_WEIGHT,
             if project_focused || project_hovered {
                 theme.tokens.foreground
             } else {
@@ -471,7 +488,7 @@ fn paint_welcome_title(
         " 中构建什么？",
         layout.suffix,
         layout.font_size,
-        500,
+        WELCOME_TEXT_WEIGHT,
         theme.tokens.foreground,
         HorizontalAlign::Start,
     );

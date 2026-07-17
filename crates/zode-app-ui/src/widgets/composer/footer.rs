@@ -34,6 +34,7 @@ pub const COMPOSER_MODEL_BACK_ID: WidgetId = WidgetId(8_640);
 
 const MODEL_NAMESPACE: u8 = 0x7d;
 const CONTROL_H: f32 = 28.0;
+const FOOTER_LABEL_SIZE: f32 = 14.0;
 const MENU_GAP: f32 = 7.0;
 const MENU_PAD: f32 = 6.0;
 const SECTION_H: f32 = 26.0;
@@ -80,7 +81,7 @@ impl ComposerFooterMenuWidget {
         let y = input.max_y() - 38.0;
         let add = Rect::xywh(input.origin.x + 10.0, y, CONTROL_H, CONTROL_H);
         let permission_w =
-            ((state.composer.sandbox_label.chars().count() as f32 * 7.0) + 38.0).clamp(84.0, 132.0);
+            (footer_label_width(&state.composer.sandbox_label) + 38.0).clamp(84.0, 150.0);
         let permission = Rect::xywh(add.max_x() + 4.0, y, permission_w, CONTROL_H);
         let send = Rect::xywh(input.max_x() - 42.0, y, CONTROL_H, CONTROL_H);
         let available = (send.origin.x - permission.max_x() - 12.0).max(0.0);
@@ -357,7 +358,7 @@ impl ComposerFooterMenuWidget {
                 (layout.permission.max_x() - permission_icon.max_x() - 10.0).max(0.0),
                 layout.permission.size.y,
             ),
-            11.0,
+            FOOTER_LABEL_SIZE,
             500,
             theme.composer_permission,
             HorizontalAlign::Start,
@@ -391,7 +392,7 @@ impl ComposerFooterMenuWidget {
                     (layout.model.size.x - 30.0).max(0.0),
                     layout.model.size.y,
                 ),
-                11.0,
+                FOOTER_LABEL_SIZE,
                 400,
                 theme.tokens.muted_foreground,
                 HorizontalAlign::End,
@@ -567,6 +568,19 @@ impl ComposerFooterMenuWidget {
         }
         painter.restore();
     }
+}
+
+fn footer_label_width(label: &str) -> f32 {
+    label
+        .chars()
+        .map(|character| {
+            if character.is_ascii() {
+                FOOTER_LABEL_SIZE * 0.56
+            } else {
+                FOOTER_LABEL_SIZE
+            }
+        })
+        .sum()
 }
 
 fn effort_label(effort: &str) -> &'static str {

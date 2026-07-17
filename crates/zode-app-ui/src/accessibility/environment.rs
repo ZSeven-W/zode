@@ -3,7 +3,8 @@ use jian_core::CursorHint;
 use zode_app_model::ZodeAppState;
 
 use crate::{
-    EnvironmentPanel, ThreadTranscript, WorkspaceLayout, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_PANEL_ID,
+    EnvironmentPanel, PinnedSummaryMode, ThreadTranscript, WorkspaceLayout, ENVIRONMENT_CLOSE_ID,
+    ENVIRONMENT_PANEL_ID,
 };
 
 use super::{next_order, node, visible_rect, InteractionNode};
@@ -29,7 +30,7 @@ pub(super) fn append_environment_nodes(
         CursorHint::Default,
     ));
     if let Some(session) = state.current_session.as_ref() {
-        for section in panel.sections.iter().filter(|section| !section.footer) {
+        for section in &panel.sections {
             let Some(rect) = ThreadTranscript::clip_to_viewport(section.rect, panel.content) else {
                 continue;
             };
@@ -45,16 +46,18 @@ pub(super) fn append_environment_nodes(
             ));
         }
     }
-    nodes.push(node(
-        ENVIRONMENT_CLOSE_ID,
-        panel.close_button,
-        Role::Button,
-        "关闭置顶摘要面板",
-        None,
-        vec![Action::Click, Action::Focus],
-        next_order(focus_order),
-        CursorHint::Pointer,
-    ));
+    if layout.pinned_summary == PinnedSummaryMode::Overlay {
+        nodes.push(node(
+            ENVIRONMENT_CLOSE_ID,
+            panel.close_button,
+            Role::Button,
+            "关闭置顶摘要面板",
+            None,
+            vec![Action::Click, Action::Focus],
+            next_order(focus_order),
+            CursorHint::Pointer,
+        ));
+    }
     for action in panel
         .repository_actions
         .iter()

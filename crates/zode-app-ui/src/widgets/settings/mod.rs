@@ -314,6 +314,17 @@ impl SettingsPanel {
         workspace_uri: Option<&WorkspaceUri>,
         theme: &ZodeTheme,
     ) {
+        Self::paint_page_with_hovered(painter, snapshot, state, workspace_uri, None, theme);
+    }
+
+    pub fn paint_page_with_hovered(
+        painter: &mut dyn Painter,
+        snapshot: &WorkspaceSnapshot,
+        state: &ZodeAppState,
+        workspace_uri: Option<&WorkspaceUri>,
+        hovered: Option<WidgetId>,
+        theme: &ZodeTheme,
+    ) {
         let layout = Self::layout(
             snapshot.layout.sidebar,
             snapshot.layout.primary_surface,
@@ -324,7 +335,8 @@ impl SettingsPanel {
             layout.sidebar,
             &layout.navigation,
             state,
-            snapshot.focused == Some(SETTINGS_SEARCH_ID),
+            snapshot.focused,
+            hovered,
             theme,
         );
         painter.save();

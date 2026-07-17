@@ -234,9 +234,17 @@ fn thread_header_actions_use_centered_semantic_icons() {
         if icon == SemanticIcon::More {
             assert_eq!(svg.color, ZodeTheme::light().tokens.foreground);
             assert_eq!(svg.width, SemanticIcon::More.stroke_width());
-            assert_eq!(svg.size, 18.0);
+            assert_eq!(svg.size, 14.0);
         }
     }
+    let folder = painter.svg(SemanticIcon::Folder.path());
+    assert_eq!(folder.size, 14.0);
+    assert_close(folder.top_left.x, rect.origin.x + 16.0, 0.01);
+    assert_close(
+        painter.text("zode desktop").origin.x,
+        rect.origin.x + 40.0,
+        0.01,
+    );
     assert!(!painter
         .texts
         .iter()

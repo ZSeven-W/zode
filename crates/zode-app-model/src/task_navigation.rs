@@ -1,6 +1,6 @@
 use crate::{
-    AppCommand, BranchCatalogState, ComposerContextMenu, LoadState, NavigationOutcome,
-    ProjectPickerAnchor, ProjectPickerState, ShellPage, ShellRoute, TaskLaunchMode, ZodeAppState,
+    AppCommand, BranchCatalogState, LoadState, NavigationOutcome, ProjectPickerAnchor,
+    ProjectPickerState, ShellPage, ShellRoute, TaskLaunchMode, ZodeAppState,
 };
 
 /// Applies new-task and project-picker commands without touching live sessions.

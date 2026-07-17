@@ -199,7 +199,7 @@ impl SemanticIcon {
 
     pub const fn stroke_width(self) -> f32 {
         let _ = self;
-        1.5
+        1.25
     }
 }
 
@@ -212,7 +212,7 @@ mod tests {
         for icon in SemanticIcon::ALL {
             assert!(!icon.path().is_empty());
             assert_eq!(icon.viewbox(), 24.0);
-            assert_eq!(icon.stroke_width(), 1.5);
+            assert_eq!(icon.stroke_width(), 1.25);
         }
     }
 

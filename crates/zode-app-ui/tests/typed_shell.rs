@@ -322,7 +322,7 @@ fn pinned_summary_paints_the_real_current_session_context() {
     let text = text(&painter);
 
     assert_eq!(layout.context_panel.size.x, 300.0);
-    assert!(text.contains("置顶摘要"));
+    assert!(text.contains("环境信息"));
     assert!(text.contains("环境信息"));
     assert!(text.contains("file:///repo/zode"));
     assert!(text.contains("codex/typed-shell"));
@@ -340,7 +340,7 @@ fn pinned_summary_auto_docks_only_when_conversation_space_is_available() {
     let (wide, wide_layout) = paint_shell(&state, 1_800.0);
     assert_eq!(wide_layout.pinned_summary, PinnedSummaryMode::Docked);
     assert_eq!(wide_layout.context_panel.size.x, 300.0);
-    assert!(text(&wide).contains("置顶摘要"));
+    assert!(text(&wide).contains("环境信息"));
     assert!(
         ThreadHeader::layout_with_pinned_summary(
             wide_layout.top_bar,
@@ -356,7 +356,7 @@ fn pinned_summary_auto_docks_only_when_conversation_space_is_available() {
         let (narrow, narrow_layout) = paint_shell(&state, width);
         assert_eq!(narrow_layout.pinned_summary, PinnedSummaryMode::Hidden);
         assert_eq!(narrow_layout.context_panel.size.x, 0.0);
-        assert!(!text(&narrow).contains("置顶摘要"));
+        assert!(!text(&narrow).contains("环境信息"));
         assert!(
             !ThreadHeader::layout_with_pinned_summary(
                 narrow_layout.top_bar,
@@ -373,7 +373,7 @@ fn pinned_summary_auto_docks_only_when_conversation_space_is_available() {
     let (overlay, overlay_layout) = paint_shell(&state, 1_200.0);
     assert_eq!(overlay_layout.pinned_summary, PinnedSummaryMode::Overlay);
     assert_eq!(overlay_layout.context_panel.size.x, 300.0);
-    assert!(text(&overlay).contains("置顶摘要"));
+    assert!(text(&overlay).contains("环境信息"));
     assert!(
         ThreadHeader::layout_with_pinned_summary(
             overlay_layout.top_bar,
@@ -398,7 +398,7 @@ fn auxiliary_sidebar_hides_auto_summary_but_explicit_overlay_preserves_the_pane(
     assert_eq!(layout.pinned_summary, PinnedSummaryMode::Hidden);
     assert_eq!(layout.context_panel.size.x, 0.0);
     assert!(layout.review_panel.size.x > 0.0);
-    assert!(!text(&painter).contains("置顶摘要"));
+    assert!(!text(&painter).contains("环境信息"));
     assert!(text(&painter).contains("workspace_shell.rs"));
 
     state.presentation.pinned_summary_overlay_open = true;
@@ -409,7 +409,7 @@ fn auxiliary_sidebar_hides_auto_summary_but_explicit_overlay_preserves_the_pane(
         Some(SecondaryPane::Review)
     );
     assert!(layout.review_panel.size.x > 0.0);
-    assert!(text(&painter).contains("置顶摘要"));
+    assert!(text(&painter).contains("环境信息"));
     assert!(text(&painter).contains("workspace_shell.rs"));
 }
 

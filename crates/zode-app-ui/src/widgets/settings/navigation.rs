@@ -354,13 +354,13 @@ pub(super) fn paint(
     rect: Rect,
     layout: &SettingsNavigationLayout,
     state: &ZodeAppState,
-    focused: bool,
+    focused: Option<WidgetId>,
+    hovered: Option<WidgetId>,
     theme: &ZodeTheme,
 ) {
     if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
         return;
     }
-    painter.fill_rect(rect, theme.sidebar);
     painter.save();
     painter.clip_rect(rect);
     let back_icon_size = 16.0_f32.min(layout.title.size.y);
@@ -371,7 +371,7 @@ pub(super) fn paint(
             layout.title.origin.y + (layout.title.size.y - back_icon_size) / 2.0,
         ),
         back_icon_size,
-        theme.tokens.muted_foreground,
+        theme.sidebar_muted_foreground,
         SemanticIcon::Back.stroke_width(),
     );
     paint_single_line(
@@ -383,40 +383,45 @@ pub(super) fn paint(
             (layout.title.size.x - 40.0).max(0.0),
             layout.title.size.y,
         ),
-        13.0,
-        450,
-        theme.tokens.muted_foreground,
+        14.0,
+        400,
+        theme.sidebar_muted_foreground,
         HorizontalAlign::Start,
     );
     let search_input = TextInputState::with_text(state.settings_search.clone());
+    let mut search_tokens = theme.tokens;
+    search_tokens.foreground = theme.sidebar_foreground;
+    search_tokens.muted_foreground = theme.sidebar_muted_foreground;
     Input {
         state: &search_input,
         placeholder: "搜索设置…",
-        focused,
-        font_size: 12.0,
+        focused: focused == Some(SETTINGS_SEARCH_ID),
+        font_size: 14.0,
         now_ms: 0,
         icon_d: Some(SemanticIcon::Search.path()),
     }
-    .paint(painter, layout.search, &theme.tokens);
+    .paint(painter, layout.search, &search_tokens);
     for group in &layout.groups {
         paint_single_line(
             painter,
             group.label,
             group.rect,
-            11.0,
-            500,
-            theme.tokens.muted_foreground,
+            14.0,
+            400,
+            theme.sidebar_muted_foreground,
             HorizontalAlign::Start,
         );
     }
     for entry in &layout.entries {
         if entry.selected {
-            painter.fill_round_rect(entry.rect, 9.0, theme.tokens.row_selected);
+            painter.fill_round_rect(entry.rect, 9.0, theme.sidebar_row_selected);
+        } else if focused == Some(entry.id) || hovered == Some(entry.id) {
+            painter.fill_round_rect(entry.rect, 9.0, theme.sidebar_row_hover);
         }
         let color = if entry.enabled || entry.selected {
             theme.sidebar_foreground
         } else {
-            theme.tokens.muted_foreground.with_alpha(0.62)
+            theme.sidebar_disabled_foreground
         };
         painter.stroke_svg_path(
             entry.icon.path(),
@@ -429,8 +434,8 @@ pub(super) fn paint(
             painter,
             entry.label,
             entry.label_rect,
-            13.0,
-            if entry.selected { 600 } else { 450 },
+            14.0,
+            400,
             color,
             HorizontalAlign::Start,
         );
@@ -445,9 +450,9 @@ pub(super) fn paint(
                 (rect.size.x - 32.0).max(0.0),
                 36.0,
             ),
-            12.0,
-            450,
-            theme.tokens.muted_foreground,
+            14.0,
+            400,
+            theme.sidebar_muted_foreground,
             HorizontalAlign::Center,
         );
     }

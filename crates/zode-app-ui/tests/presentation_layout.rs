@@ -144,6 +144,26 @@ fn presentation_breakpoints_float_the_summary_and_collapse_the_rail() {
 }
 
 #[test]
+fn docked_summary_recenters_the_conversation_in_the_remaining_column() {
+    let layout = WorkspaceLayout::compute_presentation(
+        1_800.0,
+        1_080.0,
+        Insets::ZERO,
+        ShellRoute::Conversation,
+        Some(SecondaryPane::Environment),
+    );
+
+    assert_eq!(layout.pinned_summary, PinnedSummaryMode::Docked);
+    assert_eq!(
+        layout.context_panel,
+        Rect::xywh(1_484.0, 62.0, 300.0, 1_002.0)
+    );
+    assert_eq!(layout.composer.origin.x, 494.0);
+    assert_eq!(layout.transcript.origin.x, 494.0);
+    assert_eq!(layout.composer.size.x, 736.0);
+}
+
+#[test]
 fn every_presentation_rect_stays_finite_and_inside_extreme_viewports() {
     for (width, height, insets) in [
         (

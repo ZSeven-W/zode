@@ -160,7 +160,7 @@ fn settings_route_selects_the_footer_instead_of_new_session() {
         .operations
         .iter()
         .filter_map(|operation| match operation {
-            PaintOp::FillRound(rect, color) if *color == theme.tokens.row_selected => Some(*rect),
+            PaintOp::FillRound(rect, color) if *color == theme.sidebar_row_selected => Some(*rect),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -185,7 +185,7 @@ fn every_integrations_tab_selects_the_plugins_navigation_item() {
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
         PaintOp::FillRound(selected, color)
-            if *selected == plugins.rect && *color == theme.tokens.row_selected
+            if *selected == plugins.rect && *color == theme.sidebar_row_selected
     )));
 }
 
@@ -223,7 +223,7 @@ fn conversation_route_highlights_the_real_current_session() {
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
         PaintOp::FillRound(selected, color)
-            if *selected == current_row.rect && *color == theme.tokens.row_selected
+            if *selected == current_row.rect && *color == theme.sidebar_row_selected
     )));
     assert!(!painter.operations.iter().any(|operation| matches!(
         operation,
@@ -257,7 +257,7 @@ fn active_project_replaces_the_new_task_selection_when_no_session_is_open() {
         .operations
         .iter()
         .filter_map(|operation| match operation {
-            PaintOp::FillRound(rect, color) if *color == theme.tokens.row_selected => Some(*rect),
+            PaintOp::FillRound(rect, color) if *color == theme.sidebar_row_selected => Some(*rect),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -614,7 +614,7 @@ fn action_hover_keeps_row_active_and_matches_the_reference_preview_card() {
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
         PaintOp::FillRound(active, color)
-            if *active == row.rect && *color == theme.tokens.muted.with_alpha(0.72)
+            if *active == row.rect && *color == theme.sidebar_row_hover
     )));
     let preview_card = painter
         .operations

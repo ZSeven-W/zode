@@ -345,7 +345,7 @@ impl WorkspaceLayout {
         };
         let content_right = if pinned_summary == PinnedSummaryMode::Docked {
             environment_frame
-                .map(|(panel_x, _)| panel_x - CONTENT_GUTTER.min((panel_x - main_x).max(0.0)))
+                .map(|(panel_x, _)| panel_x)
                 .unwrap_or(primary_right)
         } else {
             primary_right
@@ -353,8 +353,12 @@ impl WorkspaceLayout {
         let content_region_w = (content_right - main_x).max(0.0);
         let content_gutters = (CONTENT_GUTTER * 2.0).min(content_region_w);
         let content_w = CONTENT_W.min((content_region_w - content_gutters).max(0.0));
-        let centered_content_x = main_x + (primary_w - content_w) / 2.0;
-        let content_x = centered_content_x.min((content_right - content_w).max(main_x));
+        // A docked summary is part of the wide-screen composition rather than
+        // an overlay. Center the transcript/composer in the remaining column
+        // between the project rail and the summary card. Using `primary_w`
+        // here would keep the content centered under the whole window and then
+        // merely clamp it, which visibly pushes the conversation to the right.
+        let content_x = main_x + (content_region_w - content_w) / 2.0;
 
         let top_bar_h = TOP_BAR_H.min(available_h);
         let top_bar = Rect::xywh(main_x, insets.top, primary_w, top_bar_h);

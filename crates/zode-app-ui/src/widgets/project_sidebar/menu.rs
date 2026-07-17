@@ -404,9 +404,9 @@ fn paint_heading(painter: &mut dyn Painter, y: f32, label: &str, menu: Rect, the
         painter,
         label,
         Rect::xywh(menu.origin.x + 14.0, y, menu.size.x - 28.0, HEADING_H),
-        11.0,
-        500,
-        theme.tokens.muted_foreground,
+        13.0,
+        400,
+        theme.sidebar_muted_foreground,
         HorizontalAlign::Start,
     );
 }
@@ -424,7 +424,7 @@ fn paint_item(
     let foreground = if item.enabled {
         theme.tokens.popover_foreground
     } else {
-        theme.tokens.muted_foreground
+        theme.sidebar_disabled_foreground
     };
     let mut label_x = item.rect.origin.x + 10.0;
     if item.selected {
@@ -456,7 +456,7 @@ fn paint_item(
             (item.rect.max_x() - label_x - 10.0).max(0.0),
             item.rect.size.y,
         ),
-        13.0,
+        14.0,
         400,
         foreground,
         HorizontalAlign::Start,

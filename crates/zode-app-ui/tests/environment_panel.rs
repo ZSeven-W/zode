@@ -5,10 +5,10 @@ use zode_app_model::{
     SessionPresentationState, TranscriptItem, TranscriptState,
 };
 use zode_app_ui::{
-    EnvironmentPanel, RectExt, ZodeTheme, DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_EXTERNAL_ID,
-    DOCUMENT_PREVIEW_RETRY_ID, ENVIRONMENT_CLOSE_ID, ENVIRONMENT_COMMIT_PUSH_ID,
-    ENVIRONMENT_OPEN_WORKSPACE_ID, ENVIRONMENT_PANEL_ID, ENVIRONMENT_REFRESH_ID,
-    ENVIRONMENT_REVIEW_ID,
+    EnvironmentPanel, PinnedSummaryMode, RectExt, SemanticIcon, ZodeTheme,
+    DOCUMENT_PREVIEW_CLOSE_ID, DOCUMENT_PREVIEW_EXTERNAL_ID, DOCUMENT_PREVIEW_RETRY_ID,
+    ENVIRONMENT_CLOSE_ID, ENVIRONMENT_COMMIT_PUSH_ID, ENVIRONMENT_OPEN_WORKSPACE_ID,
+    ENVIRONMENT_PANEL_ID, ENVIRONMENT_REFRESH_ID, ENVIRONMENT_REVIEW_ID,
 };
 use zode_node_protocol::{
     DiffFile, DiffFileStatus, DiffSnapshot, SessionLocator, ThreadStatus, ThreadSummary,
@@ -23,6 +23,7 @@ struct PaintCapture {
     rounded_fills: Vec<Rect>,
     rounded_strokes: Vec<Rect>,
     shadows: Vec<(Rect, f32, f32)>,
+    svg_paths: Vec<String>,
 }
 
 impl Painter for PaintCapture {
@@ -51,12 +52,13 @@ impl Painter for PaintCapture {
     }
     fn stroke_svg_path(
         &mut self,
-        _d: &str,
+        d: &str,
         _top_left: Point2D,
         _size: f32,
         _color: Color,
         _width: f32,
     ) {
+        self.svg_paths.push(d.into());
     }
     fn fill_drop_shadow(&mut self, rect: Rect, radius: f32, blur: f32, _color: Color) {
         self.shadows.push((rect, radius, blur));
@@ -147,11 +149,28 @@ fn paint(state: &zode_app_model::ZodeAppState, rect: Rect) -> PaintCapture {
     painter
 }
 
+fn paint_mode(
+    state: &zode_app_model::ZodeAppState,
+    rect: Rect,
+    mode: PinnedSummaryMode,
+) -> PaintCapture {
+    let mut painter = PaintCapture::default();
+    EnvironmentPanel::paint_for_mode(&mut painter, rect, state, mode, &ZodeTheme::light());
+    painter
+}
+
 fn contains(outer: Rect, inner: Rect) -> bool {
     inner.min_x() >= outer.min_x()
         && inner.min_y() >= outer.min_y()
         && inner.max_x() <= outer.max_x()
         && inner.max_y() <= outer.max_y()
+}
+
+fn rect_center(rect: Rect) -> Point2D {
+    Point2D::new(
+        rect.origin.x + rect.size.x / 2.0,
+        rect.origin.y + rect.size.y / 2.0,
+    )
 }
 
 #[test]
@@ -174,7 +193,7 @@ fn wide_layout_is_a_300px_content_hug_card_with_stable_real_commands() {
         .expect("a non-empty diff is reviewable");
     assert_eq!(review.origin.x, 1_500.0);
     assert_eq!(review.size.x, 268.0);
-    assert_eq!(review.size.y, 34.0);
+    assert_eq!(review.size.y, 31.0);
     assert_eq!(layout.repository_actions.len(), 4);
     assert_eq!(layout.repository_actions[1].rect, review);
     assert_eq!(
@@ -238,10 +257,78 @@ fn floating_panel_paints_one_soft_shadow_behind_the_card() {
     assert_eq!(painter.shadows.len(), 1);
     let (shadow, radius, blur) = painter.shadows[0];
     assert_eq!(shadow.origin.x, layout.card.origin.x);
-    assert_eq!(shadow.origin.y, layout.card.origin.y + 4.0);
+    assert_eq!(shadow.origin.y, layout.card.origin.y + 8.0);
     assert_eq!(shadow.size, layout.card.size);
-    assert_eq!(radius, 16.0);
+    assert_eq!(radius, 20.0);
     assert_eq!(blur, 24.0);
+}
+
+#[test]
+fn only_the_explicit_overlay_paints_a_close_icon() {
+    let state = zode_app_model::demo_state();
+    let surface = Rect::xywh(1_484.0, 62.0, 300.0, 1_002.0);
+    let close = SemanticIcon::Close.path();
+
+    let docked = paint_mode(&state, surface, PinnedSummaryMode::Docked);
+    let overlay = paint_mode(&state, surface, PinnedSummaryMode::Overlay);
+
+    assert!(!docked.svg_paths.iter().any(|path| path.as_str() == close));
+    assert_eq!(
+        overlay
+            .svg_paths
+            .iter()
+            .filter(|path| path.as_str() == close)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn panel_starts_with_environment_and_uses_compact_canonical_rows() {
+    let (mut state, session) = state_with_session("current");
+    state
+        .presentation
+        .sessions
+        .insert(session.clone(), ready_presentation(&session));
+    let surface = Rect::xywh(1_484.0, 62.0, 300.0, 1_002.0);
+
+    let layout = EnvironmentPanel::layout(surface, &state);
+    let painter = paint(&state, surface);
+    let first = layout
+        .sections
+        .iter()
+        .find(|section| !section.footer)
+        .expect("environment section");
+    assert_eq!(first.section.kind, EnvironmentSectionKind::Changes);
+    assert_eq!(layout.header.origin.y, layout.card.origin.y + 16.0);
+    assert_eq!(first.rect.origin.y, layout.header.max_y());
+    assert_eq!(layout.header.size.y, 26.0);
+    assert!(first.rows.iter().all(|row| row.rect.size.y == 31.0));
+    assert!(layout.sections.iter().all(|section| {
+        !matches!(
+            section.section.kind,
+            EnvironmentSectionKind::Host
+                | EnvironmentSectionKind::Changes
+                | EnvironmentSectionKind::Branch
+        ) || section.header_title.is_none()
+    }));
+    assert!(!painter.texts.iter().any(|text| text == "置顶摘要"));
+    assert_eq!(
+        painter
+            .texts
+            .iter()
+            .filter(|text| text.as_str() == "环境信息")
+            .count(),
+        1
+    );
+    for icon in [SemanticIcon::ChevronDown, SemanticIcon::ExternalOpen] {
+        assert!(painter
+            .svg_paths
+            .iter()
+            .any(|path| path.as_str() == icon.path()));
+    }
+    assert_eq!(painter.rounded_fills, vec![layout.card]);
+    assert_eq!(painter.rounded_strokes, vec![layout.card]);
 }
 
 #[test]
@@ -253,7 +340,6 @@ fn no_session_keeps_host_truth_and_prompts_for_a_task() {
     let text = painter.texts.join("\n");
 
     assert!(text.contains("环境信息"));
-    assert!(text.contains("主机连接"));
     assert!(text.contains("连接中"));
     assert!(text.contains("选择任务以查看环境"));
     assert_eq!(
@@ -321,10 +407,11 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
         "后台进程",
         "cargo test -p zode-app-ui",
         "来源",
-        "docs/report.md",
+        "report.md",
+        "查看全部",
         "2 个文件",
         "+10 -4",
-        "比较工作区与 HEAD",
+        "比较分支",
         "没有安全写入契约",
     ] {
         assert!(text.contains(expected), "missing real value: {expected}");
@@ -335,7 +422,6 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
         "51 完成",
         "main",
         "网页搜索",
-        "查看全部",
     ] {
         assert!(!text.contains(fabricated), "fabricated value: {fabricated}");
     }
@@ -346,8 +432,8 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
             .find_map(|(text, origin)| (text == needle).then_some(origin.y))
             .expect("text is painted")
     };
-    assert!(text_y("变更") < text_y("环境信息"));
-    assert!(text_y("环境信息") < text_y("分支"));
+    assert!(text_y("环境信息") < text_y("变更"));
+    assert!(text_y("变更") < text_y("codex/zode-desktop"));
     assert!(
         (text_y("当前工作区") - text_y("file:///repo/zode")).abs() <= 0.5,
         "the label and value must share one vertically centered row",
@@ -382,7 +468,6 @@ fn ready_context_and_diff_project_only_real_non_empty_data() {
     for absent in [
         "文件变更",
         "当前分支",
-        "比较分支",
         "子智能体",
         "后台进程",
         "来源",
@@ -559,11 +644,19 @@ fn real_sections_drive_content_hug_geometry_and_footer_availability() {
         .all(|section| !section.section.entries.is_empty()));
     assert!((320.0..=512.0).contains(&layout.card.size.y));
     let last_row = layout.last_row.expect("a real section has a final row");
-    assert!(layout.card.max_y() - last_row.max_y() <= 24.0);
+    assert!(layout.card.max_y() - last_row.max_y() <= 32.0);
     assert!(layout.review_button.is_some());
     assert!(layout
         .review_button
-        .is_none_or(|review| layout.content.max_y() <= review.origin.y - 8.0));
+        .is_none_or(|review| layout.content.contains(rect_center(review))));
+    let painted = paint(&state, Rect::xywh(0.0, 0.0, 300.0, 900.0));
+    assert!(painted.texts.iter().any(|text| text == "report.md"));
+    assert!(painted.texts.iter().any(|text| text == "查看全部"));
+    assert!(!painted.texts.iter().any(|text| text == "文件"));
+    assert!(painted
+        .svg_paths
+        .iter()
+        .any(|path| path.as_str() == SemanticIcon::FileText.path()));
 
     if let LoadState::Ready(context) = &mut state
         .presentation
@@ -587,7 +680,7 @@ fn real_sections_drive_content_hug_geometry_and_footer_availability() {
         .review_button
         .expect("diff footer remains available");
     assert_eq!(overflow.card.size.y, 512.0);
-    assert!(overflow.content.max_y() <= review.origin.y - 8.0);
+    assert!(overflow.content.contains(rect_center(review)));
     assert!(overflow_paint.clips.contains(&overflow.content));
 
     state.presentation.sessions.insert(
@@ -627,5 +720,5 @@ fn real_sections_drive_content_hug_geometry_and_footer_availability() {
     );
     assert!(reduced.review_button.is_none());
     let reduced_last_row = reduced.last_row.expect("host has a final real row");
-    assert!(reduced.card.max_y() - reduced_last_row.max_y() <= 24.0);
+    assert!(reduced.card.contains(rect_center(reduced_last_row)));
 }

@@ -37,7 +37,7 @@ impl TypographyRole {
             Self::UiLabel => TypographyStyle {
                 family: "system-ui",
                 size: 13.0,
-                weight: 550,
+                weight: 400,
                 line_height: 18.0,
             },
             Self::UiCaption => TypographyStyle {
@@ -102,6 +102,7 @@ mod tests {
     fn semantic_roles_keep_ui_and_code_families_distinct() {
         assert_eq!(TypographyRole::Code.style().family, "monospace");
         assert_eq!(TypographyRole::UiLabel.style().family, "system-ui");
+        assert_eq!(TypographyRole::UiLabel.style().weight, 400);
         for role in [
             TypographyRole::UiDisplay,
             TypographyRole::UiBody,

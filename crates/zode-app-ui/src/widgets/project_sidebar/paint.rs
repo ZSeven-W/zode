@@ -59,9 +59,9 @@ pub(super) fn paint(
                     label.rect.size.x,
                     label.rect.size.y,
                 ),
-                12.0,
+                14.0,
                 400,
-                theme.tokens.muted_foreground,
+                theme.sidebar_disabled_foreground,
             );
         }
         for row in &layout.rows {
@@ -99,8 +99,10 @@ fn paint_navigation_row(
     let selected = navigation_item_selected(state, row.item);
     let interactive = focused == Some(navigation_widget_id(row.index))
         || hovered == Some(navigation_widget_id(row.index));
-    if selected || interactive {
-        painter.fill_round_rect(row.rect, 8.0, theme.tokens.row_selected);
+    if selected {
+        painter.fill_round_rect(row.rect, 8.0, theme.sidebar_row_selected);
+    } else if interactive {
+        painter.fill_round_rect(row.rect, 8.0, theme.sidebar_row_hover);
     }
     let icon_x = if compact {
         row.rect.origin.x + (row.rect.size.x - ICON_SIZE) / 2.0
@@ -135,8 +137,8 @@ fn paint_navigation_row(
             .max(0.0),
             row.rect.size.y,
         ),
-        13.0,
-        if selected { 500 } else { 400 },
+        14.0,
+        400,
         theme.sidebar_foreground,
     );
     if row.index == 0 && interactive {
@@ -153,7 +155,7 @@ fn paint_navigation_row(
             keycap,
             10.0,
             400,
-            theme.tokens.muted_foreground,
+            theme.sidebar_muted_foreground,
             HorizontalAlign::Center,
         );
     }
@@ -173,9 +175,9 @@ fn paint_section(
         painter,
         section.label,
         section.rect,
-        11.0,
-        500,
-        theme.tokens.muted_foreground,
+        14.0,
+        400,
+        theme.sidebar_muted_foreground,
     );
     if section.section == SidebarSection::Tasks {
         let chevron = if state.sidebar.tasks_expanded {
@@ -190,7 +192,7 @@ fn paint_section(
                 section.rect.origin.y + (section.rect.size.y - 12.0) / 2.0,
             ),
             12.0,
-            theme.tokens.muted_foreground,
+            theme.sidebar_muted_foreground,
             chevron.stroke_width(),
         );
     }
@@ -208,9 +210,9 @@ fn paint_dynamic_row(
     let action_active = row_interaction_active(row, focused, hovered)
         || matches!(&row.target, SidebarRowTarget::Project(workspace) if state.sidebar.project_menu.as_ref() == Some(workspace));
     if row.selected {
-        painter.fill_round_rect(row.rect, 8.0, theme.tokens.row_selected);
+        painter.fill_round_rect(row.rect, 8.0, theme.sidebar_row_selected);
     } else if hovered == Some(row.id) || action_active {
-        painter.fill_round_rect(row.rect, 8.0, theme.tokens.muted.with_alpha(0.72));
+        painter.fill_round_rect(row.rect, 8.0, theme.sidebar_row_hover);
     }
 
     let label_x = match row.target {
@@ -239,8 +241,8 @@ fn paint_dynamic_row(
             (row.rect.max_x() - label_x - trailing).max(0.0),
             row.rect.size.y,
         ),
-        12.0,
-        if row.selected { 500 } else { 400 },
+        14.0,
+        400,
         theme.sidebar_foreground,
     );
 
@@ -270,7 +272,7 @@ fn paint_row_trailing(
                 ),
                 10.0,
                 400,
-                theme.tokens.muted_foreground,
+                theme.sidebar_muted_foreground,
                 HorizontalAlign::Center,
             );
             return;
@@ -281,7 +283,7 @@ fn paint_row_trailing(
             SemanticIcon::Refresh.path(),
             Point2D::new(row.rect.max_x() - 19.0, row.rect.origin.y + 8.0),
             13.0,
-            theme.tokens.muted_foreground,
+            theme.sidebar_muted_foreground,
             SemanticIcon::Refresh.stroke_width(),
         ),
         Some(ThreadStatus::Failed) => draw_label(
@@ -433,9 +435,9 @@ fn paint_control(
                     control.rect.size.x - 8.0,
                     control.rect.size.y,
                 ),
-                12.0,
+                14.0,
                 400,
-                theme.tokens.muted_foreground,
+                theme.sidebar_muted_foreground,
             );
         }
     }
@@ -460,7 +462,7 @@ pub(super) fn paint_icon_button(
             rect.origin.y + (rect.size.y - size) / 2.0,
         ),
         size,
-        theme.tokens.muted_foreground,
+        theme.sidebar_muted_foreground,
         icon.stroke_width(),
     );
 }
@@ -537,7 +539,7 @@ pub(super) fn paint_hover_overlay(
         .map_or(0, |thread| thread.updated_at_ms);
     let age = relative_age_label(updated_at_ms, current_time_ms());
     let age_width = painter
-        .measure_text_weighted(&age, 11.0, 400)
+        .measure_text_weighted(&age, 12.0, 400)
         .clamp(32.0, 56.0);
     let age_rect = Rect::xywh(
         card.max_x() - 14.0 - age_width,
@@ -551,12 +553,12 @@ pub(super) fn paint_hover_overlay(
         (age_rect.origin.x - card.origin.x - 22.0).max(0.0),
         26.0,
     );
-    let title = end_ellipsize(painter, &row.label, title_rect.size.x, 13.0, 500);
+    let title = end_ellipsize(painter, &row.label, title_rect.size.x, 14.0, 500);
     draw_label(
         painter,
         &title,
         title_rect,
-        13.0,
+        14.0,
         500,
         theme.tokens.popover_foreground,
     );
@@ -564,7 +566,7 @@ pub(super) fn paint_hover_overlay(
         painter,
         &age,
         age_rect,
-        11.0,
+        12.0,
         400,
         theme.tokens.muted_foreground,
         HorizontalAlign::End,
@@ -631,12 +633,12 @@ fn paint_metadata_row(
         (rect.size.x - 21.0).max(0.0),
         rect.size.y,
     );
-    let visible = end_ellipsize(painter, label, label_rect.size.x, 11.0, 400);
+    let visible = end_ellipsize(painter, label, label_rect.size.x, 12.0, 400);
     draw_label(
         painter,
         &visible,
         label_rect,
-        11.0,
+        12.0,
         400,
         theme.tokens.popover_foreground,
     );

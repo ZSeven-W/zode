@@ -12,7 +12,9 @@ use zode_node_protocol::WorkspaceUri;
 #[derive(Default)]
 struct PaintCapture {
     texts: Vec<String>,
-    rounded_fills: Vec<(Rect, f32)>,
+    text_styles: Vec<(String, f32, u16, Color)>,
+    fills: Vec<(Rect, Color)>,
+    rounded_fills: Vec<(Rect, f32, Color)>,
     rounded_strokes: Vec<(Rect, f32, f32)>,
     dividers: Vec<(Point2D, Point2D)>,
 }
@@ -20,23 +22,37 @@ struct PaintCapture {
 impl Painter for PaintCapture {
     fn begin_frame(&mut self) {}
     fn end_frame(&mut self) {}
-    fn fill_rect(&mut self, _rect: Rect, _color: Color) {}
+    fn fill_rect(&mut self, rect: Rect, color: Color) {
+        self.fills.push((rect, color));
+    }
     fn stroke_rect(&mut self, _rect: Rect, _color: Color, _width: f32) {}
     fn draw_text(&mut self, layout: &TextLayout, _origin: Point2D) {
-        self.texts.push(
-            layout
-                .runs()
-                .iter()
-                .map(|run| run.content.as_str())
-                .collect(),
-        );
+        let text = layout
+            .runs()
+            .iter()
+            .map(|run| run.content.as_str())
+            .collect::<String>();
+        if let Some(run) = layout.runs().first() {
+            self.text_styles.push((
+                text.clone(),
+                run.font_size,
+                run.font_weight,
+                Color::rgba_u8(
+                    run.color.r(),
+                    run.color.g(),
+                    run.color.b(),
+                    f32::from(run.color.a()) / 255.0,
+                ),
+            ));
+        }
+        self.texts.push(text);
     }
     fn clip_rect(&mut self, _rect: Rect) {}
     fn stroke_line(&mut self, from: Point2D, to: Point2D, _color: Color, _width: f32) {
         self.dividers.push((from, to));
     }
-    fn fill_round_rect(&mut self, rect: Rect, radius: f32, _color: Color) {
-        self.rounded_fills.push((rect, radius));
+    fn fill_round_rect(&mut self, rect: Rect, radius: f32, color: Color) {
+        self.rounded_fills.push((rect, radius, color));
     }
     fn stroke_round_rect(&mut self, rect: Rect, radius: f32, _color: Color, width: f32) {
         self.rounded_strokes.push((rect, radius, width));
@@ -101,6 +117,51 @@ fn category_rail_has_stable_rows_and_typed_commands() {
         Some(AppCommand::Navigate(ShellRoute::Conversation))
     );
     assert!(!painter.texts.iter().any(|text| text == "即将支持"));
+}
+
+#[test]
+fn settings_navigation_uses_sidebar_interaction_colors_without_repainting_the_rail() {
+    let mut state = demo_state();
+    state.presentation.route = ShellRoute::Settings(SettingsCategory::Appearance);
+    state.shell.page = ShellPage::Settings;
+    let theme = ZodeTheme::light();
+    let layout = WorkspaceLayout::compute_presentation(
+        1_800.0,
+        1_080.0,
+        Insets::ZERO,
+        state.presentation.route,
+        None,
+    );
+    let rows = SettingsPanel::navigation_entries(layout.sidebar, &state);
+    let selected = rows.iter().find(|row| row.selected).unwrap();
+    let hovered = rows.iter().find(|row| row.label == "常规").unwrap();
+    let mut painter = PaintCapture::default();
+
+    SettingsPanel::paint_page_with_hovered(
+        &mut painter,
+        &snapshot(layout),
+        &state,
+        None,
+        Some(hovered.id),
+        &theme,
+    );
+
+    assert!(!painter.fills.contains(&(layout.sidebar, theme.sidebar)));
+    assert!(painter
+        .rounded_fills
+        .contains(&(selected.rect, 9.0, theme.sidebar_row_selected,)));
+    assert!(painter
+        .rounded_fills
+        .contains(&(hovered.rect, 9.0, theme.sidebar_row_hover)));
+    for (label, color) in [
+        ("返回应用", theme.sidebar_muted_foreground),
+        ("个人", theme.sidebar_muted_foreground),
+        ("外观", theme.sidebar_foreground),
+    ] {
+        assert!(painter.text_styles.iter().any(|style| {
+            style.0 == label && style.1 == 14.0 && style.2 == 400 && style.3 == color
+        }));
+    }
 }
 
 #[test]

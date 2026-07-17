@@ -25,7 +25,7 @@ pub(super) fn paint_footer(
         theme.tokens.border.with_alpha(0.72),
     );
     if ProjectSidebar::footer_selected(state) {
-        painter.fill_round_rect(layout.profile, 0.0, theme.tokens.row_selected);
+        painter.fill_round_rect(layout.profile, 0.0, theme.sidebar_row_selected);
     }
     if layout.compact {
         paint_avatar(
@@ -65,8 +65,8 @@ pub(super) fn paint_footer(
             (layout.profile.size.x - 52.0).max(0.0),
             layout.profile.size.y,
         ),
-        12.0,
-        500,
+        14.0,
+        400,
         theme.sidebar_foreground,
     );
     paint_icon_button(

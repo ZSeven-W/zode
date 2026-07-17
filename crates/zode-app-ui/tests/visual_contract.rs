@@ -270,7 +270,7 @@ fn overlaps(left: Rect, right: Rect) -> bool {
 }
 
 #[test]
-fn wide_shell_keeps_the_warm_rail_white_canvas_and_floating_composer_contract() {
+fn wide_shell_keeps_the_frosted_rail_white_canvas_and_floating_composer_contract() {
     let viewport = Rect::xywh(0.0, 0.0, 1800.0, 1080.0);
     let geometry = WorkspaceLayout::compute(1800.0, 1080.0, Insets::ZERO);
     let theme = ZodeTheme::light();
@@ -289,8 +289,23 @@ fn wide_shell_keeps_the_warm_rail_white_canvas_and_floating_composer_contract() 
     assert!(painter
         .operations
         .contains(&PaintOp::Fill(geometry.sidebar, theme.sidebar)));
-    assert_eq!(theme.sidebar, Color::rgb_u8(238, 237, 234));
+    assert_eq!(theme.sidebar, Color::rgb_u8(245, 246, 246));
     assert!(theme.sidebar.r < theme.tokens.background.r);
+    let edge_bands = painter
+        .operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                PaintOp::Fill(rect, color)
+                    if rect.min_x() >= geometry.sidebar.max_x() - 8.0
+                        && rect.max_x() <= geometry.sidebar.max_x()
+                        && rect.height() == geometry.sidebar.height()
+                        && color.a < 1.0
+            )
+        })
+        .count();
+    assert_eq!(edge_bands, 8, "sidebar material keeps its subtle edge ramp");
     assert!(painter.operations.iter().any(|operation| matches!(
         operation,
         PaintOp::FillRound(rect, radius, color)

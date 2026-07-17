@@ -278,7 +278,9 @@ impl WorkspaceShell {
         match state.presentation.route {
             ShellRoute::Settings(_) => {
                 let workspace = SettingsPanel::active_workspace_uri(state);
-                SettingsPanel::paint_page(painter, &snapshot, state, workspace, theme);
+                SettingsPanel::paint_page_with_hovered(
+                    painter, &snapshot, state, workspace, hovered, theme,
+                );
             }
             ShellRoute::Integrations(_) => {
                 IntegrationsPage::paint_with_focus(
@@ -347,7 +349,13 @@ impl WorkspaceShell {
             if geometry.pinned_summary != PinnedSummaryMode::Hidden
                 && geometry.context_panel.size.x > 0.0
             {
-                EnvironmentPanel::paint(painter, geometry.context_panel, state, theme);
+                EnvironmentPanel::paint_for_mode(
+                    painter,
+                    geometry.context_panel,
+                    state,
+                    geometry.pinned_summary,
+                    theme,
+                );
             }
             match state.presentation.secondary_pane {
                 Some(SecondaryPane::Environment) => {}
@@ -396,16 +404,15 @@ impl WorkspaceShell {
                     | SecondaryPane::Files
                     | SecondaryPane::SideTask,
                 ) => {}
-                Some(SecondaryPane::Environment) | None
-                    if state.presentation.secondary_sidebar_open
-                        && geometry.review_panel.size.x > 0.0 =>
+                None if state.presentation.secondary_sidebar_open
+                    && geometry.review_panel.size.x > 0.0 =>
                 {
                     painter.fill_rect(geometry.divider, theme.tokens.border);
                     if let Some(home) = PanelPicker::home_layout(geometry.review_panel, state) {
                         PanelPicker::paint_home(painter, &home, snapshot.focused, hovered, theme);
                     }
                 }
-                Some(SecondaryPane::Environment) | None => {}
+                None => {}
             }
         }
         if !matches!(state.presentation.route, ShellRoute::Settings(_)) {

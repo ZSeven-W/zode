@@ -174,13 +174,8 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
     );
     state.presentation.secondary_pane = None;
     let automatic = WorkspaceSnapshot::build(&state, 1800.0, 1080.0, Insets::ZERO);
-    let automatic_close = automatic
-        .node(WidgetId(100))
-        .expect("automatic pinned summary exposes its close action");
-    assert_eq!(
-        automatic.hit_test(rect_center(automatic_close.rect)),
-        Some(WidgetId(100))
-    );
+    assert_eq!(automatic.layout.pinned_summary, PinnedSummaryMode::Docked);
+    assert!(automatic.node(WidgetId(100)).is_none());
     assert_eq!(
         automatic.node(WidgetId(60)).unwrap().toggled,
         Some(Toggled::True)
@@ -302,6 +297,7 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
     let review = overflow_panel
         .review_button
         .expect("the canonical diff stays reviewable");
+    assert!(overflow_panel.content.contains(rect_center(review)));
     for kind in [
         EnvironmentSectionKind::Changes,
         EnvironmentSectionKind::Host,
@@ -312,7 +308,6 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
             .node(EnvironmentPanel::section_widget_id(&session, kind))
             .expect("the visible part of a real section is accessible");
         assert!(section.rect.max_y() <= overflow_panel.content.max_y());
-        assert!(section.rect.max_y() <= review.origin.y - 8.0);
     }
 
     let collapsed = WorkspaceSnapshot::build(&state, 1399.0, 900.0, Insets::ZERO);

@@ -11,11 +11,11 @@ use super::{
 use crate::{RectExt, WidgetId};
 
 pub(super) const TITLEBAR_H: f32 = 38.0;
-pub(super) const BRAND_H: f32 = 42.0;
-pub(super) const ROW_SLOT_H: f32 = 32.0;
+pub(super) const BRAND_H: f32 = 47.0;
+pub(super) const ROW_SLOT_H: f32 = 31.0;
 pub(super) const ROW_H: f32 = 30.0;
 pub(super) const FOOTER_H: f32 = 44.0;
-pub(super) const ICON_SIZE: f32 = 16.0;
+pub(super) const ICON_SIZE: f32 = 14.0;
 const MAX_PROJECTS: usize = 5;
 const MAX_PROJECT_SESSIONS: usize = 5;
 const SECTION_H: f32 = 28.0;

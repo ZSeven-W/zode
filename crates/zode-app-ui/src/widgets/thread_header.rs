@@ -13,7 +13,10 @@ const ACTION_SIZE: f32 = 32.0;
 const ACTION_GAP: f32 = 4.0;
 const ACTION_RIGHT: f32 = 12.0;
 const MIN_TITLE_REGION_WIDTH: f32 = 150.0;
-const TITLE_FONT_SIZE: f32 = 13.0;
+const TITLE_FONT_SIZE: f32 = 14.0;
+const TITLE_ICON_SIZE: f32 = 14.0;
+const TITLE_ICON_X: f32 = 16.0;
+const TITLE_TEXT_X: f32 = 40.0;
 const MENU_WIDTH: f32 = 224.0;
 const MENU_PADDING: f32 = 4.0;
 const MENU_ROW_HEIGHT: f32 = 36.0;
@@ -175,7 +178,7 @@ impl ThreadHeader {
             .unwrap_or(rect.origin.x + rect.size.x - 20.0)
             .max(rect.origin.x + 20.0);
 
-        let title_left = rect.origin.x + 20.0;
+        let title_left = rect.origin.x + TITLE_TEXT_X;
         let title = current_title(state);
         let more = title.map(|title| {
             let available = (title_right - title_left - ACTION_SIZE - 8.0).max(0.0);
@@ -463,9 +466,9 @@ impl ThreadHeader {
         let mut header = Self::layout_with_pinned_summary(rect, state, pinned_summary);
         if !show_actions {
             header.title = Rect::xywh(
-                rect.origin.x + 20.0,
+                rect.origin.x + TITLE_TEXT_X,
                 rect.origin.y,
-                (rect.size.x - 40.0).max(0.0),
+                (rect.size.x - TITLE_TEXT_X - 20.0).max(0.0),
                 rect.size.y.max(0.0),
             );
             header.more = None;
@@ -476,12 +479,22 @@ impl ThreadHeader {
         }
         let title = current_title(state);
         if let Some(title) = title {
+            painter.stroke_svg_path(
+                SemanticIcon::Folder.path(),
+                Point2D::new(
+                    rect.origin.x + TITLE_ICON_X,
+                    rect.origin.y + (rect.size.y - TITLE_ICON_SIZE).max(0.0) / 2.0,
+                ),
+                TITLE_ICON_SIZE,
+                theme.tokens.foreground,
+                SemanticIcon::Folder.stroke_width(),
+            );
             paint_single_line(
                 painter,
                 title,
                 header.title,
                 TITLE_FONT_SIZE,
-                600,
+                500,
                 theme.tokens.foreground,
                 HorizontalAlign::Start,
             );
@@ -501,7 +514,7 @@ impl ThreadHeader {
                 painter.fill_round_rect(action.rect, 9.0, theme.tokens.row_selected);
             }
             let (icon_size, icon_color, stroke_width) = if icon == SemanticIcon::More {
-                (18.0, theme.tokens.foreground, icon.stroke_width())
+                (14.0, theme.tokens.foreground, icon.stroke_width())
             } else {
                 (16.0, theme.tokens.muted_foreground, icon.stroke_width())
             };

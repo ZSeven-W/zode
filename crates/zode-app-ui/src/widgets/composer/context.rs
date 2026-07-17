@@ -538,7 +538,7 @@ fn non_empty(label: Option<&str>) -> Option<&str> {
 }
 
 fn end_ellipsize(
-    painter: &dyn Painter,
+    painter: &mut dyn Painter,
     text: &str,
     max_width: f32,
     font_size: f32,
