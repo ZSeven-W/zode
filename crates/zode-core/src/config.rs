@@ -375,6 +375,12 @@ impl BrowserConfig {
 pub struct DesktopConfig {
     pub enabled: Option<bool>,
     pub snapshot_max_nodes: Option<usize>,
+    /// Ghost-cursor overlay visualization (zode-overlay helper).
+    pub ghost_cursor: Option<bool>,
+    /// Global Esc interrupts the turn while desktop automation is active.
+    pub esc_cancel: Option<bool>,
+    /// Explicit helper path; default is `zode-overlay` next to current_exe.
+    pub overlay_helper_path: Option<String>,
 }
 
 impl DesktopConfig {
@@ -383,6 +389,15 @@ impl DesktopConfig {
     }
     pub fn snapshot_max_nodes(&self) -> usize {
         self.snapshot_max_nodes.unwrap_or(500)
+    }
+    pub fn ghost_cursor(&self) -> bool {
+        self.ghost_cursor.unwrap_or(true)
+    }
+    pub fn esc_cancel(&self) -> bool {
+        self.esc_cancel.unwrap_or(true)
+    }
+    pub fn overlay_helper_path(&self) -> Option<&str> {
+        self.overlay_helper_path.as_deref()
     }
 }
 
@@ -1304,6 +1319,11 @@ impl ZodeConfig {
         let d = other.desktop;
         self.desktop.enabled = d.enabled.or(self.desktop.enabled);
         self.desktop.snapshot_max_nodes = d.snapshot_max_nodes.or(self.desktop.snapshot_max_nodes);
+        self.desktop.ghost_cursor = d.ghost_cursor.or(self.desktop.ghost_cursor);
+        self.desktop.esc_cancel = d.esc_cancel.or(self.desktop.esc_cancel);
+        self.desktop.overlay_helper_path = d
+            .overlay_helper_path
+            .or(self.desktop.overlay_helper_path.take());
 
         // externalAgents: scalars overlay by presence; the agents map merges
         // by key with same-key entries replaced wholesale (no field-level
@@ -2874,6 +2894,28 @@ mod tests {
         base.merge_from(over);
         assert!(!base.desktop.enabled()); // overridden
         assert_eq!(base.desktop.snapshot_max_nodes(), 500); // kept
+    }
+
+    #[test]
+    fn desktop_overlay_defaults_and_merge() {
+        let d = DesktopConfig::default();
+        assert!(d.ghost_cursor());
+        assert!(d.esc_cancel());
+        assert_eq!(d.overlay_helper_path(), None);
+
+        // Layer merge: overrides survive, absent keys keep base values.
+        let mut base = ZodeConfig::default();
+        base.desktop.ghost_cursor = Some(false);
+        let mut over = ZodeConfig::default();
+        over.desktop.esc_cancel = Some(false);
+        over.desktop.overlay_helper_path = Some("/opt/zode-overlay".into());
+        base.merge_from(over);
+        assert!(!base.desktop.ghost_cursor());
+        assert!(!base.desktop.esc_cancel());
+        assert_eq!(
+            base.desktop.overlay_helper_path(),
+            Some("/opt/zode-overlay")
+        );
     }
 
     #[test]
