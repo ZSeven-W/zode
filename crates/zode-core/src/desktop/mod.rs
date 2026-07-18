@@ -11,6 +11,8 @@ pub mod atspi;
 pub mod ax;
 pub mod backend;
 pub mod cdp;
+#[path = "esc-watch.rs"]
+pub mod esc_watch;
 pub mod gate;
 #[cfg(test)]
 pub mod mock;

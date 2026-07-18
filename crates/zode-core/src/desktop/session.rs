@@ -158,6 +158,9 @@ impl DesktopSession {
     }
 
     pub async fn lease(self: &Arc<Self>) -> Result<TargetLease, DesktopError> {
+        if self.cfg.esc_cancel() {
+            crate::desktop::esc_watch::arm();
+        }
         let guard = self.slot.clone().lock_owned().await;
         let backend = self.actor.backend().await?;
         Ok(TargetLease {
@@ -174,6 +177,9 @@ impl DesktopSession {
         self: &Arc<Self>,
         exe: &str,
     ) -> Result<ResolvedBackend, DesktopError> {
+        if self.cfg.esc_cancel() {
+            crate::desktop::esc_watch::arm();
+        }
         if is_cdp_identity(exe) {
             if let Some(cdp) = self.cdp().await {
                 return Ok(ResolvedBackend::Cdp(cdp));
