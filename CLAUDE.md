@@ -497,6 +497,31 @@ ZODE_BROWSER_IT=1 cargo test -p zode-core --test browser_it -- --ignored
 It launches a headless managed Chrome, navigates a `data:` URL, evaluates
 JS, screenshots, snapshots, clicks by ref, and checks console-log capture.
 
+## Desktop ghost cursor & Esc stop
+
+Desktop automation is visualized by `crates/zode-overlay` — a zero-permission
+macOS helper (borderless, click-through, never-key windows) spawned lazily on
+the first desktop action. zode never moves the real mouse cursor; the overlay
+draws a fake one (Dubins-path flight, ported from pi-computer-use, MIT).
+
+- Wire: JSON lines on the helper's stdin (`show`/`move`/`chip`/`hide`/`quit`),
+  duplicated serialize/parse types pinned by identical golden tests in
+  `zode-core/src/desktop/overlay.rs` and `zode-overlay/src/proto.rs`.
+- Helper discovery: `desktop.overlayHelperPath`, else `zode-overlay` next to
+  the zode executable; a missing helper silently disables visualization.
+- The AX actor sends a fire-and-forget overlay command *before* each action
+  (element center + owning CGWindowID for click/scroll/set_value; a generic
+  `⌨` chip for type/key). Typed text is never shown in the overlay.
+- While desktop automation is active, a CGEventTap (armed in
+  `DesktopSession::lease`/`resolve_backend`, `desktop/esc-watch.rs`) swallows
+  global Esc and interrupts ALL running turns (same path as TUI Esc), then
+  disarms and hides the overlay; it also disarms at turn end. Tap-creation
+  failure is non-fatal (Esc support simply absent).
+- Config (`desktop.*`): `ghostCursor` (default true), `escCancel` (default
+  true), `overlayHelperPath` (default null).
+- Opt-in IT (needs a logged-in macOS session):
+  `ZODE_DESKTOP_IT=1 cargo test -p zode-overlay --test overlay-it -- --ignored`.
+
 ## External agents
 
 Zode can register explicitly configured external agent CLIs as `Task` tool
