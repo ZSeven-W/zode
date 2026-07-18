@@ -125,6 +125,11 @@ const EXTRA: &[[&str; 15]] = &[
     ["disconnected", "未连接", "未連線", "未接続", "연결 안 됨", "desconectado", "déconnecté", "getrennt", "desconectado", "отключено", "डिस्कनेक्टेड", "terputus", "ไม่ได้เชื่อมต่อ", "bağlı değil", "chưa kết nối"],
     // Question-dialog tab strip.
     ["switch", "切换", "切換", "切替", "전환", "cambiar", "changer", "wechseln", "alternar", "переключить", "स्विच", "beralih", "สลับ", "geçiş", "chuyển"],
+    // ── Ghost-cursor overlay + desktop Esc stop. ──
+    ["zode is controlling your computer", "zode 正在操控你的电脑", "zode 正在操控你的電腦", "zode がこのコンピュータを操作しています", "zode가 컴퓨터를 조작하고 있습니다", "zode está controlando tu computadora", "zode contrôle votre ordinateur", "zode steuert Ihren Computer", "zode está controlando seu computador", "zode управляет вашим компьютером", "zode आपका कंप्यूटर नियंत्रित कर रहा है", "zode sedang mengendalikan komputer Anda", "zode กำลังควบคุมคอมพิวเตอร์ของคุณ", "zode bilgisayarınızı kontrol ediyor", "zode đang điều khiển máy tính của bạn"],
+    ["press Esc to stop", "按 Esc 停止", "按 Esc 停止", "Esc で停止", "Esc 키로 중지", "presiona Esc para detener", "appuyez sur Échap pour arrêter", "Esc zum Stoppen", "pressione Esc para parar", "нажмите Esc для остановки", "रोकने के लिए Esc दबाएं", "tekan Esc untuk berhenti", "กด Esc เพื่อหยุด", "durdurmak için Esc'ye basın", "nhấn Esc để dừng"],
+    ["typing…", "输入中…", "輸入中…", "入力中…", "입력 중…", "escribiendo…", "saisie…", "Eingabe…", "digitando…", "ввод…", "टाइपिंग…", "mengetik…", "กำลังพิมพ์…", "yazılıyor…", "đang gõ…"],
+    ["desktop automation stopped (Esc)", "桌面自动化已停止（Esc）", "桌面自動化已停止（Esc）", "デスクトップ自動化を停止しました（Esc）", "데스크톱 자동화 중지됨 (Esc)", "automatización de escritorio detenida (Esc)", "automatisation du bureau arrêtée (Échap)", "Desktop-Automatisierung gestoppt (Esc)", "automação de desktop parada (Esc)", "автоматизация рабочего стола остановлена (Esc)", "डेस्कटॉप स्वचालन रोका गया (Esc)", "otomasi desktop dihentikan (Esc)", "การทำงานอัตโนมัติของเดสก์ท็อปหยุดแล้ว (Esc)", "masaüstü otomasyonu durduruldu (Esc)", "tự động hóa máy tính đã dừng (Esc)"],
 ];
 
 /// Chinese-only overlay for newer UI strings that have not gone through the

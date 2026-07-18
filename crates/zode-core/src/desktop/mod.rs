@@ -14,6 +14,7 @@ pub mod cdp;
 pub mod gate;
 #[cfg(test)]
 pub mod mock;
+pub mod overlay;
 pub mod screenshot;
 pub mod session;
 pub mod tools;
