@@ -4,6 +4,7 @@ members = [
   "crates/zode",
   "crates/zode-core",
   "crates/zode-tui",
+  "crates/zode-overlay",
   "crates/zode-app-server-protocol",
   "crates/zode-app-server-transport",
   "crates/zode-app-server",

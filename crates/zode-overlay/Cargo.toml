@@ -1,0 +1,19 @@
+[package]
+name = "zode-overlay"
+description = "Ghost-cursor overlay helper for zode desktop automation (macOS)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
+core-foundation = "0.10"
+core-graphics = { version = "0.24", features = ["elcapitan", "highsierra"] }
