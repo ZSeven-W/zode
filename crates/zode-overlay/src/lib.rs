@@ -2,4 +2,5 @@
 //! The bin (`main.rs`) is macOS-only; this lib holds the platform-neutral
 //! pieces (wire protocol, cursor motion math) so they test everywhere.
 
+pub mod motion;
 pub mod proto;
