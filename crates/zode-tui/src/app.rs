@@ -1030,6 +1030,24 @@ impl TuiApp {
         true
     }
 
+    /// Desktop-Esc stops EVERYTHING: interrupt every tab with a running turn.
+    /// Returns how many turns were interrupted.
+    fn interrupt_all_running_turns(&mut self) -> usize {
+        let mut n = 0;
+        for idx in 0..self.tabs.len() {
+            let Some(interrupt) = self.prepare_tab_interrupt(idx, None) else {
+                continue;
+            };
+            if let Some(turn_id) = interrupt.turn_id {
+                self.resolve_extension_approvals_before_tui_interrupt(interrupt.tab_id, turn_id);
+                self.mark_extension_turn_interrupt_requested(interrupt.tab_id, turn_id, None);
+            }
+            interrupt.abort.abort_with_reason("user interrupted");
+            n += 1;
+        }
+        n
+    }
+
     fn prepare_tab_interrupt(
         &mut self,
         tab_idx: usize,
@@ -2543,6 +2561,9 @@ impl TuiApp {
         // synchronous handler the ticker would otherwise fire a storm of
         // back-to-back ticks (each a redraw).
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Global-Esc fire channel from the desktop automation event tap; the
+        // TUI is its single owner (None if some other loop already claimed it).
+        let mut esc_fire = zode_core::desktop::esc_watch::take_receiver();
 
         loop {
             // Full repaint when an overlay just closed (or Ctrl+L asked): see
@@ -2598,6 +2619,18 @@ impl TuiApp {
                         // A closed receiver is immediately ready forever. Drop
                         // it so subsequent iterations park on `pending()`.
                         self.extension_task_rx = None;
+                    }
+                }
+                Some(()) = recv_desktop_esc(&mut esc_fire) => {
+                    // Global Esc during desktop automation stops the whole run,
+                    // not just the current desktop action (same path as TUI Esc).
+                    let stopped = self.interrupt_all_running_turns();
+                    zode_core::desktop::esc_watch::disarm();
+                    zode_core::desktop::overlay::hide_global();
+                    if stopped > 0 {
+                        self.toast = Some(Toast::info(
+                            crate::tr("desktop automation stopped (Esc)").to_string(),
+                        ));
                     }
                 }
                 maybe_ev = term_events.next() => {
@@ -6173,6 +6206,10 @@ impl TuiApp {
                 }
             }
             AppEvent::TurnDone { result, .. } => {
+                // Any desktop automation this turn is over: stop arming Esc and
+                // hide the ghost cursor (both no-ops if never used this turn).
+                zode_core::desktop::esc_watch::disarm();
+                zode_core::desktop::overlay::hide_global();
                 tab.chat.end_turn();
                 tab.turn_abort = None;
                 tab.active_turn_id = 0;
@@ -7971,6 +8008,16 @@ fn needs_auto_compact(context_tokens: u32, window: u32) -> bool {
 /// a stale continuation can't dispatch after the loop was stopped (by
 /// `goal_complete`, the cap, a failed turn, an interrupt, or `/goal clear`).
 /// User-typed follow-ups in the queue are preserved.
+/// Await the desktop-Esc fire channel; pends forever once it's unavailable
+/// (a non-TUI owner took it, or a prior iteration dropped it) so the select
+/// arm simply never fires instead of busy-looping on a closed channel.
+async fn recv_desktop_esc(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<()>>) -> Option<()> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 fn stop_goal_loop(tab: &mut SessionTab) {
     tab.goal_loop_active = false;
     tab.goal_loop_iter = 0;
