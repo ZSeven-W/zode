@@ -6124,6 +6124,7 @@ dependencies = [
  "cocoa",
  "core-foundation",
  "core-graphics",
+ "foreign-types 0.5.0",
  "objc",
  "serde",
  "serde_json",
