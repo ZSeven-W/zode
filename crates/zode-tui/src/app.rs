@@ -6285,6 +6285,121 @@ impl TuiApp {
         }
     }
 
+    fn handle_external_agents_command(
+        &mut self,
+        args: &str,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let subcommand = args.trim().to_ascii_lowercase();
+        let cwd = self.active_tab().engine.cwd.clone();
+
+        match subcommand.as_str() {
+            "" | "list" => {
+                let detected = zode_core::external_agents::detect_installed_presets();
+                let cfg = match ConfigManager::load(&cwd) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        self.toast = Some(Toast::error(format!(
+                            "{}: {e}",
+                            crate::tr("load config failed")
+                        )));
+                        return;
+                    }
+                };
+                let mut lines = vec!["External agent CLIs (explicit registration):".to_string()];
+                if detected.is_empty() {
+                    lines.push("  (no supported external agent CLIs found on PATH)".to_string());
+                } else {
+                    for item in detected {
+                        let status = match cfg.external_agents.agents.get(&item.name) {
+                            Some(entry) if entry.enabled == Some(false) => "disabled",
+                            Some(_) if cfg.external_agents.enabled() => "registered",
+                            Some(_) => "registered, but globally disabled",
+                            None => "available",
+                        };
+                        lines.push(format!(
+                            "  [{status}] {:<14} {}",
+                            item.name,
+                            item.command.display()
+                        ));
+                    }
+                    lines.push(
+                        "Use /external-agents discover to register every available preset."
+                            .to_string(),
+                    );
+                }
+                self.active_tab_mut().chat.push_system(&lines.join("\n"));
+            }
+            "discover" | "register" => {
+                // Persisting first and then failing to rebuild would be
+                // surprising, so reject while the active engine is running.
+                if self.active_tab().is_busy() {
+                    self.toast = Some(Toast::info(
+                        "can't register external agents during a turn — Ctrl+C first",
+                    ));
+                    return;
+                }
+                let report = match zode_core::external_agents::detect_and_register_global(&cwd) {
+                    Ok(report) => report,
+                    Err(e) => {
+                        self.toast = Some(Toast::error(format!(
+                            "{}: {e}",
+                            crate::tr("save config failed")
+                        )));
+                        return;
+                    }
+                };
+                let message = if report.detected.is_empty() {
+                    "No supported external agent CLIs were found on PATH; config was unchanged."
+                        .to_string()
+                } else {
+                    let mut parts = Vec::new();
+                    if !report.added.is_empty() {
+                        parts.push(format!("registered: {}", report.added.join(", ")));
+                    }
+                    if !report.already_registered.is_empty() {
+                        parts.push(format!(
+                            "already registered: {}",
+                            report.already_registered.join(", ")
+                        ));
+                    }
+                    if !report.effective_enabled {
+                        parts.push(
+                            "external agents remain disabled by the project config".to_string(),
+                        );
+                    }
+                    format!("External agent discovery — {}", parts.join("; "))
+                };
+
+                // Rebuild even when every preset was already present: the
+                // config may have been edited after this tab was assembled.
+                if !report.detected.is_empty() {
+                    match self.template.reload_external_agents_from_disk(&cwd) {
+                        Ok(template) => {
+                            self.start_reassemble_active(
+                                template,
+                                ReassembleEffect::Notify(ReassembleNotify::System(message)),
+                                agent_tx,
+                            );
+                        }
+                        Err(e) => {
+                            self.toast = Some(Toast::error(format!(
+                                "registered, but {}: {e}",
+                                crate::tr("reload failed")
+                            )));
+                        }
+                    }
+                } else {
+                    self.active_tab_mut().chat.push_system(&message);
+                }
+            }
+            _ => self
+                .active_tab_mut()
+                .chat
+                .push_system("usage: /external-agents [list|discover]"),
+        }
+    }
+
     async fn handle_slash(
         &mut self,
         name: &str,
@@ -6698,6 +6813,7 @@ impl TuiApp {
                 self.active_tab_mut().chat.push_system(&out);
             }
             "agents" => self.open_agents_dialog(),
+            "external-agents" => self.handle_external_agents_command(args, agent_tx),
             "workflows" => self.open_workflows_dialog(),
             "permissions" => {
                 for line in self.template.permissions_summary() {

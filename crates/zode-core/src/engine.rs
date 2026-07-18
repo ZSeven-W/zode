@@ -1269,8 +1269,8 @@ impl ZodeEngine {
             resolve_subagent_max_iterations(cfg.subagent_max_iterations),
         ));
         let mut agent_type_list = task_factory.agent_types();
-        // External agent CLIs (claude / codex / opencode / custom) as Task
-        // agent_types. Discovery is stat-only and skipped entirely in plan /
+        // Manually registered external agent CLIs as Task agent_types.
+        // Executable resolution is stat-only and skipped entirely in plan /
         // read-only mode (Task itself is absent there — red-line behavior).
         // Grants are session-scoped fingerprints carried across rebuilds.
         let external_grants = carry
@@ -1514,8 +1514,7 @@ impl ZodeEngine {
             ]);
         }
         let self_gated: &[&str] = &self_gated_names;
-        let mut gated =
-            wrap_mutating_tools(base, &gate, &mutating_allow, &force_ask, self_gated);
+        let mut gated = wrap_mutating_tools(base, &gate, &mutating_allow, &force_ask, self_gated);
 
         // 3. ToolSearch over the full set (candidates = snapshot of the
         //    gated registry, taken before ToolSearch itself is added).
@@ -2892,6 +2891,18 @@ impl EngineTemplate {
     pub fn reload_plugins_from_disk(&self, cwd: &std::path::Path) -> Result<Self, CoreError> {
         let fresh = crate::config::ConfigManager::load(cwd)?;
         Ok(self.with_plugins_disabled(fresh.plugins.disabled))
+    }
+
+    /// Re-read only the external-agent configuration after an explicit
+    /// `/external-agents discover`, preserving every other in-session choice.
+    pub fn reload_external_agents_from_disk(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Self, CoreError> {
+        let fresh = crate::config::ConfigManager::load(cwd)?;
+        let mut t = self.clone();
+        t.cfg.external_agents = fresh.external_agents;
+        Ok(t)
     }
 
     /// The persistent goal injected into the system prompt (`/goal`).
@@ -4540,7 +4551,7 @@ mod tests {
         assert!(eng.system.as_deref().unwrap_or("").contains("PLAN MODE"));
     }
 
-    /// Red line: with no external agents configured/installed, the internal
+    /// Red line: with no external agents manually configured, the internal
     /// Task path keeps today's exact shape — a PermissionGatedTool around the
     /// upstream TaskTool, so a deny gate blocks it.
     #[tokio::test]

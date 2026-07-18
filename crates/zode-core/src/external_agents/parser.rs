@@ -1,7 +1,7 @@
-//! Stream parsers for external agent stdout. Display-plane events NEVER hard
-//! fail (unknown lines degrade to `ExtEvent::Log`); control-plane fields
-//! (final result, session id for JSONL dialects) missing at end-of-stream IS
-//! a hard failure — hire/resume semantics would dangle otherwise.
+//! Stream parsers for external agent stdout. Display-plane events never hard
+//! fail (unknown lines degrade to `ExtEvent::Log`). The built-in Claude and
+//! Codex dialects require their terminal events; text and generic JSONL finish
+//! successfully at EOF, with optional session metadata supplied by profiles.
 
 use super::capability::OutputProtocol;
 
@@ -26,6 +26,8 @@ pub struct FinalResult {
 #[derive(Debug)]
 pub struct StreamParser {
     protocol: OutputProtocol,
+    text_source: Option<String>,
+    session_id_source: Option<String>,
     text_lines: Vec<String>,
     result: Option<FinalResult>,
     session_id: Option<String>,
@@ -38,8 +40,18 @@ pub struct StreamParser {
 
 impl StreamParser {
     pub fn new(protocol: &OutputProtocol) -> Self {
+        Self::with_sources(protocol, None, None)
+    }
+
+    pub fn with_sources(
+        protocol: &OutputProtocol,
+        text_source: Option<&str>,
+        session_id_source: Option<&str>,
+    ) -> Self {
         Self {
             protocol: *protocol,
+            text_source: text_source.map(String::from),
+            session_id_source: session_id_source.map(String::from),
             text_lines: Vec::new(),
             result: None,
             session_id: None,
@@ -57,8 +69,34 @@ impl StreamParser {
                 self.text_lines.push(line.to_string());
                 vec![ExtEvent::Text(line.to_string())]
             }
+            OutputProtocol::Jsonl => self.feed_generic_jsonl(line),
             OutputProtocol::JsonlClaude => self.feed_claude(line),
             OutputProtocol::JsonlCodex => self.feed_codex(line),
+        }
+    }
+
+    fn feed_generic_jsonl(&mut self, line: &str) -> Vec<ExtEvent> {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return vec![ExtEvent::Log(line.to_string())];
+        };
+        if self.session_id.is_none() {
+            let pointer = self.session_id_source.as_deref();
+            if let Some(pointer) = pointer {
+                if let Some(id) = value.pointer(pointer).and_then(|v| v.as_str()) {
+                    self.session_id = Some(id.to_string());
+                }
+            }
+        }
+        let pointer = self.text_source.as_deref().unwrap_or("/text");
+        match value.pointer(pointer).and_then(|v| v.as_str()) {
+            Some(text) if !text.is_empty() => {
+                self.text_lines.push(text.to_string());
+                vec![ExtEvent::Text(text.to_string())]
+            }
+            // A generic stream commonly contains lifecycle/tool events that
+            // do not carry user-facing text. Valid but unmatched JSON is
+            // control-plane noise, not an error log.
+            _ => vec![],
         }
     }
 
@@ -190,13 +228,13 @@ impl StreamParser {
         }
     }
 
-    /// End-of-stream. Text protocol always succeeds; JSONL dialects hard-fail
-    /// when the terminal control-plane event never arrived.
+    /// End-of-stream. Text and generic JSONL succeed at EOF; the built-in
+    /// Claude/Codex dialects hard-fail when their terminal event never arrived.
     pub fn finish(self) -> Result<FinalResult, String> {
         match self.protocol {
-            OutputProtocol::Text => Ok(FinalResult {
+            OutputProtocol::Text | OutputProtocol::Jsonl => Ok(FinalResult {
                 text: self.text_lines.join("\n"),
-                session_id: None,
+                session_id: self.session_id,
                 usage_in: None,
                 usage_out: None,
                 model: None,
@@ -288,5 +326,23 @@ mod tests {
         p.feed("line two");
         let r = p.finish().unwrap();
         assert_eq!(r.text, "line one\nline two");
+    }
+
+    #[test]
+    fn generic_jsonl_uses_configured_text_and_session_pointers() {
+        let mut p = StreamParser::with_sources(
+            &OutputProtocol::Jsonl,
+            Some("/event/delta"),
+            Some("/session/id"),
+        );
+        assert!(matches!(
+            p.feed(r#"{"session":{"id":"s-1"},"event":{"delta":"hello"}}"#)
+                .as_slice(),
+            [ExtEvent::Text(text)] if text == "hello"
+        ));
+        p.feed(r#"{"event":{"delta":"world"}}"#);
+        let result = p.finish().unwrap();
+        assert_eq!(result.text, "hello\nworld");
+        assert_eq!(result.session_id.as_deref(), Some("s-1"));
     }
 }

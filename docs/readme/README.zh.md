@@ -51,7 +51,7 @@
 - **V1 兼容的持久会话**：保留原有 `<id>.jsonl` 会话协议，同时以旁路数据增加 journal、checkpoint、rewind、fork 和隔离 Git worktree。
 - **自动化接口**：稳定的 JSON/JSONL headless 输出、精确会话定位、工具过滤、确定性退出码、stdio ACP 和本地 dashboard。
 - **多会话标签页**：用 `Ctrl+T` 并排运行多个隔离会话，并可恢复历史会话。
-- **子代理与工作流**：通过 Task 工具委派范围明确的工作，并用 `/agents`、`/workflows` 管理。
+- **子代理、团队与工作流**：通过 Task 委派一次性任务，手动注册内部或外部 CLI 队友，并用 `/agents`、`/team`、`/workflows` 管理。
 - **技能、MCP 与 hooks**：按需加载 `SKILL.md`，连接 MCP 服务器，并在工具事件上运行外部脚本。
 
 ## 安装
@@ -137,6 +137,89 @@ zode server                   # 通过 stdio 运行 JSON-RPC app-server
 zode acp                      # 通过 stdio 运行 ACP agent
 zode dashboard                # 查看本地会话、checkpoint 和 worktree
 ```
+
+## 手动注册外部 CLI 队友
+
+Zode 可以把第三方 agent CLI 用作一次性 Task worker，或加入可持续对话的
+team。注册是显式的：即使可执行文件已经位于 `PATH`，Zode 也不会自动暴露给
+模型；必须在 `externalAgents.agents` 中添加 profile。
+也可以运行 `/external-agents` 查看 `PATH` 中受支持的 CLI，再运行
+`/external-agents discover` 将发现的预置显式注册到全局配置。Zode 启动时仍不会自动扫描或注册。
+
+| Profile | 命令 | Task | Team 模式 | 外部 CLI 沙箱 |
+|---|---|---:|---:|---|
+| `claude-code` | `claude` | 是 | persistent | unrestricted |
+| `codex` | `codex` | 是 | persistent | workspace-write |
+| `opencode` | `opencode` | 是 | stateless | unknown |
+| `cline` | `cline` | 是 | stateless | unrestricted |
+| `antigravity` | `agy` | 是 | stateless | unknown |
+| `cursor` | `cursor-agent` | 是 | persistent | unrestricted |
+| `kiro` | `kiro-cli` | 是 | stateless | unrestricted |
+| `pi` | `pi` | 是 | persistent | unrestricted |
+| `grok` (Grok Build) | `grok` | 是 | persistent | unrestricted |
+
+### 添加 profile
+
+在全局 `~/.zode/config.json` 或项目级 `.zode/config.json` 中配置。已知
+profile 使用空对象即可手动启用；`command` 可写 `PATH` 中的裸命令名或路径：
+
+```jsonc
+{
+  "externalAgents": {
+    "agents": {
+      "claude-code": {},
+      "codex": {},
+      "opencode": {},
+      "cline": {},
+      "antigravity": {},
+      "cursor": {},
+      "kiro": {},
+      "pi": {},
+      "grok": {},
+      "my-agent": {
+        "command": "my-agent",
+        "args": ["run", "--json", "{prompt}"],
+        "promptTransport": "argv",
+        "output": "jsonl",
+        "textSource": "/event/delta",
+        "sessionIdSource": "/session/id",
+        "resumeArgs": ["--session", "{session_id}"],
+        "effectiveSandbox": "workspaceWrite",
+        "authEnv": ["MY_AGENT_API_KEY"],
+        "trusted": false
+      }
+    }
+  }
+}
+```
+
+只添加确实要暴露的 profile。已知预设可覆盖 `enabled`、`command`、
+`extraArgs`、`envAllow` 和 `trusted`。自定义 profile 的
+`promptTransport` 支持 `stdin`、`argv`、`file`；`output` 支持 `text`、
+通用 `jsonl`、`jsonl-claude`、`jsonl-codex`。通用 JSONL 通过 RFC 6901
+`textSource` 和 `sessionIdSource` 提取文本与会话 ID；`resumeArgs` 必须包含
+独立的 `{session_id}`。没有可恢复会话的 CLI 会作为无状态 teammate，每次派发
+启动新进程，也可作为一次性 Task worker。
+`newSessionArgs` 也可包含独立的 `{session_id}`：Zode 会为首次运行生成
+ID，后续派发使用 `resumeArgs`。
+
+外部进程只继承 `PATH`、`HOME`、`TERM` 等基础环境；API key 等变量需加入
+`envAllow` 或 `authEnv`。普通模式首次雇佣会显示命令、工作目录和沙箱并请求
+信任；Zode 只审批进程启动，不会逐项审批外部 CLI 的文件修改和 shell 命令。
+`--yolo` 等无交互模式必须显式设 `trusted: true` 才会运行。
+
+### 使用 team
+
+`team_hire` 和 `team_send` 是模型工具，不是斜杠命令。直接告诉 leader：
+
+```text
+雇佣 `codex`，命名为 `implementer`，负责实现认证重构并运行测试。
+把任务发给 `implementer`，编辑前先 claim `src/auth/`。
+```
+
+之后用 `/team`、`/team board` 查看名册和协作板，用
+`/team dismiss implementer` 移除队友。team 状态保存在
+`<cwd>/.zode/team/`，但外部 CLI 的信任授权不会跨 Zode 进程持久化。
 
 ## 新功能使用指南
 
@@ -420,6 +503,8 @@ Zode 提供 `tools:browser` 工具组：
 | `/mcp` | 管理 MCP server |
 | `/skills` | 列出可用技能 |
 | `/agents` | 管理子代理 |
+| `/external-agents [list\|discover]` | 查看 `PATH` 中受支持的外部 CLI，或显式注册所有发现的预置 |
+| `/team [status\|board\|dismiss <name>]` | 查看持久队友名册和共享 board，或移除队友 |
 | `/workflows` | 管理和运行 JS 工作流 |
 | `/sandbox ...` | 查看或控制 OS 沙箱 |
 | `/language` | 切换 UI 语言 |

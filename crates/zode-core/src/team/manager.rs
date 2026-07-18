@@ -478,13 +478,20 @@ impl TeamManager {
                     .and_then(|p| deps.external_registry.get(p).cloned())
                     .and_then(|def| ExternalSession::new(def).ok())
                     .map(|mut s| {
-                        s.session_id = pt.session_id.clone();
+                        let supports_resume = s.def.capability.resume_flag.is_some()
+                            || s.def.capability.resume_args.is_some();
+                        let restored_session_id = if supports_resume {
+                            pt.session_id.clone()
+                        } else {
+                            None
+                        };
+                        s.session_id = restored_session_id.clone();
                         (
                             TeammateBackend::External(Arc::new(tokio::sync::Mutex::new(s))),
                             pt.model_label.clone(),
                             super::TeammateMeta::External {
                                 profile: pt.profile.clone().unwrap_or_default(),
-                                session_id: pt.session_id.clone(),
+                                session_id: restored_session_id,
                             },
                         )
                     })
@@ -812,10 +819,13 @@ mod tests {
                             output_protocol:
                                 crate::external_agents::capability::OutputProtocol::Text,
                             resume_flag: Some("--resume".into()),
+                            resume_args: None,
+                            new_session_args: None,
                             effective_sandbox:
                                 crate::external_agents::capability::EffectiveSandbox::Unknown,
                             version_requirement: None,
                             session_id_source: None,
+                            text_source: None,
                         },
                         auth_env: vec![],
                         env_allow: vec![],

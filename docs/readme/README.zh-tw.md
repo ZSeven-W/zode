@@ -49,7 +49,7 @@
 - **預設啟用 OS 沙箱**：shell 命令在 macOS `sandbox-exec` 或 Linux `bwrap` 中執行，預設禁止對外網路。
 - **全螢幕 TUI**：串流 Markdown、語法高亮、diff 預覽、斜線命令補全、歷史提示、11 套內建主題、設定與說明浮層，以及 15 種 UI 語言（`/language`）。
 - **多會話分頁**：用 `Ctrl+T` 並排執行多個隔離對話，也可恢復歷史會話。
-- **子代理與工作流**：透過 Task 工具委派範圍明確的工作，並用 `/agents`、`/workflows` 管理。
+- **子代理、團隊與工作流**：透過 Task 委派一次性工作，手動註冊內部或外部 CLI 隊友，並用 `/agents`、`/team`、`/workflows` 管理。
 - **Skills、MCP 與 hooks**：按需載入 `SKILL.md`，連接 MCP server，並在工具事件上執行外部腳本。
 
 ## 安裝
@@ -134,6 +134,89 @@ zode --provider <name>
 zode server
 ```
 
+## 手動註冊外部 CLI 隊友
+
+Zode 可將第三方 agent CLI 作為一次性 Task worker，或加入可持續對話的
+team。註冊是明確操作：即使執行檔已在 `PATH`，Zode 也不會自動暴露給模型；
+必須在 `externalAgents.agents` 中加入 profile。
+也可執行 `/external-agents` 查看 `PATH` 中支援的 CLI，再執行
+`/external-agents discover` 將偵測到的預設明確註冊到全域設定。Zode 啟動時仍不會自動掃描或註冊。
+
+| Profile | 命令 | Task | Team 模式 | 外部 CLI sandbox |
+|---|---|---:|---:|---|
+| `claude-code` | `claude` | 是 | persistent | unrestricted |
+| `codex` | `codex` | 是 | persistent | workspace-write |
+| `opencode` | `opencode` | 是 | stateless | unknown |
+| `cline` | `cline` | 是 | stateless | unrestricted |
+| `antigravity` | `agy` | 是 | stateless | unknown |
+| `cursor` | `cursor-agent` | 是 | persistent | unrestricted |
+| `kiro` | `kiro-cli` | 是 | stateless | unrestricted |
+| `pi` | `pi` | 是 | persistent | unrestricted |
+| `grok` (Grok Build) | `grok` | 是 | persistent | unrestricted |
+
+### 加入 profile
+
+在全域 `~/.zode/config.json` 或專案 `.zode/config.json` 設定。已知
+profile 使用空物件即可手動啟用；`command` 可使用 `PATH` 中的命令名稱或路徑：
+
+```jsonc
+{
+  "externalAgents": {
+    "agents": {
+      "claude-code": {},
+      "codex": {},
+      "opencode": {},
+      "cline": {},
+      "antigravity": {},
+      "cursor": {},
+      "kiro": {},
+      "pi": {},
+      "grok": {},
+      "my-agent": {
+        "command": "my-agent",
+        "args": ["run", "--json", "{prompt}"],
+        "promptTransport": "argv",
+        "output": "jsonl",
+        "textSource": "/event/delta",
+        "sessionIdSource": "/session/id",
+        "resumeArgs": ["--session", "{session_id}"],
+        "effectiveSandbox": "workspaceWrite",
+        "authEnv": ["MY_AGENT_API_KEY"],
+        "trusted": false
+      }
+    }
+  }
+}
+```
+
+只加入確實要暴露的 profile。已知 preset 可覆寫 `enabled`、`command`、
+`extraArgs`、`envAllow`、`trusted`。自訂 profile 的 `promptTransport`
+支援 `stdin`、`argv`、`file`；`output` 支援 `text`、通用 `jsonl`、
+`jsonl-claude`、`jsonl-codex`。通用 JSONL 透過 RFC 6901 `textSource` 與
+`sessionIdSource` 擷取文字和 session ID；`resumeArgs` 必須含有獨立的
+`{session_id}`。無法恢復 session 的 CLI 會以無狀態 teammate 運作，每次派發
+啟動新程序，也可作為一次性 Task worker。
+`newSessionArgs` 也可包含獨立的 `{session_id}`：Zode 會為首次執行產生
+ID，之後的派發則使用 `resumeArgs`。
+
+外部程序只繼承 `PATH`、`HOME`、`TERM` 等基本環境；API key 需加入
+`envAllow` 或 `authEnv`。首次雇用會顯示命令、工作目錄和 sandbox 並要求
+信任；Zode 只審批程序啟動，不會逐項審批外部 CLI 的檔案修改與 shell 命令。
+`--yolo` 等非互動模式必須明確設定 `trusted: true`。
+
+### 使用 team
+
+`team_hire` 與 `team_send` 是模型工具，不是斜線命令。直接告訴 leader：
+
+```text
+雇用 `codex`，命名為 `implementer`，負責實作驗證重構並執行測試。
+將工作交給 `implementer`，編輯前先 claim `src/auth/`。
+```
+
+之後以 `/team`、`/team board` 查看名冊與協作板，以
+`/team dismiss implementer` 移除隊友。team 狀態保存在
+`<cwd>/.zode/team/`，但外部 CLI 的信任授權不會跨 Zode 程序持久化。
+
 ## 設定重點
 
 `providers` 是模型提供商的來源；頂層 `provider` 指向目前使用中的模型。OpenAI 相容提供商通常需要 `baseUrl` 和 `dialect`：
@@ -210,6 +293,8 @@ Zode 提供 `tools:browser` 工具組，支援讀取截圖/DOM/log、導航、�
 | `/mcp` | 管理 MCP server |
 | `/skills` | 列出技能 |
 | `/agents` | 管理子代理 |
+| `/external-agents [list\|discover]` | 查看 `PATH` 中支援的外部 CLI，或明確註冊所有偵測到的預設 |
+| `/team [status\|board\|dismiss <name>]` | 查看持久隊友名冊和共享 board，或移除隊友 |
 | `/workflows` | 管理工作流 |
 | `/sandbox ...` | 控制 OS 沙箱 |
 | `/language` | 切換 UI 語言 |

@@ -386,8 +386,9 @@ impl DesktopConfig {
     }
 }
 
-/// External agent CLIs (claude / codex / opencode / custom) exposed as Task
-/// `agent_type`s. All fields optional; effective values come from the getters.
+/// Manually registered external agent CLIs exposed as Task `agent_type`s.
+/// Known profile names receive preset defaults; arbitrary names use the custom
+/// protocol fields below. Nothing is registered merely because it is on PATH.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ExternalAgentsConfig {
@@ -415,7 +416,7 @@ impl ExternalAgentsConfig {
     }
 }
 
-/// One external agent profile. For the three built-ins only
+/// One external agent profile. For known presets only
 /// `enabled`/`command`/`extra_args`/`env_allow`/`trusted` are honored; the
 /// remaining capability fields describe custom profiles.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -428,12 +429,20 @@ pub struct ExternalAgentEntry {
     /// "stdin" | "argv" | "file" (argv requires a "{prompt}" placeholder in
     /// `args`; file requires "{prompt_file}").
     pub prompt_transport: Option<String>,
-    /// "text" | "jsonl-claude" | "jsonl-codex" (default "text").
+    /// "text" | "jsonl" | "jsonl-claude" | "jsonl-codex" (default "text").
     pub output: Option<String>,
     pub resume_flag: Option<String>,
+    /// Arguments appended on the first run with a Zode-generated session ID.
+    /// Requires a standalone `{session_id}` token and resume support.
+    pub new_session_args: Option<Vec<String>>,
+    /// General resume argv template. Requires a standalone `{session_id}`
+    /// token and takes precedence over `resumeFlag`.
+    pub resume_args: Option<Vec<String>>,
     pub version_requirement: Option<String>,
-    /// JSON pointer into the final result event, e.g. "/session_id".
+    /// JSON pointer to a session id in generic JSONL events, e.g. "/id".
     pub session_id_source: Option<String>,
+    /// JSON pointer to streamed text in generic JSONL events, e.g. "/text".
+    pub text_source: Option<String>,
     /// "none" | "readOnly" | "workspaceWrite" | "unrestricted" | "unknown".
     pub effective_sandbox: Option<String>,
     /// Env var names this CLI needs for its own auth (loader vars rejected).

@@ -41,7 +41,6 @@ dependencies = [
  "reqwest 0.13.4",
  "rmcp",
  "schemars 1.2.1",
- "schemars",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -113,7 +112,6 @@ dependencies = [
  "regex",
  "reqwest 0.13.4",
  "schemars 1.2.1",
- "schemars",
  "serde",
  "serde_json",
  "shell-words",
@@ -1438,7 +1436,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
 dependencies = [
  "foreign-types-shared 0.1.1",
- "foreign-types-shared",
 ]
 
 [[package]]
@@ -1793,7 +1790,6 @@ dependencies = [
  "futures-sink",
  "http",
  "indexmap 2.14.0",
- "indexmap",
  "slab",
  "tokio",
  "tokio-util",
@@ -2466,15 +2462,15 @@ checksum = "0717cef1bc8b636c6e1c1bbdefc09e6322da8a9321966e8928ef80d20f7f770f"
 
 [[package]]
 name = "linux-raw-sys"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
-
-[[package]]
-name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "litemap"
@@ -2775,7 +2771,6 @@ dependencies = [
  "log",
  "reqwest 0.12.28",
  "schemars 1.2.1",
- "schemars",
  "serde",
  "serde_json",
  "static_assertions",
@@ -2806,7 +2801,6 @@ dependencies = [
  "bitflags 2.13.0",
  "cfg-if",
  "foreign-types 0.3.2",
- "foreign-types",
  "libc",
  "openssl-macros",
  "openssl-sys",
@@ -3073,7 +3067,6 @@ checksum = "092791278e026273c1b65bbdcfbba3a300f2994c896bd01ab01da613c29c46f1"
 dependencies = [
  "base64 0.22.1",
  "indexmap 2.14.0",
- "indexmap",
  "quick-xml",
  "serde",
  "time",
@@ -3225,7 +3218,6 @@ checksum = "2e842efad9119158434d193c6682e2ebee4b44d6ad801d7b349623b3f57cdf55"
 dependencies = [
  "futures",
  "indexmap 2.14.0",
- "indexmap",
  "nix 0.31.3",
  "tokio",
  "tracing",
@@ -3437,7 +3429,6 @@ dependencies = [
  "lru 0.12.5",
  "paste",
  "strum 0.26.3",
- "strum",
  "unicode-segmentation",
  "unicode-truncate",
  "unicode-width 0.2.0",
@@ -4008,7 +3999,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
  "indexmap 2.14.0",
- "indexmap",
  "itoa",
  "memchr",
  "serde",
@@ -4306,7 +4296,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
 dependencies = [
  "strum_macros 0.26.4",
- "strum_macros",
 ]
 
 [[package]]
@@ -4650,9 +4639,7 @@ dependencies = [
  "serde",
  "serde_spanned",
  "toml_datetime 0.6.11",
- "toml_datetime",
  "toml_edit 0.22.27",
- "toml_edit",
 ]
 
 [[package]]
@@ -4680,14 +4667,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
 dependencies = [
  "indexmap 2.14.0",
- "indexmap",
  "serde",
  "serde_spanned",
  "toml_datetime 0.6.11",
- "toml_datetime",
  "toml_write",
  "winnow 0.7.15",
- "winnow",
 ]
 
 [[package]]
@@ -4696,7 +4680,7 @@ version = "0.25.13+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6975367e4d2ef766d86af01ffad14b622fecc8d4357a998fbc4deb6e9bacaf9b"
 dependencies = [
- "indexmap",
+ "indexmap 2.14.0",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
  "winnow 1.0.4",
@@ -5154,7 +5138,6 @@ checksum = "bb0e353e6a2fbdc176932bbaab493762eb1255a7900fe0fea1a2f96c296cc909"
 dependencies = [
  "anyhow",
  "indexmap 2.14.0",
- "indexmap",
  "wasm-encoder",
  "wasmparser",
 ]
@@ -5194,7 +5177,6 @@ dependencies = [
  "bitflags 2.13.0",
  "hashbrown 0.15.5",
  "indexmap 2.14.0",
- "indexmap",
  "semver",
 ]
 
@@ -5681,7 +5663,6 @@ dependencies = [
  "anyhow",
  "heck",
  "indexmap 2.14.0",
- "indexmap",
  "prettyplease",
  "syn",
  "wasm-metadata",
@@ -5713,7 +5694,6 @@ dependencies = [
  "anyhow",
  "bitflags 2.13.0",
  "indexmap 2.14.0",
- "indexmap",
  "log",
  "serde",
  "serde_derive",
@@ -5733,7 +5713,6 @@ dependencies = [
  "anyhow",
  "id-arena",
  "indexmap 2.14.0",
- "indexmap",
  "log",
  "semver",
  "serde",
@@ -6060,8 +6039,8 @@ dependencies = [
  "fs4 0.9.1",
  "futures",
  "futures-util",
+ "hmac",
  "indexmap 2.14.0",
- "indexmap",
  "libc",
  "noema-core",
  "opentelemetry",
@@ -6117,7 +6096,6 @@ dependencies = [
  "crossterm",
  "futures",
  "indexmap 2.14.0",
- "indexmap",
  "libc",
  "once_cell",
  "pulldown-cmark",

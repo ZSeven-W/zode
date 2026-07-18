@@ -19,6 +19,9 @@ pub enum PromptTransport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputProtocol {
     Text,
+    /// Generic newline-delimited JSON. Text and session IDs are selected with
+    /// JSON pointers from the profile instead of a CLI-specific event schema.
+    Jsonl,
     JsonlClaude,
     JsonlCodex,
 }
@@ -51,8 +54,16 @@ impl fmt::Display for EffectiveSandbox {
 pub struct ProfileCapability {
     pub prompt_transport: PromptTransport,
     pub output_protocol: OutputProtocol,
-    /// Resume flag (e.g. "--resume"); `None` = one-shot only, cannot be hired.
+    /// Simple resume flag (e.g. "--resume"). A profile is one-shot only when
+    /// both this and `resume_args` are absent.
     pub resume_flag: Option<String>,
+    /// General resume argv template, appended on later turns. Every
+    /// `{session_id}` token is replaced with the captured session id. Takes
+    /// precedence over `resume_flag`.
+    pub resume_args: Option<Vec<String>>,
+    /// Initial-run argv template for CLIs that accept a caller-selected
+    /// session ID. Zode generates the ID and replaces `{session_id}`.
+    pub new_session_args: Option<Vec<String>>,
     pub effective_sandbox: EffectiveSandbox,
     /// Minimal version accepted, compared against `--version` output AFTER
     /// the first trust approval (never before — running an untrusted binary
@@ -60,6 +71,8 @@ pub struct ProfileCapability {
     pub version_requirement: Option<String>,
     /// JSON pointer into the final result event (e.g. "/session_id").
     pub session_id_source: Option<String>,
+    /// JSON pointer to streamed result text for the generic `jsonl` protocol.
+    pub text_source: Option<String>,
 }
 
 #[cfg(test)]

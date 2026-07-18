@@ -1,9 +1,7 @@
-//! External teammate sessions: a resumable agent CLI. A profile without
-//! resume capability cannot become a teammate. Trust follows the two-phase
-//! grant from Phase A: hire only approves (PendingGrant); the first send
-//! re-hashes, probes `--version`, and promotes to Granted while capturing the
-//! session id. A fingerprint change after a session exists discards the old
-//! session id (no resume onto a changed binary).
+//! External teammate sessions. Resumable CLIs keep their conversation across
+//! assignments; one-shot CLIs remain useful as stateless teammates and start a
+//! fresh process for every send. Trust follows the two-phase grant from Phase
+//! A. A fingerprint change discards any captured session id.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,14 +24,7 @@ pub struct ExternalSession {
 }
 
 impl ExternalSession {
-    /// Fails if the profile cannot resume (one-shot-only CLIs can't be hired).
     pub fn new(def: ExternalAgentDef) -> Result<Self, TeamError> {
-        if def.capability.resume_flag.is_none() {
-            return Err(TeamError::Io(format!(
-                "external agent '{}' does not support resume and cannot be a teammate",
-                def.name
-            )));
-        }
         Ok(Self {
             def,
             session_id: None,
@@ -95,17 +86,50 @@ impl ExternalSession {
             }
         }
 
+        let mut planned_session_id = None;
         let (prompt, extra_args) = match &self.session_id {
             None => {
                 let p = match preamble {
                     Some(pre) => format!("{pre}\n\n{message}"),
                     None => message.to_string(),
                 };
-                (p, vec![])
+                let args = if let Some(template) = &self.def.capability.new_session_args {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    planned_session_id = Some(id.clone());
+                    template
+                        .iter()
+                        .map(|arg| {
+                            if arg == "{session_id}" {
+                                id.clone()
+                            } else {
+                                arg.clone()
+                            }
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                };
+                (p, args)
             }
             Some(id) => {
-                let flag = self.def.capability.resume_flag.clone().unwrap_or_default();
-                (message.to_string(), vec![flag, id.clone()])
+                let args = if let Some(template) = &self.def.capability.resume_args {
+                    template
+                        .iter()
+                        .map(|arg| {
+                            if arg == "{session_id}" {
+                                id.clone()
+                            } else {
+                                arg.clone()
+                            }
+                        })
+                        .collect()
+                } else {
+                    vec![
+                        self.def.capability.resume_flag.clone().unwrap_or_default(),
+                        id.clone(),
+                    ]
+                };
+                (message.to_string(), args)
             }
         };
 
@@ -121,10 +145,14 @@ impl ExternalSession {
             .await
             .map_err(TeamError::Io)?;
 
-        // Capture the session id on the first successful run.
-        if self.session_id.is_none() {
-            match &outcome.result.session_id {
-                Some(id) => self.session_id = Some(id.clone()),
+        // Capture the session id on the first successful run when this profile
+        // promises resume support. Stateless teammates intentionally keep it
+        // as None, so the next send starts a fresh run with the preamble.
+        let supports_resume =
+            self.def.capability.resume_flag.is_some() || self.def.capability.resume_args.is_some();
+        if supports_resume && self.session_id.is_none() {
+            match outcome.result.session_id.clone().or(planned_session_id) {
+                Some(id) => self.session_id = Some(id),
                 None => {
                     return Err(TeamError::Io(format!(
                         "external teammate '{}' produced no session id; cannot become resumable",
@@ -156,9 +184,12 @@ mod tests {
                 prompt_transport: PromptTransport::Stdin,
                 output_protocol: OutputProtocol::JsonlClaude,
                 resume_flag: Some("--resume".into()),
+                resume_args: None,
+                new_session_args: None,
                 effective_sandbox: EffectiveSandbox::Unrestricted,
                 version_requirement: None,
                 session_id_source: Some("/session_id".into()),
+                text_source: None,
             },
             auth_env: vec![],
             env_allow: vec![],
@@ -176,17 +207,104 @@ mod tests {
     }
 
     #[test]
-    fn non_resumable_profile_cannot_become_teammate() {
+    fn non_resumable_profile_becomes_a_stateless_teammate() {
         let mut def = resumable_def("fake-claude.sh");
         def.capability.resume_flag = None;
-        assert!(ExternalSession::new(def).is_err());
+        def.capability.resume_args = None;
+        assert!(ExternalSession::new(def).is_ok());
+    }
+
+    #[test]
+    fn resume_args_make_a_profile_resumable() {
+        let mut def = resumable_def("fake-claude.sh");
+        def.capability.resume_flag = None;
+        def.capability.resume_args = Some(vec!["--session".into(), "{session_id}".into()]);
+        assert!(ExternalSession::new(def).is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn host_selected_session_id_makes_text_cli_resumable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut def = resumable_def("fake-resume.sh");
+        def.capability.output_protocol = OutputProtocol::Text;
+        def.capability.resume_flag = None;
+        def.capability.new_session_args = Some(vec!["--session-id".into(), "{session_id}".into()]);
+        def.capability.resume_args = Some(vec!["--resume".into(), "{session_id}".into()]);
+        let grants = granted(&def, dir.path());
+        let mut session = ExternalSession::new(def).unwrap();
+
+        session
+            .send(
+                "task one",
+                None,
+                &grants,
+                dir.path(),
+                Duration::from_secs(30),
+                None,
+                |_| {},
+                AbortController::new(),
+            )
+            .await
+            .unwrap();
+        let id = session
+            .session_id
+            .clone()
+            .expect("host-selected session id");
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+
+        let resumed = session
+            .send(
+                "task two",
+                None,
+                &grants,
+                dir.path(),
+                Duration::from_secs(30),
+                None,
+                |_| {},
+                AbortController::new(),
+            )
+            .await
+            .unwrap();
+        assert!(resumed.result.text.contains("resumed-ok"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn stateless_teammate_starts_a_fresh_run_on_each_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut def = resumable_def("fake-resume.sh");
+        def.capability.resume_flag = None;
+        def.capability.resume_args = None;
+        let grants = granted(&def, dir.path());
+        let mut session = ExternalSession::new(def).unwrap();
+
+        for message in ["task one", "task two"] {
+            let out = session
+                .send(
+                    message,
+                    Some("you are a stateless teammate"),
+                    &grants,
+                    dir.path(),
+                    Duration::from_secs(30),
+                    None,
+                    |_| {},
+                    AbortController::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(out.result.text, "first-run done");
+            assert!(session.session_id.is_none());
+        }
     }
 
     #[tokio::test]
     #[cfg(unix)]
     async fn first_send_captures_session_id_then_resumes() {
         let dir = tempfile::tempdir().unwrap();
-        let def = resumable_def("fake-resume.sh");
+        let mut def = resumable_def("fake-resume.sh");
+        def.capability.resume_flag = None;
+        def.capability.resume_args = Some(vec!["--resume".into(), "{session_id}".into()]);
         let grants = granted(&def, dir.path());
         let mut s = ExternalSession::new(def).unwrap();
         let out1 = s

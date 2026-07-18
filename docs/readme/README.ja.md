@@ -49,7 +49,7 @@
 - **OS サンドボックスが標準有効**：shell コマンドは macOS `sandbox-exec` または Linux `bwrap` で実行され、デフォルトで outbound network を拒否。
 - **フルスクリーン TUI**：streaming Markdown、syntax highlight、diff preview、slash command autocomplete、履歴、11 個の組み込みテーマ、設定/ヘルプ overlay、15 言語 UI（`/language`）。
 - **マルチセッション tabs**：`Ctrl+T` で複数の独立した会話を並行実行し、過去の session も復元可能。
-- **サブエージェントと workflow**：Task tool で限定された作業を委任し、`/agents` と `/workflows` で管理。
+- **サブエージェント、team、workflow**：Task で一回限りの作業を委任し、内部または外部 CLI の teammate を手動登録して `/agents`、`/team`、`/workflows` で管理。
 - **Skills / MCP / hooks**：必要に応じて `SKILL.md` を読み込み、MCP server を接続し、tool event に外部 script を実行。
 
 ## インストール
@@ -134,6 +134,92 @@ zode --provider <name>
 zode server
 ```
 
+## 外部 CLI teammate の手動登録
+
+Zode は第三者の agent CLI を一回限りの Task worker、または会話を継続する
+teammate として利用できます。登録は明示的です。実行ファイルが `PATH` に
+あっても自動登録されず、`externalAgents.agents` への追加が必要です。
+`/external-agents` で `PATH` 上の対応 CLI を確認し、
+`/external-agents discover` で検出済みプリセットを明示的にグローバル設定へ登録できます。起動時の自動スキャンや登録は行いません。
+
+| Profile | Command | Task | Team mode | 外部 CLI sandbox |
+|---|---|---:|---:|---|
+| `claude-code` | `claude` | yes | persistent | unrestricted |
+| `codex` | `codex` | yes | persistent | workspace-write |
+| `opencode` | `opencode` | yes | stateless | unknown |
+| `cline` | `cline` | yes | stateless | unrestricted |
+| `antigravity` | `agy` | yes | stateless | unknown |
+| `cursor` | `cursor-agent` | yes | persistent | unrestricted |
+| `kiro` | `kiro-cli` | yes | stateless | unrestricted |
+| `pi` | `pi` | yes | persistent | unrestricted |
+| `grok` (Grok Build) | `grok` | yes | persistent | unrestricted |
+
+### Profile を追加する
+
+全 project 共通なら `~/.zode/config.json`、project 単位なら
+`.zode/config.json` に設定します。既知の profile は空 object で手動有効化
+でき、`command` は `PATH` 上の名前または path を指定できます。
+
+```jsonc
+{
+  "externalAgents": {
+    "agents": {
+      "claude-code": {},
+      "codex": {},
+      "opencode": {},
+      "cline": {},
+      "antigravity": {},
+      "cursor": {},
+      "kiro": {},
+      "pi": {},
+      "grok": {},
+      "my-agent": {
+        "command": "my-agent",
+        "args": ["run", "--json", "{prompt}"],
+        "promptTransport": "argv",
+        "output": "jsonl",
+        "textSource": "/event/delta",
+        "sessionIdSource": "/session/id",
+        "resumeArgs": ["--session", "{session_id}"],
+        "effectiveSandbox": "workspaceWrite",
+        "authEnv": ["MY_AGENT_API_KEY"],
+        "trusted": false
+      }
+    }
+  }
+}
+```
+
+公開する profile だけを追加してください。custom profile の
+`promptTransport` は `stdin`、`argv`、`file`、`output` は `text`、
+汎用 `jsonl`、`jsonl-claude`、`jsonl-codex` に対応します。汎用 JSONL は
+RFC 6901 の `textSource` と `sessionIdSource` で text と session ID を抽出し、
+`resumeArgs` には単独の `{session_id}` token が必要です。resume 非対応の CLI
+は送信ごとに新しい process を使う stateless teammate になり、一回限りの
+Task worker としても利用できます。
+`newSessionArgs` に単独の `{session_id}` を指定すると、Zode が初回 run の
+ID を生成し、以降の assignment では `resumeArgs` を使用します。
+
+外部 process には基本的に `PATH`、`HOME`、`TERM` だけが渡されるため、
+API key は `envAllow` または `authEnv` に追加します。初回 hire では command、
+cwd、sandbox を表示して trust を求めます。Zode が gate するのは process 起動
+だけで、外部 CLI の各 file edit や shell command ではありません。
+`--yolo` など非対話 mode では明示的な `trusted: true` が必要です。
+
+### Team で使う
+
+`team_hire` と `team_send` は model-facing tool です。leader に通常の文で
+依頼します。
+
+```text
+`codex` を `implementer` という teammate として hire し、認証 refactor と test を担当させてください。
+編集前に `src/auth/` を claim してから task を送ってください。
+```
+
+`/team` と `/team board` で状態を確認し、`/team dismiss implementer` で
+削除します。team state は `<cwd>/.zode/team/` に保存されますが、外部 CLI の
+trust grant は Zode process をまたいで保存されません。
+
 ## 設定の要点
 
 `providers` が model provider の source of truth で、top-level `provider` が active model を示します。OpenAI-compatible provider では通常 `baseUrl` と `dialect` を設定します。
@@ -208,6 +294,8 @@ Zode は `tools:browser` group を提供し、screenshot/DOM/log の読み取り
 | `/mcp` | MCP server 管理 |
 | `/skills` | skills 一覧 |
 | `/agents` | sub-agent 管理 |
+| `/external-agents [list\|discover]` | `PATH` 上の対応外部 CLI を表示、または検出済みプリセットを明示的に登録 |
+| `/team [status\|board\|dismiss <name>]` | 永続 teammate の roster と共有 board を確認、または teammate を削除 |
 | `/workflows` | workflow 管理 |
 | `/sandbox ...` | OS sandbox 制御 |
 | `/language` | UI 言語切り替え |

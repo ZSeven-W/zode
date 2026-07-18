@@ -31,8 +31,8 @@ pub type BuiltinProfile = (
     Vec<String>,
 );
 
-/// Built-in profiles. Flags verified against installed CLIs during
-/// implementation; adjust here only.
+/// Built-in manual presets. Keep documented headless flags centralized here
+/// so CLI drift is corrected in exactly one place.
 pub fn builtin_profiles() -> Vec<BuiltinProfile> {
     vec![
         (
@@ -42,9 +42,12 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 prompt_transport: PromptTransport::Stdin,
                 output_protocol: OutputProtocol::JsonlClaude,
                 resume_flag: Some("--resume".to_string()),
+                resume_args: None,
+                new_session_args: None,
                 effective_sandbox: EffectiveSandbox::Unrestricted,
                 version_requirement: None,
                 session_id_source: Some("/session_id".to_string()),
+                text_source: None,
             },
             vec![
                 "-p".to_string(),
@@ -62,9 +65,12 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 prompt_transport: PromptTransport::Stdin,
                 output_protocol: OutputProtocol::JsonlCodex,
                 resume_flag: Some("resume".to_string()),
+                resume_args: None,
+                new_session_args: None,
                 effective_sandbox: EffectiveSandbox::WorkspaceWrite,
                 version_requirement: None,
                 session_id_source: Some("/session_id".to_string()),
+                text_source: None,
             },
             vec![
                 "exec".to_string(),
@@ -83,12 +89,144 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 prompt_transport: PromptTransport::Argv,
                 output_protocol: OutputProtocol::Text,
                 resume_flag: None,
+                resume_args: None,
+                new_session_args: None,
                 effective_sandbox: EffectiveSandbox::Unknown,
                 version_requirement: None,
                 session_id_source: None,
+                text_source: None,
             },
             vec!["run".to_string(), "{prompt}".to_string()],
             vec![],
+        ),
+        (
+            "cline",
+            "cline",
+            ProfileCapability {
+                prompt_transport: PromptTransport::Argv,
+                output_protocol: OutputProtocol::Jsonl,
+                resume_flag: None,
+                resume_args: None,
+                new_session_args: None,
+                effective_sandbox: EffectiveSandbox::Unrestricted,
+                version_requirement: None,
+                session_id_source: None,
+                text_source: Some("/text".to_string()),
+            },
+            vec!["--json".to_string(), "{prompt}".to_string()],
+            vec![],
+        ),
+        (
+            "antigravity",
+            "agy",
+            ProfileCapability {
+                prompt_transport: PromptTransport::Argv,
+                output_protocol: OutputProtocol::Text,
+                resume_flag: None,
+                resume_args: None,
+                new_session_args: None,
+                effective_sandbox: EffectiveSandbox::Unknown,
+                version_requirement: None,
+                session_id_source: None,
+                text_source: None,
+            },
+            vec!["-p".to_string(), "{prompt}".to_string()],
+            vec![],
+        ),
+        (
+            "cursor",
+            "cursor-agent",
+            ProfileCapability {
+                prompt_transport: PromptTransport::Argv,
+                output_protocol: OutputProtocol::Jsonl,
+                resume_flag: None,
+                resume_args: Some(vec!["--resume".to_string(), "{session_id}".to_string()]),
+                new_session_args: None,
+                effective_sandbox: EffectiveSandbox::Unrestricted,
+                version_requirement: None,
+                session_id_source: Some("/session_id".to_string()),
+                text_source: Some("/result".to_string()),
+            },
+            vec![
+                "--print".to_string(),
+                "--force".to_string(),
+                "--output-format".to_string(),
+                "json".to_string(),
+                "{prompt}".to_string(),
+            ],
+            vec!["CURSOR_API_KEY".to_string()],
+        ),
+        (
+            "kiro",
+            "kiro-cli",
+            ProfileCapability {
+                prompt_transport: PromptTransport::Argv,
+                output_protocol: OutputProtocol::Text,
+                resume_flag: None,
+                resume_args: None,
+                new_session_args: None,
+                effective_sandbox: EffectiveSandbox::Unrestricted,
+                version_requirement: None,
+                session_id_source: None,
+                text_source: None,
+            },
+            vec![
+                "chat".to_string(),
+                "--no-interactive".to_string(),
+                "--trust-all-tools".to_string(),
+                "{prompt}".to_string(),
+            ],
+            vec!["KIRO_API_KEY".to_string()],
+        ),
+        (
+            "pi",
+            "pi",
+            ProfileCapability {
+                prompt_transport: PromptTransport::Argv,
+                output_protocol: OutputProtocol::Jsonl,
+                resume_flag: None,
+                resume_args: Some(vec!["--session".to_string(), "{session_id}".to_string()]),
+                new_session_args: None,
+                effective_sandbox: EffectiveSandbox::Unrestricted,
+                version_requirement: None,
+                session_id_source: Some("/id".to_string()),
+                // Pi's JSON stream starts with {type:"session",id:...} and
+                // emits complete assistant messages on message_end events.
+                text_source: Some("/message/content/0/text".to_string()),
+            },
+            vec![
+                "--mode".to_string(),
+                "json".to_string(),
+                "{prompt}".to_string(),
+            ],
+            vec![],
+        ),
+        (
+            "grok",
+            "grok",
+            ProfileCapability {
+                prompt_transport: PromptTransport::Argv,
+                output_protocol: OutputProtocol::Text,
+                resume_flag: None,
+                resume_args: Some(vec!["--resume".to_string(), "{session_id}".to_string()]),
+                new_session_args: Some(vec![
+                    "--session-id".to_string(),
+                    "{session_id}".to_string(),
+                ]),
+                effective_sandbox: EffectiveSandbox::Unrestricted,
+                version_requirement: None,
+                session_id_source: None,
+                text_source: None,
+            },
+            vec![
+                "--no-auto-update".to_string(),
+                "-p".to_string(),
+                "{prompt}".to_string(),
+                "--output-format".to_string(),
+                "plain".to_string(),
+                "--always-approve".to_string(),
+            ],
+            vec!["XAI_API_KEY".to_string()],
         ),
     ]
 }
@@ -131,6 +269,7 @@ pub fn def_from_entry(name: &str, entry: &ExternalAgentEntry) -> Result<External
 
     let output_protocol = match entry.output.as_deref().unwrap_or("text") {
         "text" => OutputProtocol::Text,
+        "jsonl" => OutputProtocol::Jsonl,
         "jsonl-claude" => OutputProtocol::JsonlClaude,
         "jsonl-codex" => OutputProtocol::JsonlCodex,
         other => {
@@ -139,6 +278,42 @@ pub fn def_from_entry(name: &str, entry: &ExternalAgentEntry) -> Result<External
             ));
         }
     };
+
+    if let Some(args) = &entry.resume_args {
+        if !args.iter().any(|arg| arg == "{session_id}") {
+            return Err(format!(
+                "external agent '{name}': resumeArgs requires a \"{{session_id}}\" token"
+            ));
+        }
+    }
+    if let Some(args) = &entry.new_session_args {
+        if !args.iter().any(|arg| arg == "{session_id}") {
+            return Err(format!(
+                "external agent '{name}': newSessionArgs requires a \"{{session_id}}\" token"
+            ));
+        }
+    }
+    let supports_resume = entry.resume_flag.is_some() || entry.resume_args.is_some();
+    if entry.new_session_args.is_some() && !supports_resume {
+        return Err(format!(
+            "external agent '{name}': newSessionArgs requires resumeArgs or resumeFlag"
+        ));
+    }
+    if supports_resume && entry.new_session_args.is_none() {
+        match output_protocol {
+            OutputProtocol::Text => {
+                return Err(format!(
+                    "external agent '{name}': resumable profiles require a JSONL output protocol"
+                ));
+            }
+            OutputProtocol::Jsonl if entry.session_id_source.is_none() => {
+                return Err(format!(
+                    "external agent '{name}': resumable generic JSONL requires sessionIdSource"
+                ));
+            }
+            OutputProtocol::Jsonl | OutputProtocol::JsonlClaude | OutputProtocol::JsonlCodex => {}
+        }
+    }
 
     let effective_sandbox = match entry.effective_sandbox.as_deref().unwrap_or("unknown") {
         "none" => EffectiveSandbox::None,
@@ -161,9 +336,12 @@ pub fn def_from_entry(name: &str, entry: &ExternalAgentEntry) -> Result<External
             prompt_transport,
             output_protocol,
             resume_flag: entry.resume_flag.clone(),
+            resume_args: entry.resume_args.clone(),
+            new_session_args: entry.new_session_args.clone(),
             effective_sandbox,
             version_requirement: entry.version_requirement.clone(),
             session_id_source: entry.session_id_source.clone(),
+            text_source: entry.text_source.clone(),
         },
         auth_env: entry.auth_env.clone().unwrap_or_default(),
         env_allow: entry.env_allow.clone().unwrap_or_default(),
@@ -221,8 +399,86 @@ mod tests {
     }
 
     #[test]
-    fn builtin_profiles_cover_three_clis() {
-        let names: Vec<_> = builtin_profiles().into_iter().map(|p| p.0).collect();
-        assert_eq!(names, vec!["claude-code", "codex", "opencode"]);
+    fn builtin_profiles_cover_manual_cli_presets() {
+        let profiles = builtin_profiles();
+        let names: Vec<_> = profiles.iter().map(|p| p.0).collect();
+        assert_eq!(
+            names,
+            vec![
+                "claude-code",
+                "codex",
+                "opencode",
+                "cline",
+                "antigravity",
+                "cursor",
+                "kiro",
+                "pi",
+                "grok"
+            ]
+        );
+        let pi = profiles.iter().find(|p| p.0 == "pi").unwrap();
+        assert!(matches!(pi.2.output_protocol, OutputProtocol::Jsonl));
+        assert_eq!(pi.2.session_id_source.as_deref(), Some("/id"));
+        assert!(pi.2.resume_args.is_some());
+        let grok = profiles.iter().find(|p| p.0 == "grok").unwrap();
+        assert!(matches!(grok.2.output_protocol, OutputProtocol::Text));
+        assert!(grok.2.new_session_args.is_some());
+        assert!(grok.2.resume_args.is_some());
+        let cursor = profiles.iter().find(|p| p.0 == "cursor").unwrap();
+        assert!(matches!(cursor.2.output_protocol, OutputProtocol::Jsonl));
+        assert_eq!(cursor.2.session_id_source.as_deref(), Some("/session_id"));
+        assert_eq!(cursor.2.text_source.as_deref(), Some("/result"));
+        assert!(cursor.2.resume_args.is_some());
+        assert!(cursor.3.iter().any(|arg| arg == "--force"));
+    }
+
+    #[test]
+    fn generic_jsonl_and_resume_args_are_validated() {
+        let ok: ExternalAgentEntry = serde_json::from_str(
+            r#"{"command":"any-agent","args":["{prompt}"],"output":"jsonl",
+                "textSource":"/delta","sessionIdSource":"/session/id",
+                "resumeArgs":["--session","{session_id}"]}"#,
+        )
+        .unwrap();
+        let def = def_from_entry("any", &ok).unwrap();
+        assert!(matches!(
+            def.capability.output_protocol,
+            OutputProtocol::Jsonl
+        ));
+        assert_eq!(def.capability.text_source.as_deref(), Some("/delta"));
+
+        let bad: ExternalAgentEntry = serde_json::from_str(
+            r#"{"command":"x","args":["{prompt}"],"resumeArgs":["--resume"]}"#,
+        )
+        .unwrap();
+        assert!(def_from_entry("bad", &bad)
+            .unwrap_err()
+            .contains("{session_id}"));
+
+        let missing_source: ExternalAgentEntry = serde_json::from_str(
+            r#"{"command":"x","args":["{prompt}"],"output":"jsonl",
+                "resumeArgs":["--resume","{session_id}"]}"#,
+        )
+        .unwrap();
+        assert!(def_from_entry("missing-source", &missing_source)
+            .unwrap_err()
+            .contains("sessionIdSource"));
+
+        let text_resume: ExternalAgentEntry = serde_json::from_str(
+            r#"{"command":"x","args":["{prompt}"],"output":"text",
+                "resumeFlag":"--resume"}"#,
+        )
+        .unwrap();
+        assert!(def_from_entry("text-resume", &text_resume)
+            .unwrap_err()
+            .contains("JSONL"));
+
+        let host_session: ExternalAgentEntry = serde_json::from_str(
+            r#"{"command":"x","args":["{prompt}"],"output":"text",
+                "newSessionArgs":["--session-id","{session_id}"],
+                "resumeArgs":["--resume","{session_id}"]}"#,
+        )
+        .unwrap();
+        assert!(def_from_entry("host-session", &host_session).is_ok());
     }
 }

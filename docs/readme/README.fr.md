@@ -49,7 +49,7 @@
 - **Sandbox OS par défaut** : les commandes shell tournent sous `sandbox-exec` sur macOS ou `bwrap` sur Linux, avec le réseau sortant refusé par défaut.
 - **TUI plein écran** : Markdown en streaming, coloration syntaxique, diff preview, autocomplétion des slash commands, historique, 11 thèmes intégrés, overlays settings/help et UI en 15 langues (`/language`).
 - **Onglets multi-session** : lancez plusieurs conversations isolées avec `Ctrl+T` et reprenez les sessions passées.
-- **Sous-agents et workflows** : déléguez des tâches bornées avec l'outil Task, puis gérez-les via `/agents` et `/workflows`.
+- **Sous-agents, équipes et workflows** : déléguez des Tasks ponctuelles, enregistrez manuellement des teammates internes ou issus de CLI externes, puis gérez-les via `/agents`, `/team` et `/workflows`.
 - **Skills, MCP et hooks** : chargez des paquets `SKILL.md`, connectez des serveurs MCP et exécutez des scripts sur les événements d'outils.
 
 ## Installation
@@ -134,6 +134,93 @@ zode --provider <name>
 zode server
 ```
 
+## Enregistrer manuellement des teammates CLI externes
+
+Zode peut utiliser une CLI d'agent comme worker Task ponctuel ou comme teammate
+persistant. L'enregistrement est volontairement manuel : la présence d'un
+exécutable dans `PATH` ne l'expose pas au modèle. Ajoutez son profile sous
+`externalAgents.agents`.
+Vous pouvez aussi utiliser `/external-agents` pour voir les CLI compatibles sur
+`PATH`, puis `/external-agents discover` pour enregistrer explicitement tous les presets détectés dans la configuration globale. Aucun scan ni enregistrement automatique n'a lieu au démarrage.
+
+| Profile | Commande | Task | Mode team | Sandbox de la CLI externe |
+|---|---|---:|---:|---|
+| `claude-code` | `claude` | oui | persistent | unrestricted |
+| `codex` | `codex` | oui | persistent | workspace-write |
+| `opencode` | `opencode` | oui | stateless | unknown |
+| `cline` | `cline` | oui | stateless | unrestricted |
+| `antigravity` | `agy` | oui | stateless | unknown |
+| `cursor` | `cursor-agent` | oui | persistent | unrestricted |
+| `kiro` | `kiro-cli` | oui | stateless | unrestricted |
+| `pi` | `pi` | oui | persistent | unrestricted |
+| `grok` (Grok Build) | `grok` | oui | persistent | unrestricted |
+
+### Ajouter un profile
+
+Utilisez `~/.zode/config.json` globalement ou `.zode/config.json` dans un
+projet. Un objet vide active manuellement un preset connu ; `command` peut être
+un nom sur `PATH` ou un chemin.
+
+```jsonc
+{
+  "externalAgents": {
+    "agents": {
+      "claude-code": {},
+      "codex": {},
+      "opencode": {},
+      "cline": {},
+      "antigravity": {},
+      "cursor": {},
+      "kiro": {},
+      "pi": {},
+      "grok": {},
+      "my-agent": {
+        "command": "my-agent",
+        "args": ["run", "--json", "{prompt}"],
+        "promptTransport": "argv",
+        "output": "jsonl",
+        "textSource": "/event/delta",
+        "sessionIdSource": "/session/id",
+        "resumeArgs": ["--session", "{session_id}"],
+        "effectiveSandbox": "workspaceWrite",
+        "authEnv": ["MY_AGENT_API_KEY"],
+        "trusted": false
+      }
+    }
+  }
+}
+```
+
+N'ajoutez que les profiles à exposer. Un profile custom accepte `stdin`,
+`argv` ou `file` comme `promptTransport`, et `text`, `jsonl` générique,
+`jsonl-claude` ou `jsonl-codex` comme `output`. Le JSONL générique extrait le
+texte et l'ID de session via les pointeurs RFC 6901 `textSource` et
+`sessionIdSource`. `resumeArgs` doit contenir un token `{session_id}` autonome.
+Une CLI sans reprise devient un teammate stateless avec un nouveau processus
+par envoi, et reste utilisable comme worker Task ponctuel.
+`newSessionArgs` peut aussi contenir un `{session_id}` autonome : Zode génère
+l'ID au premier lancement, puis utilise `resumeArgs` pour les suivants.
+
+Le processus externe ne reçoit par défaut que `PATH`, `HOME` et `TERM` ;
+ajoutez les API keys à `envAllow` ou `authEnv`. Au premier hire, Zode affiche la
+commande, le cwd et le sandbox, puis demande la confiance. Zode ne gate que le
+lancement du processus, pas chaque modification ou commande shell de la CLI.
+Les modes non interactifs comme `--yolo` exigent `trusted: true`.
+
+### Utiliser l'équipe
+
+`team_hire` et `team_send` sont des tools du modèle. Demandez au leader en
+langage naturel :
+
+```text
+Hire `codex` comme teammate `implementer` pour le refactor d'authentification et les tests.
+Envoie-lui la tâche après avoir claim `src/auth/`.
+```
+
+`/team` et `/team board` affichent l'état ; `/team dismiss implementer` retire
+le teammate. L'état est stocké dans `<cwd>/.zode/team/`, mais les trust grants
+des CLI externes ne persistent que pendant le processus Zode courant.
+
 ## Configuration
 
 `providers` est la source de vérité des providers ; le champ top-level `provider` pointe vers le modèle actif. Les providers compatibles OpenAI utilisent généralement `baseUrl` et `dialect` :
@@ -208,6 +295,8 @@ Zode inclut le groupe `tools:browser` pour lire captures/DOM/logs, naviguer, cli
 | `/mcp` | Gérer les serveurs MCP |
 | `/skills` | Lister les skills |
 | `/agents` | Gérer les sous-agents |
+| `/external-agents [list\|discover]` | Voir les CLI externes compatibles sur `PATH` ou enregistrer explicitement les presets détectés |
+| `/team [status\|board\|dismiss <name>]` | Voir les teammates persistants et le board partagé, ou retirer un teammate |
 | `/workflows` | Gérer les workflows |
 | `/sandbox ...` | Contrôler le sandbox |
 | `/language` | Changer la langue de l'UI |

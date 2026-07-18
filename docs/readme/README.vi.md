@@ -49,7 +49,7 @@
 - **OS sandbox bật mặc định**: shell commands chạy trong macOS `sandbox-exec` hoặc Linux `bwrap`, outbound network bị từ chối theo mặc định.
 - **TUI toàn màn hình**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, 11 chủ đề tích hợp, settings/help overlays và UI 15 ngôn ngữ (`/language`).
 - **Multi-session tabs**: chạy nhiều conversation tách biệt bằng `Ctrl+T` và resume session cũ.
-- **Sub-agents và workflows**: delegate công việc có scope rõ bằng Task tool, quản lý qua `/agents` và `/workflows`.
+- **Sub-agents, team và workflows**: delegate Tasks một lần, đăng ký thủ công teammate nội bộ hoặc CLI bên ngoài, rồi quản lý qua `/agents`, `/team` và `/workflows`.
 - **Skills, MCP và hooks**: load package `SKILL.md`, kết nối MCP servers và chạy external scripts trên tool events.
 
 ## Cài đặt
@@ -134,6 +134,92 @@ zode --provider <name>
 zode server
 ```
 
+## Đăng ký thủ công teammate CLI bên ngoài
+
+Zode có thể dùng agent CLI làm Task worker một lần hoặc teammate persistent.
+Việc đăng ký luôn là thủ công: executable xuất hiện trong `PATH` không tự động
+được cung cấp cho model. Hãy thêm profile vào `externalAgents.agents`.
+Dùng `/external-agents` để xem các CLI được hỗ trợ trong `PATH`, rồi dùng
+`/external-agents discover` để đăng ký rõ ràng mọi preset đã phát hiện vào config global. Khi khởi động, Zode không tự quét hoặc đăng ký.
+
+| Profile | Command | Task | Chế độ team | Sandbox của CLI ngoài |
+|---|---|---:|---:|---|
+| `claude-code` | `claude` | có | persistent | unrestricted |
+| `codex` | `codex` | có | persistent | workspace-write |
+| `opencode` | `opencode` | có | stateless | unknown |
+| `cline` | `cline` | có | stateless | unrestricted |
+| `antigravity` | `agy` | có | stateless | unknown |
+| `cursor` | `cursor-agent` | có | persistent | unrestricted |
+| `kiro` | `kiro-cli` | có | stateless | unrestricted |
+| `pi` | `pi` | có | persistent | unrestricted |
+| `grok` (Grok Build) | `grok` | có | persistent | unrestricted |
+
+### Thêm profile
+
+Dùng `~/.zode/config.json` cho global hoặc `.zode/config.json` cho project.
+Object rỗng sẽ bật thủ công preset đã biết; `command` có thể là tên trong
+`PATH` hoặc một path.
+
+```jsonc
+{
+  "externalAgents": {
+    "agents": {
+      "claude-code": {},
+      "codex": {},
+      "opencode": {},
+      "cline": {},
+      "antigravity": {},
+      "cursor": {},
+      "kiro": {},
+      "pi": {},
+      "grok": {},
+      "my-agent": {
+        "command": "my-agent",
+        "args": ["run", "--json", "{prompt}"],
+        "promptTransport": "argv",
+        "output": "jsonl",
+        "textSource": "/event/delta",
+        "sessionIdSource": "/session/id",
+        "resumeArgs": ["--session", "{session_id}"],
+        "effectiveSandbox": "workspaceWrite",
+        "authEnv": ["MY_AGENT_API_KEY"],
+        "trusted": false
+      }
+    }
+  }
+}
+```
+
+Chỉ thêm những profile bạn muốn cung cấp cho model. Custom profile hỗ trợ
+`stdin`, `argv` hoặc `file` cho `promptTransport` và `text`, `jsonl` generic,
+`jsonl-claude` hoặc `jsonl-codex` cho `output`. Generic JSONL trích text và
+session ID qua pointer RFC 6901 `textSource` và `sessionIdSource`.
+`resumeArgs` phải chứa token `{session_id}` độc lập. CLI không hỗ trợ resume
+sẽ là teammate stateless với process mới cho mỗi lần gửi, đồng thời vẫn có thể
+chạy như Task worker một lần.
+`newSessionArgs` cũng có thể chứa `{session_id}` độc lập: Zode tạo ID cho lần
+chạy đầu tiên và dùng `resumeArgs` cho các assignment tiếp theo.
+
+Process bên ngoài mặc định chỉ nhận `PATH`, `HOME` và `TERM`; thêm API key vào
+`envAllow` hoặc `authEnv`. Lần hire đầu tiên, Zode hiển thị command, cwd và
+sandbox rồi yêu cầu trust. Zode chỉ gate việc khởi động process, không gate từng
+file edit hay shell command của CLI ngoài. Mode không tương tác như `--yolo`
+cần `trusted: true` rõ ràng.
+
+### Dùng team
+
+`team_hire` và `team_send` là tools của model. Hãy yêu cầu leader bằng ngôn ngữ
+tự nhiên:
+
+```text
+Hire `codex` làm teammate `implementer` để refactor authentication và chạy tests.
+Claim `src/auth/` trước khi gửi task cho teammate.
+```
+
+`/team` và `/team board` hiển thị trạng thái; `/team dismiss implementer` xóa
+teammate. Team state nằm trong `<cwd>/.zode/team/`, nhưng trust grant của CLI
+ngoài chỉ tồn tại trong process Zode hiện tại.
+
 ## Cấu hình
 
 `providers` là source of truth cho provider definitions; top-level `provider` trỏ đến active model. OpenAI-compatible providers thường dùng `baseUrl` và `dialect`:
@@ -208,6 +294,8 @@ Zode có group `tools:browser` để đọc screenshots/DOM/logs, navigate/click
 | `/mcp` | Manage MCP servers |
 | `/skills` | List skills |
 | `/agents` | Manage sub-agents |
+| `/external-agents [list\|discover]` | Xem external CLI được hỗ trợ trong `PATH` hoặc đăng ký rõ ràng các preset đã phát hiện |
+| `/team [status\|board\|dismiss <name>]` | Xem teammate persistent và shared board, hoặc xóa teammate |
 | `/workflows` | Manage workflows |
 | `/sandbox ...` | Control OS sandbox |
 | `/language` | Switch UI language |

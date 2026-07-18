@@ -216,6 +216,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Ui,
     },
     SlashCommand {
+        name: "external-agents",
+        description: "Discover and register installed external agent CLIs",
+        usage: "/external-agents [list|discover]",
+        action: CommandAction::Local,
+    },
+    SlashCommand {
         name: "subagents",
         description: "Open the sub-agent activity panel",
         usage: "/subagents",

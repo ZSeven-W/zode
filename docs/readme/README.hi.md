@@ -49,7 +49,7 @@
 - **OS sandbox default on**: shell commands macOS `sandbox-exec` या Linux `bwrap` में चलते हैं; outbound network default रूप से denied है।
 - **Full-screen TUI**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, 11 built-in themes, settings/help overlays और 15-language UI (`/language`).
 - **Multi-session tabs**: `Ctrl+T` से कई isolated conversations साथ-साथ चलाएँ और पुरानी sessions resume करें।
-- **Sub-agents और workflows**: Task tool से scoped work delegate करें और `/agents`, `/workflows` से manage करें।
+- **Sub-agents, teams और workflows**: one-shot Tasks delegate करें, internal या external CLI teammates manually register करें, और `/agents`, `/team`, `/workflows` से manage करें।
 - **Skills, MCP और hooks**: `SKILL.md` packs load करें, MCP servers connect करें और tool events पर external scripts चलाएँ।
 
 ## Install
@@ -134,6 +134,92 @@ zode --provider <name>
 zode server
 ```
 
+## External CLI teammates को manually register करना
+
+Zode किसी agent CLI को one-shot Task worker या persistent teammate की तरह
+इस्तेमाल कर सकता है। Registration जानबूझकर manual है: executable का `PATH` में
+होना उसे model के लिए expose नहीं करता। Profile को
+`externalAgents.agents` में जोड़ें।
+`/external-agents` से `PATH` में supported CLI देखें और
+`/external-agents discover` से मिले presets को global config में explicitly register करें। Startup पर automatic scan या registration नहीं होता।
+
+| Profile | Command | Task | Team mode | External CLI sandbox |
+|---|---|---:|---:|---|
+| `claude-code` | `claude` | हाँ | persistent | unrestricted |
+| `codex` | `codex` | हाँ | persistent | workspace-write |
+| `opencode` | `opencode` | हाँ | stateless | unknown |
+| `cline` | `cline` | हाँ | stateless | unrestricted |
+| `antigravity` | `agy` | हाँ | stateless | unknown |
+| `cursor` | `cursor-agent` | हाँ | persistent | unrestricted |
+| `kiro` | `kiro-cli` | हाँ | stateless | unrestricted |
+| `pi` | `pi` | हाँ | persistent | unrestricted |
+| `grok` (Grok Build) | `grok` | हाँ | persistent | unrestricted |
+
+### Profile जोड़ें
+
+Global setup के लिए `~/.zode/config.json` और project के लिए
+`.zode/config.json` इस्तेमाल करें। Empty object किसी known preset को manually
+enable करता है; `command` `PATH` का नाम या path हो सकता है।
+
+```jsonc
+{
+  "externalAgents": {
+    "agents": {
+      "claude-code": {},
+      "codex": {},
+      "opencode": {},
+      "cline": {},
+      "antigravity": {},
+      "cursor": {},
+      "kiro": {},
+      "pi": {},
+      "grok": {},
+      "my-agent": {
+        "command": "my-agent",
+        "args": ["run", "--json", "{prompt}"],
+        "promptTransport": "argv",
+        "output": "jsonl",
+        "textSource": "/event/delta",
+        "sessionIdSource": "/session/id",
+        "resumeArgs": ["--session", "{session_id}"],
+        "effectiveSandbox": "workspaceWrite",
+        "authEnv": ["MY_AGENT_API_KEY"],
+        "trusted": false
+      }
+    }
+  }
+}
+```
+
+सिर्फ वही profiles जोड़ें जिन्हें model को देना है। Custom profile में
+`promptTransport` के लिए `stdin`, `argv` या `file` और `output` के लिए `text`,
+generic `jsonl`, `jsonl-claude` या `jsonl-codex` उपलब्ध हैं। Generic JSONL,
+RFC 6901 pointers `textSource` और `sessionIdSource` से text और session ID
+निकालता है। `resumeArgs` में अलग `{session_id}` token होना चाहिए। Resume के
+बिना CLI हर send पर नया process लेकर stateless teammate बनती है और one-shot
+Task worker के रूप में भी चल सकती है।
+`newSessionArgs` में अलग `{session_id}` देकर Zode से first run के लिए ID
+generate कराई जा सकती है; बाद के assignments में `resumeArgs` उपयोग होता है।
+
+External process को default रूप से केवल `PATH`, `HOME` और `TERM` मिलते हैं;
+API keys को `envAllow` या `authEnv` में जोड़ें। First hire पर Zode command, cwd
+और sandbox दिखाकर trust माँगता है। Zode केवल process start को gate करता है,
+external CLI के हर file edit या shell command को नहीं। `--yolo` जैसे
+non-interactive modes के लिए explicit `trusted: true` चाहिए।
+
+### Team में उपयोग
+
+`team_hire` और `team_send` model tools हैं। Leader को normal language में कहें:
+
+```text
+`codex` को auth refactor और tests के लिए `implementer` teammate की तरह hire करें।
+Task भेजने से पहले `src/auth/` claim करें।
+```
+
+`/team` और `/team board` status दिखाते हैं; `/team dismiss implementer` teammate
+हटाता है। Team state `<cwd>/.zode/team/` में रहती है, लेकिन external CLI trust
+grants केवल current Zode process तक रहती हैं।
+
 ## Configuration
 
 `providers` provider definitions की source of truth है; top-level `provider` active model बताता है। OpenAI-compatible providers आम तौर पर `baseUrl` और `dialect` use करते हैं:
@@ -208,6 +294,8 @@ Zode `tools:browser` group देता है: screenshots/DOM/logs read कर
 | `/mcp` | MCP servers manage |
 | `/skills` | Skills list |
 | `/agents` | Sub-agents manage |
+| `/external-agents [list\|discover]` | `PATH` में supported external CLI देखें या मिले presets को explicitly register करें |
+| `/team [status\|board\|dismiss <name>]` | Persistent teammates और shared board देखें या teammate हटाएँ |
 | `/workflows` | Workflows manage |
 | `/sandbox ...` | OS sandbox control |
 | `/language` | UI language switch |

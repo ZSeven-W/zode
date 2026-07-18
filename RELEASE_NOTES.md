@@ -4,6 +4,24 @@
 
 > ⚠️ **Beta.** APIs, config, and behavior may change before 1.0. Please file issues!
 
+## External CLI teams
+
+- **Manual registration by default** — installed CLIs are no longer exposed to
+  the model merely because they appear on `PATH`. Add each allowed profile to
+  `externalAgents.agents`; known presets are enabled with an empty object.
+- **More manual presets** — Claude Code, Codex, opencode, Cline, Pi, and xAI
+  Grok Build, Google Antigravity, Cursor CLI, and Kiro CLI have documented
+  headless invocations. Resumable profiles preserve context; the rest can still
+  be hired as stateless teammates or Task workers.
+- **Explicit discovery command** — `/external-agents` lists supported CLIs on
+  `PATH`; `/external-agents discover` atomically adds detected presets to the
+  global config without overwriting existing entries. Startup still never
+  scans or registers external CLIs automatically.
+- **Arbitrary CLI protocols** — custom profiles accept bare command names or
+  paths, generic JSONL `textSource` / `sessionIdSource` pointers, templated
+  `resumeArgs`, and host-generated IDs through `newSessionArgs`, allowing any
+  compatible headless CLI to participate.
+
 ## Server mode & SDKs
 
 `zode server` graduates from a metadata-only registry to a **streaming

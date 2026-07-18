@@ -49,7 +49,7 @@
 - **เปิด OS sandbox เป็นค่าเริ่มต้น**: shell commands รันใน macOS `sandbox-exec` หรือ Linux `bwrap` โดย outbound network ถูก deny เป็นค่าเริ่มต้น
 - **TUI เต็มจอ**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, ธีมในตัว 11 แบบ, settings/help overlays และ UI 15 ภาษา (`/language`)
 - **Multi-session tabs**: รันหลาย conversation แบบ isolated ด้วย `Ctrl+T` และ resume sessions เก่าได้
-- **Sub-agents และ workflows**: delegate งานที่มี scope ชัดเจนด้วย Task tool แล้วจัดการผ่าน `/agents` และ `/workflows`
+- **Sub-agents, teams และ workflows**: delegate Tasks แบบครั้งเดียว, register internal หรือ external CLI teammates ด้วยตนเอง แล้วจัดการผ่าน `/agents`, `/team` และ `/workflows`
 - **Skills, MCP และ hooks**: โหลด `SKILL.md`, เชื่อมต่อ MCP servers และรัน external scripts ตอนเกิด tool events
 
 ## ติดตั้ง
@@ -134,6 +134,91 @@ zode --provider <name>
 zode server
 ```
 
+## Register external CLI teammates ด้วยตนเอง
+
+Zode ใช้ agent CLI เป็น Task worker แบบครั้งเดียวหรือ persistent teammate ได้
+การ register เป็นแบบ manual โดยตั้งใจ: executable ที่อยู่ใน `PATH` จะไม่ถูก
+เปิดให้ model อัตโนมัติ ต้องเพิ่ม profile ใน `externalAgents.agents`
+ใช้ `/external-agents` เพื่อดู CLI ที่รองรับใน `PATH` และ
+`/external-agents discover` เพื่อลงทะเบียน preset ที่พบทั้งหมดลงใน config ส่วนกลางอย่างชัดเจน การเริ่มต้นโปรแกรมจะไม่สแกนหรือลงทะเบียนอัตโนมัติ
+
+| Profile | Command | Task | Team mode | External CLI sandbox |
+|---|---|---:|---:|---|
+| `claude-code` | `claude` | ได้ | persistent | unrestricted |
+| `codex` | `codex` | ได้ | persistent | workspace-write |
+| `opencode` | `opencode` | ได้ | stateless | unknown |
+| `cline` | `cline` | ได้ | stateless | unrestricted |
+| `antigravity` | `agy` | ได้ | stateless | unknown |
+| `cursor` | `cursor-agent` | ได้ | persistent | unrestricted |
+| `kiro` | `kiro-cli` | ได้ | stateless | unrestricted |
+| `pi` | `pi` | ได้ | persistent | unrestricted |
+| `grok` (Grok Build) | `grok` | ได้ | persistent | unrestricted |
+
+### เพิ่ม profile
+
+ใช้ `~/.zode/config.json` สำหรับ global หรือ `.zode/config.json` สำหรับ project
+object ว่างจะ enable preset ที่รู้จักแบบ manual; `command` เป็นชื่อใน `PATH`
+หรือ path ก็ได้
+
+```jsonc
+{
+  "externalAgents": {
+    "agents": {
+      "claude-code": {},
+      "codex": {},
+      "opencode": {},
+      "cline": {},
+      "antigravity": {},
+      "cursor": {},
+      "kiro": {},
+      "pi": {},
+      "grok": {},
+      "my-agent": {
+        "command": "my-agent",
+        "args": ["run", "--json", "{prompt}"],
+        "promptTransport": "argv",
+        "output": "jsonl",
+        "textSource": "/event/delta",
+        "sessionIdSource": "/session/id",
+        "resumeArgs": ["--session", "{session_id}"],
+        "effectiveSandbox": "workspaceWrite",
+        "authEnv": ["MY_AGENT_API_KEY"],
+        "trusted": false
+      }
+    }
+  }
+}
+```
+
+เพิ่มเฉพาะ profiles ที่ต้องการเปิดให้ model ใช้ Custom profile รองรับ `stdin`,
+`argv` หรือ `file` ใน `promptTransport` และรองรับ `text`, generic `jsonl`,
+`jsonl-claude` หรือ `jsonl-codex` ใน `output` Generic JSONL ดึง text และ
+session ID ผ่าน RFC 6901 pointers `textSource` และ `sessionIdSource`
+`resumeArgs` ต้องมี token `{session_id}` แยกต่างหาก CLI ที่ resume ไม่ได้
+จะเป็น stateless teammate ที่เปิด process ใหม่ต่อการส่งแต่ละครั้ง และยังใช้
+เป็น Task worker แบบครั้งเดียวได้
+`newSessionArgs` สามารถมี `{session_id}` แยกต่างหากได้ โดย Zode จะสร้าง ID
+สำหรับ run แรก แล้วใช้ `resumeArgs` ใน assignment ถัดไป
+
+External process จะได้รับเพียง `PATH`, `HOME` และ `TERM` เป็นค่าเริ่มต้น
+ให้เพิ่ม API keys ใน `envAllow` หรือ `authEnv` ตอน hire ครั้งแรก Zode จะแสดง
+command, cwd และ sandbox แล้วขอ trust Zode gate เฉพาะการเริ่ม process
+ไม่ใช่ทุก file edit หรือ shell command ของ external CLI โหมด non-interactive
+เช่น `--yolo` ต้องกำหนด `trusted: true` อย่างชัดเจน
+
+### ใช้งาน team
+
+`team_hire` และ `team_send` เป็น model tools ให้บอก leader ด้วยภาษาปกติ:
+
+```text
+Hire `codex` เป็น teammate ชื่อ `implementer` เพื่อทำ auth refactor และ tests
+Claim `src/auth/` ก่อนส่ง task ให้ teammate
+```
+
+`/team` และ `/team board` ใช้ดู status; `/team dismiss implementer` ใช้ลบ
+teammate Team state อยู่ใน `<cwd>/.zode/team/` แต่ external CLI trust grants
+จะอยู่เฉพาะใน Zode process ปัจจุบัน
+
 ## Configuration
 
 `providers` คือ source of truth ของ provider definitions ส่วน top-level `provider` ชี้ active model โดย OpenAI-compatible providers มักใช้ `baseUrl` และ `dialect`:
@@ -208,6 +293,8 @@ Zode มี `tools:browser` group สำหรับอ่าน screenshots/DOM
 | `/mcp` | Manage MCP servers |
 | `/skills` | List skills |
 | `/agents` | Manage sub-agents |
+| `/external-agents [list\|discover]` | ดู external CLI ที่รองรับใน `PATH` หรือลงทะเบียน preset ที่พบอย่างชัดเจน |
+| `/team [status\|board\|dismiss <name>]` | ดู persistent teammates และ shared board หรือลบ teammate |
 | `/workflows` | Manage workflows |
 | `/sandbox ...` | Control OS sandbox |
 | `/language` | Switch UI language |

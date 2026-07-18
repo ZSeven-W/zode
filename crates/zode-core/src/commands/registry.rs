@@ -126,6 +126,16 @@ mod tests {
     }
 
     #[test]
+    fn builtins_include_explicit_external_agent_discovery() {
+        let reg = CommandRegistry::with_builtins();
+        let command = reg
+            .get("external-agents")
+            .expect("/external-agents command should be registered");
+        assert_eq!(command.usage, "/external-agents [list|discover]");
+        assert_eq!(command.action, CommandAction::Local);
+    }
+
+    #[test]
     fn builtins_include_memory_command() {
         let reg = CommandRegistry::with_builtins();
         let memory = reg

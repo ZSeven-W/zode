@@ -49,7 +49,7 @@
 - **OS sandbox aktif default**: perintah shell berjalan di `sandbox-exec` macOS atau `bwrap` Linux, dan outbound network ditolak secara default.
 - **TUI layar penuh**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, 11 tema bawaan, settings/help overlays, dan UI 15 bahasa (`/language`).
 - **Tab multi-session**: jalankan beberapa percakapan terisolasi dengan `Ctrl+T` dan resume session lama.
-- **Sub-agents dan workflows**: delegasikan pekerjaan terarah dengan Task tool, lalu kelola lewat `/agents` dan `/workflows`.
+- **Sub-agents, team, dan workflows**: delegasikan Tasks sekali jalan, daftarkan teammate internal atau CLI eksternal secara manual, lalu kelola lewat `/agents`, `/team`, dan `/workflows`.
 - **Skills, MCP, dan hooks**: muat paket `SKILL.md`, hubungkan MCP server, dan jalankan script eksternal pada event tool.
 
 ## Instalasi
@@ -134,6 +134,91 @@ zode --provider <name>
 zode server
 ```
 
+## Mendaftarkan teammate CLI eksternal secara manual
+
+Zode dapat memakai agent CLI sebagai Task worker sekali jalan atau teammate
+persisten. Pendaftaran sengaja dibuat manual: executable di `PATH` tidak
+otomatis diekspos ke model. Tambahkan profile di `externalAgents.agents`.
+Gunakan `/external-agents` untuk melihat CLI yang didukung di `PATH`, lalu
+`/external-agents discover` untuk mendaftarkan semua preset yang ditemukan secara eksplisit ke config global. Startup tidak pernah memindai atau mendaftar otomatis.
+
+| Profile | Command | Task | Mode team | Sandbox CLI eksternal |
+|---|---|---:|---:|---|
+| `claude-code` | `claude` | ya | persistent | unrestricted |
+| `codex` | `codex` | ya | persistent | workspace-write |
+| `opencode` | `opencode` | ya | stateless | unknown |
+| `cline` | `cline` | ya | stateless | unrestricted |
+| `antigravity` | `agy` | ya | stateless | unknown |
+| `cursor` | `cursor-agent` | ya | persistent | unrestricted |
+| `kiro` | `kiro-cli` | ya | stateless | unrestricted |
+| `pi` | `pi` | ya | persistent | unrestricted |
+| `grok` (Grok Build) | `grok` | ya | persistent | unrestricted |
+
+### Menambahkan profile
+
+Gunakan `~/.zode/config.json` secara global atau `.zode/config.json` untuk
+project. Object kosong mengaktifkan preset yang dikenal secara manual;
+`command` boleh berupa nama di `PATH` atau path.
+
+```jsonc
+{
+  "externalAgents": {
+    "agents": {
+      "claude-code": {},
+      "codex": {},
+      "opencode": {},
+      "cline": {},
+      "antigravity": {},
+      "cursor": {},
+      "kiro": {},
+      "pi": {},
+      "grok": {},
+      "my-agent": {
+        "command": "my-agent",
+        "args": ["run", "--json", "{prompt}"],
+        "promptTransport": "argv",
+        "output": "jsonl",
+        "textSource": "/event/delta",
+        "sessionIdSource": "/session/id",
+        "resumeArgs": ["--session", "{session_id}"],
+        "effectiveSandbox": "workspaceWrite",
+        "authEnv": ["MY_AGENT_API_KEY"],
+        "trusted": false
+      }
+    }
+  }
+}
+```
+
+Tambahkan hanya profile yang ingin diekspos. Custom profile mendukung `stdin`,
+`argv`, atau `file` untuk `promptTransport` serta `text`, `jsonl` generik,
+`jsonl-claude`, atau `jsonl-codex` untuk `output`. JSONL generik mengekstrak
+text dan session ID memakai pointer RFC 6901 `textSource` dan
+`sessionIdSource`. `resumeArgs` wajib memuat token `{session_id}` tersendiri.
+CLI tanpa resume menjadi teammate stateless dengan process baru per kiriman,
+dan tetap dapat menjadi Task worker sekali jalan.
+`newSessionArgs` juga dapat memuat `{session_id}` tersendiri: Zode membuat ID
+untuk run pertama, lalu memakai `resumeArgs` untuk assignment berikutnya.
+
+Process eksternal secara default hanya menerima `PATH`, `HOME`, dan `TERM`;
+tambahkan API key ke `envAllow` atau `authEnv`. Saat hire pertama, Zode
+menampilkan command, cwd, dan sandbox lalu meminta trust. Zode hanya melakukan
+gate pada awal process, bukan setiap file edit atau shell command CLI eksternal.
+Mode non-interaktif seperti `--yolo` memerlukan `trusted: true` secara eksplisit.
+
+### Menggunakan team
+
+`team_hire` dan `team_send` adalah tools model. Minta leader dengan bahasa biasa:
+
+```text
+Hire `codex` sebagai teammate `implementer` untuk refactor autentikasi dan tests.
+Claim `src/auth/` sebelum mengirim task kepadanya.
+```
+
+`/team` dan `/team board` menampilkan status; `/team dismiss implementer`
+menghapus teammate. Team state disimpan di `<cwd>/.zode/team/`, tetapi trust
+grant CLI eksternal hanya berlaku selama process Zode saat ini.
+
 ## Konfigurasi
 
 `providers` adalah sumber utama untuk provider; `provider` di level atas menunjuk model aktif. Provider kompatibel OpenAI biasanya memakai `baseUrl` dan `dialect`:
@@ -208,6 +293,8 @@ Zode memiliki grup `tools:browser` untuk membaca screenshot/DOM/log, navigasi, k
 | `/mcp` | Kelola MCP server |
 | `/skills` | Daftar skills |
 | `/agents` | Kelola sub-agents |
+| `/external-agents [list\|discover]` | Lihat CLI eksternal yang didukung di `PATH` atau daftarkan preset yang ditemukan secara eksplisit |
+| `/team [status\|board\|dismiss <name>]` | Lihat teammate persisten dan board bersama, atau hapus teammate |
 | `/workflows` | Kelola workflows |
 | `/sandbox ...` | Kontrol OS sandbox |
 | `/language` | Ganti bahasa UI |

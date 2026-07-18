@@ -49,7 +49,7 @@
 - **Durable, V1-compatible sessions** — keep the existing `<id>.jsonl` transcript contract while adding journals, checkpoints, rewind, fork, and isolated Git worktrees as sidecar data
 - **Automation surfaces** — stable JSON/JSONL headless output, exact session targeting, tool filters, deterministic exit codes, ACP over stdio, and a local operations dashboard
 - **Multi-session tabs** — run several conversations side by side (`Ctrl+T`), each an isolated agent; resume past sessions with full history replay
-- **Sub-agents & workflows** — delegate scoped work to child agents via the Task tool (they inherit the same gate, sandbox, and hooks), manage them with `/agents` / `/workflows`, and toggle autonomous orchestration
+- **Sub-agents, teams & workflows** — delegate one-shot work through the Task tool, hire persistent internal or external-CLI teammates, coordinate them with a shared board and file claims, and manage the surfaces with `/agents`, `/team`, and `/workflows`
 - **Cross-agent ecosystem** — discovers skills, slash commands, and MCP servers from Claude / Codex / opencode / antigravity / pi / kilo / cursor (plus their plugin trees), with zode's own taking precedence; foreign integrations are off by default and non-portable ones are filtered out
 - **Skills & MCP** — load `SKILL.md` instruction packs on demand and connect MCP servers (`mcp__<server>__<tool>`); created agents, skills, and MCP tools surface as slash commands
 - **Hooks** — run external scripts on tool events (e.g. block dangerous commands, lint after edits)
@@ -186,6 +186,162 @@ zode dashboard             # local sessions/checkpoints/worktrees overview
 You can also point at any provider without editing the config by exporting the
 matching key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …); for Ollama the
 `baseUrl` is taken from the environment when unset.
+
+## External CLI Teammates
+
+Zode can use an installed third-party agent CLI as a one-shot Task worker or
+as a persistent or stateless teammate. Registration is deliberately manual:
+installing a CLI or putting it on `PATH` does **not** expose it to the model.
+Add a profile under `externalAgents.agents`, then start Zode in the project.
+Or run `/external-agents` to inspect supported CLIs currently on `PATH`, then
+`/external-agents discover` to explicitly add every detected preset to the
+global config. This command is user-triggered; startup never scans or registers
+external CLIs automatically.
+
+| Agent profile | Executable | Task worker | Team mode | External CLI sandbox |
+|---|---|---:|---:|---|
+| `claude-code` | `claude` | yes | persistent | unrestricted (`--dangerously-skip-permissions`) |
+| `codex` | `codex` | yes | persistent | workspace-write |
+| `opencode` | `opencode` | yes | stateless | unknown |
+| `cline` | `cline` | yes | stateless | unrestricted |
+| `antigravity` | `agy` | yes | stateless | unknown |
+| `cursor` | `cursor-agent` | yes | persistent | unrestricted |
+| `kiro` | `kiro-cli` | yes | stateless | unrestricted |
+| `pi` | `pi` | yes | persistent | unrestricted |
+| `grok` (Grok Build) | `grok` | yes | persistent | unrestricted |
+
+Every registered profile can join a team. Resumable profiles preserve the
+CLI's session ID and conversation across assignments; other CLIs are stateless
+teammates that start a fresh process for each assignment. The presets use
+the documented headless interfaces of [Cline](https://docs.cline.bot/usage/cli-overview),
+[Antigravity](https://antigravity.google/docs/cli-best-practices),
+[Cursor](https://cursor.com/docs/cli/headless),
+[Kiro](https://kiro.dev/docs/cli/headless/), [Pi](https://pi.dev/docs/latest), and xAI's
+[Grok Build](https://docs.x.ai/build/cli/headless-scripting). Other tools,
+including alternative Grok CLIs, can use a custom profile.
+
+### Add a CLI profile manually
+
+Put `externalAgents` in `~/.zode/config.json` for all projects, or in
+`<project>/.zode/config.json` for one project. An empty object explicitly
+enables a known preset and resolves its executable on the sanitized `PATH`:
+
+```jsonc
+{
+  "externalAgents": {
+    "enabled": true,
+    "timeoutSecs": 1800,
+    "maxConcurrent": 2,
+    "agents": {
+      "claude-code": {},
+      "codex": {
+        "command": "codex",
+        "extraArgs": ["--model", "your-model-id"],
+        "envAllow": ["OPENAI_API_KEY"],
+        "trusted": false
+      },
+      "opencode": {},
+      "cline": {},
+      "antigravity": {},
+      "cursor": {},
+      "kiro": {},
+      "pi": {},
+      "grok": {}
+    }
+  }
+}
+```
+
+Add only the profiles you intend to expose. A bare `command` such as `cline`
+is resolved on `PATH`; paths such as `./tools/my-agent` or
+`/opt/agents/my-agent` are also accepted. Known presets honor `enabled`,
+`command`, `extraArgs`, `envAllow`, and `trusted`; `extraArgs` is appended to
+Zode's preset invocation.
+
+CLI processes start with a cleared environment containing only `PATH`, `HOME`,
+and `TERM` (plus required Windows variables), so explicitly add API keys or
+other required variables to `envAllow`. Existing login state under `HOME`
+continues to work. A project entry with the same profile name replaces the
+whole global entry, so repeat every override that the project still needs.
+
+A custom profile declares the complete invocation and protocol:
+
+```jsonc
+{
+  "externalAgents": {
+    "agents": {
+      "my-agent": {
+        "command": "my-agent",
+        "args": ["run", "--json", "{prompt}"],
+        "promptTransport": "argv",
+        "output": "jsonl",
+        "textSource": "/event/delta",
+        "sessionIdSource": "/session/id",
+        "resumeArgs": ["--session", "{session_id}"],
+        "effectiveSandbox": "workspaceWrite",
+        "authEnv": ["MY_AGENT_API_KEY"],
+        "trusted": false
+      }
+    }
+  }
+}
+```
+
+`promptTransport` is `stdin`, `argv`, or `file`; `argv` requires a standalone
+`{prompt}` argument and `file` requires `{prompt_file}`. `output` is `text`,
+generic `jsonl`, `jsonl-claude`, or `jsonl-codex`. Generic JSONL profiles use
+RFC 6901 `textSource` and `sessionIdSource` pointers to extract streamed text
+and a resumable session ID from any event. `resumeArgs` must contain a
+standalone `{session_id}` token and is appended on later turns; `resumeFlag`
+is retained as the shorthand `<flag> <session-id>` form.
+
+If a CLI accepts a caller-selected session ID, `newSessionArgs` can contain a
+standalone `{session_id}` token. Zode generates a UUID, appends the expanded
+arguments on the first run, and uses `resumeArgs` on later assignments. This
+also makes a plain-text CLI resumable without parsing an ID from its output.
+
+This lets any headless CLI become a Task worker or stateless teammate. To
+preserve conversation context between team assignments, it must additionally
+expose a session ID, or accept one through `newSessionArgs`, plus a
+non-interactive resume invocation.
+
+`effectiveSandbox` accepts `none`, `readOnly`, `workspaceWrite`,
+`unrestricted`, or `unknown` and is displayed in the trust prompt.
+
+### Hire and work with the teammate
+
+Ask the leader in normal language; `team_hire` and `team_send` are model-facing
+tools, not slash commands:
+
+```text
+Hire the `codex` external agent as a teammate named `implementer`.
+Its role is to implement the authentication refactor and run the focused tests.
+
+Send `implementer` the task now and claim `src/auth/` for it before editing.
+
+Ask `implementer` to address the review findings while preserving its session context.
+```
+
+The first hire shows the resolved executable and arguments, working directory,
+and the CLI's effective sandbox. Approving it delegates work to that process in
+the current project: Zode gates the process launch, but does **not** gate each
+file edit or shell command performed by the external CLI. Trust grants last
+for the current Zode session; the persistent roster is recovered from
+`<cwd>/.zode/team/`, but an external teammate must be trusted again after a
+restart or executable change.
+
+In non-interactive/bypass runs (including `--yolo`), Zode cannot show the trust
+prompt and fails closed. Set `externalAgents.agents.<profile>.trusted` to
+`true` only when you deliberately want that profile to run without the prompt.
+
+Use `/team` to inspect the roster and board after hiring:
+
+```text
+/team                         # roster + board panel
+/team status                  # text roster
+/team board                   # shared goal, notes, assignments, and claims
+/team dismiss implementer     # remove the teammate
+```
 
 ## Automation, Durable Sessions, and Operations
 
@@ -566,6 +722,8 @@ loading, update, CRX packaging, and smoke-test steps.
 | `/mcp` | Manage MCP servers — enable / disable in a dialog |
 | `/skills` | List available skills |
 | `/agents` | Manage sub-agents — create (AI-assisted or manual) / delete |
+| `/external-agents [list\|discover]` | List supported external CLIs on `PATH`, or explicitly register every detected preset |
+| `/team [status\|board\|dismiss <name>]` | Inspect the persistent teammate roster and shared board, or dismiss a teammate |
 | `/workflows` | Manage & run JS-scripted workflows (`agent()`/`parallel()`/`pipeline()` orchestration, executed deterministically by zode) |
 | `/effort` | Pick the reasoning effort level |
 | `/thinking`, `/tool-details` | Toggle showing reasoning / tool-call detail |

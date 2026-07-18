@@ -5,7 +5,7 @@ use agent::permission::{PermissionBehavior, PermissionMatcher, PermissionRule, R
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::approval::{Approval, ApprovalGate};
+use crate::approval::{Approval, ApprovalGate, ApprovalScope};
 use crate::config::PermissionsConfig;
 use crate::CoreError;
 
@@ -201,6 +201,28 @@ impl ApprovalGate for RuleApprovalGate {
                 Approval::AllowOnce
             }
             Some(PermissionBehavior::Ask) | None => self.inner.approve(tool, input).await,
+        }
+    }
+
+    async fn approve_scoped(
+        &self,
+        tool: &str,
+        input: &serde_json::Value,
+        scope: ApprovalScope,
+    ) -> Approval {
+        match self.decision(tool, input) {
+            Some(PermissionBehavior::Deny) => Approval::Deny,
+            Some(PermissionBehavior::Allow) => Approval::AllowOnce,
+            None if self
+                .pass_unmatched
+                .get()
+                .is_some_and(|tools| tools.contains(tool)) =>
+            {
+                Approval::AllowOnce
+            }
+            Some(PermissionBehavior::Ask) | None => {
+                self.inner.approve_scoped(tool, input, scope).await
+            }
         }
     }
 }

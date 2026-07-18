@@ -17,7 +17,8 @@ async fn real_claude_one_shot() {
         eprintln!("ZODE_EXTAGENT_IT not set; skipping");
         return;
     }
-    let cfg = zode_core::config::ExternalAgentsConfig::default();
+    let mut cfg = zode_core::config::ExternalAgentsConfig::default();
+    cfg.agents.insert("claude-code".into(), Default::default());
     let reg = Arc::new(discover(&cfg, &[]));
     let Some(def) = reg.get("claude-code") else {
         panic!("claude CLI not found on PATH");

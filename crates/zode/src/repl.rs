@@ -222,6 +222,64 @@ async fn dispatch_command(
                 println!("  {n:<12} {desc}");
             }
         }
+        "external-agents" => {
+            let subcommand = args.trim().to_ascii_lowercase();
+            match subcommand.as_str() {
+                "" | "list" => {
+                    let detected = zode_core::external_agents::detect_installed_presets();
+                    match ConfigManager::load(&engine.cwd) {
+                        Err(e) => println!("(could not load config: {e})"),
+                        Ok(_cfg) if detected.is_empty() => {
+                            println!("(no supported external agent CLIs found on PATH)")
+                        }
+                        Ok(cfg) => {
+                            for item in detected {
+                                let status = match cfg.external_agents.agents.get(&item.name) {
+                                    Some(entry) if entry.enabled == Some(false) => "disabled",
+                                    Some(_) if cfg.external_agents.enabled() => "registered",
+                                    Some(_) => "registered, globally disabled",
+                                    None => "available",
+                                };
+                                println!(
+                                    "  [{status}] {:<14} {}",
+                                    item.name,
+                                    item.command.display()
+                                );
+                            }
+                            println!(
+                                "(use /external-agents discover to register available presets)"
+                            );
+                        }
+                    }
+                }
+                "discover" | "register" => {
+                    match zode_core::external_agents::detect_and_register_global(&engine.cwd) {
+                        Err(e) => println!("(external-agent registration failed: {e})"),
+                        Ok(report) if report.detected.is_empty() => println!(
+                            "(no supported external agent CLIs found on PATH; config unchanged)"
+                        ),
+                        Ok(report) => {
+                            if !report.added.is_empty() {
+                                println!("registered: {}", report.added.join(", "));
+                            }
+                            if !report.already_registered.is_empty() {
+                                println!(
+                                    "already registered: {}",
+                                    report.already_registered.join(", ")
+                                );
+                            }
+                            if !report.effective_enabled {
+                                println!("(external agents remain disabled by project config)");
+                            }
+                            if report.config_changed {
+                                println!("(restart zode to activate the updated agent registry)");
+                            }
+                        }
+                    }
+                }
+                _ => println!("usage: /external-agents [list|discover]"),
+            }
+        }
         "workflows" => {
             if engine.workflows.is_empty() {
                 println!("(no workflows; add ~/.zode/workflows/<name>.md or use define_workflow)");

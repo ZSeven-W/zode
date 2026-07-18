@@ -23,6 +23,7 @@ use crate::i18n_data::{LOCALES, SOURCE_STRINGS};
 /// pass through unchanged.
 #[rustfmt::skip]
 const EXTRA: &[[&str; 15]] = &[
+    ["Discover and register installed external agent CLIs", "发现并注册已安装的外部代理 CLI", "探索並註冊已安裝的外部代理 CLI", "インストール済みの外部エージェント CLI を検出して登録", "설치된 외부 에이전트 CLI 검색 및 등록", "Detectar y registrar las CLI de agentes externos instaladas", "Découvrir et enregistrer les CLI d’agents externes installées", "Installierte externe Agent-CLIs erkennen und registrieren", "Descobrir e registrar CLIs de agentes externos instaladas", "Найти и зарегистрировать установленные CLI внешних агентов", "इंस्टॉल किए गए बाहरी एजेंट CLI खोजें और रजिस्टर करें", "Temukan dan daftarkan CLI agen eksternal yang terpasang", "ค้นหาและลงทะเบียน CLI เอเจนต์ภายนอกที่ติดตั้งไว้", "Kurulu harici ajan CLI'larını keşfet ve kaydet", "Phát hiện và đăng ký các CLI tác nhân bên ngoài đã cài đặt"],
     // /connect dialog.
     ["Configured", "已配置", "已設定", "設定済み", "구성됨", "Configurados", "Configurés", "Konfiguriert", "Configurados", "Настроенные", "कॉन्फ़िगर किए गए", "Terkonfigurasi", "ที่กำหนดค่าแล้ว", "Yapılandırılmış", "Đã cấu hình"],
     ["No providers", "无提供商", "無供應商", "プロバイダーなし", "공급자 없음", "Sin proveedores", "Aucun fournisseur", "Keine Anbieter", "Sem provedores", "Нет провайдеров", "कोई प्रदाता नहीं", "Tidak ada penyedia", "ไม่มีผู้ให้บริการ", "Sağlayıcı yok", "Không có nhà cung cấp"],

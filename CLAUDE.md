@@ -499,13 +499,21 @@ JS, screenshots, snapshots, clicks by ref, and checks console-log capture.
 
 ## External agents
 
-Zode can register installed external agent CLIs (claude code / codex /
-opencode / custom) as `Task` tool `agent_type`s. Design doc:
+Zode can register explicitly configured external agent CLIs as `Task` tool
+`agent_type`s. Known manual presets cover Claude Code, Codex, opencode, Cline,
+Google Antigravity, Cursor CLI, Kiro CLI, Pi, and xAI Grok Build; arbitrary CLI
+commands use custom profiles. Design doc:
 `docs/superpowers/specs/2026-07-16-agent-team-design.md` (Phase A).
 
-- **Discovery is stat-only**: binaries found on a sanitized PATH (or
-  `externalAgents.agents.<name>.command`) are canonicalized but never
-  executed before approval. Uninstalled CLIs simply don't appear.
+- **Registration is manual and resolution is stat-only**: PATH is never
+  scanned to auto-register CLIs. Only `externalAgents.agents` entries appear;
+  their bare command names are resolved on a sanitized PATH (or an explicit
+  path), canonicalized, and never executed before approval.
+- **Explicit discovery**: `/external-agents` performs a stat-only scan of known
+  preset binary names and shows registration state. `/external-agents discover`
+  atomically adds missing presets to global config without overwriting existing
+  entries; the TUI then reassembles the active idle engine. This command does
+  not change the manual-only startup policy.
 - **Trust model (not a sandbox)**: an external agent runs IN-PLACE and is
   not gated per-operation by zode. The first call shows a dedicated trust
   approval (full argv, cwd, env allowlist names, the CLI's own sandbox
@@ -527,10 +535,12 @@ opencode / custom) as `Task` tool `agent_type`s. Design doc:
   never the parent model (`__external_agent__` result discriminant).
 - **Config** (`externalAgents`, camelCase): `enabled`, `timeoutSecs`
   (default 1800), `maxConcurrent` (process-wide, default 2), `agents` map
-  (per-profile `command`/`extraArgs`/`envAllow`/`trusted`; custom profiles
-  add `args` + `promptTransport` + `output` etc. — argv transport requires
-  a `{prompt}` placeholder). Same-key entries replace wholesale across
-  config layers.
+  (preset profiles use `command`/`extraArgs`/`envAllow`/`trusted`; custom
+  profiles add `args`, `promptTransport`, `output`, and optional generic JSONL
+  `textSource` / `sessionIdSource` pointers plus `resumeArgs` and optional
+  host-selected `newSessionArgs`). Argv transport requires a `{prompt}`
+  placeholder; session templates require a `{session_id}` placeholder.
+  Same-key entries replace wholesale across config layers.
 
 Opt-in real-CLI integration test:
 
@@ -540,12 +550,14 @@ ZODE_EXTAGENT_IT=1 cargo test -p zode-core --test extagent_it -- --ignored
 
 ## Agent team (Phase B)
 
-Zode can build a persistent, collaborating team of agents on top of the
-external-agent layer. Design: `docs/superpowers/specs/2026-07-16-agent-team-design.md`.
+Zode can build a collaborating team of internal and external agents on top of
+the external-agent layer. Design: `docs/superpowers/specs/2026-07-16-agent-team-design.md`.
 
-- **Teammates** are persistent sessions: `Internal` (an in-process QueryLoop
-  over a shared MessageStore, with its own provider/model) or `External` (a
-  resumable agent CLI). The leader is the root model.
+- **Teammates** are `Internal` (a persistent in-process QueryLoop over a shared
+  MessageStore, with its own provider/model) or `External` (a manually
+  registered agent CLI). Resumable external profiles preserve conversation
+  context; one-shot profiles run as stateless teammates with a fresh process
+  per send. The leader is the root model.
 - **Tools** (group `team`, `tools:team` to disable): `team_hire`
   (`{agent,name,role,provider?,model?,tools?}` — external hires need a
   one-time TeamMemberSession trust approval; internal hires don't),
@@ -576,8 +588,9 @@ external-agent layer. Design: `docs/superpowers/specs/2026-07-16-agent-team-desi
   teammate under `~/.zode/agent/sessions/team/`.
 - **Persistence & recovery**: hire/dismiss/send write `team.json` (HMAC-signed,
   §4.2); on the first mutating op after a restart the roster is recovered
-  (external teammates keep their resume session id but re-approve trust on the
-  next send; internal teammates rebuild their provider and reload history). An
+  (resumable external teammates keep their session id, while every external
+  teammate re-approves trust on the next send; internal teammates rebuild
+  their provider and reload history). An
   HMAC mismatch quarantines the file. Claims are TTL-renewed while a send is
   in flight so long tasks keep their reservation.
 - **`/team`** — bare `/team` opens a read-only roster + board panel (↑↓ scroll,

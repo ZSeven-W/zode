@@ -244,7 +244,11 @@ pub async fn run_external(
     });
 
     let stdout = child.stdout.take().expect("stdout piped");
-    let mut parser = StreamParser::new(&spec.def.capability.output_protocol);
+    let mut parser = StreamParser::with_sources(
+        &spec.def.capability.output_protocol,
+        spec.def.capability.text_source.as_deref(),
+        spec.def.capability.session_id_source.as_deref(),
+    );
     let mut reader = BufReader::new(stdout).lines();
 
     let deadline = tokio::time::sleep(spec.timeout);
@@ -363,9 +367,12 @@ mod tests {
                     prompt_transport: transport,
                     output_protocol: protocol,
                     resume_flag: None,
+                    resume_args: None,
+                    new_session_args: None,
                     effective_sandbox: EffectiveSandbox::Unknown,
                     version_requirement: None,
                     session_id_source: None,
+                    text_source: None,
                 },
                 auth_env: vec![],
                 env_allow: vec![],

@@ -19,7 +19,9 @@ async fn hire_send_resume_dismiss_real_claude() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let reg = Arc::new(discover(&ExternalAgentsConfig::default(), &[]));
+    let mut cfg = ExternalAgentsConfig::default();
+    cfg.agents.insert("claude-code".into(), Default::default());
+    let reg = Arc::new(discover(&cfg, &[]));
     let def = reg.get("claude-code").expect("claude CLI on PATH").clone();
 
     // Pre-grant trust for the headless test (no interactive gate here).

@@ -58,11 +58,23 @@ pub fn hash_file(path: &Path) -> std::io::Result<String> {
 pub fn preapproval_fingerprint(def: &ExternalAgentDef, cwd: &Path) -> std::io::Result<Fingerprint> {
     let mut env_names = def.auth_env.clone();
     env_names.extend(def.env_allow.iter().cloned());
+    let mut argv_template = def.args.clone();
+    if let Some(args) = &def.capability.new_session_args {
+        argv_template.push("<zode:new-session>".to_string());
+        argv_template.extend(args.clone());
+    }
+    if let Some(args) = &def.capability.resume_args {
+        argv_template.push("<zode:resume>".to_string());
+        argv_template.extend(args.clone());
+    } else if let Some(flag) = &def.capability.resume_flag {
+        argv_template.push("<zode:resume-flag>".to_string());
+        argv_template.push(flag.clone());
+    }
     Ok(Fingerprint {
         canonical_path: def.command.clone(),
         content_hash: hash_file(&def.command)?,
         version_output: None,
-        argv_template: def.args.clone(),
+        argv_template,
         cwd: cwd.to_path_buf(),
         env_names,
         effective_sandbox: def.capability.effective_sandbox.to_string(),
@@ -137,9 +149,12 @@ mod tests {
                 prompt_transport: PromptTransport::Stdin,
                 output_protocol: OutputProtocol::Text,
                 resume_flag: None,
+                resume_args: None,
+                new_session_args: None,
                 effective_sandbox: EffectiveSandbox::Unknown,
                 version_requirement: None,
                 session_id_source: None,
+                text_source: None,
             },
             auth_env: vec![],
             env_allow: vec![],

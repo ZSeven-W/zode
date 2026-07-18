@@ -49,7 +49,7 @@
 - **OS sandbox varsayılan açık**: Shell komutları macOS `sandbox-exec` veya Linux `bwrap` içinde çalışır; outbound network varsayılan olarak kapalıdır.
 - **Full-screen TUI**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, 11 yerleşik tema, settings/help overlays ve 15-language UI (`/language`).
 - **Multi-session tabs**: `Ctrl+T` ile izole conversation'ları paralel çalıştırın ve geçmiş sessions'ı resume edin.
-- **Sub-agents ve workflows**: Task tool ile scope'u net işleri delege edin, `/agents` ve `/workflows` ile yönetin.
+- **Sub-agents, teams ve workflows**: Tek seferlik Tasks delege edin, internal veya external CLI teammates'i manuel kaydedin ve `/agents`, `/team`, `/workflows` ile yönetin.
 - **Skills, MCP ve hooks**: `SKILL.md` paketlerini yükleyin, MCP servers bağlayın ve tool event'lerinde external scripts çalıştırın.
 
 ## Kurulum
@@ -134,6 +134,91 @@ zode --provider <name>
 zode server
 ```
 
+## External CLI teammates'i manuel kaydetme
+
+Zode bir agent CLI'yi tek seferlik Task worker veya persistent teammate olarak
+kullanabilir. Kayıt bilinçli olarak manueldir: executable'ın `PATH` üzerinde
+olması onu modele açmaz. Profile'ı `externalAgents.agents` altına ekleyin.
+`/external-agents` ile `PATH` üzerindeki desteklenen CLI'ları görüntüleyin;
+`/external-agents discover` ile bulunan tüm preset'leri global config'e açıkça kaydedin. Başlangıçta otomatik tarama veya kayıt yapılmaz.
+
+| Profile | Command | Task | Team mode | External CLI sandbox |
+|---|---|---:|---:|---|
+| `claude-code` | `claude` | evet | persistent | unrestricted |
+| `codex` | `codex` | evet | persistent | workspace-write |
+| `opencode` | `opencode` | evet | stateless | unknown |
+| `cline` | `cline` | evet | stateless | unrestricted |
+| `antigravity` | `agy` | evet | stateless | unknown |
+| `cursor` | `cursor-agent` | evet | persistent | unrestricted |
+| `kiro` | `kiro-cli` | evet | stateless | unrestricted |
+| `pi` | `pi` | evet | persistent | unrestricted |
+| `grok` (Grok Build) | `grok` | evet | persistent | unrestricted |
+
+### Profile ekleme
+
+Global olarak `~/.zode/config.json`, proje için `.zode/config.json` kullanın.
+Boş object bilinen preset'i manuel etkinleştirir; `command` `PATH` üzerindeki
+bir ad veya path olabilir.
+
+```jsonc
+{
+  "externalAgents": {
+    "agents": {
+      "claude-code": {},
+      "codex": {},
+      "opencode": {},
+      "cline": {},
+      "antigravity": {},
+      "cursor": {},
+      "kiro": {},
+      "pi": {},
+      "grok": {},
+      "my-agent": {
+        "command": "my-agent",
+        "args": ["run", "--json", "{prompt}"],
+        "promptTransport": "argv",
+        "output": "jsonl",
+        "textSource": "/event/delta",
+        "sessionIdSource": "/session/id",
+        "resumeArgs": ["--session", "{session_id}"],
+        "effectiveSandbox": "workspaceWrite",
+        "authEnv": ["MY_AGENT_API_KEY"],
+        "trusted": false
+      }
+    }
+  }
+}
+```
+
+Yalnızca modele açmak istediğiniz profiles'i ekleyin. Custom profile,
+`promptTransport` için `stdin`, `argv` veya `file`; `output` için `text`,
+generic `jsonl`, `jsonl-claude` veya `jsonl-codex` destekler. Generic JSONL,
+RFC 6901 `textSource` ve `sessionIdSource` pointers ile text ve session ID
+çıkarır. `resumeArgs` bağımsız bir `{session_id}` token içermelidir. Resume
+olmayan CLI her gönderimde yeni process kullanan stateless teammate olur ve
+tek seferlik Task worker olarak da çalışabilir.
+`newSessionArgs` bağımsız bir `{session_id}` de içerebilir: Zode ilk run için
+ID üretir, sonraki assignment'larda `resumeArgs` kullanır.
+
+External process varsayılan olarak yalnızca `PATH`, `HOME` ve `TERM` alır; API
+keys'i `envAllow` veya `authEnv` içine ekleyin. İlk hire sırasında Zode command,
+cwd ve sandbox'ı gösterip trust ister. Zode yalnızca process başlangıcını gate
+eder; external CLI'nin her file edit veya shell command'ını değil.
+`--yolo` gibi non-interactive modes için açık `trusted: true` gerekir.
+
+### Team içinde kullanma
+
+`team_hire` ve `team_send` model tools'dur. Leader'a normal dille söyleyin:
+
+```text
+`codex` profilini auth refactor ve tests için `implementer` adlı teammate olarak hire et.
+Task'i göndermeden önce `src/auth/` path'ini claim et.
+```
+
+`/team` ve `/team board` durumu gösterir; `/team dismiss implementer` teammate'i
+kaldırır. Team state `<cwd>/.zode/team/` altında saklanır, ancak external CLI
+trust grants yalnızca mevcut Zode process boyunca yaşar.
+
 ## Configuration
 
 `providers` provider definitions için source of truth'tür; top-level `provider` active model'i gösterir. OpenAI-compatible providers genellikle `baseUrl` ve `dialect` kullanır:
@@ -208,6 +293,8 @@ Zode `tools:browser` group sunar: screenshots/DOM/logs okuma, navigate/click/typ
 | `/mcp` | MCP servers yönetimi |
 | `/skills` | Skills listesi |
 | `/agents` | Sub-agents yönetimi |
+| `/external-agents [list\|discover]` | `PATH` üzerindeki desteklenen external CLI'ları göster veya bulunan preset'leri açıkça kaydet |
+| `/team [status\|board\|dismiss <name>]` | Persistent teammates ve shared board'u göster veya teammate'i kaldır |
 | `/workflows` | Workflows yönetimi |
 | `/sandbox ...` | OS sandbox kontrolü |
 | `/language` | UI language switch |
