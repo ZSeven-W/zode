@@ -19,7 +19,7 @@ async fn ax_lists_apps_windows_and_snapshots() {
     if !enabled() {
         return;
     }
-    let factory = platform_factory();
+    let factory = platform_factory(&zode_core::config::DesktopConfig::default());
     let backend = factory.create().await.expect("create ax backend");
 
     let apps = backend.list_apps().await.expect("list apps");
@@ -63,7 +63,10 @@ async fn ax_screenshot_produces_valid_png() {
     if !enabled() {
         return;
     }
-    let backend = platform_factory().create().await.unwrap();
+    let backend = platform_factory(&zode_core::config::DesktopConfig::default())
+        .create()
+        .await
+        .unwrap();
     let apps = backend.list_apps().await.unwrap();
     for app in &apps {
         let app_id = AppId::new(0, 0, app.executable_identity.clone(), 0);
@@ -117,7 +120,10 @@ async fn ax_set_value_round_trip() {
     if !enabled() {
         return;
     }
-    let backend = platform_factory().create().await.unwrap();
+    let backend = platform_factory(&zode_core::config::DesktopConfig::default())
+        .create()
+        .await
+        .unwrap();
     let apps = backend.list_apps().await.unwrap();
     let marker = "zode-ax-roundtrip";
     for app in &apps {
@@ -165,7 +171,10 @@ async fn ax_stale_ref_without_snapshot() {
     if !enabled() {
         return;
     }
-    let backend = platform_factory().create().await.unwrap();
+    let backend = platform_factory(&zode_core::config::DesktopConfig::default())
+        .create()
+        .await
+        .unwrap();
     let app = AppId::new(0, 0, "Nonexistent#999999".into(), 0);
     let win = WindowId::new(app, 0, 0, 0);
     let r = zode_core::desktop::backend::ElementRef::new(win, 0, 1);

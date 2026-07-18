@@ -26,23 +26,31 @@ pub use backend::{
     ElementActionKind, ElementRef, Screenshot, SnapshotResult, WindowId, WindowInfo,
 };
 
-/// The platform backend factory for this build: macOS → AX, Windows → UIA,
-/// Linux → AT-SPI2, else a graceful `Unsupported` fallback.
-pub fn platform_factory() -> std::sync::Arc<dyn DesktopBackendFactory> {
+/// The platform backend factory for this build: macOS → AX (with the optional
+/// ghost-cursor overlay sink), Windows → UIA, Linux → AT-SPI2, else a graceful
+/// `Unsupported` fallback.
+pub fn platform_factory(
+    cfg: &crate::config::DesktopConfig,
+) -> std::sync::Arc<dyn DesktopBackendFactory> {
     #[cfg(target_os = "macos")]
     {
-        std::sync::Arc::new(ax::AxFactory)
+        std::sync::Arc::new(ax::AxFactory {
+            overlay: overlay::global(cfg),
+        })
     }
     #[cfg(windows)]
     {
+        let _ = cfg;
         std::sync::Arc::new(uia::UiaFactory)
     }
     #[cfg(target_os = "linux")]
     {
+        let _ = cfg;
         std::sync::Arc::new(atspi::AtspiFactory)
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
+        let _ = cfg;
         std::sync::Arc::new(backend::UnsupportedDesktopFactory)
     }
 }

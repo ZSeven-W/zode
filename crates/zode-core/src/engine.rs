@@ -1075,7 +1075,7 @@ impl ZodeEngine {
         // else a graceful Unsupported fallback.
         let desktop_session = crate::desktop::session::DesktopSession::new(
             cfg.desktop.clone(),
-            crate::desktop::platform_factory(),
+            crate::desktop::platform_factory(&cfg.desktop),
         );
         let mut desktop_mutating_names: Vec<String> = Vec::new();
         if cfg.desktop.enabled() {
@@ -3576,7 +3576,7 @@ mod tests {
             ),
             desktop: crate::desktop::session::DesktopSession::new(
                 crate::config::DesktopConfig::default(),
-                crate::desktop::platform_factory(),
+                crate::desktop::platform_factory(&crate::config::DesktopConfig::default()),
             ),
         }
     }

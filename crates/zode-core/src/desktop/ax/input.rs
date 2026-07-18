@@ -60,12 +60,30 @@ pub fn element_action(elem: &AxElem, kind: ElementActionKind) -> Result<String, 
 
 /// Compute an element's center point in main-display screen coordinates
 /// (top-left origin), from AXPosition + AXSize.
-fn element_center(elem: &AxElem) -> Result<(f64, f64), DesktopError> {
+pub(super) fn element_center(elem: &AxElem) -> Result<(f64, f64), DesktopError> {
     let p = unsafe { attr_point(elem.as_ref(), kAXPositionAttribute) }
         .ok_or_else(|| DesktopError::NotFound("element has no AXPosition".into()))?;
     let s = unsafe { attr_size(elem.as_ref(), kAXSizeAttribute) }
         .ok_or_else(|| DesktopError::NotFound("element has no AXSize".into()))?;
     Ok((p.x + s.width / 2.0, p.y + s.height / 2.0))
+}
+
+/// Owning window's CGWindowID for an element (AXWindow → frame → CGWindowList
+/// match). Best-effort ghost-cursor targeting: any failure returns None.
+pub(super) fn cg_window_id_for_element(pid: i32, elem: &AxElem) -> Option<u32> {
+    use super::element::copy_attr;
+    use accessibility_sys::{AXUIElementGetTypeID, AXUIElementRef};
+    use core_foundation::base::{CFGetTypeID, CFRelease};
+
+    let raw = unsafe { copy_attr(elem.as_ref(), "AXWindow") }?;
+    if unsafe { CFGetTypeID(raw) } != unsafe { AXUIElementGetTypeID() } {
+        unsafe { CFRelease(raw) };
+        return None;
+    }
+    let win = unsafe { AxElem::from_create(raw as AXUIElementRef) };
+    let p = unsafe { attr_point(win.as_ref(), kAXPositionAttribute) }?;
+    let s = unsafe { attr_size(win.as_ref(), kAXSizeAttribute) }?;
+    resolve_cg_window_id(pid, p.x, p.y, s.width, s.height).ok()
 }
 
 /// Synthesize a left click at a screen point (down then up).

@@ -167,7 +167,7 @@ async fn desktop_read_tool_routes_to_cdp_after_attach() {
     // Build a session + read tool with an auto-approving gate, then attach CDP.
     let session = zode_core::desktop::session::DesktopSession::new(
         zode_core::config::DesktopConfig::default(),
-        zode_core::desktop::platform_factory(),
+        zode_core::desktop::platform_factory(&zode_core::config::DesktopConfig::default()),
     );
     session.attach_cdp(port).await.expect("attach cdp");
     let shots = tempfile::tempdir().unwrap();

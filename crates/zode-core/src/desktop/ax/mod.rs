@@ -49,12 +49,15 @@ pub fn permission_guidance() -> String {
 
 /// Factory that spins up an `AxBackend` (its own actor thread).
 #[derive(Debug, Default)]
-pub struct AxFactory;
+pub struct AxFactory {
+    /// Ghost-cursor sink; None when visualization is disabled.
+    pub overlay: Option<crate::desktop::overlay::OverlaySink>,
+}
 
 #[async_trait]
 impl DesktopBackendFactory for AxFactory {
     async fn create(&self) -> Result<Arc<dyn DesktopBackend>, DesktopError> {
-        Ok(AxBackend::spawn())
+        Ok(AxBackend::spawn(self.overlay.clone()))
     }
 }
 
@@ -119,11 +122,11 @@ pub struct AxBackend {
 }
 
 impl AxBackend {
-    pub fn spawn() -> Arc<Self> {
+    pub fn spawn(overlay: Option<crate::desktop::overlay::OverlaySink>) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         std::thread::Builder::new()
             .name("zode-ax-actor".into())
-            .spawn(move || actor_loop(rx))
+            .spawn(move || actor_loop(rx, overlay))
             .expect("spawn ax actor thread");
         Arc::new(Self { tx })
     }
@@ -282,15 +285,23 @@ struct AxState {
     snapshots: HashMap<(i32, usize), Vec<AxElem>>,
 }
 
-fn actor_loop(mut rx: mpsc::UnboundedReceiver<AxCommand>) {
+fn actor_loop(
+    mut rx: mpsc::UnboundedReceiver<AxCommand>,
+    overlay: Option<crate::desktop::overlay::OverlaySink>,
+) {
     let mut state = AxState::default();
     let mut snap_gen: u64 = 0;
     while let Some(cmd) = rx.blocking_recv() {
-        handle(cmd, &mut state, &mut snap_gen);
+        handle(cmd, &mut state, &mut snap_gen, overlay.as_ref());
     }
 }
 
-fn handle(cmd: AxCommand, state: &mut AxState, snap_gen: &mut u64) {
+fn handle(
+    cmd: AxCommand,
+    state: &mut AxState,
+    snap_gen: &mut u64,
+    overlay: Option<&crate::desktop::overlay::OverlaySink>,
+) {
     match cmd {
         AxCommand::ListApps(resp) => {
             let apps = tree::list_apps()
@@ -343,6 +354,16 @@ fn handle(cmd: AxCommand, state: &mut AxState, snap_gen: &mut u64) {
             kind,
             resp,
         } => {
+            if let Some(sink) = overlay {
+                vis_element(
+                    sink,
+                    state,
+                    pid,
+                    index,
+                    local_id,
+                    matches!(kind, ElementActionKind::Scroll),
+                );
+            }
             let out = with_node(state, pid, index, local_id, |elem| {
                 input::element_action(elem, kind)
             });
@@ -355,6 +376,9 @@ fn handle(cmd: AxCommand, state: &mut AxState, snap_gen: &mut u64) {
             text,
             resp,
         } => {
+            if let Some(sink) = overlay {
+                vis_element(sink, state, pid, index, local_id, false);
+            }
             let out = with_node(state, pid, index, local_id, |elem| {
                 // Reject secure text fields (spec §输入安全 hard rule).
                 if is_secure(elem) {
@@ -367,9 +391,21 @@ fn handle(cmd: AxCommand, state: &mut AxState, snap_gen: &mut u64) {
             let _ = resp.send(out);
         }
         AxCommand::TypeText { pid, text, resp } => {
+            // Never surface the typed text — it may contain secrets. A generic
+            // keyboard chip is enough to show that input is happening.
+            if let Some(sink) = overlay {
+                let _ = sink.send(crate::desktop::overlay::OverlayCmd::Chip {
+                    text: format!("⌨ {}", crate::i18n::t("typing…")),
+                });
+            }
             let _ = resp.send(input::type_text(pid, &text));
         }
         AxCommand::Key { pid, combo, resp } => {
+            if let Some(sink) = overlay {
+                let _ = sink.send(crate::desktop::overlay::OverlayCmd::Chip {
+                    text: format!("⌨ {combo}"),
+                });
+            }
             let _ = resp.send(input::key_combo(pid, &combo));
         }
         AxCommand::Focus { pid, index, resp } => {
@@ -397,6 +433,38 @@ fn handle(cmd: AxCommand, state: &mut AxState, snap_gen: &mut u64) {
             let _ = resp.send(());
         }
     }
+}
+
+/// Best-effort ghost-cursor targeting: element center + owning CGWindowID.
+/// Any lookup failure silently skips visualization — never the action.
+fn vis_element(
+    sink: &crate::desktop::overlay::OverlaySink,
+    state: &AxState,
+    pid: i32,
+    index: usize,
+    local_id: u64,
+    scroll: bool,
+) {
+    use crate::desktop::overlay::{OverlayCmd, Pulse};
+    let Some(nodes) = state.snapshots.get(&(pid, index)) else {
+        return;
+    };
+    let Some(elem) = (local_id as usize)
+        .checked_sub(1)
+        .and_then(|i| nodes.get(i))
+    else {
+        return;
+    };
+    let Ok((x, y)) = input::element_center(elem) else {
+        return;
+    };
+    let window_id = input::cg_window_id_for_element(pid, elem);
+    let _ = sink.send(OverlayCmd::Move {
+        x,
+        y,
+        window_id,
+        pulse: if scroll { Pulse::Scroll } else { Pulse::Click },
+    });
 }
 
 fn with_node<T>(
