@@ -1074,6 +1074,7 @@ impl TuiApp {
             // latch. Local shell / compact / background abort users keep None.
             tab.draining_turn_id = active_turn_id;
             tab.active_tool_names.clear();
+            tab.active_tool_started.clear();
             stop_goal_loop(tab);
             tab.chat.end_turn();
             tab.chat.push_system(crate::tr("(interrupted)"));
@@ -1469,6 +1470,7 @@ impl TuiApp {
             tab.reassemble_pending = true;
             tab.mode = Mode::Switching;
             tab.active_tool_names.clear();
+            tab.active_tool_started.clear();
         }
 
         let tx = agent_tx.clone();
@@ -5695,6 +5697,7 @@ impl TuiApp {
         // so text after a tool card starts a fresh segment.
         tab.mode = Mode::Thinking;
         tab.active_tool_names.clear();
+        tab.active_tool_started.clear();
         // Fresh turn: reset the per-turn tool-use flag (goal no-progress).
         tab.turn_used_tools = false;
 
@@ -5941,6 +5944,7 @@ impl TuiApp {
             tab.active_local_op_id = None;
             tab.turn_abort = None;
             tab.active_tool_names.clear();
+            tab.active_tool_started.clear();
             match result {
                 Ok(line) => {
                     tab.chat.push_system(&line);
@@ -6062,6 +6066,7 @@ impl TuiApp {
                     let tab = &mut self.tabs[tab_idx];
                     tab.draining_turn_id = None;
                     tab.active_tool_names.clear();
+                    tab.active_tool_started.clear();
                     let allow_append = !tab.store_dirty;
                     tab.store_dirty = false;
                     let (session_id, engine, title, persisted) = (
@@ -6123,18 +6128,30 @@ impl TuiApp {
                         tab.turn_used_tools = true;
                         let title = tool_call_title(name, input);
                         tab.active_tool_names.insert(id.clone(), title);
+                        tab.active_tool_started
+                            .insert(id.clone(), std::time::Instant::now());
                         if let Some(line) = process_line_for_event(&event, None) {
                             tab.chat.push_tool(&line);
                         }
                     }
                     Event::ToolResult { ref id, .. } => {
                         let known_tool = tab.active_tool_names.remove(id);
+                        let started = tab.active_tool_started.remove(id);
                         let cwd = tab.engine.cwd.clone();
                         if let Some(line) = process_line_for_event_with_cwd(
                             &event,
                             known_tool.as_deref(),
                             Some(cwd.as_path()),
                         ) {
+                            let line = match started {
+                                Some(t) => format!(
+                                    "{line} · {}",
+                                    zode_core::duration_fmt::format_duration_ms(
+                                        u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)
+                                    )
+                                ),
+                                None => line,
+                            };
                             tab.chat.push_tool(&line);
                         }
                     }
@@ -6214,6 +6231,7 @@ impl TuiApp {
                 tab.turn_abort = None;
                 tab.active_turn_id = 0;
                 tab.active_tool_names.clear();
+                tab.active_tool_started.clear();
                 let ok = result.is_ok();
                 tab.mode = match result {
                     Ok(()) => Mode::Ready,
@@ -10920,6 +10938,47 @@ mod tests {
         assert!(
             result_line.contains(&format!("cwd={}", dir.path().display())),
             "{result_line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_result_line_carries_duration_suffix() {
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].active_turn_id = 7;
+
+        app.handle_agent_event(AppEvent::Agent {
+            tab_id,
+            turn_id: 7,
+            cost_label: None,
+            event: Event::ToolUse {
+                id: "t1".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+        });
+        app.handle_agent_event(AppEvent::Agent {
+            tab_id,
+            turn_id: 7,
+            cost_label: None,
+            event: Event::ToolResult {
+                id: "t1".into(),
+                ok: true,
+                output: serde_json::Value::Null,
+            },
+        });
+
+        let last_tool_line = app.tabs[0]
+            .chat
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Tool)
+            .map(|m| m.text.clone())
+            .expect("a tool line was pushed");
+        assert!(
+            last_tool_line.contains(" · ") && last_tool_line.trim_end().ends_with('s'),
+            "expected duration suffix, got: {last_tool_line}"
         );
     }
 

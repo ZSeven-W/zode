@@ -90,6 +90,9 @@ pub struct SessionTab {
     /// Per-turn process UI state: map tool results back to their visible tool
     /// call names.
     pub active_tool_names: HashMap<String, String>,
+    /// Tool-call start instants keyed by tool_use id, for the chat row's
+    /// completion-duration suffix. Cleared with `active_tool_names`.
+    pub active_tool_started: HashMap<String, std::time::Instant>,
     /// Messages typed while a turn was in flight, held FIFO and sent one per
     /// turn once this tab goes idle (Claude-style input queueing).
     pub queued_input: std::collections::VecDeque<String>,
@@ -180,6 +183,7 @@ impl SessionTab {
             auto_compact_failures: 0,
             cost_label: "$0.00".into(),
             active_tool_names: HashMap::new(),
+            active_tool_started: HashMap::new(),
             queued_input: std::collections::VecDeque::new(),
             pending_images: Vec::new(),
             pending_shell_context: Vec::new(),
