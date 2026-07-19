@@ -1,8 +1,8 @@
 //! Persistent store for `/schedule` jobs: `<config-dir>/schedules.json`.
 //!
-//! Mirrors the atomic-write pattern used by `ConfigManager::save_global`
-//! (temp file + `fs::rename`), plus two defensive behaviors a persisted
-//! roster needs that config.json doesn't:
+//! Reuses `config::write_atomic` — the same writer-unique-temp-file +
+//! `fs::rename` helper `ConfigManager::save_global` uses — plus two
+//! defensive behaviors a persisted roster needs that config.json doesn't:
 //!
 //! - **Corrupt-file quarantine**: an unparseable `schedules.json` is renamed
 //!   to `schedules.json.corrupt` (never silently overwritten or deleted) and
@@ -23,7 +23,7 @@
 //!   observed the *unmarked* state returns `true`.
 
 use super::{ScheduleJob, ScheduleSpec};
-use crate::config::ConfigManager;
+use crate::config::{write_atomic, ConfigManager};
 use crate::error::CoreError;
 use std::path::{Path, PathBuf};
 
@@ -103,18 +103,20 @@ fn quarantine(path: &Path) {
     }
 }
 
-/// Persist the `/schedule` roster atomically: write `schedules.json.tmp` in
-/// the same directory, then `fs::rename` it over `schedules.json`. Readers
+/// Persist the `/schedule` roster atomically via `config::write_atomic`:
+/// stage in a writer-unique (pid + atomic counter suffixed) temp file in the
+/// same directory, then `fs::rename` it over `schedules.json`. Readers
 /// therefore only ever see the previous complete file or the new complete
-/// file, never a partial write.
+/// file, never a partial write — and, critically for `try_mark_fired`'s
+/// multi-process racing, two processes saving concurrently never share a
+/// single fixed temp path (which would otherwise let interleaved O_TRUNC
+/// writes rename corrupt JSON into place and quarantine the whole roster).
 pub fn save_schedules(jobs: &[ScheduleJob]) -> Result<(), CoreError> {
     let path = store_path()?;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
     let json = serde_json::to_string_pretty(jobs)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json.as_bytes())?;
-    std::fs::rename(&tmp, &path)?;
+    write_atomic(&path, json.as_bytes())?;
     Ok(())
 }
 

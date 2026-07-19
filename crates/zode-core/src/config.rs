@@ -1516,7 +1516,11 @@ impl ConfigManager {
 /// target. `std::fs::rename` replaces the destination atomically on both Unix
 /// and Windows, so readers see either the old file or the complete new one,
 /// never a half-written mix.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+///
+/// `pub(crate)` so other stores needing the same guarantee (e.g. the
+/// scheduler's `schedules.json`) reuse this instead of a fixed, shared temp
+/// path that concurrent writers could interleave (O_TRUNC, no O_EXCL).
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     // Per-call counter so two concurrent saves IN THIS PROCESS get distinct
     // temps (pid alone only separates processes); together pid+seq are unique.
