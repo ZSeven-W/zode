@@ -55,8 +55,12 @@ pub fn parse_interval(s: &str) -> Result<Duration, String> {
         .map_err(|_| "invalid interval, expected e.g. 30s, 5m, 1h".to_string())?;
     let secs = match unit {
         "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
+        "m" => n
+            .checked_mul(60)
+            .ok_or_else(|| "invalid interval, expected e.g. 30s, 5m, 1h".to_string())?,
+        "h" => n
+            .checked_mul(3600)
+            .ok_or_else(|| "invalid interval, expected e.g. 30s, 5m, 1h".to_string())?,
         _ => return Err("invalid interval, expected e.g. 30s, 5m, 1h".to_string()),
     };
     if secs < 30 {
@@ -307,5 +311,11 @@ mod tests {
             parse_schedule("/schedule add 09:00").is_err(),
             "prompt required"
         );
+    }
+
+    #[test]
+    fn interval_overflow_is_rejected() {
+        assert!(parse_interval("18446744073709551615h").is_err());
+        assert!(parse_loop("/loop 18446744073709551615h x").is_err());
     }
 }
