@@ -48,6 +48,7 @@ pub mod question;
 pub mod reminders;
 pub mod run_event;
 pub mod sandbox;
+pub mod scheduler;
 pub mod session_meta;
 pub mod sessions;
 pub mod skills;
