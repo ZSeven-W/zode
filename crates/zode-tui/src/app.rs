@@ -5769,13 +5769,12 @@ impl TuiApp {
         // Keyed off `text` (the raw argument), not `submitted_text` (which may
         // have gained a prepended shell-context note) — `sched_pending`'s keys
         // are the exact prompts `poll_scheduler` pushed onto `queued_input`.
-        // Stamped here (before the extracted tail) rather than inside
-        // `start_turn_on_tab` so the lookup key can differ per call site: the
-        // background drain in `dispatch_scheduler_background` keys off the
-        // exact prompt it popped, which — unlike here — never gains a
-        // shell-context prefix.
-        self.tabs[self.active].active_sched_job = self.sched_pending.remove(text);
-        self.start_turn_on_tab(self.active, &submitted_text, agent_tx)
+        // The actual lookup/stamp happens INSIDE `start_turn_on_tab`, after its
+        // last early-return point (see that function's doc comment) — only the
+        // key is decided here, per call site, since the background drain in
+        // `dispatch_scheduler_background` keys off the exact prompt it popped,
+        // which — unlike here — never gains a shell-context prefix.
+        self.start_turn_on_tab(self.active, &submitted_text, text, agent_tx)
             .await;
     }
 
@@ -5789,10 +5788,20 @@ impl TuiApp {
     /// on an IDLE tab other than the active one. `submit()` calls this with
     /// `self.active`, so the active-tab path is unchanged: same field
     /// writes, same ordering, same spawned events.
+    ///
+    /// `sched_key` is the lookup key into `App::sched_pending` for scheduler
+    /// attribution (see `SchedJobRef`'s doc comment). It is looked up and
+    /// removed — and `SessionTab::active_sched_job` stamped — only AFTER the
+    /// last early-return point below (image-route / turn-limit bails), so a
+    /// bailed call never consumes a pending entry nor leaves a stale stamp on
+    /// the tab: if this function returns early, `sched_pending` still owns the
+    /// entry and the next unrelated turn on this tab cannot be misattributed
+    /// to it.
     async fn start_turn_on_tab(
         &mut self,
         tab_idx: usize,
         text: &str,
+        sched_key: &str,
         agent_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
         let submitted_text = text.to_string();
@@ -5843,6 +5852,14 @@ impl TuiApp {
             )));
             return;
         };
+
+        // Past every early-return point above: this turn WILL start, so it's
+        // now safe to consume the pending scheduler entry (if any) and stamp
+        // attribution. Doing this any earlier would let a bailed call above
+        // consume `sched_key` without ever starting a turn, leaving a stuck
+        // `active_sched_job` that misattributes the tab's NEXT unrelated turn
+        // to this job (since no turn starts here, `TurnDone` never clears it).
+        self.tabs[tab_idx].active_sched_job = self.sched_pending.remove(sched_key);
 
         // Stamp the session title from the first user prompt of this tab.
         if !self.tabs[tab_idx].titled {
@@ -5998,8 +6015,12 @@ impl TuiApp {
                 idx += 1;
                 continue;
             };
-            self.tabs[idx].active_sched_job = self.sched_pending.remove(&prompt);
-            self.start_turn_on_tab(idx, &prompt, agent_tx).await;
+            // Key and text are the same string here — unlike `submit()`,
+            // this prompt never gains a shell-context prefix. The actual
+            // `sched_pending` removal + `active_sched_job` stamp happens
+            // inside `start_turn_on_tab`, after its last early-return point.
+            self.start_turn_on_tab(idx, &prompt, &prompt, agent_tx)
+                .await;
             idx += 1;
         }
     }
@@ -12257,6 +12278,45 @@ mod tests {
         assert!(
             app.toast.is_some(),
             "sequence exhaustion is visible to the user"
+        );
+    }
+
+    #[tokio::test]
+    async fn bailed_turn_start_never_stamps_or_consumes_sched_pending() {
+        // Regression test: `SessionTab::active_sched_job` must only be
+        // stamped — and the matching `App::sched_pending` entry only
+        // consumed — once `start_turn_on_tab` is past its LAST early-return
+        // point. Before the fix, the call sites stamped/removed BEFORE
+        // calling `start_turn_on_tab`, so a bailed dispatch (turn_seq
+        // overflow, unsupported image route, ...) consumed the
+        // `sched_pending` entry and left a stuck `active_sched_job` on the
+        // tab. Since no turn actually starts, `TurnDone` never clears it, so
+        // the tab's NEXT unrelated turn would get misattributed to the
+        // scheduler job — corrupting the 3-strikes circuit breaker.
+        let (mut app, agent_tx) = make_test_app().await;
+        app.tabs[0].titled = true;
+        // Deterministic bail: `turn_seq` at `u64::MAX` makes `checked_add(1)`
+        // fail, the last early-return point in `start_turn_on_tab`.
+        app.tabs[0].turn_seq = u64::MAX;
+        let job = SchedJobRef::Schedule("abcd".into());
+        app.sched_pending
+            .insert("check ci".to_string(), job.clone());
+
+        app.submit("check ci", &agent_tx).await;
+
+        assert_eq!(
+            app.tabs[0].turn_seq,
+            u64::MAX,
+            "the bail must not advance turn_seq — no turn started"
+        );
+        assert!(
+            app.tabs[0].active_sched_job.is_none(),
+            "a bailed dispatch must not stamp scheduler attribution"
+        );
+        assert_eq!(
+            app.sched_pending.get("check ci"),
+            Some(&job),
+            "a bailed dispatch must not consume the pending scheduler entry"
         );
     }
 
