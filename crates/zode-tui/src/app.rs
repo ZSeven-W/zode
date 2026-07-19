@@ -1042,6 +1042,18 @@ impl TuiApp {
             tab_id: closing_tab_id,
         });
         self.clear_extension_turn_state_for_closed_tab(closing_tab_id);
+        // A `/loop` owned by this tab can never run again: `poll_scheduler`
+        // finds no owning tab and drops the prompt — but `due()` has already
+        // incremented `runs`, so a `--max N` loop would silently burn all N
+        // executions and linger in `/loop list` forever. Retire them with the
+        // tab, and forget their failure streaks.
+        let orphaned = self.scheduler.stop_loops_for_owner(closing_tab_id as u64);
+        if !orphaned.is_empty() {
+            self.purge_sched_jobs(|job| match job {
+                SchedJobRef::Loop(id) => orphaned.contains(id),
+                SchedJobRef::Schedule(_) => false,
+            });
+        }
         // The tab's `queued_input` (and any scheduler prompt in it) dies with
         // the tab; drop the matching attribution entries so they can't outlive
         // it and capture an unrelated prompt later.
@@ -13314,6 +13326,68 @@ mod tests {
             app.sched_pending.is_empty(),
             "a closed tab's pending entries must not outlive it and capture \
              an identically-worded prompt later"
+        );
+    }
+
+    /// A `/loop` whose owning tab is closed must be retired with the tab.
+    /// Otherwise `due()` keeps returning it forever — `poll_scheduler` drops
+    /// each fire for want of an owning tab, but `runs` has already been
+    /// incremented, so a `--max N` loop burns its whole budget with zero
+    /// executions while still showing up in `/loop list`.
+    #[tokio::test]
+    async fn closing_a_tab_stops_the_loops_it_owned() {
+        let (mut app, _unused_tx, _dir) = make_test_app_with_dir().await;
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        app.new_tab(&agent_tx);
+        let ev = tokio::time::timeout(Duration::from_secs(30), agent_rx.recv())
+            .await
+            .expect("assembly finishes")
+            .expect("channel open");
+        app.handle_agent_event(ev);
+        assert_eq!(app.tabs.len(), 2);
+
+        let closing_id = app.tabs[app.active].id;
+        let surviving_id = app.tabs[1 - app.active].id;
+        let doomed = app.scheduler.add_loop(
+            closing_id as u64,
+            "check ci".into(),
+            Duration::from_secs(60),
+            Some(5),
+            std::time::Instant::now(),
+        );
+        let kept = app.scheduler.add_loop(
+            surviving_id as u64,
+            "watch deploys".into(),
+            Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.sched_fail_streak.insert(SchedJobRef::Loop(doomed), 2);
+
+        app.close_active_tab();
+
+        let ids: Vec<u32> = app.scheduler.loops().iter().map(|j| j.id).collect();
+        assert_eq!(
+            ids,
+            vec![kept],
+            "the closed tab's loop is retired; the other tab's is untouched"
+        );
+        assert!(
+            !app.sched_fail_streak
+                .contains_key(&SchedJobRef::Loop(doomed)),
+            "the retired loop's failure streak is forgotten too"
+        );
+        // And it genuinely stops coming out of `due()` even once overdue.
+        app.scheduler
+            .rewind_loop_for_test(doomed, Duration::from_secs(120));
+        let due = app.scheduler.due(
+            std::time::Instant::now(),
+            chrono::Local::now().naive_local(),
+        );
+        assert!(
+            !due.iter()
+                .any(|j| matches!(&j.kind, DueKind::Loop { id, .. } if *id == doomed)),
+            "a retired loop never fires again"
         );
     }
 
