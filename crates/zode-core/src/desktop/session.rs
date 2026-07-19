@@ -3,7 +3,7 @@
 //! subsystem-consent → app allowlist → per-family scoped grants (spec §权限).
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::config::DesktopConfig;
@@ -78,7 +78,6 @@ pub struct DesktopSession {
     scopes: PermissionScopes,
     slot: Arc<tokio::sync::Mutex<()>>,
     perm_flags: StdMutex<Vec<(String, Arc<AtomicBool>)>>,
-    window_seq: AtomicU64,
     /// Optional CDP attachment (an Electron/Chromium instance attached over its
     /// debug port). When present, `desktop_eval` and CDP-routed calls use it.
     cdp: tokio::sync::Mutex<Option<Arc<super::cdp::CdpBackend>>>,
@@ -129,7 +128,6 @@ impl DesktopSession {
             scopes: PermissionScopes::default(),
             slot: Arc::new(tokio::sync::Mutex::new(())),
             perm_flags: StdMutex::new(Vec::new()),
-            window_seq: AtomicU64::new(0),
             cdp: tokio::sync::Mutex::new(None),
         })
     }
@@ -199,14 +197,17 @@ impl DesktopSession {
     }
 
     /// Resolve a model-supplied window token into a generation-bound WindowId.
-    /// M1: the mock/AX backend addresses windows by an opaque token; the id is
-    /// stamped with the current actor generation so it fails as StaleRef after
-    /// an actor replacement. Empty token is rejected (never a silent default).
+    /// Backends mint tokens from their window index ("0", "1", …) and
+    /// dereference the key as that index, so the numeric part of the token
+    /// must round-trip into the key unchanged. The id is stamped with the
+    /// current actor generation so it fails as StaleRef after an actor
+    /// replacement. Empty/non-numeric tokens are rejected (never a silent
+    /// default).
     pub fn resolve_window(&self, app: AppId, token: &str) -> Result<WindowId, DesktopError> {
-        if token.is_empty() {
-            return Err(DesktopError::NotFound("window token required".into()));
-        }
-        let key = self.window_seq.fetch_add(1, Ordering::SeqCst);
+        let digits: String = token.chars().filter(|c| c.is_ascii_digit()).collect();
+        let key = digits
+            .parse::<u64>()
+            .map_err(|_| DesktopError::NotFound(format!("invalid window token {token:?}")))?;
         Ok(WindowId::new(app, key, 0, self.actor.generation()))
     }
 
@@ -319,5 +320,23 @@ mod tests {
         let app = AppId::new(1, 1, "com.test".into(), 0);
         assert!(s.resolve_window(app.clone(), "").is_err());
         assert!(s.resolve_window(app, "w1").is_ok());
+    }
+
+    #[test]
+    fn resolve_window_key_round_trips_token() {
+        let s = DesktopSession::new(DesktopConfig::default(), mock_factory());
+        let app = AppId::new(1, 1, "com.test".into(), 0);
+        // Platform backends dereference the key as their window index, so the
+        // same token must yield the same key no matter how many resolutions
+        // happened before it.
+        for _ in 0..3 {
+            let w = s.resolve_window(app.clone(), "0").unwrap();
+            assert_eq!(w.actor_local_key(), 0);
+        }
+        let w = s.resolve_window(app.clone(), "2").unwrap();
+        assert_eq!(w.actor_local_key(), 2);
+        // Mock-style alphanumeric tokens keep their numeric part.
+        let w = s.resolve_window(app, "w1").unwrap();
+        assert_eq!(w.actor_local_key(), 1);
     }
 }
