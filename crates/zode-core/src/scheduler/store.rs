@@ -67,23 +67,48 @@ pub fn load_schedules() -> Vec<ScheduleJob> {
     sanitize(jobs)
 }
 
-/// Drop entries whose `Daily`/`Weekly` spec has an out-of-range hour/minute
-/// (hour > 23 or minute > 59), warning once per dropped entry. `Interval`
-/// specs have no such range to validate.
+/// Drop entries with invalid specs or prompts, warning once per dropped entry:
+///
+/// - `Daily`/`Weekly` with out-of-range hour/minute (hour > 23 or minute > 59)
+/// - `Interval` with `secs < 30` (below the parser's minimum)
+/// - Prompts whose trimmed form starts with `/` or `!` (rejected at parse time,
+///   but can bypass via hand-edited `schedules.json`)
+const MIN_INTERVAL_SECS: u64 = 30;
+
 fn sanitize(jobs: Vec<ScheduleJob>) -> Vec<ScheduleJob> {
     jobs.into_iter()
         .filter(|job| {
-            let valid = match &job.spec {
+            let mut valid = true;
+            let mut reason = String::new();
+
+            // Check spec validity.
+            match &job.spec {
                 ScheduleSpec::Daily { hour, minute }
-                | ScheduleSpec::Weekly { hour, minute, .. } => *hour <= 23 && *minute <= 59,
-                ScheduleSpec::Interval { .. } => true,
-            };
+                | ScheduleSpec::Weekly { hour, minute, .. } => {
+                    if *hour > 23 || *minute > 59 {
+                        valid = false;
+                        reason = "out-of-range hour or minute".to_string();
+                    }
+                }
+                ScheduleSpec::Interval { secs } => {
+                    if *secs < MIN_INTERVAL_SECS {
+                        valid = false;
+                        reason = format!(
+                            "interval below minimum ({} < {} secs)",
+                            secs, MIN_INTERVAL_SECS
+                        );
+                    }
+                }
+            }
+
+            // Check prompt validity (must not start with / or ! after trimming).
+            if valid && job.prompt.trim_start().starts_with(['/', '!']) {
+                valid = false;
+                reason = "prompt starts with '/' or '!'".to_string();
+            }
+
             if !valid {
-                tracing::warn!(
-                    "schedules store: dropping job {:?} with out-of-range spec {:?}",
-                    job.id,
-                    job.spec
-                );
+                tracing::warn!("schedules store: dropping job {:?}: {}", job.id, reason);
             }
             valid
         })
@@ -232,6 +257,67 @@ mod tests {
         let loaded = load_schedules();
         assert_eq!(loaded.len(), 1, "only the in-range entry survives");
         assert_eq!(loaded[0].id, "good1");
+        std::env::remove_var("ZODE_CONFIG_DIR");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_schedules_drops_invalid_prompts_and_intervals() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ZODE_CONFIG_DIR", dir.path());
+        let raw = serde_json::json!([
+            {
+                "id": "good",
+                "spec": { "kind": "daily", "hour": 9, "minute": 0 },
+                "prompt": "valid prompt",
+                "enabled": true,
+                "lastFiredMs": null
+            },
+            {
+                "id": "slash_prompt",
+                "spec": { "kind": "daily", "hour": 10, "minute": 0 },
+                "prompt": "/compact",
+                "enabled": true,
+                "lastFiredMs": null
+            },
+            {
+                "id": "slash_with_space",
+                "spec": { "kind": "daily", "hour": 11, "minute": 0 },
+                "prompt": "  /cost",
+                "enabled": true,
+                "lastFiredMs": null
+            },
+            {
+                "id": "bang_prompt",
+                "spec": { "kind": "daily", "hour": 12, "minute": 0 },
+                "prompt": "!git status",
+                "enabled": true,
+                "lastFiredMs": null
+            },
+            {
+                "id": "bad_interval",
+                "spec": { "kind": "interval", "secs": 1 },
+                "prompt": "too fast",
+                "enabled": true,
+                "lastFiredMs": null
+            },
+            {
+                "id": "min_interval",
+                "spec": { "kind": "interval", "secs": 30 },
+                "prompt": "at the limit",
+                "enabled": true,
+                "lastFiredMs": null
+            }
+        ]);
+        std::fs::write(
+            dir.path().join("schedules.json"),
+            serde_json::to_string_pretty(&raw).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_schedules();
+        assert_eq!(loaded.len(), 2, "only valid entries survive");
+        assert_eq!(loaded[0].id, "good");
+        assert_eq!(loaded[1].id, "min_interval");
         std::env::remove_var("ZODE_CONFIG_DIR");
     }
 }

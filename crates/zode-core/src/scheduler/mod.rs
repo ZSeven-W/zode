@@ -282,8 +282,10 @@ const MAX_GAP_SKIPS: usize = 1024;
 
 /// Resolve the trigger point a schedule job should fire at, given its anchor.
 ///
-/// Returns `None` when the job is simply not due yet (`next_fire > wall`), and
-/// `Some((trigger_point, epoch_ms))` when it is.
+/// Returns `None` when the job is simply not due yet (`next_fire > wall`),
+/// or when gap-skipping exhausts `MAX_GAP_SKIPS` (runaway guard against
+/// pathological DST/spec combinations). Returns `Some((trigger_point, epoch_ms))`
+/// when a valid fire point is found.
 ///
 /// The loop exists for DST spring-forward: `to_epoch_ms` returns `None` for a
 /// local time that never happens, and the fix for that must ADVANCE to the
