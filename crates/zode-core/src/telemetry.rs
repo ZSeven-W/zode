@@ -157,6 +157,7 @@ fn add_event_attributes(span: &mut opentelemetry_sdk::trace::Span, event: &RunEv
             status,
             stop_reason,
             partial,
+            ..
         }
         | RunEvent::RunCompleted {
             status,

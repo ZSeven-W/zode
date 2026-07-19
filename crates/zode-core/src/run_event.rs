@@ -5,7 +5,7 @@
 //! compatibility boundary.
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use agent::stream::{Event, ResultData};
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,13 @@ pub enum RunEvent {
         input: Value,
     },
     #[serde(rename = "tool.completed")]
-    ToolCompleted { id: String, ok: bool, output: Value },
+    ToolCompleted {
+        id: String,
+        ok: bool,
+        output: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
     #[serde(rename = "usage")]
     Usage {
         input_tokens: u64,
@@ -73,6 +79,8 @@ pub enum RunEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         stop_reason: Option<String>,
         partial: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
     },
     #[serde(rename = "run.completed")]
     RunCompleted {
@@ -112,6 +120,7 @@ impl RunEvent {
                 id: id.clone(),
                 ok: *ok,
                 output: output.clone(),
+                duration_ms: None,
             },
             Event::Usage {
                 input_tokens,
@@ -231,6 +240,8 @@ pub struct TurnRecorder {
     store: Option<crate::sessions::SessionStore>,
     context: RunEventContext,
     completed: bool,
+    turn_started: Option<Instant>,
+    tool_started: HashMap<String, Instant>,
 }
 
 impl TurnRecorder {
@@ -239,6 +250,8 @@ impl TurnRecorder {
             store,
             context,
             completed: false,
+            turn_started: None,
+            tool_started: HashMap::new(),
         }
     }
 
@@ -248,6 +261,7 @@ impl TurnRecorder {
 
     /// Emit the RunStarted/TurnStarted pair.
     pub fn start(&mut self) -> Vec<RunEventEnvelope> {
+        self.turn_started = Some(Instant::now());
         vec![
             self.record(RunEvent::RunStarted),
             self.record(RunEvent::TurnStarted),
@@ -255,7 +269,27 @@ impl TurnRecorder {
     }
 
     /// Envelope + journal one event (the store skips per-token deltas).
-    pub fn record(&mut self, event: RunEvent) -> RunEventEnvelope {
+    pub fn record(&mut self, mut event: RunEvent) -> RunEventEnvelope {
+        match &mut event {
+            RunEvent::ToolStarted { id, .. } => {
+                self.tool_started.insert(id.clone(), Instant::now());
+            }
+            RunEvent::ToolCompleted {
+                id, duration_ms, ..
+            } if duration_ms.is_none() => {
+                // Only stamp when the start was observed; never guess.
+                *duration_ms = self
+                    .tool_started
+                    .remove(id)
+                    .map(|t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX));
+            }
+            RunEvent::TurnCompleted { duration_ms, .. } if duration_ms.is_none() => {
+                *duration_ms = self
+                    .turn_started
+                    .map(|t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX));
+            }
+            _ => {}
+        }
         let envelope = self.context.envelope(event);
         if let Some(store) = &self.store {
             if let Err(error) = store.append_run_event(&envelope.session_id, &envelope) {
@@ -316,6 +350,7 @@ impl TurnRecorder {
                 status: outcome.status,
                 stop_reason: outcome.stop_reason.clone(),
                 partial: outcome.partial,
+                duration_ms: None,
             }),
             self.record(RunEvent::RunCompleted {
                 status: outcome.status,
@@ -482,5 +517,80 @@ mod tests {
         assert_eq!(json["inputTokens"], 1);
         assert_eq!(json["cacheWriteTokens"], 4);
         assert!(json.get("input_tokens").is_none());
+    }
+
+    #[test]
+    fn recorder_stamps_tool_and_turn_durations() {
+        let mut recorder = TurnRecorder::new(None, RunEventContext::new("s1", None, None));
+        recorder.start();
+        let started = recorder.record(RunEvent::ToolStarted {
+            id: "t1".into(),
+            name: "Bash".into(),
+            input: serde_json::json!({}),
+        });
+        assert!(matches!(started.event, RunEvent::ToolStarted { .. }));
+        let done = recorder.record(RunEvent::ToolCompleted {
+            id: "t1".into(),
+            ok: true,
+            output: serde_json::Value::Null,
+            duration_ms: None,
+        });
+        match done.event {
+            RunEvent::ToolCompleted { duration_ms, .. } => assert!(duration_ms.is_some()),
+            other => panic!("unexpected: {other:?}"),
+        }
+        let pair = recorder.complete(None, true, &TurnOutcome::completed());
+        match &pair[0].event {
+            RunEvent::TurnCompleted { duration_ms, .. } => assert!(duration_ms.is_some()),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unmatched_tool_completion_has_no_duration() {
+        let mut recorder = TurnRecorder::new(None, RunEventContext::new("s1", None, None));
+        recorder.start();
+        // ToolCompleted whose id never had a ToolStarted: do not guess.
+        let done = recorder.record(RunEvent::ToolCompleted {
+            id: "ghost".into(),
+            ok: false,
+            output: serde_json::Value::Null,
+            duration_ms: None,
+        });
+        match done.event {
+            RunEvent::ToolCompleted { duration_ms, .. } => assert_eq!(duration_ms, None),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duration_ms_serde_is_backward_compatible() {
+        // Old journal line without durationMs must still parse.
+        let old = r#"{"type":"tool.completed","id":"t1","ok":true,"output":null}"#;
+        let ev: RunEvent = serde_json::from_str(old).expect("old shape parses");
+        assert!(matches!(
+            ev,
+            RunEvent::ToolCompleted {
+                duration_ms: None,
+                ..
+            }
+        ));
+        // New shape round-trips and serializes camelCase durationMs.
+        let new = RunEvent::ToolCompleted {
+            id: "t1".into(),
+            ok: true,
+            output: serde_json::Value::Null,
+            duration_ms: Some(1200),
+        };
+        let json = serde_json::to_string(&new).unwrap();
+        assert!(json.contains("\"durationMs\":1200"), "got: {json}");
+        // None must not serialize the key at all.
+        let none = RunEvent::TurnCompleted {
+            status: RunStatus::Completed,
+            stop_reason: None,
+            partial: false,
+            duration_ms: None,
+        };
+        assert!(!serde_json::to_string(&none).unwrap().contains("durationMs"));
     }
 }
