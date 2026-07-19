@@ -6085,6 +6085,7 @@ dependencies = [
  "atspi",
  "base64 0.22.1",
  "chromiumoxide",
+ "cocoa",
  "core-foundation",
  "core-graphics",
  "dirs",

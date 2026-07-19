@@ -522,6 +522,20 @@ draws a fake one (Dubins-path flight, ported from pi-computer-use, MIT).
 - Opt-in IT (needs a logged-in macOS session):
   `ZODE_DESKTOP_IT=1 cargo test -p zode-overlay --test overlay-it -- --ignored`.
 
+### macOS text input strategy (`type` action)
+
+`type_text` (`zode-core/src/desktop/ax/input.rs`) sends each char with its
+real US-layout virtual keycode plus the unicode payload. Text containing any
+char without a keycode (CJK, punctuation) is delivered via the pasteboard
+instead (`ax/paste.rs`): write general pasteboard → synthesize Cmd+V to the
+target pid → restore the previous pasteboard **text** after a 300 ms settle.
+Rationale: apps with custom key handling (WeChat 4.x) read the keycode, not
+the payload — keycode 0 is kVK_ANSI_A, so payload-only synthesis rendered
+every such char as "a". Known limitation: a non-text pasteboard (image/files)
+cannot be saved and is lost on the paste path. Window tokens minted by
+`desktop_read windows` are the backend's window index and round-trip through
+`DesktopSession::resolve_window` unchanged.
+
 ## External agents
 
 Zode can register explicitly configured external agent CLIs as `Task` tool

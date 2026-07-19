@@ -173,14 +173,30 @@ fn event_source() -> Result<CGEventSource, DesktopError> {
         .map_err(|_| DesktopError::Protocol("CGEventSource create failed".into()))
 }
 
+/// True when `text` contains a char with no virtual keycode: such text must
+/// go through the pasteboard path, because apps with custom key handling read
+/// the keycode, not the unicode payload (keycode 0 is kVK_ANSI_A — they would
+/// see every payload-only char as "a").
+pub fn needs_paste(text: &str) -> bool {
+    !text.chars().all(|c| char_keycode(c).is_some())
+}
+
 /// Type text one character at a time. `sent` tracks progress for `PartialInput`
 /// reporting if a later refactor adds mid-stream focus checks (M1 posts all).
+///
+/// Each event carries the character as its unicode payload plus its real
+/// US-layout keycode. Text that `needs_paste` is delivered via the pasteboard
+/// instead (see `paste.rs`).
 pub fn type_text(pid: i32, text: &str) -> Result<(), DesktopError> {
+    if needs_paste(text) {
+        return super::paste::paste_text(pid, text);
+    }
     let src = event_source()?;
     for (sent, ch) in text.chars().enumerate() {
         let mut buf = [0u16; 2];
         let utf16 = ch.encode_utf16(&mut buf);
-        let down = CGEvent::new_keyboard_event(src.clone(), 0, true).map_err(|_| {
+        let code = char_keycode(ch).unwrap_or(0);
+        let down = CGEvent::new_keyboard_event(src.clone(), code, true).map_err(|_| {
             DesktopError::PartialInput {
                 characters_sent: sent,
                 reason: "keydown create failed".into(),
@@ -188,7 +204,7 @@ pub fn type_text(pid: i32, text: &str) -> Result<(), DesktopError> {
         })?;
         down.set_string_from_utf16_unchecked(utf16);
         down.post_to_pid(pid);
-        let up = CGEvent::new_keyboard_event(src.clone(), 0, false).map_err(|_| {
+        let up = CGEvent::new_keyboard_event(src.clone(), code, false).map_err(|_| {
             DesktopError::PartialInput {
                 characters_sent: sent,
                 reason: "keyup create failed".into(),
@@ -281,6 +297,19 @@ fn keycode_for(name: &str) -> Option<CGKeyCode> {
         "end" => KeyCode::END,
         _ => return None,
     })
+}
+
+/// Keycode for a literal typed character: letters/digits plus the whitespace
+/// keys that occur inside typed text. Uppercase maps to the unshifted keycode;
+/// the unicode payload still carries the exact character.
+fn char_keycode(c: char) -> Option<CGKeyCode> {
+    use core_graphics::event::KeyCode;
+    match c {
+        ' ' => Some(KeyCode::SPACE),
+        '\n' | '\r' => Some(KeyCode::RETURN),
+        '\t' => Some(KeyCode::TAB),
+        _ => letter_keycode(c),
+    }
 }
 
 /// US-layout virtual keycodes for letters and digits.
@@ -412,5 +441,23 @@ fn resolve_cg_window_id(pid: i32, x: f64, y: f64, w: f64, h: f64) -> Result<u32,
         _ => Err(DesktopError::Ambiguous {
             candidates: matches.iter().map(|id| format!("cgwindow#{id}")).collect(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn needs_paste_classifies_by_keycode_coverage() {
+        // Fully keycode-mappable: letters, digits, space, newline, tab.
+        assert!(!needs_paste("hello world 123\n\tok"));
+        // CJK has no virtual keycode.
+        assert!(needs_paste("你好"));
+        assert!(needs_paste("hi 许嘉天"));
+        // ASCII punctuation is not in the keycode map either.
+        assert!(needs_paste("hi!"));
+        // Empty text needs no paste.
+        assert!(!needs_paste(""));
     }
 }

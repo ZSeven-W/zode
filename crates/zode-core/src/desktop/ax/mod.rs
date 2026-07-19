@@ -8,6 +8,7 @@
 
 mod element;
 mod input;
+mod paste;
 mod screenshot;
 mod tree;
 
