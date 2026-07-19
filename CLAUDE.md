@@ -550,11 +550,25 @@ cannot be saved and is lost on the paste path. Window tokens minted by
 - Both live in `zode-core/src/scheduler/` (pure `due()` core, driven by the TUI
   tick); parsers in `commands/loop-sched.rs`. 3 consecutive failed injected
   turns auto-stop a loop / disable a schedule.
-- **Scheduler injection** — due prompts are queued via `queued_input`. The
-  active tab drains through the normal queued-input path; idle background tabs
-  are drained by `dispatch_scheduler_background()` (only scheduler-owned
-  prompts). Turn spawn is the tab-parameterized `start_turn_on_tab`. Failure
-  attribution uses a pending-prompt map consumed after the turn actually starts.
+- **Due-check anchoring** — `ScheduleSpec::next_after` returns a time strictly
+  *after* its `now` argument, so `Scheduler::due()` anchors it on the job's own
+  history (the later of `last_fired_ms` and a per-job in-memory baseline
+  captured on first observation), never on the current wall clock. It stamps
+  `last_fired_ms` to the trigger point, not the observing tick, so `fire_ms_hint`
+  and the cross-process CAS dedup agree. `due()` reads no clock of its own.
+- **Job prompts are plain prompts** — `parse_loop` / `parse_schedule` reject a
+  leading `/`. Slash dispatch is active-tab-scoped and its non-turn paths can't
+  hand back the pending-attribution entry, so allowing it would mis-target
+  background tabs and leak attribution.
+- **Scheduler injection** — due prompts are queued via `queued_input`.
+  `dispatch_scheduler_queued()` drains scheduler-owned prompts from the tick on
+  EVERY idle tab, active included (the active tab routes back through `submit()`
+  so tick- and keypress-driven drains behave identically) — otherwise an
+  unattended `/loop` waits for a keypress while anti-pileup swallows later fires.
+  User-typed queued input is never auto-drained. Turn spawn is the
+  tab-parameterized `start_turn_on_tab`. Failure attribution uses a pending map
+  keyed `(tab_id, prompt)`, consumed after the turn actually starts, and purged
+  on `/loop stop`, `/schedule rm|disable`, and tab close.
 - **Interval formatting** — schedule list/confirmation echo renders intervals as
   compact round-trippable tokens (e.g. `every 2h`, not `every 2h 00m`).
 - **DST handling** — nonexistent local times skip the fire (retry next tick);

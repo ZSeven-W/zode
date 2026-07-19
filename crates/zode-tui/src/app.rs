@@ -393,7 +393,7 @@ pub struct UiConfig {
 /// Identifies which scheduler job queued a prompt, for turn-outcome
 /// attribution: `App::sched_pending` maps a queued prompt to its job so a
 /// turn-start call site (`submit()` for the active tab,
-/// `dispatch_scheduler_background()` for every other idle tab) can stamp
+/// `dispatch_scheduler_queued()` for the tick-driven drain) can stamp
 /// `SessionTab::active_sched_job`, and `TurnDone` consumes it to update
 /// `App::sched_fail_streak` (the 3-strikes circuit breaker). `Loop` ids are
 /// process-local `u32`s from `Scheduler::add_loop`; `Schedule` ids are the
@@ -403,6 +403,18 @@ pub enum SchedJobRef {
     Loop(u32),
     Schedule(String),
 }
+
+/// Key into [`TuiApp::sched_pending`]: `(SessionTab::id, exact prompt text)`.
+///
+/// The tab id is part of the key because the prompt alone is not unique — two
+/// tabs can run identically-worded jobs, and a *stale* entry (one whose queued
+/// prompt was purged, or whose turn bailed before starting) must not be able to
+/// capture an unrelated user-typed message that happens to read the same on
+/// another tab. Within one tab the pair is unique by construction:
+/// `poll_scheduler`'s anti-pileup check refuses to queue a prompt that is
+/// already queued on that tab, so at most one live entry exists per pair and
+/// two same-text jobs are attributed independently, one after the other.
+type SchedPendingKey = (usize, String);
 
 pub struct TuiApp {
     /// One independent conversation per tab; `active` indexes the focused one.
@@ -532,11 +544,14 @@ pub struct TuiApp {
     /// per tick (`poll_scheduler`). Pure/I-O-free itself; `schedules.json`
     /// load/save happens around it here and in the slash-command handlers.
     scheduler: Scheduler,
-    /// Queued-but-not-yet-submitted scheduler prompts, keyed by the exact
-    /// prompt text pushed to a tab's `queued_input`. `submit()` pops the entry
-    /// for the text it's about to run so `SessionTab::active_sched_job` can
-    /// attribute the turn back to its job.
-    sched_pending: HashMap<String, SchedJobRef>,
+    /// Queued-but-not-yet-submitted scheduler prompts, keyed by
+    /// `(owning tab id, exact prompt text)` — see [`SchedPendingKey`].
+    /// `submit()` pops the entry for the text it's about to run so
+    /// `SessionTab::active_sched_job` can attribute the turn back to its job.
+    /// Entries are purged when their job goes away (`/loop stop`,
+    /// `/schedule rm|disable`) or their tab closes, so a stale entry can never
+    /// consume a later user-typed message.
+    sched_pending: HashMap<SchedPendingKey, SchedJobRef>,
     /// Consecutive turn failures per scheduler job. Reset to zero (removed) on
     /// a success; at 3 the job is stopped/disabled — a persistently broken
     /// prompt must not retry forever.
@@ -1027,6 +1042,10 @@ impl TuiApp {
             tab_id: closing_tab_id,
         });
         self.clear_extension_turn_state_for_closed_tab(closing_tab_id);
+        // The tab's `queued_input` (and any scheduler prompt in it) dies with
+        // the tab; drop the matching attribution entries so they can't outlive
+        // it and capture an unrelated prompt later.
+        self.purge_sched_pending_for_tab(closing_tab_id);
         if self.tabs.len() == 1 {
             if let Some(abort) = self.tabs[self.active].turn_abort.take() {
                 abort.abort_with_reason("tab closed");
@@ -2737,7 +2756,7 @@ impl TuiApp {
                     // tab — its own queued scheduler prompt (if any) needs
                     // the same drain `dispatch_queued_input` gives the
                     // active tab.
-                    self.dispatch_scheduler_background(&agent_tx).await;
+                    self.dispatch_scheduler_queued(&agent_tx).await;
                 }
                 Some(req) = self.approval_rx.next() => {
                     self.route_approval_request(req);
@@ -2763,7 +2782,7 @@ impl TuiApp {
                 _ = ticker.tick() => {
                     self.status.tick();
                     self.poll_scheduler();
-                    self.dispatch_scheduler_background(&agent_tx).await;
+                    self.dispatch_scheduler_queued(&agent_tx).await;
                     self.cleanup_extension_attachments_at(std::time::Instant::now());
                     let had_toast = self.toast.is_some();
                     if let Some(t) = &mut self.toast {
@@ -5592,8 +5611,9 @@ impl TuiApp {
     /// and queue each due prompt onto its owning tab, same injection path as
     /// a user typing while busy (`SessionTab::queued_input`). Draining that
     /// queue back into a turn is NOT this function's job: `dispatch_queued_input`
-    /// covers the active tab, `dispatch_scheduler_background` covers every
-    /// other idle tab (owning-tab loops fire even when unfocused).
+    /// covers the active tab whenever the user or an agent event wakes the loop,
+    /// and `dispatch_scheduler_queued` covers EVERY tab (active included) from
+    /// the tick, so a due prompt runs unattended.
     fn poll_scheduler(&mut self) {
         let due = self.scheduler.due(
             std::time::Instant::now(),
@@ -5631,7 +5651,8 @@ impl TuiApp {
             if tab.queued_input.iter().any(|q| q == &job.prompt) {
                 continue;
             }
-            self.sched_pending.insert(job.prompt.clone(), job_ref);
+            let key = (tab.id, job.prompt.clone());
+            self.sched_pending.insert(key, job_ref);
             tab.queued_input.push_back(job.prompt);
         }
     }
@@ -5772,7 +5793,7 @@ impl TuiApp {
         // The actual lookup/stamp happens INSIDE `start_turn_on_tab`, after its
         // last early-return point (see that function's doc comment) — only the
         // key is decided here, per call site, since the background drain in
-        // `dispatch_scheduler_background` keys off the exact prompt it popped,
+        // `dispatch_scheduler_queued` keys off the exact prompt it popped,
         // which — unlike here — never gains a shell-context prefix.
         self.start_turn_on_tab(self.active, &submitted_text, text, agent_tx)
             .await;
@@ -5784,7 +5805,7 @@ impl TuiApp {
     /// task. This is the turn-spawning tail of `submit()` — the part that
     /// commits to running a turn once slash/queue/shell-context/mid-turn
     /// concerns are already resolved — factored out so a background
-    /// scheduler firing (`dispatch_scheduler_background`) can start a turn
+    /// scheduler firing (`dispatch_scheduler_queued`) can start a turn
     /// on an IDLE tab other than the active one. `submit()` calls this with
     /// `self.active`, so the active-tab path is unchanged: same field
     /// writes, same ordering, same spawned events.
@@ -5859,7 +5880,8 @@ impl TuiApp {
         // consume `sched_key` without ever starting a turn, leaving a stuck
         // `active_sched_job` that misattributes the tab's NEXT unrelated turn
         // to this job (since no turn starts here, `TurnDone` never clears it).
-        self.tabs[tab_idx].active_sched_job = self.sched_pending.remove(sched_key);
+        let sched_key = (self.tabs[tab_idx].id, sched_key.to_string());
+        self.tabs[tab_idx].active_sched_job = self.sched_pending.remove(&sched_key);
 
         // Stamp the session title from the first user prompt of this tab.
         if !self.tabs[tab_idx].titled {
@@ -5988,25 +6010,43 @@ impl TuiApp {
         });
     }
 
-    /// After `poll_scheduler` queues a due prompt onto a background
-    /// (non-active) tab, `dispatch_queued_input` can't reach it — that drain
-    /// is active-tab-only by design (queued-edit UX belongs to the tab the
-    /// user is looking at). Drain the front of every OTHER idle tab's queue,
-    /// but ONLY when that front entry is a prompt the scheduler itself
-    /// injected (`sched_pending` still owns the key) — a user-typed queued
-    /// message on a background tab is left untouched, waiting for the user
-    /// to switch back to it, exactly as before this feature existed.
-    async fn dispatch_scheduler_background(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+    /// Tick-driven drain for prompts `poll_scheduler` injected, on EVERY idle
+    /// tab — the active one included.
+    ///
+    /// The active tab's other drain, `dispatch_queued_input`, only runs from
+    /// the terminal-input and agent-event arms of the event loop. With a single
+    /// tab and the user away from the keyboard neither arm ever fires, so a due
+    /// `/loop` prompt used to sit queued until the next keypress while
+    /// `poll_scheduler`'s anti-pileup check swallowed every later fire and
+    /// `Scheduler::due` kept incrementing `runs` — a `--max N` loop could burn
+    /// through all N runs having executed zero turns. Draining from the tick is
+    /// what makes an unattended loop actually unattended.
+    ///
+    /// Only prompts the scheduler itself injected are drained (`sched_pending`
+    /// still owns the front entry's key). A user-typed queued message is never
+    /// auto-sent on a schedule — on a background tab it keeps waiting for the
+    /// user to switch back, and on the active tab it keeps waiting for the
+    /// normal drain, so the queued-edit UX is untouched.
+    async fn dispatch_scheduler_queued(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         let mut idx = 0;
         while idx < self.tabs.len() {
-            if idx == self.active || self.tabs[idx].is_busy() {
+            if self.tabs[idx].is_busy() {
                 idx += 1;
                 continue;
             }
+            // Same guard `dispatch_queued_input` honors: the front entry is
+            // currently mirrored in the prompt editor for the user to edit, so
+            // sending it out from under them would be a regression. (Only the
+            // active tab can have a queued edit open.)
+            if idx == self.active && self.queued_edit_index == Some(0) {
+                idx += 1;
+                continue;
+            }
+            let tab_id = self.tabs[idx].id;
             let is_scheduled = self.tabs[idx]
                 .queued_input
                 .front()
-                .is_some_and(|front| self.sched_pending.contains_key(front));
+                .is_some_and(|front| self.sched_pending.contains_key(&(tab_id, front.clone())));
             if !is_scheduled {
                 idx += 1;
                 continue;
@@ -6015,14 +6055,58 @@ impl TuiApp {
                 idx += 1;
                 continue;
             };
-            // Key and text are the same string here — unlike `submit()`,
-            // this prompt never gains a shell-context prefix. The actual
-            // `sched_pending` removal + `active_sched_job` stamp happens
-            // inside `start_turn_on_tab`, after its last early-return point.
-            self.start_turn_on_tab(idx, &prompt, &prompt, agent_tx)
-                .await;
+            if idx == self.active {
+                // Route the active tab through `submit()` exactly as
+                // `dispatch_queued_input` would, so a tick-driven drain and a
+                // keypress-driven drain are indistinguishable (shell-context
+                // prepend, pending images, queued-edit index bookkeeping).
+                if let Some(index) = self.queued_edit_index.as_mut() {
+                    *index = index.saturating_sub(1);
+                }
+                self.submit(&prompt, agent_tx).await;
+            } else {
+                // Key and text are the same string here — unlike `submit()`,
+                // this prompt never gains a shell-context prefix. The actual
+                // `sched_pending` removal + `active_sched_job` stamp happens
+                // inside `start_turn_on_tab`, after its last early-return point.
+                self.start_turn_on_tab(idx, &prompt, &prompt, agent_tx)
+                    .await;
+            }
             idx += 1;
         }
+    }
+
+    /// Drop every pending scheduler attribution entry whose job matches
+    /// `is_gone`, and remove the prompts those entries had already queued.
+    ///
+    /// Called when a job stops existing (`/loop stop`, `/schedule rm`,
+    /// `/schedule disable`). Without this, a stopped loop would still run one
+    /// more time from its already-queued prompt, and its orphaned
+    /// `sched_pending` entry would linger forever — ready to capture a later,
+    /// unrelated user message with the same text and (on a background tab) even
+    /// auto-run it as scheduler-owned.
+    fn purge_sched_jobs(&mut self, is_gone: impl Fn(&SchedJobRef) -> bool) {
+        let doomed: Vec<SchedPendingKey> = self
+            .sched_pending
+            .iter()
+            .filter(|(_, job)| is_gone(job))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for (tab_id, prompt) in doomed {
+            self.sched_pending.remove(&(tab_id, prompt.clone()));
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.queued_input.retain(|q| q != &prompt);
+            }
+        }
+        self.sched_fail_streak.retain(|job, _| !is_gone(job));
+    }
+
+    /// Drop pending scheduler entries belonging to a tab that is going away.
+    /// The tab's `queued_input` disappears with it, so only the map needs
+    /// clearing — but leaving entries behind would let a same-text prompt on a
+    /// future tab that reuses the id be misattributed.
+    fn purge_sched_pending_for_tab(&mut self, tab_id: usize) {
+        self.sched_pending.retain(|(id, _), _| *id != tab_id);
     }
 
     fn handle_runtime_event(&mut self, ev: AppEvent, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
@@ -6990,6 +7074,13 @@ impl TuiApp {
                     }
                     Ok(LoopCommand::Stop(id)) => {
                         self.scheduler.stop_loop(id);
+                        // A stopped loop must not get one more run out of a
+                        // prompt it already queued.
+                        self.purge_sched_jobs(|job| match (job, id) {
+                            (SchedJobRef::Loop(job_id), Some(stopped)) => *job_id == stopped,
+                            (SchedJobRef::Loop(_), None) => true,
+                            _ => false,
+                        });
                         self.active_tab_mut()
                             .chat
                             .push_system(crate::tr("loop stopped"));
@@ -7049,6 +7140,7 @@ impl TuiApp {
                         schedules.retain(|j| j.id != id);
                         let found = schedules.len() != before;
                         self.scheduler.set_schedules(schedules.clone());
+                        self.purge_sched_jobs(|job| job == &SchedJobRef::Schedule(id.clone()));
                         let msg = if !found {
                             format!("no schedule with id {id}")
                         } else {
@@ -7079,6 +7171,7 @@ impl TuiApp {
                     }
                     Ok(ScheduleCommand::Disable(id)) => {
                         let found = self.scheduler.disable_schedule(&id);
+                        self.purge_sched_jobs(|job| job == &SchedJobRef::Schedule(id.clone()));
                         let msg = if !found {
                             format!("no schedule with id {id}")
                         } else {
@@ -12299,8 +12392,8 @@ mod tests {
         // fail, the last early-return point in `start_turn_on_tab`.
         app.tabs[0].turn_seq = u64::MAX;
         let job = SchedJobRef::Schedule("abcd".into());
-        app.sched_pending
-            .insert("check ci".to_string(), job.clone());
+        let key = (app.tabs[0].id, "check ci".to_string());
+        app.sched_pending.insert(key.clone(), job.clone());
 
         app.submit("check ci", &agent_tx).await;
 
@@ -12314,7 +12407,7 @@ mod tests {
             "a bailed dispatch must not stamp scheduler attribution"
         );
         assert_eq!(
-            app.sched_pending.get("check ci"),
+            app.sched_pending.get(&key),
             Some(&job),
             "a bailed dispatch must not consume the pending scheduler entry"
         );
@@ -12915,7 +13008,7 @@ mod tests {
         // dedup then swallowed every later fire (the prompt looked "still
         // queued"), and `runs`/`max_runs` kept advancing inside
         // `Scheduler::due()` with zero executions — loops only worked on
-        // the focused tab. `dispatch_scheduler_background` drains
+        // the focused tab. `dispatch_scheduler_queued` drains
         // scheduler-owned prompts off every OTHER idle tab too.
         // `make_test_app` (vs. `_with_dir`) drops its cwd tempdir immediately,
         // which is fine for tests that never assemble another engine — but
@@ -12959,7 +13052,7 @@ mod tests {
             "another tab's loop must not touch the active tab's queue"
         );
 
-        app.dispatch_scheduler_background(&agent_tx).await;
+        app.dispatch_scheduler_queued(&agent_tx).await;
 
         assert!(
             app.tabs[1].queued_input.is_empty(),
@@ -12973,6 +13066,255 @@ mod tests {
         // The active tab was never touched — no turn started there.
         assert!(!app.tabs[0].is_busy());
         assert_eq!(app.tabs[0].active_turn_id, 0);
+    }
+
+    #[tokio::test]
+    async fn due_loop_job_on_active_tab_starts_its_turn_from_a_tick_alone() {
+        // The unattended case, and the one the per-task reviews missed: ONE
+        // tab, focused, user away from the keyboard. `dispatch_queued_input`
+        // — the active tab's only drain before this fix — runs solely from the
+        // terminal-input and agent-event arms of the event loop, neither of
+        // which fires when nothing happens. So the due prompt sat queued until
+        // the next keypress, while `poll_scheduler`'s anti-pileup check
+        // swallowed every later fire and `Scheduler::due` kept incrementing
+        // `runs` — `--max N` could be consumed with zero executions.
+        //
+        // This test drives exactly what the tick arm drives, and nothing else:
+        // `poll_scheduler()` + `dispatch_scheduler_queued()`.
+        let (mut app, _unused_tx) = make_test_app().await;
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        assert_eq!(app.tabs.len(), 1, "single-tab, active-tab scenario");
+        let owner = app.tabs[0].id as u64;
+
+        let id = app.scheduler.add_loop(
+            owner,
+            "check ci".into(),
+            std::time::Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, std::time::Duration::from_secs(61));
+
+        app.poll_scheduler();
+        app.dispatch_scheduler_queued(&agent_tx).await;
+
+        assert!(
+            app.tabs[0].queued_input.is_empty(),
+            "the tick drained the active tab's scheduler prompt"
+        );
+        assert!(
+            app.tabs[0].is_busy(),
+            "the active tab's turn actually started, with no terminal input \
+             and no agent event"
+        );
+        assert_eq!(app.tabs[0].active_turn_id, 1);
+        assert_eq!(
+            app.tabs[0].active_sched_job,
+            Some(SchedJobRef::Loop(id)),
+            "the turn is attributed to the loop that queued it"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_drain_leaves_user_typed_queued_input_alone() {
+        // The tick drain must be scheduler-only: a message the USER queued
+        // while a turn was running keeps waiting for the normal path. Auto-
+        // sending it on a timer would be a new, unasked-for behavior.
+        let (mut app, _unused_tx) = make_test_app().await;
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        app.tabs[0]
+            .queued_input
+            .push_back("my own follow-up".to_string());
+
+        app.dispatch_scheduler_queued(&agent_tx).await;
+
+        assert_eq!(
+            app.tabs[0].queued_input.front().map(String::as_str),
+            Some("my own follow-up"),
+            "user-typed queued input is never auto-drained on a schedule"
+        );
+        assert!(!app.tabs[0].is_busy(), "no turn was started");
+    }
+
+    #[tokio::test]
+    async fn tick_drain_respects_an_open_queued_edit() {
+        // `dispatch_queued_input` refuses to send the front entry while it is
+        // mirrored in the prompt editor for the user to edit; the tick drain
+        // honors the same guard, so the queued-edit UX is unchanged.
+        let (mut app, _unused_tx) = make_test_app().await;
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let owner = app.tabs[0].id as u64;
+        let id = app.scheduler.add_loop(
+            owner,
+            "check ci".into(),
+            std::time::Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, std::time::Duration::from_secs(61));
+        app.poll_scheduler();
+        app.queued_edit_index = Some(0);
+
+        app.dispatch_scheduler_queued(&agent_tx).await;
+
+        assert_eq!(
+            app.tabs[0].queued_input.front().map(String::as_str),
+            Some("check ci"),
+            "the entry being edited stays put"
+        );
+        assert!(!app.tabs[0].is_busy());
+    }
+
+    #[tokio::test]
+    async fn stopping_a_loop_purges_its_already_queued_prompt() {
+        // `/loop stop` used to leave an already-queued prompt in
+        // `queued_input`, so a stopped loop still ran one more time — and its
+        // orphaned `sched_pending` entry lived forever, ready to capture a
+        // later user-typed message with the same text.
+        let (mut app, agent_tx) = make_test_app().await;
+        let owner = app.tabs[0].id as u64;
+        let id = app.scheduler.add_loop(
+            owner,
+            "check ci".into(),
+            std::time::Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, std::time::Duration::from_secs(61));
+        app.poll_scheduler();
+        assert_eq!(app.tabs[0].queued_input.len(), 1);
+        assert_eq!(app.sched_pending.len(), 1);
+
+        app.submit("/loop stop", &agent_tx).await;
+
+        assert!(app.scheduler.loops().is_empty());
+        assert!(
+            app.tabs[0].queued_input.is_empty(),
+            "a stopped loop does not get one more run"
+        );
+        assert!(
+            app.sched_pending.is_empty(),
+            "no orphaned attribution entry survives the stop"
+        );
+
+        // And the freed text is now just ordinary user input again.
+        app.dispatch_scheduler_queued(&agent_tx).await;
+        assert!(!app.tabs[0].is_busy());
+    }
+
+    #[tokio::test]
+    async fn removing_a_schedule_purges_its_already_queued_prompt() {
+        let (mut app, agent_tx) = make_test_app().await;
+        let job = SchedJobRef::Schedule("ab12".into());
+        app.scheduler
+            .set_schedules(vec![zode_core::scheduler::ScheduleJob {
+                id: "ab12".into(),
+                spec: zode_core::scheduler::ScheduleSpec::Interval { secs: 60 },
+                prompt: "sync upstream".into(),
+                enabled: true,
+                last_fired_ms: None,
+            }]);
+        let key = (app.tabs[0].id, "sync upstream".to_string());
+        app.sched_pending.insert(key.clone(), job.clone());
+        app.tabs[0]
+            .queued_input
+            .push_back("sync upstream".to_string());
+        app.sched_fail_streak.insert(job.clone(), 2);
+
+        app.submit("/schedule rm ab12", &agent_tx).await;
+
+        assert!(
+            app.tabs[0].queued_input.is_empty(),
+            "a removed schedule does not get one more run"
+        );
+        assert!(app.sched_pending.is_empty(), "attribution entry purged");
+        assert!(
+            !app.sched_fail_streak.contains_key(&job),
+            "the removed job's failure streak is forgotten too"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_jobs_with_identical_prompt_text_are_attributed_independently() {
+        // `sched_pending` used to be keyed on the prompt text alone, so two
+        // jobs whose prompts read the same collided: the later insert won and
+        // the 3-strikes breaker punished the wrong job. Keying on
+        // `(tab_id, prompt)` — plus the anti-pileup rule that one tab never
+        // holds the same prompt twice — makes each queued instance own its own
+        // entry.
+        let (mut app, _unused_tx, _dir) = make_test_app_with_dir().await;
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        app.new_tab(&agent_tx);
+        let ev = tokio::time::timeout(Duration::from_secs(30), agent_rx.recv())
+            .await
+            .expect("assembly finishes")
+            .expect("channel open");
+        app.handle_agent_event(ev);
+        app.active = 0;
+        assert_eq!(app.tabs.len(), 2);
+
+        // Two loops on two tabs, word-for-word the same prompt.
+        let a = app.scheduler.add_loop(
+            app.tabs[0].id as u64,
+            "check ci".into(),
+            std::time::Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        let b = app.scheduler.add_loop(
+            app.tabs[1].id as u64,
+            "check ci".into(),
+            std::time::Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(a, std::time::Duration::from_secs(61));
+        app.scheduler
+            .rewind_loop_for_test(b, std::time::Duration::from_secs(61));
+
+        app.poll_scheduler();
+        assert_eq!(
+            app.sched_pending.len(),
+            2,
+            "identical prompt text does not collapse two jobs into one entry"
+        );
+
+        app.dispatch_scheduler_queued(&agent_tx).await;
+
+        assert_eq!(app.tabs[0].active_sched_job, Some(SchedJobRef::Loop(a)));
+        assert_eq!(app.tabs[1].active_sched_job, Some(SchedJobRef::Loop(b)));
+        assert!(app.sched_pending.is_empty(), "both entries consumed");
+    }
+
+    #[tokio::test]
+    async fn closing_a_tab_purges_its_pending_scheduler_entries() {
+        let (mut app, _unused_tx, _dir) = make_test_app_with_dir().await;
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        app.new_tab(&agent_tx);
+        let ev = tokio::time::timeout(Duration::from_secs(30), agent_rx.recv())
+            .await
+            .expect("assembly finishes")
+            .expect("channel open");
+        app.handle_agent_event(ev);
+        assert_eq!(app.tabs.len(), 2);
+        // `new_tab` focused tab 1; queue a scheduler prompt on it, then close
+        // it without ever draining.
+        let closing_id = app.tabs[app.active].id;
+        app.sched_pending
+            .insert((closing_id, "check ci".to_string()), SchedJobRef::Loop(7));
+
+        app.close_active_tab();
+
+        assert_eq!(app.tabs.len(), 1);
+        assert!(
+            app.sched_pending.is_empty(),
+            "a closed tab's pending entries must not outlive it and capture \
+             an identically-worded prompt later"
+        );
     }
 
     #[test]
