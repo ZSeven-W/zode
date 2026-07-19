@@ -87,6 +87,25 @@ impl Scheduler {
         id
     }
 
+    /// Stop every loop job owned by `owner`, returning the ids that were
+    /// removed.
+    ///
+    /// Called when a tab closes. Without it the jobs stay in the roster with
+    /// nowhere to run: `due()` keeps returning them (incrementing `runs`, so a
+    /// `--max N` budget is silently burned with zero executions) while the
+    /// caller drops each one for want of an owning tab, and they linger in
+    /// `/loop list` forever.
+    pub fn stop_loops_for_owner(&mut self, owner: u64) -> Vec<u32> {
+        let stopped: Vec<u32> = self
+            .loops
+            .iter()
+            .filter(|j| j.owner == owner)
+            .map(|j| j.id)
+            .collect();
+        self.loops.retain(|j| j.owner != owner);
+        stopped
+    }
+
     /// Stop a loop job by id, or all loop jobs when `id` is `None`. Returns
     /// how many were removed.
     pub fn stop_loop(&mut self, id: Option<u32>) -> usize {
@@ -170,6 +189,13 @@ impl Scheduler {
     /// and the in-process "don't fire the same trigger twice" check agree on
     /// one canonical instant regardless of how late the tick observed it.
     ///
+    /// A disabled job drops its baseline, so `/schedule enable` re-anchors at
+    /// the wall clock of the first tick that observes it enabled again rather
+    /// than replaying every occurrence accrued while it was off.
+    ///
+    /// A trigger point with no valid local instant (DST spring-forward gap) is
+    /// skipped *forward* to the following occurrence — see [`resolve_trigger`].
+    ///
     /// `due()` reads no clock of its own: everything is derived from `now`,
     /// `wall`, and stored state.
     pub fn due(&mut self, now: Instant, wall: chrono::NaiveDateTime) -> Vec<DueJob> {
@@ -196,6 +222,15 @@ impl Scheduler {
         let baselines = &mut self.schedule_baselines;
         for job in &mut self.schedules {
             if !job.enabled {
+                // Drop the baseline while a job is disabled. `set_schedules`
+                // deliberately keeps baselines for ids that survive a roster
+                // swap, and a disabled job never leaves the roster — so without
+                // this, `/schedule disable` at 09:05 followed by
+                // `/schedule enable` at 17:00 would still be anchored at 09:00
+                // and replay every occurrence accrued in between. Re-enabling
+                // must re-anchor at the current wall clock, per the documented
+                // "missed triggers are skipped, never replayed".
+                baselines.remove(&job.id);
                 continue;
             }
             // Baseline is captured the first time a job is observed, even when
@@ -207,16 +242,12 @@ impl Scheduler {
                 Some(lf) if lf > baseline => lf,
                 _ => baseline,
             };
-            let next_fire = job.spec.next_after(anchor, last_fired);
-            if next_fire > wall {
-                continue;
-            }
-            // Stamp the trigger point, not `wall`. A `None` here means the
-            // trigger point has no valid local instant (spring-forward gap):
-            // skip the fire entirely rather than substituting epoch 0, which
-            // would read back as a real, very old fire and permanently corrupt
-            // the anchor.
-            let Some(fired_ms) = naive_to_epoch_ms(next_fire) else {
+            // Resolves the trigger point, skipping *past* any occurrence that
+            // has no valid local instant (spring-forward gap) rather than
+            // retrying the same nonexistent one every tick.
+            let Some((next_fire, fired_ms)) =
+                resolve_trigger(&job.spec, anchor, last_fired, wall, naive_to_epoch_ms)
+            else {
                 continue;
             };
             due.push(DueJob {
@@ -244,6 +275,51 @@ impl Scheduler {
     }
 }
 
+/// Runaway guard for [`resolve_trigger`]'s gap-skipping walk. A DST
+/// spring-forward gap is at most a few hours, so with the 30s minimum
+/// interval the real worst case is a few hundred steps.
+const MAX_GAP_SKIPS: usize = 1024;
+
+/// Resolve the trigger point a schedule job should fire at, given its anchor.
+///
+/// Returns `None` when the job is simply not due yet (`next_fire > wall`), and
+/// `Some((trigger_point, epoch_ms))` when it is.
+///
+/// The loop exists for DST spring-forward: `to_epoch_ms` returns `None` for a
+/// local time that never happens, and the fix for that must ADVANCE to the
+/// following occurrence. Simply skipping the fire would recompute the identical
+/// nonexistent trigger point on every subsequent tick — a `Daily`/`Weekly` job
+/// scheduled inside the gap would be wedged for the life of the process, since
+/// nothing ever stamps `last_fired_ms` to move the anchor forward. Advancing
+/// matches the documented behavior ("fires on the following occurrence instead
+/// of this one").
+///
+/// `to_epoch_ms` is a parameter rather than a direct call to
+/// [`naive_to_epoch_ms`] so the gap-skipping walk is testable without depending
+/// on the host machine's timezone (`chrono::Local`): a test can inject a
+/// synthetic gap.
+fn resolve_trigger(
+    spec: &jobs::ScheduleSpec,
+    anchor: chrono::NaiveDateTime,
+    last_fired: Option<chrono::NaiveDateTime>,
+    wall: chrono::NaiveDateTime,
+    to_epoch_ms: impl Fn(chrono::NaiveDateTime) -> Option<u64>,
+) -> Option<(chrono::NaiveDateTime, u64)> {
+    let mut next_fire = spec.next_after(anchor, last_fired);
+    for _ in 0..MAX_GAP_SKIPS {
+        if next_fire > wall {
+            return None; // not due yet
+        }
+        if let Some(ms) = to_epoch_ms(next_fire) {
+            return Some((next_fire, ms));
+        }
+        // Nonexistent local time: step to the occurrence after it. `next_after`
+        // is strictly-after its `now` argument, so this always makes progress.
+        next_fire = spec.next_after(next_fire, last_fired);
+    }
+    None
+}
+
 /// Convert an epoch-millisecond wall-clock timestamp to naive local time.
 /// `last_fired_ms` is stored as epoch ms (serializable, restart-safe); this
 /// is the one spot the store's wire format meets the naive-time math that
@@ -266,7 +342,8 @@ fn epoch_ms_to_naive(ms: u64) -> Option<chrono::NaiveDateTime> {
 /// - **Fall-back (ambiguous)**: the local time maps to two instants; resolve to
 ///   the earliest so the job fires once, on the first pass through that hour.
 /// - **Spring-forward (nonexistent)**: the local time never happens; return
-///   `None` so the caller skips rather than substituting epoch 0. Epoch 0 would
+///   `None` rather than substituting epoch 0, and let the caller advance to the
+///   following occurrence (see [`resolve_trigger`]). Epoch 0 would
 ///   read back as a genuine 1970 fire and corrupt every later calculation.
 fn naive_to_epoch_ms(naive: chrono::NaiveDateTime) -> Option<u64> {
     let local = chrono::Local.from_local_datetime(&naive);
@@ -455,6 +532,201 @@ mod tests {
         // Only the next real occurrence fires, exactly once.
         assert_eq!(s.due(now, dt(2026, 7, 19, 9, 0)).len(), 1);
         assert!(s.due(now, dt(2026, 7, 19, 9, 5)).is_empty());
+    }
+
+    /// Same end-to-end for `Weekly`, whose anchoring was previously covered
+    /// only by the pure `next_after` unit test.
+    #[test]
+    fn weekly_schedule_becomes_due_through_due() {
+        let mut s = Scheduler::default();
+        let now = Instant::now();
+        // 2026-07-18 is a Saturday; 2026-07-20 is the following Monday.
+        s.set_schedules(vec![schedule(
+            "gh78",
+            ScheduleSpec::Weekly {
+                weekday: chrono::Weekday::Mon,
+                hour: 9,
+                minute: 0,
+            },
+        )]);
+
+        // Baseline on Saturday; nothing until Monday 09:00.
+        assert!(s.due(now, dt(2026, 7, 18, 10, 0)).is_empty());
+        assert!(s.due(now, dt(2026, 7, 19, 23, 0)).is_empty());
+        assert!(s.due(now, dt(2026, 7, 20, 8, 59)).is_empty());
+
+        let fired = s.due(now, dt(2026, 7, 20, 9, 0));
+        assert_eq!(fired.len(), 1, "weekly job fires on its weekday");
+        match &fired[0].kind {
+            DueKind::Schedule { id, fire_ms_hint } => {
+                assert_eq!(id, "gh78");
+                assert_eq!(
+                    *fire_ms_hint,
+                    dt(2026, 7, 20, 9, 0),
+                    "hint is the trigger point, not the observing tick"
+                );
+            }
+            other => panic!("expected a schedule job, got {other:?}"),
+        }
+
+        // Same trigger point: no re-fire for the rest of the week.
+        assert!(s.due(now, dt(2026, 7, 20, 9, 30)).is_empty());
+        assert!(s.due(now, dt(2026, 7, 24, 12, 0)).is_empty());
+        // The following Monday is a distinct trigger and does fire.
+        let next_week = s.due(now, dt(2026, 7, 27, 9, 0));
+        assert_eq!(
+            next_week.len(),
+            1,
+            "next week's occurrence is its own trigger"
+        );
+        match &next_week[0].kind {
+            DueKind::Schedule { fire_ms_hint, .. } => {
+                assert_eq!(*fire_ms_hint, dt(2026, 7, 27, 9, 0))
+            }
+            other => panic!("expected a schedule job, got {other:?}"),
+        }
+    }
+
+    /// Regression: re-enabling a job that was disabled for hours must NOT
+    /// replay the occurrences accrued while it was off. The baseline is dropped
+    /// on the disabled tick, so `enable` re-anchors at the current wall clock.
+    #[test]
+    fn re_enabling_a_schedule_re_anchors_instead_of_replaying() {
+        let mut s = Scheduler::default();
+        let now = Instant::now();
+        let job = schedule("ij90", ScheduleSpec::Interval { secs: 7200 });
+        s.set_schedules(vec![job.clone()]);
+
+        // 09:00 baseline, disabled at 09:05 before it ever fires.
+        assert!(s.due(now, dt(2026, 7, 18, 9, 0)).is_empty());
+        assert!(s.disable_schedule("ij90"));
+        // A tick while disabled drops the stale baseline.
+        assert!(s.due(now, dt(2026, 7, 18, 9, 5)).is_empty());
+        // Nothing accrues over the next eight hours either.
+        assert!(s.due(now, dt(2026, 7, 18, 13, 0)).is_empty());
+
+        // Re-enable at 17:00. `/schedule enable` round-trips the whole roster
+        // through `set_schedules`, which preserves surviving ids' baselines —
+        // the point of the fix is that there is no longer one to preserve.
+        let mut enabled = s.schedules()[0].clone();
+        enabled.enabled = true;
+        s.set_schedules(vec![enabled]);
+
+        // The re-anchoring tick fires nothing: no 11:00/13:00/15:00 backlog.
+        assert!(
+            s.due(now, dt(2026, 7, 18, 17, 0)).is_empty(),
+            "re-enable must not replay occurrences accrued while disabled"
+        );
+        assert!(s.due(now, dt(2026, 7, 18, 18, 0)).is_empty());
+        // One interval past the re-enable point, it resumes normally, once.
+        let fired = s.due(now, dt(2026, 7, 18, 19, 0));
+        assert_eq!(fired.len(), 1, "resumes one interval after re-enable");
+        match &fired[0].kind {
+            DueKind::Schedule { fire_ms_hint, .. } => {
+                assert_eq!(*fire_ms_hint, dt(2026, 7, 18, 19, 0))
+            }
+            other => panic!("expected a schedule job, got {other:?}"),
+        }
+    }
+
+    /// Disabling and re-enabling inside a single interval must still behave
+    /// sanely: the job re-anchors at the re-enable point but its own
+    /// `last_fired_ms` still governs cadence when it is the later anchor.
+    #[test]
+    fn brief_disable_re_enable_keeps_the_original_cadence() {
+        let mut s = Scheduler::default();
+        let now = Instant::now();
+        s.set_schedules(vec![schedule(
+            "kl12",
+            ScheduleSpec::Interval { secs: 7200 },
+        )]);
+
+        assert!(s.due(now, dt(2026, 7, 18, 7, 0)).is_empty()); // baseline
+        assert_eq!(s.due(now, dt(2026, 7, 18, 9, 0)).len(), 1); // fires at 09:00
+
+        assert!(s.disable_schedule("kl12"));
+        assert!(s.due(now, dt(2026, 7, 18, 9, 5)).is_empty());
+        let mut enabled = s.schedules()[0].clone();
+        enabled.enabled = true;
+        s.set_schedules(vec![enabled]);
+        assert!(s.due(now, dt(2026, 7, 18, 9, 10)).is_empty());
+
+        // `last_fired` (09:00) + 2h == 11:00 is still later than the 09:10
+        // re-anchor, so the original cadence is preserved rather than pushed
+        // out to 11:10.
+        assert!(s.due(now, dt(2026, 7, 18, 10, 59)).is_empty());
+        let fired = s.due(now, dt(2026, 7, 18, 11, 0));
+        assert_eq!(fired.len(), 1);
+        match &fired[0].kind {
+            DueKind::Schedule { fire_ms_hint, .. } => {
+                assert_eq!(*fire_ms_hint, dt(2026, 7, 18, 11, 0))
+            }
+            other => panic!("expected a schedule job, got {other:?}"),
+        }
+    }
+
+    /// Regression for the DST spring-forward wedge. Driven through
+    /// `resolve_trigger` with an injected gap rather than through `due()`,
+    /// because `due()` converts via `chrono::Local` and no fixed local time is
+    /// a gap on every machine's timezone — this keeps the test deterministic.
+    #[test]
+    fn spring_forward_gap_advances_to_the_following_occurrence() {
+        let spec = ScheduleSpec::Daily {
+            hour: 2,
+            minute: 30,
+        };
+        // Synthetic gap: 2026-03-08 02:30 does not exist.
+        let gap = dt(2026, 3, 8, 2, 30);
+        let to_ms = |n: chrono::NaiveDateTime| if n == gap { None } else { Some(1) };
+
+        // Anchored on yesterday's fire, observed at 10:00 on the gap day. The
+        // trigger point lands in the gap, so it must advance to TOMORROW's
+        // occurrence — which is not due yet, so nothing fires...
+        let anchor = dt(2026, 3, 7, 2, 30);
+        assert_eq!(
+            resolve_trigger(&spec, anchor, Some(anchor), dt(2026, 3, 8, 10, 0), to_ms),
+            None,
+            "the gap occurrence is skipped, not fired"
+        );
+        // ...and crucially, once tomorrow arrives it DOES fire, rather than the
+        // pre-fix behavior of recomputing the same nonexistent 03-08 02:30
+        // forever and wedging the job for the life of the process.
+        assert_eq!(
+            resolve_trigger(&spec, anchor, Some(anchor), dt(2026, 3, 9, 3, 0), to_ms),
+            Some((dt(2026, 3, 9, 2, 30), 1)),
+            "the following occurrence fires"
+        );
+    }
+
+    /// The gap walk must terminate even if every candidate were nonexistent,
+    /// and must not fire anything in that case.
+    #[test]
+    fn resolve_trigger_gives_up_rather_than_looping_forever() {
+        let spec = ScheduleSpec::Interval { secs: 30 };
+        let anchor = dt(2026, 3, 8, 0, 0);
+        assert_eq!(
+            resolve_trigger(&spec, anchor, None, dt(2030, 1, 1, 0, 0), |_| None),
+            None
+        );
+    }
+
+    /// Closing a tab must take its `/loop` jobs with it — otherwise `due()`
+    /// keeps burning a `--max N` budget for a job that can never run.
+    #[test]
+    fn stop_loops_for_owner_removes_only_that_owners_jobs() {
+        let mut s = Scheduler::default();
+        let now = Instant::now();
+        let a = s.add_loop(1, "a".into(), Duration::from_secs(60), None, now);
+        let b = s.add_loop(1, "b".into(), Duration::from_secs(60), None, now);
+        let keep = s.add_loop(2, "c".into(), Duration::from_secs(60), None, now);
+
+        let mut stopped = s.stop_loops_for_owner(1);
+        stopped.sort_unstable();
+        assert_eq!(stopped, vec![a, b], "both of tab 1's loops reported");
+        assert_eq!(s.loops().len(), 1, "tab 2's loop survives");
+        assert_eq!(s.loops()[0].id, keep);
+        // Idempotent: a second call finds nothing.
+        assert!(s.stop_loops_for_owner(1).is_empty());
     }
 
     #[test]
