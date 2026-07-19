@@ -54,6 +54,39 @@ pub(crate) const BROWSER_SUBCOMMAND_DESCS: &[&str] = &[
 /// should leave a trailing space instead of submitting bare.
 pub(crate) const BROWSER_SUB_TRAILING_SPACE: &[&str] = &["target", "screenshot"];
 
+/// Known `/loop` subcommands — mirrors `zode_core::commands::loop_sched::
+/// parse_loop`'s `list`/`stop` branches (the interval-start form has no fixed
+/// subcommand word, so it isn't listed here).
+pub(crate) const LOOP_SUBCOMMANDS: &[&str] = &["list", "stop"];
+
+/// Brief descriptions shown alongside each `/loop` subcommand in the hint popup.
+pub(crate) const LOOP_SUBCOMMAND_DESCS: &[&str] = &[
+    "List running loop jobs",
+    "Stop a loop job (all, if no id given)",
+];
+
+/// `/loop` entries that take a required argument, so `SubHints::confirm`
+/// should leave a trailing space instead of submitting bare. `stop`'s id is
+/// optional (bare `/loop stop` stops every job), so it's excluded here.
+pub(crate) const LOOP_SUB_TRAILING_SPACE: &[&str] = &[];
+
+/// Known `/schedule` subcommands — mirrors `zode_core::commands::loop_sched::
+/// parse_schedule`'s dispatch arms.
+pub(crate) const SCHEDULE_SUBCOMMANDS: &[&str] = &["add", "list", "rm", "enable", "disable"];
+
+/// Brief descriptions shown alongside each `/schedule` subcommand in the hint popup.
+pub(crate) const SCHEDULE_SUBCOMMAND_DESCS: &[&str] = &[
+    "Add a schedule (hh:mm | mon hh:mm | every 2h) <prompt>",
+    "List persisted schedule jobs",
+    "Remove a schedule by id",
+    "Re-enable a disabled schedule by id",
+    "Disable a schedule by id",
+];
+
+/// `/schedule` entries that take a required argument, so `SubHints::confirm`
+/// should leave a trailing space instead of submitting bare.
+pub(crate) const SCHEDULE_SUB_TRAILING_SPACE: &[&str] = &["add", "rm", "enable", "disable"];
+
 /// One secondary subcommand-hint popup, e.g. everything shown while typing
 /// `/op <sub>` or `/browser <sub>`. Parameterized at construction by the
 /// inserted `prefix` (`"/op "` / `"/browser "`) and the subset of names that

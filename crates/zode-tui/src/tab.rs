@@ -158,6 +158,11 @@ pub struct SessionTab {
     pub turn_started_at: Option<std::time::Instant>,
     /// Tool calls seen during the in-flight turn, for the completion footer.
     pub turn_tool_count: u32,
+    /// The scheduler job (if any) that queued the CURRENT/just-started turn's
+    /// prompt. Set from `App::sched_pending` at submit time, consumed at
+    /// `TurnDone` to update `App::sched_fail_streak` — a user-typed prompt
+    /// (not scheduler-queued) always leaves this `None`.
+    pub active_sched_job: Option<crate::app::SchedJobRef>,
 }
 
 impl SessionTab {
@@ -210,6 +215,7 @@ impl SessionTab {
             goal_started_at: None,
             turn_started_at: None,
             turn_tool_count: 0,
+            active_sched_job: None,
         }
     }
 

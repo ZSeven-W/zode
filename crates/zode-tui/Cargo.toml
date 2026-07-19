@@ -29,6 +29,10 @@ unicode-width = "0.2"
 once_cell = "1"
 similar = "2"
 uuid = { workspace = true }
+# Scheduler wall-clock plumbing (poll_scheduler / /schedule commands): the
+# same chrono types `zode_core::scheduler` returns (NaiveDateTime, Weekday),
+# converted to/from local wall-clock instants here.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Unix-only: the bounded /dev/tty keyboard-protocol probe in `setup_terminal`.
 [target.'cfg(unix)'.dependencies]

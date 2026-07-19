@@ -1,7 +1,7 @@
 //! TUI main loop. Initializes the terminal, runs a tokio::select! over
 //! terminal input + agent events + a tick, and drives one turn at a time.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Stdout;
 use std::ops::Range;
@@ -40,6 +40,7 @@ use zode_core::config::{ConfigManager, ImageMode, ImagesConfig};
 use zode_core::images::{split_pasted_image_paths, ImageAttachment};
 use zode_core::question::{QuestionReceiver, QuestionRequest};
 use zode_core::run_event::{RunEvent, RunEventContext, RunStatus, TurnOutcome, TurnRecorder};
+use zode_core::scheduler::{DueKind, Scheduler};
 use zode_core::session_meta::{SessionIndex, SessionMeta};
 use zode_core::sessions::SessionStore;
 use zode_core::{EngineTemplate, ZodeEngine};
@@ -389,6 +390,18 @@ pub struct UiConfig {
     pub needs_setup: bool,
 }
 
+/// Identifies which scheduler job queued a prompt, for turn-outcome
+/// attribution: `App::sched_pending` maps a queued prompt to its job so
+/// `submit()` can stamp `SessionTab::active_sched_job`, and `TurnDone`
+/// consumes it to update `App::sched_fail_streak` (the 3-strikes circuit
+/// breaker). `Loop` ids are process-local `u32`s from `Scheduler::add_loop`;
+/// `Schedule` ids are the persisted 4-hex-char ids from `schedules.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SchedJobRef {
+    Loop(u32),
+    Schedule(String),
+}
+
 pub struct TuiApp {
     /// One independent conversation per tab; `active` indexes the focused one.
     tabs: Vec<SessionTab>,
@@ -513,6 +526,19 @@ pub struct TuiApp {
     show_tool_details: bool,
     /// Index of the queued follow-up currently mirrored in the prompt editor.
     queued_edit_index: Option<usize>,
+    /// `/loop` (in-memory) + `/schedule` (persisted) job registry, polled once
+    /// per tick (`poll_scheduler`). Pure/I-O-free itself; `schedules.json`
+    /// load/save happens around it here and in the slash-command handlers.
+    scheduler: Scheduler,
+    /// Queued-but-not-yet-submitted scheduler prompts, keyed by the exact
+    /// prompt text pushed to a tab's `queued_input`. `submit()` pops the entry
+    /// for the text it's about to run so `SessionTab::active_sched_job` can
+    /// attribute the turn back to its job.
+    sched_pending: HashMap<String, SchedJobRef>,
+    /// Consecutive turn failures per scheduler job. Reset to zero (removed) on
+    /// a success; at 3 the job is stopped/disabled — a persistently broken
+    /// prompt must not retry forever.
+    sched_fail_streak: HashMap<SchedJobRef, u32>,
 }
 
 async fn forward_agent_turn_stream(
@@ -773,6 +799,13 @@ impl TuiApp {
             show_thinking,
             show_tool_details,
             queued_edit_index: None,
+            scheduler: {
+                let mut scheduler = Scheduler::default();
+                scheduler.set_schedules(zode_core::scheduler::load_schedules());
+                scheduler
+            },
+            sched_pending: HashMap::new(),
+            sched_fail_streak: HashMap::new(),
         }
     }
 
@@ -2722,6 +2755,7 @@ impl TuiApp {
                 }
                 _ = ticker.tick() => {
                     self.status.tick();
+                    self.poll_scheduler();
                     self.cleanup_extension_attachments_at(std::time::Instant::now());
                     let had_toast = self.toast.is_some();
                     if let Some(t) = &mut self.toast {
@@ -3497,6 +3531,62 @@ impl TuiApp {
                 }
                 KeyCode::Tab | KeyCode::Enter => {
                     if let Some(insert) = self.autocomplete.browser_sub_confirm() {
+                        self.input.take();
+                        self.input.insert_str(&insert);
+                        self.completion_hint = None;
+                    }
+                    self.autocomplete.dismiss();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.autocomplete.dismiss();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // 5a3. /loop subcommand hint popup (active after "/loop " prefix is typed).
+        if self.autocomplete.is_loop_sub_active() {
+            match key.code {
+                KeyCode::Up => {
+                    self.autocomplete.loop_sub_prev();
+                    return;
+                }
+                KeyCode::Down => {
+                    self.autocomplete.loop_sub_next();
+                    return;
+                }
+                KeyCode::Tab | KeyCode::Enter => {
+                    if let Some(insert) = self.autocomplete.loop_sub_confirm() {
+                        self.input.take();
+                        self.input.insert_str(&insert);
+                        self.completion_hint = None;
+                    }
+                    self.autocomplete.dismiss();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.autocomplete.dismiss();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // 5a4. /schedule subcommand hint popup (active after "/schedule " prefix).
+        if self.autocomplete.is_schedule_sub_active() {
+            match key.code {
+                KeyCode::Up => {
+                    self.autocomplete.schedule_sub_prev();
+                    return;
+                }
+                KeyCode::Down => {
+                    self.autocomplete.schedule_sub_next();
+                    return;
+                }
+                KeyCode::Tab | KeyCode::Enter => {
+                    if let Some(insert) = self.autocomplete.schedule_sub_confirm() {
                         self.input.take();
                         self.input.insert_str(&insert);
                         self.completion_hint = None;
@@ -5490,6 +5580,51 @@ impl TuiApp {
         });
     }
 
+    /// Once-per-tick scheduler poll: ask `Scheduler::due` what's ready to fire
+    /// and queue each due prompt onto its owning tab, same injection path as
+    /// a user typing while busy (`SessionTab::queued_input`).
+    fn poll_scheduler(&mut self) {
+        let due = self.scheduler.due(
+            std::time::Instant::now(),
+            chrono::Local::now().naive_local(),
+        );
+        for job in due {
+            let job_ref = match &job.kind {
+                DueKind::Loop { id, .. } => SchedJobRef::Loop(*id),
+                DueKind::Schedule { id, .. } => SchedJobRef::Schedule(id.clone()),
+            };
+            // Persistent schedules dedupe across processes before injecting —
+            // another zode process racing the same trigger must not double-fire.
+            if let DueKind::Schedule { id, fire_ms_hint } = &job.kind {
+                let Some(fire_ms) = naive_to_epoch_ms(*fire_ms_hint) else {
+                    // DST-ambiguous/nonexistent local mapping: skip this fire
+                    // rather than guess (never substitute epoch 0 — that would
+                    // look like a real earlier fire and corrupt the dedup
+                    // watermark). The next tick re-evaluates from scratch.
+                    continue;
+                };
+                if !zode_core::scheduler::try_mark_fired(id, fire_ms) {
+                    continue; // another zode process claimed this trigger
+                }
+            }
+            let tab_idx = match &job.kind {
+                DueKind::Loop { owner, .. } => self.tabs.iter().position(|t| t.id as u64 == *owner),
+                DueKind::Schedule { .. } => Some(self.active),
+            };
+            let Some(tab_idx) = tab_idx else {
+                continue; // owning tab was closed
+            };
+            let tab = &mut self.tabs[tab_idx];
+            // Anti-pileup: skip while the same prompt is still queued (mirrors
+            // the goal-loop precedent of never stacking a duplicate).
+            if tab.queued_input.iter().any(|q| q == &job.prompt) {
+                continue;
+            }
+            self.sched_pending.insert(job.prompt.clone(), job_ref);
+            tab.queued_input.push_back(job.prompt);
+        }
+    }
+
     async fn submit(&mut self, text: &str, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         let cwd = self.active_tab().engine.cwd.clone();
 
@@ -5703,6 +5838,12 @@ impl TuiApp {
         // Fresh turn: arm the completion-footer clock and tool counter.
         tab.turn_started_at = Some(std::time::Instant::now());
         tab.turn_tool_count = 0;
+        // Attribution: if `text` is a prompt the scheduler just queued, remember
+        // which job it belongs to so `TurnDone` can update the failure streak.
+        // Keyed off `text` (the raw argument), not `submitted_text` (which may
+        // have gained a prepended shell-context note) — `sched_pending`'s keys
+        // are the exact prompts `poll_scheduler` pushed onto `queued_input`.
+        tab.active_sched_job = self.sched_pending.remove(text);
 
         tab.turn_seq = turn_id;
         tab.active_turn_id = turn_id;
@@ -6268,6 +6409,36 @@ impl TuiApp {
                         Mode::Error
                     }
                 };
+                // Scheduler circuit breaker: a turn attributed to a /loop or
+                // /schedule job (via `active_sched_job`, stamped at submit time)
+                // updates that job's consecutive-failure streak. 3 in a row stops
+                // the loop / disables the schedule — a persistently broken
+                // prompt must not retry forever unattended.
+                if let Some(job_ref) = tab.active_sched_job.take() {
+                    if ok {
+                        self.sched_fail_streak.remove(&job_ref);
+                    } else {
+                        let streak = self.sched_fail_streak.entry(job_ref.clone()).or_insert(0);
+                        *streak += 1;
+                        if *streak >= 3 {
+                            self.sched_fail_streak.remove(&job_ref);
+                            match &job_ref {
+                                SchedJobRef::Loop(id) => {
+                                    self.scheduler.stop_loop(Some(*id));
+                                }
+                                SchedJobRef::Schedule(id) => {
+                                    self.scheduler.disable_schedule(id);
+                                    let _ = zode_core::scheduler::save_schedules(
+                                        self.scheduler.schedules(),
+                                    );
+                                }
+                            }
+                            tab.chat.push_system(crate::tr(
+                                "scheduler: stopped after 3 consecutive failures",
+                            ));
+                        }
+                    }
+                }
                 // Goal auto-loop: keep taking turns toward the goal until the
                 // agent calls `goal_complete` — or the user interrupts / clears
                 // the goal, or a turn fails. Only continues on a successful turn.
@@ -6667,6 +6838,161 @@ impl TuiApp {
                     }
                     Ok(BrowserCommand::Screenshot { path }) => {
                         self.spawn_browser_op(BrowserOp::Screenshot { path }, agent_tx)
+                    }
+                }
+            }
+            "loop" => {
+                use zode_core::commands::loop_sched::{parse_loop, LoopCommand};
+                let input = format!("/loop {args}");
+                match parse_loop(input.trim_end()) {
+                    Err(e) => self.active_tab_mut().chat.push_system(&e),
+                    Ok(LoopCommand::Start {
+                        interval,
+                        prompt,
+                        max_runs,
+                    }) => {
+                        let owner = self.active_tab().id as u64;
+                        let id = self.scheduler.add_loop(
+                            owner,
+                            prompt,
+                            interval,
+                            max_runs,
+                            std::time::Instant::now(),
+                        );
+                        let line = crate::tr("loop started: every {interval} (id {id})")
+                            .replace(
+                                "{interval}",
+                                &zode_core::duration_fmt::format_duration_ms(
+                                    interval.as_millis() as u64
+                                ),
+                            )
+                            .replace("{id}", &id.to_string());
+                        self.active_tab_mut().chat.push_system(&line);
+                    }
+                    Ok(LoopCommand::List) => {
+                        let lines: Vec<String> = self
+                            .scheduler
+                            .loops()
+                            .iter()
+                            .map(|j| {
+                                format!(
+                                    "#{} every {} · runs {} · {}",
+                                    j.id,
+                                    zode_core::duration_fmt::format_duration_ms(
+                                        j.interval.as_millis() as u64
+                                    ),
+                                    j.runs,
+                                    j.prompt
+                                )
+                            })
+                            .collect();
+                        let text = if lines.is_empty() {
+                            "(no loops)".to_string()
+                        } else {
+                            lines.join("\n")
+                        };
+                        self.active_tab_mut().chat.push_system(&text);
+                    }
+                    Ok(LoopCommand::Stop(id)) => {
+                        self.scheduler.stop_loop(id);
+                        self.active_tab_mut()
+                            .chat
+                            .push_system(crate::tr("loop stopped"));
+                    }
+                }
+            }
+            "schedule" => {
+                use zode_core::commands::loop_sched::{parse_schedule, ScheduleCommand};
+                let input = format!("/schedule {args}");
+                match parse_schedule(input.trim_end()) {
+                    Err(e) => self.active_tab_mut().chat.push_system(&e),
+                    Ok(ScheduleCommand::Add { spec, prompt }) => {
+                        let id = gen_schedule_id(&prompt);
+                        let spec_desc = describe_schedule_spec(&spec);
+                        let mut schedules = self.scheduler.schedules().to_vec();
+                        schedules.push(zode_core::scheduler::ScheduleJob {
+                            id: id.clone(),
+                            spec,
+                            prompt,
+                            enabled: true,
+                            last_fired_ms: None,
+                        });
+                        self.scheduler.set_schedules(schedules.clone());
+                        let msg = match zode_core::scheduler::save_schedules(&schedules) {
+                            Ok(()) => crate::tr("schedule added: {spec} (id {id})")
+                                .replace("{spec}", &spec_desc)
+                                .replace("{id}", &id),
+                            Err(e) => format!("{}: {e}", crate::tr("save config failed")),
+                        };
+                        self.active_tab_mut().chat.push_system(&msg);
+                    }
+                    Ok(ScheduleCommand::List) => {
+                        let lines: Vec<String> = self
+                            .scheduler
+                            .schedules()
+                            .iter()
+                            .map(|j| {
+                                format!(
+                                    "{} {} · {} · {}",
+                                    j.id,
+                                    if j.enabled { "enabled" } else { "disabled" },
+                                    describe_schedule_spec(&j.spec),
+                                    j.prompt
+                                )
+                            })
+                            .collect();
+                        let text = if lines.is_empty() {
+                            "(no schedules)".to_string()
+                        } else {
+                            lines.join("\n")
+                        };
+                        self.active_tab_mut().chat.push_system(&text);
+                    }
+                    Ok(ScheduleCommand::Rm(id)) => {
+                        let mut schedules = self.scheduler.schedules().to_vec();
+                        let before = schedules.len();
+                        schedules.retain(|j| j.id != id);
+                        let found = schedules.len() != before;
+                        self.scheduler.set_schedules(schedules.clone());
+                        let msg = if !found {
+                            format!("no schedule with id {id}")
+                        } else {
+                            match zode_core::scheduler::save_schedules(&schedules) {
+                                Ok(()) => format!("removed {id}"),
+                                Err(e) => format!("{}: {e}", crate::tr("save config failed")),
+                            }
+                        };
+                        self.active_tab_mut().chat.push_system(&msg);
+                    }
+                    Ok(ScheduleCommand::Enable(id)) => {
+                        let mut schedules = self.scheduler.schedules().to_vec();
+                        let found = schedules
+                            .iter_mut()
+                            .find(|j| j.id == id)
+                            .map(|j| j.enabled = true)
+                            .is_some();
+                        self.scheduler.set_schedules(schedules.clone());
+                        let msg = if !found {
+                            format!("no schedule with id {id}")
+                        } else {
+                            match zode_core::scheduler::save_schedules(&schedules) {
+                                Ok(()) => format!("enabled {id}"),
+                                Err(e) => format!("{}: {e}", crate::tr("save config failed")),
+                            }
+                        };
+                        self.active_tab_mut().chat.push_system(&msg);
+                    }
+                    Ok(ScheduleCommand::Disable(id)) => {
+                        let found = self.scheduler.disable_schedule(&id);
+                        let msg = if !found {
+                            format!("no schedule with id {id}")
+                        } else {
+                            match zode_core::scheduler::save_schedules(self.scheduler.schedules()) {
+                                Ok(()) => format!("disabled {id}"),
+                                Err(e) => format!("{}: {e}", crate::tr("save config failed")),
+                            }
+                        };
+                        self.active_tab_mut().chat.push_system(&msg);
                     }
                 }
             }
@@ -8789,6 +9115,67 @@ fn format_shell_context(cmd: &str, output: &str) -> String {
     } else {
         format!("I ran the shell command `{cmd}` locally. Output:\n```\n{out}\n```")
     }
+}
+
+/// Convert a local-time `NaiveDateTime` fire hint to epoch milliseconds for
+/// the cross-process fire-dedup store (`zode_core::scheduler::try_mark_fired`).
+/// A DST-ambiguous local time picks the earliest of the two valid instants;
+/// a nonexistent one (spring-forward gap) has no valid mapping at all, in
+/// which case this returns `None` — the caller must SKIP the fire rather
+/// than substitute epoch 0, which would look like a real earlier fire and
+/// wedge the dedup watermark.
+fn naive_to_epoch_ms(naive: chrono::NaiveDateTime) -> Option<u64> {
+    use chrono::TimeZone;
+    chrono::Local
+        .from_local_datetime(&naive)
+        .single()
+        .or_else(|| chrono::Local.from_local_datetime(&naive).earliest())
+        .map(|dt| dt.timestamp_millis().max(0) as u64)
+}
+
+/// Render a `ScheduleSpec` back into the syntax `/schedule add` accepts, for
+/// echoing in the `schedule added: {spec} (id {id})` confirmation and `list`
+/// rows.
+fn describe_schedule_spec(spec: &zode_core::scheduler::ScheduleSpec) -> String {
+    use zode_core::scheduler::ScheduleSpec;
+    match spec {
+        ScheduleSpec::Daily { hour, minute } => format!("{hour:02}:{minute:02}"),
+        ScheduleSpec::Weekly {
+            weekday,
+            hour,
+            minute,
+        } => format!("{} {hour:02}:{minute:02}", weekday_code(*weekday)),
+        ScheduleSpec::Interval { secs } => format!(
+            "every {}",
+            zode_core::duration_fmt::format_duration_ms(secs.saturating_mul(1000))
+        ),
+    }
+}
+
+/// Lowercase 3-letter weekday code, matching `parse_weekday` in
+/// `zode_core::commands::loop_sched` (so `describe_schedule_spec`'s output
+/// re-parses).
+fn weekday_code(weekday: chrono::Weekday) -> &'static str {
+    match weekday {
+        chrono::Weekday::Mon => "mon",
+        chrono::Weekday::Tue => "tue",
+        chrono::Weekday::Wed => "wed",
+        chrono::Weekday::Thu => "thu",
+        chrono::Weekday::Fri => "fri",
+        chrono::Weekday::Sat => "sat",
+        chrono::Weekday::Sun => "sun",
+    }
+}
+
+/// Generate a 4-hex-char id for a new `/schedule` job. No new dependency: a
+/// process-seeded `RandomState` hasher over `(now, prompt)` stands in for a
+/// proper RNG — collisions are harmless (the roster is small and ids are
+/// re-rolled per `/schedule add` call, never reused for identity elsewhere).
+fn gen_schedule_id(prompt: &str) -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+    let hash = RandomState::new().hash_one((std::time::Instant::now(), prompt));
+    format!("{:04x}", hash & 0xffff)
 }
 
 fn resolve_image_submit_route(
@@ -12319,6 +12706,49 @@ mod tests {
             .any(|m| m.role == Role::User && m.text == "also handle the edge case"));
         // The live turn keeps running (not superseded).
         assert_eq!(app.active_tab().active_turn_id, 1);
+    }
+
+    #[tokio::test]
+    async fn due_loop_job_queues_prompt_once() {
+        let (mut app, _tx) = make_test_app().await;
+        let owner = app.active_tab().id as u64;
+        let now = std::time::Instant::now();
+        let id = app.scheduler.add_loop(
+            owner,
+            "check ci".into(),
+            std::time::Duration::from_secs(60),
+            None,
+            now,
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, std::time::Duration::from_secs(61));
+        app.poll_scheduler();
+        assert_eq!(
+            app.active_tab().queued_input.back().map(String::as_str),
+            Some("check ci")
+        );
+        // A second poll with the job due again but the prompt still queued must not stack.
+        app.scheduler
+            .rewind_loop_for_test(id, std::time::Duration::from_secs(61));
+        app.poll_scheduler();
+        assert_eq!(
+            app.active_tab()
+                .queued_input
+                .iter()
+                .filter(|q| *q == "check ci")
+                .count(),
+            1,
+            "no duplicate queued prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_slash_command_starts_and_stops_jobs() {
+        let (mut app, tx) = make_test_app().await;
+        app.submit("/loop 5m check ci", &tx).await;
+        assert_eq!(app.scheduler.loops().len(), 1);
+        app.submit("/loop stop", &tx).await;
+        assert!(app.scheduler.loops().is_empty());
     }
 
     #[test]

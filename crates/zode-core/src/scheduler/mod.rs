@@ -108,6 +108,20 @@ impl Scheduler {
         &self.schedules
     }
 
+    /// Disable a `/schedule` job by id (sets `enabled = false` in the
+    /// in-memory roster). Returns whether a matching job was found. Callers
+    /// that need the change to survive a restart persist it separately via
+    /// `save_schedules(scheduler.schedules())` — this method has no I/O.
+    pub fn disable_schedule(&mut self, id: &str) -> bool {
+        match self.schedules.iter_mut().find(|j| j.id == id) {
+            Some(job) => {
+                job.enabled = false;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// What's due to fire right now. `now` drives loop jobs (monotonic
     /// clock); `wall` drives schedule jobs (wall clock, naive local time).
     ///
@@ -232,6 +246,21 @@ mod tests {
         s.add_loop(1, "b".into(), Duration::from_secs(60), None, now);
         assert_eq!(s.stop_loop(None), 2);
         assert!(s.loops().is_empty());
+    }
+
+    #[test]
+    fn disable_schedule_flips_enabled_and_reports_found() {
+        let mut s = Scheduler::default();
+        s.set_schedules(vec![ScheduleJob {
+            id: "ab12".into(),
+            spec: ScheduleSpec::Interval { secs: 60 },
+            prompt: "sync".into(),
+            enabled: true,
+            last_fired_ms: None,
+        }]);
+        assert!(s.disable_schedule("ab12"), "existing id found");
+        assert!(!s.schedules()[0].enabled, "flipped to disabled");
+        assert!(!s.disable_schedule("missing"), "unknown id reports false");
     }
 
     #[test]

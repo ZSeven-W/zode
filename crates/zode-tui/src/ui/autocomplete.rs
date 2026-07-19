@@ -17,7 +17,9 @@ use crate::theme::Theme;
 
 use super::autocomplete_subhints::{
     SubHints, BROWSER_SUBCOMMANDS, BROWSER_SUBCOMMAND_DESCS, BROWSER_SUB_TRAILING_SPACE,
-    OP_SUBCOMMANDS, OP_SUBCOMMAND_DESCS, OP_SUB_TRAILING_SPACE,
+    LOOP_SUBCOMMANDS, LOOP_SUBCOMMAND_DESCS, LOOP_SUB_TRAILING_SPACE, OP_SUBCOMMANDS,
+    OP_SUBCOMMAND_DESCS, OP_SUB_TRAILING_SPACE, SCHEDULE_SUBCOMMANDS, SCHEDULE_SUBCOMMAND_DESCS,
+    SCHEDULE_SUB_TRAILING_SPACE,
 };
 
 pub(crate) const MAX_VISIBLE: usize = 8;
@@ -56,6 +58,10 @@ pub struct Autocomplete {
     op_sub: SubHints,
     /// Secondary mode: subcommand hints for `/browser <sub>`.
     browser_sub: SubHints,
+    /// Secondary mode: subcommand hints for `/loop <sub>`.
+    loop_sub: SubHints,
+    /// Secondary mode: subcommand hints for `/schedule <sub>`.
+    schedule_sub: SubHints,
 }
 
 impl Default for Autocomplete {
@@ -75,6 +81,8 @@ impl Autocomplete {
             active: false,
             op_sub: SubHints::new("/op ", OP_SUB_TRAILING_SPACE),
             browser_sub: SubHints::new("/browser ", BROWSER_SUB_TRAILING_SPACE),
+            loop_sub: SubHints::new("/loop ", LOOP_SUB_TRAILING_SPACE),
+            schedule_sub: SubHints::new("/schedule ", SCHEDULE_SUB_TRAILING_SPACE),
         }
     }
 
@@ -91,10 +99,12 @@ impl Autocomplete {
 
     /// Recompute matches from the current input text.
     ///
-    /// Three modes:
+    /// Five modes:
     /// 1. Primary: `/command` (no space) — shows matching slash commands.
     /// 2. Secondary: `/op ` prefix — shows `/op` subcommand hints.
     /// 3. Secondary: `/browser ` prefix — shows `/browser` subcommand hints.
+    /// 4. Secondary: `/loop ` prefix — shows `/loop` subcommand hints.
+    /// 5. Secondary: `/schedule ` prefix — shows `/schedule` subcommand hints.
     pub fn update(&mut self, input: &str) {
         // Secondary mode: `/op ` prefix triggers subcommand hints.
         if let Some(sub_prefix) = input.strip_prefix("/op ") {
@@ -103,6 +113,8 @@ impl Autocomplete {
             self.dyn_matches.clear();
             self.state.select(None);
             self.browser_sub.dismiss();
+            self.loop_sub.dismiss();
+            self.schedule_sub.dismiss();
             let table: Vec<_> = OP_SUBCOMMANDS
                 .iter()
                 .copied()
@@ -118,6 +130,8 @@ impl Autocomplete {
             self.dyn_matches.clear();
             self.state.select(None);
             self.op_sub.dismiss();
+            self.loop_sub.dismiss();
+            self.schedule_sub.dismiss();
             let table: Vec<_> = BROWSER_SUBCOMMANDS
                 .iter()
                 .copied()
@@ -126,9 +140,45 @@ impl Autocomplete {
             self.browser_sub.update(&table, sub_prefix);
             return;
         }
-        // Clear any stale secondary state when not in `/op ` or `/browser ` mode.
+        // Secondary mode: `/loop ` prefix triggers subcommand hints.
+        if let Some(sub_prefix) = input.strip_prefix("/loop ") {
+            self.active = false;
+            self.matches.clear();
+            self.dyn_matches.clear();
+            self.state.select(None);
+            self.op_sub.dismiss();
+            self.browser_sub.dismiss();
+            self.schedule_sub.dismiss();
+            let table: Vec<_> = LOOP_SUBCOMMANDS
+                .iter()
+                .copied()
+                .zip(LOOP_SUBCOMMAND_DESCS.iter().copied())
+                .collect();
+            self.loop_sub.update(&table, sub_prefix);
+            return;
+        }
+        // Secondary mode: `/schedule ` prefix triggers subcommand hints.
+        if let Some(sub_prefix) = input.strip_prefix("/schedule ") {
+            self.active = false;
+            self.matches.clear();
+            self.dyn_matches.clear();
+            self.state.select(None);
+            self.op_sub.dismiss();
+            self.browser_sub.dismiss();
+            self.loop_sub.dismiss();
+            let table: Vec<_> = SCHEDULE_SUBCOMMANDS
+                .iter()
+                .copied()
+                .zip(SCHEDULE_SUBCOMMAND_DESCS.iter().copied())
+                .collect();
+            self.schedule_sub.update(&table, sub_prefix);
+            return;
+        }
+        // Clear any stale secondary state when not in a subcommand-hint mode.
         self.op_sub.dismiss();
         self.browser_sub.dismiss();
+        self.loop_sub.dismiss();
+        self.schedule_sub.dismiss();
 
         match input.strip_prefix('/') {
             // Only while typing the command word (no space yet).
@@ -177,6 +227,16 @@ impl Autocomplete {
     /// True when the `/browser` subcommand hint popup is showing.
     pub fn is_browser_sub_active(&self) -> bool {
         self.browser_sub.active
+    }
+
+    /// True when the `/loop` subcommand hint popup is showing.
+    pub fn is_loop_sub_active(&self) -> bool {
+        self.loop_sub.active
+    }
+
+    /// True when the `/schedule` subcommand hint popup is showing.
+    pub fn is_schedule_sub_active(&self) -> bool {
+        self.schedule_sub.active
     }
 
     pub fn matches(&self) -> &[SlashCommand] {
@@ -265,16 +325,50 @@ impl Autocomplete {
         self.browser_sub.confirm()
     }
 
+    /// Navigate down in the `/loop` subcommand hint list.
+    pub fn loop_sub_next(&mut self) {
+        self.loop_sub.next();
+    }
+
+    /// Navigate up in the `/loop` subcommand hint list.
+    pub fn loop_sub_prev(&mut self) {
+        self.loop_sub.prev();
+    }
+
+    /// Confirm the selected `/loop` subcommand; returns the text to insert
+    /// (e.g. `"/loop list"` or `"/loop stop"`).
+    pub fn loop_sub_confirm(&self) -> Option<String> {
+        self.loop_sub.confirm()
+    }
+
+    /// Navigate down in the `/schedule` subcommand hint list.
+    pub fn schedule_sub_next(&mut self) {
+        self.schedule_sub.next();
+    }
+
+    /// Navigate up in the `/schedule` subcommand hint list.
+    pub fn schedule_sub_prev(&mut self) {
+        self.schedule_sub.prev();
+    }
+
+    /// Confirm the selected `/schedule` subcommand; returns the text to insert
+    /// (e.g. `"/schedule list"` or `"/schedule add "`).
+    pub fn schedule_sub_confirm(&self) -> Option<String> {
+        self.schedule_sub.confirm()
+    }
+
     pub fn dismiss(&mut self) {
         self.active = false;
         self.op_sub.dismiss();
         self.browser_sub.dismiss();
+        self.loop_sub.dismiss();
+        self.schedule_sub.dismiss();
     }
 
     /// Render anchored above `input_area`.
     /// Renders the primary command popup when active, or one of the
-    /// secondary subcommand-hint popups (`/op`, `/browser`), but never more
-    /// than one at a time.
+    /// secondary subcommand-hint popups (`/op`, `/browser`, `/loop`,
+    /// `/schedule`), but never more than one at a time.
     pub fn render(&mut self, f: &mut Frame, input_area: Rect, theme: &Theme) {
         if self.op_sub.active {
             self.op_sub.render(f, input_area, theme);
@@ -282,6 +376,14 @@ impl Autocomplete {
         }
         if self.browser_sub.active {
             self.browser_sub.render(f, input_area, theme);
+            return;
+        }
+        if self.loop_sub.active {
+            self.loop_sub.render(f, input_area, theme);
+            return;
+        }
+        if self.schedule_sub.active {
+            self.schedule_sub.render(f, input_area, theme);
             return;
         }
         if !self.active {
@@ -762,5 +864,95 @@ mod tests {
             .collect();
         assert!(content.contains("status"), "popup should show 'status'");
         assert!(content.contains("launch"), "popup should show 'launch'");
+    }
+
+    // --- /loop subcommand hint tests ---
+
+    #[test]
+    fn loop_subcommand_tables_align() {
+        assert_eq!(LOOP_SUBCOMMANDS.len(), LOOP_SUBCOMMAND_DESCS.len());
+    }
+
+    #[test]
+    fn loop_sub_activates_on_loop_space_prefix() {
+        let mut ac = Autocomplete::new();
+        ac.update("/loop ");
+        assert!(ac.is_loop_sub_active());
+        assert!(
+            !ac.is_active(),
+            "primary popup should be off in loop-sub mode"
+        );
+    }
+
+    #[test]
+    fn loop_sub_filter_and_confirm() {
+        let mut ac = Autocomplete::default();
+        ac.update("/loop li");
+        assert!(ac.is_loop_sub_active());
+        assert_eq!(ac.loop_sub_confirm().unwrap(), "/loop list");
+    }
+
+    #[test]
+    fn loop_sub_confirm_no_trailing_space_for_stop() {
+        let mut ac = Autocomplete::new();
+        ac.update("/loop stop");
+        let text = ac.loop_sub_confirm().expect("stop match");
+        // `stop`'s id is optional (bare `/loop stop` stops every job), so no
+        // trailing space is forced the way `/browser target` gets one.
+        assert_eq!(text, "/loop stop");
+    }
+
+    // --- /schedule subcommand hint tests ---
+
+    #[test]
+    fn schedule_subcommand_tables_align() {
+        assert_eq!(SCHEDULE_SUBCOMMANDS.len(), SCHEDULE_SUBCOMMAND_DESCS.len());
+    }
+
+    #[test]
+    fn schedule_sub_activates_on_schedule_space_prefix() {
+        let mut ac = Autocomplete::new();
+        ac.update("/schedule ");
+        assert!(ac.is_schedule_sub_active());
+        assert!(
+            !ac.is_active(),
+            "primary popup should be off in schedule-sub mode"
+        );
+    }
+
+    #[test]
+    fn schedule_sub_confirm_appends_space_for_add_and_rm() {
+        let mut ac = Autocomplete::new();
+        ac.update("/schedule add");
+        let text = ac.schedule_sub_confirm().expect("add match");
+        assert_eq!(text, "/schedule add ");
+
+        ac.update("/schedule rm");
+        let text = ac.schedule_sub_confirm().expect("rm match");
+        assert_eq!(text, "/schedule rm ");
+    }
+
+    #[test]
+    fn schedule_sub_confirm_no_trailing_space_for_list() {
+        let mut ac = Autocomplete::new();
+        ac.update("/schedule list");
+        let text = ac.schedule_sub_confirm().expect("list match");
+        assert_eq!(text, "/schedule list");
+    }
+
+    #[test]
+    fn all_subcommand_hint_modes_are_mutually_exclusive() {
+        let mut ac = Autocomplete::new();
+        ac.update("/op ");
+        assert!(ac.is_op_sub_active());
+        ac.update("/browser ");
+        assert!(ac.is_browser_sub_active());
+        assert!(!ac.is_op_sub_active());
+        ac.update("/loop ");
+        assert!(ac.is_loop_sub_active());
+        assert!(!ac.is_browser_sub_active());
+        ac.update("/schedule ");
+        assert!(ac.is_schedule_sub_active());
+        assert!(!ac.is_loop_sub_active());
     }
 }

@@ -6161,6 +6161,7 @@ version = "0.1.0-beta.6"
 dependencies = [
  "agent",
  "base64 0.22.1",
+ "chrono",
  "crossterm",
  "futures",
  "indexmap 2.14.0",
