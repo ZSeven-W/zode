@@ -99,6 +99,28 @@ fn parse_hh_mm(s: &str) -> Result<(u32, u32), String> {
     Ok((hour, minute))
 }
 
+/// Job prompts must be plain prompts, never slash commands.
+///
+/// The TUI's slash dispatch (`handle_slash`) is unconditionally scoped to the
+/// *active* tab, so a `/loop` owned by a background tab whose prompt were a
+/// slash command would run that command against whatever tab the user happens
+/// to be looking at; and the slash paths that return without starting a turn
+/// have nowhere to hand back the scheduler's pending-attribution entry, which
+/// then leaks and misattributes a later, unrelated turn. Rejecting here is the
+/// one place that makes the background and active injection paths agree, and
+/// it fails at `/loop`/`/schedule add` time — loudly, while the user is
+/// looking — rather than silently sending literal `"/compact"` to the model
+/// every interval, or persisting a schedule that can never run correctly.
+fn reject_slash_prompt(prompt: &str) -> Result<(), String> {
+    if prompt.trim_start().starts_with('/') {
+        return Err(
+            "job prompts must be plain prompts, not slash commands — drop the leading '/'"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 const LOOP_USAGE: &str = "usage: /loop <30s|5m|1h> [--max N] <prompt> | list | stop [id]";
 const SCHEDULE_USAGE: &str =
     "usage: /schedule add <hh:mm|mon hh:mm|every Nh> <prompt> | list | rm <id> | enable|disable <id>";
@@ -149,6 +171,7 @@ pub fn parse_loop(input: &str) -> Result<LoopCommand, String> {
     if prompt.is_empty() {
         return Err(LOOP_USAGE.to_string());
     }
+    reject_slash_prompt(prompt)?;
 
     Ok(LoopCommand::Start {
         interval,
@@ -195,6 +218,7 @@ fn parse_schedule_add(arg: &str) -> Result<ScheduleCommand, String> {
         if prompt.is_empty() {
             return Err(SCHEDULE_USAGE.to_string());
         }
+        reject_slash_prompt(prompt)?;
         return Ok(ScheduleCommand::Add {
             spec: ScheduleSpec::Interval {
                 secs: interval.as_secs(),
@@ -212,6 +236,7 @@ fn parse_schedule_add(arg: &str) -> Result<ScheduleCommand, String> {
         if prompt.is_empty() {
             return Err(SCHEDULE_USAGE.to_string());
         }
+        reject_slash_prompt(prompt)?;
         return Ok(ScheduleCommand::Add {
             spec: ScheduleSpec::Weekly {
                 weekday,
@@ -228,6 +253,7 @@ fn parse_schedule_add(arg: &str) -> Result<ScheduleCommand, String> {
     if prompt.is_empty() {
         return Err(SCHEDULE_USAGE.to_string());
     }
+    reject_slash_prompt(prompt)?;
     Ok(ScheduleCommand::Add {
         spec: ScheduleSpec::Daily { hour, minute },
         prompt: prompt.to_string(),
@@ -311,6 +337,32 @@ mod tests {
             parse_schedule("/schedule add 09:00").is_err(),
             "prompt required"
         );
+    }
+
+    /// A slash-command job prompt is rejected at parse time — the one place
+    /// that keeps the active-tab and background injection paths in agreement.
+    #[test]
+    fn slash_command_prompts_are_rejected() {
+        for input in [
+            "/loop 5m /compact",
+            "/loop 1h --max 3 /cost",
+            "/schedule add 09:00 /compact",
+            "/schedule add mon 09:30 /compact",
+            "/schedule add every 2h /compact",
+        ] {
+            let err = match (parse_loop(input), parse_schedule(input)) {
+                (Err(e), _) if input.starts_with("/loop") => e,
+                (_, Err(e)) => e,
+                other => panic!("{input} should be rejected, got {other:?}"),
+            };
+            assert!(
+                err.contains("slash commands"),
+                "{input}: error should explain why, got {err:?}"
+            );
+        }
+        // Plain prompts that merely CONTAIN a slash are still fine.
+        assert!(parse_loop("/loop 5m check src/main.rs").is_ok());
+        assert!(parse_schedule("/schedule add 09:00 read docs/plan.md").is_ok());
     }
 
     #[test]
