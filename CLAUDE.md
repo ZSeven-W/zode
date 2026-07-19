@@ -556,10 +556,17 @@ cannot be saved and is lost on the paste path. Window tokens minted by
   captured on first observation), never on the current wall clock. It stamps
   `last_fired_ms` to the trigger point, not the observing tick, so `fire_ms_hint`
   and the cross-process CAS dedup agree. `due()` reads no clock of its own.
+  A disabled job drops its baseline, so `/schedule enable` re-anchors at the
+  current wall clock instead of replaying everything accrued while it was off.
 - **Job prompts are plain prompts** — `parse_loop` / `parse_schedule` reject a
-  leading `/`. Slash dispatch is active-tab-scoped and its non-turn paths can't
-  hand back the pending-attribution entry, so allowing it would mis-target
-  background tabs and leak attribution.
+  leading `/` *or* `!`. Slash dispatch is active-tab-scoped and its non-turn
+  paths can't hand back the pending-attribution entry, so allowing it would
+  mis-target background tabs and leak attribution; the `!cmd` shell branch
+  returns from `submit()` before that entry is consumed, with the same leak.
+- **Loops die with their tab** — `close_active_tab` calls
+  `Scheduler::stop_loops_for_owner`, otherwise `due()` would keep incrementing
+  `runs` for a job with no tab to run on (burning a `--max N` budget with zero
+  executions) and the job would linger in `/loop list`.
 - **Scheduler injection** — due prompts are queued via `queued_input`.
   `dispatch_scheduler_queued()` drains scheduler-owned prompts from the tick on
   EVERY idle tab, active included (the active tab routes back through `submit()`
@@ -571,9 +578,10 @@ cannot be saved and is lost on the paste path. Window tokens minted by
   on `/loop stop`, `/schedule rm|disable`, and tab close.
 - **Interval formatting** — schedule list/confirmation echo renders intervals as
   compact round-trippable tokens (e.g. `every 2h`, not `every 2h 00m`).
-- **DST handling** — nonexistent local times skip the fire (retry next tick);
-  ambiguous (fall-back) times fire once at the earliest valid instant. Never
-  epoch-0.
+- **DST handling** — a nonexistent local time (spring-forward gap) skips *past*
+  that occurrence to the following one, so a job scheduled inside the gap can
+  never wedge; ambiguous (fall-back) times fire once at the earliest valid
+  instant. Never epoch-0.
 - **Timing** — `TurnRecorder` stamps `durationMs` on `tool.completed` and
   `turn.completed` run events (journaled; old journals parse as `None`). The
   TUI shows per-tool `· 1.2s` suffixes, a `✓ done · 34s · 3 tools` turn footer,
