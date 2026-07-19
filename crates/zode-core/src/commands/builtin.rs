@@ -82,6 +82,18 @@ pub static BUILTINS: &[SlashCommand] = &[
         usage: "/team [status|board|dismiss <name>]",
         action: CommandAction::Engine,
     },
+    SlashCommand {
+        name: "loop",
+        description: "Run a prompt on a recurring interval (this session)",
+        usage: "/loop <30s|5m|1h> [--max N] <prompt> | list | stop [id]",
+        action: CommandAction::Ui,
+    },
+    SlashCommand {
+        name: "schedule",
+        description: "Run a prompt at scheduled times (persisted)",
+        usage: "/schedule add <hh:mm|mon hh:mm|every 2h> <prompt> | list | rm <id> | enable|disable <id>",
+        action: CommandAction::Ui,
+    },
     // Registered now, fully wired in later phases.
     SlashCommand {
         name: "theme",

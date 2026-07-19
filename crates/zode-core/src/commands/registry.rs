@@ -169,6 +169,19 @@ mod tests {
     }
 
     #[test]
+    fn loop_and_schedule_are_registered() {
+        let reg = CommandRegistry::with_builtins();
+        assert_eq!(
+            reg.get("loop").unwrap().usage,
+            "/loop <30s|5m|1h> [--max N] <prompt> | list | stop [id]"
+        );
+        assert_eq!(
+            reg.get("schedule").unwrap().usage,
+            "/schedule add <hh:mm|mon hh:mm|every 2h> <prompt> | list | rm <id> | enable|disable <id>"
+        );
+    }
+
+    #[test]
     fn parse_input_splits_name_and_args() {
         assert_eq!(
             parse_slash("/model MiniMax-M1"),
