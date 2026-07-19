@@ -1,14 +1,18 @@
 //! Scheduler core: in-memory `/loop` jobs plus persisted `/schedule` jobs,
 //! and the `due()` query that turns elapsed time into prompts to re-run.
 //!
-//! Pure and I/O-free by design — no file access, no clock other than the
-//! `Instant`/`NaiveDateTime` passed in by the caller. The JSON store for
-//! `ScheduleJob` persistence lands in a later task; this module only holds
-//! the in-memory `Scheduler` and its due-check logic.
+//! `Scheduler` itself is pure and I/O-free — no file access, no clock other
+//! than the `Instant`/`NaiveDateTime` passed in by the caller. The JSON
+//! store for `ScheduleJob` persistence (load/save/fire-dedup against
+//! `<config-dir>/schedules.json`) lives in `store`, kept separate so the
+//! in-memory due-check logic stays testable without touching the
+//! filesystem.
 
 pub mod jobs;
+mod store;
 
 pub use jobs::{LoopJob, ScheduleJob, ScheduleSpec};
+pub use store::*;
 
 use chrono::TimeZone;
 use std::time::{Duration, Instant};
