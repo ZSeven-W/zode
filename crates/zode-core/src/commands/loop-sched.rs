@@ -99,7 +99,8 @@ fn parse_hh_mm(s: &str) -> Result<(u32, u32), String> {
     Ok((hour, minute))
 }
 
-/// Job prompts must be plain prompts, never slash commands.
+/// Job prompts must be plain prompts: never a slash command (`/…`), never a
+/// shell escape (`!…`).
 ///
 /// The TUI's slash dispatch (`handle_slash`) is unconditionally scoped to the
 /// *active* tab, so a `/loop` owned by a background tab whose prompt were a
@@ -111,10 +112,16 @@ fn parse_hh_mm(s: &str) -> Result<(u32, u32), String> {
 /// it fails at `/loop`/`/schedule add` time — loudly, while the user is
 /// looking — rather than silently sending literal `"/compact"` to the model
 /// every interval, or persisting a schedule that can never run correctly.
+///
+/// `!` is rejected for the same reason: `submit()` takes the shell-escape
+/// branch and returns *before* `start_turn_on_tab` consumes the pending
+/// attribution key, so a `!cmd` job leaks a `sched_pending` entry on every
+/// fire and the 3-strikes failure breaker never applies to it.
 fn reject_slash_prompt(prompt: &str) -> Result<(), String> {
-    if prompt.trim_start().starts_with('/') {
+    if prompt.trim_start().starts_with(['/', '!']) {
         return Err(
-            "job prompts must be plain prompts, not slash commands — drop the leading '/'"
+            "job prompts must be plain prompts, not slash commands or shell escapes \
+             — drop the leading '/' or '!'"
                 .to_string(),
         );
     }
@@ -339,16 +346,25 @@ mod tests {
         );
     }
 
-    /// A slash-command job prompt is rejected at parse time — the one place
-    /// that keeps the active-tab and background injection paths in agreement.
+    /// A slash-command or shell-escape job prompt is rejected at parse time —
+    /// the one place that keeps the active-tab and background injection paths
+    /// in agreement. `!cmd` matters for the same reason: `submit()` returns on
+    /// the shell branch before the pending-attribution key is consumed, so such
+    /// a job would leak a `sched_pending` entry on every fire and escape the
+    /// 3-strikes breaker.
     #[test]
     fn slash_command_prompts_are_rejected() {
         for input in [
             "/loop 5m /compact",
             "/loop 1h --max 3 /cost",
+            "/loop 5m !git status",
+            "/loop 1h --max 3 !make build",
             "/schedule add 09:00 /compact",
             "/schedule add mon 09:30 /compact",
             "/schedule add every 2h /compact",
+            "/schedule add 09:00 !git status",
+            "/schedule add mon 09:30 !git status",
+            "/schedule add every 2h !git status",
         ] {
             let err = match (parse_loop(input), parse_schedule(input)) {
                 (Err(e), _) if input.starts_with("/loop") => e,
@@ -356,12 +372,13 @@ mod tests {
                 other => panic!("{input} should be rejected, got {other:?}"),
             };
             assert!(
-                err.contains("slash commands"),
+                err.contains("slash commands") && err.contains("shell escapes"),
                 "{input}: error should explain why, got {err:?}"
             );
         }
-        // Plain prompts that merely CONTAIN a slash are still fine.
+        // Plain prompts that merely CONTAIN a slash or a bang are still fine.
         assert!(parse_loop("/loop 5m check src/main.rs").is_ok());
+        assert!(parse_loop("/loop 5m fix the bug!").is_ok());
         assert!(parse_schedule("/schedule add 09:00 read docs/plan.md").is_ok());
     }
 
