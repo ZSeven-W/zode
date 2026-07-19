@@ -17,6 +17,8 @@ pub mod cost;
 pub mod currency;
 pub mod desktop;
 pub mod diff;
+#[path = "duration-fmt.rs"]
+pub mod duration_fmt;
 pub mod engine;
 pub mod error;
 pub mod export;
