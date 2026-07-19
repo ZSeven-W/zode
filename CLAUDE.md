@@ -536,6 +536,38 @@ cannot be saved and is lost on the paste path. Window tokens minted by
 `desktop_read windows` are the backend's window index and round-trip through
 `DesktopSession::resolve_window` unchanged.
 
+## /loop, /schedule & task timing
+
+- **`/loop <30s|5m|1h> [--max N] <prompt>`** — session-only recurring turns on
+  the current tab; `list` / `stop [id]`. Minimum interval 30s. A due prompt is
+  queued via the same `queued_input` path as the goal loop (never interrupts a
+  running turn; skips a trigger while its prompt is still queued).
+- **`/schedule add <hh:mm|mon hh:mm|every 2h> <prompt>`** — persisted to
+  `~/.zode/schedules.json` (atomic tmp+rename; corrupt files are quarantined to
+  `.corrupt`). Missed triggers while zode is not running are skipped, never
+  replayed. Cross-process dedup is first-writer-wins on `lastFiredMs`
+  (minute-floored). `list` / `rm <id>` / `enable|disable <id>`.
+- Both live in `zode-core/src/scheduler/` (pure `due()` core, driven by the TUI
+  tick); parsers in `commands/loop-sched.rs`. 3 consecutive failed injected
+  turns auto-stop a loop / disable a schedule.
+- **Scheduler injection** — due prompts are queued via `queued_input`. The
+  active tab drains through the normal queued-input path; idle background tabs
+  are drained by `dispatch_scheduler_background()` (only scheduler-owned
+  prompts). Turn spawn is the tab-parameterized `start_turn_on_tab`. Failure
+  attribution uses a pending-prompt map consumed after the turn actually starts.
+- **Interval formatting** — schedule list/confirmation echo renders intervals as
+  compact round-trippable tokens (e.g. `every 2h`, not `every 2h 00m`).
+- **DST handling** — nonexistent local times skip the fire (retry next tick);
+  ambiguous (fall-back) times fire once at the earliest valid instant. Never
+  epoch-0.
+- **Timing** — `TurnRecorder` stamps `durationMs` on `tool.completed` and
+  `turn.completed` run events (journaled; old journals parse as `None`). The
+  TUI shows per-tool `· 1.2s` suffixes, a `✓ done · 34s · 3 tools` turn footer,
+  and humanized elapsed in `/tasks` — all via
+  `zode_core::duration_fmt::format_duration_ms`.
+- **UI strings** — new UI text is added to the `EXTRA` hand-maintained overlay
+  in `zode-core/src/i18n.rs`.
+
 ## External agents
 
 Zode can register explicitly configured external agent CLIs as `Task` tool
