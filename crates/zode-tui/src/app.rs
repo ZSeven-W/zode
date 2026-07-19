@@ -391,11 +391,13 @@ pub struct UiConfig {
 }
 
 /// Identifies which scheduler job queued a prompt, for turn-outcome
-/// attribution: `App::sched_pending` maps a queued prompt to its job so
-/// `submit()` can stamp `SessionTab::active_sched_job`, and `TurnDone`
-/// consumes it to update `App::sched_fail_streak` (the 3-strikes circuit
-/// breaker). `Loop` ids are process-local `u32`s from `Scheduler::add_loop`;
-/// `Schedule` ids are the persisted 4-hex-char ids from `schedules.json`.
+/// attribution: `App::sched_pending` maps a queued prompt to its job so a
+/// turn-start call site (`submit()` for the active tab,
+/// `dispatch_scheduler_background()` for every other idle tab) can stamp
+/// `SessionTab::active_sched_job`, and `TurnDone` consumes it to update
+/// `App::sched_fail_streak` (the 3-strikes circuit breaker). `Loop` ids are
+/// process-local `u32`s from `Scheduler::add_loop`; `Schedule` ids are the
+/// persisted 4-hex-char ids from `schedules.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SchedJobRef {
     Loop(u32),
@@ -2731,6 +2733,11 @@ impl TuiApp {
                     // sent, then flush any queued input.
                     self.maybe_auto_compact(&agent_tx);
                     self.dispatch_queued_input(&agent_tx).await;
+                    // A turn going idle here may have been on a background
+                    // tab — its own queued scheduler prompt (if any) needs
+                    // the same drain `dispatch_queued_input` gives the
+                    // active tab.
+                    self.dispatch_scheduler_background(&agent_tx).await;
                 }
                 Some(req) = self.approval_rx.next() => {
                     self.route_approval_request(req);
@@ -2756,6 +2763,7 @@ impl TuiApp {
                 _ = ticker.tick() => {
                     self.status.tick();
                     self.poll_scheduler();
+                    self.dispatch_scheduler_background(&agent_tx).await;
                     self.cleanup_extension_attachments_at(std::time::Instant::now());
                     let had_toast = self.toast.is_some();
                     if let Some(t) = &mut self.toast {
@@ -5582,7 +5590,10 @@ impl TuiApp {
 
     /// Once-per-tick scheduler poll: ask `Scheduler::due` what's ready to fire
     /// and queue each due prompt onto its owning tab, same injection path as
-    /// a user typing while busy (`SessionTab::queued_input`).
+    /// a user typing while busy (`SessionTab::queued_input`). Draining that
+    /// queue back into a turn is NOT this function's job: `dispatch_queued_input`
+    /// covers the active tab, `dispatch_scheduler_background` covers every
+    /// other idle tab (owning-tab loops fire even when unfocused).
     fn poll_scheduler(&mut self) {
         let due = self.scheduler.due(
             std::time::Instant::now(),
@@ -5753,12 +5764,44 @@ impl TuiApp {
             return;
         }
 
-        let has_images = !self.active_tab().pending_images.is_empty();
+        // Attribution: if `text` is a prompt the scheduler just queued, remember
+        // which job it belongs to so `TurnDone` can update the failure streak.
+        // Keyed off `text` (the raw argument), not `submitted_text` (which may
+        // have gained a prepended shell-context note) — `sched_pending`'s keys
+        // are the exact prompts `poll_scheduler` pushed onto `queued_input`.
+        // Stamped here (before the extracted tail) rather than inside
+        // `start_turn_on_tab` so the lookup key can differ per call site: the
+        // background drain in `dispatch_scheduler_background` keys off the
+        // exact prompt it popped, which — unlike here — never gains a
+        // shell-context prefix.
+        self.tabs[self.active].active_sched_job = self.sched_pending.remove(text);
+        self.start_turn_on_tab(self.active, &submitted_text, agent_tx)
+            .await;
+    }
+
+    /// Bind `text` to `tab_idx` and spawn its turn: route/validate images,
+    /// stamp the session title, push the user message, arm per-turn state
+    /// (mode, tool counters, turn id), and kick off the engine's streaming
+    /// task. This is the turn-spawning tail of `submit()` — the part that
+    /// commits to running a turn once slash/queue/shell-context/mid-turn
+    /// concerns are already resolved — factored out so a background
+    /// scheduler firing (`dispatch_scheduler_background`) can start a turn
+    /// on an IDLE tab other than the active one. `submit()` calls this with
+    /// `self.active`, so the active-tab path is unchanged: same field
+    /// writes, same ordering, same spawned events.
+    async fn start_turn_on_tab(
+        &mut self,
+        tab_idx: usize,
+        text: &str,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let submitted_text = text.to_string();
+        let has_images = !self.tabs[tab_idx].pending_images.is_empty();
         let images_cfg = self.template.images().clone();
         let image_route = resolve_image_submit_route(
             has_images,
             images_cfg.effective_mode(),
-            self.active_tab().engine.supports_images(),
+            self.tabs[tab_idx].engine.supports_images(),
             images_cfg.vision_provider.is_some(),
         );
         // Only ROUTE the image submission here; the vision engine itself is
@@ -5794,7 +5837,7 @@ impl TuiApp {
             }
         };
 
-        let Some(turn_id) = self.active_tab().turn_seq.checked_add(1) else {
+        let Some(turn_id) = self.tabs[tab_idx].turn_seq.checked_add(1) else {
             self.toast = Some(Toast::error(crate::tr(
                 "turn limit reached — start a new task",
             )));
@@ -5802,9 +5845,9 @@ impl TuiApp {
         };
 
         // Stamp the session title from the first user prompt of this tab.
-        if !self.active_tab().titled {
+        if !self.tabs[tab_idx].titled {
             let title_source = if submitted_text.trim().is_empty() {
-                self.active_tab()
+                self.tabs[tab_idx]
                     .pending_images
                     .first()
                     .map(|image| image.display_name.as_str())
@@ -5813,12 +5856,16 @@ impl TuiApp {
             } else {
                 submitted_text.clone()
             };
-            self.active_tab_mut().stamp_title(&title_source);
+            self.tabs[tab_idx].stamp_title(&title_source);
         }
 
-        // The pending images are about to be consumed; drop any chip selection.
-        self.selected_image = None;
-        let tab = &mut self.tabs[self.active];
+        // The pending images are about to be consumed; drop any chip
+        // selection — only meaningful for the active tab's own compose box
+        // (a background scheduler firing never touches it).
+        if tab_idx == self.active {
+            self.selected_image = None;
+        }
+        let tab = &mut self.tabs[tab_idx];
         let images = std::mem::take(&mut tab.pending_images);
         let previews = image_previews(&images);
         let content = user_content_blocks(&submitted_text, &images);
@@ -5838,12 +5885,6 @@ impl TuiApp {
         // Fresh turn: arm the completion-footer clock and tool counter.
         tab.turn_started_at = Some(std::time::Instant::now());
         tab.turn_tool_count = 0;
-        // Attribution: if `text` is a prompt the scheduler just queued, remember
-        // which job it belongs to so `TurnDone` can update the failure streak.
-        // Keyed off `text` (the raw argument), not `submitted_text` (which may
-        // have gained a prepended shell-context note) — `sched_pending`'s keys
-        // are the exact prompts `poll_scheduler` pushed onto `queued_input`.
-        tab.active_sched_job = self.sched_pending.remove(text);
 
         tab.turn_seq = turn_id;
         tab.active_turn_id = turn_id;
@@ -5928,6 +5969,39 @@ impl TuiApp {
             )
             .await;
         });
+    }
+
+    /// After `poll_scheduler` queues a due prompt onto a background
+    /// (non-active) tab, `dispatch_queued_input` can't reach it — that drain
+    /// is active-tab-only by design (queued-edit UX belongs to the tab the
+    /// user is looking at). Drain the front of every OTHER idle tab's queue,
+    /// but ONLY when that front entry is a prompt the scheduler itself
+    /// injected (`sched_pending` still owns the key) — a user-typed queued
+    /// message on a background tab is left untouched, waiting for the user
+    /// to switch back to it, exactly as before this feature existed.
+    async fn dispatch_scheduler_background(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        let mut idx = 0;
+        while idx < self.tabs.len() {
+            if idx == self.active || self.tabs[idx].is_busy() {
+                idx += 1;
+                continue;
+            }
+            let is_scheduled = self.tabs[idx]
+                .queued_input
+                .front()
+                .is_some_and(|front| self.sched_pending.contains_key(front));
+            if !is_scheduled {
+                idx += 1;
+                continue;
+            }
+            let Some(prompt) = self.tabs[idx].queued_input.pop_front() else {
+                idx += 1;
+                continue;
+            };
+            self.tabs[idx].active_sched_job = self.sched_pending.remove(&prompt);
+            self.start_turn_on_tab(idx, &prompt, agent_tx).await;
+            idx += 1;
+        }
     }
 
     fn handle_runtime_event(&mut self, ev: AppEvent, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
@@ -9119,11 +9193,19 @@ fn format_shell_context(cmd: &str, output: &str) -> String {
 
 /// Convert a local-time `NaiveDateTime` fire hint to epoch milliseconds for
 /// the cross-process fire-dedup store (`zode_core::scheduler::try_mark_fired`).
-/// A DST-ambiguous local time picks the earliest of the two valid instants;
-/// a nonexistent one (spring-forward gap) has no valid mapping at all, in
-/// which case this returns `None` — the caller must SKIP the fire rather
-/// than substitute epoch 0, which would look like a real earlier fire and
-/// wedge the dedup watermark.
+///
+/// Two DST edge cases are handled, both deliberately, not accidentally:
+/// - **Fall-back (ambiguous local time, e.g. 1:30am occurring twice):**
+///   `.single()` fails, so this falls back to `.earliest()` — the job fires
+///   once, at the earlier of the two valid instants, rather than firing
+///   twice or not at all.
+/// - **Spring-forward (nonexistent local time, e.g. 2:30am on the day clocks
+///   skip to 3am):** neither `.single()` nor `.earliest()` has a valid
+///   mapping, so this returns `None` and the caller SKIPS the fire entirely
+///   for this tick — it must never substitute epoch 0, which would look like
+///   a real earlier fire and wedge the dedup watermark. The next tick
+///   re-evaluates from scratch, so a schedule that lands exactly in the gap
+///   simply fires on the following occurrence instead of this one.
 fn naive_to_epoch_ms(naive: chrono::NaiveDateTime) -> Option<u64> {
     use chrono::TimeZone;
     chrono::Local
@@ -9145,10 +9227,23 @@ fn describe_schedule_spec(spec: &zode_core::scheduler::ScheduleSpec) -> String {
             hour,
             minute,
         } => format!("{} {hour:02}:{minute:02}", weekday_code(*weekday)),
-        ScheduleSpec::Interval { secs } => format!(
-            "every {}",
-            zode_core::duration_fmt::format_duration_ms(secs.saturating_mul(1000))
-        ),
+        ScheduleSpec::Interval { secs } => format!("every {}", interval_token(*secs)),
+    }
+}
+
+/// Render an interval as the single compact `<N><unit>` token
+/// `/schedule add every <token> <prompt>` and `parse_interval` accept — NOT
+/// `format_duration_ms`'s human `"2h 00m"` form, which `parse_schedule_add`
+/// would split on the first whitespace and treat `"00m"` as the start of the
+/// prompt, corrupting the round trip. Picks the coarsest exact unit: whole
+/// hours, else whole minutes, else seconds.
+fn interval_token(secs: u64) -> String {
+    if secs.is_multiple_of(3600) {
+        format!("{}h", secs / 3600)
+    } else if secs.is_multiple_of(60) {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
     }
 }
 
@@ -12749,6 +12844,100 @@ mod tests {
         assert_eq!(app.scheduler.loops().len(), 1);
         app.submit("/loop stop", &tx).await;
         assert!(app.scheduler.loops().is_empty());
+    }
+
+    #[tokio::test]
+    async fn due_loop_job_on_background_tab_starts_its_own_turn() {
+        // A `/loop` job owned by a tab that is NOT the active one used to
+        // queue its prompt into that tab's `queued_input` and then sit
+        // there forever: `dispatch_queued_input` only ever drains the
+        // ACTIVE tab, so nothing popped it, `poll_scheduler`'s anti-pileup
+        // dedup then swallowed every later fire (the prompt looked "still
+        // queued"), and `runs`/`max_runs` kept advancing inside
+        // `Scheduler::due()` with zero executions — loops only worked on
+        // the focused tab. `dispatch_scheduler_background` drains
+        // scheduler-owned prompts off every OTHER idle tab too.
+        // `make_test_app` (vs. `_with_dir`) drops its cwd tempdir immediately,
+        // which is fine for tests that never assemble another engine — but
+        // `new_tab` below needs the cwd to still exist on disk.
+        let (mut app, _unused_tx, _dir) = make_test_app_with_dir().await;
+        // `make_test_app_with_dir`'s sender has no live receiver; use our own
+        // so the background tab's assembly-done event and turn-start events
+        // are actually delivered.
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        app.new_tab(&agent_tx);
+        let ev = tokio::time::timeout(Duration::from_secs(30), agent_rx.recv())
+            .await
+            .expect("assembly finishes")
+            .expect("channel open");
+        app.handle_agent_event(ev);
+        assert_eq!(app.tabs.len(), 2);
+        // `new_tab` focuses the new tab; put focus back on tab 0 so tab 1 is
+        // the background tab under test.
+        app.active = 0;
+        assert!(!app.tabs[1].is_busy());
+        let background_id = app.tabs[1].id as u64;
+
+        let now = std::time::Instant::now();
+        let id = app.scheduler.add_loop(
+            background_id,
+            "check ci".into(),
+            std::time::Duration::from_secs(60),
+            None,
+            now,
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, std::time::Duration::from_secs(61));
+        app.poll_scheduler();
+        assert_eq!(
+            app.tabs[1].queued_input.back().map(String::as_str),
+            Some("check ci"),
+            "poll_scheduler queues onto the OWNING tab, not the active one"
+        );
+        assert!(
+            app.tabs[0].queued_input.is_empty(),
+            "another tab's loop must not touch the active tab's queue"
+        );
+
+        app.dispatch_scheduler_background(&agent_tx).await;
+
+        assert!(
+            app.tabs[1].queued_input.is_empty(),
+            "background tab's scheduler prompt was drained"
+        );
+        assert!(
+            app.tabs[1].is_busy(),
+            "background tab's turn actually started"
+        );
+        assert_eq!(app.tabs[1].active_turn_id, 1);
+        // The active tab was never touched — no turn started there.
+        assert!(!app.tabs[0].is_busy());
+        assert_eq!(app.tabs[0].active_turn_id, 0);
+    }
+
+    #[test]
+    fn interval_token_renders_compact_round_trippable_forms() {
+        assert_eq!(interval_token(7200), "2h");
+        assert_eq!(interval_token(300), "5m");
+        assert_eq!(interval_token(90), "90s");
+    }
+
+    #[test]
+    fn describe_schedule_spec_interval_round_trips_through_schedule_add() {
+        use zode_core::commands::loop_sched::{parse_schedule, ScheduleCommand};
+        use zode_core::scheduler::ScheduleSpec;
+        let spec = ScheduleSpec::Interval { secs: 7200 };
+        let rendered = describe_schedule_spec(&spec);
+        assert_eq!(rendered, "every 2h");
+        let cmd = parse_schedule(&format!("/schedule add {rendered} check ci"))
+            .expect("describe_schedule_spec's output must re-parse");
+        assert_eq!(
+            cmd,
+            ScheduleCommand::Add {
+                spec: ScheduleSpec::Interval { secs: 7200 },
+                prompt: "check ci".to_string(),
+            }
+        );
     }
 
     #[test]
