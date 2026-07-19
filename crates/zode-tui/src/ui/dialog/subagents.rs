@@ -31,10 +31,10 @@ pub(crate) fn list_row(a: &SubAgent, now: u64) -> String {
     let end = a.finished_at.unwrap_or(now);
     let elapsed = end.saturating_sub(a.started_at);
     format!(
-        "{}{indent}{}{desc} · {}s  ↑{} ↓{}",
+        "{}{indent}{}{desc} · {}  ↑{} ↓{}",
         status_glyph(a.status),
         a.agent_type,
-        elapsed,
+        zode_core::duration_fmt::format_duration_ms(elapsed.saturating_mul(1000)),
         a.input_tokens,
         a.output_tokens
     )
@@ -239,15 +239,21 @@ mod tests {
     }
 
     #[test]
-    fn list_row_shows_glyph_type_and_tokens() {
-        let a = agent(1, "researcher", SubAgentStatus::Running);
+    fn list_row_humanizes_elapsed() {
+        let mut a = agent(1, "researcher", SubAgentStatus::Running);
+        a.started_at = 100;
+        a.finished_at = None;
         let row = list_row(&a, 130); // now=130, started=100 -> 30s
         assert!(row.contains("researcher"));
         assert!(row.contains("desc"));
-        assert!(row.contains("30s"));
+        assert!(row.contains("30.0s"));
         assert!(row.contains("↑12"));
         assert!(row.contains("↓7"));
         assert!(row.starts_with('◐')); // running glyph
+
+        // Test longer duration: 125 seconds = 2m 05s
+        let row2 = list_row(&a, 100 + 125);
+        assert!(row2.contains("2m 05s"));
     }
 
     #[test]
