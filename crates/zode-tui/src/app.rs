@@ -5700,6 +5700,9 @@ impl TuiApp {
         tab.active_tool_started.clear();
         // Fresh turn: reset the per-turn tool-use flag (goal no-progress).
         tab.turn_used_tools = false;
+        // Fresh turn: arm the completion-footer clock and tool counter.
+        tab.turn_started_at = Some(std::time::Instant::now());
+        tab.turn_tool_count = 0;
 
         tab.turn_seq = turn_id;
         tab.active_turn_id = turn_id;
@@ -6126,6 +6129,7 @@ impl TuiApp {
                         // Mark that this turn did real work (drives goal-loop
                         // no-progress detection).
                         tab.turn_used_tools = true;
+                        tab.turn_tool_count = tab.turn_tool_count.saturating_add(1);
                         let title = tool_call_title(name, input);
                         tab.active_tool_names.insert(id.clone(), title);
                         tab.active_tool_started
@@ -6232,12 +6236,35 @@ impl TuiApp {
                 tab.active_turn_id = 0;
                 tab.active_tool_names.clear();
                 tab.active_tool_started.clear();
+                let turn_elapsed = tab.turn_started_at.take().map(|t| t.elapsed());
+                let tool_count = std::mem::take(&mut tab.turn_tool_count);
                 let ok = result.is_ok();
                 tab.mode = match result {
-                    Ok(()) => Mode::Ready,
+                    Ok(()) => {
+                        if let Some(elapsed) = turn_elapsed {
+                            let line = crate::tr("✓ done · {duration} · {n} tools")
+                                .replace(
+                                    "{duration}",
+                                    &zode_core::duration_fmt::format_duration_ms(
+                                        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                                    ),
+                                )
+                                .replace("{n}", &tool_count.to_string());
+                            tab.chat.push_system(&line);
+                        }
+                        Mode::Ready
+                    }
                     Err(e) => {
-                        tab.chat
-                            .push_system(&format!("{}: {e}", crate::tr("turn failed")));
+                        let mut line = format!("{}: {e}", crate::tr("turn failed"));
+                        if let Some(elapsed) = turn_elapsed {
+                            line.push_str(&format!(
+                                " · {}",
+                                zode_core::duration_fmt::format_duration_ms(
+                                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                                )
+                            ));
+                        }
+                        tab.chat.push_system(&line);
                         Mode::Error
                     }
                 };
@@ -10979,6 +11006,44 @@ mod tests {
         assert!(
             last_tool_line.contains(" · ") && last_tool_line.trim_end().ends_with('s'),
             "expected duration suffix, got: {last_tool_line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_done_pushes_duration_footer() {
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].active_turn_id = 7;
+        app.tabs[0].turn_started_at = Some(std::time::Instant::now());
+        app.tabs[0].turn_tool_count = 0;
+
+        app.handle_agent_event(AppEvent::Agent {
+            tab_id,
+            turn_id: 7,
+            cost_label: None,
+            event: Event::ToolUse {
+                id: "t1".into(),
+                name: "Read".into(),
+                input: serde_json::json!({}),
+            },
+        });
+        app.handle_agent_event(AppEvent::TurnDone {
+            tab_id,
+            turn_id: 7,
+            result: Ok(()),
+        });
+
+        let footer = app.tabs[0]
+            .chat
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::System)
+            .map(|m| m.text.clone())
+            .expect("a system line was pushed");
+        assert!(
+            footer.starts_with('✓') && footer.contains("1 ") && footer.trim_end().ends_with('s'),
+            "expected '✓ <dur> · 1 tools' style footer, got: {footer}"
         );
     }
 

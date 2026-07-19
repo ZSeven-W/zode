@@ -154,6 +154,10 @@ pub struct SessionTab {
     pub goal_text: Option<String>,
     /// When the current goal loop started, for the sidebar elapsed-time display.
     pub goal_started_at: Option<std::time::Instant>,
+    /// When the in-flight turn started, for the completion footer.
+    pub turn_started_at: Option<std::time::Instant>,
+    /// Tool calls seen during the in-flight turn, for the completion footer.
+    pub turn_tool_count: u32,
 }
 
 impl SessionTab {
@@ -204,6 +208,8 @@ impl SessionTab {
             turn_used_tools: false,
             goal_text: None,
             goal_started_at: None,
+            turn_started_at: None,
+            turn_tool_count: 0,
         }
     }
 
