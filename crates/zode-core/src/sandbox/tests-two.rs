@@ -531,7 +531,7 @@ fn shared_resolver_applies_profile_overlay_overrides_and_extras() {
 
     // read_only + strict_read overrides and extra roots land in the config.
     let extra = tempfile::tempdir().unwrap();
-    let config = resolve_with_overrides(
+    let resolved = resolve_with_overrides(
         &settings,
         dir.path(),
         &SandboxOverrides {
@@ -540,9 +540,13 @@ fn shared_resolver_applies_profile_overlay_overrides_and_extras() {
             ..Default::default()
         },
         &[extra.path().to_path_buf()],
-    )
-    .unwrap()
-    .unwrap();
+    );
+    if cfg!(target_os = "linux") && !binary_on_path("bwrap") {
+        let error = resolved.expect_err("Linux without bwrap must fail closed");
+        assert!(error.to_string().contains("bwrap"), "{error}");
+        return;
+    }
+    let config = resolved.unwrap().unwrap();
     assert_eq!(config.mode(), SandboxMode::ReadOnly);
     assert!(config.restrict_reads());
 }
