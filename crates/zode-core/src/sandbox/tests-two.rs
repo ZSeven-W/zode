@@ -288,6 +288,7 @@
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn sandboxed_fs_sink_writes_inside_but_kernel_blocks_protected_git() {
         use agent_tools_code::FsSink;
         let dir = tempfile::tempdir().unwrap();

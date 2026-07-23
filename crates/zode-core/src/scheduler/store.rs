@@ -163,6 +163,7 @@ fn with_store_lock<T>(f: impl FnOnce() -> Result<T, CoreError>) -> Result<T, Cor
     let lock_path = dir.join("schedules.lock");
     let lock = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path)?;
@@ -259,6 +260,7 @@ fn attempt_lock_path(id: &str) -> Result<PathBuf, CoreError> {
 fn try_acquire_attempt_lock(id: &str) -> Result<Option<File>, CoreError> {
     let lock = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(attempt_lock_path(id)?)?;

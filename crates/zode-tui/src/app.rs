@@ -499,6 +499,40 @@ struct PendingScheduleFinalizer {
     retry_at: std::time::Instant,
 }
 
+#[cfg(test)]
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(previous) => std::env::set_var(self.key, previous),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+#[cfg(test)]
+struct TestConfigIsolation {
+    // Field order matters: restore the process environment and remove the
+    // temporary config directory before releasing the process-wide lock.
+    _env: EnvVarGuard,
+    _config: tempfile::TempDir,
+    _env_lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
 pub struct TuiApp {
     /// One independent conversation per tab; `active` indexes the focused one.
     tabs: Vec<SessionTab>,
@@ -668,11 +702,12 @@ pub struct TuiApp {
     /// until `TurnTaskStopped` arrives, preventing old/new drivers from sharing
     /// one message store.
     forced_turn_stops: HashMap<(usize, u64), PendingForcedTurnStop>,
+    #[cfg(test)]
+    _test_config_isolation: Option<TestConfigIsolation>,
 }
 
-async fn forward_agent_turn_stream(
+struct AgentTurnStreamContext {
     engine: Arc<ZodeEngine>,
-    stream_result: Result<Box<dyn agent::stream::EventStream>, String>,
     recorder: Option<SharedTurnRecorder>,
     abort: Option<AbortController>,
     tab_id: usize,
@@ -680,7 +715,23 @@ async fn forward_agent_turn_stream(
     tx: mpsc::UnboundedSender<AppEvent>,
     watchdog_pulse: Option<watchdog::WatchdogPulse>,
     scheduled_persistence: Option<ScheduledTurnPersistence>,
+}
+
+async fn forward_agent_turn_stream(
+    context: AgentTurnStreamContext,
+    stream_result: Result<Box<dyn agent::stream::EventStream>, String>,
 ) {
+    let AgentTurnStreamContext {
+        engine,
+        recorder,
+        abort,
+        tab_id,
+        turn_id,
+        tx,
+        watchdog_pulse,
+        scheduled_persistence,
+    } = context;
+
     let turn_ran = stream_result.is_ok();
     let scheduler_owned = scheduled_persistence.is_some();
     let mut stop_reason: Option<String> = None;
@@ -1155,6 +1206,8 @@ impl TuiApp {
             sched_fail_streak: HashMap::new(),
             watchdog,
             forced_turn_stops: HashMap::new(),
+            #[cfg(test)]
+            _test_config_isolation: None,
         }
     }
 
@@ -1629,7 +1682,8 @@ impl TuiApp {
         let due: Vec<(String, u64)> = self
             .pending_schedule_finalizers
             .iter()
-            .filter_map(|(key, pending)| (pending.retry_at <= now).then(|| key.clone()))
+            .filter(|(_, pending)| pending.retry_at <= now)
+            .map(|(key, _)| key.clone())
             .collect();
         for key in due {
             let Some(pending) = self.pending_schedule_finalizers.remove(&key) else {
@@ -6786,10 +6840,16 @@ impl TuiApp {
                 }),
         );
         let mut blocked_schedules = self.watchdog.occupied_schedule_ids();
-        blocked_schedules.extend(self.scheduler.schedules().iter().filter_map(|schedule| {
-            (schedule.watchdog_active_since_ms.is_some() || schedule.watchdog_retry_at_ms.is_some())
-                .then(|| schedule.id.clone())
-        }));
+        blocked_schedules.extend(
+            self.scheduler
+                .schedules()
+                .iter()
+                .filter(|schedule| {
+                    schedule.watchdog_active_since_ms.is_some()
+                        || schedule.watchdog_retry_at_ms.is_some()
+                })
+                .map(|schedule| schedule.id.clone()),
+        );
         blocked_schedules.extend(self.pending_schedule_leases.keys().cloned());
         blocked_schedules.extend(
             self.pending_schedule_finalizers
@@ -8189,15 +8249,17 @@ impl TuiApp {
             }
             .await;
             forward_agent_turn_stream(
-                engine,
+                AgentTurnStreamContext {
+                    engine,
+                    recorder: Some(recorder),
+                    abort: Some(abort_for_recorder),
+                    tab_id,
+                    turn_id,
+                    tx,
+                    watchdog_pulse,
+                    scheduled_persistence,
+                },
                 stream_result,
-                Some(recorder),
-                Some(abort_for_recorder),
-                tab_id,
-                turn_id,
-                tx,
-                watchdog_pulse,
-                scheduled_persistence,
             )
             .await;
         });
@@ -12592,28 +12654,6 @@ mod tests {
     use crate::ui::chat::Role;
     use zode_core::config::{NoemaSettings, ProviderConfig, ProviderKind, ZodeConfig};
 
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var(self.key, previous),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-
     #[test]
     fn sandbox_status_line_names_tmp_when_writable() {
         use zode_core::sandbox::{SandboxConfig, SandboxMode};
@@ -12948,7 +12988,7 @@ mod tests {
         let config = tempfile::tempdir().unwrap();
         let _env_lock = crate::tab::TEST_ENV_LOCK.lock().await;
         let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", config.path());
-        let (mut app, _unused_tx, cwd) = make_test_app_with_dir().await;
+        let (mut app, _unused_tx, cwd) = make_test_app_with_dir_using_current_config().await;
         let session_id = "regular-resume-saved-model";
         let path = SessionIndex::session_path(session_id).unwrap();
         Session::save(&path, &agent::message::MessageStore::new())
@@ -13032,6 +13072,11 @@ mod tests {
         (app, tx)
     }
 
+    async fn make_test_app_using_current_config() -> (TuiApp, mpsc::UnboundedSender<AppEvent>) {
+        let (app, tx, _temp) = make_test_app_with_dir_using_current_config().await;
+        (app, tx)
+    }
+
     fn arm_local_op_for_test(app: &mut TuiApp, tab_idx: usize) -> u64 {
         app.begin_local_operation(tab_idx)
             .expect("test tab accepts local operation")
@@ -13042,6 +13087,27 @@ mod tests {
     /// tests that run shell commands or assemble engines AFTER construction.
     async fn make_test_app_with_dir() -> (TuiApp, mpsc::UnboundedSender<AppEvent>, tempfile::TempDir)
     {
+        let config = tempfile::tempdir().unwrap();
+        let env_lock: tokio::sync::MutexGuard<'static, ()> = crate::tab::TEST_ENV_LOCK.lock().await;
+        let env = EnvVarGuard::set("ZODE_CONFIG_DIR", config.path());
+        let (mut app, agent_tx, cwd) = make_test_app_with_dir_using_current_config().await;
+        app._test_config_isolation = Some(TestConfigIsolation {
+            _env: env,
+            _config: config,
+            _env_lock: env_lock,
+        });
+        (app, agent_tx, cwd)
+    }
+
+    /// Build against the caller's already-isolated `ZODE_CONFIG_DIR`.
+    ///
+    /// Persisted-scheduler and session tests hold `TEST_ENV_LOCK` for their
+    /// whole transaction, so routing them through [`make_test_app_with_dir`]
+    /// would deadlock. All other tests use that locked wrapper and therefore
+    /// never load a developer's real schedules or another test's temporary
+    /// roster.
+    async fn make_test_app_with_dir_using_current_config(
+    ) -> (TuiApp, mpsc::UnboundedSender<AppEvent>, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().to_path_buf();
         let cfg = ZodeConfig {
@@ -13093,6 +13159,9 @@ mod tests {
 
     #[tokio::test]
     async fn initial_tab_records_actual_engine_access_when_resume_load_failed() {
+        let config = tempfile::tempdir().unwrap();
+        let _env_lock = crate::tab::TEST_ENV_LOCK.lock().await;
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", config.path());
         let cwd = tempfile::tempdir().unwrap();
         let cfg = ZodeConfig {
             provider: ProviderConfig {
@@ -16167,7 +16236,7 @@ mod tests {
             watchdog_active_since_ms: None,
         }])
         .unwrap();
-        let (mut app, _unused_tx, _cwd) = make_test_app_with_dir().await;
+        let (mut app, _unused_tx, _cwd) = make_test_app_with_dir_using_current_config().await;
         let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
         app.tabs[0].reassemble_pending = true;
 
@@ -16223,7 +16292,7 @@ mod tests {
             watchdog_active_since_ms: None,
         }])
         .unwrap();
-        let (mut app, _tx) = make_test_app().await;
+        let (mut app, _tx) = make_test_app_using_current_config().await;
         app.tabs[0].reassemble_pending = true;
 
         app.poll_scheduler();
@@ -16322,7 +16391,7 @@ mod tests {
             watchdog_active_since_ms: None,
         }])
         .unwrap();
-        let (mut app, _tx) = make_test_app().await;
+        let (mut app, _tx) = make_test_app_using_current_config().await;
         app.tabs[0].queued_input.push_back("same text".into());
 
         app.poll_scheduler();
@@ -16365,7 +16434,7 @@ mod tests {
             watchdog_active_since_ms: None,
         }])
         .unwrap();
-        let (mut app, _tx) = make_test_app().await;
+        let (mut app, _tx) = make_test_app_using_current_config().await;
         app.tabs[0].reassemble_pending = true;
         app.poll_scheduler();
         assert!(app.pending_schedule_leases.contains_key(id));
@@ -16408,7 +16477,7 @@ mod tests {
             watchdog_active_since_ms: None,
         }])
         .unwrap();
-        let (mut app, _tx) = make_test_app().await;
+        let (mut app, _tx) = make_test_app_using_current_config().await;
 
         app.dispatch_watchdog_retries();
 

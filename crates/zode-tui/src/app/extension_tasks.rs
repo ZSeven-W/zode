@@ -632,15 +632,17 @@ fn spawn_prepared_extension_turn(
         }
         .await;
         super::forward_agent_turn_stream(
-            engine,
+            super::AgentTurnStreamContext {
+                engine,
+                recorder: Some(recorder),
+                abort: Some(abort_for_recorder),
+                tab_id,
+                turn_id,
+                tx,
+                watchdog_pulse: None,
+                scheduled_persistence: None,
+            },
             stream_result,
-            Some(recorder),
-            Some(abort_for_recorder),
-            tab_id,
-            turn_id,
-            tx,
-            None,
-            None,
         )
         .await;
     });
@@ -3894,7 +3896,10 @@ mod tests {
     use zode_core::EngineTemplate;
 
     use super::super::extension_attachments::{BeginUpload, UploadError, UPLOAD_TTL};
-    use super::super::{AppEvent, Mode, ReassembleEffect, SessionTab, TuiApp, UiConfig};
+    use super::super::{
+        AppEvent, EnvVarGuard, Mode, ReassembleEffect, SessionTab, TestConfigIsolation, TuiApp,
+        UiConfig,
+    };
     use super::{EXTENSION_PENDING_REQUEST_LIMIT, EXTENSION_WORKER_LIMIT};
 
     async fn make_test_app() -> (
@@ -3914,6 +3919,9 @@ mod tests {
         tempfile::TempDir,
         ApprovalQueue,
     ) {
+        let config = tempfile::tempdir().unwrap();
+        let env_lock: tokio::sync::MutexGuard<'static, ()> = crate::tab::TEST_ENV_LOCK.lock().await;
+        let env = EnvVarGuard::set("ZODE_CONFIG_DIR", config.path());
         let cwd = tempfile::tempdir().unwrap();
         let mut provider = ProviderConfig {
             r#type: Some(ProviderKind::Ollama),
@@ -3964,6 +3972,11 @@ mod tests {
             op_question_queue,
             None,
         );
+        app._test_config_isolation = Some(TestConfigIsolation {
+            _env: env,
+            _config: config,
+            _env_lock: env_lock,
+        });
         app.extension_tasks
             .set_session_root_for_test(cwd.path().join("sessions"));
         let (agent_tx, agent_rx) = mpsc::unbounded_channel();

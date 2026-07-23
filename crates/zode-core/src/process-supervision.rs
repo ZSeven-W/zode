@@ -152,10 +152,12 @@ async fn spawn_and_supervise(
     abort.pulse();
     supervise_child(
         child,
-        stdin,
-        stdin_bytes,
-        stdout,
-        stderr,
+        ChildPipes {
+            stdin,
+            stdin_bytes,
+            stdout,
+            stderr,
+        },
         process_guard,
         abort,
         deadline,
@@ -168,12 +170,16 @@ async fn cleanup_failed_spawn(child: &mut Child, process_guard: &mut ProcessTree
     let _ = process_guard.terminate_and_reap(child).await;
 }
 
-async fn supervise_child<R1, R2>(
-    mut child: Child,
+struct ChildPipes<R1, R2> {
     stdin: Option<tokio::process::ChildStdin>,
     stdin_bytes: Option<Vec<u8>>,
-    mut stdout: R1,
-    mut stderr: R2,
+    stdout: R1,
+    stderr: R2,
+}
+
+async fn supervise_child<R1, R2>(
+    mut child: Child,
+    pipes: ChildPipes<R1, R2>,
     mut process_guard: ProcessTreeGuard,
     abort: AbortController,
     deadline: Duration,
@@ -183,6 +189,13 @@ where
     R1: AsyncRead + Unpin,
     R2: AsyncRead + Unpin,
 {
+    let ChildPipes {
+        stdin,
+        stdin_bytes,
+        mut stdout,
+        mut stderr,
+    } = pipes;
+
     enum Completion {
         Finished(io::Result<(ExitStatus, CappedBytes, CappedBytes)>),
         Aborted,
@@ -318,7 +331,7 @@ impl ProcessTreeGuard {
             if result == 0 {
                 return true;
             }
-            return false;
+            false
         }
 
         #[cfg(windows)]
@@ -354,7 +367,13 @@ impl ProcessTreeGuard {
                     ProcessTreeState::Alive if tokio::time::Instant::now() >= deadline => {
                         return false;
                     }
-                    ProcessTreeState::Alive => tokio::time::sleep(TREE_EXIT_POLL).await,
+                    ProcessTreeState::Alive => {
+                        // A group leader can fork after the first SIGKILL was
+                        // delivered but before it actually stops. Re-signal the
+                        // group so those late descendants cannot escape cleanup.
+                        let _ = self.kill_tree();
+                        tokio::time::sleep(TREE_EXIT_POLL).await;
+                    }
                 }
             }
         }

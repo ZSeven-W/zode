@@ -11,6 +11,7 @@
 #![cfg(target_os = "linux")]
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -43,11 +44,16 @@ impl DesktopBackendFactory for AtspiFactory {
     }
 }
 
-#[derive(Debug)]
 pub struct AtspiBackend {
     conn: AccessibilityConnection,
     /// Latest snapshot's object refs per (app index, window index).
     snapshots: Mutex<HashMap<(usize, usize), Vec<ObjectRef>>>,
+}
+
+impl fmt::Debug for AtspiBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AtspiBackend").finish_non_exhaustive()
+    }
 }
 
 /// Encode an app index in the executable identity ("app#<index>").
