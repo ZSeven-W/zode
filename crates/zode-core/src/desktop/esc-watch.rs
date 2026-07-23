@@ -15,6 +15,7 @@ const KEYCODE_ESC: i64 = 53;
 
 struct Watch {
     armed: AtomicBool,
+    #[cfg(target_os = "macos")]
     tap_started: AtomicBool,
     tx: tokio::sync::mpsc::UnboundedSender<()>,
     rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<()>>>,
@@ -27,6 +28,7 @@ fn watch() -> &'static Watch {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Watch {
             armed: AtomicBool::new(false),
+            #[cfg(target_os = "macos")]
             tap_started: AtomicBool::new(false),
             tx,
             rx: Mutex::new(Some(rx)),
@@ -46,7 +48,7 @@ pub fn arm() {
     #[cfg(target_os = "macos")]
     start_tap_once(w);
     #[cfg(not(target_os = "macos"))]
-    let _ = w;
+    let _keep_receiver_open = &w.tx;
 }
 
 /// Disarm at turn end / after a fire. Esc passes through again immediately.
