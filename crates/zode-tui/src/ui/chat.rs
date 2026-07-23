@@ -128,9 +128,8 @@ pub struct ChatView {
     revision: u64,
     render_cache: Option<RenderCache>,
     /// Per-message rendered-line cache, keyed by a hash of (role, text, width,
-    /// theme). Lets a rebuild reuse unchanged messages' lines instead of
-    /// re-parsing markdown for the whole transcript on every content change —
-    /// the key invalidates automatically on content/width/theme change.
+    /// theme, language). Lets a rebuild reuse unchanged messages' lines instead
+    /// of re-parsing markdown for the whole transcript on every content change.
     line_cache: RefCell<HashMap<u64, Vec<Line<'static>>>>,
     #[cfg(test)]
     render_misses: std::cell::Cell<usize>,
@@ -143,6 +142,9 @@ struct RenderCacheKey {
     revision: u64,
     width: u16,
     theme_name: String,
+    /// Translated chrome (the empty state and thinking labels) changes even
+    /// when the conversation revision, width, and theme do not.
+    language: zode_core::i18n::Lang,
     hide_thinking: bool,
     hide_tool_details: bool,
 }
@@ -155,6 +157,21 @@ struct RenderCache {
     /// (a Tool message that renders taller than one row). Clicking that
     /// row toggles the message's fold state.
     toggles: HashMap<usize, usize>,
+}
+
+fn message_cache_key(
+    msg: &ChatMessage,
+    width: u16,
+    theme_name: &str,
+    language: zode_core::i18n::Lang,
+) -> u64 {
+    let mut h = DefaultHasher::new();
+    msg.role.hash(&mut h);
+    msg.text.hash(&mut h);
+    width.hash(&mut h);
+    theme_name.hash(&mut h);
+    language.code().hash(&mut h);
+    h.finish()
 }
 
 impl ChatView {
@@ -477,6 +494,7 @@ impl ChatView {
             revision: self.revision,
             width,
             theme_name: meta.theme_name.to_string(),
+            language: zode_core::i18n::current(),
             hide_thinking: self.hide_thinking,
             hide_tool_details: self.hide_tool_details,
         };
@@ -701,8 +719,9 @@ impl ChatView {
     }
 
     /// `render_message` with a content-keyed cache. The key (role, text, width,
-    /// theme) invalidates automatically on any of those changing, so a rebuild
-    /// reuses unchanged messages instead of re-parsing the whole transcript.
+    /// theme, language) invalidates automatically on any of those changing, so
+    /// a rebuild reuses unchanged messages instead of re-parsing the whole
+    /// transcript.
     /// The actively-streaming message and image messages are never cached (the
     /// former grows each delta; the latter's preview isn't keyed by content).
     fn render_message_cached(
@@ -716,12 +735,7 @@ impl ChatView {
         if skip_cache || !msg.images.is_empty() {
             return self.render_message(msg, theme, width);
         }
-        let mut h = DefaultHasher::new();
-        msg.role.hash(&mut h);
-        msg.text.hash(&mut h);
-        width.hash(&mut h);
-        theme_name.hash(&mut h);
-        let key = h.finish();
+        let key = message_cache_key(msg, width, theme_name, zode_core::i18n::current());
         if let Some(lines) = self.line_cache.borrow().get(&key) {
             return lines.clone();
         }
@@ -1241,6 +1255,35 @@ mod tests {
         assert!(
             chat.render_misses.get() >= 4,
             "width change invalidates cache"
+        );
+    }
+
+    #[test]
+    fn ui_language_is_part_of_both_chat_cache_keys() {
+        let render_key = |language| RenderCacheKey {
+            revision: 0,
+            width: 80,
+            theme_name: "minimal".to_string(),
+            language,
+            hide_thinking: false,
+            hide_tool_details: false,
+        };
+        assert_ne!(
+            render_key(zode_core::i18n::Lang::En),
+            render_key(zode_core::i18n::Lang::Zh),
+            "switching language must rebuild the cached empty state"
+        );
+
+        let message = ChatMessage {
+            role: Role::Tool,
+            text: "Thinking: inspecting cache".to_string(),
+            images: Vec::new(),
+            collapsed: false,
+        };
+        assert_ne!(
+            message_cache_key(&message, 80, "minimal", zode_core::i18n::Lang::En),
+            message_cache_key(&message, 80, "minimal", zode_core::i18n::Lang::Zh),
+            "switching language must rebuild cached translated message labels"
         );
     }
 
