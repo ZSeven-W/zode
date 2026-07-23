@@ -9,9 +9,12 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
+use agent::abort::AbortController;
+
 use crate::config::{LspConfig, LspServerConfig};
 use crate::lsp::client::LspClient;
 use crate::lsp::install;
+use crate::process_supervision::spawn_blocking_tracked;
 
 #[derive(Debug)]
 pub struct LspManager {
@@ -108,10 +111,24 @@ impl LspManager {
         set
     }
 
-    /// Get (spawning if needed) the client that handles `path`. Errors when no
+    /// Get (spawning if needed) the client that handles `path`.
+    ///
+    /// Callers that own a turn should use [`Self::client_for_with_abort`] so
+    /// startup and initialization are tied to that turn. This compatibility
+    /// entry point keeps the pre-watchdog API for non-turn callers.
+    pub async fn client_for(&self, path: &Path) -> Result<Arc<LspClient>, String> {
+        let abort = AbortController::new();
+        self.client_for_with_abort(path, &abort).await
+    }
+
+    /// Abort-aware variant of [`Self::client_for`]. Errors when no
     /// configured+enabled server claims the file's extension, or the server
     /// fails to start.
-    pub async fn client_for(&self, path: &Path) -> Result<Arc<LspClient>, String> {
+    pub async fn client_for_with_abort(
+        &self,
+        path: &Path,
+        abort: &AbortController,
+    ) -> Result<Arc<LspClient>, String> {
         let lang = self.lang_for(path).ok_or_else(|| {
             format!(
                 "no language server configured for {} (enable one via /plugin)",
@@ -120,7 +137,13 @@ impl LspManager {
         })?;
         // Held across spawn so two concurrent calls don't start the server
         // twice; LSP calls aren't hot, so the brief serialization is fine.
-        let mut clients = self.clients.lock().await;
+        let mut clients = tokio::select! {
+            biased;
+            _ = abort.cancelled() => {
+                return Err("language server startup cancelled".to_string());
+            }
+            clients = self.clients.lock() => clients,
+        };
         if let Some(c) = clients.get(&lang) {
             return Ok(c.clone());
         }
@@ -136,7 +159,13 @@ impl LspManager {
         // the config says — auto-provisioning must not trample an override.
         let resolved = match install::spec_for_lang(&lang) {
             Some(spec) if cfg.command == spec.command => {
-                let path = tokio::task::spawn_blocking(move || install::ensure(spec))
+                // Auto-provisioning mutates the user's toolchain/config area.
+                // Latch retry safety before the installer can begin. The work
+                // guard lives inside the blocking closure, so hard-cancelling
+                // this tool cannot make the turn look quiescent while npm,
+                // rustup, or go is still running.
+                abort.mark_side_effect_risk();
+                let path = spawn_blocking_tracked(&abort.activity(), move || install::ensure(spec))
                     .await
                     .map_err(|e| format!("install task failed: {e}"))??;
                 LspServerConfig {
@@ -146,7 +175,17 @@ impl LspManager {
             }
             _ => cfg,
         };
-        let client = Arc::new(LspClient::start(lang.clone(), &resolved, self.root.clone()).await?);
+        if abort.is_aborted() {
+            return Err("language server startup cancelled".to_string());
+        }
+        // Starting any server is an external side effect, including custom
+        // languages and command overrides that bypass auto-provisioning. Latch
+        // before spawning so scheduler retries can never duplicate a server
+        // whose startup outcome became uncertain.
+        abort.mark_side_effect_risk();
+        let client = Arc::new(
+            LspClient::start_with_abort(lang.clone(), &resolved, self.root.clone(), abort).await?,
+        );
         clients.insert(lang, client.clone());
         Ok(client)
     }
@@ -233,6 +272,29 @@ mod tests {
         let m = LspManager::new(cfg(), PathBuf::from("/proj"));
         assert_eq!(m.resolve("src/main.rs"), PathBuf::from("/proj/src/main.rs"));
         assert_eq!(m.resolve("/abs/x.rs"), PathBuf::from("/abs/x.rs"));
+    }
+
+    #[tokio::test]
+    async fn custom_server_start_latches_side_effect_risk_before_spawn() {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "custom".to_string(),
+            LspServerConfig {
+                command: "__zode_missing_custom_lsp__".into(),
+                args: vec![],
+                extensions: vec!["custom".into()],
+            },
+        );
+        let manager = LspManager::new(LspConfig { servers }, PathBuf::from("/proj"));
+        let abort = AbortController::new();
+
+        let error = manager
+            .client_for_with_abort(Path::new("/proj/file.custom"), &abort)
+            .await
+            .expect_err("the deliberately missing custom server cannot start");
+
+        assert!(error.contains("spawn"), "{error}");
+        assert!(abort.activity().side_effect_risk());
     }
 
     fn two_lang_cfg() -> LspConfig {

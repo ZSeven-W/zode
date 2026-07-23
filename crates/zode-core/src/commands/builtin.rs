@@ -94,6 +94,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         usage: "/schedule add <hh:mm|mon hh:mm|every 2h> <prompt> | list | rm <id> | enable|disable <id>",
         action: CommandAction::Ui,
     },
+    SlashCommand {
+        name: "watchdog",
+        description: "Show background-turn watchdog health",
+        usage: "/watchdog [status]",
+        action: CommandAction::Ui,
+    },
     // Registered now, fully wired in later phases.
     SlashCommand {
         name: "theme",
@@ -133,7 +139,7 @@ pub static BUILTINS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "tasks",
-        description: "Background shells + running turns",
+        description: "Background shells, turns, and watchdog health",
         usage: "/tasks",
         action: CommandAction::Ui,
     },

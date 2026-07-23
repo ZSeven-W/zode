@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent::abort::AbortController;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -93,6 +94,22 @@ async fn ping(client: &OpClient, pf: &PortFile) -> bool {
     matches!(client.ping().await, Ok(r) if ping_result_ok(&r, pf))
 }
 
+async fn ping_supervised(
+    client: &OpClient,
+    pf: &PortFile,
+    abort: &AbortController,
+) -> Result<bool, OpError> {
+    abort.pulse();
+    tokio::select! {
+        biased;
+        _ = abort.cancelled() => Err(aborted(abort)),
+        result = client.ping() => {
+            abort.pulse();
+            Ok(matches!(result, Ok(r) if ping_result_ok(&r, pf)))
+        }
+    }
+}
+
 /// Session-scoped connection manager.
 #[derive(Debug, Default)]
 pub struct OpConnection;
@@ -105,11 +122,17 @@ impl OpConnection {
         cfg: &OpenPencilConfig,
         consent: &dyn Consent,
         tag: &str,
+        abort: &AbortController,
     ) -> Result<OpClient, OpError> {
+        if abort.is_aborted() {
+            return Err(aborted(abort));
+        }
         let transport: Arc<dyn Transport> = Arc::new(ReqwestTransport::new());
         let discovered = discover();
         let ping_ok = match &discovered {
-            Some(pf) => ping(&OpClient::new(pf.base_url(), transport.clone()), pf).await,
+            Some(pf) => {
+                ping_supervised(&OpClient::new(pf.base_url(), transport.clone()), pf, abort).await?
+            }
             None => false,
         };
         match plan_connect(discovered.is_some(), ping_ok, cfg) {
@@ -121,17 +144,22 @@ impl OpConnection {
                 // Ensure `op` is available (install on demand), then let
                 // `op start` handle the actual desktop detection — it errors
                 // clearly if no GUI app is installed.
-                let op = install::ensure_op(cfg, consent, tag).await?;
+                let op = install::ensure_op(cfg, consent, tag, abort).await?;
                 let prompt = format!(
                     "Launch OpenPencil? Runs: {} ({})",
                     op.display(),
                     cfg.launch_command()
                 );
-                if !consent.confirm(&prompt).await {
+                let confirmed = tokio::select! {
+                    biased;
+                    _ = abort.cancelled() => return Err(aborted(abort)),
+                    confirmed = consent.confirm(&prompt) => confirmed,
+                };
+                if !confirmed {
                     return Err(OpError::LaunchDeclined);
                 }
-                launcher::launch_gui(&op, cfg)?;
-                poll_until_live(cfg, transport).await
+                launcher::launch_gui(&op, cfg, abort)?;
+                poll_until_live(cfg, transport, abort).await
             }
             ConnectAction::Headless => Err(OpError::NoInstance(
                 "headless mode requires op-host-web-server (not in releases)".into(),
@@ -145,18 +173,26 @@ impl OpConnection {
 async fn poll_until_live(
     cfg: &OpenPencilConfig,
     transport: Arc<dyn Transport>,
+    abort: &AbortController,
 ) -> Result<OpClient, OpError> {
     let deadline = Duration::from_millis(cfg.connect_timeout_ms());
     let step = Duration::from_millis(200);
     let mut waited = Duration::ZERO;
     while waited < deadline {
+        if abort.is_aborted() {
+            return Err(aborted(abort));
+        }
         if let Some(pf) = discover() {
             let client = OpClient::new(pf.base_url(), transport.clone());
-            if ping(&client, &pf).await {
+            if ping_supervised(&client, &pf, abort).await? {
                 return Ok(client);
             }
         }
-        tokio::time::sleep(step).await;
+        tokio::select! {
+            biased;
+            _ = abort.cancelled() => return Err(aborted(abort)),
+            _ = tokio::time::sleep(step) => {}
+        }
         waited += step;
     }
     Err(OpError::NoInstance(
@@ -164,6 +200,10 @@ async fn poll_until_live(
          (`op start` handles detection)"
             .into(),
     ))
+}
+
+fn aborted(abort: &AbortController) -> OpError {
+    OpError::Aborted(abort.reason().unwrap_or_else(|| "aborted".to_string()))
 }
 
 /// Report discovery + live-ping status (used by the `/op status` command).

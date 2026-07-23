@@ -172,6 +172,13 @@ impl QuestionDialog {
         self.request.as_ref().and_then(|r| r.source.clone())
     }
 
+    /// Dismiss the dialog and release the waiting tool with no answer.
+    pub fn dismiss(&mut self) {
+        if let Some(request) = self.request.take() {
+            let _ = request.respond(None);
+        }
+    }
+
     fn submit_tab(&self) -> usize {
         self.specs.len()
     }
@@ -276,9 +283,7 @@ impl QuestionDialog {
             }
             KeyCode::Enter | KeyCode::Char(' ') => self.activate(),
             KeyCode::Esc => {
-                if let Some(req) = self.request.take() {
-                    let _ = req.respond(None);
-                }
+                self.dismiss();
                 true
             }
             _ => false,
@@ -805,6 +810,22 @@ mod tests {
         let req = rx.next().await.unwrap();
         let mut d = QuestionDialog::new(req);
         assert!(d.on_key(KeyCode::Esc));
+        assert_eq!(asker.await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn dismiss_releases_waiter_once_with_none() {
+        let (queue, mut rx) = question_queue();
+        let asker =
+            tokio::spawn(
+                async move { queue.ask_specs(vec![spec("pick", &["a", "b"])], None).await },
+            );
+        let req = rx.next().await.unwrap();
+        let mut dialog = QuestionDialog::new(req);
+
+        dialog.dismiss();
+        dialog.dismiss();
+
         assert_eq!(asker.await.unwrap(), None);
     }
 

@@ -79,6 +79,18 @@ impl HookHandler for ConfiguredHookHandler {
             HookOutcome::Ok
         }
     }
+
+    async fn handle_with_abort(
+        &self,
+        event: &HookEvent,
+        abort: &agent::abort::AbortController,
+    ) -> HookOutcome {
+        if self.entry.matches(event) {
+            self.inner.handle_with_abort(event, abort).await
+        } else {
+            HookOutcome::Ok
+        }
+    }
 }
 
 fn expand_tilde(p: &str) -> PathBuf {

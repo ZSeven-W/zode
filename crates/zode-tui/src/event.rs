@@ -222,6 +222,19 @@ pub enum AppEvent {
         turn_id: u64,
         result: Result<(), String>,
     },
+    /// The watchdog requested a hard abort and the owning Tokio task has now
+    /// actually stopped. Only this acknowledgement may release the tab/store;
+    /// `AbortHandle::abort()` alone is merely a cancellation request.
+    TurnTaskStopped { tab_id: usize, turn_id: u64 },
+    /// Nested workers did not quiesce within the hard-stop deadline. `result`
+    /// is present when an otherwise canonical turn reached this gate; forced
+    /// abort paths already carry their outcome in the app's pending-stop map.
+    /// The attempt remains leased and disabled until `TurnTaskStopped`.
+    TurnTaskQuarantined {
+        tab_id: usize,
+        turn_id: u64,
+        result: Option<Result<(), String>>,
+    },
     /// A transient toast, posted from off-loop work (e.g. /undo running on a
     /// spawned task) so the event loop is never blocked. Not tab-scoped.
     Toast { text: String, error: bool },

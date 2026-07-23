@@ -236,7 +236,7 @@ impl Tool for TeamClaimTool {
             .unwrap_or_default();
         let now = now_ms();
         match claims::claim(&self.board, &self.holder, &paths, &self.cwd, CLAIM_TTL, now) {
-            Ok(()) => Ok(json!({"ok": true, "claimed": paths})),
+            Ok(_) => Ok(json!({"ok": true, "claimed": paths})),
             Err(c) => Ok(json!({
                 "ok": false, "conflict": serde_json::to_value(c.conflicts).unwrap_or(Value::Null)
             })),

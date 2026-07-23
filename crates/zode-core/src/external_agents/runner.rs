@@ -1,9 +1,12 @@
 //! External agent process runner. Trust boundary notes (spec v2.3 §3.6-3.7):
 //! env starts from `env_clear()` and only an allowlist is restored; prompts
 //! prefer stdin (argv leaks via process lists); stdout/stderr are drained
-//! concurrently (pipe deadlock); termination kills the whole process group;
-//! aftermath (changed files, cache clear) is best-effort and honest about it.
+//! concurrently (pipe deadlock); termination closes the owned Unix process
+//! group or Windows `taskkill /T` tree. OS-escaped descendants are not claimed
+//! as proven dead; aftermath (changed files, cache clear) stays best-effort.
 
+use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -11,15 +14,22 @@ use std::time::{Duration, Instant};
 
 use agent::abort::AbortController;
 use agent::file_cache::FileStateCache;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use super::capability::PromptTransport;
 use super::parser::{ExtEvent, FinalResult, StreamParser};
 use super::profiles::ExternalAgentDef;
+use crate::process_supervision::ProcessTreeGuard;
 
 const STDERR_TAIL_BYTES: usize = 8 * 1024;
 const MAX_LINE_BYTES: usize = 64 * 1024;
-const KILL_GRACE: Duration = Duration::from_secs(5);
+const IO_CHUNK_BYTES: usize = 8 * 1024;
+const GIT_STATUS_MAX_BYTES: usize = 4 * 1024 * 1024;
+const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(3);
+const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(1);
+const TRUNCATION_MARKER: &str = " …[truncated]";
 
 /// Env vars restored from the parent environment on every platform.
 const BASE_ENV: &[&str] = &["PATH", "HOME", "TERM"];
@@ -29,6 +39,156 @@ const WINDOWS_ENV: &[&str] = &["SystemRoot", "USERPROFILE", "TEMP", "PATHEXT"];
 /// Loader-injection vars are refused even when explicitly allowlisted.
 fn is_forbidden_env(name: &str) -> bool {
     name == "LD_PRELOAD" || name == "LD_LIBRARY_PATH" || name.starts_with("DYLD_")
+}
+
+#[cfg(unix)]
+fn create_process_group(command: &mut tokio::process::Command) {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn create_process_group(_command: &mut tokio::process::Command) {}
+
+/// Reads logical lines without ever accumulating an unbounded unterminated
+/// line. `BufReader` and `line` both have fixed upper bounds.
+struct BoundedLineReader<R> {
+    inner: BufReader<R>,
+    line: Vec<u8>,
+    truncated: bool,
+}
+
+impl<R: AsyncRead + Unpin> BoundedLineReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner: BufReader::with_capacity(IO_CHUNK_BYTES, inner),
+            line: Vec::with_capacity(MAX_LINE_BYTES),
+            truncated: false,
+        }
+    }
+
+    async fn next_line(&mut self, abort: &AbortController) -> std::io::Result<Option<String>> {
+        loop {
+            let inner = &mut self.inner;
+            let line = &mut self.line;
+            let truncated = &mut self.truncated;
+            let available = inner.fill_buf().await?;
+            if available.is_empty() {
+                if line.is_empty() && !*truncated {
+                    return Ok(None);
+                }
+                return Ok(Some(Self::finish_line(line, truncated)));
+            }
+
+            abort.pulse();
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let consumed = newline.map_or(available.len(), |index| index + 1);
+            let payload_len = newline.unwrap_or(available.len());
+            let remaining = MAX_LINE_BYTES.saturating_sub(line.len());
+            let kept = payload_len.min(remaining);
+            line.extend_from_slice(&available[..kept]);
+            if kept < payload_len {
+                *truncated = true;
+            }
+            inner.consume(consumed);
+
+            if newline.is_some() {
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                return Ok(Some(Self::finish_line(line, truncated)));
+            }
+        }
+    }
+
+    fn finish_line(line: &mut Vec<u8>, truncated: &mut bool) -> String {
+        let mut output = String::from_utf8_lossy(line).into_owned();
+        if *truncated {
+            output.push_str(TRUNCATION_MARKER);
+        }
+        line.clear();
+        *truncated = false;
+        output
+    }
+}
+
+async fn stderr_tail<R: AsyncRead + Unpin>(
+    mut reader: R,
+    abort: AbortController,
+) -> std::io::Result<String> {
+    let mut tail = Vec::with_capacity(STDERR_TAIL_BYTES);
+    let mut chunk = [0_u8; IO_CHUNK_BYTES];
+    loop {
+        let count = reader.read(&mut chunk).await?;
+        if count == 0 {
+            break;
+        }
+        abort.pulse();
+        let bytes = &chunk[..count];
+        if bytes.len() >= STDERR_TAIL_BYTES {
+            tail.clear();
+            tail.extend_from_slice(&bytes[bytes.len() - STDERR_TAIL_BYTES..]);
+        } else {
+            let overflow = tail
+                .len()
+                .saturating_add(bytes.len())
+                .saturating_sub(STDERR_TAIL_BYTES);
+            if overflow > 0 {
+                tail.drain(..overflow);
+            }
+            tail.extend_from_slice(bytes);
+        }
+    }
+    Ok(String::from_utf8_lossy(&tail).into_owned())
+}
+
+async fn bounded_bytes<R: AsyncRead + Unpin>(
+    mut reader: R,
+    max_bytes: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut output = Vec::with_capacity(max_bytes.min(IO_CHUNK_BYTES));
+    let mut overflowed = false;
+    let mut chunk = [0_u8; IO_CHUNK_BYTES];
+    loop {
+        let count = reader.read(&mut chunk).await?;
+        if count == 0 {
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(output.len());
+        let kept = remaining.min(count);
+        output.extend_from_slice(&chunk[..kept]);
+        overflowed |= kept < count;
+    }
+    Ok((output, overflowed))
+}
+
+fn spawn_tracked<F>(abort: &AbortController, future: F) -> JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let work = abort.activity().track_worker();
+    tokio::spawn(async move {
+        let _work = work;
+        future.await
+    })
+}
+
+async fn join_bounded<T: Send + 'static>(mut task: JoinHandle<T>) -> Option<T> {
+    match tokio::time::timeout(PIPE_DRAIN_GRACE, &mut task).await {
+        Ok(result) => result.ok(),
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +217,7 @@ pub struct RunOutcome {
 
 /// Snapshot `git status --porcelain=v1 -z` as (path -> status). `None` when
 /// cwd is not a git repository.
-pub fn git_status_snapshot(cwd: &Path) -> Option<std::collections::HashMap<String, String>> {
+pub fn git_status_snapshot(cwd: &Path) -> Option<HashMap<String, String>> {
     let out = std::process::Command::new("git")
         .arg("status")
         .arg("--porcelain=v1")
@@ -68,18 +228,102 @@ pub fn git_status_snapshot(cwd: &Path) -> Option<std::collections::HashMap<Strin
     if !out.status.success() {
         return None;
     }
-    let mut map = std::collections::HashMap::new();
-    let text = String::from_utf8_lossy(&out.stdout);
+    Some(parse_git_status(&out.stdout))
+}
+
+fn parse_git_status(bytes: &[u8]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let text = String::from_utf8_lossy(bytes);
     for entry in text.split('\0').filter(|e| e.len() > 3) {
         let (status, path) = entry.split_at(3);
         map.insert(path.to_string(), status.trim().to_string());
     }
-    Some(map)
+    map
+}
+
+#[derive(Debug)]
+struct SnapshotAborted;
+
+/// Async counterpart used by `run_external`. The subprocess and its output
+/// are time/size bounded, and dropping this future invokes the platform's
+/// process-tree cleanup through [`ProcessTreeGuard`].
+async fn git_status_snapshot_async(
+    cwd: &Path,
+    abort: &AbortController,
+    observe_abort: bool,
+) -> Result<Option<HashMap<String, String>>, SnapshotAborted> {
+    if observe_abort && abort.is_aborted() {
+        return Err(SnapshotAborted);
+    }
+
+    let mut command = tokio::process::Command::new("git");
+    command
+        .arg("status")
+        .arg("--porcelain=v1")
+        .arg("-z")
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    create_process_group(&mut command);
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => return Ok(None),
+    };
+    let pid = child.id();
+    let mut process_guard = ProcessTreeGuard::new(pid, abort.clone());
+    let Some(stdout) = child.stdout.take() else {
+        return Ok(None);
+    };
+    let stdout_task = spawn_tracked(abort, bounded_bytes(stdout, GIT_STATUS_MAX_BYTES));
+    let deadline = tokio::time::sleep(GIT_STATUS_TIMEOUT);
+    tokio::pin!(deadline);
+
+    let mut was_aborted = false;
+    let mut timed_out = false;
+    let status = tokio::select! {
+        result = child.wait() => result.ok(),
+        _ = &mut deadline => {
+            timed_out = true;
+            process_guard.terminate_and_reap(&mut child).await.ok()
+        }
+        _ = abort.cancelled(), if observe_abort => {
+            was_aborted = true;
+            process_guard.terminate_and_reap(&mut child).await.ok()
+        }
+    };
+    // A successful leader may still have background descendants. Closing the
+    // group also guarantees the bounded stdout reader can reach EOF.
+    process_guard.cleanup_after_leader_exit().await;
+
+    let output_join = join_bounded(stdout_task).await;
+    if output_join.is_none() {
+        // A reader that cannot finish after group cleanup may still be held by
+        // a descendant that escaped the observable process-group boundary.
+        abort.mark_unresolved_external_work();
+    }
+    let output = output_join.and_then(Result::ok);
+
+    if was_aborted {
+        return Err(SnapshotAborted);
+    }
+    if timed_out || status.is_none() || !status.is_some_and(|status| status.success()) {
+        return Ok(None);
+    }
+    let Some((bytes, overflowed)) = output else {
+        return Ok(None);
+    };
+    if overflowed {
+        return Ok(None);
+    }
+    Ok(Some(parse_git_status(&bytes)))
 }
 
 fn diff_snapshots(
-    before: &Option<std::collections::HashMap<String, String>>,
-    after: &Option<std::collections::HashMap<String, String>>,
+    before: &Option<HashMap<String, String>>,
+    after: &Option<HashMap<String, String>>,
 ) -> Vec<String> {
     let (Some(before), Some(after)) = (before, after) else {
         return Vec::new();
@@ -100,8 +344,19 @@ pub async fn run_external(
     mut on_event: impl FnMut(ExtEvent) + Send,
     abort: AbortController,
 ) -> Result<RunOutcome, String> {
+    struct CacheClearOnDrop(Option<Arc<FileStateCache>>);
+    impl Drop for CacheClearOnDrop {
+        fn drop(&mut self) {
+            if let Some(cache) = &self.0 {
+                cache.clear();
+            }
+        }
+    }
+    let _cache_clear = CacheClearOnDrop(spec.file_cache.clone());
     let started = Instant::now();
-    let before = git_status_snapshot(&spec.cwd);
+    let before = git_status_snapshot_async(&spec.cwd, &abort, true)
+        .await
+        .map_err(|_| "external agent aborted before launch".to_string())?;
 
     let mut args: Vec<String> = spec
         .def
@@ -148,19 +403,27 @@ pub async fn run_external(
                     }
                 }
             }
-            let path = dir.join(format!("prompt-{}.txt", std::process::id()));
-            std::fs::write(&path, &spec.prompt).map_err(|e| e.to_string())?;
+            let path = dir.join(format!(
+                "prompt-{}-{}.txt",
+                std::process::id(),
+                Uuid::new_v4()
+            ));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
             }
+            let mut file = options.open(&path).map_err(|e| e.to_string())?;
+            _prompt_file = Some(TempPrompt(path.clone()));
+            std::io::Write::write_all(&mut file, spec.prompt.as_bytes())
+                .map_err(|e| e.to_string())?;
             for a in &mut args {
                 if a == "{prompt_file}" {
                     *a = path.to_string_lossy().to_string();
                 }
             }
-            _prompt_file = Some(TempPrompt(path));
         }
     }
 
@@ -173,7 +436,8 @@ pub async fn run_external(
             Stdio::piped()
         } else {
             Stdio::null()
-        });
+        })
+        .kill_on_drop(true);
 
     // env: clear, then restore the allowlist. Forbidden loader vars are
     // dropped even if a profile tries to allowlist them.
@@ -198,50 +462,28 @@ pub async fn run_external(
         }
     }
 
-    #[cfg(unix)]
-    {
-        // New process group so timeout/abort can kill the whole tree.
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setpgid(0, 0);
-                Ok(())
-            });
-        }
-    }
+    // On Unix, create a new process group. The guard also supplies Windows'
+    // tree-kill fallback so timeout, abort, and hard-drop cover descendants.
+    create_process_group(&mut cmd);
 
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn {}: {e}", spec.def.command.display()))?;
     let child_pid = child.id();
+    let mut process_guard = ProcessTreeGuard::new(child_pid, abort.clone());
 
-    if let (Some(payload), Some(mut stdin)) = (stdin_payload, child.stdin.take()) {
-        tokio::spawn(async move {
+    let stdin_task = if let (Some(payload), Some(mut stdin)) = (stdin_payload, child.stdin.take()) {
+        Some(spawn_tracked(&abort, async move {
             let _ = stdin.write_all(payload.as_bytes()).await;
             // dropping stdin closes the pipe (EOF)
-        });
-    }
+        }))
+    } else {
+        None
+    };
 
     // Concurrent drain: stderr on its own task, stdout parsed inline.
     let stderr = child.stderr.take().expect("stderr piped");
-    let stderr_task = tokio::spawn(async move {
-        let mut tail: Vec<u8> = Vec::new();
-        let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    tail.extend_from_slice(line.as_bytes());
-                    if tail.len() > STDERR_TAIL_BYTES {
-                        let cut = tail.len() - STDERR_TAIL_BYTES;
-                        tail.drain(..cut);
-                    }
-                }
-            }
-        }
-        String::from_utf8_lossy(&tail).to_string()
-    });
+    let stderr_task = spawn_tracked(&abort, stderr_tail(stderr, abort.clone()));
 
     let stdout = child.stdout.take().expect("stdout piped");
     let mut parser = StreamParser::with_sources(
@@ -249,21 +491,18 @@ pub async fn run_external(
         spec.def.capability.text_source.as_deref(),
         spec.def.capability.session_id_source.as_deref(),
     );
-    let mut reader = BufReader::new(stdout).lines();
+    let mut reader = BoundedLineReader::new(stdout);
 
     let deadline = tokio::time::sleep(spec.timeout);
     tokio::pin!(deadline);
     let mut timed_out = false;
     let mut aborted = false;
+    let mut stdout_error = None;
 
     loop {
         tokio::select! {
-            line = reader.next_line() => match line {
-                Ok(Some(mut l)) => {
-                    if l.len() > MAX_LINE_BYTES {
-                        l.truncate(MAX_LINE_BYTES);
-                        l.push_str(" …[truncated]");
-                    }
+            line = reader.next_line(&abort) => match line {
+                Ok(Some(l)) => {
                     for ev in parser.feed(&l) {
                         on_event(ev);
                     }
@@ -271,6 +510,7 @@ pub async fn run_external(
                 Ok(None) => break,
                 Err(e) => {
                     on_event(ExtEvent::Log(format!("stdout read error: {e}")));
+                    stdout_error = Some(e.to_string());
                     break;
                 }
             },
@@ -279,18 +519,46 @@ pub async fn run_external(
         }
     }
 
-    if timed_out || aborted {
-        terminate(child_pid, &mut child).await;
+    let status = if timed_out || aborted || stdout_error.is_some() {
+        process_guard.terminate_and_reap(&mut child).await
+    } else {
+        tokio::select! {
+            result = child.wait() => result,
+            _ = &mut deadline => {
+                timed_out = true;
+                process_guard.terminate_and_reap(&mut child).await
+            }
+            _ = abort.cancelled() => {
+                aborted = true;
+                process_guard.terminate_and_reap(&mut child).await
+            }
+        }
+    };
+    // A successful CLI leader may still have group-bound descendants. Close
+    // the group before joining readers, and keep the guard armed meanwhile.
+    process_guard.cleanup_after_leader_exit().await;
+    drop(reader);
+    let stderr_join = join_bounded(stderr_task).await;
+    if stderr_join.is_none() {
+        abort.mark_unresolved_external_work();
     }
-    let status = child.wait().await.map_err(|e| e.to_string())?;
-    let stderr_tail = stderr_task.await.unwrap_or_default();
+    let stderr_tail = stderr_join.and_then(Result::ok).unwrap_or_default();
+    if let Some(stdin_task) = stdin_task {
+        if join_bounded(stdin_task).await.is_none() {
+            abort.mark_unresolved_external_work();
+        }
+    }
+    // Pipes are now at EOF, closed, or their reader task has been joined.
+    let status = status.map_err(|e| e.to_string())?;
 
-    // Aftermath, on every completed spawn: clearing the WHOLE cache beats an
-    // incomplete per-path invalidation (external writes bypass fs tools).
-    if let Some(cache) = &spec.file_cache {
-        cache.clear();
-    }
-    let after = git_status_snapshot(&spec.cwd);
+    // Cache clearing is owned by `_cache_clear`, including hard-drop paths.
+    let after = match git_status_snapshot_async(&spec.cwd, &abort, false).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            aborted = true;
+            None
+        }
+    };
     let changed_files = diff_snapshots(&before, &after);
     let duration_ms = started.elapsed().as_millis() as u64;
 
@@ -306,6 +574,9 @@ pub async fn run_external(
             "external agent aborted; partial changes are NOT rolled back (changed files: {:?})",
             changed_files
         ));
+    }
+    if let Some(error) = stdout_error {
+        return Err(format!("external agent stdout read failed: {error}"));
     }
     if !status.success() {
         return Err(format!(
@@ -324,149 +595,6 @@ pub async fn run_external(
     })
 }
 
-async fn terminate(pid: Option<u32>, child: &mut tokio::process::Child) {
-    #[cfg(unix)]
-    {
-        if let Some(pid) = pid {
-            unsafe {
-                libc::killpg(pid as i32, libc::SIGTERM);
-            }
-            if tokio::time::timeout(KILL_GRACE, child.wait()).await.is_ok() {
-                return;
-            }
-            unsafe {
-                libc::killpg(pid as i32, libc::SIGKILL);
-            }
-            return;
-        }
-    }
-    let _ = pid;
-    let _ = child.kill().await;
-}
-
 #[cfg(test)]
-mod tests {
-    use super::super::capability::{
-        EffectiveSandbox, OutputProtocol, ProfileCapability, PromptTransport,
-    };
-    use super::*;
-
-    fn fixture(script: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/extagent")
-            .join(script)
-    }
-
-    fn test_spec(script: &str, transport: PromptTransport, protocol: OutputProtocol) -> RunSpec {
-        RunSpec {
-            def: ExternalAgentDef {
-                name: "fake".to_string(),
-                command: fixture(script),
-                args: vec![],
-                capability: ProfileCapability {
-                    prompt_transport: transport,
-                    output_protocol: protocol,
-                    resume_flag: None,
-                    resume_args: None,
-                    new_session_args: None,
-                    effective_sandbox: EffectiveSandbox::Unknown,
-                    version_requirement: None,
-                    session_id_source: None,
-                    text_source: None,
-                },
-                auth_env: vec![],
-                env_allow: vec![],
-                trusted: false,
-            },
-            prompt: "do the thing".to_string(),
-            cwd: std::env::temp_dir(),
-            timeout: Duration::from_secs(30),
-            extra_args: vec![],
-            file_cache: None,
-        }
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn runner_happy_path_streams_events_and_returns_result() {
-        let spec = test_spec(
-            "fake-claude.sh",
-            PromptTransport::Stdin,
-            OutputProtocol::JsonlClaude,
-        );
-        let mut seen = vec![];
-        let out = run_external(spec, |e| seen.push(e), AbortController::new())
-            .await
-            .unwrap();
-        assert_eq!(out.result.session_id.as_deref(), Some("sess-0001"));
-        assert_eq!(out.exit_code, 0);
-        assert!(seen.iter().any(|e| matches!(e, ExtEvent::ToolUse { .. })));
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    #[serial_test::serial]
-    async fn runner_env_is_cleared_to_allowlist() {
-        std::env::set_var("ZODE_SECRET_PROBE", "must-not-leak");
-        let spec = test_spec(
-            "fake-env-dump.sh",
-            PromptTransport::Stdin,
-            OutputProtocol::Text,
-        );
-        let out = run_external(spec, |_| {}, AbortController::new())
-            .await
-            .unwrap();
-        std::env::remove_var("ZODE_SECRET_PROBE");
-        assert!(!out.result.text.contains("ZODE_SECRET_PROBE"));
-        assert!(out.result.text.contains("PATH="));
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn runner_timeout_kills_process_group() {
-        let mut spec = test_spec("fake-hang.sh", PromptTransport::Stdin, OutputProtocol::Text);
-        spec.timeout = Duration::from_millis(300);
-        let started = Instant::now();
-        assert!(run_external(spec, |_| {}, AbortController::new())
-            .await
-            .is_err());
-        assert!(started.elapsed() < Duration::from_secs(10));
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn runner_reports_changed_files_in_git_cwd() {
-        let repo = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(repo.path())
-                .env("GIT_AUTHOR_NAME", "t")
-                .env("GIT_AUTHOR_EMAIL", "t@t")
-                .env("GIT_COMMITTER_NAME", "t")
-                .env("GIT_COMMITTER_EMAIL", "t@t")
-                .output()
-                .unwrap()
-        };
-        git(&["init", "-q"]);
-        std::fs::write(repo.path().join("clean.txt"), "old").unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-qm", "init"]);
-        let mut spec = test_spec(
-            "fake-writer.sh",
-            PromptTransport::Stdin,
-            OutputProtocol::Text,
-        );
-        spec.cwd = repo.path().to_path_buf();
-        let out = run_external(spec, |_| {}, AbortController::new())
-            .await
-            .unwrap();
-        assert!(
-            out.changed_files
-                .iter()
-                .any(|p| p.contains("written-by-agent.txt")),
-            "changed: {:?}",
-            out.changed_files
-        );
-    }
-}
+#[path = "runner-tests.rs"]
+mod tests;

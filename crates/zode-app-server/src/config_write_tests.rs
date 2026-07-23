@@ -49,6 +49,7 @@ fn whitelist_matches_every_serialized_zode_config_key() {
         "browser",
         "noema",
         "compact",
+        "backgroundWatchdog",
     ]
     .into_iter()
     .map(str::to_string)
@@ -89,6 +90,27 @@ fn subagent_iteration_budget_patch_accepts_bounded_and_unbounded_values() {
 
     let unbounded = merge_patch(&bounded, json!({"subagentMaxIterations": 0})).unwrap();
     assert_eq!(unbounded.subagent_max_iterations, Some(0));
+}
+
+#[test]
+fn background_watchdog_patch_preserves_false_and_zero() {
+    let config = merge_patch(
+        &ZodeConfig::default(),
+        json!({
+            "backgroundWatchdog": {
+                "enabled": false,
+                "maxRetries": 0,
+                "inactivityTimeoutSecs": 45
+            }
+        }),
+    )
+    .unwrap();
+    assert_eq!(config.background_watchdog.enabled, Some(false));
+    assert_eq!(config.background_watchdog.max_retries, Some(0));
+    assert_eq!(
+        config.background_watchdog.inactivity_timeout().as_secs(),
+        45
+    );
 }
 
 #[test]

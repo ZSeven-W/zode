@@ -11,7 +11,7 @@ use agent::abort::AbortController;
 use agent::file_cache::FileStateCache;
 use agent::provider::Provider;
 use agent::tool::ToolRegistry;
-use agent_tools_code::task::TaskObserver;
+use agent_tools_code::task::{TaskFinishGuard, TaskObserver};
 
 use super::ask::{parse_asks, Ask};
 use super::board::Board;
@@ -23,6 +23,25 @@ use crate::config::ZodeConfig;
 use crate::external_agents::{ExternalAgentRegistry, GrantStore};
 
 const CLAIM_TTL: Duration = Duration::from_secs(1800);
+
+fn spawn_claim_renewal(
+    board: Board,
+    holder: String,
+    requested: Vec<String>,
+    abort: &AbortController,
+) -> tokio::task::JoinHandle<()> {
+    // Register before spawning so a hard-stop quiescence check cannot race
+    // the renewal task's first poll.
+    let work = abort.activity().track_worker();
+    tokio::spawn(async move {
+        let _work = work;
+        let interval = CLAIM_TTL / 3;
+        loop {
+            tokio::time::sleep(interval).await;
+            claims::renew(&board, &holder, &requested, CLAIM_TTL, tools::now_ms());
+        }
+    })
+}
 
 /// Everything the manager borrows from the engine to build teammates. Cheap
 /// to clone (Arcs); refreshed on each engine rebuild so a hot swap of model /
@@ -221,9 +240,11 @@ impl TeamManager {
         };
 
         // 2. claim (atomic; rolled back if dispatch setup fails).
-        if !claim_paths.is_empty() {
+        let claim_lease = if claim_paths.is_empty() {
+            claims::ClaimLease::default()
+        } else {
             let board = self.board();
-            if let Err(c) = claims::claim(
+            match claims::claim(
                 &board,
                 to,
                 claim_paths,
@@ -231,42 +252,92 @@ impl TeamManager {
                 CLAIM_TTL,
                 tools::now_ms(),
             ) {
-                self.reset_idle(to, generation);
-                return Err(TeamError::Io(format!(
-                    "claim conflict: {}",
-                    serde_json::to_string(&c.conflicts).unwrap_or_default()
-                )));
+                Ok(claimed) => claimed,
+                Err(c) => {
+                    self.reset_idle(to, generation);
+                    return Err(TeamError::Io(format!(
+                        "claim conflict: {}",
+                        serde_json::to_string(&c.conflicts).unwrap_or_default()
+                    )));
+                }
             }
-        }
+        };
 
         // 3. dispatch. A renewal task extends the claims' TTL while the send
         // is in flight so a long task can't lose its reservation mid-run.
-        let obs_id = deps.observer.on_start(to, Some(message), 1);
+        let observation = TaskFinishGuard::start(deps.observer.clone(), to, Some(message), 1);
+        let obs_id = observation.id();
         let roster_names: Vec<String> = self.roster().into_iter().map(|t| t.name).collect();
-        let renewal = if claim_paths.is_empty() {
+        let renewal = if claim_lease.requested.is_empty() {
             None
         } else {
             let board = self.board();
             let holder = to.to_string();
-            Some(tokio::spawn(async move {
-                let interval = CLAIM_TTL / 3;
-                loop {
-                    tokio::time::sleep(interval).await;
-                    claims::renew(&board, &holder, CLAIM_TTL, tools::now_ms());
-                }
-            }))
+            let requested = claim_lease.requested.clone();
+            Some(spawn_claim_renewal(board, holder, requested, &abort))
         };
-        let result = self.dispatch(deps, to, message, obs_id, abort).await;
-        if let Some(task) = renewal {
-            task.abort();
+        struct SendCleanup<'a> {
+            manager: &'a TeamManager,
+            to: String,
+            generation: u64,
+            acquired_claims: Vec<String>,
+            renewal: Option<tokio::task::JoinHandle<()>>,
+            observation: TaskFinishGuard,
+            armed: bool,
+        }
+        impl SendCleanup<'_> {
+            async fn stop_renewal(&mut self) {
+                if let Some(renewal) = self.renewal.take() {
+                    renewal.abort();
+                    let _ = renewal.await;
+                }
+            }
+
+            fn release_claims(&mut self) {
+                if !self.acquired_claims.is_empty() {
+                    claims::release(&self.manager.board(), &self.to, Some(&self.acquired_claims));
+                }
+                self.manager.reset_idle(&self.to, self.generation);
+            }
+
+            async fn settle(&mut self, result: &str, error: Option<&str>) {
+                self.observation.finish(result, error);
+                self.stop_renewal().await;
+                self.release_claims();
+                self.armed = false;
+            }
+        }
+        impl Drop for SendCleanup<'_> {
+            fn drop(&mut self) {
+                if self.armed {
+                    self.observation
+                        .finish("", Some("team send cancelled before backend completion"));
+                    if let Some(renewal) = self.renewal.take() {
+                        // Drop cannot await. The task owns a TurnWorkGuard, so
+                        // root quiescence remains closed until cancellation is
+                        // observed and the worker is actually dropped.
+                        renewal.abort();
+                    }
+                    self.release_claims();
+                    self.armed = false;
+                }
+            }
         }
 
-        // Release claims + settle status guarded by generation (a stale
-        // completion must not clobber a newer send).
-        if !claim_paths.is_empty() {
-            claims::release(&self.board(), to, Some(claim_paths));
+        let mut cleanup = SendCleanup {
+            manager: self,
+            to: to.to_string(),
+            generation,
+            acquired_claims: claim_lease.acquired,
+            renewal,
+            observation,
+            armed: true,
+        };
+        let result = self.dispatch(deps, to, message, obs_id, abort).await;
+        match &result {
+            Ok((reply, _, _)) => cleanup.settle(reply, None).await,
+            Err(error) => cleanup.settle("", Some(&error.to_string())).await,
         }
-        self.reset_idle(to, generation);
 
         match result {
             Ok((reply, changed_files, usage)) => {
@@ -389,7 +460,6 @@ impl TeamManager {
                         }
                     }
                 }
-                deps.observer.on_finish(obs_id, &out.result.text, None);
                 Ok((out.result.text, out.changed_files, usage))
             }
         }
@@ -876,5 +946,205 @@ mod tests {
             .is_err());
         let board = Board::new(cwd.join(".zode/team"));
         assert!(board.read().map(|s| s.claims.is_empty()).unwrap_or(true));
+    }
+
+    #[tokio::test]
+    async fn claim_renewal_worker_holds_quiescence_until_joined() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = Board::new(dir.path().join(".zode/team"));
+        let abort = AbortController::new();
+        let activity = abort.activity();
+
+        let renewal = spawn_claim_renewal(board, "worker".into(), vec!["src".into()], &abort);
+        assert_eq!(activity.active_workers(), 1);
+
+        renewal.abort();
+        let _ = renewal.await;
+        tokio::time::timeout(Duration::from_secs(1), activity.wait_for_quiescence())
+            .await
+            .expect("joined renewal should release its worker guard");
+        assert_eq!(activity.active_workers(), 0);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn send_releases_new_claim_but_preserves_preexisting_claim_after_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        let reg = ext_registry("my-ext", "fake-resume.sh");
+        let grants = Arc::new(GrantStore::default());
+        let def = reg.get("my-ext").unwrap();
+        let mut fingerprint = crate::external_agents::preapproval_fingerprint(def, &cwd).unwrap();
+        fingerprint.version_output = Some("1.0".into());
+        grants.store_pending(&def.name, fingerprint);
+        grants.promote(&def.name, "1.0".into());
+        let (mut deps, _) = deps(reg);
+        deps.grants = grants;
+
+        let mgr = TeamManager::new(cwd.clone());
+        mgr.hire(
+            &deps,
+            HireRequest {
+                agent: "my-ext".into(),
+                name: "worker".into(),
+                role: "builder".into(),
+                provider: None,
+                model: None,
+                tools: None,
+            },
+        )
+        .await
+        .unwrap();
+        let board = Board::new(cwd.join(".zode/team"));
+        claims::claim(
+            &board,
+            "worker",
+            &["src".into()],
+            &cwd,
+            CLAIM_TTL,
+            tools::now_ms(),
+        )
+        .unwrap();
+        let absolute = cwd.join("src").to_string_lossy().to_string();
+        let new_absolute = cwd.join("new.rs").to_string_lossy().to_string();
+
+        mgr.send(
+            &deps,
+            "worker",
+            "task",
+            &[absolute, new_absolute],
+            AbortController::new(),
+        )
+        .await
+        .unwrap();
+
+        let remaining = board.read().unwrap().claims;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].holder, "worker");
+        assert_eq!(remaining[0].path, "src");
+        assert_eq!(mgr.roster()[0].status_line, "idle");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn send_releases_dot_claim_after_dispatch_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        let reg = ext_registry("my-ext", "fake-resume.sh");
+        let (mut deps, _) = deps(reg);
+        deps.grants = Arc::new(GrantStore::default());
+        let mgr = TeamManager::new(cwd.clone());
+        mgr.hire(
+            &deps,
+            HireRequest {
+                agent: "my-ext".into(),
+                name: "worker".into(),
+                role: "builder".into(),
+                provider: None,
+                model: None,
+                tools: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let abort = AbortController::new();
+        let activity = abort.activity();
+        let error = mgr
+            .send(&deps, "worker", "task", &["./src".into()], abort)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("approval"));
+        assert_eq!(activity.active_workers(), 0);
+        let board = Board::new(cwd.join(".zode/team"));
+        assert!(board.read().unwrap().claims.is_empty());
+        assert_eq!(mgr.roster()[0].status_line, "idle");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn dropping_send_releases_new_claim_but_preserves_preexisting_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        let reg = ext_registry("my-ext", "fake-hang.sh");
+        let grants = Arc::new(GrantStore::default());
+        let def = reg.get("my-ext").unwrap();
+        let mut fingerprint = crate::external_agents::preapproval_fingerprint(def, &cwd).unwrap();
+        fingerprint.version_output = Some("1.0".into());
+        grants.store_pending(&def.name, fingerprint);
+        grants.promote(&def.name, "1.0".into());
+        let (mut deps, _) = deps(reg);
+        deps.grants = grants;
+        let mgr = Arc::new(TeamManager::new(cwd.clone()));
+        mgr.hire(
+            &deps,
+            HireRequest {
+                agent: "my-ext".into(),
+                name: "worker".into(),
+                role: "builder".into(),
+                provider: None,
+                model: None,
+                tools: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let board = Board::new(cwd.join(".zode/team"));
+        claims::claim(
+            &board,
+            "worker",
+            &["src".into()],
+            &cwd,
+            CLAIM_TTL,
+            tools::now_ms(),
+        )
+        .unwrap();
+
+        let abort = AbortController::new();
+        let activity = abort.activity();
+        let running = {
+            let mgr = mgr.clone();
+            let deps = deps.clone();
+            tokio::spawn(async move {
+                mgr.send(
+                    &deps,
+                    "worker",
+                    "task",
+                    &["./src".into(), "new.rs".into()],
+                    abort,
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if board
+                    .read()
+                    .is_ok_and(|snapshot| snapshot.claims.len() == 2)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("send should acquire its new claim");
+
+        running.abort();
+        let _ = running.await;
+        tokio::time::timeout(Duration::from_secs(2), activity.wait_for_quiescence())
+            .await
+            .expect("cancelled send workers should become quiescent");
+
+        let remaining = board.read().unwrap().claims;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].holder, "worker");
+        assert_eq!(remaining[0].path, "src");
+        assert_eq!(mgr.roster()[0].status_line, "idle");
     }
 }

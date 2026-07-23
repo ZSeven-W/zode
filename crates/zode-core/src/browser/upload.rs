@@ -46,7 +46,7 @@ impl Tool for UploadExecution {
         SafetyClass::Mutating
     }
 
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let target = if let Some(selector) = input.get("selector").and_then(Value::as_str) {
             ClickTarget::Selector(selector.to_string())
         } else {
@@ -73,16 +73,10 @@ impl Tool for UploadExecution {
             .target_override
             .clone()
             .unwrap_or_else(|| self.session.target());
-        let lease = self
-            .session
-            .lease_as(effective)
-            .await
-            .map_err(|error| AgentError::other(error.to_string()))?;
-        lease
-            .backend()
-            .set_file_input(&target, &paths)
-            .await
-            .map_err(|error| AgentError::other(error.to_string()))?;
+        let lease =
+            super::tools::await_browser_response(ctx, self.session.lease_as(effective)).await?;
+        let backend = lease.backend();
+        super::tools::await_browser_response(ctx, backend.set_file_input(&target, &paths)).await?;
         Ok(json!({"ok": true, "count": paths.len()}))
     }
 }
@@ -210,11 +204,9 @@ impl Tool for BrowserUploadTool {
     async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let (target, paths, mut shown) = Self::preflight(&input)?;
         let effective = self.effective_target();
-        let lease = self
-            .session
-            .lease_as(effective.clone())
-            .await
-            .map_err(|error| AgentError::other(error.to_string()))?;
+        let lease =
+            super::tools::await_browser_response(ctx, self.session.lease_as(effective.clone()))
+                .await?;
         if let Some(obj) = shown.as_object_mut() {
             obj.insert(
                 "_target".into(),
@@ -223,7 +215,9 @@ impl Tool for BrowserUploadTool {
                     BrowserTarget::Bridge => "bridge",
                 }),
             );
-            if let Ok(url) = lease.backend().current_url().await {
+            let backend = lease.backend();
+            if let Ok(url) = super::tools::await_browser_response(ctx, backend.current_url()).await
+            {
                 obj.insert("_page_url".into(), json!(url));
             }
             match &target {

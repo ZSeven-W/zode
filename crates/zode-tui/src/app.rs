@@ -72,6 +72,13 @@ use crate::ui::toast::Toast;
 
 mod extension_attachments;
 mod extension_tasks;
+mod watchdog;
+
+use watchdog::{
+    BackgroundWatchdog, Failure as WatchdogFailure, FailureCause, Recovery, WatchdogAction,
+};
+
+type SharedTurnRecorder = Arc<std::sync::Mutex<TurnRecorder>>;
 
 const PROMPT_HISTORY_FILE: &str = "prompt_history.json";
 /// Cap on persisted prompt-history entries PER SESSION. When exceeded, the
@@ -98,6 +105,14 @@ const GOAL_LOOP_DEFAULT_MAX_TURNS: u32 = 25;
 /// lack of progress: a model that keeps replying "I'll continue" without
 /// doing any work (no tool calls, no diff) is spinning, not progressing.
 const GOAL_LOOP_NO_PROGRESS_LIMIT: u32 = 3;
+
+/// A Tokio abort is only a request: nested provider/tool workers may still be
+/// running after their owner future returns. Watched turns get this secondary
+/// deadline before the tab and schedule are quarantined. The lease remains
+/// held after the deadline until every tracked worker actually drops.
+const HARD_STOP_QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
+const SCHEDULE_ROSTER_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const SCHEDULE_FINALIZER_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 fn prompt_history_path() -> Option<std::path::PathBuf> {
     ConfigManager::config_dir()
@@ -391,13 +406,13 @@ pub struct UiConfig {
 }
 
 /// Identifies which scheduler job queued a prompt, for turn-outcome
-/// attribution: `App::sched_pending` maps a queued prompt to its job so a
-/// turn-start call site (`submit()` for the active tab,
+/// attribution: `App::sched_pending` maps each queued prompt occurrence to its
+/// job so a turn-start call site (`submit()` for the active tab,
 /// `dispatch_scheduler_queued()` for the tick-driven drain) can stamp
 /// `SessionTab::active_sched_job`, and `TurnDone` consumes it to update
 /// `App::sched_fail_streak` (the 3-strikes circuit breaker). `Loop` ids are
 /// process-local `u32`s from `Scheduler::add_loop`; `Schedule` ids are the
-/// persisted 4-hex-char ids from `schedules.json`.
+/// persisted 12-hex-char ids from `schedules.json` (legacy ids remain valid).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SchedJobRef {
     Loop(u32),
@@ -410,11 +425,79 @@ pub enum SchedJobRef {
 /// tabs can run identically-worded jobs, and a *stale* entry (one whose queued
 /// prompt was purged, or whose turn bailed before starting) must not be able to
 /// capture an unrelated user-typed message that happens to read the same on
-/// another tab. Within one tab the pair is unique by construction:
-/// `poll_scheduler`'s anti-pileup check refuses to queue a prompt that is
-/// already queued on that tab, so at most one live entry exists per pair and
-/// two same-text jobs are attributed independently, one after the other.
+/// another tab. The value is an occurrence-ordered queue: distinct jobs on the
+/// same tab may intentionally have identical prompt text, and each queued copy
+/// must retain its own attribution.
 type SchedPendingKey = (usize, String);
+type SchedPendingJobs = VecDeque<SchedJobRef>;
+
+#[derive(Debug, Clone)]
+enum ForcedTurnStop {
+    Watchdog(WatchdogFailure),
+    Manual {
+        job: SchedJobRef,
+        failure: Option<WatchdogFailure>,
+    },
+    Canonical {
+        job: SchedJobRef,
+        result: Result<(), String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct QuarantinedRecovery {
+    job: SchedJobRef,
+    failures: u32,
+    last_failure_ms: u64,
+}
+
+struct PendingForcedTurnStop {
+    outcome: ForcedTurnStop,
+    attempt_lease: Option<zode_core::scheduler::ScheduleAttemptLease>,
+    activity: Option<agent::abort::TurnActivity>,
+    quarantine: Option<QuarantinedRecovery>,
+    source_terminal_seen: bool,
+}
+
+#[derive(Clone)]
+struct ScheduledTurnPersistence {
+    session_id: String,
+    title: String,
+    persisted: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct PendingScheduleLease {
+    lease: zode_core::scheduler::ScheduleAttemptLease,
+    origin: PendingScheduleOrigin,
+    queued_at: std::time::Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingScheduleOrigin {
+    /// A canonical schedule slot claimed by `try_claim_watchdog_fire`.
+    Fire,
+    /// A persisted retry token claimed into the local queue.
+    Retry(u64),
+}
+
+#[derive(Debug, Clone)]
+enum ScheduleTerminalMutation {
+    /// Preserve every watchdog field and clear only the active attempt token.
+    ClearOnly,
+    /// Commit the complete terminal recovery state owned by this attempt.
+    WatchdogState {
+        failures: u32,
+        last_failure_ms: Option<u64>,
+        retry_at_ms: Option<u64>,
+        enabled: Option<bool>,
+    },
+}
+
+struct PendingScheduleFinalizer {
+    lease: zode_core::scheduler::ScheduleAttemptLease,
+    mutation: ScheduleTerminalMutation,
+    retry_at: std::time::Instant,
+}
 
 pub struct TuiApp {
     /// One independent conversation per tab; `active` indexes the focused one.
@@ -452,6 +535,9 @@ pub struct TuiApp {
     theme_store: ThemeStore,
     theme: Theme,
     should_quit: bool,
+    /// One-shot transition that rejects UI/extension request sources before
+    /// the scheduler finalizer drain begins.
+    shutdown_cleanup_started: bool,
     /// True after the first idle Esc on a non-empty draft: a second Esc then
     /// clears it. Any other key disarms it (so a stray Esc never wipes a draft).
     esc_clear_armed: bool,
@@ -544,39 +630,70 @@ pub struct TuiApp {
     /// per tick (`poll_scheduler`). Pure/I-O-free itself; `schedules.json`
     /// load/save happens around it here and in the slash-command handlers.
     scheduler: Scheduler,
+    /// Throttle authoritative roster reconciliation across concurrently
+    /// running zode processes.
+    last_schedule_roster_refresh: std::time::Instant,
     /// Queued-but-not-yet-submitted scheduler prompts, keyed by
-    /// `(owning tab id, exact prompt text)` — see [`SchedPendingKey`].
-    /// `submit()` pops the entry for the text it's about to run so
-    /// `SessionTab::active_sched_job` can attribute the turn back to its job.
+    /// `(owning tab id, exact prompt text)` — see [`SchedPendingKey`]. Each
+    /// value is FIFO because multiple distinct jobs may queue the same text on
+    /// one tab. `submit()` pops only the oldest occurrence for the text it's
+    /// about to run so `SessionTab::active_sched_job` can attribute the turn
+    /// back to its job.
     /// Entries are purged when their job goes away (`/loop stop`,
     /// `/schedule rm|disable`) or their tab closes, so a stale entry can never
     /// consume a later user-typed message.
-    sched_pending: HashMap<SchedPendingKey, SchedJobRef>,
+    sched_pending: HashMap<SchedPendingKey, SchedPendingJobs>,
+    /// Monotonic enqueue time per unique scheduler job. It bounds the
+    /// claim-to-start phase even when an interactive turn or queued user input
+    /// keeps the owning tab busy indefinitely.
+    sched_queued_at: HashMap<SchedJobRef, std::time::Instant>,
+    /// Cross-process leases for persisted schedule occurrences that have been
+    /// claimed but are still waiting in a tab queue. The lease moves into the
+    /// tab at turn start. If exact-token cleanup fails, it remains here as a
+    /// fail-closed fence even after the queue occurrence is removed.
+    pending_schedule_leases: HashMap<String, PendingScheduleLease>,
+    /// Terminal schedule mutations whose first durable write failed. The OS
+    /// lease remains held and the scheduler id remains blocked until a retry
+    /// commits, or a stale CAS is durably disabled for manual review.
+    pending_schedule_finalizers: HashMap<(String, u64), PendingScheduleFinalizer>,
     /// Consecutive turn failures per scheduler job. Reset to zero (removed) on
     /// a success; at 3 the job is stopped/disabled — a persistently broken
     /// prompt must not retry forever.
     sched_fail_streak: HashMap<SchedJobRef, u32>,
+    /// Liveness and bounded recovery for unattended scheduler-owned turns.
+    /// Ordinary interactive turns are deliberately never registered here.
+    watchdog: BackgroundWatchdog,
+    /// Hard-abort requests awaiting proof that the Tokio owner actually
+    /// stopped. The tab remains draining and its schedule lease remains held
+    /// until `TurnTaskStopped` arrives, preventing old/new drivers from sharing
+    /// one message store.
+    forced_turn_stops: HashMap<(usize, u64), PendingForcedTurnStop>,
 }
 
 async fn forward_agent_turn_stream(
     engine: Arc<ZodeEngine>,
     stream_result: Result<Box<dyn agent::stream::EventStream>, String>,
-    mut recorder: Option<TurnRecorder>,
+    recorder: Option<SharedTurnRecorder>,
     abort: Option<AbortController>,
     tab_id: usize,
     turn_id: u64,
     tx: mpsc::UnboundedSender<AppEvent>,
+    watchdog_pulse: Option<watchdog::WatchdogPulse>,
+    scheduled_persistence: Option<ScheduledTurnPersistence>,
 ) {
     let turn_ran = stream_result.is_ok();
+    let scheduler_owned = scheduled_persistence.is_some();
     let mut stop_reason: Option<String> = None;
-    let result = match stream_result {
+    let mut result = match stream_result {
         Ok(mut stream) => {
             if let Some(note) = engine.take_restore_note() {
-                if let Some(recorder) = recorder.as_mut() {
-                    recorder.record(RunEvent::Notice {
-                        code: "zode.compact.restore".into(),
-                        message: note.clone(),
-                    });
+                if let Some(recorder) = &recorder {
+                    if let Ok(mut recorder) = recorder.lock() {
+                        recorder.record(RunEvent::Notice {
+                            code: "zode.compact.restore".into(),
+                            message: note.clone(),
+                        });
+                    }
                 }
                 let _ = tx.send(AppEvent::Agent {
                     tab_id,
@@ -592,9 +709,14 @@ async fn forward_agent_turn_stream(
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(event) => {
+                        if let Some(pulse) = &watchdog_pulse {
+                            pulse.activity(std::time::Instant::now());
+                        }
                         engine.cost.observe(&event).await;
-                        if let Some(recorder) = recorder.as_mut() {
-                            recorder.record_agent(&event);
+                        if let Some(recorder) = &recorder {
+                            if let Ok(mut recorder) = recorder.lock() {
+                                recorder.record_agent(&event);
+                            }
                         }
                         if let Event::Result { data } = &event {
                             stop_reason = data.stop_reason.clone();
@@ -618,11 +740,16 @@ async fn forward_agent_turn_stream(
                         }
                     }
                     Err(error) => {
-                        if let Some(recorder) = recorder.as_mut() {
-                            recorder.record(RunEvent::Error {
-                                code: "stream_error".into(),
-                                message: error.to_string(),
-                            });
+                        if let Some(pulse) = &watchdog_pulse {
+                            pulse.activity(std::time::Instant::now());
+                        }
+                        if let Some(recorder) = &recorder {
+                            if let Ok(mut recorder) = recorder.lock() {
+                                recorder.record(RunEvent::Error {
+                                    code: "stream_error".into(),
+                                    message: error.to_string(),
+                                });
+                            }
                         }
                         result = Err(error.to_string());
                         break;
@@ -633,24 +760,127 @@ async fn forward_agent_turn_stream(
         }
         Err(error) => Err(error),
     };
-    if let Some(recorder) = recorder.as_mut() {
+    if let Some(pulse) = &watchdog_pulse {
+        pulse.activity(std::time::Instant::now());
+    }
+    let mut terminal_quarantined = false;
+    if scheduler_owned {
+        if let Some(activity) = abort.as_ref().map(AbortController::activity) {
+            if tokio::time::timeout(HARD_STOP_QUIESCE_TIMEOUT, activity.wait_for_quiescence())
+                .await
+                .is_err()
+            {
+                terminal_quarantined = true;
+                result = Err(
+                    "watchdog quarantine: tracked workers exceeded the quiescence deadline"
+                        .to_string(),
+                );
+                let _ = tx.send(AppEvent::TurnTaskQuarantined {
+                    tab_id,
+                    turn_id,
+                    result: Some(result.clone()),
+                });
+                // Do not journal, publish a terminal, or release the schedule
+                // while a tracked worker can still mutate the shared store.
+                // The UI disables the job and holds its attempt lease after
+                // the quarantine event; this waiter is intentionally
+                // unbounded so only real quiescence can lift that isolation.
+                activity.wait_for_quiescence().await;
+                if let Some(pulse) = &watchdog_pulse {
+                    pulse.activity(std::time::Instant::now());
+                }
+            }
+        }
+    }
+    if let Some(persistence) = scheduled_persistence {
+        if !crate::tab::persist_session(
+            persistence.session_id,
+            engine.clone(),
+            persistence.title,
+            persistence.persisted,
+            false,
+        )
+        .await
+        {
+            result = Err("durable session save failed".to_string());
+            if !terminal_quarantined {
+                terminal_quarantined = true;
+                let _ = tx.send(AppEvent::TurnTaskQuarantined {
+                    tab_id,
+                    turn_id,
+                    result: Some(result.clone()),
+                });
+            }
+        }
+        if let Some(pulse) = &watchdog_pulse {
+            pulse.activity(std::time::Instant::now());
+        }
+    }
+    if let Some(recorder) = &recorder {
+        let Ok(mut recorder) = recorder.lock() else {
+            if let Some(pulse) = &watchdog_pulse {
+                pulse.terminal();
+            }
+            let sent = if terminal_quarantined {
+                tx.send(AppEvent::TurnTaskStopped { tab_id, turn_id })
+            } else {
+                tx.send(AppEvent::TurnDone {
+                    tab_id,
+                    turn_id,
+                    result,
+                })
+            };
+            let _ = sent;
+            return;
+        };
         // A user cancel journals Interrupted (like `zode -p`), not a generic
         // failure. stop_reason stays the model's short token — never the raw
         // error text, which telemetry.rs exports verbatim.
-        let interrupted = abort.as_ref().is_some_and(|abort| abort.is_aborted());
+        let watchdog_timeout = watchdog_pulse
+            .as_ref()
+            .and_then(watchdog::WatchdogPulse::timeout_kind);
+        let interrupted =
+            watchdog_timeout.is_none() && abort.as_ref().is_some_and(|abort| abort.is_aborted());
         let failed = result.is_err();
+        if let Some(kind) = watchdog_timeout {
+            recorder.record(RunEvent::Notice {
+                code: "watchdog.timeout".into(),
+                message: format!("{} timeout", kind.label()),
+            });
+        }
         let outcome = TurnOutcome {
-            status: RunStatus::derive(interrupted, failed, stop_reason.as_deref()),
-            stop_reason,
-            partial: failed,
+            status: if terminal_quarantined || watchdog_timeout.is_some() {
+                RunStatus::Failed
+            } else {
+                RunStatus::derive(interrupted, failed, stop_reason.as_deref())
+            },
+            stop_reason: terminal_quarantined
+                .then(|| "watchdog_quarantined".to_string())
+                .or_else(|| {
+                    watchdog_timeout
+                        .map(|kind| format!("watchdog_{}_timeout", kind.label().replace(' ', "_")))
+                })
+                .or(stop_reason),
+            partial: terminal_quarantined || failed || watchdog_timeout.is_some(),
         };
         recorder.complete(Some(&engine.checkpoints), turn_ran, &outcome);
     }
-    let _ = tx.send(AppEvent::TurnDone {
-        tab_id,
-        turn_id,
-        result,
-    });
+    if let Some(pulse) = &watchdog_pulse {
+        // Recorder finalization and the nested-worker gate are both complete.
+        // Mark terminal before enqueueing so a concurrent UI tick cannot turn
+        // the tiny send/mark window into a false abort-grace expiration.
+        pulse.terminal();
+    }
+    let sent = if terminal_quarantined {
+        tx.send(AppEvent::TurnTaskStopped { tab_id, turn_id })
+    } else {
+        tx.send(AppEvent::TurnDone {
+            tab_id,
+            turn_id,
+            result,
+        })
+    };
+    let _ = sent;
 }
 
 impl TuiApp {
@@ -739,6 +969,105 @@ impl TuiApp {
         // with capture off (`"mouseCapture": false`) the terminal owns
         // selection — ⌘C copies natively — and no mouse events reach the app.
         let mouse_capture = template.mouse_capture();
+        let mut scheduler = Scheduler::default();
+        scheduler.set_schedules(zode_core::scheduler::load_schedules());
+        let watchdog_config = template.background_watchdog().clone();
+        let mut watchdog = BackgroundWatchdog::new(watchdog_config.clone());
+        let restore_instant = std::time::Instant::now();
+        let restore_epoch_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let schedules_at_startup = scheduler.schedules().to_vec();
+        for schedule in &schedules_at_startup {
+            if let Some(active_token_ms) = schedule.watchdog_active_since_ms {
+                match zode_core::scheduler::recover_orphaned_watchdog_attempt(
+                    &schedule.id,
+                    active_token_ms,
+                ) {
+                    Ok(zode_core::scheduler::OrphanAttemptRecovery::Live) => {
+                        tab0.chat.push_system(&format!(
+                            "watchdog: schedule {} is currently owned by another live zode process",
+                            schedule.id
+                        ));
+                    }
+                    Ok(zode_core::scheduler::OrphanAttemptRecovery::Stale) => {
+                        scheduler.set_schedules(zode_core::scheduler::load_schedules());
+                    }
+                    Ok(zode_core::scheduler::OrphanAttemptRecovery::Recovered(roster)) => {
+                        scheduler.set_schedules(roster);
+                        tab0.chat.push_system(&format!(
+                            "watchdog: schedule {} was active when its owner exited; disabled for manual review",
+                            schedule.id
+                        ));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, schedule_id = %schedule.id, "failed to inspect active watchdog lease");
+                    }
+                }
+                continue;
+            }
+            if !schedule.enabled {
+                continue;
+            }
+            if !watchdog_config.enabled()
+                && (schedule.watchdog_failures > 0 || schedule.watchdog_retry_at_ms.is_some())
+            {
+                match zode_core::scheduler::persist_idle_watchdog_state_if_matches(
+                    schedule, 0, None, None, None,
+                ) {
+                    Ok(true) => {
+                        scheduler.clear_watchdog_failures(&schedule.id);
+                    }
+                    Ok(false) => {
+                        scheduler.set_schedules(zode_core::scheduler::load_schedules());
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, schedule_id = %schedule.id, "failed to clear disabled watchdog state");
+                    }
+                }
+                continue;
+            }
+            if schedule.watchdog_failures == 0 {
+                continue;
+            }
+            if schedule.watchdog_failures > watchdog_config.max_retries() {
+                match zode_core::scheduler::persist_idle_watchdog_state_if_matches(
+                    schedule,
+                    schedule.watchdog_failures,
+                    schedule.watchdog_last_failure_ms,
+                    None,
+                    Some(false),
+                ) {
+                    Ok(true) => {
+                        scheduler.disable_schedule(&schedule.id);
+                    }
+                    Ok(false) => {
+                        scheduler.set_schedules(zode_core::scheduler::load_schedules());
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, schedule_id = %schedule.id, "failed to persist exhausted watchdog state");
+                    }
+                }
+                continue;
+            }
+            if let Some(retry_at_ms) = schedule.watchdog_retry_at_ms {
+                let delay =
+                    std::time::Duration::from_millis(retry_at_ms.saturating_sub(restore_epoch_ms));
+                let Some(due_at) = restore_instant.checked_add(delay) else {
+                    tracing::warn!(schedule_id = %schedule.id, "watchdog retry deadline is out of range");
+                    continue;
+                };
+                watchdog.restore_retry(
+                    SchedJobRef::Schedule(schedule.id.clone()),
+                    tab0.id,
+                    schedule.prompt.clone(),
+                    schedule.watchdog_failures,
+                    due_at,
+                    retry_at_ms,
+                );
+            }
+        }
         // Apply the configured UI language so the chrome renders localized.
         if let Some(lang) = template.language() {
             zode_core::i18n::set_language_code(lang);
@@ -771,6 +1100,7 @@ impl TuiApp {
             theme_store,
             theme,
             should_quit: false,
+            shutdown_cleanup_started: false,
             esc_clear_armed: false,
             selected_image: None,
             image_chip_hits: Vec::new(),
@@ -816,13 +1146,15 @@ impl TuiApp {
             show_thinking,
             show_tool_details,
             queued_edit_index: None,
-            scheduler: {
-                let mut scheduler = Scheduler::default();
-                scheduler.set_schedules(zode_core::scheduler::load_schedules());
-                scheduler
-            },
+            scheduler,
+            last_schedule_roster_refresh: std::time::Instant::now(),
             sched_pending: HashMap::new(),
+            sched_queued_at: HashMap::new(),
+            pending_schedule_leases: HashMap::new(),
+            pending_schedule_finalizers: HashMap::new(),
             sched_fail_streak: HashMap::new(),
+            watchdog,
+            forced_turn_stops: HashMap::new(),
         }
     }
 
@@ -894,13 +1226,525 @@ impl TuiApp {
         self.active_input_selection = None;
     }
 
+    fn sched_job_is_pending(&self, job: &SchedJobRef) -> bool {
+        self.sched_pending
+            .values()
+            .any(|jobs| jobs.iter().any(|candidate| candidate == job))
+    }
+
+    fn reload_schedule_roster(&mut self) -> bool {
+        match zode_core::scheduler::try_load_schedules() {
+            Ok(schedules) => {
+                self.scheduler.set_schedules(schedules);
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to refresh persisted schedule roster");
+                false
+            }
+        }
+    }
+
+    fn sched_job_has_pending_lease(&self, job: &SchedJobRef) -> bool {
+        match job {
+            SchedJobRef::Loop(_) => false,
+            SchedJobRef::Schedule(id) => {
+                self.pending_schedule_leases.contains_key(id)
+                    || self
+                        .pending_schedule_finalizers
+                        .keys()
+                        .any(|(pending_id, _)| pending_id == id)
+            }
+        }
+    }
+
+    /// Linearize a queued->running transition against remote disable/remove.
+    /// Read failures leave the prompt and lease queued; an authoritative
+    /// disabled, missing, or token-mismatched row cancels only this occurrence.
+    fn queued_schedule_claim_is_runnable(
+        &mut self,
+        job: &SchedJobRef,
+    ) -> Result<bool, zode_core::CoreError> {
+        let SchedJobRef::Schedule(id) = job else {
+            return Ok(true);
+        };
+        let Some(pending) = self.pending_schedule_leases.get(id) else {
+            return Ok(true);
+        };
+        let active_token_ms = pending.lease.active_token_ms();
+        let roster = zode_core::scheduler::try_load_schedules()?;
+        let runnable = roster.iter().any(|schedule| {
+            schedule.id == *id
+                && schedule.enabled
+                && schedule.watchdog_active_since_ms == Some(active_token_ms)
+        });
+        self.scheduler.set_schedules(roster);
+        Ok(runnable)
+    }
+
+    fn push_sched_pending(&mut self, key: SchedPendingKey, job: SchedJobRef) {
+        self.sched_queued_at
+            .entry(job.clone())
+            .or_insert_with(std::time::Instant::now);
+        self.sched_pending.entry(key).or_default().push_back(job);
+    }
+
+    fn pop_sched_pending(&mut self, key: &SchedPendingKey) -> Option<SchedJobRef> {
+        let (job, now_empty) = {
+            let jobs = self.sched_pending.get_mut(key)?;
+            let job = jobs.pop_front();
+            (job, jobs.is_empty())
+        };
+        if now_empty {
+            self.sched_pending.remove(key);
+        }
+        if let Some(job) = job.as_ref() {
+            if !self.sched_job_is_pending(job) {
+                self.sched_queued_at.remove(job);
+            }
+        }
+        job
+    }
+
+    fn pop_sched_pending_if_front(
+        &mut self,
+        key: &SchedPendingKey,
+        expected: &SchedJobRef,
+    ) -> Option<SchedJobRef> {
+        let matches = self.sched_pending.get(key).and_then(|jobs| jobs.front()) == Some(expected);
+        matches.then(|| self.pop_sched_pending(key)).flatten()
+    }
+
+    /// Remove one exact scheduler-owned queue occurrence without releasing its
+    /// persisted lease. Queue-timeout recovery needs to move that lease
+    /// directly into terminal persistence, not briefly expose an idle token.
+    fn take_sched_pending_occurrence(&mut self, expected: &SchedJobRef) -> Option<(usize, String)> {
+        let (key, occurrence) = self.sched_pending.iter().find_map(|(key, jobs)| {
+            jobs.iter()
+                .position(|job| job == expected)
+                .map(|occurrence| (key.clone(), occurrence))
+        })?;
+        let (tab_id, prompt) = key.clone();
+
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            let mut seen = 0usize;
+            tab.queued_input.retain(|queued| {
+                if queued != &prompt {
+                    return true;
+                }
+                let remove = seen == occurrence;
+                seen = seen.saturating_add(1);
+                !remove
+            });
+        }
+        let now_empty = if let Some(jobs) = self.sched_pending.get_mut(&key) {
+            jobs.remove(occurrence);
+            jobs.is_empty()
+        } else {
+            false
+        };
+        if now_empty {
+            self.sched_pending.remove(&key);
+        }
+        self.sched_queued_at.remove(expected);
+        Some((tab_id, prompt))
+    }
+
+    /// Release a queued schedule's exact persisted active token before
+    /// dropping its OS lease. An I/O failure retains the lease in memory, so
+    /// no other process can mistake the still-active token for abandoned work.
+    fn release_pending_schedule_lease(&mut self, job: &SchedJobRef) -> bool {
+        let SchedJobRef::Schedule(id) = job else {
+            return true;
+        };
+        let Some(pending) = self.pending_schedule_leases.remove(id) else {
+            return true;
+        };
+        self.finalize_schedule_attempt(pending.lease, ScheduleTerminalMutation::ClearOnly)
+    }
+
+    /// Cancel an unstarted occurrence without treating it as a successful
+    /// retry. The combined retry claim already cleared its retry token, while
+    /// exact lease release clears only active ownership, so consecutive
+    /// failure history remains untouched.
+    fn cancel_pending_sched_job(&mut self, job: &SchedJobRef) {
+        self.release_pending_schedule_lease(job);
+        self.watchdog.cancel_job(job);
+    }
+
+    fn cancel_persisted_retry_if_present(&mut self, job: &SchedJobRef) {
+        let SchedJobRef::Schedule(id) = job else {
+            return;
+        };
+        let roster = match zode_core::scheduler::try_load_schedules() {
+            Ok(roster) => roster,
+            Err(error) => {
+                tracing::warn!(%error, schedule_id = %id, "failed to inspect persisted retry during cancellation");
+                return;
+            }
+        };
+        let retry_at_ms = roster
+            .iter()
+            .find(|schedule| &schedule.id == id)
+            .and_then(|schedule| schedule.watchdog_retry_at_ms);
+        let Some(retry_at_ms) = retry_at_ms else {
+            self.scheduler.set_schedules(roster);
+            return;
+        };
+        if let Err(error) = zode_core::scheduler::clear_watchdog_retry_if(id, retry_at_ms) {
+            tracing::warn!(%error, schedule_id = %id, "failed to cancel persisted watchdog retry");
+        }
+        self.reload_schedule_roster();
+    }
+
+    fn cancel_sched_pending_if_front(
+        &mut self,
+        key: &SchedPendingKey,
+        expected: &SchedJobRef,
+    ) -> Option<SchedJobRef> {
+        let job = self.pop_sched_pending_if_front(key, expected)?;
+        self.cancel_pending_sched_job(&job);
+        Some(job)
+    }
+
+    /// Graceful application exit may discard queued, never-started work. Clear
+    /// those tokens; active turns deliberately keep theirs so an interrupted
+    /// process is recovered fail-closed on the next startup.
+    fn release_all_pending_schedule_leases(&mut self) {
+        let ids: Vec<String> = self.pending_schedule_leases.keys().cloned().collect();
+        for id in ids {
+            let Some(pending) = self.pending_schedule_leases.remove(&id) else {
+                continue;
+            };
+            let result = match pending.origin {
+                PendingScheduleOrigin::Retry(retry_token_ms) => {
+                    zode_core::scheduler::restore_claimed_watchdog_retry_for_shutdown(
+                        &id,
+                        pending.lease.active_token_ms(),
+                        retry_token_ms,
+                    )
+                }
+                PendingScheduleOrigin::Fire => {
+                    zode_core::scheduler::restore_claimed_watchdog_fire_for_shutdown(&pending.lease)
+                }
+            };
+            match result {
+                Ok(true) => drop(pending),
+                Ok(false) => {
+                    match zode_core::scheduler::quarantine_claimed_watchdog_queue_restore_conflict(
+                        &id,
+                        pending.lease.active_token_ms(),
+                    ) {
+                        Ok(conflict) => {
+                            tracing::error!(schedule_id = %id, ?conflict, "queued schedule restore conflicted; quarantined for manual review");
+                            drop(pending);
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, schedule_id = %id, "failed to quarantine queued restore conflict; retaining lease");
+                            self.pending_schedule_leases.insert(id, pending);
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, schedule_id = %id, "failed to release queued schedule during shutdown; retaining lease");
+                    self.pending_schedule_leases.insert(id, pending);
+                }
+            }
+        }
+        self.reload_schedule_roster();
+    }
+
+    /// Convert every scheduler-owned turn into an owned shutdown finalizer.
+    /// The UI keeps polling agent events until those finalizers have proved
+    /// worker quiescence and completed durable persistence; only then may the
+    /// app drop the tabs and their attempt leases.
+    fn begin_scheduler_shutdown(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        let targets: Vec<(usize, usize, u64, SchedJobRef, bool)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(tab_idx, tab)| {
+                let job = tab.active_sched_job.clone()?;
+                if tab.active_turn_id > 0 {
+                    Some((tab_idx, tab.id, tab.active_turn_id, job, true))
+                } else {
+                    tab.draining_turn_id
+                        .map(|turn_id| (tab_idx, tab.id, turn_id, job, false))
+                }
+            })
+            .collect();
+
+        for (tab_idx, tab_id, turn_id, job, active) in targets {
+            if self.forced_turn_stops.contains_key(&(tab_id, turn_id)) {
+                continue;
+            }
+            if active {
+                let Some(interrupt) = self.prepare_tab_interrupt(tab_idx, Some(turn_id)) else {
+                    continue;
+                };
+                self.watchdog
+                    .cancel_turn(tab_id, turn_id, std::time::Instant::now());
+                self.resolve_extension_approvals_before_tui_interrupt(tab_id, turn_id);
+                self.mark_extension_turn_interrupt_requested(tab_id, turn_id, None);
+                interrupt.abort.abort_with_reason("application exiting");
+            }
+            self.begin_forced_turn_stop(
+                tab_id,
+                turn_id,
+                ForcedTurnStop::Manual { job, failure: None },
+                agent_tx,
+            );
+        }
+    }
+
+    fn scheduler_shutdown_pending(&self) -> bool {
+        !self.pending_schedule_leases.is_empty()
+            || !self.pending_schedule_finalizers.is_empty()
+            || !self.forced_turn_stops.is_empty()
+            || self.tabs.iter().any(|tab| {
+                tab.active_sched_job.is_some()
+                    && (tab.active_turn_id > 0 || tab.draining_turn_id.is_some())
+            })
+    }
+
+    fn release_unsupervised_terminal_lease(
+        &mut self,
+        lease: Option<zode_core::scheduler::ScheduleAttemptLease>,
+    ) {
+        let Some(lease) = lease else {
+            return;
+        };
+        self.finalize_schedule_attempt(lease, ScheduleTerminalMutation::ClearOnly);
+    }
+
+    /// Commit a terminal mutation while retaining the live OS lease across
+    /// transient store failures. A stale CAS is not treated as success: the
+    /// authoritative row is disabled under the roster lock before the lease is
+    /// released, preventing an unexpectedly superseded attempt from replaying.
+    fn try_apply_schedule_finalizer(
+        &mut self,
+        mut pending: PendingScheduleFinalizer,
+    ) -> Option<PendingScheduleFinalizer> {
+        let id = pending.lease.schedule_id().to_string();
+        let active_token_ms = pending.lease.active_token_ms();
+        let result = match &pending.mutation {
+            ScheduleTerminalMutation::ClearOnly => {
+                zode_core::scheduler::clear_watchdog_attempt_if(&id, active_token_ms)
+            }
+            ScheduleTerminalMutation::WatchdogState {
+                failures,
+                last_failure_ms,
+                retry_at_ms,
+                enabled,
+            } => zode_core::scheduler::persist_watchdog_state_for_attempt(
+                &id,
+                active_token_ms,
+                *failures,
+                *last_failure_ms,
+                *retry_at_ms,
+                None,
+                *enabled,
+            ),
+        };
+
+        match result {
+            Ok(true) => {
+                drop(pending);
+                self.reload_schedule_roster();
+                None
+            }
+            Ok(false) => match zode_core::scheduler::quarantine_watchdog_terminal_conflict(
+                &id,
+                active_token_ms,
+            ) {
+                Ok(zode_core::scheduler::WatchdogTerminalConflict::StillOwned) => {
+                    pending.retry_at = std::time::Instant::now()
+                        .checked_add(SCHEDULE_FINALIZER_RETRY_INTERVAL)
+                        .unwrap_or_else(std::time::Instant::now);
+                    Some(pending)
+                }
+                Ok(zode_core::scheduler::WatchdogTerminalConflict::Missing) => {
+                    tracing::warn!(schedule_id = %id, active_token_ms, "schedule disappeared before terminal persistence");
+                    drop(pending);
+                    self.reload_schedule_roster();
+                    None
+                }
+                Ok(zode_core::scheduler::WatchdogTerminalConflict::SafeToRelease {
+                    persisted_active_token_ms,
+                    newly_disabled,
+                }) => {
+                    tracing::error!(
+                        schedule_id = %id,
+                        active_token_ms,
+                        ?persisted_active_token_ms,
+                        newly_disabled,
+                        "schedule terminal CAS conflicted; authoritative row is disabled for manual review"
+                    );
+                    drop(pending);
+                    self.reload_schedule_roster();
+                    None
+                }
+                Err(error) => {
+                    tracing::error!(%error, schedule_id = %id, "failed to quarantine stale schedule terminal; retaining lease");
+                    pending.retry_at = std::time::Instant::now()
+                        .checked_add(SCHEDULE_FINALIZER_RETRY_INTERVAL)
+                        .unwrap_or_else(std::time::Instant::now);
+                    Some(pending)
+                }
+            },
+            Err(error) => {
+                tracing::error!(%error, schedule_id = %id, "failed to persist schedule terminal; retaining lease for retry");
+                pending.retry_at = std::time::Instant::now()
+                    .checked_add(SCHEDULE_FINALIZER_RETRY_INTERVAL)
+                    .unwrap_or_else(std::time::Instant::now);
+                Some(pending)
+            }
+        }
+    }
+
+    fn finalize_schedule_attempt(
+        &mut self,
+        lease: zode_core::scheduler::ScheduleAttemptLease,
+        mutation: ScheduleTerminalMutation,
+    ) -> bool {
+        let key = (lease.schedule_id().to_string(), lease.active_token_ms());
+        let pending = PendingScheduleFinalizer {
+            lease,
+            mutation,
+            retry_at: std::time::Instant::now(),
+        };
+        if let Some(pending) = self.try_apply_schedule_finalizer(pending) {
+            let replaced = self.pending_schedule_finalizers.insert(key, pending);
+            debug_assert!(
+                replaced.is_none(),
+                "attempt token uniquely owns its finalizer"
+            );
+            false
+        } else {
+            true
+        }
+    }
+
+    fn retry_pending_schedule_finalizers(&mut self, now: std::time::Instant) {
+        let due: Vec<(String, u64)> = self
+            .pending_schedule_finalizers
+            .iter()
+            .filter_map(|(key, pending)| (pending.retry_at <= now).then(|| key.clone()))
+            .collect();
+        for key in due {
+            let Some(pending) = self.pending_schedule_finalizers.remove(&key) else {
+                continue;
+            };
+            if let Some(pending) = self.try_apply_schedule_finalizer(pending) {
+                self.pending_schedule_finalizers.insert(key, pending);
+            }
+        }
+    }
+
+    /// A failed claim can mean a live owner, a just-completed winner, or a
+    /// crashed owner whose persisted token is now orphaned. Reconcile the
+    /// authoritative roster and disable only a provably orphaned attempt.
+    fn reconcile_failed_schedule_claim(&mut self, id: &str, tab_idx: usize) {
+        let roster = match zode_core::scheduler::try_load_schedules() {
+            Ok(roster) => roster,
+            Err(error) => {
+                tracing::warn!(%error, schedule_id = %id, "failed to read schedule owner state");
+                return;
+            }
+        };
+        let active_token = roster
+            .iter()
+            .find(|schedule| schedule.id == id)
+            .and_then(|schedule| schedule.watchdog_active_since_ms);
+        self.scheduler.set_schedules(roster);
+        let Some(active_token) = active_token else {
+            return;
+        };
+        match zode_core::scheduler::recover_orphaned_watchdog_attempt(id, active_token) {
+            Ok(zode_core::scheduler::OrphanAttemptRecovery::Recovered(roster)) => {
+                self.scheduler.set_schedules(roster);
+                self.watchdog
+                    .cancel_job(&SchedJobRef::Schedule(id.to_string()));
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    tab.chat.push_system(&format!(
+                        "watchdog: schedule {id} lost its owner; disabled for manual review"
+                    ));
+                }
+            }
+            Ok(zode_core::scheduler::OrphanAttemptRecovery::Stale) => {
+                self.reload_schedule_roster();
+            }
+            Ok(zode_core::scheduler::OrphanAttemptRecovery::Live) => {}
+            Err(error) => {
+                tracing::warn!(%error, schedule_id = %id, "failed to reconcile schedule attempt owner")
+            }
+        }
+    }
+
+    /// Detach the scheduler attribution, if any, for one concrete queued
+    /// message before the user edits or deletes it. Equal-text occurrences are
+    /// paired FIFO with the per-key attribution queue, so removing occurrence
+    /// N cannot accidentally cancel a different same-text job.
+    fn detach_sched_occurrence_at(
+        &mut self,
+        tab_idx: usize,
+        queue_index: usize,
+    ) -> Option<SchedJobRef> {
+        let tab = self.tabs.get(tab_idx)?;
+        let prompt = tab.queued_input.get(queue_index)?.clone();
+        let occurrence = tab
+            .queued_input
+            .iter()
+            .take(queue_index)
+            .filter(|candidate| *candidate == &prompt)
+            .count();
+        let key = (tab.id, prompt);
+        let (job, now_empty) = {
+            let jobs = self.sched_pending.get_mut(&key)?;
+            if occurrence >= jobs.len() {
+                return None;
+            }
+            let job = jobs.remove(occurrence);
+            (job, jobs.is_empty())
+        };
+        if now_empty {
+            self.sched_pending.remove(&key);
+        }
+        if let Some(job) = job.as_ref() {
+            if !self.sched_job_is_pending(job) {
+                self.sched_queued_at.remove(job);
+            }
+        }
+        job
+    }
+
     fn save_queued_edit_text(&mut self, text: String) -> Option<usize> {
         let index = self.queued_edit_index?;
         self.queued_edit_index = None;
-        let queue = &mut self.tabs[self.active].queued_input;
-        if index >= queue.len() {
+        if index >= self.tabs[self.active].queued_input.len() {
             return None;
         }
+        // Taking control of a scheduler-injected occurrence turns it into an
+        // ordinary queued user message. Detach before mutating the text so the
+        // exact occurrence (not merely every equal string) is cancelled.
+        if let Some(job) = self.detach_sched_occurrence_at(self.active, index) {
+            self.cancel_pending_sched_job(&job);
+        }
+        if !text.trim().is_empty() {
+            let edited_key = (self.tabs[self.active].id, text.clone());
+            // The edited occurrence is user-owned. If its new text collides
+            // with other scheduler occurrences, their text-only queue entries
+            // can no longer be distinguished safely by position. Drop those
+            // attributions too (leave the messages queued as ordinary user
+            // input) rather than let the edited message capture a job.
+            if let Some(jobs) = self.sched_pending.remove(&edited_key) {
+                for job in jobs {
+                    self.sched_queued_at.remove(&job);
+                    self.cancel_pending_sched_job(&job);
+                }
+            }
+        }
+        let queue = &mut self.tabs[self.active].queued_input;
         if text.trim().is_empty() {
             queue.remove(index);
             Some(index.min(queue.len()))
@@ -1023,7 +1867,13 @@ impl TuiApp {
 
     /// Close the active tab (Ctrl+W). Aborts its in-flight turn first; closing
     /// the last tab quits.
+    #[cfg(test)]
     fn close_active_tab(&mut self) {
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel();
+        self.close_active_tab_with_events(&agent_tx);
+    }
+
+    fn close_active_tab_with_events(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         // Drop the tab's clipboard preview temp files before it goes away.
         let temps: Vec<std::path::PathBuf> = self.tabs[self.active]
             .pending_images
@@ -1054,19 +1904,68 @@ impl TuiApp {
                 SchedJobRef::Schedule(_) => false,
             });
         }
-        // The tab's `queued_input` (and any scheduler prompt in it) dies with
-        // the tab; drop the matching attribution entries so they can't outlive
-        // it and capture an unrelated prompt later.
-        self.purge_sched_pending_for_tab(closing_tab_id);
-        if self.tabs.len() == 1 {
+        let active_job = self.tabs[self.active].active_sched_job.clone();
+        let mut active_turn_id = (self.tabs[self.active].active_turn_id > 0)
+            .then_some(self.tabs[self.active].active_turn_id)
+            .or(self.tabs[self.active].draining_turn_id);
+        if self.tabs[self.active].active_turn_id > 0 {
+            if let Some(interrupt) = self.prepare_tab_interrupt(self.active, active_turn_id) {
+                active_turn_id = interrupt.turn_id;
+                if let Some(turn_id) = interrupt.turn_id {
+                    self.watchdog
+                        .cancel_turn(interrupt.tab_id, turn_id, std::time::Instant::now());
+                }
+                interrupt.abort.abort_with_reason("tab closed");
+            }
+        } else if active_turn_id.is_none() {
+            // Local operations do not own scheduler state, but still receive
+            // their cooperative cancellation before the tab disappears.
             if let Some(abort) = self.tabs[self.active].turn_abort.take() {
                 abort.abort_with_reason("tab closed");
             }
+        }
+        if let (Some(turn_id), Some(job)) = (active_turn_id, active_job.clone()) {
+            self.begin_forced_turn_stop(
+                closing_tab_id,
+                turn_id,
+                ForcedTurnStop::Manual { job, failure: None },
+                agent_tx,
+            );
+        }
+        // A non-final tab close is an explicit cancellation. Closing the last
+        // tab is application shutdown instead: keep queued schedule leases so
+        // the two-phase exit can restore their exact fire/retry tokens rather
+        // than silently consuming work that never started.
+        if self.tabs.len() == 1 {
+            let queued_jobs: Vec<SchedJobRef> = self
+                .sched_pending
+                .iter()
+                .filter(|((tab_id, _), _)| *tab_id == closing_tab_id)
+                .flat_map(|(_, jobs)| jobs.iter().cloned())
+                .collect();
+            self.sched_pending
+                .retain(|(tab_id, _), _| *tab_id != closing_tab_id);
+            for job in queued_jobs {
+                self.sched_queued_at.remove(&job);
+            }
+        } else {
+            self.purge_sched_pending_for_tab(closing_tab_id);
+        }
+        let cancelled_watchdog_jobs = self.watchdog.cancel_tab(closing_tab_id);
+        for job in &cancelled_watchdog_jobs {
+            if active_job.as_ref() != Some(job) {
+                self.cancel_persisted_retry_if_present(job);
+            }
+        }
+        if let Some(task) = self.tabs[self.active].turn_task.take() {
+            task.abort();
+            tokio::spawn(async move {
+                let _ = task.await;
+            });
+        }
+        if self.tabs.len() == 1 {
             self.should_quit = true;
             return;
-        }
-        if let Some(abort) = self.tabs[self.active].turn_abort.take() {
-            abort.abort_with_reason("tab closed");
         }
         self.tabs.remove(self.active);
         if self.active >= self.tabs.len() {
@@ -1089,6 +1988,8 @@ impl TuiApp {
             return false;
         };
         if let Some(turn_id) = interrupt.turn_id {
+            self.watchdog
+                .cancel_turn(interrupt.tab_id, turn_id, std::time::Instant::now());
             self.resolve_extension_approvals_before_tui_interrupt(interrupt.tab_id, turn_id);
             self.mark_extension_turn_interrupt_requested(interrupt.tab_id, turn_id, None);
         }
@@ -1105,6 +2006,8 @@ impl TuiApp {
                 continue;
             };
             if let Some(turn_id) = interrupt.turn_id {
+                self.watchdog
+                    .cancel_turn(interrupt.tab_id, turn_id, std::time::Instant::now());
                 self.resolve_extension_approvals_before_tui_interrupt(interrupt.tab_id, turn_id);
                 self.mark_extension_turn_interrupt_requested(interrupt.tab_id, turn_id, None);
             }
@@ -1226,6 +2129,10 @@ impl TuiApp {
     /// bindings are never consulted here, so an old N request cannot attach to
     /// N+1 or cross from the turn domain into a same-numbered local operation.
     fn route_approval_request(&mut self, request: ApprovalRequest) {
+        if self.should_quit {
+            let _ = request.respond(Approval::Deny);
+            return;
+        }
         let Some(source) = request.source.as_deref() else {
             let _ = request.respond(Approval::Deny);
             return;
@@ -1469,6 +2376,46 @@ impl TuiApp {
             }
         }
         self.active_question = Some(QuestionDialog::new(req));
+    }
+
+    fn route_question_request(&mut self, req: QuestionRequest) {
+        if self.should_quit {
+            let _ = req.respond(None);
+            return;
+        }
+        // A question is a modal like an approval: clear overlays so it cannot
+        // be hidden, then show it or queue it behind the active question.
+        self.settings = None;
+        self.connect = None;
+        self.session_picker = None;
+        self.tasks_panel = None;
+        self.subagents_panel = None;
+        self.files_panel = None;
+        self.team_panel = None;
+        self.browser_panel = None;
+        self.show_help = false;
+        if self.active_question.is_none() {
+            self.open_question(req);
+        } else {
+            self.pending_questions.push_back(req);
+        }
+    }
+
+    fn reject_pending_ui_requests_for_shutdown(&mut self) {
+        if let Some(mut dialog) = self.active_dialog.take() {
+            if let Some(request) = dialog.take_request() {
+                let _ = request.respond(Approval::Deny);
+            }
+        }
+        while let Some(request) = self.pending_requests.pop_front() {
+            let _ = request.respond(Approval::Deny);
+        }
+        if let Some(mut question) = self.active_question.take() {
+            question.dismiss();
+        }
+        while let Some(request) = self.pending_questions.pop_front() {
+            let _ = request.respond(None);
+        }
     }
 
     /// Start rebuilding the active tab's engine from `template` off the UI loop
@@ -2404,7 +3351,11 @@ impl TuiApp {
 
     /// Left-click on a collapsible sidebar section header toggles its fold;
     /// clicking the modified-files "…+k more" row opens the full-list overlay.
-    fn try_sidebar_header_click(&mut self, mouse: &MouseEvent) -> bool {
+    fn try_sidebar_header_click(
+        &mut self,
+        mouse: &MouseEvent,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) -> bool {
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return false;
         }
@@ -2441,7 +3392,7 @@ impl TuiApp {
                 self.active = i;
                 // close_active_tab also invalidates sidebar_hits so a second
                 // buffered click can't act on the stale row→tab mapping.
-                self.close_active_tab();
+                self.close_active_tab_with_events(agent_tx);
             }
             return true;
         }
@@ -2664,16 +3615,34 @@ impl TuiApp {
                 drawn?;
             }
             if self.should_quit {
-                // Sweep any clipboard preview temp files still held by any tab.
-                let temps: Vec<std::path::PathBuf> = self
-                    .tabs
-                    .iter()
-                    .flat_map(|t| t.pending_images.iter().map(|i| i.path.clone()))
-                    .collect();
-                for path in &temps {
-                    cleanup_clipboard_temp(&mut self.clipboard_temps, path);
+                // Queued schedule occurrences never started, so a graceful
+                // exit can safely release their exact active tokens. Running
+                // scheduler turns enter an owned finalizer and keep the event
+                // loop alive until worker quiescence and durable persistence
+                // complete; crash recovery is reserved for a real process
+                // loss, not a normal Ctrl-D, `/exit`, or last-tab close.
+                if !self.shutdown_cleanup_started {
+                    self.shutdown_cleanup_started = true;
+                    self.reject_pending_ui_requests_for_shutdown();
+                    self.begin_extension_shutdown();
                 }
-                break;
+                self.release_all_pending_schedule_leases();
+                self.begin_scheduler_shutdown(&agent_tx);
+                self.retry_pending_schedule_finalizers(std::time::Instant::now());
+                if self.scheduler_shutdown_pending() {
+                    self.skip_next_draw = true;
+                } else {
+                    // Sweep any clipboard preview temp files still held by any tab.
+                    let temps: Vec<std::path::PathBuf> = self
+                        .tabs
+                        .iter()
+                        .flat_map(|t| t.pending_images.iter().map(|i| i.path.clone()))
+                        .collect();
+                    for path in &temps {
+                        cleanup_clipboard_temp(&mut self.clipboard_temps, path);
+                    }
+                    break;
+                }
             }
 
             // Keep Tokio's default fair selection. Extension worker results
@@ -2703,6 +3672,9 @@ impl TuiApp {
                 }
                 maybe_ev = term_events.next() => {
                     if let Some(Ok(ev)) = maybe_ev {
+                        if self.should_quit {
+                            continue;
+                        }
                         let mut burst = vec![ev];
                         // Coalesce the rest of an input burst before redrawing.
                         // A trackpad/wheel momentum flick floods scroll events;
@@ -2737,7 +3709,9 @@ impl TuiApp {
                         .await;
                         // Switching to a tab that has queued input (and is now
                         // idle) flushes it here, not just on its own turn-done.
-                        self.dispatch_queued_input(&agent_tx).await;
+                        if !self.should_quit {
+                            self.dispatch_queued_input(&agent_tx).await;
+                        }
                     }
                 }
                 Some(app_ev) = agent_rx.recv() => {
@@ -2758,43 +3732,36 @@ impl TuiApp {
                             Err(_) => break,
                         }
                     }
-                    self.dispatch_extension_completions(&agent_tx);
-                    // A turn may have just finished — if it left the context at
-                    // the auto-compact threshold, compact before anything new is
-                    // sent, then flush any queued input.
-                    self.maybe_auto_compact(&agent_tx);
-                    self.dispatch_queued_input(&agent_tx).await;
-                    // A turn going idle here may have been on a background
-                    // tab — its own queued scheduler prompt (if any) needs
-                    // the same drain `dispatch_queued_input` gives the
-                    // active tab.
-                    self.dispatch_scheduler_queued(&agent_tx).await;
+                    if !self.should_quit {
+                        self.dispatch_extension_completions(&agent_tx);
+                        // A turn may have just finished — if it left the context at
+                        // the auto-compact threshold, compact before anything new is
+                        // sent, then flush any queued input.
+                        self.maybe_auto_compact(&agent_tx);
+                        self.dispatch_queued_input(&agent_tx).await;
+                        // A turn going idle here may have been on a background
+                        // tab — its own queued scheduler prompt (if any) needs
+                        // the same drain `dispatch_queued_input` gives the
+                        // active tab.
+                        self.dispatch_scheduler_queued(&agent_tx).await;
+                    }
                 }
                 Some(req) = self.approval_rx.next() => {
                     self.route_approval_request(req);
                 }
                 Some(req) = self.question_rx.next() => {
-                    // A question is a modal like an approval: clear overlays so
-                    // it can't be hidden, then show it (or queue if one's up).
-                    self.settings = None;
-                    self.connect = None;
-                    self.session_picker = None;
-                    self.tasks_panel = None;
-                    self.subagents_panel = None;
-                    self.files_panel = None;
-                    self.team_panel = None;
-                    self.browser_panel = None;
-                    self.show_help = false;
-                    if self.active_question.is_none() {
-                        self.open_question(req);
-                    } else {
-                        self.pending_questions.push_back(req);
-                    }
+                    self.route_question_request(req);
                 }
                 _ = ticker.tick() => {
                     self.status.tick();
-                    self.poll_scheduler();
-                    self.dispatch_scheduler_queued(&agent_tx).await;
+                    self.retry_pending_schedule_finalizers(std::time::Instant::now());
+                    if !self.should_quit {
+                        self.poll_queued_watchdog();
+                        self.poll_watchdog(&agent_tx);
+                        self.dispatch_watchdog_retries();
+                        self.poll_scheduler();
+                        self.dispatch_scheduler_queued(&agent_tx).await;
+                    }
                     self.cleanup_extension_attachments_at(std::time::Instant::now());
                     let had_toast = self.toast.is_some();
                     if let Some(t) = &mut self.toast {
@@ -3034,12 +4001,13 @@ impl TuiApp {
             picker.render(f, area, &theme);
         }
         if self.tasks_panel.is_some() {
-            let turns: Vec<String> = self
+            let mut turns: Vec<String> = self
                 .tabs
                 .iter()
                 .filter(|t| t.is_busy())
                 .map(|t| format!("{}: running", t.title))
                 .collect();
+            turns.extend(self.watchdog_status_lines(std::time::Instant::now()));
             let now = now_secs();
             let shells = std::mem::take(&mut self.bg_shells);
             if let Some(panel) = &mut self.tasks_panel {
@@ -3148,7 +4116,7 @@ impl TuiApp {
                 return;
             }
             CtEvent::Mouse(mouse) => {
-                self.handle_mouse(mouse);
+                self.handle_mouse(mouse, agent_tx);
                 return;
             }
             CtEvent::Resize(_, _) => {
@@ -3432,7 +4400,7 @@ impl TuiApp {
                 return;
             }
             (KeyCode::Char('w'), m) if is_primary_mod(m) => {
-                self.close_active_tab();
+                self.close_active_tab_with_events(agent_tx);
                 return;
             }
             (KeyCode::Char('b'), m) if is_primary_mod(m) => {
@@ -4019,7 +4987,7 @@ impl TuiApp {
         false
     }
 
-    fn handle_mouse(&mut self, mouse: MouseEvent) {
+    fn handle_mouse(&mut self, mouse: MouseEvent, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         if let Some(picker) = &mut self.session_picker {
             match session_picker_scroll_from_mouse(mouse.kind) {
                 Some(SessionPickerMouseScroll::Up(n)) => picker.scroll_up(n),
@@ -4101,7 +5069,7 @@ impl TuiApp {
         }
 
         // Left-click on a collapsible sidebar section header toggles its fold.
-        if self.try_sidebar_header_click(&mouse) {
+        if self.try_sidebar_header_click(&mouse, agent_tx) {
             return;
         }
 
@@ -5563,18 +6531,61 @@ impl TuiApp {
     /// turn, FIFO). Called after each agent event, so it fires as soon as a
     /// turn's `TurnDone` clears the busy flag.
     async fn dispatch_queued_input(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
-        if self.active_tab().is_busy() {
+        if self.should_quit || self.active_tab().is_busy() {
             return;
         }
         if self.queued_edit_index == Some(0) {
             return;
         }
+        let tab_id = self.active_tab().id;
+        let pending = self.active_tab().queued_input.front().and_then(|prompt| {
+            let key = (tab_id, prompt.clone());
+            self.sched_pending
+                .get(&key)
+                .and_then(|jobs| jobs.front())
+                .cloned()
+                .map(|job| (key, job))
+        });
+        if let Some((key, job)) = pending.as_ref() {
+            match self.queued_schedule_claim_is_runnable(job) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.active_tab_mut().queued_input.pop_front();
+                    self.cancel_sched_pending_if_front(key, job);
+                    self.active_tab_mut().chat.push_system(
+                        "scheduler: queued occurrence was disabled or lost ownership before start",
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to validate queued schedule; keeping it queued");
+                    return;
+                }
+            }
+        }
         let next = self.active_tab_mut().queued_input.pop_front();
         if let Some(text) = next {
-            if let Some(index) = self.queued_edit_index.as_mut() {
-                *index = index.saturating_sub(1);
+            let started = if let Some((_, job)) = pending.as_ref() {
+                self.submit_scheduler_occurrence(&text, job, agent_tx).await
+            } else {
+                self.submit(&text, agent_tx).await
+            };
+            let deferred = !started
+                && pending.as_ref().is_some_and(|(key, job)| {
+                    self.sched_pending.get(key).and_then(|jobs| jobs.front()) == Some(job)
+                });
+            if deferred {
+                self.active_tab_mut().queued_input.push_front(text);
+            } else {
+                if let Some(index) = self.queued_edit_index.as_mut() {
+                    *index = index.saturating_sub(1);
+                }
+                if !started {
+                    if let Some((key, job)) = pending {
+                        self.cancel_sched_pending_if_front(&key, &job);
+                    }
+                }
             }
-            self.submit(&text, agent_tx).await;
         }
     }
 
@@ -5619,6 +6630,132 @@ impl TuiApp {
         });
     }
 
+    /// Reconcile persisted schedules written by other zode processes without
+    /// turning a transient read error into an empty authoritative roster.
+    /// This also imports retry tokens and recovers active tokens whose OS
+    /// owner disappeared after this process started.
+    fn refresh_persisted_schedule_roster(&mut self, now: std::time::Instant) {
+        if now.saturating_duration_since(self.last_schedule_roster_refresh)
+            < SCHEDULE_ROSTER_REFRESH_INTERVAL
+        {
+            return;
+        }
+        self.last_schedule_roster_refresh = now;
+        let mut roster = match zode_core::scheduler::try_load_schedules() {
+            Ok(roster) => roster,
+            Err(error) => {
+                tracing::warn!(%error, "failed to reconcile persisted schedules");
+                return;
+            }
+        };
+
+        let mut locally_owned = self
+            .pending_schedule_leases
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        locally_owned.extend(self.tabs.iter().filter_map(|tab| {
+            tab.watchdog_attempt_lease
+                .as_ref()
+                .map(|lease| lease.schedule_id().to_string())
+        }));
+        locally_owned.extend(self.forced_turn_stops.values().filter_map(|pending| {
+            pending
+                .attempt_lease
+                .as_ref()
+                .map(|lease| lease.schedule_id().to_string())
+        }));
+        locally_owned.extend(
+            self.pending_schedule_finalizers
+                .keys()
+                .map(|(id, _)| id.clone()),
+        );
+
+        let orphan_candidates: Vec<(String, u64)> = roster
+            .iter()
+            .filter_map(|schedule| {
+                let token = schedule.watchdog_active_since_ms?;
+                (!locally_owned.contains(&schedule.id)).then(|| (schedule.id.clone(), token))
+            })
+            .collect();
+        for (id, token) in orphan_candidates {
+            match zode_core::scheduler::recover_orphaned_watchdog_attempt(&id, token) {
+                Ok(zode_core::scheduler::OrphanAttemptRecovery::Recovered(updated)) => {
+                    roster = updated;
+                    self.watchdog.cancel_job(&SchedJobRef::Schedule(id.clone()));
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        tab.chat.push_system(&format!(
+                            "watchdog: schedule {id} lost its owner; disabled for manual review"
+                        ));
+                    }
+                }
+                Ok(zode_core::scheduler::OrphanAttemptRecovery::Live)
+                | Ok(zode_core::scheduler::OrphanAttemptRecovery::Stale) => {}
+                Err(error) => {
+                    tracing::warn!(%error, schedule_id = %id, "failed to inspect runtime schedule owner");
+                }
+            }
+        }
+
+        self.scheduler.set_schedules(roster.clone());
+        let runnable_ids: HashSet<String> = roster
+            .iter()
+            .filter(|schedule| schedule.enabled)
+            .map(|schedule| schedule.id.clone())
+            .collect();
+        let stale_queued_ids: HashSet<String> = self
+            .sched_pending
+            .values()
+            .flat_map(|jobs| jobs.iter())
+            .filter_map(|job| match job {
+                SchedJobRef::Schedule(id) if !runnable_ids.contains(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        for id in stale_queued_ids {
+            let job = SchedJobRef::Schedule(id);
+            self.purge_sched_jobs(|candidate| candidate == &job);
+        }
+        for id in self.watchdog.occupied_schedule_ids() {
+            if !runnable_ids.contains(&id) {
+                let job = SchedJobRef::Schedule(id);
+                self.watchdog
+                    .cancel_recoveries_matching(|candidate| candidate == &job);
+            }
+        }
+
+        let now_epoch_ms = current_epoch_ms();
+        let retry_tab_id = self.tabs[self.active].id;
+        for schedule in roster {
+            let Some(retry_token_ms) = schedule.watchdog_retry_at_ms else {
+                continue;
+            };
+            let job = SchedJobRef::Schedule(schedule.id.clone());
+            if !schedule.enabled
+                || schedule.watchdog_active_since_ms.is_some()
+                || schedule.watchdog_failures == 0
+                || self.watchdog.job_is_occupied(&job)
+                || self.sched_job_is_pending(&job)
+                || self.sched_job_has_pending_lease(&job)
+            {
+                continue;
+            }
+            let delay = Duration::from_millis(retry_token_ms.saturating_sub(now_epoch_ms));
+            let Some(due_at) = now.checked_add(delay) else {
+                tracing::warn!(schedule_id = %schedule.id, "watchdog retry deadline is out of range");
+                continue;
+            };
+            self.watchdog.restore_retry(
+                job,
+                retry_tab_id,
+                schedule.prompt,
+                schedule.watchdog_failures,
+                due_at,
+                retry_token_ms,
+            );
+        }
+    }
+
     /// Once-per-tick scheduler poll: ask `Scheduler::due` what's ready to fire
     /// and queue each due prompt onto its owning tab, same injection path as
     /// a user typing while busy (`SessionTab::queued_input`). Draining that
@@ -5627,28 +6764,78 @@ impl TuiApp {
     /// and `dispatch_scheduler_queued` covers EVERY tab (active included) from
     /// the tick, so a due prompt runs unattended.
     fn poll_scheduler(&mut self) {
-        let due = self.scheduler.due(
-            std::time::Instant::now(),
-            chrono::Local::now().naive_local(),
+        let now = std::time::Instant::now();
+        self.refresh_persisted_schedule_roster(now);
+        let mut blocked_loops = self.watchdog.occupied_loop_ids();
+        blocked_loops.extend(
+            self.sched_pending
+                .values()
+                .flat_map(|jobs| jobs.iter())
+                .filter_map(|job| match job {
+                    SchedJobRef::Loop(id) => Some(*id),
+                    SchedJobRef::Schedule(_) => None,
+                }),
+        );
+        blocked_loops.extend(
+            self.tabs
+                .iter()
+                .filter_map(|tab| tab.active_sched_job.as_ref())
+                .filter_map(|job| match job {
+                    SchedJobRef::Loop(id) => Some(*id),
+                    SchedJobRef::Schedule(_) => None,
+                }),
+        );
+        let mut blocked_schedules = self.watchdog.occupied_schedule_ids();
+        blocked_schedules.extend(self.scheduler.schedules().iter().filter_map(|schedule| {
+            (schedule.watchdog_active_since_ms.is_some() || schedule.watchdog_retry_at_ms.is_some())
+                .then(|| schedule.id.clone())
+        }));
+        blocked_schedules.extend(self.pending_schedule_leases.keys().cloned());
+        blocked_schedules.extend(
+            self.pending_schedule_finalizers
+                .keys()
+                .map(|(id, _)| id.clone()),
+        );
+        blocked_schedules.extend(
+            self.sched_pending
+                .values()
+                .flat_map(|jobs| jobs.iter())
+                .filter_map(|job| match job {
+                    SchedJobRef::Loop(_) => None,
+                    SchedJobRef::Schedule(id) => Some(id.clone()),
+                }),
+        );
+        blocked_schedules.extend(self.tabs.iter().filter_map(|tab| {
+            match tab.active_sched_job.as_ref() {
+                Some(SchedJobRef::Schedule(id)) => Some(id.clone()),
+                _ => None,
+            }
+        }));
+        let wall_now = chrono::Local::now();
+        let due = self.scheduler.due_candidates_with_blocked_jobs(
+            now,
+            wall_now.naive_local(),
+            wall_now.timestamp_millis().max(0) as u64,
+            &blocked_loops,
+            &blocked_schedules,
         );
         for job in due {
             let job_ref = match &job.kind {
                 DueKind::Loop { id, .. } => SchedJobRef::Loop(*id),
                 DueKind::Schedule { id, .. } => SchedJobRef::Schedule(id.clone()),
             };
-            // Persistent schedules dedupe across processes before injecting —
-            // another zode process racing the same trigger must not double-fire.
-            if let DueKind::Schedule { id, fire_ms_hint } = &job.kind {
-                let Some(fire_ms) = naive_to_epoch_ms(*fire_ms_hint) else {
-                    // DST-ambiguous/nonexistent local mapping: skip this fire
-                    // rather than guess (never substitute epoch 0 — that would
-                    // look like a real earlier fire and corrupt the dedup
-                    // watermark). The next tick re-evaluates from scratch.
-                    continue;
-                };
-                if !zode_core::scheduler::try_mark_fired(id, fire_ms) {
-                    continue; // another zode process claimed this trigger
-                }
+            // Anti-pileup is job-identity based, not prompt-text based. Two
+            // distinct jobs may intentionally use the same prompt, while one
+            // logical job must never own two queued/running occurrences.
+            if self.watchdog.job_is_occupied(&job_ref)
+                || self.sched_job_is_pending(&job_ref)
+                || self.sched_job_has_pending_lease(&job_ref)
+                || self
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.active_sched_job.as_ref() == Some(&job_ref))
+            {
+                continue;
             }
             let tab_idx = match &job.kind {
                 DueKind::Loop { owner, .. } => self.tabs.iter().position(|t| t.id as u64 == *owner),
@@ -5657,19 +6844,924 @@ impl TuiApp {
             let Some(tab_idx) = tab_idx else {
                 continue; // owning tab was closed
             };
-            let tab = &mut self.tabs[tab_idx];
-            // Anti-pileup: skip while the same prompt is still queued (mirrors
-            // the goal-loop precedent of never stacking a duplicate).
-            if tab.queued_input.iter().any(|q| q == &job.prompt) {
+            let key = (self.tabs[tab_idx].id, job.prompt.clone());
+            let attributed = self.sched_pending.get(&key).map_or(0, VecDeque::len);
+            let queued_matches = self.tabs[tab_idx]
+                .queued_input
+                .iter()
+                .filter(|candidate| *candidate == &job.prompt)
+                .count();
+            // Do not put scheduler attribution behind an equal-text user
+            // message: without metadata inside `queued_input`, that earlier
+            // occurrence must remain unambiguously user-owned. Equal counts
+            // mean every existing match belongs to the FIFO attribution list,
+            // so another distinct scheduler job can safely append its copy.
+            if queued_matches != attributed {
                 continue;
             }
-            let key = (tab.id, job.prompt.clone());
-            self.sched_pending.insert(key, job_ref);
-            tab.queued_input.push_back(job.prompt);
+
+            // Claim the exact fire slot and its attempt lease in one store
+            // transaction before enqueueing. The returned OS lock remains in
+            // `pending_schedule_leases`, fencing later cadences even while a
+            // busy tab delays this turn.
+            let claimed_lease = if let DueKind::Schedule {
+                id, fire_epoch_ms, ..
+            } = &job.kind
+            {
+                let lease = match zode_core::scheduler::try_claim_watchdog_fire(id, *fire_epoch_ms)
+                {
+                    Ok(Some(lease)) => lease,
+                    Ok(None) => {
+                        self.reconcile_failed_schedule_claim(id, tab_idx);
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, schedule_id = %id, "failed to claim schedule fire");
+                        continue;
+                    }
+                };
+                let active_token_ms = lease.active_token_ms();
+                self.reload_schedule_roster();
+                self.scheduler.mark_watchdog_active(id, active_token_ms);
+                Some((id.clone(), lease))
+            } else {
+                None
+            };
+            self.push_sched_pending(key, job_ref);
+            self.tabs[tab_idx].queued_input.push_back(job.prompt);
+            if let Some((id, lease)) = claimed_lease {
+                let replaced = self.pending_schedule_leases.insert(
+                    id,
+                    PendingScheduleLease {
+                        lease,
+                        origin: PendingScheduleOrigin::Fire,
+                        queued_at: now,
+                    },
+                );
+                debug_assert!(
+                    replaced.is_none(),
+                    "schedule identity guard prevents replacement"
+                );
+            }
         }
     }
 
-    async fn submit(&mut self, text: &str, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+    /// Advance unattended-turn liveness, request cooperative aborts, and
+    /// hard-stop a tab when an aborted provider task never drains. Its slot
+    /// and lease remain fenced until tracked nested workers also quiesce.
+    fn poll_queued_watchdog(&mut self) {
+        if !self.watchdog.enabled() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let timeout = self.watchdog.queue_start_timeout();
+        let overdue: Vec<SchedJobRef> = self
+            .sched_queued_at
+            .iter()
+            .filter_map(|(job, queued_at)| {
+                let queued_at = match job {
+                    SchedJobRef::Schedule(id) => self
+                        .pending_schedule_leases
+                        .get(id)
+                        .map(|pending| pending.queued_at)
+                        .unwrap_or(*queued_at),
+                    SchedJobRef::Loop(_) => *queued_at,
+                };
+                (now.saturating_duration_since(queued_at) >= timeout).then(|| job.clone())
+            })
+            .collect();
+
+        for job in overdue {
+            let Some((tab_id, prompt)) = self.take_sched_pending_occurrence(&job) else {
+                self.sched_queued_at.remove(&job);
+                continue;
+            };
+            let attempt_lease = match &job {
+                SchedJobRef::Schedule(id) => {
+                    let Some(pending) = self.pending_schedule_leases.remove(id) else {
+                        tracing::error!(schedule_id = %id, "queued watchdog timeout had no attempt lease");
+                        self.watchdog.cancel_job(&job);
+                        continue;
+                    };
+                    if let Some(schedule) = self
+                        .scheduler
+                        .schedules()
+                        .iter()
+                        .find(|schedule| &schedule.id == id)
+                    {
+                        self.watchdog
+                            .seed_failures(&job, schedule.watchdog_failures);
+                    }
+                    Some(pending.lease)
+                }
+                SchedJobRef::Loop(_) => None,
+            };
+            let failure = self
+                .watchdog
+                .fail_queued(job, tab_id, prompt, std::time::Instant::now());
+            self.apply_watchdog_failure(failure, attempt_lease);
+        }
+    }
+
+    fn watchdog_status_lines(&self, now: std::time::Instant) -> Vec<String> {
+        let mut lines = self.watchdog.status_lines(now);
+        let timeout = self.watchdog.queue_start_timeout();
+        let mut queued: Vec<String> = self
+            .sched_queued_at
+            .iter()
+            .map(|(job, queued_at)| {
+                let age = now.saturating_duration_since(*queued_at);
+                format!(
+                    "{} · queued {}s · start timeout in {}s",
+                    watchdog::job_label(job),
+                    age.as_secs(),
+                    timeout.saturating_sub(age).as_secs(),
+                )
+            })
+            .collect();
+        queued.extend(self.pending_schedule_finalizers.values().map(|pending| {
+            format!(
+                "schedule {} · terminal persistence fenced; retry in {}s",
+                pending.lease.schedule_id(),
+                pending.retry_at.saturating_duration_since(now).as_secs(),
+            )
+        }));
+        queued.sort();
+        lines.extend(queued);
+        lines
+    }
+
+    fn poll_watchdog(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        let now = std::time::Instant::now();
+        for action in self.watchdog.poll(now) {
+            match action {
+                WatchdogAction::Abort {
+                    tab_id,
+                    turn_id,
+                    kind,
+                } => {
+                    let Some(tab_idx) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+                        self.watchdog.forget_turn(tab_id, turn_id);
+                        continue;
+                    };
+                    let Some(interrupt) = self.prepare_tab_interrupt(tab_idx, Some(turn_id)) else {
+                        // The terminal won the race with this tick or the tab
+                        // moved to another generation; never abort that newer
+                        // owner and never recover the stale record.
+                        self.watchdog.forget_turn(tab_id, turn_id);
+                        continue;
+                    };
+                    self.resolve_extension_approvals_before_tui_interrupt(tab_id, turn_id);
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        tab.chat.push_system(&format!(
+                            "watchdog: {} timeout — cancelling turn {turn_id}",
+                            kind.label()
+                        ));
+                    }
+                    interrupt
+                        .abort
+                        .abort_with_reason(format!("watchdog {} timeout", kind.label()));
+                }
+                WatchdogAction::HardStop {
+                    tab_id,
+                    turn_id,
+                    failure,
+                } => {
+                    self.begin_forced_turn_stop(
+                        tab_id,
+                        turn_id,
+                        ForcedTurnStop::Watchdog(failure),
+                        agent_tx,
+                    );
+                }
+                WatchdogAction::ForceCancel {
+                    tab_id,
+                    turn_id,
+                    job,
+                    failure,
+                } => {
+                    self.begin_forced_turn_stop(
+                        tab_id,
+                        turn_id,
+                        ForcedTurnStop::Manual { job, failure },
+                        agent_tx,
+                    );
+                }
+            }
+        }
+    }
+
+    fn begin_forced_turn_stop(
+        &mut self,
+        tab_id: usize,
+        turn_id: u64,
+        outcome: ForcedTurnStop,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            if let ForcedTurnStop::Watchdog(failure) = outcome {
+                self.apply_watchdog_failure(failure, None);
+            }
+            return;
+        };
+        if tab.draining_turn_id != Some(turn_id) {
+            return;
+        }
+        if self.forced_turn_stops.contains_key(&(tab_id, turn_id)) {
+            return;
+        }
+        let task = tab.turn_task.take();
+        let activity = tab.watchdog_activity.take();
+        let attempt_lease = tab.watchdog_attempt_lease.take();
+        let scheduled_persistence =
+            tab.active_sched_job
+                .as_ref()
+                .map(|_| ScheduledTurnPersistence {
+                    session_id: tab.session_id.clone(),
+                    title: tab.title.clone(),
+                    persisted: tab.persisted_msgs.clone(),
+                });
+        let persistence_engine = tab.engine.clone();
+        self.forced_turn_stops.insert(
+            (tab_id, turn_id),
+            PendingForcedTurnStop {
+                outcome,
+                attempt_lease,
+                activity: activity.clone(),
+                quarantine: None,
+                source_terminal_seen: false,
+            },
+        );
+        let tx = agent_tx.clone();
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + HARD_STOP_QUIESCE_TIMEOUT;
+            let mut quarantined = false;
+            let mut task = task;
+            if let Some(task) = task.as_mut() {
+                task.abort();
+            }
+            let task_stopped = match task.as_mut() {
+                Some(task) => tokio::time::timeout_at(deadline, task).await.is_ok(),
+                None => true,
+            };
+            let workers_stopped = if task_stopped {
+                match activity.as_ref() {
+                    Some(activity) => {
+                        tokio::time::timeout_at(deadline, activity.wait_for_quiescence())
+                            .await
+                            .is_ok()
+                    }
+                    None => true,
+                }
+            } else {
+                false
+            };
+            if !task_stopped || !workers_stopped {
+                quarantined = true;
+                let _ = tx.send(AppEvent::TurnTaskQuarantined {
+                    tab_id,
+                    turn_id,
+                    result: None,
+                });
+                if !task_stopped {
+                    if let Some(task) = task {
+                        let _ = task.await;
+                    }
+                }
+                if !workers_stopped {
+                    if let Some(activity) = activity {
+                        activity.wait_for_quiescence().await;
+                    }
+                }
+            }
+            if let Some(persistence) = scheduled_persistence {
+                let mut save = Box::pin(crate::tab::persist_session(
+                    persistence.session_id,
+                    persistence_engine,
+                    persistence.title,
+                    persistence.persisted,
+                    false,
+                ));
+                let persisted =
+                    match tokio::time::timeout(HARD_STOP_QUIESCE_TIMEOUT, &mut save).await {
+                        Ok(persisted) => persisted,
+                        Err(_) => {
+                            if !quarantined {
+                                quarantined = true;
+                                let _ = tx.send(AppEvent::TurnTaskQuarantined {
+                                    tab_id,
+                                    turn_id,
+                                    result: None,
+                                });
+                            }
+                            save.await
+                        }
+                    };
+                if !persisted && !quarantined {
+                    let _ = tx.send(AppEvent::TurnTaskQuarantined {
+                        tab_id,
+                        turn_id,
+                        result: None,
+                    });
+                }
+            }
+            let _ = tx.send(AppEvent::TurnTaskStopped { tab_id, turn_id });
+        });
+    }
+
+    fn quarantine_turn_task(
+        &mut self,
+        tab_id: usize,
+        turn_id: u64,
+        canonical_result: Option<Result<(), String>>,
+    ) {
+        let key = (tab_id, turn_id);
+        if !self.forced_turn_stops.contains_key(&key) {
+            let Some(mut result) = canonical_result else {
+                return;
+            };
+            if result.is_ok() {
+                result = Err(
+                    "watchdog quarantine: tracked workers exceeded the quiescence deadline"
+                        .to_string(),
+                );
+            }
+            let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                return;
+            };
+            if tab.active_turn_id != turn_id && tab.draining_turn_id != Some(turn_id) {
+                return;
+            }
+            let Some(job) = tab.active_sched_job.clone() else {
+                return;
+            };
+            // A quarantine is a draining fence even if the source raced away
+            // with its abort handle before this event reached the UI.
+            tab.active_turn_id = 0;
+            tab.draining_turn_id = Some(turn_id);
+            self.forced_turn_stops.insert(
+                key,
+                PendingForcedTurnStop {
+                    outcome: ForcedTurnStop::Canonical { job, result },
+                    attempt_lease: tab.watchdog_attempt_lease.take(),
+                    activity: tab.watchdog_activity.take(),
+                    quarantine: None,
+                    source_terminal_seen: false,
+                },
+            );
+        }
+
+        let Some(pending) = self.forced_turn_stops.get(&key) else {
+            return;
+        };
+        if pending.quarantine.is_some() {
+            return;
+        }
+        let outcome = pending.outcome.clone();
+        let active_token_ms = pending
+            .attempt_lease
+            .as_ref()
+            .map(zode_core::scheduler::ScheduleAttemptLease::active_token_ms);
+        let job = match &outcome {
+            ForcedTurnStop::Watchdog(failure) => failure.job.clone(),
+            ForcedTurnStop::Manual { job, .. } | ForcedTurnStop::Canonical { job, .. } => {
+                job.clone()
+            }
+        };
+        let current_failures = match &job {
+            SchedJobRef::Schedule(id) => self
+                .scheduler
+                .schedules()
+                .iter()
+                .find(|schedule| &schedule.id == id)
+                .map(|schedule| schedule.watchdog_failures)
+                .unwrap_or(0),
+            SchedJobRef::Loop(_) => 0,
+        };
+        let failures = match &outcome {
+            ForcedTurnStop::Watchdog(failure) => match failure.recovery {
+                Recovery::RetryScheduled { attempt, .. } => attempt,
+                Recovery::Exhausted { failures } | Recovery::ManualReview { failures } => failures,
+                Recovery::Cancelled => current_failures.saturating_add(1),
+            },
+            ForcedTurnStop::Manual { .. } | ForcedTurnStop::Canonical { .. } => {
+                current_failures.saturating_add(1)
+            }
+        };
+        let last_failure_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let recovery = QuarantinedRecovery {
+            job: job.clone(),
+            failures,
+            last_failure_ms,
+        };
+
+        self.watchdog.cancel_job(&job);
+        match &job {
+            SchedJobRef::Loop(id) => {
+                self.scheduler.stop_loop(Some(*id));
+            }
+            SchedJobRef::Schedule(id) => {
+                let active_token_ms = active_token_ms.or_else(|| {
+                    self.scheduler
+                        .schedules()
+                        .iter()
+                        .find(|schedule| &schedule.id == id)
+                        .and_then(|schedule| schedule.watchdog_active_since_ms)
+                });
+                if let Some(active_token_ms) = active_token_ms {
+                    if let Err(error) = zode_core::scheduler::persist_watchdog_state_for_attempt(
+                        id,
+                        active_token_ms,
+                        failures,
+                        Some(last_failure_ms),
+                        None,
+                        Some(active_token_ms),
+                        Some(false),
+                    ) {
+                        tracing::error!(%error, schedule_id = %id, "failed to persist watchdog quarantine");
+                    }
+                } else {
+                    tracing::error!(schedule_id = %id, "refusing to quarantine a schedule without its active token");
+                }
+                self.reload_schedule_roster();
+            }
+        }
+        self.purge_sched_jobs(|candidate| candidate == &job);
+        if let Some(pending) = self.forced_turn_stops.get_mut(&key) {
+            pending.quarantine = Some(recovery);
+        }
+        let message = format!(
+            "watchdog: {} did not quiesce after hard stop; its tab/store is quarantined and the job is disabled until every worker exits",
+            watchdog::job_label(&job)
+        );
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.mode = Mode::Error;
+            tab.chat.push_system(&message);
+        } else {
+            tracing::error!(job = %watchdog::job_label(&job), "{message}");
+        }
+    }
+
+    fn manual_review_failure(&self, tab_id: usize, job: SchedJobRef) -> WatchdogFailure {
+        let failures = match &job {
+            SchedJobRef::Schedule(id) => self
+                .scheduler
+                .schedules()
+                .iter()
+                .find(|schedule| &schedule.id == id)
+                .map(|schedule| schedule.watchdog_failures.saturating_add(1))
+                .unwrap_or(1),
+            SchedJobRef::Loop(_) => 1,
+        };
+        WatchdogFailure {
+            job,
+            tab_id,
+            cause: FailureCause::ManualCancellationUnknown,
+            recovery: Recovery::ManualReview { failures },
+        }
+    }
+
+    fn finish_forced_turn_stop(&mut self, tab_id: usize, turn_id: u64) {
+        let Some(PendingForcedTurnStop {
+            mut outcome,
+            attempt_lease,
+            activity,
+            quarantine,
+            source_terminal_seen,
+        }) = self.forced_turn_stops.remove(&(tab_id, turn_id))
+        else {
+            return;
+        };
+        let unsafe_manual_job = match &outcome {
+            ForcedTurnStop::Manual { job, failure }
+                if failure.is_none()
+                    && activity.as_ref().is_some_and(|activity| {
+                        activity.side_effect_risk() || activity.unresolved_external_work()
+                    }) =>
+            {
+                Some(job.clone())
+            }
+            _ => None,
+        };
+        if let Some(job) = unsafe_manual_job {
+            let generated = self.manual_review_failure(tab_id, job);
+            if let ForcedTurnStop::Manual { failure, .. } = &mut outcome {
+                *failure = Some(generated);
+            }
+        }
+        let result: Result<(), String> = if quarantine.is_some() {
+            Err("watchdog quarantine: tracked workers exceeded the quiescence deadline".into())
+        } else {
+            match &outcome {
+                ForcedTurnStop::Watchdog(_) => {
+                    Err("watchdog hard stop completed after cancellation grace".into())
+                }
+                ForcedTurnStop::Manual { .. } => {
+                    Err("user interruption hard stop completed".into())
+                }
+                ForcedTurnStop::Canonical { result, .. } => result.clone(),
+            }
+        };
+        let terminal = AppEvent::TurnDone {
+            tab_id,
+            turn_id,
+            result: result.clone(),
+        };
+        self.forward_extension_turn_event(tab_id, turn_id, &terminal);
+
+        let mut scheduled_job = None;
+        let mut schedule_attempt_lease = attempt_lease;
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            if tab.draining_turn_id == Some(turn_id) || tab.active_turn_id == turn_id {
+                if let Some(recorder) = tab.watchdog_recorder.take() {
+                    // Canonical quarantine completes in the source worker
+                    // after quiescence. Forced aborts never reach that tail,
+                    // so the UI owns their one terminal journal record.
+                    if !source_terminal_seen
+                        && !matches!(&outcome, ForcedTurnStop::Canonical { .. })
+                    {
+                        if let Ok(mut recorder) = recorder.lock() {
+                            let (code, message, status, stop_reason) = if quarantine.is_some() {
+                                (
+                                    "watchdog.quarantine",
+                                    "hard-stopped worker exceeded the quiescence deadline",
+                                    RunStatus::Failed,
+                                    "watchdog_quarantined",
+                                )
+                            } else {
+                                match &outcome {
+                                    ForcedTurnStop::Watchdog(_) => (
+                                        "watchdog.hard_stop",
+                                        "cancellation grace expired; worker was hard-stopped",
+                                        RunStatus::Failed,
+                                        "watchdog_abort_grace_expired",
+                                    ),
+                                    ForcedTurnStop::Manual { .. } => (
+                                        "watchdog.force_cancel",
+                                        "manual cancellation grace expired; worker was hard-stopped",
+                                        RunStatus::Interrupted,
+                                        "user_interrupted",
+                                    ),
+                                    ForcedTurnStop::Canonical { .. } => unreachable!(),
+                                }
+                            };
+                            recorder.record(RunEvent::Notice {
+                                code: code.into(),
+                                message: message.into(),
+                            });
+                            recorder.complete(
+                                Some(&tab.engine.checkpoints),
+                                true,
+                                &TurnOutcome {
+                                    status,
+                                    stop_reason: Some(stop_reason.into()),
+                                    partial: true,
+                                },
+                            );
+                        }
+                    }
+                }
+                tab.draining_turn_id = None;
+                tab.active_turn_id = 0;
+                tab.turn_abort = None;
+                tab.turn_task = None;
+                tab.watchdog_activity = None;
+                if schedule_attempt_lease.is_none() {
+                    schedule_attempt_lease = tab.watchdog_attempt_lease.take();
+                }
+                scheduled_job = tab.active_sched_job.take();
+                tab.turn_started_at = None;
+                tab.turn_tool_count = 0;
+                tab.active_tool_names.clear();
+                tab.active_tool_started.clear();
+                tab.chat.end_turn();
+                tab.mode = if quarantine.is_some()
+                    || result.is_err()
+                    || matches!(&outcome, ForcedTurnStop::Watchdog(_))
+                {
+                    Mode::Error
+                } else {
+                    Mode::Ready
+                };
+                tab.store_dirty = false;
+            }
+        }
+        if let Some(recovery) = quarantine {
+            if let SchedJobRef::Schedule(id) = &recovery.job {
+                if let Some(lease) = schedule_attempt_lease.take() {
+                    self.finalize_schedule_attempt(
+                        lease,
+                        ScheduleTerminalMutation::WatchdogState {
+                            failures: recovery.failures,
+                            last_failure_ms: Some(recovery.last_failure_ms),
+                            retry_at_ms: None,
+                            enabled: Some(false),
+                        },
+                    );
+                } else {
+                    tracing::error!(schedule_id = %id, "refusing to clear quarantine without its attempt lease");
+                }
+            }
+        } else {
+            match outcome {
+                ForcedTurnStop::Watchdog(failure) => {
+                    self.apply_watchdog_failure(failure, schedule_attempt_lease.take())
+                }
+                ForcedTurnStop::Manual { job, failure } => {
+                    if let Some(failure) = failure {
+                        self.apply_watchdog_failure(failure, schedule_attempt_lease.take());
+                    } else {
+                        // A side-effect-free force cancel keeps its watchdog
+                        // run context until the worker join completes so a
+                        // raced canonical terminal can still consume it.
+                        self.watchdog.cancel_job(&job);
+                        self.clear_schedule_watchdog_success(
+                            scheduled_job.as_ref().unwrap_or(&job),
+                            schedule_attempt_lease.take(),
+                        );
+                    }
+                }
+                ForcedTurnStop::Canonical { job, result } => {
+                    if self.watchdog.enabled() {
+                        if let Some(failure) = self.watchdog.finish(
+                            tab_id,
+                            turn_id,
+                            &result,
+                            std::time::Instant::now(),
+                        ) {
+                            self.apply_watchdog_failure(failure, schedule_attempt_lease.take());
+                        } else {
+                            self.clear_schedule_watchdog_success(
+                                &job,
+                                schedule_attempt_lease.take(),
+                            );
+                        }
+                    } else {
+                        self.release_unsupervised_terminal_lease(schedule_attempt_lease.take());
+                    }
+                }
+            }
+        }
+        drop(schedule_attempt_lease);
+    }
+
+    /// Move retries whose backoff elapsed onto the original tab's scheduler
+    /// queue. A busy tab or user-owned queued input delays dispatch without
+    /// consuming the retry.
+    fn dispatch_watchdog_retries(&mut self) {
+        let now = std::time::Instant::now();
+        for retry in self.watchdog.due_retries(now) {
+            let Some(tab_idx) = self.tabs.iter().position(|tab| tab.id == retry.tab_id) else {
+                self.watchdog.cancel_job(&retry.job);
+                continue;
+            };
+            let tab = &self.tabs[tab_idx];
+            if tab.is_busy()
+                || !tab.queued_input.is_empty()
+                || self.sched_job_is_pending(&retry.job)
+                || self.sched_job_has_pending_lease(&retry.job)
+            {
+                continue;
+            }
+
+            if let SchedJobRef::Schedule(id) = &retry.job {
+                let Some(retry_token_ms) = self.watchdog.retry_token(&retry.job) else {
+                    tracing::error!(schedule_id = %id, "persisted watchdog retry has no claim token");
+                    self.watchdog.cancel_job(&retry.job);
+                    continue;
+                };
+                let lease = match zode_core::scheduler::try_claim_watchdog_retry(id, retry_token_ms)
+                {
+                    Ok(Some(lease)) => lease,
+                    Ok(None) => {
+                        let roster = match zode_core::scheduler::try_load_schedules() {
+                            Ok(roster) => roster,
+                            Err(error) => {
+                                tracing::warn!(%error, schedule_id = %id, "failed to reconcile watchdog retry; keeping it pending");
+                                continue;
+                            }
+                        };
+                        let retry_still_pending = roster.iter().any(|schedule| {
+                            schedule.id == *id
+                                && schedule.enabled
+                                && schedule.watchdog_active_since_ms.is_none()
+                                && schedule.watchdog_retry_at_ms == Some(retry_token_ms)
+                        });
+                        self.scheduler.set_schedules(roster);
+                        if retry_still_pending {
+                            continue;
+                        }
+                        self.reconcile_failed_schedule_claim(id, tab_idx);
+                        self.watchdog.cancel_job(&retry.job);
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, schedule_id = %id, "failed to claim watchdog retry; keeping it pending");
+                        continue;
+                    }
+                };
+                let active_token_ms = lease.active_token_ms();
+                self.reload_schedule_roster();
+                self.scheduler.mark_watchdog_active(id, active_token_ms);
+                let replaced = self.pending_schedule_leases.insert(
+                    id.clone(),
+                    PendingScheduleLease {
+                        lease,
+                        origin: PendingScheduleOrigin::Retry(retry_token_ms),
+                        queued_at: now,
+                    },
+                );
+                debug_assert!(
+                    replaced.is_none(),
+                    "retry identity guard prevents replacement"
+                );
+            }
+            self.push_sched_pending((retry.tab_id, retry.prompt.clone()), retry.job.clone());
+            self.tabs[tab_idx]
+                .queued_input
+                .push_back(retry.prompt.clone());
+            self.tabs[tab_idx].chat.push_system(&format!(
+                "watchdog: starting retry {} for {}",
+                retry.attempt,
+                watchdog::job_label(&retry.job)
+            ));
+        }
+    }
+
+    fn apply_watchdog_failure(
+        &mut self,
+        failure: WatchdogFailure,
+        mut attempt_lease: Option<zode_core::scheduler::ScheduleAttemptLease>,
+    ) {
+        let job = failure.job.clone();
+        let cause = failure.cause.label();
+        let persisted_failures = match &failure.recovery {
+            Recovery::RetryScheduled { attempt, .. } => Some(*attempt),
+            Recovery::Exhausted { failures } | Recovery::ManualReview { failures } => {
+                Some(*failures)
+            }
+            Recovery::Cancelled => None,
+        };
+        let persist_retry = matches!(&failure.recovery, Recovery::RetryScheduled { .. });
+        let manual_review = matches!(&failure.recovery, Recovery::ManualReview { .. });
+        let cancelled = matches!(&failure.recovery, Recovery::Cancelled);
+        let stopped = matches!(
+            &failure.recovery,
+            Recovery::Exhausted { .. } | Recovery::ManualReview { .. }
+        );
+        let mut persisted_schedule_state = None;
+        if let (SchedJobRef::Schedule(id), Some(failures)) = (&job, persisted_failures) {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0);
+            let retry_at_ms = match &failure.recovery {
+                Recovery::RetryScheduled { delay, .. } => {
+                    Some(now_ms.saturating_add(delay.as_millis() as u64))
+                }
+                Recovery::Exhausted { .. }
+                | Recovery::ManualReview { .. }
+                | Recovery::Cancelled => None,
+            };
+            self.scheduler
+                .record_watchdog_failure(id, failures, now_ms, retry_at_ms);
+            if let Some(retry_at_ms) = retry_at_ms {
+                self.watchdog.set_retry_token(&job, retry_at_ms);
+            }
+            persisted_schedule_state = Some((id.clone(), failures, now_ms, retry_at_ms));
+        }
+        let message = match failure.recovery {
+            Recovery::RetryScheduled { attempt, delay } => format!(
+                "watchdog: {cause}; retry {attempt} scheduled in {}s",
+                delay.as_secs()
+            ),
+            Recovery::Cancelled => {
+                format!("watchdog: {cause}; recovery cancelled because the job was stopped")
+            }
+            Recovery::Exhausted { failures } | Recovery::ManualReview { failures } => {
+                match &job {
+                    SchedJobRef::Loop(id) => {
+                        self.scheduler.stop_loop(Some(*id));
+                    }
+                    SchedJobRef::Schedule(id) => {
+                        self.scheduler.disable_schedule(id);
+                    }
+                }
+                self.purge_sched_jobs(|candidate| candidate == &job);
+                self.watchdog.cancel_job(&job);
+                if manual_review {
+                    format!(
+                        "watchdog: {cause}; possible side effects or unknown execution state — {} stopped after {failures} failure(s); inspect before re-enabling",
+                        watchdog::job_label(&job)
+                    )
+                } else {
+                    format!(
+                        "watchdog: {cause}; exhausted after {failures} failures — {} stopped",
+                        watchdog::job_label(&job)
+                    )
+                }
+            }
+        };
+        if let Some((id, failures, last_failure_ms, retry_at_ms)) = persisted_schedule_state {
+            if let Some(lease) = attempt_lease.take() {
+                self.finalize_schedule_attempt(
+                    lease,
+                    ScheduleTerminalMutation::WatchdogState {
+                        failures,
+                        last_failure_ms: Some(last_failure_ms),
+                        retry_at_ms,
+                        enabled: stopped.then_some(false),
+                    },
+                );
+            } else {
+                tracing::error!(schedule_id = %id, "refusing to persist a schedule terminal without its active token");
+            }
+        } else if persist_retry {
+            tracing::debug!(job = %watchdog::job_label(&job), "loop watchdog retry is process-local");
+        } else if cancelled {
+            if let SchedJobRef::Schedule(id) = &job {
+                // Removal/disable suppresses recovery, but the terminal still
+                // owns the active-attempt token. Leaving it behind would make
+                // a disabled schedule impossible to re-enable in this process.
+                if let Some(lease) = attempt_lease.take() {
+                    self.finalize_schedule_attempt(lease, ScheduleTerminalMutation::ClearOnly);
+                } else {
+                    tracing::error!(schedule_id = %id, "refusing to clear cancelled schedule without its attempt lease");
+                }
+            }
+        }
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == failure.tab_id) {
+            tab.chat.push_system(&message);
+        } else {
+            tracing::warn!(job = %watchdog::job_label(&job), "{message}");
+        }
+    }
+
+    fn clear_schedule_watchdog_success(
+        &mut self,
+        job: &SchedJobRef,
+        attempt_lease: Option<zode_core::scheduler::ScheduleAttemptLease>,
+    ) {
+        let SchedJobRef::Schedule(id) = job else {
+            return;
+        };
+        self.scheduler.clear_watchdog_failures(id);
+        if let Some(lease) = attempt_lease {
+            self.finalize_schedule_attempt(
+                lease,
+                ScheduleTerminalMutation::WatchdogState {
+                    failures: 0,
+                    last_failure_ms: None,
+                    retry_at_ms: None,
+                    enabled: None,
+                },
+            );
+        } else {
+            tracing::error!(schedule_id = %id, "refusing to persist schedule success without its attempt lease");
+        }
+    }
+
+    /// Submit input and report whether it actually started a new agent turn.
+    /// Scheduler queue drains use the result to discard attribution for a
+    /// prompt they already popped when validation or command handling bails.
+    async fn submit(&mut self, text: &str, agent_tx: &mpsc::UnboundedSender<AppEvent>) -> bool {
+        self.submit_with_scheduler_origin(text, None, agent_tx)
+            .await
+    }
+
+    async fn submit_scheduler_occurrence(
+        &mut self,
+        text: &str,
+        expected_job: &SchedJobRef,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) -> bool {
+        self.submit_with_scheduler_origin(text, Some(expected_job), agent_tx)
+            .await
+    }
+
+    async fn submit_with_scheduler_origin(
+        &mut self,
+        text: &str,
+        expected_job: Option<&SchedJobRef>,
+        agent_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) -> bool {
+        if self.should_quit {
+            return false;
+        }
+        if let Some(expected_job) = expected_job {
+            if self.active_tab().is_busy() {
+                return false;
+            }
+            // Scheduler prompts are stored program text, not paste events.
+            // Treat an existing image path literally and keep the user's
+            // compose-box attachments/shell context isolated from this turn.
+            return self
+                .start_turn_on_tab(self.active, text, text, Some(expected_job), agent_tx)
+                .await;
+        }
         let cwd = self.active_tab().engine.cwd.clone();
 
         // `!<cmd>` runs a shell command directly (no agent turn). The command +
@@ -5680,13 +7772,13 @@ impl TuiApp {
             if !cmd.is_empty() {
                 self.spawn_local_shell(cmd, agent_tx);
             }
-            return;
+            return false;
         }
         let parsed = match split_pasted_image_paths(&cwd, text) {
             Ok(parsed) => parsed,
             Err(e) => {
                 self.toast = Some(Toast::error(e.to_string()));
-                return;
+                return false;
             }
         };
         let mut submitted_text = parsed.remaining_text;
@@ -5698,7 +7790,7 @@ impl TuiApp {
                     Some(e) => Some(e),
                     None => {
                         self.handle_slash(name, args, agent_tx).await;
-                        return;
+                        return false;
                     }
                 },
                 None => None,
@@ -5712,7 +7804,7 @@ impl TuiApp {
             && pasted_images.is_empty()
             && self.active_tab().pending_images.is_empty()
         {
-            return;
+            return false;
         }
 
         let pasted_count = pasted_images.len();
@@ -5729,7 +7821,7 @@ impl TuiApp {
                 Some(e) => Some(e),
                 None => {
                     self.handle_slash(name, args, agent_tx).await;
-                    return;
+                    return false;
                 }
             },
             None => None,
@@ -5775,7 +7867,7 @@ impl TuiApp {
                     self.toast = Some(Toast::info(crate::tr(
                         "steered into the running turn — the agent will see it next step",
                     )));
-                    return;
+                    return false;
                 }
             }
             if !submitted_text.trim().is_empty() {
@@ -5794,21 +7886,14 @@ impl TuiApp {
                     crate::tr("images")
                 )));
             }
-            return;
+            return false;
         }
 
-        // Attribution: if `text` is a prompt the scheduler just queued, remember
-        // which job it belongs to so `TurnDone` can update the failure streak.
-        // Keyed off `text` (the raw argument), not `submitted_text` (which may
-        // have gained a prepended shell-context note) — `sched_pending`'s keys
-        // are the exact prompts `poll_scheduler` pushed onto `queued_input`.
-        // The actual lookup/stamp happens INSIDE `start_turn_on_tab`, after its
-        // last early-return point (see that function's doc comment) — only the
-        // key is decided here, per call site, since the background drain in
-        // `dispatch_scheduler_queued` keys off the exact prompt it popped,
-        // which — unlike here — never gains a shell-context prefix.
-        self.start_turn_on_tab(self.active, &submitted_text, text, agent_tx)
-            .await;
+        // Direct submissions carry no scheduler provenance. Even identical
+        // text cannot consume a queued occurrence; only the two queue drains
+        // call `submit_scheduler_occurrence` with its exact expected job.
+        self.start_turn_on_tab(self.active, &submitted_text, text, None, agent_tx)
+            .await
     }
 
     /// Bind `text` to `tab_idx` and spawn its turn: route/validate images,
@@ -5822,23 +7907,35 @@ impl TuiApp {
     /// `self.active`, so the active-tab path is unchanged: same field
     /// writes, same ordering, same spawned events.
     ///
-    /// `sched_key` is the lookup key into `App::sched_pending` for scheduler
-    /// attribution (see `SchedJobRef`'s doc comment). It is looked up and
-    /// removed — and `SessionTab::active_sched_job` stamped — only AFTER the
-    /// last early-return point below (image-route / turn-limit bails), so a
-    /// bailed call never consumes a pending entry nor leaves a stale stamp on
-    /// the tab: if this function returns early, `sched_pending` still owns the
-    /// entry and the next unrelated turn on this tab cannot be misattributed
-    /// to it.
+    /// `expected_sched_job` is explicit queue-drain provenance. It must match
+    /// the oldest occurrence under `sched_key`; text equality alone is never
+    /// ownership. The match is removed and `active_sched_job` stamped only
+    /// after the last image-route/turn-limit preflight, so a bail preserves the
+    /// exact queued occurrence for its claim-to-start watchdog.
     async fn start_turn_on_tab(
         &mut self,
         tab_idx: usize,
         text: &str,
         sched_key: &str,
+        expected_sched_job: Option<&SchedJobRef>,
         agent_tx: &mpsc::UnboundedSender<AppEvent>,
-    ) {
+    ) -> bool {
+        if self.should_quit {
+            return false;
+        }
         let submitted_text = text.to_string();
-        let has_images = !self.tabs[tab_idx].pending_images.is_empty();
+        let sched_key = (self.tabs[tab_idx].id, sched_key.to_string());
+        let pending_job = self
+            .sched_pending
+            .get(&sched_key)
+            .and_then(|jobs| jobs.front())
+            .filter(|job| expected_sched_job == Some(*job))
+            .cloned();
+        if expected_sched_job.is_some() && pending_job.is_none() {
+            return false;
+        }
+        let scheduler_owned = pending_job.is_some();
+        let has_images = !scheduler_owned && !self.tabs[tab_idx].pending_images.is_empty();
         let images_cfg = self.template.images().clone();
         let image_route = resolve_image_submit_route(
             has_images,
@@ -5857,7 +7954,7 @@ impl TuiApp {
                     self.toast = Some(Toast::error(crate::tr(
                         "current provider does not declare image support; set supportsImages=true or configure /vision provider <name>",
                     )));
-                    return;
+                    return false;
                 }
                 None
             }
@@ -5866,14 +7963,14 @@ impl TuiApp {
                     self.toast = Some(Toast::error(crate::tr(
                         "configure /vision provider <name> first",
                     )));
-                    return;
+                    return false;
                 };
                 let Some(template) = self.template.with_vision_provider(provider_name) else {
                     self.toast = Some(Toast::error(
                         crate::tr("vision provider '{provider_name}' is not configured")
                             .replace("{provider_name}", provider_name),
                     ));
-                    return;
+                    return false;
                 };
                 Some((template, provider_name.to_string()))
             }
@@ -5883,7 +7980,7 @@ impl TuiApp {
             self.toast = Some(Toast::error(crate::tr(
                 "turn limit reached — start a new task",
             )));
-            return;
+            return false;
         };
 
         // Past every early-return point above: this turn WILL start, so it's
@@ -5892,8 +7989,51 @@ impl TuiApp {
         // consume `sched_key` without ever starting a turn, leaving a stuck
         // `active_sched_job` that misattributes the tab's NEXT unrelated turn
         // to this job (since no turn starts here, `TurnDone` never clears it).
-        let sched_key = (self.tabs[tab_idx].id, sched_key.to_string());
-        self.tabs[tab_idx].active_sched_job = self.sched_pending.remove(&sched_key);
+        let mut schedule_attempt_lease = None;
+        if let Some(job @ SchedJobRef::Schedule(id)) = pending_job.as_ref() {
+            let lease = match self.pending_schedule_leases.remove(id) {
+                Some(pending) => Ok(Some(pending.lease)),
+                None => {
+                    // Compatibility fallback for tests/legacy injection paths.
+                    // Production fire and retry dispatch claim before queueing.
+                    if let Some(retry_token_ms) = self.watchdog.retry_token(job) {
+                        zode_core::scheduler::try_claim_watchdog_retry(id, retry_token_ms)
+                    } else {
+                        zode_core::scheduler::try_begin_watchdog_attempt(id)
+                    }
+                }
+            };
+            let lease = match lease {
+                Ok(Some(lease)) => lease,
+                Ok(None) => {
+                    if let Some(removed) = self.pop_sched_pending(&sched_key) {
+                        self.cancel_pending_sched_job(&removed);
+                    }
+                    self.reconcile_failed_schedule_claim(id, tab_idx);
+                    self.tabs[tab_idx].chat.push_system(&format!(
+                        "watchdog: attempt for schedule {id} is owned by another zode process"
+                    ));
+                    return false;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, schedule_id = %id, "failed to claim queued schedule attempt");
+                    if let Some(removed) = self.pop_sched_pending(&sched_key) {
+                        self.cancel_pending_sched_job(&removed);
+                    }
+                    return false;
+                }
+            };
+            let active_token_ms = lease.active_token_ms();
+            self.reload_schedule_roster();
+            self.scheduler.mark_watchdog_active(id, active_token_ms);
+            schedule_attempt_lease = Some(lease);
+        }
+        self.tabs[tab_idx].active_sched_job = if scheduler_owned {
+            self.pop_sched_pending(&sched_key)
+        } else {
+            None
+        };
+        self.tabs[tab_idx].watchdog_attempt_lease = schedule_attempt_lease;
 
         // Stamp the session title from the first user prompt of this tab.
         if !self.tabs[tab_idx].titled {
@@ -5913,11 +8053,15 @@ impl TuiApp {
         // The pending images are about to be consumed; drop any chip
         // selection — only meaningful for the active tab's own compose box
         // (a background scheduler firing never touches it).
-        if tab_idx == self.active {
+        if tab_idx == self.active && !scheduler_owned {
             self.selected_image = None;
         }
         let tab = &mut self.tabs[tab_idx];
-        let images = std::mem::take(&mut tab.pending_images);
+        let images = if scheduler_owned {
+            Vec::new()
+        } else {
+            std::mem::take(&mut tab.pending_images)
+        };
         let previews = image_previews(&images);
         let content = user_content_blocks(&submitted_text, &images);
         // The image bytes are now in `content` (base64); the clipboard preview
@@ -5936,18 +8080,49 @@ impl TuiApp {
         // Fresh turn: arm the completion-footer clock and tool counter.
         tab.turn_started_at = Some(std::time::Instant::now());
         tab.turn_tool_count = 0;
+        tab.watchdog_recorder = None;
+        tab.watchdog_activity = None;
 
         tab.turn_seq = turn_id;
         tab.active_turn_id = turn_id;
         let tab_id = tab.id;
         let abort = AbortController::new();
         tab.turn_abort = Some(abort.clone());
+        let turn_activity = abort.activity();
         // A clone for the recorder so it can distinguish a user cancel from a
         // failure (the turn's own `abort` is moved into `engine.turn`).
         let abort_for_recorder = abort.clone();
 
         let engine = tab.engine.clone();
         let session_id = tab.session_id.clone();
+        let watchdog_job = tab.active_sched_job.clone();
+        let scheduler_owned = watchdog_job.is_some();
+        let scheduled_persistence = watchdog_job.as_ref().map(|_| ScheduledTurnPersistence {
+            session_id: session_id.clone(),
+            title: tab.title.clone(),
+            persisted: tab.persisted_msgs.clone(),
+        });
+        let watchdog_pulse = watchdog_job.and_then(|job| {
+            // Persisted schedules carry their failure count across restarts;
+            // seed it before registering this new attempt.
+            if let SchedJobRef::Schedule(id) = &job {
+                if let Some(schedule) = self.scheduler.schedules().iter().find(|s| &s.id == id) {
+                    self.watchdog
+                        .seed_failures(&job, schedule.watchdog_failures);
+                }
+            }
+            self.watchdog.start(
+                job,
+                tab_id,
+                turn_id,
+                submitted_text.clone(),
+                std::time::Instant::now(),
+                turn_activity.clone(),
+            )
+        });
+        if scheduler_owned {
+            tab.watchdog_activity = Some(turn_activity);
+        }
         let mut recorder = TurnRecorder::new(
             SessionStore::open_default().ok(),
             RunEventContext::new(
@@ -5965,6 +8140,10 @@ impl TuiApp {
                 tracing::warn!("checkpoint start failed: {error}");
             }
         }
+        let recorder = Arc::new(std::sync::Mutex::new(recorder));
+        if scheduler_owned {
+            tab.watchdog_recorder = Some(recorder.clone());
+        }
         let images_for_vision = images.clone();
         let submitted_text_for_vision = submitted_text.clone();
         let vision_prompt = images_cfg.effective_prompt().to_string();
@@ -5973,7 +8152,7 @@ impl TuiApp {
         // provider task can enqueue a tool approval request.
         self.template
             .bind_approval_turn(&tab_id.to_string(), turn_id);
-        tokio::spawn(async move {
+        let turn_task = tokio::spawn(async move {
             let stream_result: Result<Box<dyn agent::stream::EventStream>, String> = async {
                 if let Some((vision_template, provider_name)) = vision_template {
                     let assembled = vision_template
@@ -6017,9 +8196,13 @@ impl TuiApp {
                 tab_id,
                 turn_id,
                 tx,
+                watchdog_pulse,
+                scheduled_persistence,
             )
             .await;
         });
+        self.tabs[tab_idx].turn_task = Some(turn_task);
+        true
     }
 
     /// Tick-driven drain for prompts `poll_scheduler` injected, on EVERY idle
@@ -6040,6 +8223,9 @@ impl TuiApp {
     /// user to switch back, and on the active tab it keeps waiting for the
     /// normal drain, so the queued-edit UX is untouched.
     async fn dispatch_scheduler_queued(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        if self.should_quit {
+            return;
+        }
         let mut idx = 0;
         while idx < self.tabs.len() {
             if self.tabs[idx].is_busy() {
@@ -6055,34 +8241,72 @@ impl TuiApp {
                 continue;
             }
             let tab_id = self.tabs[idx].id;
-            let is_scheduled = self.tabs[idx]
-                .queued_input
-                .front()
-                .is_some_and(|front| self.sched_pending.contains_key(&(tab_id, front.clone())));
-            if !is_scheduled {
+            let pending = self.tabs[idx].queued_input.front().and_then(|front| {
+                let key = (tab_id, front.clone());
+                self.sched_pending
+                    .get(&key)
+                    .and_then(|jobs| jobs.front())
+                    .cloned()
+                    .map(|job| (key, job))
+            });
+            let Some((pending_key, pending_job)) = pending else {
                 idx += 1;
                 continue;
+            };
+            match self.queued_schedule_claim_is_runnable(&pending_job) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.tabs[idx].queued_input.pop_front();
+                    self.cancel_sched_pending_if_front(&pending_key, &pending_job);
+                    self.tabs[idx].chat.push_system(
+                        "scheduler: queued occurrence was disabled or lost ownership before start",
+                    );
+                    idx += 1;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to validate queued schedule; keeping it queued");
+                    idx += 1;
+                    continue;
+                }
             }
             let Some(prompt) = self.tabs[idx].queued_input.pop_front() else {
                 idx += 1;
                 continue;
             };
-            if idx == self.active {
+            let started = if idx == self.active {
                 // Route the active tab through `submit()` exactly as
                 // `dispatch_queued_input` would, so a tick-driven drain and a
                 // keypress-driven drain are indistinguishable (shell-context
                 // prepend, pending images, queued-edit index bookkeeping).
-                if let Some(index) = self.queued_edit_index.as_mut() {
-                    *index = index.saturating_sub(1);
-                }
-                self.submit(&prompt, agent_tx).await;
+                self.submit_scheduler_occurrence(&prompt, &pending_job, agent_tx)
+                    .await
             } else {
                 // Key and text are the same string here — unlike `submit()`,
                 // this prompt never gains a shell-context prefix. The actual
                 // `sched_pending` removal + `active_sched_job` stamp happens
                 // inside `start_turn_on_tab`, after its last early-return point.
-                self.start_turn_on_tab(idx, &prompt, &prompt, agent_tx)
-                    .await;
+                self.start_turn_on_tab(idx, &prompt, &prompt, Some(&pending_job), agent_tx)
+                    .await
+            };
+            let deferred = !started
+                && self
+                    .sched_pending
+                    .get(&pending_key)
+                    .and_then(|jobs| jobs.front())
+                    == Some(&pending_job);
+            if deferred {
+                // Preflight did not consume attribution or ownership. Put the
+                // concrete occurrence back until its queue watchdog starts the
+                // turn or converts the wait into bounded retry.
+                self.tabs[idx].queued_input.push_front(prompt);
+            } else if !started {
+                self.cancel_sched_pending_if_front(&pending_key, &pending_job);
+            }
+            if idx == self.active && !deferred {
+                if let Some(index) = self.queued_edit_index.as_mut() {
+                    *index = index.saturating_sub(1);
+                }
             }
             idx += 1;
         }
@@ -6098,27 +8322,82 @@ impl TuiApp {
     /// unrelated user message with the same text and (on a background tab) even
     /// auto-run it as scheduler-owned.
     fn purge_sched_jobs(&mut self, is_gone: impl Fn(&SchedJobRef) -> bool) {
-        let doomed: Vec<SchedPendingKey> = self
+        let mut doomed_jobs: HashSet<SchedJobRef> = self
+            .sched_pending
+            .values()
+            .flat_map(|jobs| jobs.iter())
+            .filter(|job| is_gone(job))
+            .cloned()
+            .collect();
+        doomed_jobs.extend(self.pending_schedule_leases.keys().filter_map(|id| {
+            let job = SchedJobRef::Schedule(id.clone());
+            is_gone(&job).then_some(job)
+        }));
+        let doomed: Vec<(SchedPendingKey, Vec<bool>)> = self
             .sched_pending
             .iter()
-            .filter(|(_, job)| is_gone(job))
-            .map(|(key, _)| key.clone())
+            .filter_map(|(key, jobs)| {
+                let removals: Vec<bool> = jobs.iter().map(&is_gone).collect();
+                removals
+                    .iter()
+                    .any(|remove| *remove)
+                    .then(|| (key.clone(), removals))
+            })
             .collect();
-        for (tab_id, prompt) in doomed {
-            self.sched_pending.remove(&(tab_id, prompt.clone()));
+
+        for ((tab_id, prompt), removals) in doomed {
+            // The first N equal-text queue entries correspond FIFO to the N
+            // jobs captured in `removals`. Remove only the matching job's
+            // concrete occurrences; equal-text occurrences owned by another
+            // job (or later user input) survive.
             if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-                tab.queued_input.retain(|q| q != &prompt);
+                let mut occurrence = 0;
+                tab.queued_input.retain(|queued| {
+                    if queued != &prompt {
+                        return true;
+                    }
+                    let remove = removals.get(occurrence).copied().unwrap_or(false);
+                    occurrence += 1;
+                    !remove
+                });
+            }
+
+            let key = (tab_id, prompt);
+            let now_empty = if let Some(jobs) = self.sched_pending.get_mut(&key) {
+                jobs.retain(|job| !is_gone(job));
+                jobs.is_empty()
+            } else {
+                false
+            };
+            if now_empty {
+                self.sched_pending.remove(&key);
             }
         }
+        for job in &doomed_jobs {
+            self.sched_queued_at.remove(job);
+            self.release_pending_schedule_lease(job);
+        }
         self.sched_fail_streak.retain(|job, _| !is_gone(job));
+        self.watchdog.cancel_recoveries_matching(is_gone);
     }
 
     /// Drop pending scheduler entries belonging to a tab that is going away.
     /// The tab's `queued_input` disappears with it, so only the map needs
     /// clearing — but leaving entries behind would let a same-text prompt on a
     /// future tab that reuses the id be misattributed.
-    fn purge_sched_pending_for_tab(&mut self, tab_id: usize) {
+    fn purge_sched_pending_for_tab(&mut self, tab_id: usize) -> HashSet<SchedJobRef> {
+        let jobs: HashSet<SchedJobRef> = self
+            .sched_pending
+            .iter()
+            .filter(|((id, _), _)| *id == tab_id)
+            .flat_map(|(_, jobs)| jobs.iter().cloned())
+            .collect();
         self.sched_pending.retain(|(id, _), _| *id != tab_id);
+        for job in &jobs {
+            self.sched_queued_at.remove(job);
+            self.release_pending_schedule_lease(job);
+        }
+        jobs
     }
 
     fn handle_runtime_event(&mut self, ev: AppEvent, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
@@ -6131,6 +8410,19 @@ impl TuiApp {
     }
 
     fn handle_agent_event(&mut self, ev: AppEvent) {
+        if let AppEvent::TurnTaskStopped { tab_id, turn_id } = &ev {
+            self.finish_forced_turn_stop(*tab_id, *turn_id);
+            return;
+        }
+        if let AppEvent::TurnTaskQuarantined {
+            tab_id,
+            turn_id,
+            result,
+        } = &ev
+        {
+            self.quarantine_turn_task(*tab_id, *turn_id, result.clone());
+            return;
+        }
         if let AppEvent::ReassembleDone {
             tab_id,
             seq,
@@ -6358,6 +8650,29 @@ impl TuiApp {
                 tab_id: *tab_id,
                 turn_id: *turn_id,
             });
+            if let Some(pending) = self.forced_turn_stops.get_mut(&(*tab_id, *turn_id)) {
+                // The hard-stop waiter owns terminal delivery and persistence.
+                // A worker can race its abort and queue TurnDone just before
+                // exiting; do not release the store before JoinHandle confirms
+                // that nested drivers and tools have actually been dropped.
+                pending.source_terminal_seen = true;
+                if let AppEvent::TurnDone { result, .. } = &ev {
+                    let canonical_job = match &pending.outcome {
+                        ForcedTurnStop::Manual { job, failure } => {
+                            failure.is_none().then(|| job.clone())
+                        }
+                        ForcedTurnStop::Canonical { job, .. } => Some(job.clone()),
+                        ForcedTurnStop::Watchdog(_) => None,
+                    };
+                    if let Some(job) = canonical_job {
+                        pending.outcome = ForcedTurnStop::Canonical {
+                            job,
+                            result: result.clone(),
+                        };
+                    }
+                }
+                return;
+            }
         }
         // Route to the originating tab; drop events from a closed tab.
         let (tab_id, turn_id) = match &ev {
@@ -6375,6 +8690,8 @@ impl TuiApp {
             | AppEvent::LocalShellDone { .. }
             | AppEvent::ConnectDialogReady { .. }
             | AppEvent::ReassembleDone { .. }
+            | AppEvent::TurnTaskStopped { .. }
+            | AppEvent::TurnTaskQuarantined { .. }
             | AppEvent::ExtensionTask(_) => {
                 unreachable!("handled above")
             }
@@ -6392,6 +8709,9 @@ impl TuiApp {
         if turn_id != self.tabs[tab_idx].active_turn_id {
             if let AppEvent::TurnDone { ref result, .. } = ev {
                 if self.tabs[tab_idx].draining_turn_id == Some(turn_id) {
+                    let watchdog_failure =
+                        self.watchdog
+                            .finish(tab_id, turn_id, result, std::time::Instant::now());
                     // The exact interrupted turn's terminal is canonical for
                     // the draining lifecycle even though active_turn_id was
                     // cleared at abort time. It owns the one interrupted wire
@@ -6400,6 +8720,13 @@ impl TuiApp {
                     self.forward_extension_turn_event(tab_id, turn_id, &ev);
                     let tab = &mut self.tabs[tab_idx];
                     tab.draining_turn_id = None;
+                    tab.turn_task = None;
+                    tab.watchdog_recorder = None;
+                    tab.watchdog_activity = None;
+                    let mut schedule_attempt_lease = tab.watchdog_attempt_lease.take();
+                    let scheduled_job = tab.active_sched_job.take();
+                    tab.turn_started_at = None;
+                    tab.turn_tool_count = 0;
                     tab.active_tool_names.clear();
                     tab.active_tool_started.clear();
                     let allow_append = !tab.store_dirty;
@@ -6410,20 +8737,34 @@ impl TuiApp {
                         tab.title.clone(),
                         tab.persisted_msgs.clone(),
                     );
-                    if let Some(sessions) = extension_sessions {
-                        tokio::spawn(async move {
-                            sessions
-                                .persist(session_id, engine, title, persisted, allow_append)
-                                .await;
-                        });
+                    if scheduled_job.is_none() {
+                        if let Some(sessions) = extension_sessions {
+                            tokio::spawn(async move {
+                                sessions
+                                    .persist(session_id, engine, title, persisted, allow_append)
+                                    .await;
+                            });
+                        } else {
+                            tokio::spawn(crate::tab::persist_session(
+                                session_id,
+                                engine,
+                                title,
+                                persisted,
+                                allow_append,
+                            ));
+                        }
+                    }
+                    if self.watchdog.enabled() {
+                        if let Some(failure) = watchdog_failure {
+                            self.apply_watchdog_failure(failure, schedule_attempt_lease.take());
+                        } else if let Some(job) = scheduled_job.as_ref() {
+                            self.clear_schedule_watchdog_success(
+                                job,
+                                schedule_attempt_lease.take(),
+                            );
+                        }
                     } else {
-                        tokio::spawn(crate::tab::persist_session(
-                            session_id,
-                            engine,
-                            title,
-                            persisted,
-                            allow_append,
-                        ));
+                        self.release_unsupervised_terminal_lease(schedule_attempt_lease.take());
                     }
                 } else {
                     // Remember every real provider terminal for idempotent old
@@ -6565,13 +8906,28 @@ impl TuiApp {
                 zode_core::desktop::overlay::hide_global();
                 tab.chat.end_turn();
                 tab.turn_abort = None;
+                tab.turn_task = None;
+                tab.watchdog_recorder = None;
+                tab.watchdog_activity = None;
+                let mut schedule_attempt_lease = tab.watchdog_attempt_lease.take();
                 tab.active_turn_id = 0;
                 tab.active_tool_names.clear();
                 tab.active_tool_started.clear();
                 let turn_elapsed = tab.turn_started_at.take().map(|t| t.elapsed());
                 let tool_count = std::mem::take(&mut tab.turn_tool_count);
                 let ok = result.is_ok();
-                tab.mode = match result {
+                let scheduled_job = tab.active_sched_job.take();
+                let watchdog_failure = if self.watchdog.enabled() && scheduled_job.is_some() {
+                    self.watchdog
+                        .finish(tab_id, turn_id, &result, std::time::Instant::now())
+                } else {
+                    None
+                };
+                let watchdog_success =
+                    (self.watchdog.enabled() && ok && watchdog_failure.is_none())
+                        .then(|| scheduled_job.clone())
+                        .flatten();
+                tab.mode = match &result {
                     Ok(()) => {
                         if let Some(elapsed) = turn_elapsed {
                             let line = crate::tr("✓ done · {duration} · {n} tools")
@@ -6605,28 +8961,36 @@ impl TuiApp {
                 // updates that job's consecutive-failure streak. 3 in a row stops
                 // the loop / disables the schedule — a persistently broken
                 // prompt must not retry forever unattended.
-                if let Some(job_ref) = tab.active_sched_job.take() {
-                    if ok {
-                        self.sched_fail_streak.remove(&job_ref);
-                    } else {
-                        let streak = self.sched_fail_streak.entry(job_ref.clone()).or_insert(0);
-                        *streak += 1;
-                        if *streak >= 3 {
-                            self.sched_fail_streak.remove(&job_ref);
-                            match &job_ref {
-                                SchedJobRef::Loop(id) => {
-                                    self.scheduler.stop_loop(Some(*id));
+                if !self.watchdog.enabled() {
+                    if let Some(job_ref) = scheduled_job.as_ref() {
+                        if ok {
+                            self.sched_fail_streak.remove(job_ref);
+                        } else {
+                            let streak = self.sched_fail_streak.entry(job_ref.clone()).or_insert(0);
+                            *streak += 1;
+                            if *streak >= 3 {
+                                self.sched_fail_streak.remove(job_ref);
+                                match job_ref {
+                                    SchedJobRef::Loop(id) => {
+                                        self.scheduler.stop_loop(Some(*id));
+                                    }
+                                    SchedJobRef::Schedule(id) => {
+                                        match zode_core::scheduler::disable_schedule_atomic(id) {
+                                            Ok(update) => {
+                                                self.scheduler.set_schedules(update.schedules)
+                                            }
+                                            Err(error) => tracing::warn!(
+                                                %error,
+                                                schedule_id = %id,
+                                                "failed to persist scheduler circuit breaker"
+                                            ),
+                                        }
+                                    }
                                 }
-                                SchedJobRef::Schedule(id) => {
-                                    self.scheduler.disable_schedule(id);
-                                    let _ = zode_core::scheduler::save_schedules(
-                                        self.scheduler.schedules(),
-                                    );
-                                }
+                                tab.chat.push_system(crate::tr(
+                                    "scheduler: stopped after 3 consecutive failures",
+                                ));
                             }
-                            tab.chat.push_system(crate::tr(
-                                "scheduler: stopped after 3 consecutive failures",
-                            ));
                         }
                     }
                 }
@@ -6696,23 +9060,39 @@ impl TuiApp {
                     tab.title.clone(),
                     tab.persisted_msgs.clone(),
                 );
-                // Mine the just-completed turn for durable memories (no-op
-                // unless autoExtract is on; runs detached, never blocks).
-                engine.spawn_post_turn_extraction();
-                if let Some(sessions) = extension_sessions {
-                    tokio::spawn(async move {
-                        sessions
-                            .persist(session_id, engine, title, persisted, allow_append)
-                            .await;
-                    });
+                if scheduled_job.is_none() {
+                    // Interactive turns keep memory extraction detached.
+                    // Scheduler turns deliberately skip it: starting a new
+                    // external LLM/write worker after their source-side
+                    // quiescence and durable save would outlive the attempt
+                    // lease and overlap the next recurrence.
+                    engine.spawn_post_turn_extraction();
+                    if let Some(sessions) = extension_sessions {
+                        tokio::spawn(async move {
+                            sessions
+                                .persist(session_id, engine, title, persisted, allow_append)
+                                .await;
+                        });
+                    } else {
+                        tokio::spawn(crate::tab::persist_session(
+                            session_id,
+                            engine,
+                            title,
+                            persisted,
+                            allow_append,
+                        ));
+                    }
+                }
+                if let Some(job) = watchdog_success {
+                    self.clear_schedule_watchdog_success(&job, schedule_attempt_lease.take());
+                }
+                if let Some(failure) = watchdog_failure {
+                    self.apply_watchdog_failure(failure, schedule_attempt_lease.take());
+                }
+                if self.watchdog.enabled() {
+                    drop(schedule_attempt_lease);
                 } else {
-                    tokio::spawn(crate::tab::persist_session(
-                        session_id,
-                        engine,
-                        title,
-                        persisted,
-                        allow_append,
-                    ));
+                    self.release_unsupervised_terminal_lease(schedule_attempt_lease.take());
                 }
             }
             AppEvent::Toast { .. }
@@ -6723,6 +9103,8 @@ impl TuiApp {
             | AppEvent::LocalShellDone { .. }
             | AppEvent::ConnectDialogReady { .. }
             | AppEvent::ReassembleDone { .. }
+            | AppEvent::TurnTaskStopped { .. }
+            | AppEvent::TurnTaskQuarantined { .. }
             | AppEvent::ExtensionTask(_) => {
                 unreachable!("handled above")
             }
@@ -7105,21 +9487,31 @@ impl TuiApp {
                 match parse_schedule(input.trim_end()) {
                     Err(e) => self.active_tab_mut().chat.push_system(&e),
                     Ok(ScheduleCommand::Add { spec, prompt }) => {
-                        let id = gen_schedule_id(&prompt);
                         let spec_desc = describe_schedule_spec(&spec);
-                        let mut schedules = self.scheduler.schedules().to_vec();
-                        schedules.push(zode_core::scheduler::ScheduleJob {
+                        let id = gen_schedule_id(self.scheduler.schedules());
+                        let job = zode_core::scheduler::ScheduleJob {
                             id: id.clone(),
                             spec,
                             prompt,
                             enabled: true,
                             last_fired_ms: None,
-                        });
-                        self.scheduler.set_schedules(schedules.clone());
-                        let msg = match zode_core::scheduler::save_schedules(&schedules) {
-                            Ok(()) => crate::tr("schedule added: {spec} (id {id})")
-                                .replace("{spec}", &spec_desc)
-                                .replace("{id}", &id),
+                            watchdog_failures: 0,
+                            watchdog_last_failure_ms: None,
+                            watchdog_retry_at_ms: None,
+                            watchdog_active_since_ms: None,
+                        };
+                        let msg = match zode_core::scheduler::add_schedule_atomic(job) {
+                            Ok(update) => {
+                                let applied = update.applied;
+                                self.scheduler.set_schedules(update.schedules);
+                                if applied {
+                                    crate::tr("schedule added: {spec} (id {id})")
+                                        .replace("{spec}", &spec_desc)
+                                        .replace("{id}", &id)
+                                } else {
+                                    format!("schedule id collision: {id}; try again")
+                                }
+                            }
                             Err(e) => format!("{}: {e}", crate::tr("save config failed")),
                         };
                         self.active_tab_mut().chat.push_system(&msg);
@@ -7147,50 +9539,83 @@ impl TuiApp {
                         self.active_tab_mut().chat.push_system(&text);
                     }
                     Ok(ScheduleCommand::Rm(id)) => {
-                        let mut schedules = self.scheduler.schedules().to_vec();
-                        let before = schedules.len();
-                        schedules.retain(|j| j.id != id);
-                        let found = schedules.len() != before;
-                        self.scheduler.set_schedules(schedules.clone());
-                        self.purge_sched_jobs(|job| job == &SchedJobRef::Schedule(id.clone()));
-                        let msg = if !found {
-                            format!("no schedule with id {id}")
-                        } else {
-                            match zode_core::scheduler::save_schedules(&schedules) {
-                                Ok(()) => format!("removed {id}"),
-                                Err(e) => format!("{}: {e}", crate::tr("save config failed")),
+                        // A queued occurrence is locally owned but has not
+                        // started: cancel it and exact-clear its active token
+                        // before asking the store to delete the now-idle row.
+                        let removed_job = SchedJobRef::Schedule(id.clone());
+                        if self.sched_job_is_pending(&removed_job)
+                            || self.sched_job_has_pending_lease(&removed_job)
+                        {
+                            self.purge_sched_jobs(|job| job == &removed_job);
+                        }
+                        let msg = match zode_core::scheduler::remove_schedule_atomic(&id) {
+                            Ok(update) => {
+                                let applied = update.applied;
+                                let active = update
+                                    .schedules
+                                    .iter()
+                                    .find(|schedule| schedule.id == id)
+                                    .is_some_and(|schedule| {
+                                        schedule.watchdog_active_since_ms.is_some()
+                                    });
+                                self.scheduler.set_schedules(update.schedules);
+                                if applied {
+                                    self.purge_sched_jobs(|job| job == &removed_job);
+                                    format!("removed {id}")
+                                } else if active {
+                                    format!(
+                                        "schedule {id} still has an active attempt; disable it now and remove it after the attempt finishes"
+                                    )
+                                } else {
+                                    format!("no schedule with id {id}")
+                                }
                             }
+                            Err(e) => format!("{}: {e}", crate::tr("save config failed")),
                         };
                         self.active_tab_mut().chat.push_system(&msg);
                     }
                     Ok(ScheduleCommand::Enable(id)) => {
-                        let mut schedules = self.scheduler.schedules().to_vec();
-                        let found = schedules
-                            .iter_mut()
-                            .find(|j| j.id == id)
-                            .map(|j| j.enabled = true)
-                            .is_some();
-                        self.scheduler.set_schedules(schedules.clone());
-                        let msg = if !found {
-                            format!("no schedule with id {id}")
-                        } else {
-                            match zode_core::scheduler::save_schedules(&schedules) {
-                                Ok(()) => format!("enabled {id}"),
-                                Err(e) => format!("{}: {e}", crate::tr("save config failed")),
+                        let msg = match zode_core::scheduler::enable_schedule_atomic(&id) {
+                            Ok(update) => {
+                                let applied = update.applied;
+                                let active = update
+                                    .schedules
+                                    .iter()
+                                    .find(|schedule| schedule.id == id)
+                                    .is_some_and(|schedule| {
+                                        schedule.watchdog_active_since_ms.is_some()
+                                    });
+                                self.scheduler.set_schedules(update.schedules);
+                                if applied {
+                                    self.watchdog.cancel_job(&SchedJobRef::Schedule(id.clone()));
+                                    format!("enabled {id}")
+                                } else if active {
+                                    format!(
+                                        "schedule {id} still has an active attempt; wait for it to finish or restart to recover an orphan before enabling"
+                                    )
+                                } else {
+                                    format!("no schedule with id {id}")
+                                }
                             }
+                            Err(e) => format!("{}: {e}", crate::tr("save config failed")),
                         };
                         self.active_tab_mut().chat.push_system(&msg);
                     }
                     Ok(ScheduleCommand::Disable(id)) => {
-                        let found = self.scheduler.disable_schedule(&id);
-                        self.purge_sched_jobs(|job| job == &SchedJobRef::Schedule(id.clone()));
-                        let msg = if !found {
-                            format!("no schedule with id {id}")
-                        } else {
-                            match zode_core::scheduler::save_schedules(self.scheduler.schedules()) {
-                                Ok(()) => format!("disabled {id}"),
-                                Err(e) => format!("{}: {e}", crate::tr("save config failed")),
+                        let msg = match zode_core::scheduler::disable_schedule_atomic(&id) {
+                            Ok(update) => {
+                                let applied = update.applied;
+                                self.scheduler.set_schedules(update.schedules);
+                                if applied {
+                                    self.purge_sched_jobs(|job| {
+                                        job == &SchedJobRef::Schedule(id.clone())
+                                    });
+                                    format!("disabled {id}")
+                                } else {
+                                    format!("no schedule with id {id}")
+                                }
                             }
+                            Err(e) => format!("{}: {e}", crate::tr("save config failed")),
                         };
                         self.active_tab_mut().chat.push_system(&msg);
                     }
@@ -7233,6 +9658,16 @@ impl TuiApp {
                 }
             }
             "tasks" => self.open_tasks_panel().await,
+            "watchdog" => {
+                let args = args.trim();
+                let message = if args.is_empty() || args == "status" {
+                    self.watchdog_status_lines(std::time::Instant::now())
+                        .join("\n")
+                } else {
+                    "usage: /watchdog [status]".to_string()
+                };
+                self.active_tab_mut().chat.push_system(&message);
+            }
             "subagents" => self.open_subagents_panel(),
             "config" => {
                 let msg = format!(
@@ -7618,7 +10053,7 @@ impl TuiApp {
         let tx = agent_tx.clone();
         tokio::spawn(async move {
             let _ = &abort; // keep the controller alive for the duration
-            let result = match OpConnection::ensure(&cfg, consent.as_ref(), &tag).await {
+            let result = match OpConnection::ensure(&cfg, consent.as_ref(), &tag, &abort).await {
                 Ok(client) => match client.call(&tool, args).await {
                     Ok(v) => Ok(serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())),
                     Err(e) => Err(format!("/op {tool} failed: {e}")),
@@ -7708,7 +10143,7 @@ impl TuiApp {
             .push_system(&format!("{}: {prompt}", crate::tr("generating design")));
         let tx = agent_tx.clone();
         tokio::spawn(async move {
-            let result = match OpConnection::ensure(&cfg, consent.as_ref(), &tag).await {
+            let result = match OpConnection::ensure(&cfg, consent.as_ref(), &tag, &abort).await {
                 Ok(client) => {
                     let g =
                         load_guidance(skills.as_ref(), &["frontend-design", "openpencil-design"]);
@@ -9317,28 +11752,11 @@ fn format_shell_context(cmd: &str, output: &str) -> String {
     }
 }
 
-/// Convert a local-time `NaiveDateTime` fire hint to epoch milliseconds for
-/// the cross-process fire-dedup store (`zode_core::scheduler::try_mark_fired`).
-///
-/// Two DST edge cases are handled, both deliberately, not accidentally:
-/// - **Fall-back (ambiguous local time, e.g. 1:30am occurring twice):**
-///   `.single()` fails, so this falls back to `.earliest()` — the job fires
-///   once, at the earlier of the two valid instants, rather than firing
-///   twice or not at all.
-/// - **Spring-forward (nonexistent local time, e.g. 2:30am on the day clocks
-///   skip to 3am):** neither `.single()` nor `.earliest()` has a valid
-///   mapping, so this returns `None` and the caller SKIPS the fire entirely
-///   for this tick — it must never substitute epoch 0, which would look like
-///   a real earlier fire and wedge the dedup watermark. The next tick
-///   re-evaluates from scratch, so a schedule that lands exactly in the gap
-///   simply fires on the following occurrence instead of this one.
-fn naive_to_epoch_ms(naive: chrono::NaiveDateTime) -> Option<u64> {
-    use chrono::TimeZone;
-    chrono::Local
-        .from_local_datetime(&naive)
-        .single()
-        .or_else(|| chrono::Local.from_local_datetime(&naive).earliest())
-        .map(|dt| dt.timestamp_millis().max(0) as u64)
+fn current_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// Render a `ScheduleSpec` back into the syntax `/schedule add` accepts, for
@@ -9388,15 +11806,17 @@ fn weekday_code(weekday: chrono::Weekday) -> &'static str {
     }
 }
 
-/// Generate a 4-hex-char id for a new `/schedule` job. No new dependency: a
-/// process-seeded `RandomState` hasher over `(now, prompt)` stands in for a
-/// proper RNG — collisions are harmless (the roster is small and ids are
-/// re-rolled per `/schedule add` call, never reused for identity elsewhere).
-fn gen_schedule_id(prompt: &str) -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::BuildHasher;
-    let hash = RandomState::new().hash_one((std::time::Instant::now(), prompt));
-    format!("{:04x}", hash & 0xffff)
+/// Generate a compact but identity-safe id. Watchdog recovery and enable /
+/// disable operations target ids, so collisions are not harmless: retry until
+/// the 12-hex UUID prefix is unique in the current roster.
+fn gen_schedule_id(existing: &[zode_core::scheduler::ScheduleJob]) -> String {
+    loop {
+        let full = Uuid::new_v4().simple().to_string();
+        let id = full[..12].to_string();
+        if existing.iter().all(|job| job.id != id) {
+            return id;
+        }
+    }
 }
 
 fn resolve_image_submit_route(
@@ -10298,7 +12718,7 @@ mod tests {
     #[tokio::test]
     async fn clicking_a_sidebar_tab_row_switches_the_active_tab() {
         use ratatui::{backend::TestBackend, Terminal};
-        let (mut app, _tx) = make_test_app().await;
+        let (mut app, agent_tx) = make_test_app().await;
         let engine = app.active_tab().engine.clone();
         app.tabs
             .push(crate::tab::SessionTab::new(2, engine, String::new()));
@@ -10312,20 +12732,26 @@ mod tests {
             .tabs_rows_start
             .expect("tab rows recorded during render");
         assert_eq!(app.sidebar_hits.tab_index_at(start + 1), Some(1));
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: area.x + 2,
-            row: start + 1,
-            modifiers: KeyModifiers::NONE,
-        });
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x + 2,
+                row: start + 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            &agent_tx,
+        );
         assert_eq!(app.active, 1, "click on the second tab row switches to it");
         // A click below the tab list does nothing.
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: area.x + 2,
-            row: start + app.sidebar_hits.tabs_shown,
-            modifiers: KeyModifiers::NONE,
-        });
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x + 2,
+                row: start + app.sidebar_hits.tabs_shown,
+                modifiers: KeyModifiers::NONE,
+            },
+            &agent_tx,
+        );
         assert_eq!(app.active, 1);
     }
 
@@ -10394,6 +12820,8 @@ mod tests {
         match ev {
             AppEvent::Agent { .. } => "Agent",
             AppEvent::TurnDone { .. } => "TurnDone",
+            AppEvent::TurnTaskStopped { .. } => "TurnTaskStopped",
+            AppEvent::TurnTaskQuarantined { .. } => "TurnTaskQuarantined",
             AppEvent::Toast { .. } => "Toast",
             AppEvent::CompactDone { .. } => "CompactDone",
             AppEvent::BgProgress { .. } => "BgProgress",
@@ -11927,6 +14355,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watchdog_slash_command_reports_status_and_usage() {
+        let (mut app, agent_tx) = make_test_app().await;
+        app.handle_slash("watchdog", "status", &agent_tx).await;
+        let status = &app.active_tab().chat.messages().last().unwrap().text;
+        assert!(status.contains("watchdog: enabled"));
+        assert!(status.contains("inactivity"));
+
+        app.handle_slash("watchdog", "unknown", &agent_tx).await;
+        assert_eq!(
+            app.active_tab().chat.messages().last().unwrap().text,
+            "usage: /watchdog [status]"
+        );
+        assert_eq!(app.active_tab().active_turn_id, 0);
+        assert!(app.active_tab().queued_input.is_empty());
+    }
+
+    #[tokio::test]
     async fn model_switch_hot_swaps_without_reassemble_pending() {
         let (mut app, agent_tx) = make_test_app().await;
         app.active_tab_mut().extension_access = zode_core::ToolAccessMode::ReadOnly;
@@ -12342,6 +14787,174 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timed_out_draining_turn_done_finishes_watchdog_once() {
+        let (mut app, _tx) = make_test_app().await;
+        app.watchdog = BackgroundWatchdog::new(zode_core::config::BackgroundWatchdogConfig {
+            enabled: Some(true),
+            inactivity_timeout_secs: Some(5),
+            max_runtime_secs: Some(30),
+            abort_grace_secs: Some(2),
+            max_retries: Some(2),
+            initial_backoff_secs: Some(3),
+            max_backoff_secs: Some(10),
+        });
+        let start = std::time::Instant::now();
+        let tab_id = app.tabs[0].id;
+        let job = SchedJobRef::Loop(77);
+        app.watchdog.start(
+            job.clone(),
+            tab_id,
+            42,
+            "check".into(),
+            start,
+            AbortController::new().activity(),
+        );
+        assert!(matches!(
+            app.watchdog
+                .poll(start + std::time::Duration::from_secs(6))
+                .as_slice(),
+            [WatchdogAction::Abort { .. }]
+        ));
+        app.tabs[0].active_turn_id = 0;
+        app.tabs[0].draining_turn_id = Some(42);
+        app.tabs[0].active_sched_job = Some(job);
+
+        app.handle_agent_event(AppEvent::TurnDone {
+            tab_id,
+            turn_id: 42,
+            result: Err("aborted".into()),
+        });
+        assert_eq!(app.tabs[0].draining_turn_id, None);
+        assert_eq!(
+            app.watchdog
+                .due_retries(start + std::time::Duration::from_secs(99))
+                .len(),
+            1
+        );
+
+        app.handle_agent_event(AppEvent::TurnDone {
+            tab_id,
+            turn_id: 42,
+            result: Err("aborted".into()),
+        });
+        assert_eq!(
+            app.watchdog
+                .due_retries(start + std::time::Duration::from_secs(99))
+                .len(),
+            1,
+            "duplicate stale terminal cannot increment recovery twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn raced_canonical_terminal_is_finished_with_its_real_outcome() {
+        let (mut app, _tx) = make_test_app().await;
+        let start = std::time::Instant::now();
+        let tab_id = app.tabs[0].id;
+        let job = SchedJobRef::Loop(900);
+        app.watchdog.start(
+            job.clone(),
+            tab_id,
+            42,
+            "check".into(),
+            start,
+            AbortController::new().activity(),
+        );
+        app.watchdog.cancel_turn(tab_id, 42, start);
+        let actions = app.watchdog.poll(start + Duration::from_secs(11));
+        let (forced_job, forced_failure) = match actions.as_slice() {
+            [WatchdogAction::ForceCancel { job, failure, .. }] => (job.clone(), failure.clone()),
+            other => panic!("expected a real force-cancel action, got {other:?}"),
+        };
+        assert!(forced_failure.is_none());
+        app.tabs[0].active_turn_id = 0;
+        app.tabs[0].draining_turn_id = Some(42);
+        app.tabs[0].active_sched_job = Some(job.clone());
+        app.forced_turn_stops.insert(
+            (tab_id, 42),
+            PendingForcedTurnStop {
+                outcome: ForcedTurnStop::Manual {
+                    job: forced_job,
+                    failure: forced_failure,
+                },
+                attempt_lease: None,
+                activity: None,
+                quarantine: None,
+                source_terminal_seen: false,
+            },
+        );
+
+        app.handle_agent_event(AppEvent::TurnDone {
+            tab_id,
+            turn_id: 42,
+            result: Err("provider failed before forced waiter completed".into()),
+        });
+
+        let pending = app.forced_turn_stops.get(&(tab_id, 42)).unwrap();
+        assert!(pending.source_terminal_seen);
+        assert!(matches!(
+            &pending.outcome,
+            ForcedTurnStop::Canonical { result: Err(_), .. }
+        ));
+
+        app.handle_agent_event(AppEvent::TurnTaskStopped {
+            tab_id,
+            turn_id: 42,
+        });
+
+        assert_eq!(app.tabs[0].mode, Mode::Error);
+        assert_eq!(
+            app.watchdog
+                .due_retries(start + Duration::from_secs(99))
+                .len(),
+            1,
+            "the canonical error enters recovery instead of being cleared as success"
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_turn_quarantine_keeps_the_tab_busy_until_workers_stop() {
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        let loop_id = app.scheduler.add_loop(
+            tab_id as u64,
+            "check".into(),
+            Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.tabs[0].active_turn_id = 42;
+        app.tabs[0].active_sched_job = Some(SchedJobRef::Loop(loop_id));
+
+        app.handle_agent_event(AppEvent::TurnTaskQuarantined {
+            tab_id,
+            turn_id: 42,
+            result: Some(Ok(())),
+        });
+
+        assert!(app.forced_turn_stops.contains_key(&(tab_id, 42)));
+        assert!(matches!(
+            &app.forced_turn_stops[&(tab_id, 42)].outcome,
+            ForcedTurnStop::Canonical { result: Err(_), .. }
+        ));
+        assert!(app.tabs[0].is_busy(), "quarantine keeps the slot fenced");
+        assert!(
+            app.scheduler.loops().iter().all(|job| job.id != loop_id),
+            "the quarantined job is stopped before its lease can be released"
+        );
+        assert_eq!(app.tabs[0].mode, Mode::Error);
+
+        app.handle_agent_event(AppEvent::TurnTaskStopped {
+            tab_id,
+            turn_id: 42,
+        });
+
+        assert!(!app.forced_turn_stops.contains_key(&(tab_id, 42)));
+        assert!(!app.tabs[0].is_busy());
+        assert_eq!(app.tabs[0].mode, Mode::Error);
+    }
+
+    #[tokio::test]
     async fn interrupting_non_agent_abort_handle_never_enters_draining_state() {
         let (mut app, _tx) = make_test_app().await;
         app.tabs[0].active_turn_id = 0;
@@ -12405,7 +15018,7 @@ mod tests {
         app.tabs[0].turn_seq = u64::MAX;
         let job = SchedJobRef::Schedule("abcd".into());
         let key = (app.tabs[0].id, "check ci".to_string());
-        app.sched_pending.insert(key.clone(), job.clone());
+        app.push_sched_pending(key.clone(), job.clone());
 
         app.submit("check ci", &agent_tx).await;
 
@@ -12419,10 +15032,164 @@ mod tests {
             "a bailed dispatch must not stamp scheduler attribution"
         );
         assert_eq!(
-            app.sched_pending.get(&key),
+            app.sched_pending.get(&key).and_then(|jobs| jobs.front()),
             Some(&job),
             "a bailed dispatch must not consume the pending scheduler entry"
         );
+    }
+
+    #[tokio::test]
+    async fn direct_same_text_submit_never_claims_scheduler_occurrence() {
+        let (mut app, agent_tx) = make_test_app().await;
+        let job = SchedJobRef::Loop(701);
+        let prompt = "check ci".to_string();
+        let key = (app.tabs[0].id, prompt.clone());
+        app.tabs[0].queued_input.push_back(prompt.clone());
+        app.push_sched_pending(key.clone(), job.clone());
+
+        assert!(app.submit(&prompt, &agent_tx).await);
+
+        assert!(app.tabs[0].active_sched_job.is_none());
+        assert_eq!(
+            app.sched_pending.get(&key).and_then(|jobs| jobs.front()),
+            Some(&job),
+            "only an explicit queue-drain provenance may claim attribution"
+        );
+        assert_eq!(
+            app.tabs[0].queued_input.iter().cloned().collect::<Vec<_>>(),
+            vec![prompt]
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_dispatch_preserves_a_popped_occurrence_when_turn_start_bails() {
+        let (mut app, _unused_tx) = make_test_app().await;
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let id = app.scheduler.add_loop(
+            app.tabs[0].id as u64,
+            "check ci".into(),
+            Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+        app.tabs[0].turn_seq = u64::MAX;
+
+        app.dispatch_scheduler_queued(&agent_tx).await;
+
+        assert_eq!(
+            app.tabs[0].queued_input.iter().cloned().collect::<Vec<_>>(),
+            vec!["check ci".to_string()]
+        );
+        assert!(app.tabs[0].active_sched_job.is_none());
+        assert!(
+            app.sched_job_is_pending(&SchedJobRef::Loop(id)),
+            "a popped prompt that cannot start must restore its exact attribution"
+        );
+
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+        assert_eq!(
+            app.tabs[0].queued_input.iter().cloned().collect::<Vec<_>>(),
+            vec!["check ci".to_string()],
+            "the retained occurrence blocks duplicate fires until its queue deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_queue_dispatch_preserves_a_bailed_scheduler_occurrence() {
+        let (mut app, _unused_tx) = make_test_app().await;
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let id = app.scheduler.add_loop(
+            app.tabs[0].id as u64,
+            "check ci".into(),
+            Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+        app.tabs[0].turn_seq = u64::MAX;
+
+        app.dispatch_queued_input(&agent_tx).await;
+
+        assert_eq!(
+            app.tabs[0].queued_input.iter().cloned().collect::<Vec<_>>(),
+            vec!["check ci".to_string()],
+            "a preflight failure must leave the exact scheduler occurrence queued"
+        );
+        assert!(app.sched_job_is_pending(&SchedJobRef::Loop(id)));
+        assert!(app.tabs[0].active_sched_job.is_none());
+    }
+
+    #[tokio::test]
+    async fn scheduler_image_path_preflight_does_not_accumulate_attachments() {
+        let (mut app, _unused_tx) = make_test_app().await;
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("watch.png");
+        std::fs::write(
+            &path,
+            [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0],
+        )
+        .unwrap();
+        let prompt = path.display().to_string();
+        let id = app.scheduler.add_loop(
+            app.tabs[0].id as u64,
+            prompt.clone(),
+            Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+        app.tabs[0].turn_seq = u64::MAX;
+
+        app.dispatch_scheduler_queued(&agent_tx).await;
+        app.dispatch_scheduler_queued(&agent_tx).await;
+
+        assert!(
+            app.tabs[0].pending_images.is_empty(),
+            "a scheduler path is literal text and cannot append an attachment per tick"
+        );
+        assert_eq!(
+            app.tabs[0].queued_input.iter().cloned().collect::<Vec<_>>(),
+            vec![prompt]
+        );
+        assert!(app.sched_job_is_pending(&SchedJobRef::Loop(id)));
+    }
+
+    #[tokio::test]
+    async fn shutdown_fence_never_starts_a_queued_scheduler_occurrence() {
+        let (mut app, _unused_tx) = make_test_app().await;
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let id = app.scheduler.add_loop(
+            app.tabs[0].id as u64,
+            "check ci".into(),
+            Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+        app.should_quit = true;
+
+        app.dispatch_queued_input(&agent_tx).await;
+        app.dispatch_scheduler_queued(&agent_tx).await;
+
+        assert_eq!(
+            app.tabs[0].queued_input.iter().cloned().collect::<Vec<_>>(),
+            vec!["check ci".to_string()]
+        );
+        assert_eq!(app.tabs[0].active_turn_id, 0);
+        assert!(app.tabs[0].active_sched_job.is_none());
+        assert!(app.sched_job_is_pending(&SchedJobRef::Loop(id)));
     }
 
     #[tokio::test]
@@ -13003,6 +15770,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_loop_prompt_does_not_consume_max_run_budget() {
+        let (mut app, _tx) = make_test_app().await;
+        let id = app.scheduler.add_loop(
+            app.active_tab().id as u64,
+            "check once per execution".into(),
+            Duration::from_secs(60),
+            Some(2),
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+        assert_eq!(app.scheduler.loops()[0].runs, 1);
+
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+        assert_eq!(
+            app.scheduler.loops()[0].runs,
+            1,
+            "queued work is not an execution and must not spend --max"
+        );
+        assert_eq!(app.active_tab().queued_input.len(), 1);
+    }
+
+    #[tokio::test]
     async fn loop_slash_command_starts_and_stops_jobs() {
         let (mut app, tx) = make_test_app().await;
         app.submit("/loop 5m check ci", &tx).await;
@@ -13228,9 +16021,13 @@ mod tests {
                 prompt: "sync upstream".into(),
                 enabled: true,
                 last_fired_ms: None,
+                watchdog_failures: 0,
+                watchdog_last_failure_ms: None,
+                watchdog_retry_at_ms: None,
+                watchdog_active_since_ms: None,
             }]);
         let key = (app.tabs[0].id, "sync upstream".to_string());
-        app.sched_pending.insert(key.clone(), job.clone());
+        app.push_sched_pending(key.clone(), job.clone());
         app.tabs[0]
             .queued_input
             .push_back("sync upstream".to_string());
@@ -13253,10 +16050,8 @@ mod tests {
     async fn two_jobs_with_identical_prompt_text_are_attributed_independently() {
         // `sched_pending` used to be keyed on the prompt text alone, so two
         // jobs whose prompts read the same collided: the later insert won and
-        // the 3-strikes breaker punished the wrong job. Keying on
-        // `(tab_id, prompt)` — plus the anti-pileup rule that one tab never
-        // holds the same prompt twice — makes each queued instance own its own
-        // entry.
+        // the 3-strikes breaker punished the wrong job. The tab id keeps
+        // cross-tab occurrences independent too.
         let (mut app, _unused_tx, _dir) = make_test_app_with_dir().await;
         let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
         app.new_tab(&agent_tx);
@@ -13303,6 +16098,426 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_tab_same_text_jobs_queue_and_start_fifo() {
+        let (mut app, _unused_tx) = make_test_app().await;
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let owner = app.tabs[0].id as u64;
+        let a = app.scheduler.add_loop(
+            owner,
+            "check ci".into(),
+            Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        let b = app.scheduler.add_loop(
+            owner,
+            "check ci".into(),
+            Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(a, Duration::from_secs(61));
+        app.scheduler
+            .rewind_loop_for_test(b, Duration::from_secs(61));
+
+        app.poll_scheduler();
+
+        let key = (app.tabs[0].id, "check ci".to_string());
+        assert_eq!(app.tabs[0].queued_input.len(), 2);
+        assert_eq!(
+            app.sched_pending.get(&key),
+            Some(&VecDeque::from([
+                SchedJobRef::Loop(a),
+                SchedJobRef::Loop(b)
+            ])),
+            "one text key retains both occurrence identities"
+        );
+
+        app.dispatch_scheduler_queued(&agent_tx).await;
+
+        assert_eq!(app.tabs[0].active_sched_job, Some(SchedJobRef::Loop(a)));
+        assert_eq!(app.tabs[0].queued_input.len(), 1);
+        assert_eq!(
+            app.sched_pending.get(&key).and_then(|jobs| jobs.front()),
+            Some(&SchedJobRef::Loop(b)),
+            "starting one occurrence consumes only the FIFO head"
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_schedule_lease_is_held_from_queue_until_turn_start() {
+        let config = tempfile::tempdir().unwrap();
+        let _env_lock = crate::tab::TEST_ENV_LOCK.lock().await;
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", config.path());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let id = "queuelease01";
+        zode_core::scheduler::save_schedules(&[zode_core::scheduler::ScheduleJob {
+            id: id.into(),
+            spec: zode_core::scheduler::ScheduleSpec::Interval { secs: 30 },
+            prompt: "sync queue lease".into(),
+            enabled: true,
+            last_fired_ms: Some(now_ms - 31_000),
+            watchdog_failures: 0,
+            watchdog_last_failure_ms: None,
+            watchdog_retry_at_ms: None,
+            watchdog_active_since_ms: None,
+        }])
+        .unwrap();
+        let (mut app, _unused_tx, _cwd) = make_test_app_with_dir().await;
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        app.tabs[0].reassemble_pending = true;
+
+        app.poll_scheduler();
+
+        let queued = zode_core::scheduler::load_schedules().pop().unwrap();
+        let active_token = queued
+            .watchdog_active_since_ms
+            .expect("queue claim persists an active token");
+        assert!(app.pending_schedule_leases.contains_key(id));
+        assert_eq!(app.tabs[0].queued_input.len(), 1);
+        assert!(zode_core::scheduler::try_claim_watchdog_fire(
+            id,
+            queued.last_fired_ms.unwrap() + 30_000
+        )
+        .unwrap()
+        .is_none());
+
+        app.tabs[0].reassemble_pending = false;
+        app.dispatch_scheduler_queued(&agent_tx).await;
+
+        assert!(!app.pending_schedule_leases.contains_key(id));
+        assert_eq!(
+            app.tabs[0]
+                .watchdog_attempt_lease
+                .as_ref()
+                .map(zode_core::scheduler::ScheduleAttemptLease::active_token_ms),
+            Some(active_token),
+            "the exact queued lease moves into the running tab"
+        );
+        if let Some(task) = app.tabs[0].turn_task.take() {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_restores_a_claimed_but_unstarted_fire() {
+        let config = tempfile::tempdir().unwrap();
+        let _env_lock = crate::tab::TEST_ENV_LOCK.lock().await;
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", config.path());
+        let now_ms = current_epoch_ms();
+        let anchor_ms = now_ms.saturating_sub(31_000);
+        let id = "queueexit001";
+        zode_core::scheduler::save_schedules(&[zode_core::scheduler::ScheduleJob {
+            id: id.into(),
+            spec: zode_core::scheduler::ScheduleSpec::Interval { secs: 30 },
+            prompt: "restore on exit".into(),
+            enabled: true,
+            last_fired_ms: Some(anchor_ms),
+            watchdog_failures: 0,
+            watchdog_last_failure_ms: None,
+            watchdog_retry_at_ms: None,
+            watchdog_active_since_ms: None,
+        }])
+        .unwrap();
+        let (mut app, _tx) = make_test_app().await;
+        app.tabs[0].reassemble_pending = true;
+
+        app.poll_scheduler();
+        assert!(app.pending_schedule_leases.contains_key(id));
+        assert_ne!(
+            zode_core::scheduler::load_schedules()[0].last_fired_ms,
+            Some(anchor_ms)
+        );
+
+        app.release_all_pending_schedule_leases();
+
+        let restored = zode_core::scheduler::load_schedules().pop().unwrap();
+        assert_eq!(restored.last_fired_ms, Some(anchor_ms));
+        assert_eq!(restored.watchdog_active_since_ms, None);
+        assert!(app.pending_schedule_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scheduler_preflight_failure_keeps_the_owned_occurrence_queued() {
+        let (mut app, _unused_tx) = make_test_app().await;
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let id = app.scheduler.add_loop(
+            app.tabs[0].id as u64,
+            "defer before start".into(),
+            Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+        app.tabs[0].turn_seq = u64::MAX;
+
+        app.dispatch_scheduler_queued(&agent_tx).await;
+
+        let job = SchedJobRef::Loop(id);
+        assert_eq!(
+            app.tabs[0].queued_input.front().map(String::as_str),
+            Some("defer before start")
+        );
+        assert!(app.sched_job_is_pending(&job));
+        assert!(app.sched_queued_at.contains_key(&job));
+        assert!(!app.tabs[0].is_busy());
+    }
+
+    #[tokio::test]
+    async fn queued_start_deadline_enters_bounded_watchdog_retry() {
+        let (mut app, _tx) = make_test_app().await;
+        let id = app.scheduler.add_loop(
+            app.tabs[0].id as u64,
+            "queue timeout".into(),
+            Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+        let job = SchedJobRef::Loop(id);
+        let overdue = std::time::Instant::now()
+            .checked_sub(app.watchdog.queue_start_timeout() + Duration::from_secs(1))
+            .unwrap();
+        app.sched_queued_at.insert(job.clone(), overdue);
+
+        app.poll_queued_watchdog();
+
+        assert!(app.tabs[0].queued_input.is_empty());
+        assert!(!app.sched_job_is_pending(&job));
+        assert!(app.watchdog.job_is_occupied(&job));
+        assert!(!app
+            .watchdog
+            .due_retries(std::time::Instant::now() + Duration::from_secs(60))
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn user_text_collision_does_not_consume_a_persisted_fire() {
+        let config = tempfile::tempdir().unwrap();
+        let _env_lock = crate::tab::TEST_ENV_LOCK.lock().await;
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", config.path());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let anchor_ms = now_ms - 31_000;
+        let id = "queuecollision01";
+        zode_core::scheduler::save_schedules(&[zode_core::scheduler::ScheduleJob {
+            id: id.into(),
+            spec: zode_core::scheduler::ScheduleSpec::Interval { secs: 30 },
+            prompt: "same text".into(),
+            enabled: true,
+            last_fired_ms: Some(anchor_ms),
+            watchdog_failures: 0,
+            watchdog_last_failure_ms: None,
+            watchdog_retry_at_ms: None,
+            watchdog_active_since_ms: None,
+        }])
+        .unwrap();
+        let (mut app, _tx) = make_test_app().await;
+        app.tabs[0].queued_input.push_back("same text".into());
+
+        app.poll_scheduler();
+
+        assert!(!app.pending_schedule_leases.contains_key(id));
+        assert!(!app.sched_job_is_pending(&SchedJobRef::Schedule(id.into())));
+        assert_eq!(app.scheduler.schedules()[0].last_fired_ms, Some(anchor_ms));
+        assert_eq!(
+            zode_core::scheduler::load_schedules()[0].last_fired_ms,
+            Some(anchor_ms),
+            "an unclaimed occurrence remains due"
+        );
+
+        app.tabs[0].queued_input.clear();
+        app.poll_scheduler();
+
+        assert!(app.pending_schedule_leases.contains_key(id));
+        assert!(app.sched_job_is_pending(&SchedJobRef::Schedule(id.into())));
+    }
+
+    #[tokio::test]
+    async fn editing_a_persisted_schedule_queue_releases_only_active_ownership() {
+        let config = tempfile::tempdir().unwrap();
+        let _env_lock = crate::tab::TEST_ENV_LOCK.lock().await;
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", config.path());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let id = "queueedit001";
+        zode_core::scheduler::save_schedules(&[zode_core::scheduler::ScheduleJob {
+            id: id.into(),
+            spec: zode_core::scheduler::ScheduleSpec::Interval { secs: 30 },
+            prompt: "sync editable lease".into(),
+            enabled: true,
+            last_fired_ms: Some(now_ms - 31_000),
+            watchdog_failures: 2,
+            watchdog_last_failure_ms: Some(now_ms - 5_000),
+            watchdog_retry_at_ms: None,
+            watchdog_active_since_ms: None,
+        }])
+        .unwrap();
+        let (mut app, _tx) = make_test_app().await;
+        app.tabs[0].reassemble_pending = true;
+        app.poll_scheduler();
+        assert!(app.pending_schedule_leases.contains_key(id));
+
+        app.queued_edit_index = Some(0);
+        app.save_queued_edit_text("manual follow-up".into());
+
+        let persisted = zode_core::scheduler::load_schedules().pop().unwrap();
+        assert_eq!(persisted.watchdog_active_since_ms, None);
+        assert_eq!(persisted.watchdog_failures, 2);
+        assert_eq!(persisted.watchdog_last_failure_ms, Some(now_ms - 5_000));
+        assert!(!app.pending_schedule_leases.contains_key(id));
+        assert!(!app.sched_job_is_pending(&SchedJobRef::Schedule(id.into())));
+        assert_eq!(
+            app.tabs[0].queued_input.front().map(String::as_str),
+            Some("manual follow-up")
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_retry_claims_its_lease_before_entering_the_queue() {
+        let config = tempfile::tempdir().unwrap();
+        let _env_lock = crate::tab::TEST_ENV_LOCK.lock().await;
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", config.path());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let id = "queueretry01";
+        let retry_at_ms = now_ms.saturating_sub(1);
+        zode_core::scheduler::save_schedules(&[zode_core::scheduler::ScheduleJob {
+            id: id.into(),
+            spec: zode_core::scheduler::ScheduleSpec::Interval { secs: 300 },
+            prompt: "retry with lease".into(),
+            enabled: true,
+            last_fired_ms: Some(now_ms),
+            watchdog_failures: 1,
+            watchdog_last_failure_ms: Some(now_ms - 5_000),
+            watchdog_retry_at_ms: Some(retry_at_ms),
+            watchdog_active_since_ms: None,
+        }])
+        .unwrap();
+        let (mut app, _tx) = make_test_app().await;
+
+        app.dispatch_watchdog_retries();
+
+        let persisted = zode_core::scheduler::load_schedules().pop().unwrap();
+        assert_eq!(persisted.watchdog_retry_at_ms, None);
+        assert!(persisted.watchdog_active_since_ms.is_some());
+        assert!(app.pending_schedule_leases.contains_key(id));
+        assert!(app.sched_job_is_pending(&SchedJobRef::Schedule(id.into())));
+        assert!(
+            zode_core::scheduler::try_claim_watchdog_retry(id, retry_at_ms)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn purging_one_same_text_job_preserves_the_other_occurrence() {
+        let (mut app, _unused_tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        let key = (tab_id, "check ci".to_string());
+        let a = SchedJobRef::Loop(10);
+        let b = SchedJobRef::Loop(11);
+        app.push_sched_pending(key.clone(), a.clone());
+        app.push_sched_pending(key.clone(), b.clone());
+        app.tabs[0].queued_input.push_back("check ci".into());
+        app.tabs[0].queued_input.push_back("check ci".into());
+
+        app.purge_sched_jobs(|job| job == &a);
+
+        assert_eq!(
+            app.tabs[0].queued_input,
+            VecDeque::from(["check ci".to_string()]),
+            "only the purged job's concrete prompt occurrence is removed"
+        );
+        assert_eq!(
+            app.sched_pending.get(&key),
+            Some(&VecDeque::from([b])),
+            "the equal-text sibling keeps its attribution"
+        );
+    }
+
+    #[tokio::test]
+    async fn editing_a_queued_scheduler_prompt_detaches_and_unblocks_its_job() {
+        let (mut app, _unused_tx) = make_test_app().await;
+        let owner = app.tabs[0].id as u64;
+        let id = app.scheduler.add_loop(
+            owner,
+            "check ci".into(),
+            Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+        assert!(app.sched_job_is_pending(&SchedJobRef::Loop(id)));
+
+        app.queued_edit_index = Some(0);
+        app.save_queued_edit_text("manual follow-up".into());
+
+        assert_eq!(
+            app.tabs[0].queued_input.front().map(String::as_str),
+            Some("manual follow-up")
+        );
+        assert!(
+            !app.sched_job_is_pending(&SchedJobRef::Loop(id)),
+            "edited text is ordinary user input, not scheduler-owned"
+        );
+
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+        assert!(
+            app.sched_job_is_pending(&SchedJobRef::Loop(id)),
+            "detaching the edited occurrence releases identity-based pileup"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_queued_scheduler_prompt_detaches_and_unblocks_its_job() {
+        let (mut app, _unused_tx) = make_test_app().await;
+        let owner = app.tabs[0].id as u64;
+        let id = app.scheduler.add_loop(
+            owner,
+            "check ci".into(),
+            Duration::from_secs(60),
+            None,
+            std::time::Instant::now(),
+        );
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+
+        app.queued_edit_index = Some(0);
+        app.save_queued_edit_text(String::new());
+
+        assert!(app.tabs[0].queued_input.is_empty());
+        assert!(!app.sched_job_is_pending(&SchedJobRef::Loop(id)));
+
+        app.scheduler
+            .rewind_loop_for_test(id, Duration::from_secs(61));
+        app.poll_scheduler();
+        assert!(
+            app.sched_job_is_pending(&SchedJobRef::Loop(id)),
+            "deleting the queued occurrence releases identity-based pileup"
+        );
+    }
+
+    #[tokio::test]
     async fn closing_a_tab_purges_its_pending_scheduler_entries() {
         let (mut app, _unused_tx, _dir) = make_test_app_with_dir().await;
         let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -13316,10 +16531,9 @@ mod tests {
         // `new_tab` focused tab 1; queue a scheduler prompt on it, then close
         // it without ever draining.
         let closing_id = app.tabs[app.active].id;
-        app.sched_pending
-            .insert((closing_id, "check ci".to_string()), SchedJobRef::Loop(7));
+        app.push_sched_pending((closing_id, "check ci".to_string()), SchedJobRef::Loop(7));
 
-        app.close_active_tab();
+        app.close_active_tab_with_events(&agent_tx);
 
         assert_eq!(app.tabs.len(), 1);
         assert!(
@@ -13364,7 +16578,7 @@ mod tests {
         );
         app.sched_fail_streak.insert(SchedJobRef::Loop(doomed), 2);
 
-        app.close_active_tab();
+        app.close_active_tab_with_events(&agent_tx);
 
         let ids: Vec<u32> = app.scheduler.loops().iter().map(|j| j.id).collect();
         assert_eq!(

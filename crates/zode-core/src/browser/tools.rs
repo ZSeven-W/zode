@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use agent::abort::AbortController;
 use agent::error::AgentError;
 use agent::tool::{SafetyClass, Tool, ToolUseContext};
 use async_trait::async_trait;
@@ -43,6 +44,81 @@ impl BrowserToolDeps {
 
 fn to_agent_err(e: BrowserError) -> AgentError {
     AgentError::other(e.to_string())
+}
+
+/// A browser request can outlive its local future (the bridge, CDP handler,
+/// or a freshly launched browser may still be working). Keep the turn fenced
+/// until the adapter receives a response that proves a terminal state.
+struct UnresolvedBrowserCall {
+    abort: AbortController,
+    armed: bool,
+}
+
+impl UnresolvedBrowserCall {
+    fn new(abort: AbortController) -> Self {
+        Self { abort, armed: true }
+    }
+
+    fn resolve(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for UnresolvedBrowserCall {
+    fn drop(&mut self) {
+        if self.armed {
+            self.abort.mark_unresolved_external_work();
+        }
+    }
+}
+
+fn aborted(ctx: &ToolUseContext) -> AgentError {
+    AgentError::Aborted(
+        ctx.abort
+            .reason()
+            .unwrap_or_else(|| "browser operation aborted".into()),
+    )
+}
+
+fn browser_error_is_terminal(error: &BrowserError) -> bool {
+    // NotFound is a definite local/pre-dispatch outcome. Launch, protocol,
+    // timeout, and dead-channel errors cannot prove that an external browser
+    // did not start or partially apply the request.
+    matches!(error, BrowserError::NotFound(_))
+}
+
+/// Await one browser boundary while observing the root turn abort. This is
+/// also used for read operations because lazy backend creation and bridge/CDP
+/// reads can start work whose completion is unknown after a dropped future.
+pub(super) async fn await_browser_response<T>(
+    ctx: &ToolUseContext,
+    request: impl std::future::Future<Output = Result<T, BrowserError>>,
+) -> Result<T, AgentError> {
+    if ctx.abort.is_aborted() {
+        return Err(aborted(ctx));
+    }
+    ctx.abort.pulse();
+    let mut unresolved = UnresolvedBrowserCall::new(ctx.abort.clone());
+    tokio::pin!(request);
+    tokio::select! {
+        biased;
+        _ = ctx.abort.cancelled() => Err(aborted(ctx)),
+        result = &mut request => {
+            ctx.abort.pulse();
+            match result {
+                Ok(value) => {
+                    unresolved.resolve();
+                    Ok(value)
+                }
+                Err(error) => {
+                    if browser_error_is_terminal(&error) {
+                        unresolved.resolve();
+                    }
+                    Err(to_agent_err(error))
+                }
+            }
+        }
+    }
 }
 
 /// Resolve a click/type target from `selector` / `ref` / `x`+`y` input
@@ -113,11 +189,19 @@ impl Tool for BrowserReadTool {
         SafetyClass::ReadOnly
     }
 
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        let lease = self.deps.lease().await.map_err(to_agent_err)?;
-        match input.get("action").and_then(|a| a.as_str()).unwrap_or("") {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+        let action = input.get("action").and_then(|a| a.as_str()).unwrap_or("");
+        if !matches!(
+            action,
+            "screenshot" | "snapshot" | "console" | "network" | "tabs" | "downloads"
+        ) {
+            return Err(AgentError::other(format!("unknown action: {action:?}")));
+        }
+        let lease = await_browser_response(ctx, self.deps.lease()).await?;
+        let backend = lease.backend();
+        match action {
             "screenshot" => {
-                let shot = lease.backend().screenshot().await.map_err(to_agent_err)?;
+                let shot = await_browser_response(ctx, backend.screenshot()).await?;
                 drop(lease); // release the browser before disk I/O
                 crate::desktop::screenshot::save_screenshot_artifact(
                     &self.deps.shots_dir,
@@ -125,18 +209,18 @@ impl Tool for BrowserReadTool {
                 )
             }
             "snapshot" => Ok(json!({
-                "outline": lease.backend().snapshot().await.map_err(to_agent_err)?
+                "outline": await_browser_response(ctx, backend.snapshot()).await?
             })),
             "console" => {
                 let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
                 Ok(json!({
-                    "entries": lease.backend().console_logs(limit).await.map_err(to_agent_err)?
+                    "entries": await_browser_response(ctx, backend.console_logs(limit)).await?
                 }))
             }
             "network" => {
                 let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
                 Ok(json!({
-                    "entries": lease.backend().network_log(limit).await.map_err(to_agent_err)?
+                    "entries": await_browser_response(ctx, backend.network_log(limit)).await?
                 }))
             }
             "downloads" => {
@@ -146,13 +230,13 @@ impl Tool for BrowserReadTool {
                     .unwrap_or(100)
                     .clamp(1, 100) as usize;
                 Ok(json!({
-                    "entries": lease.backend().downloads(limit).await.map_err(to_agent_err)?
+                    "entries": await_browser_response(ctx, backend.downloads(limit)).await?
                 }))
             }
             "tabs" => Ok(json!({
-                "tabs": lease.backend().tabs().await.map_err(to_agent_err)?
+                "tabs": await_browser_response(ctx, backend.tabs()).await?
             })),
-            other => Err(AgentError::other(format!("unknown action: {other:?}"))),
+            _ => unreachable!("validated browser_read action"),
         }
     }
 }
@@ -207,20 +291,25 @@ impl Tool for BrowserActTool {
         SafetyClass::Mutating
     }
 
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        let lease = self.deps.lease().await.map_err(to_agent_err)?;
-        match input.get("action").and_then(|a| a.as_str()).unwrap_or("") {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+        let action = input.get("action").and_then(|a| a.as_str()).unwrap_or("");
+        if !matches!(action, "navigate" | "click" | "type" | "key" | "scroll") {
+            return Err(AgentError::other(format!("unknown action: {action:?}")));
+        }
+        let lease = await_browser_response(ctx, self.deps.lease()).await?;
+        let backend = lease.backend();
+        match action {
             "navigate" => {
                 let url = input
                     .get("url")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| AgentError::other("navigate: 'url' required"))?;
-                let final_url = lease.backend().navigate(url).await.map_err(to_agent_err)?;
+                let final_url = await_browser_response(ctx, backend.navigate(url)).await?;
                 Ok(json!({ "url": final_url }))
             }
             "click" => {
                 let target = click_target(&input)?;
-                lease.backend().click(&target).await.map_err(to_agent_err)?;
+                await_browser_response(ctx, backend.click(&target)).await?;
                 Ok(json!({ "ok": true }))
             }
             "type" => {
@@ -229,11 +318,7 @@ impl Tool for BrowserActTool {
                     .get("text")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| AgentError::other("type: 'text' required"))?;
-                lease
-                    .backend()
-                    .type_text(&target, text)
-                    .await
-                    .map_err(to_agent_err)?;
+                await_browser_response(ctx, backend.type_text(&target, text)).await?;
                 Ok(json!({ "ok": true }))
             }
             "key" => {
@@ -241,16 +326,16 @@ impl Tool for BrowserActTool {
                     .get("key")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| AgentError::other("key: 'key' required"))?;
-                lease.backend().press_key(key).await.map_err(to_agent_err)?;
+                await_browser_response(ctx, backend.press_key(key)).await?;
                 Ok(json!({ "ok": true }))
             }
             "scroll" => {
                 let dx = input.get("dx").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let dy = input.get("dy").and_then(|v| v.as_f64()).unwrap_or(600.0);
-                lease.backend().scroll(dx, dy).await.map_err(to_agent_err)?;
+                await_browser_response(ctx, backend.scroll(dx, dy)).await?;
                 Ok(json!({ "ok": true }))
             }
-            other => Err(AgentError::other(format!("unknown action: {other:?}"))),
+            _ => unreachable!("validated browser_act action"),
         }
     }
 }
@@ -296,17 +381,14 @@ impl Tool for BrowserEvalTool {
         SafetyClass::Mutating
     }
 
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let expression = input
             .get("expression")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AgentError::other("eval: 'expression' required"))?;
-        let lease = self.deps.lease().await.map_err(to_agent_err)?;
-        let value = lease
-            .backend()
-            .evaluate(expression)
-            .await
-            .map_err(to_agent_err)?;
+        let lease = await_browser_response(ctx, self.deps.lease()).await?;
+        let backend = lease.backend();
+        let value = await_browser_response(ctx, backend.evaluate(expression)).await?;
         Ok(json!({ "value": value }))
     }
 }
@@ -353,12 +435,17 @@ impl Tool for BrowserTabsTool {
         SafetyClass::Mutating
     }
 
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        let lease = self.deps.lease().await.map_err(to_agent_err)?;
-        match input.get("action").and_then(|a| a.as_str()).unwrap_or("") {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+        let action = input.get("action").and_then(|a| a.as_str()).unwrap_or("");
+        if !matches!(action, "new" | "close" | "select") {
+            return Err(AgentError::other(format!("unknown action: {action:?}")));
+        }
+        let lease = await_browser_response(ctx, self.deps.lease()).await?;
+        let backend = lease.backend();
+        match action {
             "new" => {
                 let url = input.get("url").and_then(|v| v.as_str());
-                let tab = lease.backend().tab_new(url).await.map_err(to_agent_err)?;
+                let tab = await_browser_response(ctx, backend.tab_new(url)).await?;
                 Ok(json!({ "tab": tab }))
             }
             "close" => {
@@ -366,7 +453,7 @@ impl Tool for BrowserTabsTool {
                     .get("id")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| AgentError::other("close: 'id' required"))?;
-                lease.backend().tab_close(id).await.map_err(to_agent_err)?;
+                await_browser_response(ctx, backend.tab_close(id)).await?;
                 Ok(json!({ "ok": true }))
             }
             "select" => {
@@ -374,10 +461,10 @@ impl Tool for BrowserTabsTool {
                     .get("id")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| AgentError::other("select: 'id' required"))?;
-                lease.backend().tab_select(id).await.map_err(to_agent_err)?;
+                await_browser_response(ctx, backend.tab_select(id)).await?;
                 Ok(json!({ "ok": true }))
             }
-            other => Err(AgentError::other(format!("unknown action: {other:?}"))),
+            _ => unreachable!("validated browser_tabs action"),
         }
     }
 }
@@ -530,5 +617,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["value"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn uncertain_browser_error_latches_unresolved_work() {
+        for error in [
+            BrowserError::Protocol("response lost".into()),
+            BrowserError::Timeout("request".into()),
+        ] {
+            let context = ctx();
+            let result: Result<(), AgentError> =
+                await_browser_response(&context, async { Err(error) }).await;
+            assert!(result.is_err());
+            assert!(context.abort.activity().unresolved_external_work());
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_browser_response_does_not_latch_unresolved_work() {
+        let context = ctx();
+        assert_eq!(
+            await_browser_response(&context, async { Ok::<_, BrowserError>(42) })
+                .await
+                .unwrap(),
+            42
+        );
+        assert!(!context.abort.activity().unresolved_external_work());
+
+        let terminal = ctx();
+        let _: Result<(), AgentError> = await_browser_response(&terminal, async {
+            Err(BrowserError::NotFound("no target".into()))
+        })
+        .await;
+        assert!(!terminal.abort.activity().unresolved_external_work());
+    }
+
+    #[tokio::test]
+    async fn abort_after_browser_dispatch_latches_unresolved_work() {
+        let context = ctx();
+        let abort = context.abort.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = started_rx.await;
+            abort.abort_with_reason("test stop");
+        });
+        let request = async move {
+            let _ = started_tx.send(());
+            std::future::pending::<Result<(), BrowserError>>().await
+        };
+
+        let result = await_browser_response(&context, request).await;
+        assert!(matches!(result, Err(AgentError::Aborted(_))));
+        assert!(context.abort.activity().unresolved_external_work());
     }
 }

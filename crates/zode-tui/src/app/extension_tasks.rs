@@ -42,6 +42,8 @@ const EXTENSION_WORKER_LIMIT: usize = 4;
 const EXTENSION_RECENT_REQUEST_LIMIT: usize = 128;
 const EXTENSION_RECENT_TURN_LIMIT: usize = 128;
 const EXTENSION_PENDING_APPROVAL_LIMIT: usize = 64;
+const EXTENSION_SHUTDOWN_CODE: &str = "server_shutting_down";
+const EXTENSION_SHUTDOWN_MESSAGE: &str = "server is shutting down";
 pub(super) const SIDE_PANEL_BROWSER_CONTEXT: &str = r#"<browser_side_panel_context>
 This turn was submitted from the browser side panel. The active browser page beside the panel is the primary context for the request. If the request could reasonably refer to that page—including phrases such as "this", "this page", "current page", "summarize", "what is this about", "这个", "这个页面", "当前页面", "讲的是什么", or "帮我看看"—inspect the page with browser_read before answering. Do not read or search the local workspace to guess what the page contains. Use local files only when the user explicitly asks about the project, code, workspace, or a local file.
 </browser_side_panel_context>"#;
@@ -593,6 +595,7 @@ fn spawn_prepared_extension_turn(
             tracing::warn!("extension checkpoint start failed: {error}");
         }
     }
+    let recorder = Arc::new(std::sync::Mutex::new(recorder));
     tokio::spawn(async move {
         let stream_result: Result<Box<dyn agent::stream::EventStream>, String> = async {
             if let Some(vision) = vision {
@@ -636,6 +639,8 @@ fn spawn_prepared_extension_turn(
             tab_id,
             turn_id,
             tx,
+            None,
+            None,
         )
         .await;
     });
@@ -1097,6 +1102,85 @@ impl TuiApp {
         self.extension_tasks.connected(connection_id);
     }
 
+    /// Fail every claimed extension RPC before fencing its owner. This is
+    /// idempotent: disconnecting clears the request claims and cancellation
+    /// state, so late worker events cannot mutate state or emit a second reply.
+    pub(super) fn begin_extension_shutdown(&mut self) {
+        let mut pending_requests: Vec<(u64, String)> = self
+            .extension_tasks
+            .pending_requests
+            .iter()
+            .cloned()
+            .collect();
+        pending_requests.sort();
+        for (connection_id, request_id) in &pending_requests {
+            self.extension_tasks
+                .finish_request(*connection_id, request_id);
+            let _ = self.send_extension_frame(
+                *connection_id,
+                TaskServerFrame::error(
+                    request_id.clone(),
+                    EXTENSION_SHUTDOWN_CODE,
+                    EXTENSION_SHUTDOWN_MESSAGE,
+                ),
+            );
+        }
+
+        let mut connections: HashSet<u64> = self
+            .extension_tasks
+            .live_connections
+            .iter()
+            .copied()
+            .collect();
+        connections.extend(
+            self.extension_tasks
+                .cancellation_by_connection
+                .keys()
+                .copied(),
+        );
+        connections.extend(
+            pending_requests
+                .iter()
+                .map(|(connection_id, _)| *connection_id),
+        );
+        connections.extend(
+            self.extension_tasks
+                .pending_approvals
+                .values()
+                .map(|approval| approval.connection_id),
+        );
+        connections.extend(
+            self.extension_tasks
+                .turn_routes
+                .values()
+                .filter_map(|route| route.connection_id),
+        );
+
+        let mut connections: Vec<u64> = connections.into_iter().collect();
+        connections.sort_unstable();
+        for connection_id in connections {
+            self.disconnect_extension_connection(connection_id);
+        }
+
+        // Extension index/snapshot workers are fenced by the connection
+        // cancellation flags above. Reassembly workers use sequence/pending
+        // state instead, so invalidate their placeholders before a queued
+        // ReassembleDone can be applied during the shutdown drain.
+        let pending_task_ids: HashSet<String> = self
+            .extension_tasks
+            .pending_task_metadata
+            .keys()
+            .cloned()
+            .collect();
+        for tab in &mut self.tabs {
+            if tab.reassemble_pending && pending_task_ids.contains(&tab.session_id) {
+                tab.reassemble_pending = false;
+            }
+        }
+        self.extension_tasks.pending_task_metadata.clear();
+        self.extension_tasks.pending_completions.clear();
+    }
+
     pub(super) fn cleanup_extension_attachments_at(&mut self, now: Instant) {
         self.extension_attachments.cleanup_expired(now);
     }
@@ -1239,16 +1323,28 @@ impl TuiApp {
                 self.disconnect_extension_connection(inbound.connection_id);
             }
             TaskInboundKind::Request(frame) => {
-                if !(self.extension_bridge_liveness(inbound.connection_id))() {
-                    self.disconnect_extension_connection(inbound.connection_id);
-                    return;
-                }
-                self.connect_extension_connection(inbound.connection_id);
                 let TaskClientBody::Request {
                     id: request_id,
                     method,
                     params,
                 } = frame.body;
+                if self.should_quit {
+                    let _ = self.send_extension_frame(
+                        inbound.connection_id,
+                        TaskServerFrame::error(
+                            request_id,
+                            EXTENSION_SHUTDOWN_CODE,
+                            EXTENSION_SHUTDOWN_MESSAGE,
+                        ),
+                    );
+                    self.disconnect_extension_connection(inbound.connection_id);
+                    return;
+                }
+                if !(self.extension_bridge_liveness(inbound.connection_id))() {
+                    self.disconnect_extension_connection(inbound.connection_id);
+                    return;
+                }
+                self.connect_extension_connection(inbound.connection_id);
                 match self
                     .extension_tasks
                     .claim_request(inbound.connection_id, &request_id)
@@ -1707,6 +1803,8 @@ impl TuiApp {
         let interrupt = self
             .prepare_tab_interrupt(tab_idx, Some(turn_id))
             .expect("live turn was validated before interrupt preparation");
+        self.watchdog
+            .cancel_turn(tab_id, turn_id, std::time::Instant::now());
         // Core/TUI ownership is cleared by prepare_tab_interrupt before the
         // extension claims the route, so no terminal modal can survive the
         // handoff or be mistaken for an extension-origin approval.
@@ -9305,6 +9403,151 @@ mod tests {
         assert_eq!(app.extension_tasks.pending_request_count_for_test(), 0);
         assert_eq!(app.extension_tasks.sessions.io_started_for_test(), 0);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn extension_shutdown_fails_pending_rpc_and_fences_late_completion() {
+        let (mut app, tx, mut rx, _cwd, queue) = make_test_app_with_approval_queue().await;
+        let connection_id = 313;
+        let slots = app.extension_tasks.worker_slots.clone();
+        let gate = slots
+            .acquire_many(EXTENSION_WORKER_LIMIT as u32)
+            .await
+            .unwrap();
+        app.dispatch_extension_inbound(
+            TaskInbound {
+                connection_id,
+                kind: TaskInboundKind::Request(TaskClientFrame::request(
+                    "shutdown-pending",
+                    "snapshot/read",
+                    serde_json::json!({}),
+                )),
+            },
+            &tx,
+        );
+        let cancellation = app
+            .extension_tasks
+            .cancellation(connection_id)
+            .expect("connected worker has a cancellation fence");
+        let tab_id = app.tabs[0].id;
+        let task_id = app.tabs[0].session_id.clone();
+        let prepared = app
+            .arm_extension_text_turn(connection_id, task_id.clone(), "shutdown approval".into())
+            .expect("extension turn arms");
+        let (approval, approval_waiter) =
+            request_from_app_queue(&mut app, queue, tab_id.to_string()).await;
+        app.route_approval_request(approval);
+        app.extension_tasks.pending_task_metadata.insert(
+            task_id,
+            super::PendingTaskMetadata {
+                cwd: "pending".into(),
+                model: "pending".into(),
+                access: zode_core::ToolAccessMode::Prompt,
+            },
+        );
+        app.tabs[0].reassemble_pending = true;
+
+        app.begin_extension_shutdown();
+
+        assert_eq!(
+            approval_result_with_timeout(approval_waiter).await,
+            Approval::Deny
+        );
+        assert!(cancellation.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!app.extension_tasks.connection_is_live(connection_id));
+        assert_eq!(app.extension_tasks.pending_request_count_for_test(), 0);
+        assert_eq!(app.extension_tasks.pending_approval_count_for_test(), 0);
+        assert!(!app.tabs[0].reassemble_pending);
+        assert!(app.extension_tasks.pending_task_metadata.is_empty());
+        assert_eq!(
+            app.extension_tasks
+                .turn_routes
+                .get(&(tab_id, prepared.turn_id))
+                .and_then(|route| route.connection_id),
+            None
+        );
+        let frames_before_late = app.extension_tasks.sent_frames_for_test();
+        let shutdown = frames_before_late
+            .iter()
+            .map(|(_, frame)| serde_json::to_value(frame).unwrap())
+            .find(|frame| frame["id"] == "shutdown-pending")
+            .expect("pending request receives a terminal shutdown error");
+        assert_eq!(shutdown["kind"], "error");
+        assert_eq!(shutdown["code"], "server_shutting_down");
+
+        app.handle_extension_task_event(
+            crate::event::ExtensionTaskEvent::IndexReady {
+                connection_id,
+                purpose: crate::event::ExtensionIndexPurpose::Request {
+                    request_id: "shutdown-pending".into(),
+                    request: crate::event::ExtensionTaskRequest::SnapshotRead { task_id: None },
+                },
+                result: Ok(SessionIndex::default()),
+            },
+            &tx,
+        );
+        app.begin_extension_shutdown();
+        assert_eq!(
+            app.extension_tasks.sent_frames_for_test().len(),
+            frames_before_late.len(),
+            "late completion and repeated shutdown cannot reply twice"
+        );
+
+        drop(gate);
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_err(), "cancelled worker emitted an event");
+    }
+
+    #[tokio::test]
+    async fn extension_request_during_shutdown_gets_same_id_error_without_claim_or_io() {
+        let (mut app, tx, _rx, _cwd) = make_test_app().await;
+        app.should_quit = true;
+
+        app.dispatch_extension_inbound(
+            TaskInbound {
+                connection_id: 314,
+                kind: TaskInboundKind::Request(TaskClientFrame::request(
+                    "shutdown-new",
+                    "task/create",
+                    serde_json::json!({}),
+                )),
+            },
+            &tx,
+        );
+
+        let frames = app.extension_tasks.sent_frames_for_test();
+        assert_eq!(frames.len(), 1);
+        let shutdown = serde_json::to_value(&frames[0].1).unwrap();
+        assert_eq!(shutdown["id"], "shutdown-new");
+        assert_eq!(shutdown["kind"], "error");
+        assert_eq!(shutdown["code"], "server_shutting_down");
+        assert_eq!(app.extension_tasks.pending_request_count_for_test(), 0);
+        assert_eq!(app.extension_tasks.sessions.io_started_for_test(), 0);
+        assert!(!app.extension_tasks.connection_is_live(314));
+    }
+
+    #[tokio::test]
+    async fn extension_disconnect_during_shutdown_still_cleans_connection() {
+        let (mut app, tx, _rx, _cwd) = make_test_app().await;
+        let connection_id = 315;
+        app.extension_tasks.connected(connection_id);
+        let cancellation = app
+            .extension_tasks
+            .cancellation(connection_id)
+            .expect("connected worker has a cancellation fence");
+        app.should_quit = true;
+
+        app.dispatch_extension_inbound(
+            TaskInbound {
+                connection_id,
+                kind: TaskInboundKind::Disconnected,
+            },
+            &tx,
+        );
+
+        assert!(cancellation.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!app.extension_tasks.connection_is_live(connection_id));
+        assert!(app.extension_tasks.sent_frames_for_test().is_empty());
     }
 
     #[tokio::test]

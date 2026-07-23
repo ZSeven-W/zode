@@ -15,7 +15,7 @@ pub use jobs::{LoopJob, ScheduleJob, ScheduleSpec};
 pub use store::*;
 
 use chrono::TimeZone;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 /// Something that is due to fire: `prompt` is what gets re-run, `kind`
@@ -37,6 +37,9 @@ pub enum DueKind {
         /// The wall-clock instant this schedule job was due at, for Task 7's
         /// cross-process CAS dedup against `last_fired_ms`.
         fire_ms_hint: chrono::NaiveDateTime,
+        /// Canonical absolute token. Interval schedules use epoch arithmetic
+        /// in the host path, so DST fall-back cannot pause or duplicate phase.
+        fire_epoch_ms: u64,
     },
 }
 
@@ -50,17 +53,6 @@ pub struct Scheduler {
     loops: Vec<LoopJob>,
     schedules: Vec<ScheduleJob>,
     next_loop_id: u32,
-    /// Per-schedule-job in-memory baseline: the wall clock the job was first
-    /// *observed* by `due()` after entering the roster. Used as the anchor for
-    /// `ScheduleSpec::next_after` while `last_fired_ms` is still unknown, so a
-    /// job that has never fired schedules its first fire relative to when it
-    /// joined the roster rather than relative to "now" (which, because
-    /// `next_after` is strictly-after, could never be reached — see `due`).
-    ///
-    /// Captured lazily inside `due()` from that call's `wall` argument, never
-    /// from a hidden clock read, so `due()` stays a pure function of
-    /// `(now, wall)` plus the scheduler's own state.
-    schedule_baselines: HashMap<String, chrono::NaiveDateTime>,
 }
 
 impl Scheduler {
@@ -131,13 +123,6 @@ impl Scheduler {
     /// Replace the `/schedule` roster wholesale (mirrors the store's
     /// contents; Task 7 owns loading/saving `schedules.json`).
     pub fn set_schedules(&mut self, schedules: Vec<ScheduleJob>) {
-        // Drop baselines for jobs that are no longer in the roster; a job that
-        // is re-added later must re-anchor from the moment it re-enters rather
-        // than resurrecting a stale baseline. Jobs that survive the swap keep
-        // theirs, so `/schedule enable` (which round-trips the whole roster
-        // through this method) doesn't silently re-anchor everything.
-        self.schedule_baselines
-            .retain(|id, _| schedules.iter().any(|j| &j.id == id));
         self.schedules = schedules;
     }
 
@@ -148,12 +133,69 @@ impl Scheduler {
 
     /// Disable a `/schedule` job by id (sets `enabled = false` in the
     /// in-memory roster). Returns whether a matching job was found. Callers
-    /// that need the change to survive a restart persist it separately via
-    /// `save_schedules(scheduler.schedules())` — this method has no I/O.
+    /// that need the change to survive a restart use
+    /// `disable_schedule_atomic` and refresh this roster — this method has no
+    /// I/O and must not be used to overwrite a concurrently edited store.
     pub fn disable_schedule(&mut self, id: &str) -> bool {
         match self.schedules.iter_mut().find(|j| j.id == id) {
             Some(job) => {
                 job.enabled = false;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Persistable watchdog bookkeeping for a schedule attempt.
+    pub fn record_watchdog_failure(
+        &mut self,
+        id: &str,
+        failures: u32,
+        at_ms: u64,
+        retry_at_ms: Option<u64>,
+    ) -> bool {
+        match self.schedules.iter_mut().find(|job| job.id == id) {
+            Some(job) => {
+                job.watchdog_failures = failures;
+                job.watchdog_last_failure_ms = Some(at_ms);
+                job.watchdog_retry_at_ms = retry_at_ms;
+                job.watchdog_active_since_ms = None;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A successful run or explicit re-enable opens a fresh recovery window.
+    pub fn clear_watchdog_failures(&mut self, id: &str) -> bool {
+        match self.schedules.iter_mut().find(|job| job.id == id) {
+            Some(job) => {
+                job.watchdog_failures = 0;
+                job.watchdog_last_failure_ms = None;
+                job.watchdog_retry_at_ms = None;
+                job.watchdog_active_since_ms = None;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Mirror a successful persisted retry claim into the in-memory roster.
+    pub fn clear_watchdog_retry_if(&mut self, id: &str, expected_retry_at_ms: u64) -> bool {
+        match self.schedules.iter_mut().find(|job| job.id == id) {
+            Some(job) if job.watchdog_retry_at_ms == Some(expected_retry_at_ms) => {
+                job.watchdog_retry_at_ms = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn mark_watchdog_active(&mut self, id: &str, active_since_ms: u64) -> bool {
+        match self.schedules.iter_mut().find(|job| job.id == id) {
+            Some(job) => {
+                job.watchdog_retry_at_ms = None;
+                job.watchdog_active_since_ms = Some(active_since_ms);
                 true
             }
             None => false,
@@ -167,41 +209,93 @@ impl Scheduler {
     /// single missed tick — `next_fire` always advances to `now + interval`,
     /// never accumulates. A job retires (is removed) once `runs >= max_runs`.
     ///
-    /// Schedule jobs: only `enabled` jobs are considered. The next-fire point
-    /// is computed by anchoring `ScheduleSpec::next_after` on the job's own
-    /// history — NOT on `wall`. `next_after` is documented to return a time
-    /// strictly *after* its `now` argument, so anchoring it on `wall` and then
-    /// testing `next_fire <= wall` could never be true and no schedule could
-    /// ever fire. The anchor is therefore the later of:
+    /// Schedule jobs: only `enabled` jobs are considered. Their persisted
+    /// `last_fired_ms` is the shared recurrence anchor. Interval candidates are
+    /// exact multiples of the interval from that anchor; daily and weekly
+    /// candidates use their intrinsic calendar phase. This is intentionally
+    /// independent of when a particular process first observes the roster.
     ///
-    /// - the job's `last_fired_ms` (when known), and
-    /// - the job's in-memory baseline: the `wall` of the first `due()` call
-    ///   that observed it (see [`Scheduler::schedule_baselines`]).
+    /// If several occurrences were missed, only the latest due occurrence is
+    /// returned. That coalesces backlog without changing phase or replaying one
+    /// prompt per missed tick. `last_fired_ms` is stamped to the exact trigger
+    /// point (also reported as `fire_ms_hint`), not to the observing `wall`, so
+    /// every process presents the same millisecond CAS token for a given slot.
+    /// The persistent store supplies a creation/re-enable anchor for all normal
+    /// jobs; a legacy in-memory job with no anchor uses a fixed Unix-epoch
+    /// local phase rather than a process-local startup time.
     ///
-    /// Taking the later of the two is what makes missed triggers *skipped*
-    /// rather than replayed: after a restart a daily job whose `last_fired_ms`
-    /// is three days old anchors on the startup baseline, so its next fire is
-    /// the upcoming occurrence, not three backlogged ones.
-    ///
-    /// When that anchored next-fire point is `<= wall` the job fires, and
-    /// `last_fired_ms` is stamped to the *trigger point* (the same value
-    /// reported as `fire_ms_hint`), not to `wall` — so cross-process CAS dedup
-    /// and the in-process "don't fire the same trigger twice" check agree on
-    /// one canonical instant regardless of how late the tick observed it.
-    ///
-    /// A disabled job drops its baseline, so `/schedule enable` re-anchors at
-    /// the wall clock of the first tick that observes it enabled again rather
-    /// than replaying every occurrence accrued while it was off.
-    ///
-    /// A trigger point with no valid local instant (DST spring-forward gap) is
-    /// skipped *forward* to the following occurrence — see [`resolve_trigger`].
+    /// A trigger point with no valid local instant (a DST spring-forward gap)
+    /// is skipped. Once the following valid occurrence is due, it becomes the
+    /// latest canonical slot.
     ///
     /// `due()` reads no clock of its own: everything is derived from `now`,
     /// `wall`, and stored state.
     pub fn due(&mut self, now: Instant, wall: chrono::NaiveDateTime) -> Vec<DueJob> {
+        self.due_with_blocked_loops(now, wall, &HashSet::new())
+    }
+
+    /// Variant used by the watchdog-aware host. A blocked loop remains
+    /// overdue without advancing `runs` or consuming `max_runs`; once its
+    /// active attempt/backoff clears, the next poll fires it exactly once.
+    pub fn due_with_blocked_loops(
+        &mut self,
+        now: Instant,
+        wall: chrono::NaiveDateTime,
+        blocked_loops: &HashSet<u32>,
+    ) -> Vec<DueJob> {
+        self.due_with_blocked_jobs(now, wall, blocked_loops, &HashSet::new())
+    }
+
+    /// Host-aware variant that leaves both locally occupied loop and schedule
+    /// watermarks untouched. This keeps the in-memory schedule phase aligned
+    /// with the persisted store while an attempt waits, runs, or backs off.
+    pub fn due_with_blocked_jobs(
+        &mut self,
+        now: Instant,
+        wall: chrono::NaiveDateTime,
+        blocked_loops: &HashSet<u32>,
+        blocked_schedules: &HashSet<String>,
+    ) -> Vec<DueJob> {
+        self.due_impl(now, wall, None, blocked_loops, blocked_schedules, true)
+    }
+
+    /// Host claim mode: loop accounting is committed immediately, while a
+    /// persisted schedule is only peeked. Its authoritative watermark moves
+    /// in the cross-process store transaction, so a failed I/O, text
+    /// collision, or lost claim cannot consume the local occurrence.
+    pub fn due_candidates_with_blocked_jobs(
+        &mut self,
+        now: Instant,
+        wall: chrono::NaiveDateTime,
+        wall_epoch_ms: u64,
+        blocked_loops: &HashSet<u32>,
+        blocked_schedules: &HashSet<String>,
+    ) -> Vec<DueJob> {
+        self.due_impl(
+            now,
+            wall,
+            Some(wall_epoch_ms),
+            blocked_loops,
+            blocked_schedules,
+            false,
+        )
+    }
+
+    fn due_impl(
+        &mut self,
+        now: Instant,
+        wall: chrono::NaiveDateTime,
+        wall_epoch_ms: Option<u64>,
+        blocked_loops: &HashSet<u32>,
+        blocked_schedules: &HashSet<String>,
+        advance_schedule_watermarks: bool,
+    ) -> Vec<DueJob> {
         let mut due = Vec::new();
 
         for job in &mut self.loops {
+            if blocked_loops.contains(&job.id) {
+                continue;
+            }
             if job.next_fire <= now {
                 due.push(DueJob {
                     prompt: job.prompt.clone(),
@@ -217,37 +311,20 @@ impl Scheduler {
         self.loops
             .retain(|j| j.max_runs.is_none_or(|max| j.runs < max));
 
-        // Disjoint field borrows: the loop mutates `self.schedules` while
-        // reading/inserting into `self.schedule_baselines`.
-        let baselines = &mut self.schedule_baselines;
         for job in &mut self.schedules {
-            if !job.enabled {
-                // Drop the baseline while a job is disabled. `set_schedules`
-                // deliberately keeps baselines for ids that survive a roster
-                // swap, and a disabled job never leaves the roster — so without
-                // this, `/schedule disable` at 09:05 followed by
-                // `/schedule enable` at 17:00 would still be anchored at 09:00
-                // and replay every occurrence accrued in between. Re-enabling
-                // must re-anchor at the current wall clock, per the documented
-                // "missed triggers are skipped, never replayed".
-                baselines.remove(&job.id);
+            if !job.enabled || blocked_schedules.contains(&job.id) {
                 continue;
             }
-            // Baseline is captured the first time a job is observed, even when
-            // it is not going to fire — so it is anchored to roster-entry time
-            // rather than to whenever the first fire-eligible tick happens.
-            let baseline = *baselines.entry(job.id.clone()).or_insert(wall);
             let last_fired = job.last_fired_ms.and_then(epoch_ms_to_naive);
-            let anchor = match last_fired {
-                Some(lf) if lf > baseline => lf,
-                _ => baseline,
-            };
-            // Resolves the trigger point, skipping *past* any occurrence that
-            // has no valid local instant (spring-forward gap) rather than
-            // retrying the same nonexistent one every tick.
-            let Some((next_fire, fired_ms)) =
-                resolve_trigger(&job.spec, anchor, last_fired, wall, naive_to_epoch_ms)
-            else {
+            let anchor = last_fired.unwrap_or_else(unix_epoch_local_phase);
+            let Some((next_fire, fired_ms)) = resolve_trigger(
+                &job.spec,
+                anchor,
+                job.last_fired_ms,
+                wall,
+                wall_epoch_ms,
+                naive_to_epoch_ms,
+            ) else {
                 continue;
             };
             due.push(DueJob {
@@ -255,9 +332,12 @@ impl Scheduler {
                 kind: DueKind::Schedule {
                     id: job.id.clone(),
                     fire_ms_hint: next_fire,
+                    fire_epoch_ms: fired_ms,
                 },
             });
-            job.last_fired_ms = Some(fired_ms);
+            if advance_schedule_watermarks {
+                job.last_fired_ms = Some(fired_ms);
+            }
         }
 
         due
@@ -275,51 +355,111 @@ impl Scheduler {
     }
 }
 
-/// Runaway guard for [`resolve_trigger`]'s gap-skipping walk. A DST
-/// spring-forward gap is at most a few hours, so with the 30s minimum
-/// interval the real worst case is a few hundred steps.
-const MAX_GAP_SKIPS: usize = 1024;
-
-/// Resolve the trigger point a schedule job should fire at, given its anchor.
+/// Resolve the latest canonical trigger point that is due for one schedule.
 ///
-/// Returns `None` when the job is simply not due yet (`next_fire > wall`),
-/// or when gap-skipping exhausts `MAX_GAP_SKIPS` (runaway guard against
-/// pathological DST/spec combinations). Returns `Some((trigger_point, epoch_ms))`
-/// when a valid fire point is found.
+/// `anchor` is normally the persisted `last_fired_ms` converted to local wall
+/// time. For an interval it is also the phase origin; for calendar schedules
+/// the configured hour/weekday supplies the phase and the anchor prevents an
+/// occurrence at or before creation/the previous fire from being returned.
+/// Only the latest occurrence at or before `wall` is considered, so downtime
+/// coalesces to one token instead of replaying the entire backlog.
 ///
-/// The loop exists for DST spring-forward: `to_epoch_ms` returns `None` for a
-/// local time that never happens, and the fix for that must ADVANCE to the
-/// following occurrence. Simply skipping the fire would recompute the identical
-/// nonexistent trigger point on every subsequent tick — a `Daily`/`Weekly` job
-/// scheduled inside the gap would be wedged for the life of the process, since
-/// nothing ever stamps `last_fired_ms` to move the anchor forward. Advancing
-/// matches the documented behavior ("fires on the following occurrence instead
-/// of this one").
-///
-/// `to_epoch_ms` is a parameter rather than a direct call to
-/// [`naive_to_epoch_ms`] so the gap-skipping walk is testable without depending
-/// on the host machine's timezone (`chrono::Local`): a test can inject a
-/// synthetic gap.
+/// `to_epoch_ms` is injected to keep DST-gap tests independent of the host
+/// timezone. A nonexistent latest slot is skipped; on a later call the next
+/// valid calendar occurrence naturally becomes the latest candidate.
 fn resolve_trigger(
     spec: &jobs::ScheduleSpec,
     anchor: chrono::NaiveDateTime,
-    last_fired: Option<chrono::NaiveDateTime>,
+    anchor_epoch_ms: Option<u64>,
     wall: chrono::NaiveDateTime,
+    wall_epoch_ms: Option<u64>,
     to_epoch_ms: impl Fn(chrono::NaiveDateTime) -> Option<u64>,
 ) -> Option<(chrono::NaiveDateTime, u64)> {
-    let mut next_fire = spec.next_after(anchor, last_fired);
-    for _ in 0..MAX_GAP_SKIPS {
-        if next_fire > wall {
-            return None; // not due yet
+    if let (jobs::ScheduleSpec::Interval { secs }, Some(anchor_epoch_ms), Some(wall_epoch_ms)) =
+        (spec, anchor_epoch_ms, wall_epoch_ms)
+    {
+        let fired_ms = latest_interval_epoch_slot(anchor_epoch_ms, wall_epoch_ms, *secs)?;
+        return epoch_ms_to_naive(fired_ms).map(|candidate| (candidate, fired_ms));
+    }
+    let candidate = match spec {
+        jobs::ScheduleSpec::Interval { secs } => latest_interval_slot(anchor, wall, *secs)?,
+        jobs::ScheduleSpec::Daily { hour, minute } => latest_daily_slot(wall, *hour, *minute)?,
+        jobs::ScheduleSpec::Weekly {
+            weekday,
+            hour,
+            minute,
+        } => latest_weekly_slot(wall, *weekday, *hour, *minute)?,
+    };
+    if candidate <= anchor {
+        return None;
+    }
+    to_epoch_ms(candidate).map(|ms| (candidate, ms))
+}
+
+fn latest_interval_epoch_slot(anchor_ms: u64, wall_ms: u64, secs: u64) -> Option<u64> {
+    let period_ms = secs.checked_mul(1_000)?;
+    let elapsed_ms = wall_ms.checked_sub(anchor_ms)?;
+    if elapsed_ms < period_ms {
+        return None;
+    }
+    anchor_ms.checked_add((elapsed_ms / period_ms).checked_mul(period_ms)?)
+}
+
+fn latest_interval_slot(
+    anchor: chrono::NaiveDateTime,
+    wall: chrono::NaiveDateTime,
+    secs: u64,
+) -> Option<chrono::NaiveDateTime> {
+    let period_ms = secs.checked_mul(1_000)?;
+    if period_ms == 0 {
+        return None;
+    }
+    let elapsed_ms = wall.signed_duration_since(anchor).num_milliseconds();
+    if elapsed_ms < i64::try_from(period_ms).ok()? {
+        return None;
+    }
+    let slots = u64::try_from(elapsed_ms).ok()? / period_ms;
+    let offset_ms = slots.checked_mul(period_ms)?;
+    anchor.checked_add_signed(chrono::Duration::milliseconds(
+        i64::try_from(offset_ms).ok()?,
+    ))
+}
+
+fn latest_daily_slot(
+    wall: chrono::NaiveDateTime,
+    hour: u32,
+    minute: u32,
+) -> Option<chrono::NaiveDateTime> {
+    let today = wall.date().and_hms_opt(hour, minute, 0)?;
+    if today <= wall {
+        Some(today)
+    } else {
+        today.checked_sub_signed(chrono::Duration::days(1))
+    }
+}
+
+fn latest_weekly_slot(
+    wall: chrono::NaiveDateTime,
+    weekday: chrono::Weekday,
+    hour: u32,
+    minute: u32,
+) -> Option<chrono::NaiveDateTime> {
+    use chrono::Datelike;
+
+    for days_ago in 0..7 {
+        let date = wall
+            .date()
+            .checked_sub_signed(chrono::Duration::days(days_ago))?;
+        let candidate = date.and_hms_opt(hour, minute, 0)?;
+        if date.weekday() == weekday && candidate <= wall {
+            return Some(candidate);
         }
-        if let Some(ms) = to_epoch_ms(next_fire) {
-            return Some((next_fire, ms));
-        }
-        // Nonexistent local time: step to the occurrence after it. `next_after`
-        // is strictly-after its `now` argument, so this always makes progress.
-        next_fire = spec.next_after(next_fire, last_fired);
     }
     None
+}
+
+fn unix_epoch_local_phase() -> chrono::NaiveDateTime {
+    chrono::DateTime::UNIX_EPOCH.naive_utc()
 }
 
 /// Convert an epoch-millisecond wall-clock timestamp to naive local time.
@@ -388,6 +528,62 @@ mod tests {
     }
 
     #[test]
+    fn blocked_loop_does_not_consume_max_runs() {
+        let mut scheduler = Scheduler::default();
+        let now = Instant::now();
+        let id = scheduler.add_loop(7, "check ci".into(), Duration::from_secs(60), Some(2), now);
+        scheduler.rewind_loop_for_test(id, Duration::from_secs(61));
+        assert_eq!(scheduler.due(now, sample_wall()).len(), 1);
+        assert_eq!(scheduler.loops()[0].runs, 1);
+
+        scheduler.rewind_loop_for_test(id, Duration::from_secs(61));
+        let blocked = HashSet::from([id]);
+        for _ in 0..3 {
+            assert!(scheduler
+                .due_with_blocked_loops(now, sample_wall(), &blocked)
+                .is_empty());
+            assert_eq!(scheduler.loops()[0].runs, 1);
+        }
+
+        assert_eq!(
+            scheduler
+                .due_with_blocked_loops(now, sample_wall(), &HashSet::new())
+                .len(),
+            1
+        );
+        assert!(scheduler.loops().is_empty());
+    }
+
+    #[test]
+    fn blocked_schedule_does_not_advance_its_canonical_watermark() {
+        let now = Instant::now();
+        let anchor = dt(2026, 7, 18, 8, 0);
+        let mut scheduler = Scheduler::default();
+        scheduler.set_schedules(vec![schedule(
+            "blocked-schedule",
+            ScheduleSpec::Interval { secs: 3600 },
+            anchor,
+        )]);
+        let blocked = HashSet::from(["blocked-schedule".to_string()]);
+
+        assert!(scheduler
+            .due_with_blocked_jobs(now, dt(2026, 7, 18, 10, 30), &HashSet::new(), &blocked,)
+            .is_empty());
+        assert_eq!(
+            scheduler.schedules()[0].last_fired_ms,
+            naive_to_epoch_ms(anchor),
+            "queued/running work must not consume persisted cadence locally"
+        );
+        let due = scheduler.due_with_blocked_jobs(
+            now,
+            dt(2026, 7, 18, 10, 30),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert_eq!(only_fire_hint(&due), dt(2026, 7, 18, 10, 0));
+    }
+
+    #[test]
     fn stop_loop_none_clears_all() {
         let mut s = Scheduler::default();
         let now = Instant::now();
@@ -406,6 +602,10 @@ mod tests {
             prompt: "sync".into(),
             enabled: true,
             last_fired_ms: None,
+            watchdog_failures: 0,
+            watchdog_last_failure_ms: None,
+            watchdog_retry_at_ms: None,
+            watchdog_active_since_ms: None,
         }]);
         assert!(s.disable_schedule("ab12"), "existing id found");
         assert!(!s.schedules()[0].enabled, "flipped to disabled");
@@ -419,14 +619,103 @@ mod tests {
             .unwrap()
     }
 
-    fn schedule(id: &str, spec: ScheduleSpec) -> ScheduleJob {
+    fn schedule(id: &str, spec: ScheduleSpec, anchor: chrono::NaiveDateTime) -> ScheduleJob {
         ScheduleJob {
             id: id.into(),
             spec,
             prompt: "standup notes".into(),
             enabled: true,
-            last_fired_ms: None,
+            last_fired_ms: Some(naive_to_epoch_ms(anchor).expect("valid local anchor")),
+            watchdog_failures: 0,
+            watchdog_last_failure_ms: None,
+            watchdog_retry_at_ms: None,
+            watchdog_active_since_ms: None,
         }
+    }
+
+    fn only_fire_hint(due: &[DueJob]) -> chrono::NaiveDateTime {
+        assert_eq!(due.len(), 1, "expected one canonical schedule trigger");
+        match &due[0].kind {
+            DueKind::Schedule { fire_ms_hint, .. } => *fire_ms_hint,
+            other => panic!("expected a schedule job, got {other:?}"),
+        }
+    }
+
+    fn only_schedule_fire_epoch(due: &[DueJob]) -> u64 {
+        let mut epochs = due.iter().filter_map(|job| match &job.kind {
+            DueKind::Schedule { fire_epoch_ms, .. } => Some(*fire_epoch_ms),
+            DueKind::Loop { .. } => None,
+        });
+        let epoch = epochs
+            .next()
+            .expect("expected one canonical schedule trigger");
+        assert!(
+            epochs.next().is_none(),
+            "expected only one schedule trigger"
+        );
+        epoch
+    }
+
+    #[test]
+    fn host_candidates_peek_schedule_watermark_but_commit_loop_accounting() {
+        let now = Instant::now();
+        let anchor = dt(2026, 7, 18, 8, 0);
+        let anchor_epoch_ms = naive_to_epoch_ms(anchor).expect("valid local anchor");
+        let mut scheduler = Scheduler::default();
+        scheduler.set_schedules(vec![schedule(
+            "candidate-peek",
+            ScheduleSpec::Interval { secs: 3600 },
+            anchor,
+        )]);
+        let loop_id = scheduler.add_loop(
+            7,
+            "check loop".into(),
+            Duration::from_secs(60),
+            Some(2),
+            now,
+        );
+        scheduler.rewind_loop_for_test(loop_id, Duration::from_secs(61));
+
+        let wall_epoch_ms =
+            anchor_epoch_ms + Duration::from_secs(2 * 3600 + 30 * 60).as_millis() as u64;
+        let first = scheduler.due_candidates_with_blocked_jobs(
+            now,
+            dt(2026, 7, 18, 10, 30),
+            wall_epoch_ms,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        let expected_epoch_ms = anchor_epoch_ms + Duration::from_secs(2 * 3600).as_millis() as u64;
+        assert_eq!(only_schedule_fire_epoch(&first), expected_epoch_ms);
+        assert_eq!(scheduler.loops()[0].runs, 1, "loop accounting is committed");
+        assert_eq!(
+            scheduler.schedules()[0].last_fired_ms,
+            Some(anchor_epoch_ms),
+            "the host must leave schedule advancement to the store claim"
+        );
+
+        let repeated = scheduler.due_candidates_with_blocked_jobs(
+            now,
+            dt(2026, 7, 18, 10, 30),
+            wall_epoch_ms,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert_eq!(
+            only_schedule_fire_epoch(&repeated),
+            expected_epoch_ms,
+            "an unclaimed candidate remains available with the same CAS token"
+        );
+        assert!(
+            repeated
+                .iter()
+                .all(|job| !matches!(&job.kind, DueKind::Loop { .. })),
+            "the loop was committed on the first candidate poll"
+        );
+        assert_eq!(
+            scheduler.schedules()[0].last_fired_ms,
+            Some(anchor_epoch_ms)
+        );
     }
 
     /// End-to-end for a `Daily` job: it must actually come out of `due()` once
@@ -439,9 +728,10 @@ mod tests {
         s.set_schedules(vec![schedule(
             "ab12",
             ScheduleSpec::Daily { hour: 9, minute: 0 },
+            dt(2026, 7, 18, 8, 0),
         )]);
 
-        // 08:00 registers the baseline; nothing is due yet.
+        // The persisted creation anchor is 08:00; nothing is due yet.
         assert!(s.due(now, dt(2026, 7, 18, 8, 0)).is_empty());
         assert!(s.due(now, dt(2026, 7, 18, 8, 59)).is_empty());
 
@@ -450,7 +740,9 @@ mod tests {
         assert_eq!(fired.len(), 1, "daily job fires once the time passes");
         assert_eq!(fired[0].prompt, "standup notes");
         match &fired[0].kind {
-            DueKind::Schedule { id, fire_ms_hint } => {
+            DueKind::Schedule {
+                id, fire_ms_hint, ..
+            } => {
                 assert_eq!(id, "ab12");
                 assert_eq!(
                     *fire_ms_hint,
@@ -488,9 +780,10 @@ mod tests {
         s.set_schedules(vec![schedule(
             "cd34",
             ScheduleSpec::Interval { secs: 3600 },
+            dt(2026, 7, 18, 8, 0),
         )]);
 
-        // Baseline at 08:00; the first fire is one interval later.
+        // Creation anchor at 08:00; the first fire is one interval later.
         assert!(s.due(now, dt(2026, 7, 18, 8, 0)).is_empty());
         assert!(s.due(now, dt(2026, 7, 18, 8, 59)).is_empty());
 
@@ -514,24 +807,183 @@ mod tests {
         }
     }
 
-    /// Downtime must be skipped, not replayed: a job whose stored `last_fired`
-    /// is days old anchors on the startup baseline, so exactly one fire happens
-    /// at the next real occurrence rather than one per missed day.
     #[test]
-    fn missed_triggers_are_skipped_not_replayed() {
+    fn host_interval_candidates_keep_epoch_cadence_when_naive_wall_moves_back() {
+        let now = Instant::now();
+        let anchor_epoch_ms = 2_000_000_000_000;
+        let mut job = schedule(
+            "dst-fallback",
+            ScheduleSpec::Interval { secs: 3600 },
+            dt(2026, 10, 31, 0, 0),
+        );
+        job.last_fired_ms = Some(anchor_epoch_ms);
+        let mut scheduler = Scheduler::default();
+        scheduler.set_schedules(vec![job]);
+
+        let before_fallback = scheduler.due_candidates_with_blocked_jobs(
+            now,
+            dt(2026, 11, 1, 1, 55),
+            anchor_epoch_ms + Duration::from_secs(55 * 60).as_millis() as u64,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(
+            before_fallback.is_empty(),
+            "less than one epoch hour elapsed"
+        );
+
+        let after_fallback = scheduler.due_candidates_with_blocked_jobs(
+            now,
+            dt(2026, 11, 1, 1, 5),
+            anchor_epoch_ms + Duration::from_secs(65 * 60).as_millis() as u64,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        let first_epoch_ms = only_schedule_fire_epoch(&after_fallback);
+        assert_eq!(
+            first_epoch_ms,
+            anchor_epoch_ms + Duration::from_secs(3600).as_millis() as u64,
+            "absolute elapsed time fires even though local wall time moved backward"
+        );
+
+        let mut claimed = scheduler.schedules()[0].clone();
+        claimed.last_fired_ms = Some(first_epoch_ms);
+        scheduler.set_schedules(vec![claimed]);
+        let next = scheduler.due_candidates_with_blocked_jobs(
+            now,
+            dt(2026, 11, 1, 1, 10),
+            anchor_epoch_ms + Duration::from_secs(125 * 60).as_millis() as u64,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        let second_epoch_ms = only_schedule_fire_epoch(&next);
+        assert_eq!(second_epoch_ms - first_epoch_ms, 3_600_000);
+        assert_eq!(
+            scheduler.schedules()[0].last_fired_ms,
+            Some(first_epoch_ms),
+            "candidate polling still leaves the claimed store watermark untouched"
+        );
+    }
+
+    #[test]
+    fn independent_schedulers_share_interval_phase_and_exact_token() {
+        let now = Instant::now();
+        let anchor = dt(2026, 7, 18, 8, 0) + chrono::Duration::milliseconds(347);
+        let job = schedule(
+            "phase-interval",
+            ScheduleSpec::Interval { secs: 3600 },
+            anchor,
+        );
+        let mut process_a = Scheduler::default();
+        let mut process_b = Scheduler::default();
+        process_a.set_schedules(vec![job.clone()]);
+        process_b.set_schedules(vec![job]);
+
+        // These are the first observations in each process and happen at
+        // different points inside the same overdue interval slot.
+        let a = process_a.due(now, dt(2026, 7, 18, 9, 10));
+        let b = process_b.due(now, dt(2026, 7, 18, 9, 55));
+        let expected = dt(2026, 7, 18, 9, 0) + chrono::Duration::milliseconds(347);
+        assert_eq!(only_fire_hint(&a), expected);
+        assert_eq!(only_fire_hint(&b), expected);
+        assert_eq!(
+            process_a.schedules()[0].last_fired_ms,
+            process_b.schedules()[0].last_fired_ms,
+            "both processes present the identical millisecond CAS token"
+        );
+        assert_eq!(
+            process_a.schedules()[0].last_fired_ms,
+            naive_to_epoch_ms(expected)
+        );
+    }
+
+    #[test]
+    fn independent_schedulers_coalesce_interval_backlog_without_phase_drift() {
+        let now = Instant::now();
+        let job = schedule(
+            "phase-backlog",
+            ScheduleSpec::Interval { secs: 3600 },
+            dt(2026, 7, 18, 8, 0),
+        );
+        let mut process_a = Scheduler::default();
+        let mut process_b = Scheduler::default();
+        process_a.set_schedules(vec![job.clone()]);
+        process_b.set_schedules(vec![job]);
+
+        // Four occurrences are overdue. Both observers coalesce directly to
+        // 12:00 even though their ticks happen at different wall times.
+        let a = process_a.due(now, dt(2026, 7, 18, 12, 5));
+        let b = process_b.due(now, dt(2026, 7, 18, 12, 59));
+        assert_eq!(only_fire_hint(&a), dt(2026, 7, 18, 12, 0));
+        assert_eq!(only_fire_hint(&b), dt(2026, 7, 18, 12, 0));
+    }
+
+    #[test]
+    fn independent_schedulers_share_daily_and_weekly_calendar_slots() {
+        let now = Instant::now();
+
+        let daily = schedule(
+            "phase-daily",
+            ScheduleSpec::Daily { hour: 9, minute: 0 },
+            dt(2026, 7, 17, 9, 0),
+        );
+        let mut daily_a = Scheduler::default();
+        let mut daily_b = Scheduler::default();
+        daily_a.set_schedules(vec![daily.clone()]);
+        daily_b.set_schedules(vec![daily]);
+        assert!(daily_a.due(now, dt(2026, 7, 18, 8, 0)).is_empty());
+        let daily_b_due = daily_b.due(now, dt(2026, 7, 18, 9, 15));
+        let daily_a_due = daily_a.due(now, dt(2026, 7, 18, 9, 45));
+        assert_eq!(only_fire_hint(&daily_a_due), dt(2026, 7, 18, 9, 0));
+        assert_eq!(only_fire_hint(&daily_b_due), dt(2026, 7, 18, 9, 0));
+
+        let weekly = schedule(
+            "phase-weekly",
+            ScheduleSpec::Weekly {
+                weekday: chrono::Weekday::Mon,
+                hour: 9,
+                minute: 0,
+            },
+            dt(2026, 7, 13, 9, 0),
+        );
+        let mut weekly_a = Scheduler::default();
+        let mut weekly_b = Scheduler::default();
+        weekly_a.set_schedules(vec![weekly.clone()]);
+        weekly_b.set_schedules(vec![weekly]);
+        assert!(weekly_a.due(now, dt(2026, 7, 19, 12, 0)).is_empty());
+        let weekly_b_due = weekly_b.due(now, dt(2026, 7, 20, 9, 15));
+        let weekly_a_due = weekly_a.due(now, dt(2026, 7, 20, 9, 45));
+        assert_eq!(only_fire_hint(&weekly_a_due), dt(2026, 7, 20, 9, 0));
+        assert_eq!(only_fire_hint(&weekly_b_due), dt(2026, 7, 20, 9, 0));
+    }
+
+    /// Downtime is coalesced, not replayed: a job whose stored `last_fired` is
+    /// days old emits only the latest canonical slot, never one prompt per
+    /// missed day.
+    #[test]
+    fn missed_triggers_coalesce_to_the_latest_slot() {
         let mut s = Scheduler::default();
         let now = Instant::now();
         let stale = naive_to_epoch_ms(dt(2026, 7, 10, 9, 0)).expect("valid local time");
-        let mut job = schedule("ef56", ScheduleSpec::Daily { hour: 9, minute: 0 });
-        job.last_fired_ms = Some(stale);
+        let job = schedule(
+            "ef56",
+            ScheduleSpec::Daily { hour: 9, minute: 0 },
+            epoch_ms_to_naive(stale).expect("valid local anchor"),
+        );
         s.set_schedules(vec![job]);
 
-        // Startup at 12:00 on the 18th: eight days of occurrences were missed.
-        assert!(
-            s.due(now, dt(2026, 7, 18, 12, 0)).is_empty(),
-            "no backlog replay on startup"
-        );
-        // Only the next real occurrence fires, exactly once.
+        // At 12:00 on the 18th, eight daily occurrences were missed. Only the
+        // latest (today at 09:00) is emitted.
+        let coalesced = s.due(now, dt(2026, 7, 18, 12, 0));
+        assert_eq!(coalesced.len(), 1, "backlog coalesces to one trigger");
+        match &coalesced[0].kind {
+            DueKind::Schedule { fire_ms_hint, .. } => {
+                assert_eq!(*fire_ms_hint, dt(2026, 7, 18, 9, 0))
+            }
+            other => panic!("expected a schedule job, got {other:?}"),
+        }
+        assert!(s.due(now, dt(2026, 7, 18, 12, 1)).is_empty());
+        // Tomorrow's occurrence remains a distinct slot.
         assert_eq!(s.due(now, dt(2026, 7, 19, 9, 0)).len(), 1);
         assert!(s.due(now, dt(2026, 7, 19, 9, 5)).is_empty());
     }
@@ -550,9 +1002,10 @@ mod tests {
                 hour: 9,
                 minute: 0,
             },
+            dt(2026, 7, 18, 10, 0),
         )]);
 
-        // Baseline on Saturday; nothing until Monday 09:00.
+        // Persisted creation anchor on Saturday; nothing until Monday 09:00.
         assert!(s.due(now, dt(2026, 7, 18, 10, 0)).is_empty());
         assert!(s.due(now, dt(2026, 7, 19, 23, 0)).is_empty());
         assert!(s.due(now, dt(2026, 7, 20, 8, 59)).is_empty());
@@ -560,7 +1013,9 @@ mod tests {
         let fired = s.due(now, dt(2026, 7, 20, 9, 0));
         assert_eq!(fired.len(), 1, "weekly job fires on its weekday");
         match &fired[0].kind {
-            DueKind::Schedule { id, fire_ms_hint } => {
+            DueKind::Schedule {
+                id, fire_ms_hint, ..
+            } => {
                 assert_eq!(id, "gh78");
                 assert_eq!(
                     *fire_ms_hint,
@@ -589,29 +1044,33 @@ mod tests {
         }
     }
 
-    /// Regression: re-enabling a job that was disabled for hours must NOT
-    /// replay the occurrences accrued while it was off. The baseline is dropped
-    /// on the disabled tick, so `enable` re-anchors at the current wall clock.
+    /// Re-enabling persists a fresh shared anchor, so occurrences accrued while
+    /// the job was disabled are not replayed.
     #[test]
     fn re_enabling_a_schedule_re_anchors_instead_of_replaying() {
         let mut s = Scheduler::default();
         let now = Instant::now();
-        let job = schedule("ij90", ScheduleSpec::Interval { secs: 7200 });
+        let job = schedule(
+            "ij90",
+            ScheduleSpec::Interval { secs: 7200 },
+            dt(2026, 7, 18, 9, 0),
+        );
         s.set_schedules(vec![job.clone()]);
 
-        // 09:00 baseline, disabled at 09:05 before it ever fires.
+        // 09:00 creation anchor, disabled at 09:05 before it ever fires.
         assert!(s.due(now, dt(2026, 7, 18, 9, 0)).is_empty());
         assert!(s.disable_schedule("ij90"));
-        // A tick while disabled drops the stale baseline.
+        // Disabled jobs remain inert.
         assert!(s.due(now, dt(2026, 7, 18, 9, 5)).is_empty());
         // Nothing accrues over the next eight hours either.
         assert!(s.due(now, dt(2026, 7, 18, 13, 0)).is_empty());
 
-        // Re-enable at 17:00. `/schedule enable` round-trips the whole roster
-        // through `set_schedules`, which preserves surviving ids' baselines —
-        // the point of the fix is that there is no longer one to preserve.
+        // Mirror `/schedule enable`, which atomically stores its wall time as
+        // the new shared cadence anchor before refreshing the scheduler.
         let mut enabled = s.schedules()[0].clone();
         enabled.enabled = true;
+        enabled.last_fired_ms =
+            Some(naive_to_epoch_ms(dt(2026, 7, 18, 17, 0)).expect("valid re-enable anchor"));
         s.set_schedules(vec![enabled]);
 
         // The re-anchoring tick fires nothing: no 11:00/13:00/15:00 backlog.
@@ -631,16 +1090,17 @@ mod tests {
         }
     }
 
-    /// Disabling and re-enabling inside a single interval must still behave
-    /// sanely: the job re-anchors at the re-enable point but its own
-    /// `last_fired_ms` still governs cadence when it is the later anchor.
+    /// A re-enable anchor is persisted even inside the old interval, so every
+    /// process starts the same fresh cadence instead of preserving a private
+    /// in-memory phase.
     #[test]
-    fn brief_disable_re_enable_keeps_the_original_cadence() {
+    fn brief_disable_re_enable_starts_a_shared_fresh_cadence() {
         let mut s = Scheduler::default();
         let now = Instant::now();
         s.set_schedules(vec![schedule(
             "kl12",
             ScheduleSpec::Interval { secs: 7200 },
+            dt(2026, 7, 18, 7, 0),
         )]);
 
         assert!(s.due(now, dt(2026, 7, 18, 7, 0)).is_empty()); // baseline
@@ -650,18 +1110,20 @@ mod tests {
         assert!(s.due(now, dt(2026, 7, 18, 9, 5)).is_empty());
         let mut enabled = s.schedules()[0].clone();
         enabled.enabled = true;
+        enabled.last_fired_ms =
+            Some(naive_to_epoch_ms(dt(2026, 7, 18, 9, 10)).expect("valid re-enable anchor"));
         s.set_schedules(vec![enabled]);
         assert!(s.due(now, dt(2026, 7, 18, 9, 10)).is_empty());
 
-        // `last_fired` (09:00) + 2h == 11:00 is still later than the 09:10
-        // re-anchor, so the original cadence is preserved rather than pushed
-        // out to 11:10.
+        // The persisted 09:10 re-enable anchor intentionally moves the next
+        // interval to 11:10 in every process.
         assert!(s.due(now, dt(2026, 7, 18, 10, 59)).is_empty());
-        let fired = s.due(now, dt(2026, 7, 18, 11, 0));
+        assert!(s.due(now, dt(2026, 7, 18, 11, 0)).is_empty());
+        let fired = s.due(now, dt(2026, 7, 18, 11, 10));
         assert_eq!(fired.len(), 1);
         match &fired[0].kind {
             DueKind::Schedule { fire_ms_hint, .. } => {
-                assert_eq!(*fire_ms_hint, dt(2026, 7, 18, 11, 0))
+                assert_eq!(*fire_ms_hint, dt(2026, 7, 18, 11, 10))
             }
             other => panic!("expected a schedule job, got {other:?}"),
         }
@@ -686,7 +1148,7 @@ mod tests {
         // occurrence — which is not due yet, so nothing fires...
         let anchor = dt(2026, 3, 7, 2, 30);
         assert_eq!(
-            resolve_trigger(&spec, anchor, Some(anchor), dt(2026, 3, 8, 10, 0), to_ms),
+            resolve_trigger(&spec, anchor, None, dt(2026, 3, 8, 10, 0), None, to_ms,),
             None,
             "the gap occurrence is skipped, not fired"
         );
@@ -694,20 +1156,19 @@ mod tests {
         // pre-fix behavior of recomputing the same nonexistent 03-08 02:30
         // forever and wedging the job for the life of the process.
         assert_eq!(
-            resolve_trigger(&spec, anchor, Some(anchor), dt(2026, 3, 9, 3, 0), to_ms),
+            resolve_trigger(&spec, anchor, None, dt(2026, 3, 9, 3, 0), None, to_ms,),
             Some((dt(2026, 3, 9, 2, 30), 1)),
             "the following occurrence fires"
         );
     }
 
-    /// The gap walk must terminate even if every candidate were nonexistent,
-    /// and must not fire anything in that case.
+    /// An invalid local trigger token must be skipped rather than fabricated.
     #[test]
-    fn resolve_trigger_gives_up_rather_than_looping_forever() {
+    fn resolve_trigger_skips_an_unresolvable_local_slot() {
         let spec = ScheduleSpec::Interval { secs: 30 };
         let anchor = dt(2026, 3, 8, 0, 0);
         assert_eq!(
-            resolve_trigger(&spec, anchor, None, dt(2030, 1, 1, 0, 0), |_| None),
+            resolve_trigger(&spec, anchor, None, dt(2030, 1, 1, 0, 0), None, |_| None,),
             None
         );
     }
@@ -740,6 +1201,10 @@ mod tests {
             prompt: "sync".into(),
             enabled: false,
             last_fired_ms: None,
+            watchdog_failures: 0,
+            watchdog_last_failure_ms: None,
+            watchdog_retry_at_ms: None,
+            watchdog_active_since_ms: None,
         }]);
         // Advance the wall clock well past several intervals: an ENABLED job
         // would fire here (see `interval_schedule_becomes_due_through_due`),

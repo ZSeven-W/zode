@@ -14,7 +14,7 @@ use agent::error::AgentError;
 use agent::file_cache::FileStateCache;
 use agent::stream::Event;
 use agent::tool::{SafetyClass, Tool, ToolUseContext};
-use agent_tools_code::task::{TaskObserver, DEFAULT_MAX_DEPTH};
+use agent_tools_code::task::{TaskFinishGuard, TaskObserver, DEFAULT_MAX_DEPTH};
 use async_trait::async_trait;
 
 use crate::approval::{Approval, ApprovalGate, ApprovalScope};
@@ -23,6 +23,10 @@ use crate::external_agents::{
     limiter::ExternalLimiter, parser::ExtEvent, preapproval_fingerprint, ExternalAgentDef,
     ExternalAgentRegistry, Fingerprint, GrantCheck, GrantStore,
 };
+use crate::process_supervision::{run_captured, CaptureError};
+
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const VERSION_PROBE_OUTPUT_CAP: usize = 64 * 1024;
 
 /// Runtime knobs read fresh per call (config reloads apply immediately).
 #[derive(Debug, Clone)]
@@ -164,10 +168,20 @@ impl ZodeTaskTool {
         // First run after an approval: probe --version (the binary is now
         // trusted enough to execute) and finalize the fingerprint.
         if check != GrantCheck::Granted {
-            let version = probe_version(def).await.map_err(|e| {
-                self.grants.revoke(&def.name);
-                AgentError::other(format!("version probe for '{}' failed: {e}", def.name))
-            })?;
+            let version = match probe_version(def, &ctx.abort).await {
+                Ok(version) => version,
+                Err(AgentError::Aborted(reason)) => {
+                    self.grants.revoke(&def.name);
+                    return Err(AgentError::Aborted(reason));
+                }
+                Err(error) => {
+                    self.grants.revoke(&def.name);
+                    return Err(AgentError::other(format!(
+                        "version probe for '{}' failed: {error}",
+                        def.name
+                    )));
+                }
+            };
             if let Some(req) = &def.capability.version_requirement {
                 if !version_satisfies(&version, req) {
                     self.grants.revoke(&def.name);
@@ -182,9 +196,13 @@ impl ZodeTaskTool {
             }
         }
 
-        let obs_id = self
-            .observer
-            .on_start(&def.name, description.as_deref(), ctx.task_depth + 1);
+        let mut observation = TaskFinishGuard::start(
+            self.observer.clone(),
+            &def.name,
+            description.as_deref(),
+            ctx.task_depth + 1,
+        );
+        let obs_id = observation.id();
         let observer = self.observer.clone();
         let spec = RunSpec {
             def: def.clone(),
@@ -217,7 +235,7 @@ impl ZodeTaskTool {
 
         match outcome {
             Ok(out) => {
-                self.observer.on_finish(obs_id, &out.result.text, None);
+                observation.finish(&out.result.text, None);
                 Ok(serde_json::json!({
                     "output": out.result.text,
                     "agent_type": def.name,
@@ -234,7 +252,7 @@ impl ZodeTaskTool {
                 }))
             }
             Err(e) => {
-                self.observer.on_finish(obs_id, "", Some(&e));
+                observation.finish("", Some(&e));
                 Err(AgentError::other(e))
             }
         }
@@ -242,25 +260,31 @@ impl ZodeTaskTool {
 }
 
 /// Run `<command> --version` under the same env hygiene as a real run and
-/// return the first output line. 5s cap.
-async fn probe_version(def: &ExternalAgentDef) -> Result<String, String> {
+/// return the first output line. The shared supervisor bounds output, observes
+/// root cancellation, and owns the entire process group through termination.
+async fn probe_version(
+    def: &ExternalAgentDef,
+    abort: &agent::abort::AbortController,
+) -> Result<String, AgentError> {
     let mut cmd = tokio::process::Command::new(&def.command);
-    cmd.arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+    cmd.arg("--version");
     cmd.env_clear();
     for name in ["PATH", "HOME", "TERM"] {
         if let Ok(v) = std::env::var(name) {
             cmd.env(name, v);
         }
     }
-    let out = tokio::time::timeout(Duration::from_secs(5), cmd.output())
-        .await
-        .map_err(|_| "timed out".to_string())?
-        .map_err(|e| e.to_string())?;
+    let out = match run_captured(cmd, abort, VERSION_PROBE_TIMEOUT, VERSION_PROBE_OUTPUT_CAP).await
+    {
+        Ok(output) => output,
+        Err(CaptureError::Aborted(reason)) => return Err(AgentError::Aborted(reason)),
+        Err(error) => return Err(AgentError::other(error.to_string())),
+    };
     if !out.status.success() {
-        return Err(format!("exit {}", out.status.code().unwrap_or(-1)));
+        return Err(AgentError::other(format!(
+            "exit {}",
+            out.status.code().unwrap_or(-1)
+        )));
     }
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -554,5 +578,85 @@ mod tests {
         assert!(version_satisfies("2.0", ">=1.9.9"));
         assert!(!version_satisfies("1.1", ">=1.2"));
         assert!(!version_satisfies("no digits here", ">=1.0"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_probe_honors_root_abort_before_spawn() {
+        let registry = registry_with("fake-ext", "fake-claude.sh", true);
+        let def = registry.get("fake-ext").unwrap();
+        let abort = agent::abort::AbortController::new();
+        abort.abort_with_reason("watchdog stop");
+
+        let error = probe_version(def, &abort).await.unwrap_err();
+
+        assert!(matches!(error, AgentError::Aborted(reason) if reason == "watchdog stop"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aborting_version_probe_kills_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("version-probe.sh");
+        let pid_file = dir.path().join("probe-child.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nsleep 30 &\nchild=$!\nprintf %s \"$child\" > '{}'\nwait\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let mut cfg = ExternalAgentsConfig::default();
+        cfg.agents.insert(
+            "probe".to_string(),
+            serde_json::from_value(json!({
+                "command": script.display().to_string(),
+                "args": [],
+                "promptTransport": "stdin",
+                "output": "jsonl-claude",
+                "trusted": true,
+            }))
+            .unwrap(),
+        );
+        let registry = crate::external_agents::discover(&cfg, &[]);
+        let def = registry.get("probe").unwrap().clone();
+        let abort = agent::abort::AbortController::new();
+        let probe_abort = abort.clone();
+        let probe = tokio::spawn(async move { probe_version(&def, &probe_abort).await });
+        let pid = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(raw) = tokio::fs::read_to_string(&pid_file).await {
+                    if let Ok(pid) = raw.trim().parse::<u32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("version probe did not write its child pid");
+
+        abort.abort_with_reason("watchdog stop");
+        let error = probe.await.unwrap().unwrap_err();
+        assert!(matches!(error, AgentError::Aborted(reason) if reason == "watchdog stop"));
+
+        for _ in 0..100 {
+            let alive = std::process::Command::new("/bin/kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .is_ok_and(|output| output.status.success());
+            if !alive {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("version-probe descendant {pid} survived abort");
     }
 }

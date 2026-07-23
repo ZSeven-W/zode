@@ -5,9 +5,11 @@
 //! launch; tools are registered under `mcp__<server>__<tool>`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use agent::abort::AbortController;
 use agent::error::AgentError;
-use agent::mcp::{Lifecycle, McpConfig, McpRegistry, RmcpConnector};
+use agent::mcp::{Lifecycle, LifecycleError, McpConfig, McpRegistry, RmcpConnector};
 use agent::tool::{SafetyClass, Tool, ToolUseContext};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -43,6 +45,10 @@ pub use discovery::discover_mcp_config;
 /// Per-server connect timeout — a hung/unreachable server must never block
 /// the whole launch.
 const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// A remote tool must not hold a scheduler turn forever. Timing out locally
+/// does not prove the server stopped, so the call is fenced as unresolved.
+const TOOL_TIMEOUT_SECS: u64 = 60;
 
 /// Connect all servers in `config` (concurrently, each bounded by a timeout)
 /// and return the live Lifecycle. Failures/timeouts are logged and skipped;
@@ -122,6 +128,79 @@ impl ZodeMcpTool {
     }
 }
 
+struct UnresolvedMcpCall {
+    abort: AbortController,
+    armed: bool,
+}
+
+impl UnresolvedMcpCall {
+    fn new(abort: AbortController) -> Self {
+        Self { abort, armed: true }
+    }
+
+    fn resolve(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for UnresolvedMcpCall {
+    fn drop(&mut self) {
+        if self.armed {
+            self.abort.mark_unresolved_external_work();
+        }
+    }
+}
+
+fn mcp_aborted(ctx: &ToolUseContext) -> AgentError {
+    AgentError::Aborted(
+        ctx.abort
+            .reason()
+            .unwrap_or_else(|| "MCP tool call aborted".into()),
+    )
+}
+
+async fn await_mcp_response(
+    ctx: &ToolUseContext,
+    server: &str,
+    timeout: Duration,
+    request: impl std::future::Future<Output = Result<Value, LifecycleError>>,
+) -> Result<Value, AgentError> {
+    if ctx.abort.is_aborted() {
+        return Err(mcp_aborted(ctx));
+    }
+    ctx.abort.pulse();
+    let mut unresolved = UnresolvedMcpCall::new(ctx.abort.clone());
+    tokio::pin!(request);
+    tokio::select! {
+        biased;
+        _ = ctx.abort.cancelled() => Err(mcp_aborted(ctx)),
+        result = &mut request => {
+            ctx.abort.pulse();
+            match result {
+                Ok(value) => {
+                    unresolved.resolve();
+                    Ok(value)
+                }
+                Err(error) => {
+                    // Unknown/disabled servers are pre-dispatch outcomes, and
+                    // Tool is a server-declared terminal response. Connector
+                    // errors include transport/protocol loss and stay armed.
+                    if !matches!(error, LifecycleError::Connector(_)) {
+                        unresolved.resolve();
+                    }
+                    Err(AgentError::other(format!("mcp {server}: {error}")))
+                }
+            }
+        }
+        _ = tokio::time::sleep(timeout) => {
+            Err(AgentError::other(format!(
+                "mcp {server}: tool call timed out after {}s",
+                timeout.as_secs()
+            )))
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for ZodeMcpTool {
     fn name(&self) -> &str {
@@ -136,11 +215,14 @@ impl Tool for ZodeMcpTool {
     fn safety_class(&self) -> SafetyClass {
         SafetyClass::Unknown // gated by default (unknown side effects)
     }
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        self.lifecycle
-            .call_tool(&self.server, &self.tool, input)
-            .await
-            .map_err(|e| AgentError::other(format!("mcp {}: {e}", self.server)))
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+        await_mcp_response(
+            ctx,
+            &self.server,
+            Duration::from_secs(TOOL_TIMEOUT_SECS),
+            self.lifecycle.call_tool(&self.server, &self.tool, input),
+        )
+        .await
     }
 }
 
@@ -168,5 +250,70 @@ mod tests {
         let merged = merge_config(Some(base), Some(overlay)).unwrap();
         assert_eq!(merged.servers.len(), 1);
         assert!(merged.servers.contains_key("shared"));
+    }
+
+    fn ctx() -> ToolUseContext {
+        ToolUseContext::new(std::env::temp_dir())
+    }
+
+    #[tokio::test]
+    async fn mcp_transport_error_and_timeout_latch_unresolved_work() {
+        let transport = ctx();
+        let result = await_mcp_response(&transport, "test", Duration::from_secs(1), async {
+            Err(LifecycleError::Connector("connection lost".into()))
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(transport.abort.activity().unresolved_external_work());
+
+        let timed_out = ctx();
+        let result = await_mcp_response(
+            &timed_out,
+            "test",
+            Duration::from_millis(1),
+            std::future::pending(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(timed_out.abort.activity().unresolved_external_work());
+    }
+
+    #[tokio::test]
+    async fn mcp_explicit_terminal_response_does_not_latch_unresolved_work() {
+        let success = ctx();
+        let value = await_mcp_response(&success, "test", Duration::from_secs(1), async {
+            Ok(json!({"ok": true}))
+        })
+        .await
+        .unwrap();
+        assert_eq!(value, json!({"ok": true}));
+        assert!(!success.abort.activity().unresolved_external_work());
+
+        let tool_error = ctx();
+        let result = await_mcp_response(&tool_error, "test", Duration::from_secs(1), async {
+            Err(LifecycleError::Tool("rejected".into()))
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(!tool_error.abort.activity().unresolved_external_work());
+    }
+
+    #[tokio::test]
+    async fn abort_after_mcp_dispatch_latches_unresolved_work() {
+        let context = ctx();
+        let abort = context.abort.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = started_rx.await;
+            abort.abort_with_reason("test stop");
+        });
+        let request = async move {
+            let _ = started_tx.send(());
+            std::future::pending::<Result<Value, LifecycleError>>().await
+        };
+
+        let result = await_mcp_response(&context, "test", Duration::from_secs(1), request).await;
+        assert!(matches!(result, Err(AgentError::Aborted(_))));
+        assert!(context.abort.activity().unresolved_external_work());
     }
 }

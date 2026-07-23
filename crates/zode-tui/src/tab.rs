@@ -50,6 +50,23 @@ pub struct SessionTab {
     pub store_dirty: bool,
     /// Abort handle for the in-flight turn, if any.
     pub turn_abort: Option<AbortController>,
+    /// Tokio worker that owns the provider stream. Keeping the JoinHandle (not
+    /// only its AbortHandle) lets the watchdog wait until cancellation has
+    /// actually dropped nested drivers/tools before it snapshots the session or
+    /// permits another turn to share the store.
+    pub turn_task: Option<tokio::task::JoinHandle<()>>,
+    /// Shared only for watchdog-managed turns so a grace-expired hard cancel
+    /// can still journal a terminal outcome and close the checkpoint.
+    pub watchdog_recorder: Option<Arc<std::sync::Mutex<zode_core::run_event::TurnRecorder>>>,
+    /// Cross-process OS lock for the active persisted schedule attempt. It is
+    /// released only after terminal watchdog state has been committed; an
+    /// unclean process exit drops the OS lock but leaves the active token for
+    /// startup orphan recovery.
+    pub watchdog_attempt_lease: Option<zode_core::scheduler::ScheduleAttemptLease>,
+    /// Shared worker-quiescence signal for a watchdog-managed turn. Hard stop
+    /// waits for every nested query/tool worker guard to drop before releasing
+    /// the schedule lease or persisting a potentially racing store snapshot.
+    pub watchdog_activity: Option<agent::abort::TurnActivity>,
     /// Monotonic generation for abortable non-agent operations that reserve
     /// the tab busy slot. Completion events carry this id so a delayed
     /// predecessor cannot release or relabel a newer operation/agent turn.
@@ -178,6 +195,10 @@ impl SessionTab {
             persisted_msgs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             store_dirty: false,
             turn_abort: None,
+            turn_task: None,
+            watchdog_recorder: None,
+            watchdog_attempt_lease: None,
+            watchdog_activity: None,
             local_op_seq: 0,
             active_local_op_id: None,
             draining_turn_id: None,
@@ -239,7 +260,7 @@ impl SessionTab {
     /// paths that don't track the append watermark, so it forces a full
     /// rewrite and resets the tab's watermark.
     pub async fn save_session(&self) {
-        persist_session(
+        let _ = persist_session(
             self.session_id.clone(),
             self.engine.clone(),
             self.title.clone(),
@@ -251,9 +272,8 @@ impl SessionTab {
 }
 
 /// Snapshot a session's store (MessageStore: Clone) then persist it and bump
-/// its index recency. Standalone (owned args) so the app can spawn it off the
-/// event loop. The std mutex guard is dropped before the await, so it never
-/// crosses an await point.
+/// its index recency. The snapshot is taken before waiting for the global save
+/// lock, so a later turn can never leak into an older queued save.
 ///
 /// `allow_append`: when the store only grew since the last save (a normal
 /// turn), append the new tail instead of rewriting the whole file — the
@@ -268,17 +288,30 @@ pub async fn persist_session(
     title: String,
     persisted: Arc<std::sync::atomic::AtomicUsize>,
     allow_append: bool,
-) {
+) -> bool {
+    let snapshot = match engine.store.lock() {
+        Ok(store) => store.clone(),
+        Err(_) => return false,
+    };
+    persist_session_snapshot(session_id, engine, title, persisted, allow_append, snapshot).await
+}
+
+/// Persist an already-owned, quiescent snapshot. Scheduler turns use this
+/// before their canonical terminal so durable state cannot race the next turn.
+pub async fn persist_session_snapshot(
+    session_id: String,
+    engine: Arc<ZodeEngine>,
+    title: String,
+    persisted: Arc<std::sync::atomic::AtomicUsize>,
+    allow_append: bool,
+    snapshot: agent::message::MessageStore,
+) -> bool {
     use std::sync::atomic::Ordering;
     // Serialize all saves: prevents same-session transcript temp-file races and
     // SessionIndex lost updates across concurrent tab saves.
     let _guard = SAVE_LOCK.lock().await;
     let Ok(store) = SessionStore::open_default() else {
-        return;
-    };
-    let snapshot = match engine.store.lock() {
-        Ok(store) => store.clone(),
-        Err(_) => return,
+        return false;
     };
     let total = snapshot.len();
     let mut meta = store.load_meta(&session_id).unwrap_or_else(|_| {
@@ -301,9 +334,10 @@ pub async fn persist_session(
     };
     if let Err(error) = result {
         tracing::warn!("durable session save failed: {error}");
-        return;
+        return false;
     }
     persisted.store(total, Ordering::Relaxed);
+    true
 }
 
 /// Run synchronous index I/O on the blocking pool while holding the same lock

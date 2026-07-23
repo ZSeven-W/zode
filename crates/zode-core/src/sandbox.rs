@@ -23,7 +23,6 @@ use std::sync::Arc;
 use agent::error::AgentError;
 use agent::tool::{SafetyClass, Tool, ToolUseContext};
 use async_trait::async_trait;
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::approval::{Approval, ApprovalGate};
@@ -659,6 +658,7 @@ impl SandboxConfig {
 // tests and the opt-in `windows-sandbox-it` integration test instead.
 #[cfg(all(test, unix))]
 mod tests {
+    include!("sandbox/fs-supervision-tests.rs");
     include!("sandbox/tests-one.rs");
     include!("sandbox/tests-two.rs");
 }

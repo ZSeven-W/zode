@@ -92,6 +92,24 @@ enum UiaCommand {
     Ping(oneshot::Sender<()>),
 }
 
+impl UiaCommand {
+    /// Skip queued UIA work when cancellation has already dropped the local
+    /// response receiver. An operation already executing on the STA thread is
+    /// still conservatively reported as unresolved by the desktop tool layer.
+    fn response_closed(&self) -> bool {
+        match self {
+            Self::ListApps(resp) => resp.is_closed(),
+            Self::ListWindows { resp, .. } => resp.is_closed(),
+            Self::Snapshot { resp, .. } => resp.is_closed(),
+            Self::ElementAction { resp, .. } => resp.is_closed(),
+            Self::SetValue { resp, .. } => resp.is_closed(),
+            Self::TypeText { resp, .. } => resp.is_closed(),
+            Self::Focus { resp, .. } => resp.is_closed(),
+            Self::Ping(resp) => resp.is_closed(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct UiaBackend {
     tx: mpsc::UnboundedSender<UiaCommand>,
@@ -258,7 +276,9 @@ fn actor_loop(mut rx: mpsc::UnboundedReceiver<UiaCommand>) {
             Err(_) => {
                 // Drain commands with a permission/protocol error.
                 while let Some(cmd) = rx.blocking_recv() {
-                    fail_command(cmd, "failed to create UIAutomation (COM init)");
+                    if !cmd.response_closed() {
+                        fail_command(cmd, "failed to create UIAutomation (COM init)");
+                    }
                 }
                 return;
             }
@@ -269,6 +289,9 @@ fn actor_loop(mut rx: mpsc::UnboundedReceiver<UiaCommand>) {
         snapshots: HashMap::new(),
     };
     while let Some(cmd) = rx.blocking_recv() {
+        if cmd.response_closed() {
+            continue;
+        }
         handle(cmd, &mut state);
     }
 }

@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn loop_and_schedule_are_registered() {
+    fn loop_schedule_and_watchdog_are_registered() {
         let reg = CommandRegistry::with_builtins();
         assert_eq!(
             reg.get("loop").unwrap().usage,
@@ -179,6 +179,9 @@ mod tests {
             reg.get("schedule").unwrap().usage,
             "/schedule add <hh:mm|mon hh:mm|every 2h> <prompt> | list | rm <id> | enable|disable <id>"
         );
+        let watchdog = reg.get("watchdog").unwrap();
+        assert_eq!(watchdog.usage, "/watchdog [status]");
+        assert_eq!(watchdog.action, CommandAction::Ui);
     }
 
     #[test]

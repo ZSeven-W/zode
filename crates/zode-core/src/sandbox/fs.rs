@@ -1,4 +1,11 @@
 use super::*;
+use agent::abort::AbortController;
+use std::time::Duration;
+
+use crate::process_supervision::{run_captured_with_input, CaptureError};
+
+const FS_OP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub(super) const FS_OP_OUTPUT_CAP: usize = 64 * 1024;
 
 /// Path to a shared empty, read-only directory used to mask not-yet-existing
 /// protected subdirs under bwrap (so the sandbox can't create them). Created
@@ -37,143 +44,46 @@ impl SandboxedFsSink {
         p.to_string_lossy().into_owned()
     }
 
-    /// Run `argv` under the sandbox, optionally feeding `stdin_bytes`. A
-    /// non-zero exit (e.g. the kernel denying the write) becomes an io::Error
-    /// carrying stderr, which the fs tool surfaces like any write failure.
-    async fn run(&self, argv: &[String], stdin_bytes: Option<&[u8]>) -> std::io::Result<()> {
-        let wrapped = self.config.wrap_argv(argv);
-        let (program, rest) = wrapped
-            .split_first()
-            .ok_or_else(|| std::io::Error::other("empty sandbox argv"))?;
-        let mut cmd = Command::new(program);
-        cmd.args(rest);
-        cmd.stdin(if stdin_bytes.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::piped());
-        let mut child = cmd.spawn()?;
-        if let Some(bytes) = stdin_bytes {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(bytes).await?;
-                stdin.shutdown().await?;
-            }
-        }
-        let output = child.wait_with_output().await?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "sandboxed fs op failed ({}): {}",
-                    output.status,
-                    stderr.trim()
-                ),
-            ))
-        }
-    }
-}
-
-#[async_trait]
-impl agent_tools_code::FsSink for SandboxedFsSink {
-    async fn write_file(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-        #[cfg(windows)]
-        if self.config.is_windows_tier_one() {
-            return super::windows::run_fs_operation(
-                &self.config,
-                super::windows::FsOperation::Write {
-                    path: path.to_path_buf(),
-                    bytes: bytes.to_vec(),
-                },
-            )
-            .await;
-        }
-        // `sh -c 'exec cat > "$0"' <path>`: $0 is the path (no shell
-        // interpolation/injection), and the bytes arrive on stdin (binary-safe).
-        let argv = vec![
+    fn write_argv(path: &Path) -> Vec<String> {
+        vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
             "exec cat > \"$0\"".to_string(),
             Self::path_str(path),
-        ];
-        self.run(&argv, Some(bytes)).await
+        ]
     }
-    async fn create_dir(&self, path: &Path, recursive: bool) -> std::io::Result<()> {
-        #[cfg(windows)]
-        if self.config.is_windows_tier_one() {
-            return super::windows::run_fs_operation(
-                &self.config,
-                super::windows::FsOperation::CreateDir {
-                    path: path.to_path_buf(),
-                    recursive,
-                },
-            )
-            .await;
-        }
+
+    fn create_dir_argv(path: &Path, recursive: bool) -> Vec<String> {
         let mut argv = vec!["mkdir".to_string()];
         if recursive {
             argv.push("-p".to_string());
         }
         argv.push("--".to_string());
         argv.push(Self::path_str(path));
-        self.run(&argv, None).await
+        argv
     }
-    async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
-        // Renaming a path onto itself is a no-op for `fs::rename`, but `mv -f`
-        // errors ("same file"); short-circuit to match.
+
+    fn rename_argv(from: &Path, to: &Path) -> std::io::Result<Option<Vec<String>>> {
         if from == to {
-            return Ok(());
+            return Ok(None);
         }
-        // `mv` would move INTO an existing directory target (foo → bar/foo),
-        // whereas `fs::rename(from, to)` treats `to` as the literal new path.
-        // Reject a directory target so the sandboxed path matches direct-rename
-        // semantics (the host can stat `to`; only the mutation is sandboxed).
         if to.is_dir() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "rename target is an existing directory",
             ));
         }
-        #[cfg(windows)]
-        if self.config.is_windows_tier_one() {
-            return super::windows::run_fs_operation(
-                &self.config,
-                super::windows::FsOperation::Rename {
-                    from: from.to_path_buf(),
-                    to: to.to_path_buf(),
-                },
-            )
-            .await;
-        }
-        let argv = vec![
+        Ok(Some(vec![
             "mv".to_string(),
             "-f".to_string(),
             "--".to_string(),
             Self::path_str(from),
             Self::path_str(to),
-        ];
-        self.run(&argv, None).await
+        ]))
     }
-    async fn remove(&self, path: &Path, recursive: bool, is_dir: bool) -> std::io::Result<()> {
-        #[cfg(windows)]
-        if self.config.is_windows_tier_one() {
-            return super::windows::run_fs_operation(
-                &self.config,
-                super::windows::FsOperation::Remove {
-                    path: path.to_path_buf(),
-                    recursive,
-                    is_dir,
-                },
-            )
-            .await;
-        }
-        // Match tokio::fs semantics: empty-dir removal = rmdir, tree = rm -rf,
-        // file = rm -f (the tool already stat'd the target, so it exists).
-        let argv = if is_dir && !recursive {
+
+    fn remove_argv(path: &Path, recursive: bool, is_dir: bool) -> Vec<String> {
+        if is_dir && !recursive {
             vec!["rmdir".to_string(), "--".to_string(), Self::path_str(path)]
         } else if recursive {
             vec![
@@ -189,8 +99,236 @@ impl agent_tools_code::FsSink for SandboxedFsSink {
                 "--".to_string(),
                 Self::path_str(path),
             ]
+        }
+    }
+
+    /// Run `argv` in a tracked process group under the sandbox. The supervisor
+    /// owns all pipes and the input bytes, so dropping the tool future cannot
+    /// detach an `rm`/`mv`/`cat` process from turn quiescence.
+    pub(super) async fn run(
+        &self,
+        argv: &[String],
+        stdin_bytes: Option<Vec<u8>>,
+        abort: &AbortController,
+    ) -> std::io::Result<()> {
+        let wrapped = self.config.wrap_argv(argv);
+        let (program, rest) = wrapped
+            .split_first()
+            .ok_or_else(|| std::io::Error::other("empty sandbox argv"))?;
+        let mut cmd = Command::new(program);
+        cmd.args(rest);
+        let output =
+            run_captured_with_input(cmd, stdin_bytes, abort, FS_OP_TIMEOUT, FS_OP_OUTPUT_CAP)
+                .await
+                .map_err(capture_error_to_io)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let truncated = if output.stderr_truncated {
+                " [stderr truncated]"
+            } else {
+                ""
+            };
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "sandboxed fs op failed ({}): {}{}",
+                    output.status,
+                    stderr.trim(),
+                    truncated,
+                ),
+            ))
+        }
+    }
+}
+
+fn capture_error_to_io(error: CaptureError) -> std::io::Error {
+    match error {
+        CaptureError::Aborted(reason) => {
+            std::io::Error::new(std::io::ErrorKind::Interrupted, reason)
+        }
+        CaptureError::Io(error) => error,
+        CaptureError::TimedOut => std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "sandboxed filesystem operation timed out",
+        ),
+        CaptureError::Worker(error) => std::io::Error::other(error),
+    }
+}
+
+#[async_trait]
+impl agent_tools_code::FsSink for SandboxedFsSink {
+    async fn write_file(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        #[cfg(windows)]
+        if self.config.is_windows_tier_one() {
+            let abort = AbortController::new();
+            return super::windows::run_fs_operation(
+                &self.config,
+                super::windows::FsOperation::Write {
+                    path: path.to_path_buf(),
+                    bytes: bytes.to_vec(),
+                },
+                &abort,
+            )
+            .await;
+        }
+        // `sh -c 'exec cat > "$0"' <path>`: $0 is the path (no shell
+        // interpolation/injection), and the bytes arrive on stdin (binary-safe).
+        let abort = AbortController::new();
+        self.run(&Self::write_argv(path), Some(bytes.to_vec()), &abort)
+            .await
+    }
+    async fn create_dir(&self, path: &Path, recursive: bool) -> std::io::Result<()> {
+        #[cfg(windows)]
+        if self.config.is_windows_tier_one() {
+            let abort = AbortController::new();
+            return super::windows::run_fs_operation(
+                &self.config,
+                super::windows::FsOperation::CreateDir {
+                    path: path.to_path_buf(),
+                    recursive,
+                },
+                &abort,
+            )
+            .await;
+        }
+        let abort = AbortController::new();
+        self.run(&Self::create_dir_argv(path, recursive), None, &abort)
+            .await
+    }
+    async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        #[cfg(windows)]
+        if self.config.is_windows_tier_one() {
+            let abort = AbortController::new();
+            return super::windows::run_fs_operation(
+                &self.config,
+                super::windows::FsOperation::Rename {
+                    from: from.to_path_buf(),
+                    to: to.to_path_buf(),
+                },
+                &abort,
+            )
+            .await;
+        }
+        let Some(argv) = Self::rename_argv(from, to)? else {
+            return Ok(());
         };
-        self.run(&argv, None).await
+        let abort = AbortController::new();
+        self.run(&argv, None, &abort).await
+    }
+    async fn remove(&self, path: &Path, recursive: bool, is_dir: bool) -> std::io::Result<()> {
+        #[cfg(windows)]
+        if self.config.is_windows_tier_one() {
+            let abort = AbortController::new();
+            return super::windows::run_fs_operation(
+                &self.config,
+                super::windows::FsOperation::Remove {
+                    path: path.to_path_buf(),
+                    recursive,
+                    is_dir,
+                },
+                &abort,
+            )
+            .await;
+        }
+        // Match tokio::fs semantics: empty-dir removal = rmdir, tree = rm -rf,
+        // file = rm -f (the tool already stat'd the target, so it exists).
+        let abort = AbortController::new();
+        self.run(&Self::remove_argv(path, recursive, is_dir), None, &abort)
+            .await
+    }
+
+    async fn write_file_tracked(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+        abort: &AbortController,
+    ) -> std::io::Result<()> {
+        #[cfg(windows)]
+        if self.config.is_windows_tier_one() {
+            return super::windows::run_fs_operation(
+                &self.config,
+                super::windows::FsOperation::Write {
+                    path: path.to_path_buf(),
+                    bytes: bytes.to_vec(),
+                },
+                abort,
+            )
+            .await;
+        }
+        self.run(&Self::write_argv(path), Some(bytes.to_vec()), abort)
+            .await
+    }
+
+    async fn create_dir_tracked(
+        &self,
+        path: &Path,
+        recursive: bool,
+        abort: &AbortController,
+    ) -> std::io::Result<()> {
+        #[cfg(windows)]
+        if self.config.is_windows_tier_one() {
+            return super::windows::run_fs_operation(
+                &self.config,
+                super::windows::FsOperation::CreateDir {
+                    path: path.to_path_buf(),
+                    recursive,
+                },
+                abort,
+            )
+            .await;
+        }
+        self.run(&Self::create_dir_argv(path, recursive), None, abort)
+            .await
+    }
+
+    async fn rename_tracked(
+        &self,
+        from: &Path,
+        to: &Path,
+        abort: &AbortController,
+    ) -> std::io::Result<()> {
+        #[cfg(windows)]
+        if self.config.is_windows_tier_one() {
+            return super::windows::run_fs_operation(
+                &self.config,
+                super::windows::FsOperation::Rename {
+                    from: from.to_path_buf(),
+                    to: to.to_path_buf(),
+                },
+                abort,
+            )
+            .await;
+        }
+        let Some(argv) = Self::rename_argv(from, to)? else {
+            return Ok(());
+        };
+        self.run(&argv, None, abort).await
+    }
+
+    async fn remove_tracked(
+        &self,
+        path: &Path,
+        recursive: bool,
+        is_dir: bool,
+        abort: &AbortController,
+    ) -> std::io::Result<()> {
+        #[cfg(windows)]
+        if self.config.is_windows_tier_one() {
+            return super::windows::run_fs_operation(
+                &self.config,
+                super::windows::FsOperation::Remove {
+                    path: path.to_path_buf(),
+                    recursive,
+                    is_dir,
+                },
+                abort,
+            )
+            .await;
+        }
+        self.run(&Self::remove_argv(path, recursive, is_dir), None, abort)
+            .await
     }
 }
 

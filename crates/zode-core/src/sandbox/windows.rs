@@ -196,6 +196,7 @@ pub fn cleanup_acl_journal() -> Result<(), String> {
 pub(super) async fn run_fs_operation(
     config: &SandboxConfig,
     operation: FsOperation,
+    abort: &agent::abort::AbortController,
 ) -> std::io::Result<()> {
-    fs_impersonation::run(config, operation).await
+    fs_impersonation::run(config, operation, abort).await
 }

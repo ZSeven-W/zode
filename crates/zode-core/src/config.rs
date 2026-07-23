@@ -616,6 +616,100 @@ pub struct LspServerConfig {
     pub extensions: Vec<String>,
 }
 
+/// Watchdog policy for unattended turns started by `/loop` and `/schedule`.
+///
+/// Every field is optional so global, project, and project-state config layers
+/// can override one knob without resetting the others. Effective values are
+/// exposed through the getters below and deliberately bounded: a malformed or
+/// extreme config must not turn the 100 ms TUI tick into either an immediate
+/// abort loop or an effectively disabled safety mechanism.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BackgroundWatchdogConfig {
+    /// Master switch. Unset defaults to enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Bound claim-to-start queueing and abort a running turn after this many
+    /// seconds without provider/tool activity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inactivity_timeout_secs: Option<u64>,
+    /// Absolute wall-clock cap even when the turn keeps emitting activity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_runtime_secs: Option<u64>,
+    /// Time allowed for cooperative cancellation before the tab is released.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abort_grace_secs: Option<u64>,
+    /// Number of recovery attempts after the initial failed/timed-out run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+    /// Delay before the first retry; later retries double from this value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_backoff_secs: Option<u64>,
+    /// Ceiling for exponential retry backoff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_backoff_secs: Option<u64>,
+}
+
+impl BackgroundWatchdogConfig {
+    pub const DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 15 * 60;
+    pub const DEFAULT_MAX_RUNTIME_SECS: u64 = 60 * 60;
+    pub const DEFAULT_ABORT_GRACE_SECS: u64 = 10;
+    pub const DEFAULT_MAX_RETRIES: u32 = 3;
+    pub const DEFAULT_INITIAL_BACKOFF_SECS: u64 = 5;
+    pub const DEFAULT_MAX_BACKOFF_SECS: u64 = 5 * 60;
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    pub fn inactivity_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.inactivity_timeout_secs
+                .unwrap_or(Self::DEFAULT_INACTIVITY_TIMEOUT_SECS)
+                .clamp(5, 24 * 60 * 60),
+        )
+    }
+
+    pub fn max_runtime(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.max_runtime_secs
+                .unwrap_or(Self::DEFAULT_MAX_RUNTIME_SECS)
+                .clamp(30, 7 * 24 * 60 * 60),
+        )
+    }
+
+    pub fn abort_grace(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.abort_grace_secs
+                .unwrap_or(Self::DEFAULT_ABORT_GRACE_SECS)
+                .clamp(1, 5 * 60),
+        )
+    }
+
+    pub fn max_retries(&self) -> u32 {
+        self.max_retries
+            .unwrap_or(Self::DEFAULT_MAX_RETRIES)
+            .min(20)
+    }
+
+    pub fn initial_backoff(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.initial_backoff_secs
+                .unwrap_or(Self::DEFAULT_INITIAL_BACKOFF_SECS)
+                .clamp(1, 60 * 60),
+        )
+    }
+
+    pub fn max_backoff(&self) -> std::time::Duration {
+        let initial = self.initial_backoff().as_secs();
+        std::time::Duration::from_secs(
+            self.max_backoff_secs
+                .unwrap_or(Self::DEFAULT_MAX_BACKOFF_SECS)
+                .clamp(initial, 24 * 60 * 60),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ZodeConfig {
@@ -759,6 +853,9 @@ pub struct ZodeConfig {
     /// Compaction ladder / post-compaction restoration knobs.
     #[serde(skip_serializing_if = "is_default")]
     pub compact: CompactSettings,
+    /// Liveness, cancellation, and retry policy for unattended scheduler turns.
+    #[serde(skip_serializing_if = "is_default")]
+    pub background_watchdog: BackgroundWatchdogConfig,
 
     // --- Legacy (Zig/TS-era) flat fields, read-only for backward compat.
     // Mapped into `provider` by `normalize_legacy()` and dropped on save
@@ -1360,6 +1457,26 @@ impl ZodeConfig {
             c.restore_files_budget.or(self.compact.restore_files_budget);
         self.compact.recall_after_compact =
             c.recall_after_compact.or(self.compact.recall_after_compact);
+
+        let w = other.background_watchdog;
+        self.background_watchdog.enabled = w.enabled.or(self.background_watchdog.enabled);
+        self.background_watchdog.inactivity_timeout_secs = w
+            .inactivity_timeout_secs
+            .or(self.background_watchdog.inactivity_timeout_secs);
+        self.background_watchdog.max_runtime_secs = w
+            .max_runtime_secs
+            .or(self.background_watchdog.max_runtime_secs);
+        self.background_watchdog.abort_grace_secs = w
+            .abort_grace_secs
+            .or(self.background_watchdog.abort_grace_secs);
+        self.background_watchdog.max_retries =
+            w.max_retries.or(self.background_watchdog.max_retries);
+        self.background_watchdog.initial_backoff_secs = w
+            .initial_backoff_secs
+            .or(self.background_watchdog.initial_backoff_secs);
+        self.background_watchdog.max_backoff_secs = w
+            .max_backoff_secs
+            .or(self.background_watchdog.max_backoff_secs);
     }
 }
 
@@ -1571,6 +1688,38 @@ mod tests {
         assert_eq!(base.mouse_capture, Some(true));
         base.merge_from(ZodeConfig::default());
         assert_eq!(base.mouse_capture, Some(true)); // unset layer preserves
+    }
+
+    #[test]
+    fn background_watchdog_parses_clamps_and_merges_by_presence() {
+        let mut global: ZodeConfig = serde_json::from_str(
+            r#"{"backgroundWatchdog":{"enabled":true,"inactivityTimeoutSecs":1,"maxRuntimeSecs":2,"abortGraceSecs":0,"maxRetries":99,"initialBackoffSecs":20,"maxBackoffSecs":2}}"#,
+        )
+        .unwrap();
+        assert!(global.background_watchdog.enabled());
+        assert_eq!(global.background_watchdog.inactivity_timeout().as_secs(), 5);
+        assert_eq!(global.background_watchdog.max_runtime().as_secs(), 30);
+        assert_eq!(global.background_watchdog.abort_grace().as_secs(), 1);
+        assert_eq!(global.background_watchdog.max_retries(), 20);
+        assert_eq!(global.background_watchdog.max_backoff().as_secs(), 20);
+
+        let project: ZodeConfig = serde_json::from_str(
+            r#"{"backgroundWatchdog":{"enabled":false,"maxRetries":0,"initialBackoffSecs":3}}"#,
+        )
+        .unwrap();
+        global.merge_from(project);
+        assert!(!global.background_watchdog.enabled());
+        assert_eq!(global.background_watchdog.max_retries(), 0);
+        assert_eq!(global.background_watchdog.initial_backoff().as_secs(), 3);
+        assert_eq!(
+            global.background_watchdog.inactivity_timeout().as_secs(),
+            5,
+            "omitted project field preserves the global layer"
+        );
+
+        global.merge_from(ZodeConfig::default());
+        assert_eq!(global.background_watchdog.enabled, Some(false));
+        assert_eq!(global.background_watchdog.max_retries, Some(0));
     }
 
     #[test]

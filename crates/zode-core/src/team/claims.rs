@@ -30,6 +30,15 @@ pub struct ClaimConflict {
     pub conflicts: Vec<ClaimEntry>,
 }
 
+/// The canonical paths covered by one claim request and the subset inserted
+/// by that request. Callers may renew every requested path, but must release
+/// only `acquired` so a pre-existing claim from the same holder survives.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ClaimLease {
+    pub requested: Vec<String>,
+    pub acquired: Vec<String>,
+}
+
 /// Canonicalize a claim path: canonicalize the NEAREST EXISTING ancestor,
 /// then lexically normalize the remainder (so brand-new files are claimable).
 /// The result must stay inside the canonical cwd (cwd confinement).
@@ -96,7 +105,7 @@ pub fn claim(
     cwd: &Path,
     ttl: Duration,
     now_ms: u64,
-) -> Result<(), ClaimConflict> {
+) -> Result<ClaimLease, ClaimConflict> {
     let mut canonical = Vec::with_capacity(paths.len());
     for raw in paths {
         match canonicalize_claim(cwd, raw) {
@@ -112,6 +121,7 @@ pub fn claim(
             }
         }
     }
+    let requested = canonical.clone();
     let expires_at_ms = now_ms.saturating_add(ttl.as_millis() as u64);
     let holder = holder.to_string();
     board
@@ -127,16 +137,27 @@ pub fn claim(
                     serde_json::to_string(&conflicts).unwrap_or_default(),
                 ));
             }
+            let mut acquired = Vec::new();
             for p in canonical {
-                if !claims.iter().any(|c| c.holder == holder && c.path == p) {
+                if let Some(existing) = claims
+                    .iter_mut()
+                    .find(|c| c.holder == holder && c.path == p)
+                {
+                    existing.expires_at_ms = existing.expires_at_ms.max(expires_at_ms);
+                } else {
                     claims.push(ClaimEntry {
                         holder: holder.clone(),
-                        path: p,
+                        path: p.clone(),
                         expires_at_ms,
                     });
+                    acquired.push(p);
                 }
             }
-            Ok(())
+            Ok(acquired)
+        })
+        .map(|acquired| ClaimLease {
+            requested,
+            acquired,
         })
         .map_err(|e| match e {
             TeamError::Io(json) => ClaimConflict {
@@ -167,13 +188,17 @@ pub fn release(board: &Board, holder: &str, paths: Option<&[String]>) {
     });
 }
 
-/// Extend the TTL of `holder`'s active claims (backend-neutral renewal —
+/// Extend the TTL of the selected `holder` claims (backend-neutral renewal —
 /// TeamManager drives this while a send is in flight).
-pub fn renew(board: &Board, holder: &str, ttl: Duration, now_ms: u64) {
+pub fn renew(board: &Board, holder: &str, paths: &[String], ttl: Duration, now_ms: u64) {
     let holder = holder.to_string();
+    let paths = paths.to_vec();
     let expires_at_ms = now_ms.saturating_add(ttl.as_millis() as u64);
     let _ = board.with_claims(move |claims| {
-        for c in claims.iter_mut().filter(|c| c.holder == holder) {
+        for c in claims
+            .iter_mut()
+            .filter(|c| c.holder == holder && paths.iter().any(|path| path == &c.path))
+        {
             c.expires_at_ms = c.expires_at_ms.max(expires_at_ms);
         }
         Ok(())
@@ -249,6 +274,37 @@ mod tests {
     }
 
     #[test]
+    fn claim_returns_exact_canonical_paths_written_to_board() {
+        let (_d, cwd, board) = setup();
+        let absolute = cwd.join("src/api").to_string_lossy().to_string();
+        let claimed = claim(
+            &board,
+            "alice",
+            &["./src".into(), absolute],
+            &cwd,
+            TTL,
+            1_000,
+        )
+        .unwrap();
+
+        assert_eq!(claimed.requested, vec!["src", "src/api"]);
+        assert_eq!(claimed.acquired, vec!["src", "src/api"]);
+        let stored: Vec<String> = board
+            .read()
+            .unwrap()
+            .claims
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
+        assert_eq!(stored, claimed.acquired);
+
+        let repeated = claim(&board, "alice", &["./src".into()], &cwd, TTL, 2_000).unwrap();
+        assert_eq!(repeated.requested, vec!["src"]);
+        assert!(repeated.acquired.is_empty());
+        assert_eq!(board.read().unwrap().claims.len(), 2);
+    }
+
+    #[test]
     fn renew_extends_and_batch_is_atomic() {
         let (_d, cwd, board) = setup();
         claim(&board, "alice", &["src/api".into()], &cwd, TTL, 1_000).unwrap();
@@ -265,7 +321,13 @@ mod tests {
         assert!(!e.conflicts.is_empty());
         // the clean path must NOT have been claimed
         claim(&board, "carol", &["docs.md".into()], &cwd, TTL, 1_000).unwrap();
-        renew(&board, "alice", Duration::from_secs(1200), 1_000);
+        renew(
+            &board,
+            "alice",
+            &["src/api".into()],
+            Duration::from_secs(1200),
+            1_000,
+        );
         let snap = board.read().unwrap();
         let alice = snap.claims.iter().find(|c| c.holder == "alice").unwrap();
         assert!(alice.expires_at_ms >= 1_000 + 1_200_000);

@@ -1,6 +1,7 @@
 //! `op_read` (ReadOnly, ungated) and `op_write` (Mutating, gated) agent tools.
 //! `safety_class()` is static per tool, so read vs write must be two tools.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use agent::error::AgentError;
@@ -10,7 +11,7 @@ use serde_json::{json, Value};
 
 use super::connection::OpConnection;
 use super::design::{load_guidance, DesignOrchestrator, DirectLlmContentGenerator};
-use super::{is_read_tool, Consent};
+use super::{is_read_tool, Consent, OpError};
 use crate::config::OpenPencilConfig;
 use crate::question::QuestionQueue;
 use crate::task_factory::ModelRuntimeState;
@@ -62,7 +63,12 @@ impl Consent for QueueConsent {
 
 /// Route a tool call to the live OpenPencil instance. Validates read/write
 /// routing (misrouted calls are rejected immediately, before any network I/O).
-async fn dispatch(deps: &OpToolDeps, input: Value, writing: bool) -> Result<Value, AgentError> {
+async fn dispatch(
+    deps: &OpToolDeps,
+    ctx: &ToolUseContext,
+    input: Value,
+    writing: bool,
+) -> Result<Value, AgentError> {
     let tool = input
         .get("tool")
         .and_then(|t| t.as_str())
@@ -78,13 +84,87 @@ async fn dispatch(deps: &OpToolDeps, input: Value, writing: bool) -> Result<Valu
         )));
     }
     let args = input.get("arguments").cloned().unwrap_or_else(|| json!({}));
-    let client = OpConnection::ensure(&deps.cfg, deps.consent.as_ref(), &deps.tag)
+    let client = OpConnection::ensure(&deps.cfg, deps.consent.as_ref(), &deps.tag, &ctx.abort)
         .await
-        .map_err(|e| AgentError::other(e.to_string()))?;
-    client
-        .call(tool, args)
-        .await
-        .map_err(|e| AgentError::other(e.to_string()))
+        .map_err(map_op_error)?;
+    call_remote(&client, tool, args, writing, &ctx.abort).await
+}
+
+async fn call_remote(
+    client: &super::client::OpClient,
+    tool: &str,
+    args: Value,
+    writing: bool,
+    abort: &agent::abort::AbortController,
+) -> Result<Value, AgentError> {
+    if abort.is_aborted() {
+        return Err(aborted(abort));
+    }
+    abort.pulse();
+    let request = client.call(tool, args);
+    tokio::pin!(request);
+    tokio::select! {
+        biased;
+        _ = abort.cancelled() => {
+            // Dropping the HTTP future stops local work, but once a mutating
+            // request has reached the live editor its commit status cannot be
+            // proven. Keep scheduler recovery fail-closed.
+            if writing {
+                abort.mark_unresolved_external_work();
+            }
+            Err(aborted(abort))
+        }
+        result = &mut request => {
+            abort.pulse();
+            match result {
+                Ok(value) => Ok(value),
+                Err(error) => {
+                    // A transport/RPC/parse failure after a write was sent is
+                    // not proof that the editor rolled it back.
+                    if writing {
+                        abort.mark_unresolved_external_work();
+                    }
+                    Err(map_op_error(error))
+                }
+            }
+        }
+    }
+}
+
+fn map_op_error(error: OpError) -> AgentError {
+    match error {
+        OpError::Aborted(reason) => AgentError::Aborted(reason),
+        other => AgentError::other(other.to_string()),
+    }
+}
+
+fn aborted(abort: &agent::abort::AbortController) -> AgentError {
+    AgentError::Aborted(abort.reason().unwrap_or_else(|| "aborted".to_string()))
+}
+
+fn map_design_error(
+    error: OpError,
+    abort: &agent::abort::AbortController,
+    remote_started: bool,
+) -> AgentError {
+    if remote_started {
+        // `Planned` is emitted immediately before `design_skeleton` dispatch.
+        // Any later failure may therefore describe a partially committed page.
+        abort.mark_unresolved_external_work();
+    }
+    if abort.is_aborted() {
+        aborted(abort)
+    } else {
+        map_op_error(error)
+    }
+}
+
+fn design_result_requires_review(result: &super::design::DesignResult) -> bool {
+    !result.failures.is_empty()
+        || result
+            .refine
+            .get("error")
+            .is_some_and(|error| !error.is_null())
 }
 
 fn schema(kind: &str) -> Value {
@@ -136,7 +216,8 @@ impl Tool for OpReadTool {
 
     fn description(&self) -> &str {
         "Read OpenPencil design state (get_*/list_*/snapshot_*/read_nodes/batch_get/...). \
-         Args: {tool, arguments}."
+         Args: {tool, arguments}. Connection setup may install or launch OpenPencil; a detached \
+         GUI launch is reported to scheduler safety state."
     }
 
     fn input_schema(&self) -> Value {
@@ -147,8 +228,8 @@ impl Tool for OpReadTool {
         SafetyClass::ReadOnly
     }
 
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        dispatch(&self.deps, input, false).await
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+        dispatch(&self.deps, ctx, input, false).await
     }
 }
 
@@ -160,7 +241,8 @@ impl Tool for OpWriteTool {
 
     fn description(&self) -> &str {
         "Mutate an OpenPencil design (insert/update/delete/move/page/vars or batch_design DSL). \
-         Args: {tool, arguments}."
+         Args: {tool, arguments}. Cancellation after dispatch is treated as an unverified remote \
+         outcome and is never auto-replayed."
     }
 
     fn input_schema(&self) -> Value {
@@ -171,8 +253,8 @@ impl Tool for OpWriteTool {
         SafetyClass::Mutating
     }
 
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        dispatch(&self.deps, input, true).await
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+        dispatch(&self.deps, ctx, input, true).await
     }
 }
 
@@ -218,15 +300,20 @@ impl Tool for OpDesignTool {
         SafetyClass::Mutating
     }
 
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let prompt = input
             .get("prompt")
             .and_then(|p| p.as_str())
             .ok_or_else(|| AgentError::other("op_design: missing 'prompt'"))?;
-        let client =
-            OpConnection::ensure(&self.deps.cfg, self.deps.consent.as_ref(), &self.deps.tag)
-                .await
-                .map_err(|e| AgentError::other(e.to_string()))?;
+        let abort = ctx.abort.child();
+        let client = OpConnection::ensure(
+            &self.deps.cfg,
+            self.deps.consent.as_ref(),
+            &self.deps.tag,
+            &abort,
+        )
+        .await
+        .map_err(map_op_error)?;
         // `deps.skills` is an `Arc<SkillRegistry>`; pass it by reference.
         let guidance = load_guidance(
             self.deps.skills.as_ref(),
@@ -237,12 +324,42 @@ impl Tool for OpDesignTool {
             provider: runtime.provider,
             model: runtime.model,
         };
-        let abort = agent::abort::AbortController::new();
-        let progress = |_| {};
-        let res = DesignOrchestrator
-            .run(&client, &generator, &guidance, prompt, &abort, &progress)
-            .await
-            .map_err(|e| AgentError::other(e.to_string()))?;
+        let activity = abort.activity();
+        let remote_started = Arc::new(AtomicBool::new(false));
+        let progress_remote_started = remote_started.clone();
+        let progress = move |event| {
+            if matches!(event, super::design::DesignProgress::Planned { .. }) {
+                progress_remote_started.store(true, Ordering::Release);
+            }
+            activity.pulse();
+        };
+        abort.mark_side_effect_risk();
+        let run = DesignOrchestrator.run(&client, &generator, &guidance, prompt, &abort, &progress);
+        tokio::pin!(run);
+        let res = tokio::select! {
+            biased;
+            _ = abort.cancelled() => {
+                // The pipeline may have committed skeleton/content/refine
+                // remotely before cancellation reached this local future.
+                if remote_started.load(Ordering::Acquire) {
+                    abort.mark_unresolved_external_work();
+                }
+                return Err(aborted(&abort));
+            }
+            result = &mut run => result.map_err(|error| {
+                map_design_error(
+                    error,
+                    &abort,
+                    remote_started.load(Ordering::Acquire),
+                )
+            })?,
+        };
+        if design_result_requires_review(&res) {
+            // The orchestrator intentionally returns section/refine failures
+            // as a partial result. A skeleton or earlier sections may already
+            // exist, so scheduled recurrence must pause for human review.
+            abort.mark_unresolved_external_work();
+        }
         Ok(json!({
             "sections": res.section_ids,
             "failures": res.failures,
@@ -306,7 +423,38 @@ mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use agent::tool::{SafetyClass, Tool};
+    use async_trait::async_trait;
+
+    #[derive(Debug)]
+    struct PendingTransport;
+
+    #[async_trait]
+    impl super::super::client::Transport for PendingTransport {
+        async fn post_json(
+            &self,
+            _url: &str,
+            _body: Value,
+        ) -> Result<Value, super::super::OpError> {
+            std::future::pending().await
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingTransport;
+
+    #[async_trait]
+    impl super::super::client::Transport for FailingTransport {
+        async fn post_json(
+            &self,
+            _url: &str,
+            _body: Value,
+        ) -> Result<Value, super::super::OpError> {
+            Err(super::super::OpError::Http("connection reset".to_string()))
+        }
+    }
 
     #[test]
     fn classes_and_names() {
@@ -393,5 +541,96 @@ mod tests {
         ] {
             assert!(!is_read_tool(t), "{t} should be write");
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_remote_write_is_latched_as_unresolved() {
+        let client = super::super::client::OpClient::new(
+            "http://127.0.0.1:1".to_string(),
+            Arc::new(PendingTransport),
+        );
+        let abort = agent::abort::AbortController::new();
+        let cancel = abort.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            cancel.abort_with_reason("watchdog");
+        });
+
+        let result = call_remote(&client, "insert_node", json!({}), true, &abort).await;
+        assert!(matches!(result, Err(AgentError::Aborted(reason)) if reason == "watchdog"));
+        assert!(abort.activity().side_effect_risk());
+        assert!(abort.activity().unresolved_external_work());
+    }
+
+    #[tokio::test]
+    async fn cancelled_remote_read_does_not_invent_a_side_effect() {
+        let client = super::super::client::OpClient::new(
+            "http://127.0.0.1:1".to_string(),
+            Arc::new(PendingTransport),
+        );
+        let abort = agent::abort::AbortController::new();
+        let cancel = abort.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            cancel.abort_with_reason("watchdog");
+        });
+
+        let result = call_remote(&client, "get_node", json!({}), false, &abort).await;
+        assert!(matches!(result, Err(AgentError::Aborted(reason)) if reason == "watchdog"));
+        assert!(!abort.activity().side_effect_risk());
+        assert!(!abort.activity().unresolved_external_work());
+    }
+
+    #[tokio::test]
+    async fn failed_remote_write_is_latched_as_unresolved() {
+        let client = super::super::client::OpClient::new(
+            "http://127.0.0.1:1".to_string(),
+            Arc::new(FailingTransport),
+        );
+        let abort = agent::abort::AbortController::new();
+        let result = call_remote(&client, "insert_node", json!({}), true, &abort).await;
+        assert!(result.is_err());
+        assert!(abort.activity().unresolved_external_work());
+    }
+
+    #[test]
+    fn design_error_after_remote_boundary_is_latched() {
+        let abort = agent::abort::AbortController::new();
+        let error = map_design_error(
+            super::super::OpError::Parse("missing root id".to_string()),
+            &abort,
+            true,
+        );
+        assert!(matches!(error, AgentError::Other(_)));
+        assert!(abort.activity().unresolved_external_work());
+    }
+
+    #[test]
+    fn design_plan_error_before_remote_boundary_is_not_latched() {
+        let abort = agent::abort::AbortController::new();
+        let error = map_design_error(
+            super::super::OpError::Parse("bad model plan".to_string()),
+            &abort,
+            false,
+        );
+        assert!(matches!(error, AgentError::Other(_)));
+        assert!(!abort.activity().unresolved_external_work());
+    }
+
+    #[test]
+    fn partial_design_result_requires_review() {
+        let partial = super::super::design::DesignResult {
+            section_ids: vec!["section-1".to_string()],
+            refine: json!({"error": "connection reset"}),
+            failures: Vec::new(),
+        };
+        assert!(design_result_requires_review(&partial));
+
+        let complete = super::super::design::DesignResult {
+            section_ids: vec!["section-1".to_string()],
+            refine: json!({"ok": true}),
+            failures: Vec::new(),
+        };
+        assert!(!design_result_requires_review(&complete));
     }
 }

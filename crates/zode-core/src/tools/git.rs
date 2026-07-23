@@ -3,26 +3,40 @@
 //! mutating ones (commit/checkout/stash/branch) are Mutating and get
 //! wrapped by PermissionGatedTool at assembly time. `git pr` is post-v1.
 
-use std::path::Path;
+use std::time::Duration;
 
 use agent::error::AgentError;
 use agent::tool::{SafetyClass, Tool, ToolUseContext};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use crate::process_supervision::{run_captured, CaptureError};
+
+const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+const GIT_STREAM_CAP: usize = 1024 * 1024;
+
 /// Run `git <args>` in `cwd`; return a JSON object with the result.
-async fn run_git(cwd: &Path, args: &[String]) -> Result<Value, AgentError> {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .await
-        .map_err(|e| AgentError::other(format!("git spawn failed: {e}")))?;
+async fn run_git(ctx: &ToolUseContext, args: &[String]) -> Result<Value, AgentError> {
+    let mut command = tokio::process::Command::new("git");
+    command.args(args).current_dir(&ctx.cwd);
+    let output = match run_captured(command, &ctx.abort, GIT_TIMEOUT, GIT_STREAM_CAP).await {
+        Ok(output) => output,
+        Err(CaptureError::Aborted(reason)) => return Err(AgentError::Aborted(reason)),
+        Err(CaptureError::TimedOut) => {
+            return Err(AgentError::other(format!(
+                "git command timed out after {}s",
+                GIT_TIMEOUT.as_secs()
+            )))
+        }
+        Err(error) => return Err(AgentError::other(format!("git execution failed: {error}"))),
+    };
     Ok(json!({
         "ok": output.status.success(),
         "exit_code": output.status.code().unwrap_or(-1),
         "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
         "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+        "stdout_truncated": output.stdout_truncated,
+        "stderr_truncated": output.stderr_truncated,
     }))
 }
 
@@ -65,7 +79,7 @@ impl Tool for GitStatus {
     }
     async fn call(&self, ctx: &ToolUseContext, _input: Value) -> Result<Value, AgentError> {
         run_git(
-            &ctx.cwd,
+            ctx,
             &["status".into(), "--porcelain=v1".into(), "--branch".into()],
         )
         .await
@@ -105,7 +119,7 @@ impl Tool for GitDiff {
             args.push("--".into());
             args.extend(paths);
         }
-        run_git(&ctx.cwd, &args).await
+        run_git(ctx, &args).await
     }
 }
 
@@ -131,7 +145,7 @@ impl Tool for GitLog {
             .and_then(|v| v.as_u64())
             .unwrap_or(20);
         run_git(
-            &ctx.cwd,
+            ctx,
             &[
                 "log".into(),
                 format!("--max-count={n}"),
@@ -162,7 +176,7 @@ impl Tool for GitBlame {
     async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let path = str_field(&input, "path")
             .ok_or_else(|| AgentError::other("GitBlame requires `path`"))?;
-        run_git(&ctx.cwd, &["blame".into(), "--".into(), path.into()]).await
+        run_git(ctx, &["blame".into(), "--".into(), path.into()]).await
     }
 }
 
@@ -199,7 +213,7 @@ impl Tool for GitCommit {
             // `--` fences user paths so a leading-dash name isn't a flag.
             let mut add = vec!["add".to_string(), "--".to_string()];
             add.extend(paths.clone());
-            let r = run_git(&ctx.cwd, &add).await?;
+            let r = run_git(ctx, &add).await?;
             if !r["ok"].as_bool().unwrap_or(false) {
                 return Ok(r);
             }
@@ -210,7 +224,7 @@ impl Tool for GitCommit {
         if stage_all && paths.is_empty() {
             args.insert(1, "-a".into());
         }
-        run_git(&ctx.cwd, &args).await
+        run_git(ctx, &args).await
     }
 }
 
@@ -241,7 +255,7 @@ impl Tool for GitBranch {
         } else {
             vec!["branch".into(), "--list".into()]
         };
-        run_git(&ctx.cwd, &args).await
+        run_git(ctx, &args).await
     }
 }
 
@@ -282,7 +296,7 @@ impl Tool for GitCheckout {
             args.push("-b".into());
         }
         args.push(target.to_string());
-        run_git(&ctx.cwd, &args).await
+        run_git(ctx, &args).await
     }
 }
 
@@ -313,7 +327,7 @@ impl Tool for GitStash {
                 )))
             }
         };
-        run_git(&ctx.cwd, &["stash".to_string(), op.to_string()]).await
+        run_git(ctx, &["stash".to_string(), op.to_string()]).await
     }
 }
 
@@ -367,7 +381,7 @@ impl Tool for GitWorktree {
             }
             _ => unreachable!(),
         }
-        run_git(&ctx.cwd, &args).await
+        run_git(ctx, &args).await
     }
 }
 
@@ -437,6 +451,88 @@ mod tests {
             .await
             .unwrap();
         assert!(out["stdout"].as_str().unwrap().contains("init"));
+    }
+
+    #[tokio::test]
+    async fn git_tools_honor_root_abort_before_spawn() {
+        let dir = init_repo();
+        let context = ctx(dir.path());
+        context.abort.abort_with_reason("watchdog stop");
+
+        let error = GitStatus.call(&context, json!({})).await.unwrap_err();
+
+        assert!(matches!(error, AgentError::Aborted(reason) if reason == "watchdog stop"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aborting_git_commit_kills_hook_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = init_repo();
+        let pid_file = dir.path().join("hook-child.pid");
+        let hook = dir.path().join(".git/hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nsleep 30 &\nchild=$!\nprintf %s \"$child\" > '{}'\nwait\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&hook, permissions).unwrap();
+        std::process::Command::new("git")
+            .args([
+                "config",
+                "core.hooksPath",
+                hook.parent().unwrap().to_str().unwrap(),
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+
+        let context = ctx(dir.path());
+        let abort = context.abort.clone();
+        let mut call = tokio::spawn(async move {
+            GitCommit
+                .call(&context, json!({"message": "blocked hook", "all": true}))
+                .await
+        });
+        let pid = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if call.is_finished() {
+                    let result = (&mut call).await.unwrap();
+                    panic!("git commit exited before hook pid was written: {result:?}");
+                }
+                if let Ok(raw) = tokio::fs::read_to_string(&pid_file).await {
+                    if let Ok(pid) = raw.trim().parse::<u32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("git hook did not write its child pid");
+
+        abort.abort_with_reason("watchdog stop");
+        let error = call.await.unwrap().unwrap_err();
+        assert!(matches!(error, AgentError::Aborted(reason) if reason == "watchdog stop"));
+
+        for _ in 0..100 {
+            let alive = std::process::Command::new("/bin/kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .is_ok_and(|output| output.status.success());
+            if !alive {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("git hook descendant {pid} survived abort");
     }
 
     #[tokio::test]

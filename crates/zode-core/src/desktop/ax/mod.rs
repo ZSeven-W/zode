@@ -117,6 +117,27 @@ enum AxCommand {
     Ping(oneshot::Sender<()>),
 }
 
+impl AxCommand {
+    /// A dropped tool future closes its response receiver. Commands that have
+    /// not started yet can then be cancelled safely instead of applying a
+    /// desktop action after the scheduler has already stopped the turn.
+    fn response_closed(&self) -> bool {
+        match self {
+            Self::ListApps(resp) => resp.is_closed(),
+            Self::ListWindows { resp, .. } => resp.is_closed(),
+            Self::Snapshot { resp, .. } => resp.is_closed(),
+            Self::ElementAction { resp, .. } => resp.is_closed(),
+            Self::SetValue { resp, .. } => resp.is_closed(),
+            Self::TypeText { resp, .. } => resp.is_closed(),
+            Self::Key { resp, .. } => resp.is_closed(),
+            Self::Focus { resp, .. } => resp.is_closed(),
+            Self::Launch { resp, .. } => resp.is_closed(),
+            Self::Screenshot { resp, .. } => resp.is_closed(),
+            Self::Ping(resp) => resp.is_closed(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct AxBackend {
     tx: mpsc::UnboundedSender<AxCommand>,
@@ -293,6 +314,9 @@ fn actor_loop(
     let mut state = AxState::default();
     let mut snap_gen: u64 = 0;
     while let Some(cmd) = rx.blocking_recv() {
+        if cmd.response_closed() {
+            continue;
+        }
         handle(cmd, &mut state, &mut snap_gen, overlay.as_ref());
     }
 }

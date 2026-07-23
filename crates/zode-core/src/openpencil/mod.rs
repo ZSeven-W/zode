@@ -83,6 +83,8 @@ pub fn is_read_tool(name: &str) -> bool {
 /// Failures across the op-bridge.
 #[derive(Debug, Error)]
 pub enum OpError {
+    #[error("operation aborted: {0}")]
+    Aborted(String),
     #[error("the `op` CLI is not installed")]
     NotInstalled,
     #[error("install declined by user")]

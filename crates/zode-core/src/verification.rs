@@ -7,7 +7,6 @@
 //! edits that have not been re-checked.
 
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,9 +17,12 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::process_supervision::{run_captured, CaptureError};
+
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const MAX_TIMEOUT_SECS: u64 = 600;
 const MODEL_OUTPUT_CAP: usize = 16 * 1024;
+const PROCESS_OUTPUT_CAP: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default)]
 pub struct VerificationState {
@@ -222,39 +224,46 @@ impl Tool for RunCheckTool {
             c.arg("-c").arg(&parsed.command);
             c
         };
-        cmd.current_dir(&cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        cmd.current_dir(&cwd);
 
-        let output =
-            match tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output()).await {
-                Ok(Ok(output)) => output,
-                Ok(Err(err)) => {
-                    return Err(AgentError::other(format!("run_check spawn failed: {err}")));
-                }
-                Err(_) => {
-                    let failures = vec![format!("command timed out after {timeout_secs}s")];
-                    self.state
-                        .record("run_check", &parsed.command, false, failures.clone());
-                    return Ok(json!({
-                        "passed": false,
-                        "command": parsed.command,
-                        "cwd": cwd.display().to_string(),
-                        "exit_code": null,
-                        "stdout": "",
-                        "stderr": "",
-                        "stdout_truncated": false,
-                        "stderr_truncated": false,
-                        "failures": failures,
-                    }));
-                }
-            };
+        let output = match run_captured(
+            cmd,
+            &ctx.abort,
+            Duration::from_secs(timeout_secs),
+            PROCESS_OUTPUT_CAP,
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(CaptureError::Aborted(reason)) => return Err(AgentError::Aborted(reason)),
+            Err(CaptureError::TimedOut) => {
+                let failures = vec![format!("command timed out after {timeout_secs}s")];
+                self.state
+                    .record("run_check", &parsed.command, false, failures.clone());
+                return Ok(json!({
+                    "passed": false,
+                    "command": parsed.command,
+                    "cwd": cwd.display().to_string(),
+                    "exit_code": null,
+                    "stdout": "",
+                    "stderr": "",
+                    "stdout_truncated": false,
+                    "stderr_truncated": false,
+                    "failures": failures,
+                }));
+            }
+            Err(error) => {
+                return Err(AgentError::other(format!(
+                    "run_check execution failed: {error}"
+                )));
+            }
+        };
 
         let exit_code = output.status.code().unwrap_or(-1);
         let (stdout, stdout_truncated) = cap_output(&String::from_utf8_lossy(&output.stdout));
         let (stderr, stderr_truncated) = cap_output(&String::from_utf8_lossy(&output.stderr));
+        let stdout_truncated = stdout_truncated || output.stdout_truncated;
+        let stderr_truncated = stderr_truncated || output.stderr_truncated;
         let failures = evaluate_assertions(&parsed, exit_code, &stdout, &stderr);
         let passed = failures.is_empty();
         self.state
@@ -394,6 +403,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["passed"], false);
+        assert!(state.completion_evidence().is_err());
+    }
+
+    #[tokio::test]
+    async fn run_check_honors_root_abort() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = VerificationState::default();
+        let tool = RunCheckTool::new(state);
+        let context = ctx(dir.path());
+        context.abort.abort_with_reason("watchdog stop");
+
+        let error = tool
+            .call(&context, json!({"command": "printf should-not-run"}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AgentError::Aborted(reason) if reason == "watchdog stop"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_check_reports_a_bounded_timeout_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = VerificationState::default();
+        let tool = RunCheckTool::new(state.clone());
+
+        let out = tool
+            .call(
+                &ctx(dir.path()),
+                json!({"command": "sleep 30", "timeout_secs": 1}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out["passed"], false);
+        assert_eq!(out["exit_code"], Value::Null);
+        assert!(out["failures"][0]
+            .as_str()
+            .unwrap()
+            .contains("timed out after 1s"));
         assert!(state.completion_evidence().is_err());
     }
 

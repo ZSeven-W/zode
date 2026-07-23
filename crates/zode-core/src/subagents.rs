@@ -141,7 +141,9 @@ impl SubAgentRegistry {
     fn push_event(&self, id: u64, event: &Event) {
         if let Ok(mut s) = self.inner.lock() {
             if let Some(a) = s.agents.iter_mut().find(|a| a.id == id) {
-                apply_event(a, event);
+                if a.status == SubAgentStatus::Running {
+                    apply_event(a, event);
+                }
             }
         }
     }
@@ -149,6 +151,9 @@ impl SubAgentRegistry {
     fn finish(&self, id: u64, result: &str, error: Option<&str>) {
         if let Ok(mut s) = self.inner.lock() {
             if let Some(a) = s.agents.iter_mut().find(|a| a.id == id) {
+                if a.status != SubAgentStatus::Running {
+                    return;
+                }
                 a.finished_at = Some(now_secs());
                 if let Some(err) = error {
                     a.status = SubAgentStatus::Failed;

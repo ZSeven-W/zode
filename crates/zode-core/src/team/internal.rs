@@ -156,6 +156,11 @@ impl InternalSession {
             .model_max_tokens(self.spec.model_max_tokens)
             .max_iterations(self.spec.max_iterations)
             .max_api_retries(self.spec.max_api_retries)
+            // This loop is driven inside the parent TeamSend tool task. It
+            // must not wait for root-turn quiescence while that parent guard
+            // is necessarily still active.
+            .task_depth(1)
+            .root_turn_owner(false)
             .auto_compact(true)
             .microcompact(self.spec.microcompact)
             .use_prompt_cache(self.spec.use_prompt_cache)
@@ -164,10 +169,11 @@ impl InternalSession {
             builder = builder.temperature(t);
         }
 
-        let mut stream = builder.build().run(message, abort).await.map_err(|e| {
-            observer.on_finish(obs_id, "", Some(&e.to_string()));
-            TeamError::Io(e.to_string())
-        })?;
+        let mut stream = builder
+            .build()
+            .run(message, abort)
+            .await
+            .map_err(|e| TeamError::Io(e.to_string()))?;
 
         use agent::stream::Event;
         use futures::StreamExt;
@@ -202,8 +208,6 @@ impl InternalSession {
                 _ => {}
             }
         }
-        observer.on_finish(obs_id, &reply, error.as_deref());
-
         // Persist: clone the store under the std lock, then await the write
         // with the lock released (mirrors the engine's session-save pattern).
         let snapshot = {

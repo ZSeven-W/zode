@@ -554,6 +554,15 @@ Optional top-level config keys (all have sensible defaults):
     "defaultTarget": "managed",  // "managed" | "bridge"
     "headless": false,           // managed Chromium launch mode
     "viewport": { "width": 1440, "height": 900 }
+  },
+  "backgroundWatchdog": {
+    "enabled": true,             // watch unattended /loop and /schedule turns
+    "inactivityTimeoutSecs": 900, // abort after 15 minutes without provider/tool activity
+    "maxRuntimeSecs": 3600,      // absolute one-hour cap per background turn
+    "abortGraceSecs": 10,        // wait for cooperative cancellation before hard-stop
+    "maxRetries": 3,             // consecutive recovery attempts before exhaustion
+    "initialBackoffSecs": 5,     // first retry delay
+    "maxBackoffSecs": 300        // cap for exponential retry backoff
   }
 }
 ```
@@ -702,6 +711,74 @@ Useful commands:
 See [`extensions/chrome/README.md`](extensions/chrome/README.md) for extension
 loading, update, CRX packaging, and smoke-test steps.
 
+## Background Turn Watchdog
+
+Scheduler-owned `/loop` and `/schedule` turns run under an in-process liveness
+watchdog. Provider, tool, and nested-agent activity refreshes a shared
+source-side heartbeat, while
+`maxRuntimeSecs` remains an absolute cap. On either timeout, zode requests
+cooperative cancellation, waits `abortGraceSecs`, and hard-stops the local turn
+task if it still has not drained. Stopping the task is not enough to release
+its scheduler slot: zode also waits for every tracked provider, tool,
+hook, subprocess reader, and nested-agent worker to quiesce. If that second
+boundary is not reached within five seconds, the tab/store is quarantined, the
+job is disabled, and its live-attempt lease remains held until the workers
+actually exit.
+
+Failed attempts use bounded exponential backoff from `initialBackoffSecs` to
+`maxBackoffSecs`. A successful turn clears its consecutive-failure count; once
+`maxRetries` is exhausted, zode stops the loop or disables the persisted
+schedule. Manual interruption, job removal, and explicit disabling cancel
+pending recovery instead of creating another retry when no mutation started.
+Recovery is intentionally conservative around side effects: zode retries
+automatically only when it has not observed a side effect; if a mutation may
+already have happened, including a manual cancellation mid-mutation, it
+stops/disables the job and waits for human review. Tools that deliberately
+detach work (`BashRun` or a detached GUI) also stop recurrence after that turn.
+The same inactivity limit bounds claim-to-start queueing: if a busy tab or
+turn preflight keeps an owned occurrence from starting, it becomes a normal
+side-effect-free watchdog failure and enters the same bounded retry policy
+instead of holding its cross-process lease forever.
+
+Quiescence is a local guarantee. Work already accepted by a remote MCP server,
+browser extension, desktop actor, or other external system may not support
+revocation. If such a call is interrupted, zode marks its result unresolved,
+disables the scheduler job, and requires you to verify the external state
+before re-enabling it.
+
+Use `/watchdog status` for configuration and per-turn/retry health. The same
+state appears in `/tasks` alongside background shells and running turns;
+claimed queue age and terminal-persistence fences are shown there too.
+
+This is a watchdog for scheduler turns inside the current zode process. It is
+not an OS process supervisor and cannot restart zode after a crash or machine
+restart; use your platform's service manager when process-level restarts are
+required. Persisted schedules record an active-attempt token backed by a
+per-schedule OS file lock. At startup, a contended lock is left alone because
+another zode process still owns it; a free lock with the exact persisted token
+is an orphan from an unclean exit, so zode disables that schedule as
+execution-state-unknown instead of replaying it silently.
+This recovery contract covers process crashes. It does not claim storage-level
+durability across sudden power loss or failed hardware, and it does not replace
+an OS service manager.
+
+The fire timestamp and active-attempt token are claimed atomically before a
+persisted prompt enters a tab queue, so queued work is already exclusive across
+zode processes. That same lease moves with the prompt into the turn and remains
+held through final transcript/index persistence. Editing, removing, or
+disabling a queued occurrence is an explicit cancellation and clears only its
+matching active token. Graceful application exit instead restores the exact
+unstarted fire watermark or retry token, so it cannot consume work that never
+ran. A terminal roster write that fails keeps the lease in a retrying finalizer;
+a conflicting token is durably disabled for review before release. Scheduler
+turns skip detached post-turn memory extraction, and graceful exit drains
+worker quiescence plus terminal persistence before destroying their tabs.
+Recurrence phase is canonical: interval slots use absolute epoch arithmetic
+from the persisted anchor (including across DST fallback), calendar schedules
+keep their wall-clock phase, and missed backlog coalesces to the latest due
+slot. A running process also refreshes the roster so remote disable/remove,
+retry, and orphan ownership changes take effect without a restart.
+
 ## Slash Commands
 
 | Command | What it does |
@@ -717,7 +794,10 @@ loading, update, CRX packaging, and smoke-test steps.
 | `/connect` | Connect and switch the active provider |
 | `/sidebar [on\|off\|toggle\|auto\|mcp\|files\|todo]` | Show/hide the right sidebar; fold the MCP / modified-files / todo sections (also click their ▼ headers) |
 | `/browser [status\|launch\|close\|pair\|target <managed\|bridge>\|screenshot [path]]` | Browser control panel and commands; pair the Chrome bridge extension or switch between managed Chromium and your Chrome profile |
-| `/tasks` | Background shells + running turns panel |
+| `/loop <interval> [--max N] <prompt>` | Run a recurring prompt in the current tab; `list` / `stop [id]` |
+| `/schedule add <when> <prompt>` | Persist a scheduled prompt; `list` / `rm <id>` / `enable\|disable <id>` |
+| `/watchdog [status]` | Show background-turn watchdog configuration, health, and pending retries |
+| `/tasks` | Background shells, running turns, and watchdog health panel |
 | `/undo`, `/redo` | Undo / redo the last file edit |
 | `/mcp` | Manage MCP servers — enable / disable in a dialog |
 | `/skills` | List available skills |

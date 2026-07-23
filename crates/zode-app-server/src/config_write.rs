@@ -41,6 +41,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "browser",
     "noema",
     "compact",
+    "backgroundWatchdog",
 ];
 
 pub fn merge_patch(current: &ZodeConfig, patch: Value) -> Result<ZodeConfig, ErrorObject> {

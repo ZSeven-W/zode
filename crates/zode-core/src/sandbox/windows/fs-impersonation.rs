@@ -3,6 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use agent::abort::AbortController;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_NO_MORE_FILES, HANDLE,
@@ -44,13 +45,28 @@ pub(crate) enum FsOperation {
     },
 }
 
-pub(super) async fn run(config: &SandboxConfig, operation: FsOperation) -> io::Result<()> {
+pub(super) async fn run(
+    config: &SandboxConfig,
+    operation: FsOperation,
+    abort: &AbortController,
+) -> io::Result<()> {
+    if abort.is_aborted() {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            abort
+                .reason()
+                .unwrap_or_else(|| "sandbox filesystem operation cancelled".into()),
+        ));
+    }
     let roots = config.windows_writable_roots();
     let read_only = config.mode == super::SandboxMode::ReadOnly;
-    tokio::task::spawn_blocking(move || run_sync(&roots, read_only, || perform(operation)))
-        .await
-        .map_err(|error| io::Error::other(format!("sandbox fs-op worker failed: {error}")))?
-        .map_err(Into::into)
+    let activity = abort.activity();
+    crate::process_supervision::spawn_blocking_tracked(&activity, move || {
+        run_sync(&roots, read_only, || perform(operation))
+    })
+    .await
+    .map_err(|error| io::Error::other(format!("sandbox fs-op worker failed: {error}")))?
+    .map_err(Into::into)
 }
 
 pub(super) async fn verify_write_denied(

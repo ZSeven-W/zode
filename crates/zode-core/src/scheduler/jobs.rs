@@ -104,6 +104,28 @@ pub struct ScheduleJob {
     pub prompt: String,
     pub enabled: bool,
     pub last_fired_ms: Option<u64>,
+    /// Consecutive watchdog failures. Persisted so restarting zode cannot
+    /// evade `backgroundWatchdog.maxRetries`; reset after a successful run or
+    /// an explicit re-enable.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub watchdog_failures: u32,
+    /// Wall-clock timestamp of the most recent watchdog-managed failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog_last_failure_ms: Option<u64>,
+    /// Next recovery deadline in epoch milliseconds. Keeping it in the same
+    /// atomic schedule store makes an in-backoff restart resume rather than
+    /// silently losing or immediately duplicating the recovery attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog_retry_at_ms: Option<u64>,
+    /// Persisted while a schedule turn owns execution. A leftover value on
+    /// startup means the previous process died before a canonical terminal;
+    /// replay is unsafe and the host disables the job for manual review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog_active_since_ms: Option<u64>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]

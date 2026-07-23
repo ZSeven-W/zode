@@ -54,6 +54,21 @@ struct ActiveConnection {
     tx: mpsc::UnboundedSender<OutboundFrame>,
 }
 
+/// Removes a pending bridge RPC waiter when the caller is cancelled or its
+/// future is otherwise dropped. The extension may still have received the
+/// request, so the tool boundary separately records unresolved external work;
+/// this guard only prevents a stale local waiter from surviving until timeout.
+struct RpcWaiterGuard<'a> {
+    server: &'a BridgeServer,
+    id: u64,
+}
+
+impl Drop for RpcWaiterGuard<'_> {
+    fn drop(&mut self) {
+        self.server.remove_waiter(self.id);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingHandle {
     pub code: String,
@@ -210,18 +225,15 @@ impl BridgeServer {
             method: method.to_string(),
             params,
         };
+        let _waiter = RpcWaiterGuard { server: self, id };
         if tx.send(OutboundFrame::Browser(req)).is_err() {
-            self.remove_waiter(id);
             return Err(BrowserError::Dead("bridge connection closed".into()));
         }
 
         match tokio::time::timeout(Duration::from_secs(30), reply_rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(BrowserError::Dead("bridge connection closed".into())),
-            Err(_) => {
-                self.remove_waiter(id);
-                Err(BrowserError::Timeout(format!("bridge rpc {method}")))
-            }
+            Err(_) => Err(BrowserError::Timeout(format!("bridge rpc {method}"))),
         }
     }
 
@@ -1151,6 +1163,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result, serde_json::json!("current"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn dropped_rpc_call_removes_local_waiter() {
+        let srv = BridgeServer::new_with_preferred_port(0);
+        let (mut ws, _) = pair_task_client(&srv).await;
+        let call_server = srv.clone();
+        let call = tokio::spawn(async move {
+            call_server
+                .call(RpcKind::Cdp, "Page.getFrameTree", serde_json::json!({}))
+                .await
+        });
+        let _request = ws.next().await.unwrap().unwrap();
+        assert_eq!(srv.state.lock().unwrap().waiters.len(), 1);
+
+        call.abort();
+        let _ = call.await;
+        assert!(srv.state.lock().unwrap().waiters.is_empty());
     }
 
     #[tokio::test]

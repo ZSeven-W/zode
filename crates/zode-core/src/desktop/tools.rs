@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use agent::abort::AbortController;
 use agent::error::AgentError;
 use agent::tool::{SafetyClass, Tool, ToolUseContext};
 use async_trait::async_trait;
@@ -38,6 +39,82 @@ impl std::fmt::Debug for DesktopToolDeps {
 
 fn to_agent_err(e: DesktopError) -> AgentError {
     AgentError::other(e.to_string())
+}
+
+/// Accessibility and CDP actors may keep running after their local receiver
+/// is dropped. This guard makes every dispatched desktop operation fail closed
+/// unless a response proves that the operation reached a terminal state.
+struct UnresolvedDesktopCall {
+    abort: AbortController,
+    armed: bool,
+}
+
+impl UnresolvedDesktopCall {
+    fn new(abort: AbortController) -> Self {
+        Self { abort, armed: true }
+    }
+
+    fn resolve(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for UnresolvedDesktopCall {
+    fn drop(&mut self) {
+        if self.armed {
+            self.abort.mark_unresolved_external_work();
+        }
+    }
+}
+
+fn aborted(ctx: &ToolUseContext) -> AgentError {
+    AgentError::Aborted(
+        ctx.abort
+            .reason()
+            .unwrap_or_else(|| "desktop operation aborted".into()),
+    )
+}
+
+fn desktop_error_is_terminal(error: &DesktopError) -> bool {
+    !matches!(
+        error,
+        DesktopError::Protocol(_)
+            | DesktopError::Timeout(_)
+            | DesktopError::Dead(_)
+            | DesktopError::PartialInput { .. }
+            | DesktopError::PartialKeyInput { .. }
+    )
+}
+
+async fn await_desktop_response<T>(
+    ctx: &ToolUseContext,
+    request: impl std::future::Future<Output = Result<T, DesktopError>>,
+) -> Result<T, AgentError> {
+    if ctx.abort.is_aborted() {
+        return Err(aborted(ctx));
+    }
+    ctx.abort.pulse();
+    let mut unresolved = UnresolvedDesktopCall::new(ctx.abort.clone());
+    tokio::pin!(request);
+    tokio::select! {
+        biased;
+        _ = ctx.abort.cancelled() => Err(aborted(ctx)),
+        result = &mut request => {
+            ctx.abort.pulse();
+            match result {
+                Ok(value) => {
+                    unresolved.resolve();
+                    Ok(value)
+                }
+                Err(error) => {
+                    if desktop_error_is_terminal(&error) {
+                        unresolved.resolve();
+                    }
+                    Err(to_agent_err(error))
+                }
+            }
+        }
+    }
 }
 
 /// Map a `desktop_act` action to its approval family. Total over the schema's
@@ -147,17 +224,22 @@ impl Tool for DesktopReadTool {
         SafetyClass::ReadOnly
     }
 
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
-        match input.get("action").and_then(|a| a.as_str()).unwrap_or("") {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+        let action = input.get("action").and_then(|a| a.as_str()).unwrap_or("");
+        if !matches!(action, "apps" | "windows" | "snapshot") {
+            return Err(AgentError::other(format!("unknown action: {action:?}")));
+        }
+        match action {
             "apps" => {
                 authorize(&self.deps, None).await?;
                 // Platform apps (AX/UIA/AT-SPI2) plus any CDP-attached instance,
                 // so the model can address an attached Electron app by identity.
-                let lease = self.deps.session.lease().await.map_err(to_agent_err)?;
-                let mut apps = lease.backend().list_apps().await.map_err(to_agent_err)?;
+                let lease = await_desktop_response(ctx, self.deps.session.lease()).await?;
+                let backend = lease.backend();
+                let mut apps = await_desktop_response(ctx, backend.list_apps()).await?;
                 drop(lease);
                 if let Some(cdp) = self.deps.session.cdp().await {
-                    if let Ok(mut cdp_apps) = cdp.list_apps().await {
+                    if let Ok(mut cdp_apps) = await_desktop_response(ctx, cdp.list_apps()).await {
                         apps.append(&mut cdp_apps);
                     }
                 }
@@ -166,29 +248,18 @@ impl Tool for DesktopReadTool {
             "windows" => {
                 let exe = arg_str(&input, "app")?;
                 authorize(&self.deps, Some(exe)).await?;
-                let rb = self
-                    .deps
-                    .session
-                    .resolve_backend(exe)
-                    .await
-                    .map_err(to_agent_err)?;
+                let rb =
+                    await_desktop_response(ctx, self.deps.session.resolve_backend(exe)).await?;
                 let app = self.deps.session.resolve_app(exe);
-                let windows = rb
-                    .backend()
-                    .list_windows(&app)
-                    .await
-                    .map_err(to_agent_err)?;
+                let backend = rb.backend();
+                let windows = await_desktop_response(ctx, backend.list_windows(&app)).await?;
                 Ok(json!({ "windows": windows }))
             }
             "snapshot" => {
                 let exe = arg_str(&input, "app")?;
                 authorize(&self.deps, Some(exe)).await?;
-                let rb = self
-                    .deps
-                    .session
-                    .resolve_backend(exe)
-                    .await
-                    .map_err(to_agent_err)?;
+                let rb =
+                    await_desktop_response(ctx, self.deps.session.resolve_backend(exe)).await?;
                 let app = self.deps.session.resolve_app(exe);
                 let token = arg_str(&input, "window")?;
                 let win = self
@@ -196,14 +267,11 @@ impl Tool for DesktopReadTool {
                     .session
                     .resolve_window(app, token)
                     .map_err(to_agent_err)?;
-                let snap = rb
-                    .backend()
-                    .snapshot(&win, None)
-                    .await
-                    .map_err(to_agent_err)?;
+                let backend = rb.backend();
+                let snap = await_desktop_response(ctx, backend.snapshot(&win, None)).await?;
                 Ok(json!({ "outline": snap.outline }))
             }
-            other => Err(AgentError::other(format!("unknown action: {other:?}"))),
+            _ => unreachable!("validated desktop_read action"),
         }
     }
 }
@@ -255,7 +323,7 @@ impl Tool for DesktopActTool {
         SafetyClass::Mutating
     }
 
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let action = input.get("action").and_then(|a| a.as_str()).unwrap_or("");
         if action_family(action).is_none() {
             return Err(AgentError::other(format!("unknown action: {action:?}")));
@@ -263,20 +331,13 @@ impl Tool for DesktopActTool {
         let exe = arg_str(&input, "app")?;
         authorize(&self.deps, Some(exe)).await?;
         let app = self.deps.session.resolve_app(exe);
-        let rb = self
-            .deps
-            .session
-            .resolve_backend(exe)
-            .await
-            .map_err(to_agent_err)?;
+        let rb = await_desktop_response(ctx, self.deps.session.resolve_backend(exe)).await?;
         let backend = rb.backend();
 
         match action {
             "launch" => {
-                let info = backend
-                    .launch_app(&super::backend::AppLaunchId(exe.to_string()))
-                    .await
-                    .map_err(to_agent_err)?;
+                let ident = super::backend::AppLaunchId(exe.to_string());
+                let info = await_desktop_response(ctx, backend.launch_app(&ident)).await?;
                 Ok(json!({ "launched": info }))
             }
             "focus" => {
@@ -285,7 +346,7 @@ impl Tool for DesktopActTool {
                     .session
                     .resolve_window(app, arg_str(&input, "window")?)
                     .map_err(to_agent_err)?;
-                backend.focus_window(&win).await.map_err(to_agent_err)?;
+                await_desktop_response(ctx, backend.focus_window(&win)).await?;
                 Ok(json!({ "ok": true }))
             }
             "click" | "toggle" | "expand" | "scroll" => {
@@ -305,10 +366,7 @@ impl Tool for DesktopActTool {
                     "expand" => ElementActionKind::Expand,
                     _ => ElementActionKind::Scroll,
                 };
-                let out = backend
-                    .element_action(&er, kind)
-                    .await
-                    .map_err(to_agent_err)?;
+                let out = await_desktop_response(ctx, backend.element_action(&er, kind)).await?;
                 Ok(json!({ "result": out }))
             }
             "set_value" => {
@@ -322,10 +380,8 @@ impl Tool for DesktopActTool {
                     .and_then(|v| v.as_u64())
                     .ok_or_else(|| AgentError::other("'ref' required for set_value"))?;
                 let er = super::backend::ElementRef::new(win, 0, local);
-                backend
-                    .set_value(&er, arg_str(&input, "text")?)
-                    .await
-                    .map_err(to_agent_err)?;
+                await_desktop_response(ctx, backend.set_value(&er, arg_str(&input, "text")?))
+                    .await?;
                 Ok(json!({ "ok": true }))
             }
             "type" => {
@@ -334,10 +390,8 @@ impl Tool for DesktopActTool {
                     .session
                     .resolve_window(app, arg_str(&input, "window")?)
                     .map_err(to_agent_err)?;
-                backend
-                    .type_text(&win, arg_str(&input, "text")?)
-                    .await
-                    .map_err(to_agent_err)?;
+                await_desktop_response(ctx, backend.type_text(&win, arg_str(&input, "text")?))
+                    .await?;
                 Ok(json!({ "ok": true }))
             }
             "key" => {
@@ -346,10 +400,7 @@ impl Tool for DesktopActTool {
                     .session
                     .resolve_window(app, arg_str(&input, "window")?)
                     .map_err(to_agent_err)?;
-                backend
-                    .key(&win, arg_str(&input, "combo")?)
-                    .await
-                    .map_err(to_agent_err)?;
+                await_desktop_response(ctx, backend.key(&win, arg_str(&input, "combo")?)).await?;
                 Ok(json!({ "ok": true }))
             }
             other => Err(AgentError::other(format!("unknown action: {other:?}"))),
@@ -396,7 +447,7 @@ impl Tool for DesktopScreenshotTool {
         SafetyClass::Mutating
     }
 
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let exe = arg_str(&input, "app")?;
         authorize(&self.deps, Some(exe)).await?;
         let app = self.deps.session.resolve_app(exe);
@@ -405,13 +456,9 @@ impl Tool for DesktopScreenshotTool {
             .session
             .resolve_window(app, arg_str(&input, "window")?)
             .map_err(to_agent_err)?;
-        let rb = self
-            .deps
-            .session
-            .resolve_backend(exe)
-            .await
-            .map_err(to_agent_err)?;
-        let shot = rb.backend().screenshot(&win).await.map_err(to_agent_err)?;
+        let rb = await_desktop_response(ctx, self.deps.session.resolve_backend(exe)).await?;
+        let backend = rb.backend();
+        let shot = await_desktop_response(ctx, backend.screenshot(&win)).await?;
         drop(rb); // release the input lease before disk I/O
         save_screenshot_artifact(&self.deps.shots_dir, &shot.bytes)
     }
@@ -458,7 +505,7 @@ impl Tool for DesktopEvalTool {
         SafetyClass::Mutating
     }
 
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         authorize(&self.deps, None).await?;
         let expr = arg_str(&input, "expression")?;
         let token = arg_str(&input, "window")?;
@@ -474,7 +521,7 @@ impl Tool for DesktopEvalTool {
             .session
             .resolve_window(app, token)
             .map_err(to_agent_err)?;
-        let value = cdp.evaluate(&win, expr).await.map_err(to_agent_err)?;
+        let value = await_desktop_response(ctx, cdp.evaluate(&win, expr)).await?;
         Ok(json!({ "value": value }))
     }
 }
@@ -634,5 +681,57 @@ mod tests {
             .as_object()
             .unwrap()
             .contains_key("__agent_content_blocks__"));
+    }
+
+    #[tokio::test]
+    async fn uncertain_desktop_error_latches_unresolved_work() {
+        for error in [
+            DesktopError::Protocol("actor response lost".into()),
+            DesktopError::Timeout("actor request".into()),
+        ] {
+            let context = ctx();
+            let result: Result<(), AgentError> =
+                await_desktop_response(&context, async { Err(error) }).await;
+            assert!(result.is_err());
+            assert!(context.abort.activity().unresolved_external_work());
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_desktop_response_does_not_latch_unresolved_work() {
+        let context = ctx();
+        assert_eq!(
+            await_desktop_response(&context, async { Ok::<_, DesktopError>(42) })
+                .await
+                .unwrap(),
+            42
+        );
+        assert!(!context.abort.activity().unresolved_external_work());
+
+        let terminal = ctx();
+        let _: Result<(), AgentError> = await_desktop_response(&terminal, async {
+            Err(DesktopError::NotFound("no window".into()))
+        })
+        .await;
+        assert!(!terminal.abort.activity().unresolved_external_work());
+    }
+
+    #[tokio::test]
+    async fn abort_after_desktop_dispatch_latches_unresolved_work() {
+        let context = ctx();
+        let abort = context.abort.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = started_rx.await;
+            abort.abort_with_reason("test stop");
+        });
+        let request = async move {
+            let _ = started_tx.send(());
+            std::future::pending::<Result<(), DesktopError>>().await
+        };
+
+        let result = await_desktop_response(&context, request).await;
+        assert!(matches!(result, Err(AgentError::Aborted(_))));
+        assert!(context.abort.activity().unresolved_external_work());
     }
 }

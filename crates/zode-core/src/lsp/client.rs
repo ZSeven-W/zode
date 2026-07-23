@@ -19,6 +19,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Mutex, Notify};
 
+use agent::abort::AbortController;
+
 use crate::config::LspServerConfig;
 
 /// How long to wait for a response to a normal request before giving up.
@@ -41,6 +43,42 @@ type Diagnostics = Arc<Mutex<HashMap<String, Vec<Value>>>>;
 /// Trailing stderr lines, for when the server dies and we must say why.
 type StderrTail = Arc<Mutex<Vec<String>>>;
 
+/// Fail-closed receipt for one LSP message that may still be executing in a
+/// persistent server. It deliberately does not count the server reader as a
+/// turn worker: the server outlives individual turns, so that would make
+/// watchdog quiescence impossible. Instead, only an interrupted protocol
+/// operation latches unresolved external work.
+pub(crate) struct LspOperationGuard {
+    abort: AbortController,
+    armed: bool,
+}
+
+impl LspOperationGuard {
+    fn new(abort: &AbortController) -> Self {
+        Self {
+            abort: abort.clone(),
+            armed: true,
+        }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for LspOperationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.abort.mark_unresolved_external_work();
+        }
+    }
+}
+
+enum AbortableWriteError {
+    Cancelled,
+    Io(std::io::Error),
+}
+
 #[derive(Debug)]
 pub struct LspClient {
     /// LSP `languageId` (e.g. "rust") — also the config key.
@@ -61,12 +99,38 @@ pub struct LspClient {
     _child: Child,
     #[cfg(test)]
     write_failure_notify: Option<Arc<Notify>>,
+    #[cfg(test)]
+    write_success_notify: Option<Arc<Notify>>,
 }
 
 impl LspClient {
     /// Spawn the server, run the initialize/initialized handshake, and return
     /// a ready client. Errors if the process can't start or initialize fails.
     pub async fn start(lang: String, cfg: &LspServerConfig, root: PathBuf) -> Result<Self, String> {
+        Self::start_inner(lang, cfg, root, None).await
+    }
+
+    /// Turn-scoped startup. The persistent client is still session-owned, but
+    /// its initialize handshake observes `abort` and records an interrupted
+    /// request as unresolved external work.
+    pub(crate) async fn start_with_abort(
+        lang: String,
+        cfg: &LspServerConfig,
+        root: PathBuf,
+        abort: &AbortController,
+    ) -> Result<Self, String> {
+        Self::start_inner(lang, cfg, root, Some(abort)).await
+    }
+
+    async fn start_inner(
+        lang: String,
+        cfg: &LspServerConfig,
+        root: PathBuf,
+        abort: Option<&AbortController>,
+    ) -> Result<Self, String> {
+        if abort.is_some_and(AbortController::is_aborted) {
+            return Err("language server startup cancelled".to_string());
+        }
         let mut child = Command::new(&cfg.command)
             .args(&cfg.args)
             .current_dir(&root)
@@ -116,8 +180,14 @@ impl LspClient {
             _child: child,
             #[cfg(test)]
             write_failure_notify: None,
+            #[cfg(test)]
+            write_success_notify: None,
         };
-        client.initialize().await?;
+        if let Some(abort) = abort {
+            client.initialize_with_abort(abort).await?;
+        } else {
+            client.initialize().await?;
+        }
         Ok(client)
     }
 
@@ -142,9 +212,48 @@ impl LspClient {
         Ok(())
     }
 
+    async fn initialize_with_abort(&self, abort: &AbortController) -> Result<(), String> {
+        let params = json!({
+            "processId": std::process::id(),
+            "rootUri": path_to_uri(&self.root),
+            "capabilities": {
+                "textDocument": {
+                    "hover": { "contentFormat": ["markdown", "plaintext"] },
+                    "definition": {}, "references": {}, "documentSymbol": {},
+                    "rename": {}, "formatting": {},
+                    "publishDiagnostics": { "relatedInformation": true }
+                },
+                "workspace": { "configuration": true, "workspaceFolders": true }
+            },
+            "clientInfo": { "name": "zode", "version": env!("CARGO_PKG_VERSION") }
+        });
+        self.request_with_timeout_and_abort("initialize", params, INIT_TIMEOUT_SECS, abort)
+            .await?;
+        if abort.is_aborted() {
+            return Err("lsp initialize: cancelled".to_string());
+        }
+        self.notify_with_abort("initialized", json!({}), abort)
+            .await?;
+        Ok(())
+    }
+
     /// Send a request and await its result (or a mapped error).
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         self.request_with_timeout(method, params, REQUEST_TIMEOUT_SECS)
+            .await
+    }
+
+    /// Send a request owned by one root turn. Cancellation removes the local
+    /// waiter and asks the server to cancel the request; because LSP provides
+    /// no acknowledgement for that notification, the operation remains
+    /// fail-closed as unresolved external work.
+    pub(crate) async fn request_with_abort(
+        &self,
+        method: &str,
+        params: Value,
+        abort: &AbortController,
+    ) -> Result<Value, String> {
+        self.request_with_timeout_and_abort(method, params, REQUEST_TIMEOUT_SECS, abort)
             .await
     }
 
@@ -154,19 +263,61 @@ impl LspClient {
         params: Value,
         timeout_secs: u64,
     ) -> Result<Value, String> {
+        self.request_inner(method, params, timeout_secs, None).await
+    }
+
+    async fn request_with_timeout_and_abort(
+        &self,
+        method: &str,
+        params: Value,
+        timeout_secs: u64,
+        abort: &AbortController,
+    ) -> Result<Value, String> {
+        self.request_inner(method, params, timeout_secs, Some(abort))
+            .await
+    }
+
+    async fn request_inner(
+        &self,
+        method: &str,
+        params: Value,
+        timeout_secs: u64,
+        abort: Option<&AbortController>,
+    ) -> Result<Value, String> {
         if self.dead.load(Ordering::SeqCst) {
             return Err(format!("lsp {method}: language server is not running"));
+        }
+        if abort.is_some_and(AbortController::is_aborted) {
+            return Err(format!("lsp {method}: cancelled"));
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
 
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let write_error = write_message(&self.stdin, &msg).await.err();
+        let (write_error, mut operation) = if let Some(abort) = abort {
+            match write_message_with_abort(&self.stdin, &msg, abort).await {
+                Ok(operation) => (None, Some(operation)),
+                Err(AbortableWriteError::Cancelled) => {
+                    self.pending.lock().await.remove(&id);
+                    return Err(format!("lsp {method}: cancelled"));
+                }
+                Err(AbortableWriteError::Io(error)) => (Some(error), None),
+            }
+        } else {
+            (write_message(&self.stdin, &msg).await.err(), None)
+        };
         #[cfg(test)]
         if write_error.is_some() {
             if let Some(notify) = &self.write_failure_notify {
                 notify.notify_one();
+            }
+        } else if let Some(notify) = &self.write_success_notify {
+            notify.notify_one();
+        }
+        if write_error.is_none() {
+            if let Some(abort) = abort {
+                abort.pulse();
             }
         }
 
@@ -181,7 +332,30 @@ impl LspClient {
             Duration::from_secs(timeout_secs)
         };
 
-        let resp = match tokio::time::timeout(response_timeout, rx).await {
+        let response = tokio::time::timeout(response_timeout, rx);
+        tokio::pin!(response);
+        let response = if let Some(abort) = abort {
+            tokio::select! {
+                biased;
+                response = &mut response => response,
+                _ = abort.cancelled() => {
+                    self.pending.lock().await.remove(&id);
+                    // Best effort only: `$/cancelRequest` is a notification,
+                    // so even a successful write cannot prove server-side
+                    // cancellation. The armed operation guard records that.
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(100),
+                        self.notify("$/cancelRequest", json!({ "id": id })),
+                    )
+                    .await;
+                    return Err(format!("lsp {method}: cancelled"));
+                }
+            }
+        } else {
+            response.await
+        };
+
+        let resp = match response {
             Ok(Ok(v)) => v,
             Ok(Err(_)) => {
                 self.pending.lock().await.remove(&id);
@@ -198,6 +372,12 @@ impl LspClient {
                 return Err(format!("lsp {method}: timed out"));
             }
         };
+        if let Some(operation) = &mut operation {
+            operation.disarm();
+        }
+        if let Some(abort) = abort {
+            abort.pulse();
+        }
         if let Some(err) = resp.get("error") {
             let m = err
                 .get("message")
@@ -213,32 +393,116 @@ impl LspClient {
         let _ = write_message(&self.stdin, &msg).await;
     }
 
+    async fn notify_with_abort(
+        &self,
+        method: &str,
+        params: Value,
+        abort: &AbortController,
+    ) -> Result<(), String> {
+        let msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        let mut operation = write_message_with_abort(&self.stdin, &msg, abort)
+            .await
+            .map_err(|error| match error {
+                AbortableWriteError::Cancelled => format!("lsp {method}: cancelled"),
+                AbortableWriteError::Io(error) => format!("lsp write {method}: {error}"),
+            })?;
+        operation.disarm();
+        abort.pulse();
+        Ok(())
+    }
+
     /// Ensure `path` has been opened on the server; returns its URI.
     pub async fn ensure_open(&self, path: &Path) -> Result<String, String> {
         let uri = path_to_uri(path);
-        {
-            let mut open = self.open.lock().await;
-            if open.contains(&uri) {
-                return Ok(uri);
-            }
-            open.insert(uri.clone());
+        if self.open.lock().await.contains(&uri) {
+            return Ok(uri);
         }
         let text = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| format!("read {}: {e}", path.display()))?;
+        let mut open = self.open.lock().await;
+        if open.contains(&uri) {
+            return Ok(uri);
+        }
         // The `languageId` is per-file (derived from its extension), not per
         // server: one server can host several languages — typescript-language-
         // server serves js/jsx/ts/tsx, clangd serves c/cpp/objc — and the
         // server applies different rules per id. Falls back to the server key.
         let language_id = language_id_for(path, &self.lang);
-        self.notify(
-            "textDocument/didOpen",
-            json!({ "textDocument": {
+        let msg = json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {
                 "uri": uri, "languageId": language_id, "version": 1, "text": text
-            }}),
-        )
-        .await;
+            }
+        }});
+        write_message(&self.stdin, &msg)
+            .await
+            .map_err(|e| format!("lsp write textDocument/didOpen: {e}"))?;
+        open.insert(uri.clone());
         Ok(uri)
+    }
+
+    /// Abort-aware [`Self::ensure_open`]. A newly sent `didOpen` returns an
+    /// armed receipt that the enclosing tool must retain until it reaches a
+    /// normal terminal result. Dropping the tool between `didOpen` and that
+    /// result marks the turn's external state unresolved.
+    pub(crate) async fn ensure_open_with_abort(
+        &self,
+        path: &Path,
+        abort: &AbortController,
+    ) -> Result<(String, Option<LspOperationGuard>), String> {
+        if abort.is_aborted() {
+            return Err("lsp textDocument/didOpen: cancelled".to_string());
+        }
+        let uri = path_to_uri(path);
+        let open = tokio::select! {
+            biased;
+            _ = abort.cancelled() => {
+                return Err("lsp textDocument/didOpen: cancelled".to_string());
+            }
+            open = self.open.lock() => open,
+        };
+        if open.contains(&uri) {
+            return Ok((uri, None));
+        }
+        drop(open);
+
+        let text = tokio::select! {
+            biased;
+            _ = abort.cancelled() => {
+                return Err("lsp textDocument/didOpen: cancelled".to_string());
+            }
+            text = tokio::fs::read_to_string(path) => {
+                text.map_err(|e| format!("read {}: {e}", path.display()))?
+            }
+        };
+        let mut open = tokio::select! {
+            biased;
+            _ = abort.cancelled() => {
+                return Err("lsp textDocument/didOpen: cancelled".to_string());
+            }
+            open = self.open.lock() => open,
+        };
+        if open.contains(&uri) {
+            return Ok((uri, None));
+        }
+
+        let language_id = language_id_for(path, &self.lang);
+        let msg = json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {
+                "uri": uri, "languageId": language_id, "version": 1, "text": text
+            }
+        }});
+        let operation = write_message_with_abort(&self.stdin, &msg, abort)
+            .await
+            .map_err(|error| match error {
+                AbortableWriteError::Cancelled => "lsp textDocument/didOpen: cancelled".to_string(),
+                AbortableWriteError::Io(error) => {
+                    format!("lsp write textDocument/didOpen: {error}")
+                }
+            })?;
+        open.insert(uri.clone());
+        abort.pulse();
+        Ok((uri, Some(operation)))
     }
 
     /// Collect diagnostics for `uri`, waiting up to `wait` for the server to
@@ -262,6 +526,44 @@ impl LspClient {
             }
             let tick = remaining.min(Duration::from_millis(150));
             tokio::select! {
+                _ = self.diag_notify.notified() => {}
+                _ = tokio::time::sleep(tick) => {}
+            }
+        }
+    }
+
+    /// Abort-aware [`Self::diagnostics_for`] for root-turn tools.
+    pub(crate) async fn diagnostics_for_with_abort(
+        &self,
+        uri: &str,
+        wait: Duration,
+        abort: &AbortController,
+    ) -> Result<Option<Vec<Value>>, String> {
+        let deadline = Instant::now() + wait;
+        loop {
+            let diagnostics = tokio::select! {
+                biased;
+                _ = abort.cancelled() => {
+                    return Err("lsp diagnostics: cancelled".to_string());
+                }
+                diagnostics = self.diagnostics.lock() => diagnostics,
+            };
+            if let Some(diagnostics) = diagnostics.get(uri) {
+                abort.pulse();
+                return Ok(Some(diagnostics.clone()));
+            }
+            drop(diagnostics);
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            let tick = remaining.min(Duration::from_millis(150));
+            tokio::select! {
+                biased;
+                _ = abort.cancelled() => {
+                    return Err("lsp diagnostics: cancelled".to_string());
+                }
                 _ = self.diag_notify.notified() => {}
                 _ = tokio::time::sleep(tick) => {}
             }
@@ -425,6 +727,43 @@ async fn write_message(stdin: &Arc<Mutex<ChildStdin>>, msg: &Value) -> std::io::
     guard.flush().await
 }
 
+/// Write one message while observing the owning turn. Waiting for the shared
+/// stdin lock has not touched the server, so cancellation there is clean. Once
+/// the first write may be polled, the returned RAII receipt stays armed until
+/// a caller observes a protocol-level terminal result.
+async fn write_message_with_abort(
+    stdin: &Arc<Mutex<ChildStdin>>,
+    msg: &Value,
+    abort: &AbortController,
+) -> Result<LspOperationGuard, AbortableWriteError> {
+    if abort.is_aborted() {
+        return Err(AbortableWriteError::Cancelled);
+    }
+    let body = serde_json::to_vec(msg).unwrap_or_default();
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    let mut stdin = tokio::select! {
+        biased;
+        _ = abort.cancelled() => {
+            return Err(AbortableWriteError::Cancelled);
+        }
+        stdin = stdin.lock() => stdin,
+    };
+
+    let operation = LspOperationGuard::new(abort);
+    let write = async {
+        stdin.write_all(header.as_bytes()).await?;
+        stdin.write_all(&body).await?;
+        stdin.flush().await
+    };
+    tokio::pin!(write);
+    let result = tokio::select! {
+        biased;
+        result = &mut write => result.map_err(AbortableWriteError::Io),
+        _ = abort.cancelled() => Err(AbortableWriteError::Cancelled),
+    };
+    result.map(|()| operation)
+}
+
 /// LSP `languageId` for a file, by extension. Disambiguates the languages a
 /// single server hosts (js vs ts, c vs cpp); unknown extensions fall back to
 /// the server's own key.
@@ -533,6 +872,7 @@ mod tests {
             root: std::env::temp_dir(),
             _child: child,
             write_failure_notify: Some(write_failed.clone()),
+            write_success_notify: None,
         };
 
         let simulated_reader = async {
@@ -565,6 +905,130 @@ mod tests {
 
         assert!(err.contains("exited"), "{err}");
         assert!(err.contains("Unknown binary"), "{err}");
+    }
+
+    #[cfg(unix)]
+    fn idle_custom_client(write_success_notify: Option<Arc<Notify>>) -> LspClient {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn idle custom language server");
+        let stdin = child.stdin.take().expect("child stdin");
+        LspClient {
+            lang: "custom".into(),
+            stdin: Arc::new(Mutex::new(stdin)),
+            next_id: AtomicI64::new(1),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            diagnostics: Arc::new(Mutex::new(HashMap::new())),
+            diag_notify: Arc::new(Notify::new()),
+            dead: Arc::new(AtomicBool::new(false)),
+            open: Mutex::new(HashSet::new()),
+            root: std::env::temp_dir(),
+            _child: child,
+            write_failure_notify: None,
+            write_success_notify,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_custom_server_request_after_send_marks_unresolved() {
+        let sent = Arc::new(Notify::new());
+        let client = idle_custom_client(Some(sent.clone()));
+        let abort = AbortController::new();
+        let activity = abort.activity();
+        let mut request =
+            Box::pin(client.request_with_abort("custom/slowRequest", json!({}), &abort));
+
+        tokio::select! {
+            _ = sent.notified() => {}
+            result = &mut request => panic!("idle server unexpectedly completed request: {result:?}"),
+        }
+        assert!(!activity.unresolved_external_work());
+        assert_eq!(
+            activity.active_workers(),
+            0,
+            "persistent LSP is not turn work"
+        );
+
+        drop(request);
+
+        assert!(activity.unresolved_external_work());
+        assert_eq!(activity.active_workers(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aborting_custom_server_request_stops_waiter_and_marks_unresolved() {
+        let sent = Arc::new(Notify::new());
+        let client = idle_custom_client(Some(sent.clone()));
+        let abort = AbortController::new();
+        let activity = abort.activity();
+        let mut request =
+            Box::pin(client.request_with_abort("custom/slowRequest", json!({}), &abort));
+
+        tokio::select! {
+            _ = sent.notified() => {}
+            result = &mut request => panic!("idle server unexpectedly completed request: {result:?}"),
+        }
+        abort.abort();
+        let error = tokio::time::timeout(Duration::from_secs(1), request)
+            .await
+            .expect("root abort must stop the local request waiter")
+            .expect_err("an aborted request cannot succeed");
+
+        assert!(error.contains("cancelled"), "{error}");
+        assert!(activity.unresolved_external_work());
+        assert!(client.pending.lock().await.is_empty());
+        assert_eq!(activity.active_workers(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn normal_custom_server_response_disarms_request_receipt() {
+        let sent = Arc::new(Notify::new());
+        let client = idle_custom_client(Some(sent.clone()));
+        let abort = AbortController::new();
+        let pending = client.pending.clone();
+        let request = client.request_with_abort("custom/quickRequest", json!({}), &abort);
+        let respond = async {
+            sent.notified().await;
+            let sender = pending
+                .lock()
+                .await
+                .remove(&1)
+                .expect("sent request must have a pending response slot");
+            sender
+                .send(json!({ "jsonrpc": "2.0", "id": 1, "result": { "ok": true } }))
+                .expect("request future still receives its response");
+        };
+
+        let (result, ()) = tokio::join!(request, respond);
+
+        assert_eq!(result.expect("normal response"), json!({ "ok": true }));
+        assert!(!abort.activity().unresolved_external_work());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_after_did_open_marks_custom_server_work_unresolved() {
+        let client = idle_custom_client(None);
+        let abort = AbortController::new();
+        let file = tempfile::NamedTempFile::new().expect("temp source file");
+
+        let (_, operation) = client
+            .ensure_open_with_abort(file.path(), &abort)
+            .await
+            .expect("didOpen writes to the custom server");
+        assert!(!abort.activity().unresolved_external_work());
+
+        drop(operation);
+
+        assert!(abort.activity().unresolved_external_work());
     }
 
     /// A server that has not published yet must be reported as such, not as an

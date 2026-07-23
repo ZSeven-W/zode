@@ -43,6 +43,8 @@ pub mod permission_rules;
 pub mod plugin;
 pub mod plugin_package;
 pub mod portability;
+#[path = "process-supervision.rs"]
+mod process_supervision;
 pub mod provider;
 pub mod question;
 pub mod reminders;

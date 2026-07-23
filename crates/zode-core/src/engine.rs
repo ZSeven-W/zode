@@ -3058,6 +3058,12 @@ impl EngineTemplate {
         self.cfg.mouse_capture_enabled()
     }
 
+    /// Effective unattended-turn watchdog policy. Kept on the template so
+    /// model/provider reassembly cannot silently change a running app's policy.
+    pub fn background_watchdog(&self) -> &crate::config::BackgroundWatchdogConfig {
+        &self.cfg.background_watchdog
+    }
+
     /// Whether autonomous orchestration is on (`/orchestration`). Default ON
     /// (unset → enabled); toggle off via Settings / `/orchestration`.
     pub fn autonomous_orchestration(&self) -> bool {

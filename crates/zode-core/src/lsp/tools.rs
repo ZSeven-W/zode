@@ -13,7 +13,7 @@ use agent::tool::{SafetyClass, Tool, ToolUseContext};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::lsp::client::LspClient;
+use crate::lsp::client::{LspClient, LspOperationGuard};
 use crate::lsp::manager::LspManager;
 
 /// How long `lsp_diagnostics` waits for the server's first publish.
@@ -52,12 +52,74 @@ fn position(input: &Value) -> Result<Value, AgentError> {
     Ok(json!({ "line": line, "character": character }))
 }
 
-/// Resolve `file`, open it, and hand back (client, uri).
-async fn open(mgr: &Arc<LspManager>, file: &str) -> Result<(Arc<LspClient>, String), AgentError> {
+struct OpenedDocument {
+    client: Arc<LspClient>,
+    uri: String,
+    did_open: Option<LspOperationGuard>,
+}
+
+impl OpenedDocument {
+    async fn request(
+        &mut self,
+        ctx: &ToolUseContext,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, AgentError> {
+        let result = self
+            .client
+            .request_with_abort(method, params, &ctx.abort)
+            .await;
+        // If root cancellation won, dropping `did_open` must preserve the
+        // fail-closed latch. Every other return has either a server terminal
+        // response or its own request guard recording uncertainty.
+        if !ctx.abort.is_aborted() {
+            self.complete();
+        }
+        result.map_err(AgentError::other)
+    }
+
+    async fn diagnostics(
+        &mut self,
+        ctx: &ToolUseContext,
+        wait: Duration,
+    ) -> Result<Option<Vec<Value>>, AgentError> {
+        let result = self
+            .client
+            .diagnostics_for_with_abort(&self.uri, wait, &ctx.abort)
+            .await;
+        if !ctx.abort.is_aborted() {
+            self.complete();
+        }
+        result.map_err(AgentError::other)
+    }
+
+    fn complete(&mut self) {
+        if let Some(operation) = &mut self.did_open {
+            operation.disarm();
+        }
+    }
+}
+
+/// Resolve `file`, open it, and hand back a turn-scoped document operation.
+async fn open(
+    mgr: &Arc<LspManager>,
+    file: &str,
+    ctx: &ToolUseContext,
+) -> Result<OpenedDocument, AgentError> {
     let path = mgr.resolve(file);
-    let client = mgr.client_for(&path).await.map_err(AgentError::other)?;
-    let uri = client.ensure_open(&path).await.map_err(AgentError::other)?;
-    Ok((client, uri))
+    let client = mgr
+        .client_for_with_abort(&path, &ctx.abort)
+        .await
+        .map_err(AgentError::other)?;
+    let (uri, did_open) = client
+        .ensure_open_with_abort(&path, &ctx.abort)
+        .await
+        .map_err(AgentError::other)?;
+    Ok(OpenedDocument {
+        client,
+        uri,
+        did_open,
+    })
 }
 
 fn file_schema() -> Value {
@@ -176,14 +238,14 @@ impl Tool for LspDiagnosticsTool {
         file_schema()
     }
     readonly!();
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let file = file_arg(&input)?;
-        let (client, uri) = open(&self.0, &file).await?;
+        let mut opened = open(&self.0, &file, ctx).await?;
         // A server that hasn't published yet is still indexing — say so rather
         // than reporting zero diagnostics, which reads as "the file is clean".
-        let Some(diags) = client
-            .diagnostics_for(&uri, Duration::from_secs(DIAG_WAIT_SECS))
-            .await
+        let Some(diags) = opened
+            .diagnostics(ctx, Duration::from_secs(DIAG_WAIT_SECS))
+            .await?
         else {
             return Ok(json!({
                 "file": file,
@@ -219,17 +281,18 @@ impl Tool for LspHoverTool {
         position_schema()
     }
     readonly!();
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let file = file_arg(&input)?;
         let pos = position(&input)?;
-        let (client, uri) = open(&self.0, &file).await?;
-        let result = client
+        let mut opened = open(&self.0, &file, ctx).await?;
+        let uri = opened.uri.clone();
+        let result = opened
             .request(
+                ctx,
                 "textDocument/hover",
                 json!({ "textDocument": { "uri": uri }, "position": pos }),
             )
-            .await
-            .map_err(AgentError::other)?;
+            .await?;
         Ok(json!({ "hover": hover_text(&result) }))
     }
 }
@@ -248,17 +311,18 @@ impl Tool for LspDefinitionTool {
         position_schema()
     }
     readonly!();
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let file = file_arg(&input)?;
         let pos = position(&input)?;
-        let (client, uri) = open(&self.0, &file).await?;
-        let result = client
+        let mut opened = open(&self.0, &file, ctx).await?;
+        let uri = opened.uri.clone();
+        let result = opened
             .request(
+                ctx,
                 "textDocument/definition",
                 json!({ "textDocument": { "uri": uri }, "position": pos }),
             )
-            .await
-            .map_err(AgentError::other)?;
+            .await?;
         Ok(json!({ "locations": normalize_locations(&result) }))
     }
 }
@@ -277,20 +341,21 @@ impl Tool for LspReferencesTool {
         position_schema()
     }
     readonly!();
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let file = file_arg(&input)?;
         let pos = position(&input)?;
-        let (client, uri) = open(&self.0, &file).await?;
-        let result = client
+        let mut opened = open(&self.0, &file, ctx).await?;
+        let uri = opened.uri.clone();
+        let result = opened
             .request(
+                ctx,
                 "textDocument/references",
                 json!({
                     "textDocument": { "uri": uri }, "position": pos,
                     "context": { "includeDeclaration": true }
                 }),
             )
-            .await
-            .map_err(AgentError::other)?;
+            .await?;
         let locs = normalize_locations(&result);
         Ok(json!({ "count": locs.len(), "locations": locs }))
     }
@@ -310,16 +375,17 @@ impl Tool for LspSymbolsTool {
         file_schema()
     }
     readonly!();
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let file = file_arg(&input)?;
-        let (client, uri) = open(&self.0, &file).await?;
-        let result = client
+        let mut opened = open(&self.0, &file, ctx).await?;
+        let uri = opened.uri.clone();
+        let result = opened
             .request(
+                ctx,
                 "textDocument/documentSymbol",
                 json!({ "textDocument": { "uri": uri } }),
             )
-            .await
-            .map_err(AgentError::other)?;
+            .await?;
         let symbols = flatten_symbols(&result);
         Ok(json!({ "count": symbols.len(), "symbols": symbols }))
     }
@@ -348,21 +414,22 @@ impl Tool for LspRenameTool {
         })
     }
     readonly!();
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let file = file_arg(&input)?;
         let pos = position(&input)?;
         let new_name = input
             .get("new_name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AgentError::other("missing required string 'new_name'"))?;
-        let (client, uri) = open(&self.0, &file).await?;
-        let result = client
+        let mut opened = open(&self.0, &file, ctx).await?;
+        let uri = opened.uri.clone();
+        let result = opened
             .request(
+                ctx,
                 "textDocument/rename",
                 json!({ "textDocument": { "uri": uri }, "position": pos, "newName": new_name }),
             )
-            .await
-            .map_err(AgentError::other)?;
+            .await?;
         Ok(json!({ "preview": true, "edit": result }))
     }
 }
@@ -381,19 +448,20 @@ impl Tool for LspFormatTool {
         file_schema()
     }
     readonly!();
-    async fn call(&self, _ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+    async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let file = file_arg(&input)?;
-        let (client, uri) = open(&self.0, &file).await?;
-        let result = client
+        let mut opened = open(&self.0, &file, ctx).await?;
+        let uri = opened.uri.clone();
+        let result = opened
             .request(
+                ctx,
                 "textDocument/formatting",
                 json!({
                     "textDocument": { "uri": uri },
                     "options": { "tabSize": 4, "insertSpaces": true }
                 }),
             )
-            .await
-            .map_err(AgentError::other)?;
+            .await?;
         let count = result.as_array().map(|a| a.len()).unwrap_or(0);
         Ok(json!({ "preview": true, "edits": result, "count": count }))
     }

@@ -151,6 +151,9 @@ The agent can call OpenPencil tools directly via two tool wrappers:
 
 Both tools are registered in the `op` tool group and connect to OpenPencil
 via `OpConnection::ensure` (which may trigger install/launch — see below).
+Their connection, HTTP, and design-pipeline work use the root turn's abort
+controller. If a remote mutation is cancelled after dispatch, its outcome is
+latched as unverified external work so a scheduler turn cannot replay it.
 
 ### `openpencil.*` config keys
 
@@ -251,8 +254,17 @@ tool call:
    - Unix: `bash -c "$OP_INSTALL_SCRIPT"` with `OP_VERSION=<releaseTag>`.
    - Windows: `powershell.exe -NoProfile -Command "$OP_INSTALL_SCRIPT"`.
    The install command and argv are shown in the consent prompt before running.
+   The child is owned by a tracked supervisor with a five-minute deadline,
+   64-KiB-per-stream capture, abort propagation, and process-tree termination
+   (Unix process group / Windows `taskkill /T`). Installer output cannot grow
+   the turn without bound, and the watchdog does not release the turn until the
+   supervisor has reaped it.
 5. **Launch** — if installed but not running (port file absent / ping fails),
-   prompt the user then spawn `op start` as a detached background process.
+   prompt the user then spawn `op start` as a detached background process. This
+   detach is intentional product behavior, not supervised foreground work; it
+   sets the turn's unresolved-external-work latch. A scheduler-owned turn that
+   auto-launches the GUI is therefore stopped/disabled for human review instead
+   of automatically replayed.
 
 The localhost trust boundary means: both ping and tool calls go to
 `http://127.0.0.1:<port>/mcp` without auth headers. The token in the port
@@ -546,18 +558,83 @@ cannot be saved and is lost on the paste path. Window tokens minted by
   `~/.zode/schedules.json` (atomic tmp+rename; corrupt files are quarantined to
   `.corrupt`). Missed triggers while zode is not running are skipped, never
   replayed. Cross-process dedup is first-writer-wins on `lastFiredMs`
-  (minute-floored). `list` / `rm <id>` / `enable|disable <id>`.
+  (exact epoch milliseconds, so two 30-second slots in one minute remain
+  distinct). Fire/retry/roster mutations are compare-and-swap updates under the
+  store lock; each active attempt also holds a stable per-schedule OS file
+  lock. `list` / `rm <id>` / `enable|disable <id>`.
 - Both live in `zode-core/src/scheduler/` (pure `due()` core, driven by the TUI
-  tick); parsers in `commands/loop-sched.rs`. 3 consecutive failed injected
-  turns auto-stop a loop / disable a schedule.
+  tick); parsers in `commands/loop-sched.rs`.
+- **Background watchdog scope** — only scheduler-owned `/loop` and `/schedule`
+  turns are registered with `zode-tui/src/app/watchdog.rs`; ordinary
+  interactive turns are not. This is an in-process turn watchdog, not an OS
+  supervisor: it does not restart zode after a process crash or machine
+  restart.
+- **Liveness and cancellation** — source-side provider, tool, and nested-agent
+  activity shares a turn signal and refreshes it before UI-channel delivery,
+  avoiding false timeouts when the UI is busy. `inactivityTimeoutSecs` is an
+  idle limit and `maxRuntimeSecs` is an absolute turn limit. A breach first
+  sends the normal cooperative abort, then hard-aborts the local turn task
+  after `abortGraceSecs` if no terminal event has arrived. The scheduler slot
+  and attempt lease are released only after every tracked provider/tool/hook/
+  subprocess/nested-agent worker reaches quiescence. A second five-second miss
+  quarantines the tab/store and disables the job while retaining its lease;
+  real quiescence is still required before final persistence and release. A
+  watchdog timeout is journaled as a failed, partial turn rather than as a user
+  interruption.
+- **Queued-attempt liveness** — the same inactivity duration is the maximum
+  claim-to-start wait. A scheduler preflight failure keeps the exact occurrence
+  queued rather than consuming it; expiry is side-effect-free failure and uses
+  the normal bounded retry/backoff path. `/watchdog` and `/tasks` show queue age.
+- **Recovery** — failures retry with capped exponential backoff; success resets
+  the consecutive count. After `maxRetries` is exhausted, the loop is stopped
+  or the persisted schedule is disabled. Manual interruption, job removal,
+  explicit disabling, and tab close suppress pending recovery. The safety
+  policy is conservative around non-idempotent work: automatically retry only
+  when no side effect was observed; if a mutation may have completed, stop or
+  disable the job and wait for human review. Manual cancellation after a
+  mutating tool started follows the same fail-closed rule. Intentionally
+  detached work (`BashRun`, detached GUI launch) latches unresolved external
+  work and stops recurrence even when the local turn otherwise succeeds.
+  Persisted active-attempt tokens are
+  paired with per-job OS locks: a contended lock belongs to another live zode
+  process and is not touched; a free lock with the exact token is an orphaned,
+  execution-state-unknown attempt and disables the schedule on startup rather
+  than replaying it.
+- **Lease finalization** — a terminal roster CAS must commit before its OS lease
+  is released. Transient I/O failures enter a retrying finalizer; a stale CAS is
+  classified under the store lock and durably disabled without clearing a
+  different owner's token. Graceful shutdown rejects new work and drains these
+  finalizers. Claimed-but-unstarted fires restore their prior watermark, and
+  claimed retries restore their exact retry token; explicit edit/remove/disable
+  remains cancellation. Scheduler turns skip detached post-turn extraction.
+- **External quiescence boundary** — the worker/lease fence proves local
+  provider, tool, hook, subprocess, and nested-agent ownership has ended. An
+  MCP server, browser extension, desktop actor, or other remote system may have
+  accepted a mutation that its protocol cannot revoke. Cancellation latches
+  that state as unresolved and disables the job for human review; never claim
+  that the remote action itself was rolled back.
+- **Watchdog config and visibility** — top-level camelCase
+  `backgroundWatchdog` supports `enabled` (default `true`),
+  `inactivityTimeoutSecs` (`900`), `maxRuntimeSecs` (`3600`),
+  `abortGraceSecs` (`10`), `maxRetries` (`3`), `initialBackoffSecs` (`5`), and
+  `maxBackoffSecs` (`300`). `/watchdog status` reports effective config plus
+  live/retry state; `/tasks` includes the same health lines beside background
+  shells and running turns.
 - **Due-check anchoring** — `ScheduleSpec::next_after` returns a time strictly
   *after* its `now` argument, so `Scheduler::due()` anchors it on the job's own
-  history (the later of `last_fired_ms` and a per-job in-memory baseline
-  captured on first observation), never on the current wall clock. It stamps
-  `last_fired_ms` to the trigger point, not the observing tick, so `fire_ms_hint`
-  and the cross-process CAS dedup agree. `due()` reads no clock of its own.
-  A disabled job drops its baseline, so `/schedule enable` re-anchors at the
-  current wall clock instead of replaying everything accrued while it was off.
+  persisted history, never on process startup or the observing wall clock.
+  Interval slots are exact multiples from that anchor; daily/weekly jobs keep
+  their intrinsic calendar phase, and missed backlog coalesces to the latest
+  due slot. It stamps `last_fired_ms` to the trigger point, not the observing
+  tick, so `fire_ms_hint` and the cross-process CAS dedup agree. `due()` reads no
+  clock of its own. `/schedule enable` atomically writes a fresh persisted
+  anchor, so disabled time is not replayed.
+- **Runtime roster convergence** — the TUI refreshes the fallible authoritative
+  schedule roster while running, imports persisted retries, revalidates queued
+  claims before start, and recovers only provably orphaned active tokens.
+  Interval schedules use absolute epoch slots in the host path so DST fallback
+  cannot pause or duplicate their elapsed-time cadence. The persistence promise
+  is process-crash recovery, not sudden-power-loss or hardware durability.
 - **Job prompts are plain prompts** — `parse_loop` / `parse_schedule` reject a
   leading `/` *or* `!`. Slash dispatch is active-tab-scoped and its non-turn
   paths can't hand back the pending-attribution entry, so allowing it would
@@ -573,9 +650,15 @@ cannot be saved and is lost on the paste path. Window tokens minted by
   so tick- and keypress-driven drains behave identically) — otherwise an
   unattended `/loop` waits for a keypress while anti-pileup swallows later fires.
   User-typed queued input is never auto-drained. Turn spawn is the
-  tab-parameterized `start_turn_on_tab`. Failure attribution uses a pending map
-  keyed `(tab_id, prompt)`, consumed after the turn actually starts, and purged
-  on `/loop stop`, `/schedule rm|disable`, and tab close.
+  tab-parameterized `start_turn_on_tab`. Failure attribution uses an
+  occurrence-aware FIFO keyed by `(tab_id, prompt)`, so equal-text jobs remain
+  distinct. A persisted schedule atomically claims its fire timestamp, active
+  token, and OS attempt lease before entering this queue; the exact lease moves
+  into the turn and remains held until tracked workers and final transcript/
+  index persistence finish. Queue edit/removal, `/loop stop`, `/schedule
+  rm|disable`, and tab close purge only the matching occurrences and exact
+  tokens. Persistence failure quarantines the job rather than releasing it for
+  overlap.
 - **Interval formatting** — schedule list/confirmation echo renders intervals as
   compact round-trippable tokens (e.g. `every 2h`, not `every 2h 00m`).
 - **DST handling** — a nonexistent local time (spring-forward gap) skips *past*
