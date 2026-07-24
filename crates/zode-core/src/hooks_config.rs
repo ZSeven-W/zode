@@ -93,7 +93,7 @@ impl HookHandler for ConfiguredHookHandler {
     }
 }
 
-fn expand_tilde(p: &str) -> PathBuf {
+pub(crate) fn expand_tilde(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest);
@@ -166,11 +166,22 @@ fn substitute_plugin_path(script: &str, root: &std::path::Path, data: &std::path
     }
 }
 
-/// Load hooks.json (global ⊕ project) into handlers ready to register.
+/// Load hooks.json (global ⊕ project ⊕ plugins) into handlers ready to
+/// register. A hook whose `script` ends in `.js` runs in the in-process
+/// QuickJS sandbox ([`crate::js_hook`]); everything else spawns the external
+/// script via agent's [`ScriptHookHandler`]. A JS hook whose file is missing
+/// or oversized is skipped (logged), never breaking assembly.
 pub fn load_hook_handlers(cwd: &std::path::Path) -> Vec<Arc<dyn HookHandler>> {
     load_hook_entries(cwd)
         .into_iter()
-        .map(|e| Arc::new(ConfiguredHookHandler::new(e)) as Arc<dyn HookHandler>)
+        .filter_map(|entry| {
+            if crate::js_hook::is_js_hook(&entry.script) {
+                crate::js_hook::JsHookHandler::load(entry)
+                    .map(|handler| Arc::new(handler) as Arc<dyn HookHandler>)
+            } else {
+                Some(Arc::new(ConfiguredHookHandler::new(entry)) as Arc<dyn HookHandler>)
+            }
+        })
         .collect()
 }
 
@@ -223,6 +234,51 @@ mod tests {
             output: serde_json::json!({}),
             ok: true,
         }));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn installed_plugin_js_hook_loads_and_blocks() {
+        use agent::hook::{HookEvent, HookOutcome};
+
+        let home = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("ZODE_CONFIG_DIR");
+        std::env::set_var("ZODE_CONFIG_DIR", home.path());
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/plugins/zode-hook-demo");
+        let manager = crate::plugin_package::PluginPackageManager::open_default().unwrap();
+        manager
+            .install(source.to_str().unwrap(), home.path(), true)
+            .unwrap();
+
+        // Full pipeline: registry → plugin hooks.json → ${ZODE_PLUGIN_ROOT}
+        // substitution → .js dispatch → JsHookHandler.
+        let handlers = load_hook_handlers(home.path());
+        let block = HookEvent::BeforeToolUse {
+            tool: "Bash".into(),
+            input: serde_json::json!({ "command": "rm -rf /" }),
+        };
+        let safe = HookEvent::BeforeToolUse {
+            tool: "Bash".into(),
+            input: serde_json::json!({ "command": "ls -la" }),
+        };
+        let mut blocked = false;
+        let mut allowed_safe = true;
+        for handler in &handlers {
+            if handler.handle(&block).await == HookOutcome::Block {
+                blocked = true;
+            }
+            if handler.handle(&safe).await == HookOutcome::Block {
+                allowed_safe = false;
+            }
+        }
+
+        match prev {
+            Some(value) => std::env::set_var("ZODE_CONFIG_DIR", value),
+            None => std::env::remove_var("ZODE_CONFIG_DIR"),
+        }
+        assert!(blocked, "plugin JS hook should block `rm -rf /`");
+        assert!(allowed_safe, "plugin JS hook should allow a safe command");
     }
 
     #[test]

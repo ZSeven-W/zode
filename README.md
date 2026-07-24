@@ -52,7 +52,7 @@
 - **Sub-agents, teams & workflows** — delegate one-shot work through the Task tool, hire persistent internal or external-CLI teammates, coordinate them with a shared board and file claims, and manage the surfaces with `/agents`, `/team`, and `/workflows`
 - **Portable local configuration** — reads direct skills and MCP configuration from Claude Code, Codex, Cursor, opencode, and Gemini, while never importing their installed plugin trees or caches
 - **Skills & MCP** — load `SKILL.md` instruction packs on demand and connect MCP servers (`mcp__<server>__<tool>`); created agents, skills, and MCP tools surface as slash commands
-- **Hooks** — run external scripts on tool events (e.g. block dangerous commands, lint after edits)
+- **Hooks** — run a shell script or a sandboxed JavaScript hook on agent events (e.g. block dangerous commands, lint after edits)
 - **Three-level instructions** — global (`~/.zode/`) → project root → cwd (`AGENTS.md` / `CLAUDE.md`)
 
 ## Install
@@ -1056,6 +1056,54 @@ from the persisted anchor (including across DST fallback), calendar schedules
 keep their wall-clock phase, and missed backlog coalesces to the latest due
 slot. A running process also refreshes the roster so remote disable/remove,
 retry, and orphan ownership changes take effect without a restart.
+
+## Hooks
+
+Hooks run your code on agent events (before/after a tool, session start/end,
+user/assistant messages, compaction, and more). They are declared in
+`hooks.json`, merged from `~/.zode/hooks.json`, the project's
+`.zode/hooks.json`, and any installed plugin:
+
+```json
+{
+  "hooks": [
+    { "event": "before_tool_use", "tool": "Bash", "script": "~/.zode/hooks/guard.js" },
+    { "event": "after_tool_use", "script": "~/.zode/hooks/lint.sh" }
+  ]
+}
+```
+
+Each entry matches an `event` (optionally narrowed to one `tool`) and points at
+a `script`. Two kinds of script are supported:
+
+- **Executable** (`.sh`, a binary, anything with a shebang) — the event is
+  serialized to JSON on the script's **stdin**; the **exit code** decides the
+  outcome: `0` proceed, `2` block the triggering action, anything else warn.
+- **Sandboxed JavaScript** (`.js`) — run **in-process** in Zode's QuickJS
+  sandbox (no filesystem, network, terminal, or process access; bounded memory
+  and time), so no shell or Node is required. Register a synchronous handler
+  with `zode.hook(fn)`; it receives the event and returns an outcome:
+
+  ```js
+  zode.hook((event) => {
+    if (event.tool === "Bash" && /rm\s+-rf/.test(event.input.command || "")) {
+      return { block: true, reason: "refusing destructive rm -rf" };
+    }
+    return { ok: true };
+  });
+  ```
+
+  Return `{ ok: true }` / nothing / `true` to proceed, a non-empty string or
+  `{ block: true, reason }` to block (the reason is written to the log), or
+  `{ warn: <code> }` to warn. A `.js` hook's source is loaded when the session
+  is assembled — restart (or open a new session) to pick up edits; executable
+  hooks are re-read on every event.
+
+Plugins ship hooks under `hooks/hooks.json`; a hook `script` may use
+`${ZODE_PLUGIN_ROOT}` (the install dir) and `${ZODE_PLUGIN_DATA}` (a per-plugin
+data dir). See the runnable [`examples/plugins/zode-hook-demo/`](examples/plugins/zode-hook-demo/)
+— a JavaScript `before_tool_use` hook that blocks destructive Bash commands.
+Installing a plugin with hooks requires `--trust`.
 
 ## Slash Commands
 

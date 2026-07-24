@@ -1,0 +1,6 @@
+{
+  "name": "zode-hook-demo",
+  "version": "0.1.0",
+  "description": "Demo plugin: a sandboxed JavaScript before_tool_use hook that guards Bash against destructive commands.",
+  "author": { "name": "Zode" }
+}

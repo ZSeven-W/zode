@@ -1,0 +1,9 @@
+{
+  "hooks": [
+    {
+      "event": "before_tool_use",
+      "tool": "Bash",
+      "script": "${ZODE_PLUGIN_ROOT}/hooks/guard.js"
+    }
+  ]
+}

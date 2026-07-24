@@ -33,6 +33,7 @@ pub mod i18n;
 pub mod i18n_data;
 pub mod images;
 pub mod instructions;
+pub mod js_hook;
 pub mod lsp;
 pub mod mcp;
 pub mod models_dev;
