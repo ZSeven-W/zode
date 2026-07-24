@@ -79,6 +79,21 @@ enum AbortableWriteError {
     Io(std::io::Error),
 }
 
+/// Whether an LSP request method is a pure query with no server-side external
+/// side effect. Such a method's interruption cannot leave external work
+/// pending, so its operation guard need not latch. Edit-producing methods
+/// (`textDocument/rename`, `textDocument/formatting`) are conservatively
+/// excluded even though the server only *returns* edits.
+fn lsp_method_is_read_only(method: &str) -> bool {
+    matches!(
+        method,
+        "textDocument/hover"
+            | "textDocument/definition"
+            | "textDocument/references"
+            | "textDocument/documentSymbol"
+    )
+}
+
 #[derive(Debug)]
 pub struct LspClient {
     /// LSP `languageId` (e.g. "rust") — also the config key.
@@ -297,7 +312,19 @@ impl LspClient {
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         let (write_error, mut operation) = if let Some(abort) = abort {
             match write_message_with_abort(&self.stdin, &msg, abort).await {
-                Ok(operation) => (None, Some(operation)),
+                Ok(mut operation) => {
+                    // A pure query (hover/definition/…) computes a result the
+                    // server returns; it mutates no external state, so an
+                    // unacknowledged `$/cancelRequest`, a timeout, or a dropped
+                    // connection leaves nothing pending. Disarm up front so
+                    // those outcomes never latch unresolved external work and
+                    // wrongly disable a scheduler job. Edit-producing methods
+                    // (rename/formatting) stay armed.
+                    if lsp_method_is_read_only(method) {
+                        operation.disarm();
+                    }
+                    (None, Some(operation))
+                }
                 Err(AbortableWriteError::Cancelled) => {
                     self.pending.lock().await.remove(&id);
                     return Err(format!("lsp {method}: cancelled"));

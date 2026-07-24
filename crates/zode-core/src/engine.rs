@@ -1142,7 +1142,7 @@ impl ZodeEngine {
         let mcp = match mcp_connect {
             Some(handle) => match handle.await {
                 Ok(lifecycle) => {
-                    for tool in crate::mcp::mcp_tools(&lifecycle) {
+                    for tool in crate::mcp::mcp_tools(&lifecycle, cfg.mcp_tool_timeout()) {
                         base.register(tool);
                     }
                     Some(lifecycle)

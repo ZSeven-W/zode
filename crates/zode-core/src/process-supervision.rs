@@ -407,9 +407,26 @@ impl ProcessTreeGuard {
         if !self.armed {
             return;
         }
-        let signal_succeeded = self.kill_tree();
-        let proven = self.wait_for_tree_exit(signal_succeeded).await;
-        self.complete_cleanup(proven);
+        // The leader has already exited and been reaped by the caller.
+        #[cfg(unix)]
+        {
+            // A dedicated process group was established at spawn, so probe it
+            // and prove it empty (re-signalling stragglers along the way).
+            let signal_succeeded = self.kill_tree();
+            let proven = self.wait_for_tree_exit(signal_succeeded).await;
+            self.complete_cleanup(proven);
+        }
+        // On platforms without an owned process-group/job boundary (Windows and
+        // others) the child was never placed in a tree we can probe. The leader
+        // exited normally and has been reaped; re-running `taskkill /T` against
+        // its now-free (possibly recycled) PID would risk force-killing an
+        // unrelated tree while proving nothing, so a normal exit with a known
+        // identity is treated as clean. A missing identity cannot be proven and
+        // stays latched.
+        #[cfg(not(unix))]
+        {
+            self.complete_cleanup(self.pid.is_some());
+        }
     }
 
     pub(crate) async fn terminate_and_reap(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
@@ -549,6 +566,22 @@ mod tests {
         assert_eq!(output.stderr.len(), 1024);
         assert!(output.stdout_truncated);
         assert!(output.stderr_truncated);
+        assert!(!abort.activity().unresolved_external_work());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_successful_capture_does_not_latch_unresolved() {
+        // Regression: a normally-exiting Windows child was reaped, then
+        // cleanup ran `taskkill` against the dead PID, failed, and latched
+        // unresolved work — disabling scheduler jobs after one success.
+        let mut command = Command::new("cmd");
+        command.args(["/C", "echo hello"]);
+        let abort = AbortController::new();
+        let output = run_captured(command, &abort, Duration::from_secs(5), 1024)
+            .await
+            .unwrap();
+        assert!(output.status.success());
         assert!(!abort.activity().unresolved_external_work());
     }
 

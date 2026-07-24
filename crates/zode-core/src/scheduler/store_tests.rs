@@ -49,6 +49,33 @@ fn legacy_missing_anchor_is_migrated_once_from_store_mtime() {
 
 #[test]
 #[serial_test::serial]
+fn cas_on_one_job_preserves_an_unrelated_invalid_row_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("ZODE_CONFIG_DIR", dir.path());
+    let path = dir.path().join("schedules.json");
+
+    // A valid row plus a row this build considers invalid (a slash-prefixed
+    // prompt). Write both directly so the invalid one lands on disk.
+    let valid = schedule("valid");
+    let mut invalid = schedule("legacyslash");
+    invalid.prompt = "/some-old-command".into();
+    std::fs::write(&path, serde_json::to_vec(&[valid, invalid]).unwrap()).unwrap();
+
+    // A CAS against the valid job must not erase the invalid row.
+    assert!(try_mark_fired("valid", 1_800_000_100_000));
+
+    let on_disk: Vec<ScheduleJob> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(
+        on_disk.iter().any(|job| job.id == "legacyslash"),
+        "an unrelated invalid row must survive a CAS on a different job"
+    );
+    // But the running roster still filters it out.
+    assert!(load_schedules().iter().all(|job| job.id != "legacyslash"));
+    std::env::remove_var("ZODE_CONFIG_DIR");
+}
+
+#[test]
+#[serial_test::serial]
 fn exact_fire_tokens_allow_both_thirty_second_slots() {
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("ZODE_CONFIG_DIR", dir.path());

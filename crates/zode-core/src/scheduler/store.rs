@@ -37,7 +37,9 @@ pub fn try_load_schedules() -> Result<Vec<ScheduleJob>, CoreError> {
 fn load_and_migrate_schedules_unlocked() -> Result<Vec<ScheduleJob>, CoreError> {
     let mut jobs = load_schedules_unlocked()?;
     if jobs.is_empty() || !jobs.iter().any(|job| job.last_fired_ms.is_none()) {
-        return Ok(jobs);
+        // The consumed roster is sanitized so invalid jobs never run, but the
+        // sanitized set is NOT written back — see `load_schedules_unlocked`.
+        return Ok(sanitize(jobs));
     }
 
     // Migrate old jobs to one stable cross-process recurrence anchor.
@@ -52,10 +54,20 @@ fn load_and_migrate_schedules_unlocked() -> Result<Vec<ScheduleJob>, CoreError> 
             job.last_fired_ms = Some(anchor_ms);
         }
     }
+    // Persist the migrated roster in full — never the sanitized subset, so a
+    // row this build considers invalid is preserved on disk for a future build
+    // that understands it. Only the returned (running) roster is filtered.
     save_schedules_unlocked(&jobs)?;
-    Ok(jobs)
+    Ok(sanitize(jobs))
 }
 
+/// Load the raw roster verbatim (deserialized only). Deliberately does NOT
+/// sanitize: CAS mutators load → mutate one job → save, and filtering here
+/// would silently erase every row this build considers invalid (a hand-edited
+/// prompt, an interval below the current minimum, a row carrying live watchdog
+/// evidence) as a side effect of claiming an unrelated job. Sanitizing is a
+/// read-time concern for the running roster only (see the callers that wrap the
+/// result in `sanitize`).
 fn load_schedules_unlocked() -> Result<Vec<ScheduleJob>, CoreError> {
     let path = store_path()?;
     let raw = match std::fs::read_to_string(&path) {
@@ -63,18 +75,17 @@ fn load_schedules_unlocked() -> Result<Vec<ScheduleJob>, CoreError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
-    let jobs: Vec<ScheduleJob> = match serde_json::from_str(&raw) {
-        Ok(jobs) => jobs,
+    match serde_json::from_str(&raw) {
+        Ok(jobs) => Ok(jobs),
         Err(e) => {
             tracing::warn!(
                 "schedules store: corrupt {}, quarantining: {e}",
                 path.display()
             );
             quarantine(&path);
-            return Ok(Vec::new());
+            Ok(Vec::new())
         }
-    };
-    Ok(sanitize(jobs))
+    }
 }
 
 /// Drop invalid specs/prompts/ids and later duplicate ids with warnings.

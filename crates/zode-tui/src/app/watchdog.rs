@@ -199,7 +199,14 @@ impl WatchdogPulse {
         runtime: Duration,
     ) -> Option<TimeoutKind> {
         let source_activity = self.source.last_activity_at();
-        let mut state = self.state.lock().ok()?;
+        // Recover a poisoned lock rather than returning None: the critical
+        // sections are trivial field writes, so the state is still consistent,
+        // and bailing out would make a panicked turn permanently immune to the
+        // watchdog (fail-open) — it would hold its job and lease forever.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.last_activity_at = state.last_activity_at.max(source_activity);
         if state.terminal || state.timeout.is_some() {
             return None;
@@ -219,17 +226,17 @@ impl WatchdogPulse {
 
     fn snapshot(&self) -> PulseState {
         let source_activity = self.source.last_activity_at();
-        self.state
+        // Recover a poisoned lock instead of fabricating `terminal: true`:
+        // faking a completed turn would make the Aborting/Cancelling force
+        // paths in `poll` skip a run that is actually stuck (fail-open).
+        let state = self
+            .state
             .lock()
-            .map(|state| PulseState {
-                last_activity_at: state.last_activity_at.max(source_activity),
-                ..*state
-            })
-            .unwrap_or(PulseState {
-                last_activity_at: Instant::now(),
-                terminal: true,
-                timeout: None,
-            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        PulseState {
+            last_activity_at: state.last_activity_at.max(source_activity),
+            ..*state
+        }
     }
 }
 

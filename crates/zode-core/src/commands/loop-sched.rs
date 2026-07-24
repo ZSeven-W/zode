@@ -66,6 +66,12 @@ pub fn parse_interval(s: &str) -> Result<Duration, String> {
     if secs < 30 {
         return Err("minimum interval is 30s".to_string());
     }
+    // Cap the interval so `Instant + Duration` in the scheduler can never
+    // overflow and panic. A year is far beyond any real recurring loop.
+    const MAX_INTERVAL_SECS: u64 = 365 * 24 * 3600;
+    if secs > MAX_INTERVAL_SECS {
+        return Err("maximum interval is 365d".to_string());
+    }
     Ok(Duration::from_secs(secs))
 }
 
@@ -386,5 +392,12 @@ mod tests {
     fn interval_overflow_is_rejected() {
         assert!(parse_interval("18446744073709551615h").is_err());
         assert!(parse_loop("/loop 18446744073709551615h x").is_err());
+        // The `s` unit skips checked_mul, so a huge value once slipped past and
+        // later panicked `Instant + Duration` in the scheduler. Now capped.
+        assert!(parse_interval("18446744073709551615s").is_err());
+        assert!(parse_loop("/loop 18446744073709551615s x").is_err());
+        // Just over the year cap is rejected; exactly the cap is accepted.
+        assert!(parse_interval("31536001s").is_err());
+        assert!(parse_interval("31536000s").is_ok());
     }
 }

@@ -457,6 +457,13 @@ struct PendingForcedTurnStop {
     activity: Option<agent::abort::TurnActivity>,
     quarantine: Option<QuarantinedRecovery>,
     source_terminal_seen: bool,
+    /// The turn's shared recorder and engine, captured so a forced stop can
+    /// journal the terminal record and close the checkpoint even if the owning
+    /// tab is removed before `TurnTaskStopped` arrives (Ctrl+W on a non-last
+    /// tab mid-turn). `None` on the Canonical path, where the source worker
+    /// completes the recorder itself.
+    recorder: Option<SharedTurnRecorder>,
+    engine: Option<Arc<ZodeEngine>>,
 }
 
 #[derive(Clone)]
@@ -1389,16 +1396,36 @@ impl TuiApp {
         })?;
         let (tab_id, prompt) = key.clone();
 
+        let active_tab_id = self.tabs.get(self.active).map(|tab| tab.id);
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            // Resolve the absolute queue index of the `occurrence`-th entry
+            // whose text matches this prompt, so we can both remove it and keep
+            // any open queued-edit cursor aligned with the shift.
             let mut seen = 0usize;
-            tab.queued_input.retain(|queued| {
-                if queued != &prompt {
-                    return true;
+            let mut removed_index = None;
+            for (index, queued) in tab.queued_input.iter().enumerate() {
+                if queued == &prompt {
+                    if seen == occurrence {
+                        removed_index = Some(index);
+                        break;
+                    }
+                    seen = seen.saturating_add(1);
                 }
-                let remove = seen == occurrence;
-                seen = seen.saturating_add(1);
-                !remove
-            });
+            }
+            if let Some(index) = removed_index {
+                tab.queued_input.remove(index);
+                // The edit cursor only tracks the active tab's queue. If this
+                // expiry removed the entry being edited, cancel the edit; if it
+                // removed one before it, shift the cursor down so a save can't
+                // overwrite the wrong message.
+                if active_tab_id == Some(tab_id) {
+                    match self.queued_edit_index {
+                        Some(edit) if edit == index => self.queued_edit_index = None,
+                        Some(edit) if edit > index => self.queued_edit_index = Some(edit - 1),
+                        _ => {}
+                    }
+                }
+            }
         }
         let now_empty = if let Some(jobs) = self.sched_pending.get_mut(&key) {
             jobs.remove(occurrence);
@@ -2021,10 +2048,22 @@ impl TuiApp {
                 self.cancel_persisted_retry_if_present(job);
             }
         }
-        if let Some(task) = self.tabs[self.active].turn_task.take() {
-            task.abort();
+        // A scheduler turn's task was already taken by `begin_forced_turn_stop`
+        // above; anything left here is an interactive turn or local op. It
+        // received a cooperative abort, so let it drain briefly — for an
+        // interactive turn that lets its `TurnRecorder` (which lives inside the
+        // task, alongside the engine) journal the terminal record and close the
+        // checkpoint instead of leaving a dangling turn. Hard-abort only if the
+        // task ignores cancellation within the grace window.
+        if let Some(mut task) = self.tabs[self.active].turn_task.take() {
             tokio::spawn(async move {
-                let _ = task.await;
+                if tokio::time::timeout(HARD_STOP_QUIESCE_TIMEOUT, &mut task)
+                    .await
+                    .is_err()
+                {
+                    task.abort();
+                    let _ = task.await;
+                }
             });
         }
         if self.tabs.len() == 1 {
@@ -2086,6 +2125,19 @@ impl TuiApp {
         tab_idx: usize,
         expected_turn_id: Option<u64>,
     ) -> Option<PreparedTabInterrupt> {
+        self.prepare_tab_interrupt_labeled(tab_idx, expected_turn_id, true)
+    }
+
+    /// `prepare_tab_interrupt` with control over the transcript notice. A
+    /// watchdog timeout passes `push_interrupted = false` and prints its own
+    /// "watchdog: … timeout" line instead, so a supervised failure is never
+    /// mislabeled in the transcript as a user interruption.
+    fn prepare_tab_interrupt_labeled(
+        &mut self,
+        tab_idx: usize,
+        expected_turn_id: Option<u64>,
+        push_interrupted: bool,
+    ) -> Option<PreparedTabInterrupt> {
         let (prepared, local_op_id) = {
             let tab = self.tabs.get_mut(tab_idx)?;
             let active_turn_id = (tab.active_turn_id > 0).then_some(tab.active_turn_id);
@@ -2107,10 +2159,13 @@ impl TuiApp {
             // latch. Local shell / compact / background abort users keep None.
             tab.draining_turn_id = active_turn_id;
             tab.active_tool_names.clear();
+            tab.active_tool_api_names.clear();
             tab.active_tool_started.clear();
             stop_goal_loop(tab);
             tab.chat.end_turn();
-            tab.chat.push_system(crate::tr("(interrupted)"));
+            if push_interrupted {
+                tab.chat.push_system(crate::tr("(interrupted)"));
+            }
             tab.mode = Mode::Ready;
             (
                 PreparedTabInterrupt {
@@ -3659,6 +3714,11 @@ impl TuiApp {
         // TUI is its single owner (None if some other loop already claimed it).
         let mut esc_fire = zode_core::desktop::esc_watch::take_receiver();
 
+        // Set once the user asks to force-quit during the graceful drain (a
+        // second Ctrl+C). Leases stay retained, so recovery still handles them
+        // — this only abandons the wait, it never releases running work.
+        let mut force_quit = false;
+
         loop {
             // Full repaint when an overlay just closed (or Ctrl+L asked): see
             // `overlay_was_open` — repairs cells the terminal lost under it.
@@ -3704,8 +3764,18 @@ impl TuiApp {
                 self.release_all_pending_schedule_leases();
                 self.begin_scheduler_shutdown(&agent_tx);
                 self.retry_pending_schedule_finalizers(std::time::Instant::now());
-                if self.scheduler_shutdown_pending() {
-                    self.skip_next_draw = true;
+                if self.scheduler_shutdown_pending() && !force_quit {
+                    // Keep the loop alive until worker quiescence + durable
+                    // persistence, but DON'T freeze the screen: surface a
+                    // draining notice (once) and keep redrawing so the user
+                    // isn't staring at a dead UI, and can press Ctrl+C to
+                    // force-quit. Leases are retained either way.
+                    if self.toast.is_none() {
+                        self.toast = Some(Toast::info(
+                            crate::tr("finishing background work… (Ctrl+C to force quit)")
+                                .to_string(),
+                        ));
+                    }
                 } else {
                     // Sweep any clipboard preview temp files still held by any tab.
                     let temps: Vec<std::path::PathBuf> = self
@@ -3748,6 +3818,13 @@ impl TuiApp {
                 maybe_ev = term_events.next() => {
                     if let Some(Ok(ev)) = maybe_ev {
                         if self.should_quit {
+                            // The app is draining. Ignore all input except a
+                            // force-quit (Ctrl+C), which abandons the wait on
+                            // the next loop pass without releasing retained
+                            // leases.
+                            if is_force_quit_event(&ev) {
+                                force_quit = true;
+                            }
                             continue;
                         }
                         let mut burst = vec![ev];
@@ -7256,7 +7333,9 @@ impl TuiApp {
                         self.watchdog.forget_turn(tab_id, turn_id);
                         continue;
                     };
-                    let Some(interrupt) = self.prepare_tab_interrupt(tab_idx, Some(turn_id)) else {
+                    let Some(interrupt) =
+                        self.prepare_tab_interrupt_labeled(tab_idx, Some(turn_id), false)
+                    else {
                         // The terminal won the race with this tick or the tab
                         // moved to another generation; never abort that newer
                         // owner and never recover the stale record.
@@ -7325,6 +7404,11 @@ impl TuiApp {
         let task = tab.turn_task.take();
         let activity = tab.watchdog_activity.take();
         let attempt_lease = tab.watchdog_attempt_lease.take();
+        // Capture the recorder + engine so `finish_forced_turn_stop` can
+        // journal the terminal record and close the checkpoint even after the
+        // tab is removed. Taking the recorder here also prevents the tab-side
+        // completion path from firing a duplicate.
+        let recorder = tab.watchdog_recorder.take();
         let scheduled_persistence =
             tab.active_sched_job
                 .as_ref()
@@ -7342,6 +7426,8 @@ impl TuiApp {
                 activity: activity.clone(),
                 quarantine: None,
                 source_terminal_seen: false,
+                recorder,
+                engine: Some(persistence_engine.clone()),
             },
         );
         let tx = agent_tx.clone();
@@ -7459,6 +7545,9 @@ impl TuiApp {
                     activity: tab.watchdog_activity.take(),
                     quarantine: None,
                     source_terminal_seen: false,
+                    // Canonical: the source worker owns recorder completion.
+                    recorder: None,
+                    engine: None,
                 },
             );
         }
@@ -7583,6 +7672,8 @@ impl TuiApp {
             activity,
             quarantine,
             source_terminal_seen,
+            recorder,
+            engine,
         }) = self.forced_turn_stops.remove(&(tab_id, turn_id))
         else {
             return;
@@ -7624,58 +7715,59 @@ impl TuiApp {
         };
         self.forward_extension_turn_event(tab_id, turn_id, &terminal);
 
+        // Journal the terminal record and close the checkpoint from the
+        // captured recorder + engine. This runs regardless of whether the tab
+        // still exists, so Ctrl+W on a non-last tab mid-turn no longer leaves a
+        // dangling journal turn and an unclosed checkpoint. Canonical quarantine
+        // completes in the source worker instead (recorder captured as None).
+        if let Some(recorder) = recorder {
+            if !source_terminal_seen && !matches!(&outcome, ForcedTurnStop::Canonical { .. }) {
+                if let Ok(mut recorder) = recorder.lock() {
+                    let (code, message, status, stop_reason) = if quarantine.is_some() {
+                        (
+                            "watchdog.quarantine",
+                            "hard-stopped worker exceeded the quiescence deadline",
+                            RunStatus::Failed,
+                            "watchdog_quarantined",
+                        )
+                    } else {
+                        match &outcome {
+                            ForcedTurnStop::Watchdog(_) => (
+                                "watchdog.hard_stop",
+                                "cancellation grace expired; worker was hard-stopped",
+                                RunStatus::Failed,
+                                "watchdog_abort_grace_expired",
+                            ),
+                            ForcedTurnStop::Manual { .. } => (
+                                "watchdog.force_cancel",
+                                "manual cancellation grace expired; worker was hard-stopped",
+                                RunStatus::Interrupted,
+                                "user_interrupted",
+                            ),
+                            ForcedTurnStop::Canonical { .. } => unreachable!(),
+                        }
+                    };
+                    recorder.record(RunEvent::Notice {
+                        code: code.into(),
+                        message: message.into(),
+                    });
+                    recorder.complete(
+                        engine.as_ref().map(|engine| &engine.checkpoints),
+                        true,
+                        &TurnOutcome {
+                            status,
+                            stop_reason: Some(stop_reason.into()),
+                            partial: true,
+                        },
+                    );
+                }
+            }
+        }
+
         let mut scheduled_job = None;
         let mut schedule_attempt_lease = attempt_lease;
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             if tab.draining_turn_id == Some(turn_id) || tab.active_turn_id == turn_id {
-                if let Some(recorder) = tab.watchdog_recorder.take() {
-                    // Canonical quarantine completes in the source worker
-                    // after quiescence. Forced aborts never reach that tail,
-                    // so the UI owns their one terminal journal record.
-                    if !source_terminal_seen
-                        && !matches!(&outcome, ForcedTurnStop::Canonical { .. })
-                    {
-                        if let Ok(mut recorder) = recorder.lock() {
-                            let (code, message, status, stop_reason) = if quarantine.is_some() {
-                                (
-                                    "watchdog.quarantine",
-                                    "hard-stopped worker exceeded the quiescence deadline",
-                                    RunStatus::Failed,
-                                    "watchdog_quarantined",
-                                )
-                            } else {
-                                match &outcome {
-                                    ForcedTurnStop::Watchdog(_) => (
-                                        "watchdog.hard_stop",
-                                        "cancellation grace expired; worker was hard-stopped",
-                                        RunStatus::Failed,
-                                        "watchdog_abort_grace_expired",
-                                    ),
-                                    ForcedTurnStop::Manual { .. } => (
-                                        "watchdog.force_cancel",
-                                        "manual cancellation grace expired; worker was hard-stopped",
-                                        RunStatus::Interrupted,
-                                        "user_interrupted",
-                                    ),
-                                    ForcedTurnStop::Canonical { .. } => unreachable!(),
-                                }
-                            };
-                            recorder.record(RunEvent::Notice {
-                                code: code.into(),
-                                message: message.into(),
-                            });
-                            recorder.complete(
-                                Some(&tab.engine.checkpoints),
-                                true,
-                                &TurnOutcome {
-                                    status,
-                                    stop_reason: Some(stop_reason.into()),
-                                    partial: true,
-                                },
-                            );
-                        }
-                    }
-                }
                 tab.draining_turn_id = None;
                 tab.active_turn_id = 0;
                 tab.turn_abort = None;
@@ -10905,6 +10997,18 @@ const AGENT_COALESCE_CAP: usize = 1024;
 /// useful waker registered. That's safe here: the caller loops straight back to
 /// `select!`, which re-polls this stream with the real task waker before it ever
 /// parks, and the 100ms tick is a liveness backstop regardless.
+/// Ctrl+C — the force-quit chord accepted while the app is draining shutdown.
+fn is_force_quit_event(ev: &CtEvent) -> bool {
+    matches!(
+        ev,
+        CtEvent::Key(KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers,
+            ..
+        }) if modifiers.contains(KeyModifiers::CONTROL)
+    )
+}
+
 fn drain_ready_events<S>(stream: &mut S, cap: usize) -> Vec<CtEvent>
 where
     S: futures::Stream<Item = std::io::Result<CtEvent>> + Unpin,
@@ -15179,6 +15283,8 @@ mod tests {
                 activity: None,
                 quarantine: None,
                 source_terminal_seen: false,
+                recorder: None,
+                engine: None,
             },
         );
 

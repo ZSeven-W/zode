@@ -46,9 +46,11 @@ pub use discovery::discover_mcp_config;
 /// the whole launch.
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 
-/// A remote tool must not hold a scheduler turn forever. Timing out locally
-/// does not prove the server stopped, so the call is fenced as unresolved.
-const TOOL_TIMEOUT_SECS: u64 = 60;
+/// Default per-call MCP tool timeout when config leaves it unset. A remote tool
+/// must not hold a scheduler turn forever; timing out locally does not prove the
+/// server stopped, so the call is fenced as unresolved. Overridable (including
+/// disabling) via `mcpToolTimeoutSecs` — see [`ConfigManager`]-loaded config.
+pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 60;
 
 /// Connect all servers in `config` (concurrently, each bounded by a timeout)
 /// and return the live Lifecycle. Failures/timeouts are logged and skipped;
@@ -89,7 +91,10 @@ pub async fn connect(config: McpConfig) -> Arc<Lifecycle> {
 }
 
 /// Build a ZodeMcpTool for every tool discovered on a connected server.
-pub fn mcp_tools(lifecycle: &Arc<Lifecycle>) -> Vec<Arc<dyn Tool>> {
+///
+/// `tool_timeout` bounds each call locally: `None` disables the local timeout
+/// (relying on the turn's own cancellation), `Some(d)` fences a stuck server.
+pub fn mcp_tools(lifecycle: &Arc<Lifecycle>, tool_timeout: Option<Duration>) -> Vec<Arc<dyn Tool>> {
     let mut out: Vec<Arc<dyn Tool>> = Vec::new();
     for server in lifecycle.registry.snapshot() {
         for tool in server.state.tool_names() {
@@ -97,6 +102,7 @@ pub fn mcp_tools(lifecycle: &Arc<Lifecycle>) -> Vec<Arc<dyn Tool>> {
                 lifecycle.clone(),
                 server.name.clone(),
                 tool.clone(),
+                tool_timeout,
             )));
         }
     }
@@ -112,16 +118,24 @@ pub struct ZodeMcpTool {
     server: String,
     tool: String,
     display_name: String,
+    /// Per-call local timeout; `None` disables it.
+    timeout: Option<Duration>,
 }
 
 impl ZodeMcpTool {
-    pub fn new(lifecycle: Arc<Lifecycle>, server: String, tool: String) -> Self {
+    pub fn new(
+        lifecycle: Arc<Lifecycle>,
+        server: String,
+        tool: String,
+        timeout: Option<Duration>,
+    ) -> Self {
         let display_name = prefixed_tool_name(&server, &tool);
         Self {
             lifecycle,
             server,
             tool,
             display_name,
+            timeout,
         }
     }
 }
@@ -160,7 +174,7 @@ fn mcp_aborted(ctx: &ToolUseContext) -> AgentError {
 async fn await_mcp_response(
     ctx: &ToolUseContext,
     server: &str,
-    timeout: Duration,
+    timeout: Option<Duration>,
     request: impl std::future::Future<Output = Result<Value, LifecycleError>>,
 ) -> Result<Value, AgentError> {
     if ctx.abort.is_aborted() {
@@ -168,6 +182,14 @@ async fn await_mcp_response(
     }
     ctx.abort.pulse();
     let mut unresolved = UnresolvedMcpCall::new(ctx.abort.clone());
+    // A disabled (`None`) timeout waits forever, so far in the future the arm
+    // never fires; the turn's own cancellation is then the only bound.
+    let timeout_sleep = async {
+        match timeout {
+            Some(duration) => tokio::time::sleep(duration).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
     tokio::pin!(request);
     tokio::select! {
         biased;
@@ -190,10 +212,10 @@ async fn await_mcp_response(
                 }
             }
         }
-        _ = tokio::time::sleep(timeout) => {
+        _ = timeout_sleep => {
             Err(AgentError::other(format!(
                 "mcp {server}: tool call timed out after {}s",
-                timeout.as_secs()
+                timeout.map(|d| d.as_secs()).unwrap_or_default()
             )))
         }
     }
@@ -217,7 +239,7 @@ impl Tool for ZodeMcpTool {
         await_mcp_response(
             ctx,
             &self.server,
-            Duration::from_secs(TOOL_TIMEOUT_SECS),
+            self.timeout,
             self.lifecycle.call_tool(&self.server, &self.tool, input),
         )
         .await
@@ -257,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_transport_error_and_timeout_latch_unresolved_work() {
         let transport = ctx();
-        let result = await_mcp_response(&transport, "test", Duration::from_secs(1), async {
+        let result = await_mcp_response(&transport, "test", Some(Duration::from_secs(1)), async {
             Err(LifecycleError::Connector("connection lost".into()))
         })
         .await;
@@ -268,7 +290,7 @@ mod tests {
         let result = await_mcp_response(
             &timed_out,
             "test",
-            Duration::from_millis(1),
+            Some(Duration::from_millis(1)),
             std::future::pending(),
         )
         .await;
@@ -279,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_explicit_terminal_response_does_not_latch_unresolved_work() {
         let success = ctx();
-        let value = await_mcp_response(&success, "test", Duration::from_secs(1), async {
+        let value = await_mcp_response(&success, "test", Some(Duration::from_secs(1)), async {
             Ok(json!({"ok": true}))
         })
         .await
@@ -288,7 +310,7 @@ mod tests {
         assert!(!success.abort.activity().unresolved_external_work());
 
         let tool_error = ctx();
-        let result = await_mcp_response(&tool_error, "test", Duration::from_secs(1), async {
+        let result = await_mcp_response(&tool_error, "test", Some(Duration::from_secs(1)), async {
             Err(LifecycleError::Tool("rejected".into()))
         })
         .await;
@@ -310,7 +332,8 @@ mod tests {
             std::future::pending::<Result<Value, LifecycleError>>().await
         };
 
-        let result = await_mcp_response(&context, "test", Duration::from_secs(1), request).await;
+        let result =
+            await_mcp_response(&context, "test", Some(Duration::from_secs(1)), request).await;
         assert!(matches!(result, Err(AgentError::Aborted(_))));
         assert!(context.abort.activity().unresolved_external_work());
     }

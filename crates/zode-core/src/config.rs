@@ -801,6 +801,12 @@ pub struct ZodeConfig {
     /// `0` disables retries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_api_retries: Option<u32>,
+    /// Per-call timeout (seconds) for an MCP tool. A remote tool must not hold a
+    /// scheduler turn forever, but slow-but-valid servers (build/deploy/scrape)
+    /// need more than the default. Absent = 60; `0` disables the local timeout
+    /// (the call then relies on the turn's own cancellation only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_tool_timeout_secs: Option<u64>,
     /// Whether zode silently checks GitHub Releases in the background at startup
     /// and swaps in a newer build (applied on the next launch). Default ON; set
     /// `false` to disable. Skipped automatically for dev builds and when the
@@ -959,6 +965,18 @@ impl ZodeConfig {
     /// Whether RTK-style Bash stdout compression is on. Default true.
     pub fn compress_output(&self) -> bool {
         self.tools.compress_output.unwrap_or(true)
+    }
+
+    /// Per-call MCP tool timeout. `None` means the built-in 60s default; a
+    /// configured `0` disables the local timeout entirely.
+    pub fn mcp_tool_timeout(&self) -> Option<std::time::Duration> {
+        match self.mcp_tool_timeout_secs {
+            None => Some(std::time::Duration::from_secs(
+                crate::mcp::DEFAULT_TOOL_TIMEOUT_SECS,
+            )),
+            Some(0) => None,
+            Some(secs) => Some(std::time::Duration::from_secs(secs)),
+        }
     }
 
     /// Fill missing provider connection details from env vars. Anthropic /
@@ -1336,6 +1354,9 @@ impl ZodeConfig {
         }
         if other.max_api_retries.is_some() {
             self.max_api_retries = other.max_api_retries;
+        }
+        if other.mcp_tool_timeout_secs.is_some() {
+            self.mcp_tool_timeout_secs = other.mcp_tool_timeout_secs;
         }
         if other.auto_update.is_some() {
             self.auto_update = other.auto_update;
