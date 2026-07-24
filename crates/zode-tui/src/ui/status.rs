@@ -7,6 +7,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::theme::Theme;
+use zode_core::ui_extensions::{UiStatusLine, UiTone};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -84,7 +85,7 @@ impl StatusBar {
         Some((self.context_tokens as u64 * 100 / self.context_window as u64).min(100))
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme, custom: &[UiStatusLine]) {
         let (label, color) = match self.mode {
             Mode::Ready => ("ready", theme.accent),
             Mode::Thinking => ("thinking", theme.system),
@@ -213,7 +214,35 @@ impl StatusBar {
             ),
         ]);
 
-        let para = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg_secondary));
+        let mut lines = vec![Line::from(spans)];
+        if area.height > 1 && !custom.is_empty() {
+            let mut custom_spans = Vec::new();
+            for (index, line) in custom.iter().enumerate() {
+                if index > 0 {
+                    custom_spans.push(Span::styled(" │ ", Style::default().fg(theme.separator)));
+                }
+                custom_spans.extend(line.spans.iter().map(|span| {
+                    let color = match span.tone.as_ref().unwrap_or(&UiTone::Default) {
+                        UiTone::Default => theme.fg_text,
+                        UiTone::Muted => theme.fg_subtle,
+                        UiTone::Accent => theme.accent,
+                        UiTone::Success => Color::Green,
+                        UiTone::Warning => Color::Yellow,
+                        UiTone::Danger => Color::Red,
+                    };
+                    let mut style = Style::default().fg(color);
+                    if span.bold {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    if span.italic {
+                        style = style.add_modifier(Modifier::ITALIC);
+                    }
+                    Span::styled(span.text.clone(), style)
+                }));
+            }
+            lines.push(Line::from(custom_spans));
+        }
+        let para = Paragraph::new(lines).style(Style::default().bg(theme.bg_secondary));
         f.render_widget(para, area);
     }
 }
@@ -231,7 +260,7 @@ mod tests {
         sb.input_tokens = 12;
         let backend = TestBackend::new(60, 1);
         let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| sb.render(f, f.area(), &theme)).unwrap();
+        term.draw(|f| sb.render(f, f.area(), &theme, &[])).unwrap();
         let content: String = term
             .backend()
             .buffer()
@@ -255,7 +284,7 @@ mod tests {
         sb.tick();
         let backend = TestBackend::new(100, 1);
         let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| sb.render(f, f.area(), &theme)).unwrap();
+        term.draw(|f| sb.render(f, f.area(), &theme, &[])).unwrap();
         let content: String = term
             .backend()
             .buffer()
@@ -278,7 +307,7 @@ mod tests {
         let theme = ThemeStore::with_builtins().resolve(None);
         let backend = TestBackend::new(120, 1);
         let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| sb.render(f, f.area(), &theme)).unwrap();
+        term.draw(|f| sb.render(f, f.area(), &theme, &[])).unwrap();
         term.backend()
             .buffer()
             .content()
@@ -302,6 +331,31 @@ mod tests {
     fn context_badge_hidden_without_window() {
         let sb = StatusBar::new("m".into()); // context_window defaults to 0
         assert!(!render_to_string(&sb).contains("ctx"));
+    }
+
+    #[test]
+    fn renders_plugin_content_on_second_status_row() {
+        use zode_core::ui_extensions::{UiSpan, UiStatusLine, UiTone};
+
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let sb = StatusBar::new("m".into());
+        let custom = vec![UiStatusLine {
+            spans: vec![UiSpan {
+                text: "plugin status".into(),
+                tone: Some(UiTone::Accent),
+                bold: true,
+                italic: false,
+            }],
+        }];
+        let backend = TestBackend::new(80, 2);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| sb.render(f, f.area(), &theme, &custom))
+            .unwrap();
+        let second_row: String = term.backend().buffer().content()[80..]
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(second_row.contains("plugin status"));
     }
 
     #[test]

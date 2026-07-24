@@ -2875,6 +2875,23 @@ impl EngineTemplate {
         t
     }
 
+    /// Clone with browser control enabled/disabled while retaining the shared
+    /// browser session. Reassembly uses the config value to register or omit
+    /// browser tools; the shared session flag is synced only after the
+    /// reassembly lands (`sync_browser_session_enabled`), so a failed rebuild
+    /// never leaves the `/browser` panel claiming a state the tools don't have.
+    pub fn with_browser_enabled(&self, enabled: bool) -> Self {
+        let mut t = self.clone();
+        t.cfg.browser.enabled = Some(enabled);
+        t
+    }
+
+    /// Align the shared browser session's live panel flag with this template's
+    /// config. Called when a template-replacing reassembly completes.
+    pub fn sync_browser_session_enabled(&self) {
+        self.browser.set_enabled(self.cfg.browser.enabled());
+    }
+
     /// Clone with the disabled-plugin set replaced (for the `/plugin` picker,
     /// which reassembles so the new tool/MCP/skill/LSP set takes effect live).
     pub fn with_plugins_disabled(&self, disabled: Vec<String>) -> Self {

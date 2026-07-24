@@ -1,0 +1,17 @@
+{
+  "name": "zode-ui-demo",
+  "version": "0.3.0",
+  "description": "Demonstrates Zode's declarative JavaScript sidebar and status-line APIs.",
+  "author": {
+    "name": "Local developer"
+  },
+  "ui": {
+    "sidebar": "./scripts/ui.js",
+    "statusLine": "./scripts/ui.js"
+  },
+  "permissions": {
+    "network": ["api.github.com"],
+    "env": [],
+    "context": ["tabs", "workspace", "tools", "tasks", "services"]
+  }
+}

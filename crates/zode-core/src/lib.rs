@@ -62,6 +62,7 @@ pub mod telemetry;
 pub mod tool_filter;
 pub mod tool_trace;
 pub mod tools;
+pub mod ui_extensions;
 pub mod updater;
 pub mod user_commands;
 pub mod verification;

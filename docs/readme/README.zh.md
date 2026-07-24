@@ -327,15 +327,223 @@ zode -p "运行 CI" --sandbox-profile ci --rules ./permissions.json
 
 ### 插件和静态 marketplace
 
-受管理插件可包含 skills、commands、agents、hooks、MCP 和 LSP。Zode 支持
-`plugin.json`、`.zode-plugin/plugin.json`、`.grok-plugin/plugin.json` 和
-`.claude-plugin/plugin.json`。安装内容会复制为带来源与 SHA-256 tree hash 的
-不可变快照；包含可执行能力的插件只有在显式传入 `--trust` 后才会启用。
+受管理插件可包含 skills、commands、agents、hooks、MCP、LSP 和受限的 JavaScript
+UI 渲染器。Zode 支持
+`plugin.json`、`.zode-plugin/plugin.json`、`.codex-plugin/plugin.json`、
+`.grok-plugin/plugin.json` 和 `.claude-plugin/plugin.json`。同时支持 Codex
+与 Claude Code 的组件路径数组，并在首次安装时遵循 Claude Code 的
+`defaultEnabled`。Codex apps/connectors 以及 Claude Code themes、monitors、
+output styles 等宿主专属组件会被忽略；仅包含 app 的插件会因没有 Zode 可用组件而
+拒绝安装。安装内容会复制为带来源与 SHA-256 tree hash 的不可变快照；包含可执行
+能力的插件只有在显式传入 `--trust` 后才会启用。
+
+#### JavaScript UI 插件快速开始
+
+最小 UI 插件只需要 manifest 和一个 JavaScript 文件：
+
+```text
+my-plugin/
+├── plugin.json
+└── scripts/
+    └── ui.js
+```
+
+`plugin.json`：
+
+```json
+{
+  "name": "my-plugin",
+  "version": "0.1.0",
+  "ui": {
+    "sidebar": "./scripts/ui.js",
+    "statusLine": "./scripts/ui.js"
+  },
+  "permissions": {
+    "network": ["quota.example.com"],
+    "env": ["CODING_PLAN_TOKEN"],
+    "context": ["tabs", "workspace", "tools", "tasks", "services"]
+  }
+}
+```
+
+可以安装本地目录，也可以直接安装 GitHub 仓库或仓库子目录。正在运行的 Zode
+需要重启，才会载入新的插件快照：
 
 ```bash
 zode plugin validate ./my-plugin
 zode plugin install ./my-plugin --trust
 zode plugin install owner/repo@main#plugins/my-plugin --trust
+zode plugin list
+```
+
+修改源代码后运行 `zode plugin update my-plugin` 更新已安装快照。由于
+JavaScript、hooks、MCP server 和声明的网络访问都属于可执行能力，安装时必须显式
+传入 `--trust`。安装和更新都会打印插件声明的权限（网络域名、环境变量、context
+scope）。如果更新后的 manifest 申请的权限**超出**已安装快照，更新会被拒绝，
+必须重新携带 `--trust` 才能接受——活动的 Git 源无法静默扩大自己的授权。
+
+#### UI 渲染 API
+
+UI 插件可以在 sidebar 版本号正上方渲染声明式内容——所有插件按加载顺序合计
+最多 6 行。manifest 指定 JS 入口：
+
+```json
+{
+  "name": "my-sidebar",
+  "ui": {
+    "sidebar": "./ui/sidebar.js",
+    "statusLine": "./ui/status-line.js"
+  }
+}
+```
+
+JS 通过 `zode.ui.sidebar` 注册同步渲染函数。`ctx` 是只读 JSON 快照，包含终端、
+会话、模型、状态、token 和上下文窗口信息；脚本不会获得文件系统、网络、终端或
+Ratatui 句柄，最终样式与宽度由 Zode 控制。
+
+```js
+zode.ui.sidebar((ctx) => ({
+  lines: [
+    {
+      spans: [
+        { text: ctx.model.id, tone: "accent", bold: true },
+        { text: `  ctx ${ctx.context.usedPercent ?? "?"}%`, tone: "muted" }
+      ]
+    }
+  ]
+}));
+```
+
+`tone` 支持 `default`、`muted`、`accent`、`success`、`warning`、`danger`，
+span 还支持 `bold` 和 `italic`。renderer 必须是同步函数。每个脚本最大
+256 KiB，每次执行最多使用 8 MiB JS 内存和 25 ms，且 renderer 最快每 250 ms
+重新求值一次（间隔内复用缓存输出）；sidebar 每个 renderer 最多 6 行（所有插件
+合计也是 6 行），每行最多 16 个 span、2,048 字节文本，控制字符会由宿主清理。
+
+状态栏也可以扩展：没有插件输出时保持 1 行；同步的
+`zode.ui.statusLine` renderer 返回 spans 后，布局会动态扩展为 2 行。Zode
+自身的核心状态和安全提示固定在第一行，插件输出合并到第二行。
+
+```js
+zode.ui.statusLine((ctx) => ({
+  spans: [
+    { text: ctx.session.title, tone: "accent", bold: true },
+    { text: `  ↑${ctx.tokens.input} ↓${ctx.tokens.output}`, tone: "muted" }
+  ]
+}));
+```
+
+#### 渲染上下文与权限
+
+每个 renderer 都能直接获得以下基础字段，无需额外申请 context 权限：
+
+| 字段 | 结构与含义 |
+| --- | --- |
+| `ctx.apiVersion` | 上下文 API 版本，目前为 `1`。 |
+| `ctx.app` | `{ version, effort }`。 |
+| `ctx.terminal` | `{ width, height }`，单位为终端 cell。 |
+| `ctx.session` | 当前任务的 `{ id, title, cwd, busy }`。 |
+| `ctx.model` | `{ id, provider }`。 |
+| `ctx.status` | `{ mode, planMode, selectionMode, yolo, sandbox }`；`sandbox` 为 `{ enabled, readOnly, network }`。 |
+| `ctx.tokens` | `{ input, output }` token 计数。 |
+| `ctx.context` | `{ used, window, usedPercent }`；无法计算时百分比为 `null`。 |
+| `ctx.data` | 仅包含当前插件自己注册的后台数据源结果。 |
+
+更丰富的信息只有在 `permissions.context` 声明对应 scope 后才会出现：
+
+| Scope | 暴露字段 | 结构与限制 |
+| --- | --- | --- |
+| `tabs` | `ctx.tabs` | `{ active, count }`；`active` 从 1 开始。 |
+| `workspace` | `ctx.workspace.modifiedFiles` | 最多 50 条 Git `{ path, added, removed }`。 |
+| `tools` | `ctx.tools.available` | 当前任务启用的工具名，已排序。 |
+| `tools` | `ctx.tools.active` | 当前正在执行的工具名。 |
+| `tools` | `ctx.tools.recent` | 最近最多 20 条 `{ name, status, durationMs }`。 |
+| `tasks` | `ctx.tasks.todoStatuses` | 只有 Todo 状态，不包含 Todo 正文。 |
+| `tasks` | `ctx.tasks.subagents` | `{ type, status }`，不包含 prompt 或对话。 |
+| `tasks` | `ctx.tasks.goal` | `{ active, turn }`，不包含 Goal 正文。 |
+| `services` | `ctx.services.mcp` | `{ name, connected }`。 |
+| `services` | `ctx.services.lsp` | `{ language, running }`。 |
+
+例如：
+
+```json
+{
+  "permissions": {
+    "context": ["tabs", "workspace", "tools", "tasks", "services"]
+  }
+}
+```
+
+`ctx.tools` 是观察接口：插件可以知道有哪些工具、哪些工具正在运行或最近运行过，
+但 UI 插件不能直接调用工具。工具输入/输出、prompt、对话正文、Todo/Goal 正文、
+环境变量值和凭证都不会暴露，也不能借此绕过 Zode 原有的审批系统。
+
+#### 后台 HTTP 数据
+
+UI 插件还可以注册后台 HTTP 数据源。网络域名和凭证环境变量必须在 manifest 中
+显式声明：
+
+```json
+{
+  "permissions": {
+    "network": ["quota.example.com"],
+    "env": ["CODING_PLAN_TOKEN"]
+  }
+}
+```
+
+请求采用声明式配置，在渲染路径之外执行。Zode 只在 Rust 请求层把环境变量组装进
+header，JS 无法读取 token：
+
+```js
+zode.data.define("codingPlan", {
+  refreshIntervalMs: 60000,
+  request: {
+    url: "https://quota.example.com/v1/usage",
+    method: "GET",
+    timeoutMs: 3000,
+    headers: {
+      Authorization: { env: "CODING_PLAN_TOKEN", prefix: "Bearer " }
+    }
+  }
+});
+
+zode.ui.statusLine((ctx) => ({
+  spans: [
+    {
+      text: `remaining ${ctx.data.codingPlan?.data?.remaining ?? "…"}`,
+      tone: "accent"
+    }
+  ]
+}));
+```
+
+`zode.data.define(key, config)` 的 key 长度为 1–64，只能包含字母、数字、下划线
+和连字符。`request` 支持 `url`、`method`、`headers`、可选 JSON `body` 和
+`timeoutMs`。默认使用 `GET`、3 秒超时和 60 秒刷新间隔，目前只允许 HTTPS
+`GET`/`POST`。普通 header 值是字符串；秘密 header 使用
+`{ "env": "NAME", "prefix": "Bearer " }`。环境变量还必须列在
+`permissions.env` 中，只会由 Rust 请求层在发送时读取，永远不会返回给 JS。
+
+Zode 会禁用重定向和代理、校验并固定公网 DNS、拒绝 localhost/私网、把响应限制为
+256 KiB、把请求超时限制在 500 ms 到 10 秒，并将刷新间隔限制在 10 秒到 1 小时。
+`*.example.com` 只匹配子域名，不匹配裸域名 `example.com`。
+
+每个插件只能看到自己的数据。`ctx.data.<key>` 的结果是
+`{ ok, status, data, updatedAt }`，请求失败时为
+`{ ok: false, error, updatedAt }`。JSON 响应会成为对象或数组，非 JSON 响应会
+成为字符串；HTTP 错误状态仍会提供 `status` 和 `data`，同时 `ok` 为 `false`。
+
+调用私有配额或 Coding Plan API 时，需要在启动 Zode 前提供环境变量：
+
+```bash
+CODING_PLAN_TOKEN=... zode
+```
+
+[完整的可运行示例](../../examples/plugins/zode-ui-demo/)会在 sidebar 和状态栏显示
+模型、上下文和工具活动，并通过 `zode.data.define` 读取公开的 GitHub API 配额。
+
+```bash
 zode plugin list --json
 zode plugin details my-plugin
 zode plugin disable my-plugin
@@ -517,7 +725,10 @@ Zode 提供 `tools:browser` 工具组：
 
 Zode 会按层级读取指令：全局 `~/.zode/`、项目根目录、当前工作目录；每层优先使用 `AGENTS.md`，再回退到 `CLAUDE.md`。技能位于 `.zode/skills/**/SKILL.md`，MCP server 位于 `~/.zode/mcp.json`、`.mcp.json` 或 `.zode/mcp.json`，hooks 位于 `~/.zode/hooks.json` 或 `.zode/hooks.json`。
 
-Zode 也可以发现 Claude、Codex、opencode、Cursor 等其他 agent 已安装的技能、命令和 MCP 配置。跨 agent 导入默认偏保守；项目内发现的外部 MCP 默认禁用，需要你显式启用。
+Zode 会读取 Claude Code、Codex、opencode、Cursor、Gemini 等其他 agent 的直接
+skills 目录和 MCP 配置，但不会扫描这些产品安装的 plugin tree 或 plugin cache。
+需要复用插件时，请通过 `zode plugin install ... --trust` 显式安装；通过 Zode
+安装时仍兼容 Codex 与 Claude Code 的插件包格式。
 
 ## ZSeven-W 生态
 

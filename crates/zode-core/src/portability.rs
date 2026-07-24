@@ -1,13 +1,10 @@
 //! Cross-agent portability checks.
 //!
-//! Zode merges skills and slash commands discovered from other coding agents
-//! (Claude / codex / opencode / antigravity / …). Some of those items hard-code
-//! environment variables that only the defining host ever sets — e.g. a Claude
-//! plugin command that runs `${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh`. Under
-//! zode that variable is unset, so the item can only fail. Rather than surface
-//! a command/skill that is broken on arrival, we drop it at load time. Zode's
-//! own items never reference these foreign host variables, so the filter only
-//! ever removes non-portable cross-agent content.
+//! User-copied skills and compatible slash commands can still contain
+//! environment variables that only another host sets — e.g. a Claude plugin
+//! command that runs `${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh`. Under Zode that
+//! variable is unset, so the item can only fail. Rather than surface content
+//! that is broken on arrival, we drop it at load time.
 
 /// Environment variables tied to a specific foreign agent's plugin host. Zode
 /// never sets these, so any skill/command body that interpolates one is

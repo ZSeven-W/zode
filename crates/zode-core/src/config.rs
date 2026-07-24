@@ -1527,6 +1527,16 @@ impl ConfigManager {
         Self::save_global(&cfg)
     }
 
+    /// Persist whether built-in browser control is enabled by default.
+    /// Keep this separate from the `tools:browser` plugin-group switch: the
+    /// `/browser` panel exposes the browser config itself, while `/plugin`
+    /// remains responsible for plugin-group policy.
+    pub fn persist_browser_enabled(enabled: bool) -> Result<(), CoreError> {
+        let mut cfg = Self::load_global()?;
+        cfg.browser.enabled = Some(enabled);
+        Self::save_global(&cfg)
+    }
+
     /// On first run, drop a starter `config.json` into the global config dir so
     /// the user has a real file to edit (provider + a default model; no api key,
     /// so an env key still wins via the fallback). Returns `Ok(true)` when a
@@ -3095,6 +3105,30 @@ mod tests {
                 .browser
                 .default_target(),
             "bridge"
+        );
+        std::env::remove_var("ZODE_CONFIG_DIR");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn browser_enabled_persists_without_clobbering_global_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ZODE_CONFIG_DIR", dir.path());
+        ConfigManager::save_global(&ZodeConfig {
+            theme: Some("mono".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        ConfigManager::persist_browser_enabled(false).unwrap();
+        let saved = ConfigManager::load_global().unwrap();
+        assert_eq!(saved.browser.enabled, Some(false));
+        assert_eq!(saved.theme.as_deref(), Some("mono"));
+
+        ConfigManager::persist_browser_enabled(true).unwrap();
+        assert_eq!(
+            ConfigManager::load_global().unwrap().browser.enabled,
+            Some(true)
         );
         std::env::remove_var("ZODE_CONFIG_DIR");
     }

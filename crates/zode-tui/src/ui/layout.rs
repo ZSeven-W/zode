@@ -33,7 +33,7 @@ pub struct HeaderInfo<'a> {
     pub effort: &'a str,
 }
 
-pub fn split_main(area: Rect, show_tabs: bool) -> ChromeAreas {
+pub fn split_main(area: Rect, show_tabs: bool, status_rows: u16) -> ChromeAreas {
     if area.height <= 1 {
         return ChromeAreas {
             header: None,
@@ -50,7 +50,7 @@ pub fn split_main(area: Rect, show_tabs: bool) -> ChromeAreas {
     } else {
         0
     };
-    let status_h = 1;
+    let status_h = status_rows.clamp(1, 2);
     let reserved_without_chat = header_h + status_h;
     let remaining = area.height.saturating_sub(reserved_without_chat);
     let composer_h = if area.height >= 8 {
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn split_main_allocates_header_right_tabs_chat_composer_status() {
         let area = Rect::new(0, 0, 100, 30);
-        let split = split_main(area, true);
+        let split = split_main(area, true, 1);
         assert_eq!(split.header, Some(Rect::new(0, 0, 64, 1)));
         assert_eq!(split.tabs, Some(Rect::new(64, 0, 36, 30)));
         assert_eq!(split.chat, Rect::new(0, 1, 64, 24));
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn split_main_uses_chat_padding_not_layout_gutter_before_composer() {
         let area = Rect::new(0, 0, 100, 30);
-        let split = split_main(area, true);
+        let split = split_main(area, true, 1);
         let chat_bottom = split.chat.y.saturating_add(split.chat.height);
         assert_eq!(
             split.composer.y.saturating_sub(chat_bottom),
@@ -209,9 +209,18 @@ mod tests {
     }
 
     #[test]
+    fn split_main_grows_status_to_two_rows_on_demand() {
+        let area = Rect::new(0, 0, 100, 30);
+        let split = split_main(area, true, 2);
+        assert_eq!(split.chat, Rect::new(0, 1, 64, 23));
+        assert_eq!(split.composer, Rect::new(0, 24, 64, 4));
+        assert_eq!(split.status, Rect::new(0, 28, 64, 2));
+    }
+
+    #[test]
     fn split_main_hides_right_tabs_when_width_is_tight() {
         let area = Rect::new(0, 0, 95, 30);
-        let split = split_main(area, true);
+        let split = split_main(area, true, 1);
         assert_eq!(split.tabs, None);
         assert_eq!(split.chat, Rect::new(0, 1, 95, 24));
         assert_eq!(split.composer, Rect::new(0, 25, 95, 4));
@@ -221,7 +230,7 @@ mod tests {
     #[test]
     fn split_main_preserves_core_areas_on_short_terminals() {
         let area = Rect::new(0, 0, 80, 6);
-        let split = split_main(area, false);
+        let split = split_main(area, false, 1);
         assert_eq!(split.header, Some(Rect::new(0, 0, 80, 1)));
         assert_eq!(split.tabs, None);
         assert_eq!(split.chat.height, 1);

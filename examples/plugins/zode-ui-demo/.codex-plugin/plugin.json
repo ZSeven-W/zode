@@ -1,0 +1,17 @@
+{
+  "name": "zode-ui-demo",
+  "version": "0.3.0",
+  "description": "Zode JavaScript UI demonstration plugin.",
+  "author": {
+    "name": "Local developer"
+  },
+  "interface": {
+    "displayName": "Zode Ui Demo",
+    "shortDescription": "Demo sidebar and dynamic status line.",
+    "longDescription": "Shows model, context, mode, and session data through Zode's sandboxed JavaScript UI API.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Show the Zode UI plugin demo."
+  }
+}

@@ -56,9 +56,8 @@ const TOOL_TIMEOUT_SECS: u64 = 60;
 /// session starts without the unreachable server.
 pub async fn connect(config: McpConfig) -> Arc<Lifecycle> {
     let registry = McpRegistry::new();
-    // Register every server (so `/mcp` can list disabled ones), but only
-    // CONNECT the enabled ones — foreign/cross-agent servers default to
-    // disabled, so a machine full of them doesn't auto-connect dozens.
+    // Register every server so `/mcp` can list disabled definitions, but only
+    // connect the ones the user or installed plugin enabled.
     let mut names: Vec<String> = Vec::new();
     for (name, server_cfg) in config.servers {
         if server_cfg.enabled() {
@@ -72,9 +71,8 @@ pub async fn connect(config: McpConfig) -> Arc<Lifecycle> {
     let connects = names.into_iter().map(|name| {
         let lc = lifecycle.clone();
         async move {
-            // A failed connect is expected for cross-agent-discovered servers
-            // (not installed / need another env). The `/mcp` dialog shows live
-            // connection state, so log at debug to avoid spamming every launch.
+            // The `/mcp` dialog shows live connection state, so keep connection
+            // failures at debug level instead of spamming every launch.
             match tokio::time::timeout(timeout, lc.connect(&name)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => tracing::debug!("mcp server {name} failed to connect: {e}"),

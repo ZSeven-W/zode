@@ -27,6 +27,14 @@ pub(crate) static TEST_ENV_LOCK: Lazy<tokio::sync::Mutex<()>> =
 use crate::ui::chat::ChatView;
 use crate::ui::status::Mode;
 
+#[derive(Debug, Clone)]
+pub struct ToolActivity {
+    pub id: String,
+    pub name: String,
+    pub status: &'static str,
+    pub duration_ms: Option<u64>,
+}
+
 pub struct SessionTab {
     /// Stable id used to route agent events back to this tab even after other
     /// tabs are closed (a Vec index would shift). Monotonic, app-assigned.
@@ -107,9 +115,14 @@ pub struct SessionTab {
     /// Per-turn process UI state: map tool results back to their visible tool
     /// call names.
     pub active_tool_names: HashMap<String, String>,
+    /// Raw stable tool names keyed by tool-use id. UI plugins may observe
+    /// these names/statuses, but never tool inputs or outputs.
+    pub active_tool_api_names: HashMap<String, String>,
     /// Tool-call start instants keyed by tool_use id, for the chat row's
     /// completion-duration suffix. Cleared with `active_tool_names`.
     pub active_tool_started: HashMap<String, std::time::Instant>,
+    /// Bounded, metadata-only tool activity visible to trusted UI plugins.
+    pub recent_tools: std::collections::VecDeque<ToolActivity>,
     /// Messages typed while a turn was in flight, held FIFO and sent one per
     /// turn once this tab goes idle (Claude-style input queueing).
     pub queued_input: std::collections::VecDeque<String>,
@@ -213,7 +226,9 @@ impl SessionTab {
             auto_compact_failures: 0,
             cost_label: "$0.00".into(),
             active_tool_names: HashMap::new(),
+            active_tool_api_names: HashMap::new(),
             active_tool_started: HashMap::new(),
+            recent_tools: std::collections::VecDeque::new(),
             queued_input: std::collections::VecDeque::new(),
             pending_images: Vec::new(),
             pending_shell_context: Vec::new(),

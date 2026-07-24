@@ -67,12 +67,16 @@ fn execute(action: &PluginCommand, cwd: &Path) -> Result<String, zode_core::Core
             let path = resolve_path(cwd, path);
             Ok(serde_json::to_string_pretty(&manager.validate(&path)?)?)
         }
-        PluginCommand::Install { source, trust } => Ok(serde_json::to_string_pretty(
-            &manager.install(source, cwd, *trust)?,
-        )?),
-        PluginCommand::Update { name } => Ok(serde_json::to_string_pretty(
-            &manager.update(name.as_deref(), cwd)?,
-        )?),
+        PluginCommand::Install { source, trust } => {
+            let installed = manager.install(source, cwd, *trust)?;
+            warn_permissions(std::slice::from_ref(&installed));
+            Ok(serde_json::to_string_pretty(&installed)?)
+        }
+        PluginCommand::Update { name, trust } => {
+            let updated = manager.update(name.as_deref(), cwd, *trust)?;
+            warn_permissions(&updated);
+            Ok(serde_json::to_string_pretty(&updated)?)
+        }
         PluginCommand::Uninstall { name, keep_data } => Ok(serde_json::to_string_pretty(
             &manager.uninstall(name, *keep_data)?,
         )?),
@@ -137,6 +141,21 @@ fn marketplace(
         MarketplaceCommand::Remove { name } => Ok(serde_json::to_string_pretty(
             &manager.marketplace_remove(name)?,
         )?),
+    }
+}
+
+/// Surface each plugin's declared capability grant on stderr, so a `--trust`
+/// install/update is informed consent rather than a blind flag. Stdout keeps
+/// the stable machine-readable JSON (which now also carries `permissions`).
+fn warn_permissions(plugins: &[zode_core::plugin_package::InstalledPlugin]) {
+    for plugin in plugins {
+        if !plugin.permissions.is_empty() {
+            eprintln!(
+                "zode plugin: {} may use {}",
+                plugin.name,
+                plugin.permissions.summary()
+            );
+        }
     }
 }
 

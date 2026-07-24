@@ -566,6 +566,9 @@ pub struct TuiApp {
     input: InputBox,
     pending_cursor_seq: Option<FragmentedCursorSeqState>,
     status: StatusBar,
+    ui_extensions: zode_core::ui_extensions::UiExtensionHost,
+    ui_data_revision: u64,
+    status_rows: u16,
     theme_store: ThemeStore,
     theme: Theme,
     should_quit: bool,
@@ -1148,6 +1151,13 @@ impl TuiApp {
             input: InputBox::new(),
             pending_cursor_seq: None,
             status,
+            ui_extensions: if cfg!(test) {
+                zode_core::ui_extensions::UiExtensionHost::default()
+            } else {
+                zode_core::ui_extensions::UiExtensionHost::load()
+            },
+            ui_data_revision: 0,
+            status_rows: 1,
             theme_store,
             theme,
             should_quit: false,
@@ -2537,6 +2547,7 @@ impl TuiApp {
             tab.reassemble_pending = true;
             tab.mode = Mode::Switching;
             tab.active_tool_names.clear();
+            tab.active_tool_api_names.clear();
             tab.active_tool_started.clear();
         }
 
@@ -2644,6 +2655,16 @@ impl TuiApp {
                 if !tab_creation && !extension_reconfigure {
                     self.template = done.template;
                     self.status.model = model;
+                    // The `/browser` panel's default-enabled flag lives on the
+                    // shared session; sync it only now that the new tool set is
+                    // real (a failed rebuild must not flip the visible state).
+                    self.template.sync_browser_session_enabled();
+                    // Re-read managed UI plugin renderers so plugin
+                    // install/enable/disable done since the last load (e.g.
+                    // via the `zode plugin` CLI) takes effect — including
+                    // stopping a removed plugin's background HTTP data tasks.
+                    // Cheap no-op when nothing changed.
+                    self.ui_extensions.reload();
                 }
                 if self.active < self.tabs.len() && self.tabs[self.active].id == tab_id {
                     self.refresh_dynamic_commands();
@@ -3808,6 +3829,9 @@ impl TuiApp {
                 }
                 _ = ticker.tick() => {
                     self.status.tick();
+                    let ui_data_revision = self.ui_extensions.data_revision();
+                    let ui_data_changed = ui_data_revision != self.ui_data_revision;
+                    self.ui_data_revision = ui_data_revision;
                     self.retry_pending_schedule_finalizers(std::time::Instant::now());
                     if !self.should_quit {
                         self.poll_queued_watchdog();
@@ -3847,7 +3871,8 @@ impl TuiApp {
                     // animates (spinner, toast countdown) is active, so the
                     // frame would be identical. Any real event path leaves
                     // `skip_next_draw` false and redraws normally.
-                    let animating = any_busy || self.toast.is_some() || had_toast;
+                    let animating =
+                        any_busy || self.toast.is_some() || had_toast || ui_data_changed;
                     self.skip_next_draw = !animating && !overlay_open;
                 }
             }
@@ -3897,8 +3922,159 @@ impl TuiApp {
         let active_busy = self.tabs[self.active].is_busy();
         let active_cost = self.tabs[self.active].cost_label.clone();
         let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_visibility);
+        // UI plugin extensions: the render context below is allocation-heavy
+        // (tool lists, git files, service maps), so skip all of it when no
+        // renderer is installed — the overwhelmingly common case.
+        let (status_extensions, sidebar_extensions) = if self.ui_extensions.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            let active_session_id = self.tabs[self.active].session_id.clone();
+            let mut available_tools = self.tabs[self.active]
+                .engine
+                .tools
+                .names()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            available_tools.sort();
+            let mut active_tools = self.tabs[self.active]
+                .active_tool_api_names
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            active_tools.sort();
+            active_tools.dedup();
+            let recent_tools = self.tabs[self.active]
+                .recent_tools
+                .iter()
+                .map(|activity| {
+                    serde_json::json!({
+                        "name": activity.name,
+                        "status": activity.status,
+                        "durationMs": activity.duration_ms
+                    })
+                })
+                .collect::<Vec<_>>();
+            let workspace_files = self.tabs[self.active]
+                .git_files
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .take(50)
+                .map(|file| {
+                    serde_json::json!({
+                        "path": file.path,
+                        "added": file.added,
+                        "removed": file.removed
+                    })
+                })
+                .collect::<Vec<_>>();
+            let todo_statuses = self.tabs[self.active]
+                .todos
+                .iter()
+                .map(|todo| format!("{:?}", todo.status).to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            let mcp_services = self.tabs[self.active]
+                .mcp_status
+                .iter()
+                .map(|(name, connected)| serde_json::json!({"name": name, "connected": connected}))
+                .collect::<Vec<_>>();
+            let lsp_services = self.tabs[self.active]
+            .lsp_status
+            .iter()
+            .map(
+                |(language, running)| serde_json::json!({"language": language, "running": running}),
+            )
+            .collect::<Vec<_>>();
+            let subagent_states = self
+                .subagents
+                .iter()
+                .map(|agent| {
+                    serde_json::json!({
+                        "type": agent.agent_type,
+                        "status": format!("{:?}", agent.status).to_ascii_lowercase()
+                    })
+                })
+                .collect::<Vec<_>>();
 
-        let areas = split_main(area, show_sidebar);
+            let context_percent = (self.status.context_window > 0).then(|| {
+                (self.status.context_tokens as u64 * 100 / self.status.context_window as u64)
+                    .min(100)
+            });
+            let ui_context = serde_json::json!({
+                "apiVersion": 1,
+                "terminal": {
+                    "width": area.width,
+                    "height": area.height
+                },
+                "session": {
+                    "id": active_session_id,
+                    "title": &active_title,
+                    "cwd": active_cwd.display().to_string(),
+                    "busy": active_busy
+                },
+                "model": {
+                    "id": &active_model,
+                    "provider": &self.status.provider
+                },
+                "status": {
+                    "mode": format!("{:?}", self.status.mode).to_ascii_lowercase(),
+                    "planMode": self.status.plan_mode,
+                    "selectionMode": self.status.selection_mode,
+                    "yolo": self.status.yolo,
+                    "sandbox": {
+                        "enabled": self.status.sandbox,
+                        "readOnly": self.status.sandbox_read_only,
+                        "network": self.status.sandbox_network
+                    }
+                },
+                "tokens": {
+                    "input": self.status.input_tokens,
+                    "output": self.status.output_tokens
+                },
+                "context": {
+                    "used": self.status.context_tokens,
+                    "window": self.status.context_window,
+                    "usedPercent": context_percent
+                },
+                "app": {
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "effort": self.template.effort().unwrap_or("medium")
+                },
+                "tabs": {
+                    "active": self.active + 1,
+                    "count": self.tabs.len()
+                },
+                "workspace": {
+                    "modifiedFiles": workspace_files
+                },
+                "tools": {
+                    "available": available_tools,
+                    "active": active_tools,
+                    "recent": recent_tools
+                },
+                "tasks": {
+                    "todoStatuses": todo_statuses,
+                    "subagents": subagent_states,
+                    "goal": {
+                        "active": self.tabs[self.active].goal_loop_active,
+                        "turn": self.tabs[self.active].goal_loop_iter
+                    }
+                },
+                "services": {
+                    "mcp": mcp_services,
+                    "lsp": lsp_services
+                }
+            });
+            let status = self.ui_extensions.status_line(ui_context.clone()).to_vec();
+            let sidebar = if show_sidebar {
+                self.ui_extensions.sidebar(ui_context).to_vec()
+            } else {
+                Vec::new()
+            };
+            (status, sidebar)
+        };
+        self.status_rows = if status_extensions.is_empty() { 1 } else { 2 };
+        let areas = split_main(area, show_sidebar, self.status_rows);
         if let Some(header) = areas.header {
             render_header(
                 f,
@@ -3948,6 +4124,7 @@ impl TuiApp {
                     files_collapsed: self.files_section_collapsed,
                     version: env!("CARGO_PKG_VERSION"),
                 },
+                &sidebar_extensions,
                 &theme,
             );
             self.sidebar_hits = hits;
@@ -4022,7 +4199,8 @@ impl TuiApp {
             completion_placeholder,
             self.active_input_selection,
         );
-        self.status.render(f, areas.status, &theme);
+        self.status
+            .render(f, areas.status, &theme, &status_extensions);
         // Autocomplete popup floats above the input row.
         self.autocomplete.render(f, input_area, &theme);
         // @-mention popup occupies the same band; the two are mutually exclusive
@@ -5132,7 +5310,7 @@ impl TuiApp {
         };
         let area = Rect::new(0, 0, width, height);
         let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_visibility);
-        let areas = split_main(area, show_sidebar);
+        let areas = split_main(area, show_sidebar, self.status_rows);
         let input_area = self.input_area_for_composer(areas.composer);
 
         if self.selection_mode {
@@ -5326,7 +5504,7 @@ impl TuiApp {
             };
             let area = Rect::new(0, 0, width, height);
             let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_visibility);
-            let chat_area = split_main(area, show_sidebar).chat;
+            let chat_area = split_main(area, show_sidebar, self.status_rows).chat;
             self.copy_chat_selection(selection, chat_area);
         } else if let Some(selection) = self.active_input_selection {
             self.copy_input_selection(selection);
@@ -5579,6 +5757,7 @@ impl TuiApp {
             // and the `tools:browser` plugin-group toggle. Either one being off
             // means zero browser tools are actually live.
             group_enabled: engine.browser.enabled() && engine.plugins.is_enabled("tools:browser"),
+            default_enabled: engine.browser.enabled(),
             target: match engine.browser.target() {
                 zode_core::browser::BrowserTarget::Managed => "managed".into(),
                 zode_core::browser::BrowserTarget::Bridge => "bridge".into(),
@@ -6298,20 +6477,33 @@ impl TuiApp {
                 status = self.browser_panel_status();
             }
             BrowserPanelAction::ToggleDefault => {
-                // Reuse the SAME toggle+persist+reassemble path the `/plugin`
-                // picker uses on close, so `tools:browser` round-trips through
-                // config exactly like every other tool group.
-                let enabled = status.group_enabled;
-                let disabled = if enabled {
-                    vec!["tools:browser".to_string()]
-                } else {
-                    Vec::new()
-                };
-                self.apply_plugins(disabled, vec!["tools:browser".to_string()], agent_tx)
-                    .await;
-                // Reassembly runs off-loop (ReassembleDone lands later), so
-                // reflect the intended state immediately for a responsive UI.
-                status.group_enabled = !enabled;
+                if self.active_tab().is_busy() {
+                    self.toast = Some(Toast::info(crate::tr(
+                        "can't switch during a turn — Ctrl+C first",
+                    )));
+                    return;
+                }
+                let enabled = !status.default_enabled;
+                if let Err(e) = ConfigManager::persist_browser_enabled(enabled) {
+                    self.toast = Some(Toast::error(format!(
+                        "{}: {e}",
+                        crate::tr("save config failed")
+                    )));
+                    return;
+                }
+                let t = self.template.with_browser_enabled(enabled);
+                self.start_reassemble_active(
+                    t,
+                    ReassembleEffect::Notify(ReassembleNotify::Toast(
+                        crate::tr("browser config updated").to_string(),
+                    )),
+                    agent_tx,
+                );
+                // Reassembly lands asynchronously; reflect the saved intent
+                // immediately while retaining any independent plugin disable.
+                status.default_enabled = enabled;
+                status.group_enabled =
+                    enabled && self.active_tab().engine.plugins.is_enabled("tools:browser");
             }
         }
         if let Some(p) = &mut self.browser_panel {
@@ -7496,6 +7688,7 @@ impl TuiApp {
                 tab.turn_started_at = None;
                 tab.turn_tool_count = 0;
                 tab.active_tool_names.clear();
+                tab.active_tool_api_names.clear();
                 tab.active_tool_started.clear();
                 tab.chat.end_turn();
                 tab.mode = if quarantine.is_some()
@@ -8134,6 +8327,7 @@ impl TuiApp {
         // so text after a tool card starts a fresh segment.
         tab.mode = Mode::Thinking;
         tab.active_tool_names.clear();
+        tab.active_tool_api_names.clear();
         tab.active_tool_started.clear();
         // Fresh turn: reset the per-turn tool-use flag (goal no-progress).
         tab.turn_used_tools = false;
@@ -8633,6 +8827,7 @@ impl TuiApp {
             tab.active_local_op_id = None;
             tab.turn_abort = None;
             tab.active_tool_names.clear();
+            tab.active_tool_api_names.clear();
             tab.active_tool_started.clear();
             match result {
                 Ok(line) => {
@@ -8790,6 +8985,7 @@ impl TuiApp {
                     tab.turn_started_at = None;
                     tab.turn_tool_count = 0;
                     tab.active_tool_names.clear();
+                    tab.active_tool_api_names.clear();
                     tab.active_tool_started.clear();
                     let allow_append = !tab.store_dirty;
                     tab.store_dirty = false;
@@ -8867,15 +9063,42 @@ impl TuiApp {
                         tab.turn_tool_count = tab.turn_tool_count.saturating_add(1);
                         let title = tool_call_title(name, input);
                         tab.active_tool_names.insert(id.clone(), title);
+                        tab.active_tool_api_names.insert(id.clone(), name.clone());
                         tab.active_tool_started
                             .insert(id.clone(), std::time::Instant::now());
+                        tab.recent_tools.push_back(crate::tab::ToolActivity {
+                            id: id.clone(),
+                            name: name.clone(),
+                            status: "running",
+                            duration_ms: None,
+                        });
+                        while tab.recent_tools.len() > 20 {
+                            tab.recent_tools.pop_front();
+                        }
                         if let Some(line) = process_line_for_event(&event, None) {
                             tab.chat.push_tool(&line);
                         }
                     }
                     Event::ToolResult { ref id, .. } => {
                         let known_tool = tab.active_tool_names.remove(id);
+                        tab.active_tool_api_names.remove(id);
                         let started = tab.active_tool_started.remove(id);
+                        if let Some(activity) = tab
+                            .recent_tools
+                            .iter_mut()
+                            .rev()
+                            .find(|item| item.id == *id)
+                        {
+                            activity.status =
+                                if matches!(&event, Event::ToolResult { ok: true, .. }) {
+                                    "succeeded"
+                                } else {
+                                    "failed"
+                                };
+                            activity.duration_ms = started.map(|instant| {
+                                u64::try_from(instant.elapsed().as_millis()).unwrap_or(u64::MAX)
+                            });
+                        }
                         let cwd = tab.engine.cwd.clone();
                         if let Some(line) = process_line_for_event_with_cwd(
                             &event,
@@ -8974,6 +9197,7 @@ impl TuiApp {
                 let mut schedule_attempt_lease = tab.watchdog_attempt_lease.take();
                 tab.active_turn_id = 0;
                 tab.active_tool_names.clear();
+                tab.active_tool_api_names.clear();
                 tab.active_tool_started.clear();
                 let turn_elapsed = tab.turn_started_at.take().map(|t| t.elapsed());
                 let tool_count = std::mem::take(&mut tab.turn_tool_count);
@@ -14112,6 +14336,11 @@ mod tests {
             last_tool_line.contains(" · ") && last_tool_line.trim_end().ends_with('s'),
             "expected duration suffix, got: {last_tool_line}"
         );
+        assert!(app.tabs[0].active_tool_api_names.is_empty());
+        let activity = app.tabs[0].recent_tools.back().expect("tool activity");
+        assert_eq!(activity.name, "Bash");
+        assert_eq!(activity.status, "succeeded");
+        assert!(activity.duration_ms.is_some());
     }
 
     #[tokio::test]

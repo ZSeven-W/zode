@@ -50,7 +50,7 @@
 - **Automation surfaces** — stable JSON/JSONL headless output, exact session targeting, tool filters, deterministic exit codes, ACP over stdio, and a local operations dashboard
 - **Multi-session tabs** — run several conversations side by side (`Ctrl+T`), each an isolated agent; resume past sessions with full history replay
 - **Sub-agents, teams & workflows** — delegate one-shot work through the Task tool, hire persistent internal or external-CLI teammates, coordinate them with a shared board and file claims, and manage the surfaces with `/agents`, `/team`, and `/workflows`
-- **Cross-agent ecosystem** — discovers skills, slash commands, and MCP servers from Claude / Codex / opencode / antigravity / pi / kilo / cursor (plus their plugin trees), with zode's own taking precedence; foreign integrations are off by default and non-portable ones are filtered out
+- **Portable local configuration** — reads direct skills and MCP configuration from Claude Code, Codex, Cursor, opencode, and Gemini, while never importing their installed plugin trees or caches
 - **Skills & MCP** — load `SKILL.md` instruction packs on demand and connect MCP servers (`mcp__<server>__<tool>`); created agents, skills, and MCP tools surface as slash commands
 - **Hooks** — run external scripts on tool events (e.g. block dangerous commands, lint after edits)
 - **Three-level instructions** — global (`~/.zode/`) → project root → cwd (`AGENTS.md` / `CLAUDE.md`)
@@ -456,15 +456,242 @@ Built-in profiles are `read-only`, `workspace`, `workspace-network`, and
 ### Plugins and static marketplaces
 
 A managed plugin can contribute skills, commands, agents, hooks, MCP servers,
-and LSP servers. Zode accepts `plugin.json`, `.zode-plugin/plugin.json`,
-`.grok-plugin/plugin.json`, and `.claude-plugin/plugin.json`; installs are
-immutable snapshots with provenance and a SHA-256 tree hash. Executable plugin
-content is never activated without the explicit `--trust` flag.
+LSP servers, and sandboxed JavaScript UI renderers. Zode accepts `plugin.json`, `.zode-plugin/plugin.json`,
+`.codex-plugin/plugin.json`, `.grok-plugin/plugin.json`, and
+`.claude-plugin/plugin.json`. Codex and Claude Code component path arrays are
+supported, and Claude Code's `defaultEnabled` is honored on first install.
+Host-only components such as Codex apps/connectors and Claude Code themes,
+monitors, or output styles are ignored; an app-only plugin is rejected because
+it has no Zode-compatible component. Installs are immutable snapshots with
+provenance and a SHA-256 tree hash. Executable plugin content is never activated
+without the explicit `--trust` flag.
+
+#### JavaScript UI plugin quick start
+
+The smallest UI plugin contains a manifest and one JavaScript file:
+
+```text
+my-plugin/
+├── plugin.json
+└── scripts/
+    └── ui.js
+```
+
+`plugin.json`:
+
+```json
+{
+  "name": "my-plugin",
+  "version": "0.1.0",
+  "ui": {
+    "sidebar": "./scripts/ui.js",
+    "statusLine": "./scripts/ui.js"
+  },
+  "permissions": {
+    "network": ["quota.example.com"],
+    "env": ["CODING_PLAN_TOKEN"],
+    "context": ["tabs", "workspace", "tools", "tasks", "services"]
+  }
+}
+```
+
+Install a local directory or a GitHub repository/subdirectory, then restart a
+running Zode process so it loads the new snapshot:
 
 ```bash
 zode plugin validate ./my-plugin
 zode plugin install ./my-plugin --trust
 zode plugin install owner/repo@main#plugins/my-plugin --trust
+zode plugin list
+```
+
+Use `zode plugin update my-plugin` after changing the source. `--trust` is
+required because JavaScript, hooks, MCP servers, and declared network access are
+executable capabilities. Install and update print the plugin's declared
+permission grant (network hosts, env vars, context scopes). An update whose
+manifest requests *broader* permissions than the installed snapshot is refused
+unless you rerun it with `--trust` — a moving Git source cannot silently widen
+its own grant.
+
+#### UI render API
+
+UI plugins can contribute declarative rows immediately above the sidebar
+version — at most six rows in total, shared across all plugins in load order.
+Declare a JavaScript entrypoint in the manifest:
+
+```json
+{
+  "name": "my-sidebar",
+  "ui": {
+    "sidebar": "./ui/sidebar.js",
+    "statusLine": "./ui/status-line.js"
+  }
+}
+```
+
+Register a synchronous renderer with `zode.ui.sidebar`. The context is a
+read-only JSON snapshot containing terminal, session, model, status, token, and
+context-window fields. The result is rendered by Zode; scripts receive no
+filesystem, network, terminal, or Ratatui bridge.
+
+```js
+zode.ui.sidebar((ctx) => ({
+  lines: [
+    {
+      spans: [
+        { text: ctx.model.id, tone: "accent", bold: true },
+        { text: `  ctx ${ctx.context.usedPercent ?? "?"}%`, tone: "muted" }
+      ]
+    }
+  ]
+}));
+```
+
+Supported tones are `default`, `muted`, `accent`, `success`, `warning`, and
+`danger`; spans also accept `bold` and `italic`. A renderer must be synchronous.
+Each script is limited to 256 KiB, 8 MiB of JS memory, and 25 ms per evaluation,
+and renderers are re-evaluated at most every 250 ms (cached output is reused
+between evaluations). Sidebar output is limited to 6 lines per renderer (6 in
+total across plugins), each line to 16 spans and 2,048 bytes of text. Control
+characters are sanitized by the host.
+
+The status bar is also extensible. It remains one row when no plugin returns
+content and grows to two rows dynamically when a synchronous
+`zode.ui.statusLine` renderer returns spans. Zode keeps its core status and
+safety indicators on the first row; plugin output is composed on the second.
+
+```js
+zode.ui.statusLine((ctx) => ({
+  spans: [
+    { text: ctx.session.title, tone: "accent", bold: true },
+    { text: `  ↑${ctx.tokens.input} ↓${ctx.tokens.output}`, tone: "muted" }
+  ]
+}));
+```
+
+#### Render context and permissions
+
+Every renderer receives the following base fields without requesting additional
+context permission:
+
+| Field | Shape and meaning |
+| --- | --- |
+| `ctx.apiVersion` | Context API version; currently `1`. |
+| `ctx.app` | `{ version, effort }`. |
+| `ctx.terminal` | `{ width, height }` in terminal cells. |
+| `ctx.session` | `{ id, title, cwd, busy }` for the active task. |
+| `ctx.model` | `{ id, provider }`. |
+| `ctx.status` | `{ mode, planMode, selectionMode, yolo, sandbox }`; `sandbox` contains `{ enabled, readOnly, network }`. |
+| `ctx.tokens` | `{ input, output }` token counters. |
+| `ctx.context` | `{ used, window, usedPercent }`; the percentage can be `null`. |
+| `ctx.data` | Results belonging only to data sources registered by this plugin. |
+
+Richer sections are omitted unless the plugin requests the matching scope in
+`permissions.context`:
+
+| Scope | Exposed field | Shape and limits |
+| --- | --- | --- |
+| `tabs` | `ctx.tabs` | `{ active, count }`; `active` is one-based. |
+| `workspace` | `ctx.workspace.modifiedFiles` | Up to 50 `{ path, added, removed }` Git entries. |
+| `tools` | `ctx.tools.available` | Sorted names of tools enabled for the active task. |
+| `tools` | `ctx.tools.active` | Names of tools currently executing. |
+| `tools` | `ctx.tools.recent` | Up to 20 `{ name, status, durationMs }` records. |
+| `tasks` | `ctx.tasks.todoStatuses` | Todo status strings only, without todo text. |
+| `tasks` | `ctx.tasks.subagents` | `{ type, status }` records, without prompts or transcripts. |
+| `tasks` | `ctx.tasks.goal` | `{ active, turn }`, without goal text. |
+| `services` | `ctx.services.mcp` | `{ name, connected }` records. |
+| `services` | `ctx.services.lsp` | `{ language, running }` records. |
+
+For example:
+
+```json
+{
+  "permissions": {
+    "context": ["tabs", "workspace", "tools", "tasks", "services"]
+  }
+}
+```
+
+`ctx.tools` is an observation API: it tells a renderer which tools exist and
+which tools are or were running. UI plugins cannot invoke a tool. Tool inputs,
+tool outputs, prompts, transcript content, todo/goal text, environment values,
+and credentials are not included, and the API cannot bypass Zode's approval
+system.
+
+#### Background HTTP data
+
+UI plugins can also register background HTTP data sources. Network and secret
+access must be declared in the manifest:
+
+```json
+{
+  "permissions": {
+    "network": ["quota.example.com"],
+    "env": ["CODING_PLAN_TOKEN"]
+  }
+}
+```
+
+The request is declarative and runs outside the render path. Secret environment
+variables are assembled into headers by Zode and are never exposed to
+JavaScript:
+
+```js
+zode.data.define("codingPlan", {
+  refreshIntervalMs: 60000,
+  request: {
+    url: "https://quota.example.com/v1/usage",
+    method: "GET",
+    timeoutMs: 3000,
+    headers: {
+      Authorization: { env: "CODING_PLAN_TOKEN", prefix: "Bearer " }
+    }
+  }
+});
+
+zode.ui.statusLine((ctx) => ({
+  spans: [
+    {
+      text: `remaining ${ctx.data.codingPlan?.data?.remaining ?? "…"}`,
+      tone: "accent"
+    }
+  ]
+}));
+```
+
+`zode.data.define(key, config)` accepts a 1–64 character alphanumeric,
+underscore, or hyphen key. `request` supports `url`, `method`, `headers`,
+optional JSON `body`, and `timeoutMs`. Defaults are `GET`, 3-second timeout,
+and a 60-second refresh. Only HTTPS `GET` and `POST` are accepted. Literal
+headers are strings; a secret header uses
+`{ "env": "NAME", "prefix": "Bearer " }`. The environment variable must also
+appear in `permissions.env`, is read only by Rust when building the request,
+and is never returned to JavaScript.
+
+Zode disables redirects and proxies, validates and pins public DNS addresses,
+rejects localhost/private networks, caps responses at 256 KiB, clamps request
+timeouts to 500 ms–10 seconds, and clamps refresh intervals to
+10 seconds–1 hour. A wildcard such as `*.example.com` matches subdomains but
+not the bare `example.com` host.
+
+Each plugin sees only its own data. `ctx.data.<key>` contains
+`{ ok, status, data, updatedAt }` or
+`{ ok: false, error, updatedAt }`. JSON responses become objects/arrays;
+non-JSON responses become strings. An HTTP error status still includes
+`status` and `data`, with `ok: false`.
+
+Start Zode with the required secret in its environment when using a private
+quota or coding-plan API:
+
+```bash
+CODING_PLAN_TOKEN=... zode
+```
+
+The [complete runnable example](examples/plugins/zode-ui-demo/) displays
+model/context/tool activity in the sidebar and status line and uses
+`zode.data.define` for a public GitHub API quota.
+
+```bash
 zode plugin list --json
 zode plugin details my-plugin
 zode plugin disable my-plugin
@@ -849,14 +1076,12 @@ directory it prefers `AGENTS.md` over `CLAUDE.md`. Skills live under
 `.zode/skills/**/SKILL.md`; MCP servers in `~/.zode/mcp.json` ⊕ `.mcp.json`;
 hooks in `~/.zode/hooks.json` ⊕ `.zode/hooks.json`.
 
-**Cross-agent compatibility.** Zode also discovers skills, slash commands, and
-MCP servers already installed for other coding agents — Claude (`~/.claude`),
-Codex (`~/.codex`), opencode, antigravity, pi, kilo, cursor — including their
-plugin trees. Zode's own definitions take precedence on a name clash. Foreign
-MCP servers and foreign-plugin commands are **off by default** (copy one into a
-`.zode/` dir to opt in), and skills/commands that hard-code another agent's host
-variables (e.g. `${CLAUDE_PLUGIN_ROOT}`) are filtered out since they can't run
-here. Hooks are **not** imported from other agents (they execute shell commands).
+**Cross-agent configuration.** Zode reads direct skills and MCP configuration
+from Claude Code, Codex, Cursor, opencode, Gemini, and related local agents.
+Installed plugin trees and plugin caches belonging to those products are never
+scanned. To reuse a plugin, install its source explicitly with
+`zode plugin install ... --trust`; Codex and Claude Code package formats remain
+supported for plugins installed through Zode.
 
 ## Configuring MCP Servers
 
@@ -917,16 +1142,12 @@ connected / disconnected / disabled — with Space to toggle one on or off; the
 sidebar's collapsible `mcp` section (click its ▼ header, or `/sidebar mcp`)
 mirrors the same live connection state at a glance.
 
-**Cross-agent discovery.** Zode also adopts MCP servers already configured for
-Claude (`~/.claude.json`), Cursor (`~/.cursor/mcp.json`), opencode, Gemini,
-and Codex (`~/.codex/config.toml`) from your home directory — so an existing
-setup works with zero extra config. The same files found *inside a project*
-(e.g. a cloned repo's `.cursor/mcp.json`) are discovered but **disabled by
-default**, since a workspace shouldn't be able to silently spawn processes;
-opt one in via `/mcp` or by declaring it in zode's own `.mcp.json`, which
-always takes precedence on a name clash. `openpencil` is reserved — op-bridge
-(see below) drives it natively, so any server declared under that name is
-ignored.
+Zode also reads direct MCP configuration from Claude Code, Codex, Cursor,
+opencode, and Gemini. Home configuration is treated as the user's setup;
+project-local foreign MCP definitions are discovered disabled and can be
+enabled through `/mcp`. MCP declarations buried in another product's installed
+plugin tree are not scanned. `openpencil` is reserved — op-bridge (see below)
+drives it natively, so any server declared under that name is ignored.
 
 ## Installing Skills & Command Markdown
 
@@ -956,8 +1177,10 @@ The skill now shows up in `/skills`, the agent can invoke it on its own via
 the Skill tool, and it also becomes a dynamic slash command — typing
 `/code-review look at src/lib.rs` expands to a prompt that runs the skill.
 Extra files next to `SKILL.md` (references, scripts) ship with the skill.
-Skills already installed for Claude / Codex / opencode / cursor etc. are
-picked up automatically from their home dirs — a zode skill wins name clashes.
+Direct skills directories belonging to Claude Code, Codex, opencode, Cursor,
+and related agents are scanned. Skills buried inside those products' installed
+plugin trees or caches are not; install the plugin explicitly through Zode if
+you want to use it here.
 
 ### Install a command (prompt Markdown)
 

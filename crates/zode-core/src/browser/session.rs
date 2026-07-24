@@ -2,7 +2,7 @@
 //! operations serialized by the slot mutex (agent dispatches tools
 //! concurrently; "current tab" is session state — see spec).
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
@@ -22,6 +22,7 @@ pub struct BrowserSession {
     cfg: BrowserConfig,
     factory: Arc<dyn BackendFactory>,
     bridge: Arc<BridgeServer>,
+    enabled: AtomicBool,
     target: StdMutex<BrowserTarget>,
     slot: tokio::sync::Mutex<Option<Arc<dyn BrowserBackend>>>,
     perm_flags: StdMutex<Vec<(String, Arc<AtomicBool>)>>,
@@ -48,10 +49,12 @@ impl BrowserSession {
             "bridge" => BrowserTarget::Bridge,
             _ => BrowserTarget::Managed,
         };
+        let enabled = cfg.enabled();
         Arc::new(Self {
             cfg,
             factory,
             bridge: BridgeServer::new(),
+            enabled: AtomicBool::new(enabled),
             target: StdMutex::new(target),
             slot: tokio::sync::Mutex::new(None),
             perm_flags: StdMutex::new(Vec::new()),
@@ -101,7 +104,15 @@ impl BrowserSession {
     /// plugin-group toggle — callers that need "are the tools actually live"
     /// must check both (see `app.rs` `browser_panel_status`).
     pub fn enabled(&self) -> bool {
-        self.cfg.enabled()
+        self.enabled.load(Ordering::SeqCst)
+    }
+
+    /// Update the live config view used by the `/browser` panel. Engine
+    /// reassembly separately uses `EngineTemplate::cfg` to add or remove the
+    /// actual tools; keeping this flag on the shared session avoids replacing
+    /// the browser process just to reflect a config toggle.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::SeqCst);
     }
 
     pub fn set_target(&self, t: BrowserTarget) -> Result<(), BrowserError> {
@@ -251,6 +262,20 @@ mod tests {
         };
         let s = BrowserSession::new(cfg, MockFactory::new());
         assert!(matches!(s.target(), BrowserTarget::Bridge));
+    }
+
+    #[test]
+    fn enabled_can_be_updated_without_replacing_the_session() {
+        let s = BrowserSession::new(
+            BrowserConfig {
+                enabled: Some(false),
+                ..Default::default()
+            },
+            MockFactory::new(),
+        );
+        assert!(!s.enabled());
+        s.set_enabled(true);
+        assert!(s.enabled());
     }
 
     #[tokio::test]

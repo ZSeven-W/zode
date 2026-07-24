@@ -13,53 +13,29 @@ use serde_json::{json, Value};
 
 use crate::config::ConfigManager;
 
-/// Skills dirs, low → high precedence (later dirs override same-named earlier
-/// skills). Cross-agent compat sources (opencode / Claude / agents.md / codex,
-/// each global then project) come first, then zode's own (global then project)
-/// last — so a zode skill always wins a name clash, per "zode highest priority".
+/// Skill directories, low → high precedence.
 ///
-/// Foreign PLUGIN trees (`~/.claude/plugins`, `~/.codex/plugins`, opencode
-/// plugins) ARE scanned: the plugins living there (e.g. Claude's
-/// `superpowers`) were installed by the USER through that product's plugin
-/// manager — user-installed content, not product built-ins (those ship
-/// inside the app bundle, not under `~/.claude`). Unwanted individual
-/// skills are disabled via `/plugin` (`plugins.disabled`).
+/// Direct skill directories belonging to other agents are portable user
+/// configuration and are scanned. Their plugin caches are deliberately not
+/// scanned; install a plugin explicitly through Zode to use it here.
 pub fn skills_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    let home = dirs::home_dir();
-
-    // 1. Global cross-agent sources (lowest precedence).
-    if let Some(h) = &home {
-        dirs.push(h.join(".config").join("opencode").join("skills")); // opencode
-        dirs.push(h.join(".claude").join("skills")); // Claude
-        dirs.push(h.join(".agents").join("skills")); // agents.md ecosystem
-        dirs.push(h.join(".codex").join("skills")); // codex
-        dirs.push(h.join(".gemini").join("antigravity-cli").join("skills")); // antigravity
-        dirs.push(h.join(".pi").join("agent").join("skills")); // pi coding agent
-        dirs.push(h.join(".kilo").join("skills")); // kilo
-        dirs.push(h.join(".cursor").join("skills")); // cursor
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".config").join("opencode").join("skills"));
+        dirs.push(home.join(".claude").join("skills"));
+        dirs.push(home.join(".agents").join("skills"));
+        dirs.push(home.join(".codex").join("skills"));
+        dirs.push(home.join(".gemini").join("antigravity-cli").join("skills"));
+        dirs.push(home.join(".pi").join("agent").join("skills"));
+        dirs.push(home.join(".kilo").join("skills"));
+        dirs.push(home.join(".cursor").join("skills"));
     }
-    // 1b. Skills bundled in user-installed plugins (e.g. Claude's
-    // `superpowers` lives at ~/.claude/plugins/cache/<mp>/<plugin>/<ver>/
-    // skills). load_dir only looks one level deep, so each `skills` dir must
-    // be listed; scan the plugin trees (claude / codex / opencode) for them.
-    if let Some(h) = &home {
-        collect_plugin_skill_dirs(&h.join(".claude").join("plugins"), &mut dirs);
-        collect_plugin_skill_dirs(&h.join(".codex").join("plugins"), &mut dirs);
-        collect_plugin_skill_dirs(
-            &h.join(".config").join("opencode").join("plugin"),
-            &mut dirs,
-        );
-    }
-    // 2. Project cross-agent sources (incl. their plugin trees).
     dirs.push(cwd.join(".opencode").join("skills"));
     dirs.push(cwd.join(".claude").join("skills"));
     dirs.push(cwd.join(".agents").join("skills"));
     dirs.push(cwd.join(".codex").join("skills"));
-    collect_plugin_skill_dirs(&cwd.join(".claude").join("plugins"), &mut dirs);
-    collect_plugin_skill_dirs(&cwd.join(".codex").join("plugins"), &mut dirs);
-    // 3. zode's own (highest precedence): global then project, including its
-    // own plugins folder (~/.zode/plugins, .zode/plugins) scanned for skills.
+
+    // Zode global sources, including plugins installed by Zode itself.
     if let Ok(global) = ConfigManager::config_dir() {
         collect_plugin_skill_dirs(&global.join("plugins"), &mut dirs);
         dirs.push(global.join("skills"));
@@ -67,6 +43,7 @@ pub fn skills_dirs(cwd: &Path) -> Vec<PathBuf> {
     dirs.extend(crate::plugin_package::installed_package_dirs(
         crate::plugin_package::PackageDirectoryKind::Skills,
     ));
+    // Project-local Zode sources have highest precedence.
     collect_plugin_skill_dirs(&cwd.join(".zode").join("plugins"), &mut dirs);
     dirs.push(cwd.join(".zode").join("skills"));
     dirs
@@ -109,8 +86,8 @@ pub fn load_skills_from(dirs: &[PathBuf]) -> SkillRegistry {
 /// Scan the dir tree ONCE and return both `(name, description)` for every
 /// discovered skill AND a registry containing only those for which
 /// `keep(name)` is true. Avoids walking + YAML-parsing the whole (large,
-/// cross-agent + plugin) skills tree twice per engine assembly — the
-/// previous pattern of a full `load_skills_from` for the meta list plus a
+/// plugin) skills tree twice per engine assembly — the previous pattern of a
+/// full `load_skills_from` for the meta list plus a
 /// separate `load_skills_filtered` for the live registry.
 pub fn load_skills_meta_and_registry(
     dirs: &[PathBuf],
@@ -254,6 +231,42 @@ mod tests {
             format!("---\nname: {name}\ndescription: {desc}\n---\n{body}"),
         )
         .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn skills_dirs_import_direct_sources_but_not_plugin_caches() {
+        let config = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("ZODE_CONFIG_DIR");
+        std::env::set_var("ZODE_CONFIG_DIR", config.path());
+
+        for relative in [
+            ".claude/skills",
+            ".codex/skills",
+            ".agents/skills",
+            ".opencode/skills",
+            ".claude/plugins/cache/demo/skills",
+            ".codex/plugins/cache/demo/skills",
+        ] {
+            std::fs::create_dir_all(project.path().join(relative)).unwrap();
+        }
+
+        let dirs = skills_dirs(project.path());
+        match previous {
+            Some(value) => std::env::set_var("ZODE_CONFIG_DIR", value),
+            None => std::env::remove_var("ZODE_CONFIG_DIR"),
+        }
+
+        assert!(dirs.contains(&project.path().join(".claude/skills")));
+        assert!(dirs.contains(&project.path().join(".codex/skills")));
+        assert!(dirs.contains(&project.path().join(".agents/skills")));
+        assert!(dirs.contains(&project.path().join(".opencode/skills")));
+        assert!(!dirs
+            .iter()
+            .any(|path| path.to_string_lossy().contains("/plugins/")));
+        assert!(dirs.contains(&config.path().join("skills")));
+        assert!(dirs.contains(&project.path().join(".zode/skills")));
     }
 
     #[test]

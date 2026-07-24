@@ -28,6 +28,8 @@ pub enum BrowserPanelAction {
 pub struct BrowserPanelStatus {
     /// Whether the `tools:browser` group is enabled for this session.
     pub group_enabled: bool,
+    /// Persistent `browser.enabled` config value (including its default).
+    pub default_enabled: bool,
     /// "managed" | "bridge".
     pub target: String,
     /// Whether the extension bridge currently has an authenticated connection.
@@ -78,7 +80,7 @@ impl BrowserPanel {
             "Reconnect extension".to_string(),
             format!(
                 "Enabled by default: {}",
-                if self.status.group_enabled {
+                if self.status.default_enabled {
                     "Yes"
                 } else {
                     "No"
@@ -255,6 +257,7 @@ mod tests {
     fn status() -> BrowserPanelStatus {
         BrowserPanelStatus {
             group_enabled: true,
+            default_enabled: true,
             target: "managed".into(),
             paired: false,
             running: false,
@@ -290,6 +293,7 @@ mod tests {
         let mut p = BrowserPanel::new(status());
         p.set_status(BrowserPanelStatus {
             group_enabled: false,
+            default_enabled: false,
             target: "bridge".into(),
             paired: true,
             running: false,
@@ -298,6 +302,19 @@ mod tests {
         assert_eq!(p.status_lines()[1], "Target:    bridge");
         assert_eq!(p.status_lines()[2], "Extension: Paired");
         assert!(p.items()[3].contains("No"));
+    }
+
+    #[test]
+    fn default_row_is_independent_from_plugin_group_status() {
+        let p = BrowserPanel::new(BrowserPanelStatus {
+            group_enabled: false,
+            default_enabled: true,
+            target: "managed".into(),
+            paired: false,
+            running: false,
+        });
+        assert_eq!(p.status_lines()[0], "Status:    Disabled");
+        assert!(p.items()[3].contains("Yes"));
     }
 
     #[test]

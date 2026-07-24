@@ -17,6 +17,7 @@ const MAX_PLUGIN_BYTES: u64 = 256 * 1024 * 1024;
 const MANIFEST_PATHS: &[&str] = &[
     "plugin.json",
     ".zode-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
     ".grok-plugin/plugin.json",
     ".claude-plugin/plugin.json",
 ];
@@ -176,6 +177,7 @@ pub fn validate_plugin(root: &Path) -> Result<ValidatedPlugin, CoreError> {
     } else {
         PluginManifest {
             name: derived_name(root)?,
+            default_enabled: None,
             version: None,
             description: None,
             author: None,
@@ -189,6 +191,8 @@ pub fn validate_plugin(root: &Path) -> Result<ValidatedPlugin, CoreError> {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
+            ui: None,
+            permissions: Default::default(),
         }
     };
     validate_name(&manifest.name)?;
@@ -222,11 +226,24 @@ pub fn validate_plugin(root: &Path) -> Result<ValidatedPlugin, CoreError> {
         manifest.lsp_servers.as_ref(),
         &mut components,
     )?;
+    if let Some(relative) = manifest.ui.as_ref().and_then(|ui| ui.sidebar.as_deref()) {
+        validate_script_path(root, "ui.sidebar", relative)?;
+        components.push("ui".to_string());
+    }
+    if let Some(relative) = manifest
+        .ui
+        .as_ref()
+        .and_then(|ui| ui.status_line.as_deref())
+    {
+        validate_script_path(root, "ui.statusLine", relative)?;
+        components.push("ui".to_string());
+    }
+    validate_permissions(&manifest.permissions)?;
     components.sort();
     components.dedup();
     if components.is_empty() {
         return Err(CoreError::Other(
-            "plugin has no discoverable skills, commands, agents, hooks, MCP, or LSP components"
+            "plugin has no discoverable skills, commands, agents, hooks, MCP, LSP, or UI components"
                 .into(),
         ));
     }
@@ -236,6 +253,69 @@ pub fn validate_plugin(root: &Path) -> Result<ValidatedPlugin, CoreError> {
         manifest,
         components,
     })
+}
+
+fn validate_permissions(permissions: &super::PluginPermissions) -> Result<(), CoreError> {
+    for pattern in &permissions.network {
+        let host = pattern.strip_prefix("*.").unwrap_or(pattern);
+        if host.is_empty()
+            || host.contains('/')
+            || host.contains(':')
+            || host.starts_with('.')
+            || host.ends_with('.')
+            || !host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
+        {
+            return Err(CoreError::Other(format!(
+                "invalid plugin network hostname permission: {pattern}"
+            )));
+        }
+    }
+    for name in &permissions.env {
+        let mut bytes = name.bytes();
+        let valid_first = bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+        if !valid_first || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+            return Err(CoreError::Other(format!(
+                "invalid plugin environment permission: {name}"
+            )));
+        }
+    }
+    const CONTEXT_SCOPES: &[&str] = &["tabs", "workspace", "tools", "tasks", "services"];
+    for scope in &permissions.context {
+        if !CONTEXT_SCOPES.contains(&scope.as_str()) {
+            return Err(CoreError::Other(format!(
+                "invalid plugin context permission: {scope}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_script_path(root: &Path, label: &str, relative: &str) -> Result<(), CoreError> {
+    validate_relative_path(relative)?;
+    let path = root.join(relative);
+    ensure_contained(root, &path)?;
+    if !path.is_file() {
+        return Err(CoreError::Other(format!(
+            "plugin {label} path does not exist: {relative}"
+        )));
+    }
+    if path.extension().and_then(|value| value.to_str()) != Some("js") {
+        return Err(CoreError::Other(format!(
+            "plugin {label} path must be a .js file: {relative}"
+        )));
+    }
+    let size = std::fs::metadata(&path)?.len();
+    if size > crate::ui_extensions::MAX_UI_SCRIPT_BYTES as u64 {
+        return Err(CoreError::Other(format!(
+            "plugin {label} script exceeds {} bytes: {relative}",
+            crate::ui_extensions::MAX_UI_SCRIPT_BYTES
+        )));
+    }
+    Ok(())
 }
 
 fn validate_paths(
@@ -287,15 +367,18 @@ fn validate_component(
             components.push(label.to_string());
         }
         Some(PluginPathOrInline::Path(relative)) => {
-            validate_relative_path(relative)?;
-            let path = root.join(relative);
-            ensure_contained(root, &path)?;
-            if !path.is_file() {
+            validate_config_path(root, label, relative)?;
+            components.push(label.to_string());
+        }
+        Some(PluginPathOrInline::Paths(relative)) => {
+            if relative.is_empty() {
                 return Err(CoreError::Other(format!(
-                    "plugin {label} path does not exist: {relative}"
+                    "plugin {label} paths must not be empty"
                 )));
             }
-            parse_json_file(&path)?;
+            for relative in relative {
+                validate_config_path(root, label, relative)?;
+            }
             components.push(label.to_string());
         }
         None => {
@@ -307,6 +390,18 @@ fn validate_component(
         }
     }
     Ok(())
+}
+
+fn validate_config_path(root: &Path, label: &str, relative: &str) -> Result<(), CoreError> {
+    validate_relative_path(relative)?;
+    let path = root.join(relative);
+    ensure_contained(root, &path)?;
+    if !path.is_file() {
+        return Err(CoreError::Other(format!(
+            "plugin {label} path does not exist: {relative}"
+        )));
+    }
+    parse_json_file(&path)
 }
 
 pub(super) fn scan_marketplace(

@@ -209,7 +209,13 @@ pub enum PluginCommand {
         trust: bool,
     },
     /// Update one plugin, or every managed plugin when name is omitted.
-    Update { name: Option<String> },
+    Update {
+        name: Option<String>,
+        /// Accept manifest permissions broader than the installed snapshot
+        /// (new network hosts, env vars, or context scopes).
+        #[arg(long)]
+        trust: bool,
+    },
     /// Uninstall a managed plugin package.
     #[command(alias = "remove", alias = "rm")]
     Uninstall {

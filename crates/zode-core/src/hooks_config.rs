@@ -152,9 +152,11 @@ fn substitute_plugin_path(script: &str, root: &std::path::Path, data: &std::path
     let expanded = script
         .replace("${ZODE_PLUGIN_ROOT}", &root_text)
         .replace("${CLAUDE_PLUGIN_ROOT}", &root_text)
+        .replace("${CODEX_PLUGIN_ROOT}", &root_text)
         .replace("${GROK_PLUGIN_ROOT}", &root_text)
         .replace("${ZODE_PLUGIN_DATA}", &data_text)
         .replace("${CLAUDE_PLUGIN_DATA}", &data_text)
+        .replace("${CODEX_PLUGIN_DATA}", &data_text)
         .replace("${GROK_PLUGIN_DATA}", &data_text);
     let path = std::path::Path::new(&expanded);
     if path.is_absolute() || expanded.starts_with("~/") {

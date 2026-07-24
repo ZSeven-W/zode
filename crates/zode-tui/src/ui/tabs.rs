@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use zode_core::ui_extensions::{UiSidebarContribution, UiTone};
 use zode_core::TodoItem;
 
 use crate::tab::SessionTab;
@@ -212,6 +213,7 @@ pub fn render_sidebar(
     tabs: &[SessionTab],
     active: usize,
     info: SidebarInfo<'_>,
+    custom: &[UiSidebarContribution],
     theme: &Theme,
 ) -> SidebarHits {
     let row_width = area.width.saturating_sub(1) as usize;
@@ -225,7 +227,8 @@ pub fn render_sidebar(
     let files_h =
         crate::ui::modified_files::section_height(info.git_files.len(), info.files_collapsed);
     let todo_h = crate::ui::todo::section_height(info.todos.len(), info.todos_collapsed);
-    let version_foot = 2; // blank gap + the pinned `● zode <version>` row
+    let custom_lines = plugin_sidebar_lines(custom, row_width, theme);
+    let version_foot = custom_lines.len() + 2;
 
     let mut hits = SidebarHits::default();
     let header_row = |lines: &Vec<Line<'_>>| {
@@ -320,8 +323,74 @@ pub fn render_sidebar(
     }
     let content_rows = lines.len() as u16;
     render_sidebar_block(f, area, lines, theme);
+    render_plugin_rows(f, area, content_rows, custom_lines, theme);
     render_version_row(f, area, content_rows, info.version, theme);
     hits
+}
+
+fn plugin_sidebar_lines(
+    contributions: &[UiSidebarContribution],
+    row_width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    contributions
+        .iter()
+        .flat_map(|contribution| contribution.lines.iter())
+        .take(6)
+        .map(|line| {
+            let spans = line
+                .spans
+                .iter()
+                .map(|span| {
+                    let color = match span.tone.as_ref().unwrap_or(&UiTone::Default) {
+                        UiTone::Default => theme.fg_text,
+                        UiTone::Muted => theme.fg_subtle,
+                        UiTone::Accent => theme.accent,
+                        UiTone::Success => Color::Green,
+                        UiTone::Warning => Color::Yellow,
+                        UiTone::Danger => Color::Red,
+                    };
+                    let mut style = Style::default().bg(theme.bg_secondary).fg(color);
+                    if span.bold {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    if span.italic {
+                        style = style.add_modifier(Modifier::ITALIC);
+                    }
+                    Span::styled(span.text.clone(), style)
+                })
+                .collect::<Vec<_>>();
+            fit_line_to_width(
+                Line::from(spans),
+                row_width,
+                Style::default().bg(theme.bg_secondary),
+            )
+        })
+        .collect()
+}
+
+/// Plugin-owned declarative rows pinned immediately above the version.
+fn render_plugin_rows(
+    f: &mut Frame,
+    area: Rect,
+    occupied: u16,
+    lines: Vec<Line<'static>>,
+    theme: &Theme,
+) {
+    if lines.is_empty() || area.height < 4 || area.width < 4 {
+        return;
+    }
+    let version_y = area.y + area.height - 1;
+    let height = lines.len().min(version_y.saturating_sub(area.y) as usize) as u16;
+    let start_y = version_y.saturating_sub(height);
+    if start_y <= area.y + occupied {
+        return;
+    }
+    let strip = Rect::new(area.x + 1, start_y, area.width.saturating_sub(1), height);
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.bg_secondary)),
+        strip,
+    );
 }
 
 /// The pinned `● zode <version>` footer row, on the sidebar's last line.
@@ -741,7 +810,7 @@ mod tests {
         let mut hits = SidebarHits::default();
         terminal
             .draw(|f| {
-                hits = render_sidebar(f, f.area(), &[], 0, info, &theme);
+                hits = render_sidebar(f, f.area(), &[], 0, info, &[], &theme);
             })
             .unwrap();
         let rows: Vec<String> = terminal
@@ -820,7 +889,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                render_sidebar(f, f.area(), &[], 0, info, &theme);
+                render_sidebar(f, f.area(), &[], 0, info, &[], &theme);
             })
             .unwrap();
         let rows: Vec<String> = terminal
@@ -879,7 +948,7 @@ mod tests {
         let mut hits = SidebarHits::default();
         terminal
             .draw(|f| {
-                hits = render_sidebar(f, f.area(), &[], 0, info, &theme);
+                hits = render_sidebar(f, f.area(), &[], 0, info, &[], &theme);
             })
             .unwrap();
         let rows = terminal
@@ -919,6 +988,48 @@ mod tests {
         // Click hitboxes point at the header rows just rendered.
         assert_eq!(hits.mcp_header_row, mcp_row.map(|r| r as u16));
         assert_eq!(hits.files_header_row, files_row.map(|r| r as u16));
+    }
+
+    #[test]
+    fn sidebar_renders_plugin_rows_immediately_above_version() {
+        use zode_core::ui_extensions::{UiSidebarContribution, UiSidebarLine, UiSpan, UiTone};
+
+        let theme = crate::theme::ThemeStore::with_builtins().resolve(Some("minimal"));
+        let info = info_with_sections(&[], &[], false, false);
+        let custom = vec![UiSidebarContribution {
+            plugin: "clock".into(),
+            lines: vec![UiSidebarLine {
+                spans: vec![UiSpan {
+                    text: "custom sidebar".into(),
+                    tone: Some(UiTone::Accent),
+                    bold: true,
+                    italic: false,
+                }],
+            }],
+        }];
+        let backend = ratatui::backend::TestBackend::new(34, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_sidebar(f, f.area(), &[], 0, info, &custom, &theme);
+            })
+            .unwrap();
+        let rows: Vec<String> = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(34)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect();
+        let custom_row = rows
+            .iter()
+            .position(|row| row.contains("custom sidebar"))
+            .unwrap();
+        let version_row = rows
+            .iter()
+            .position(|row| row.contains("zode 0.1.0-test"))
+            .unwrap();
+        assert_eq!(custom_row + 1, version_row);
     }
 
     #[test]
