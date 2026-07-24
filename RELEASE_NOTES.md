@@ -1,213 +1,85 @@
-# zode v0.1.0-beta.6
+# zode v0.1.0-beta.7
 
 **zode** is an open-source, AI-native coding assistant for your terminal: it reads your code, runs commands, searches files, and manages git — all from a fast Rust TUI, with non-blocking permissions and an on-by-default OS sandbox.
 
 > ⚠️ **Beta.** APIs, config, and behavior may change before 1.0. Please file issues!
 
-## External CLI teams
+## Desktop automation
 
-- **Manual registration by default** — installed CLIs are no longer exposed to
-  the model merely because they appear on `PATH`. Add each allowed profile to
-  `externalAgents.agents`; known presets are enabled with an empty object.
-- **More manual presets** — Claude Code, Codex, opencode, Cline, Pi, and xAI
-  Grok Build, Google Antigravity, Cursor CLI, and Kiro CLI have documented
-  headless invocations. Resumable profiles preserve context; the rest can still
-  be hired as stateless teammates or Task workers.
-- **Explicit discovery command** — `/external-agents` lists supported CLIs on
-  `PATH`; `/external-agents discover` atomically adds detected presets to the
-  global config without overwriting existing entries. Startup still never
-  scans or registers external CLIs automatically.
-- **Arbitrary CLI protocols** — custom profiles accept bare command names or
-  paths, generic JSONL `textSource` / `sessionIdSource` pointers, templated
-  `resumeArgs`, and host-generated IDs through `newSessionArgs`, allowing any
-  compatible headless CLI to participate.
+Zode can now drive native desktop apps, not just the browser.
 
-## Server mode & SDKs
+- **`desktop_read` / `desktop_act` / `desktop_screenshot`** — read the
+  accessibility tree, click/type/scroll/set-value by element, and capture the
+  screen, across **macOS** (AX), **Windows** (UI Automation), **Linux**
+  (AT-SPI), and **Electron** apps (CDP attach).
+- **Ghost cursor + Esc stop** — a zero-permission overlay draws a fake cursor
+  flying along a Dubins path to each action; zode never moves your real mouse.
+  While automation is active a global **Esc** interrupts every running turn and
+  hides the overlay.
+- **`/desktop`** reports target/permission state; config lives under
+  `desktop.*` (`ghostCursor`, `escCancel`, `overlayHelperPath`).
 
-`zode server` graduates from a metadata-only registry to a **streaming
-JSON-RPC runtime**. New in this release:
+## Background-turn watchdog, `/loop` & `/schedule`
 
-- **Streaming turns** — `turn/start` returns immediately and streams model
-  output and tool calls as notifications (`turn/started`,
-  `item/agentMessage/delta`, `item/started` / `item/completed`,
-  `turn/completed` with `finalText` + token `usage`, plus `turn/interrupted` /
-  `turn/failed`). `turn/interrupt` cancels a running turn.
-- **Interactive approvals** — the `prompt` policy drives server→client
-  `approval/request` frames the client answers with
-  `{ "decision": "allow" | "allowAlways" | "deny" }`.
-- **WebSocket transport** — `zode server --listen ws://127.0.0.1:0` serves over
-  a loopback WebSocket, publishing a `0600` `<config-dir>/server.json`
-  credentials file (`{port, pid, token}`) and authenticating upgrades with
-  `Authorization: Bearer <token>`. stdio (`zode server`) remains the default.
-- **New methods** — `model/set` supports thread-level model changes and
-  per-turn overrides. `config/write` applies a whitelisted shallow patch and
-  can atomically persist it; `persist` defaults to `false`.
-- **Five SDKs** (Rust, TypeScript, Python, Go, Kotlin/JVM) ship event
-  subscription + approval handlers, shared protocol fixtures, and end-to-end
-  tests against a real `zode` binary. See [`sdk/README.md`](sdk/README.md).
-- **GitHub Packages** — the TypeScript SDK is published as
-  `@zseven-w/zode-sdk@0.1.0-beta.6` under the npm `beta` dist-tag, and the
-  Kotlin SDK as `com.zseven.zode:zode-sdk:0.1.0-beta.6`. Both package jobs
-  build and test before publishing.
-- **All five SDKs in the release pipeline** — the Go module is versioned by
-  `sdk/go/v0.1.0-beta.6`; Python ships a wheel and source distribution; Rust
-  ships a standalone source bundle containing the SDK and protocol dependency.
-  The Python and Rust archives are attached to this GitHub Release because GitHub
-  Packages does not provide PyPI or Cargo registries.
+Unattended and recurring work is now first-class.
 
-> 🚨 **BREAKING CHANGE — default approval policy is now `readOnly`.**
-> `initialize` previously left side-effecting work effectively unrestricted;
-> it now **denies** tool calls, `command/exec`, and filesystem writes unless
-> the client passes `approvalPolicy: "auto"` (run without asking) or
-> `"prompt"` (confirm each operation via `approval/request`). Clients that ran
-> commands or wrote files without setting a policy **must** now set one. The
-> accepted policy is echoed back in the `initialize` result.
+- **`/loop <30s|5m|1h> [--max N] <prompt>`** — session-only recurring turns on
+  the current tab (`list` / `stop`).
+- **`/schedule add <hh:mm|mon hh:mm|every 2h> <prompt>`** — persisted cron-like
+  schedules (`~/.zode/schedules.json`, atomic writes, cross-process first-writer
+  dedup, DST-aware). `list` / `rm` / `enable|disable`.
+- **Background watchdog** — scheduler-owned turns get an idle/runtime watchdog
+  with cooperative-then-hard abort, capped-backoff retry, and a fail-closed
+  policy that stops (not blindly replays) a job when a mutation may have run.
+  `/watchdog` and `/tasks` show live health and queue age. Configurable under
+  `backgroundWatchdog.*`.
+- **Turn timing** — per-tool `· 1.2s` suffixes, a `✓ done · 34s · 3 tools` turn
+  footer, and humanized elapsed times in `/tasks`.
 
-> 📦 **TypeScript package rename.** The npm scope is now
-> `@zseven-w/zode-sdk` (previously `@zseven/zode-sdk`) so it can be published
-> under this repository owner's GitHub Packages scope. Update imports and
-> package-manager configuration when upgrading. GitHub npm and Maven installs
-> require credentials with `read:packages`.
+## JavaScript UI plugin extensions
 
-## Browser bridge and task side panel
+Managed plugins can now contribute UI, evaluated in a sandboxed QuickJS runtime
+with no filesystem, network, or terminal bridge.
 
-- **A full task side panel** — extension 0.5.0 rebuilds the Chrome side panel
-  with React and TypeScript. Start or select a session shared with the TUI,
-  choose a model and approval policy, watch streaming output, stop a turn, and
-  answer approvals without switching the terminal's active tab.
-- **Extension-only daemon startup** — one normal zode launch followed by
-  `/browser pair` registers a Native Messaging host and stores the bridge
-  token. The extension can then start an authenticated, extension-only zode
-  daemon on demand when the CLI is closed, using the most recently registered
-  workspace and shutting down when Chrome disconnects.
-- **The current page stays current** — side-panel turns treat the adjacent
-  active page as their primary browser context, so requests such as “analyze
-  this page” do not open a replacement tab. Standalone TUI/CLI automation keeps
-  using an isolated, sticky tab in zode's Chrome tab group; screenshot focus is
-  restored afterward, and manually navigating that tab causes zode to hand it
-  back and create another automation tab.
-- **Upload and download support** — browser tools can populate file inputs and
-  upload files, while downloads created during the current bridge session are
-  exposed through a bounded session cache. Side-panel turns accept up to eight
-  attachments / 20 MiB total (5 MiB per image, 1 MiB per UTF-8 text or code
-  file).
-- **Packaging and polish** — toolbar icons follow Chrome's light/dark theme,
-  Windows pairing launches Chrome directly, and every tagged release now
-  builds, tests, and attaches `zode-browser-bridge-<version>.zip`.
+- **`zode.ui.sidebar` / `zode.ui.statusLine`** — synchronous renderers that
+  return declarative rows/spans; the host renders them (tones, bold/italic).
+- **`zode.data.define`** — background HTTPS `GET`/`POST` data sources; secret
+  env vars are assembled into request headers by Rust and never exposed to JS,
+  with pinned public-DNS resolution, redirects/proxies disabled, and
+  response/timeout/refresh caps.
+- **Read-only render context** gated by `permissions.context` (tabs, workspace,
+  tools, tasks, services); plugins observe tool identity/status but never tool
+  inputs/outputs, prompts, or credentials.
+- **Consent & safety** — install/update print the declared permission grant,
+  `zode plugin update` refuses to widen permissions without a fresh `--trust`,
+  and disabling/uninstalling a plugin tears down its renderers and data tasks.
+  Codex `.codex-plugin` manifests and Claude `defaultEnabled` are supported.
 
-After upgrading, run `/browser pair` once with the new CLI and reload the
-extension from `chrome://extensions`. Older bridge builds can still drive the
-traditional browser automation path, but do not provide the side panel or
-Native Messaging auto-start.
+## Agent team & external CLI teammates
 
-## Windows sandbox and input reliability
+- **Manual external-agent registration** — installed CLIs are never exposed to
+  the model just for being on `PATH`; add profiles to `externalAgents.agents`
+  (`/external-agents discover` adds known presets). First use shows a trust
+  approval; a self-gated `ZodeTaskTool` routes `Task` to internal or external
+  agents without changing today's gating.
+- **Agent team (`/team`)** — hire persistent internal or external-CLI teammates,
+  coordinate them with a shared host-managed board and subtree-aware file
+  claims, and inspect the roster/board. Leader-mediated `@ask` relays keep
+  collaboration turn-end and reviewable.
 
-- **Tier 1 sandbox by default** — Windows commands and file
-  operations now run through a low-integrity restricted token with capability
-  ACLs scoped to the configured workspace roots. This replaces the previous
-  no-op Windows backend and does not require administrator privileges.
-- **Opt-in Tier 2 network isolation** — set
-  `sandbox.windowsTier` to `"elevated"` (`"appcontainer"` and `"strict"` are
-  aliases) to launch commands inside an AppContainer without network
-  capabilities, including loopback. Tier 1 constrains filesystem access but
-  does **not** enforce network denial.
-- **Verified enforcement** — Windows CI builds the full workspace and runs
-  dedicated Tier 1 / Tier 2 integration probes covering in-root and out-of-root
-  access, read-only behavior, and AppContainer network denial.
-- **Reliable Windows paste and clipboard handling** — clipboard text is
-  preserved and emitted as UTF-8; coalesced multiline paste bursts remain in
-  the composer instead of becoming several submissions; duplicate surrogate
-  key events are collapsed; and asynchronous clipboard helpers now have time
-  and byte limits.
+## Reliability & fail-closed hardening
 
-Tier 1 is the default Windows sandbox; Tier 2 is the optional AppContainer
-backend for network isolation. Tier 1 does not isolate the network, and
-compatibility allowances for build tools and atomic renames mean the sandbox
-should remain one layer in the approval model rather than a boundary for
-hostile code.
-
-## Agent runtime and model routing
-
-- **Provider-aware vision routing** — image capability is derived from
-  models.dev metadata and legacy attachment declarations using the exact
-  provider/model pair. Explicit `supportsImages` settings still win, and
-  `/connect` persists the selected model's image capability.
-- **Native reasoning controls** — `/effort` maps to Anthropic adaptive thinking
-  and effort on supported models, preserves the older budget shape where
-  required, and sends `reasoning_effort` plus `max_completion_tokens` only to
-  OpenAI-compatible providers that explicitly enable reasoning.
-- **Sub-agents can finish naturally** — task sub-agents no longer stop at a
-  small fixed iteration count. Leave `subagentMaxIterations` absent or `0` for
-  no fixed limit, or set a positive value when a headless or cost-sensitive
-  workflow needs a hard budget.
-- **Fresh-state reminders** — one-shot reminders warn the model when a file it
-  read has changed or disappeared, the git branch has drifted, or a todo list
-  has gone five turns without an update, reducing edits based on stale state.
-- **More resilient sessions** — session indexes use cross-process locking,
-  atomic snapshots, backups, corrupt-index archival, and orphan JSONL recovery.
-  Agent histories also tolerate a torn final JSONL line without discarding the
-  valid history before it.
-- **Higher-signal tool output** — the agent runtime adds ripgrep-backed context
-  and multiline search, clips huge minified lines around the real match, and
-  structurally compresses noisy command output such as `git status`, `ls`, and
-  `cargo test` before applying output limits.
-
-## LSP and project memory
-
-- **Reliable lazy LSP startup** — language servers still start on the first
-  `lsp_*` call, but missing rustup components are no longer mistaken for real
-  binaries. zode resolves or installs the required component while still
-  preferring a usable executable already on `PATH`.
-- **Actionable failures instead of long retries** — server exit preserves the
-  tail of stderr, fails pending requests immediately, and marks the process
-  dead. EPIPE handling briefly waits for the real exit diagnostic instead of
-  repeatedly returning only a timeout or “broken pipe.”
-- **Honest cold-start diagnostics** — `lsp_diagnostics` reports `analyzing`
-  until the first diagnostic publication arrives instead of reporting a false
-  zero-diagnostics result. The system prompt also advertises symbols,
-  references, hover, and diagnostics tools when an LSP is enabled.
-- **Code-aware Noema anchors** — memories can now carry paths, symbols, commit,
-  language, error signatures, and commands, with a dedicated `error_fix` kind.
-  Paths are normalized against the turn's working directory and project
-  identity remains stable across subdirectories and linked worktrees.
-- **More relevant recall** — malformed optional anchors degrade safely, secret
-  material remains gated, error-fix deduplication understands anchors, and
-  recall scores overlapping file/symbol/error context more highly. Existing
-  memories require no migration.
-
-## TUI and interaction polish
-
-- **Eleven built-in themes** — the catalog grows from four to eleven with
-  Aurora Forge, Ember Atelier, Sakura Paper, Arctic Day, Lavender Mist, Citrus
-  Grove, and Verdant Signal. Catppuccin Mocha remains the default, and a custom
-  theme with the same id still overrides a built-in.
-- **More robust sidebar chrome** — the sidebar uses a closed top edge and
-  continuous left rail, with corrected content and mouse coordinates plus more
-  stable section/footer behavior as terminal dimensions change.
-- **Mouse support where it matters** — click session tabs, AskUserQuestion
-  choices and submit controls, or permission choices 1/2/3 while the
-  non-blocking prompt remains open over the chat.
-- **Complete expanded tool output** — an expanded tool block now keeps the full
-  retained output instead of the former short teaser. Transcript rendering
-  expands tabs, strips control characters, and truncates CJK safely.
-- **Safer session deletion and smoother redraws** — deleting a session requires
-  pressing Delete twice on the same item; navigation, filtering, or Escape
-  cancels the confirmation. Synchronous terminal updates remove full-screen
-  flashes when toasts expire or the view scrolls.
-
-## CI and release hardening
-
-- CI now covers Rust fmt, Clippy with warnings denied, workspace tests,
-  `cargo-deny`, a strict five-language SDK matrix against a real zode binary,
-  full Windows workspace compilation, and dedicated Windows sandbox probes.
-- Release tags fan out to six platform archives, the tested browser extension,
-  install scripts, all five SDK channels, and idempotent TypeScript/Kotlin
-  GitHub Packages jobs. The pipeline also creates or verifies the Go module tag
-  and attaches tested Rust/Python archives to the GitHub Release.
-- Fixture generation and staleness guards keep the shared JSON-RPC method list,
-  sample frames, and SDK expectations aligned with the Rust protocol source.
-
----
+- The background watchdog's "unresolved external work" fence was tightened so it
+  no longer fires spuriously: a normally-exiting subprocess on Windows no longer
+  latches on every success, read-only LSP queries no longer latch on timeout,
+  and MCP tool calls gained a configurable timeout (`mcpToolTimeoutSecs`, `0`
+  disables the local bound) instead of a hardcoded 60s.
+- Closing a tab mid-turn now finalizes the run journal and checkpoint instead of
+  leaving a dangling turn; graceful shutdown shows a draining notice and accepts
+  a second **Ctrl+C** to force-quit instead of freezing.
+- `/loop` intervals are capped so a huge value can't panic; the schedule store
+  no longer erases rows it considers invalid as a side effect of an unrelated
+  update; a poisoned watchdog lock fails closed.
 
 ## Install
 
@@ -225,7 +97,7 @@ curl -fsSL https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.
 irm https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.ps1 | iex
 ```
 
-The installers auto-detect your OS + CPU, download the matching binary from this release, and drop `zode` on your PATH. Pin a version with `--version v0.1.0-beta.6` (sh) or `$env:ZODE_VERSION='v0.1.0-beta.6'` (ps1).
+The installers auto-detect your OS + CPU, download the matching binary from this release, and drop `zode` on your PATH. Pin a version with `--version v0.1.0-beta.7` (sh) or `$env:ZODE_VERSION='v0.1.0-beta.7'` (ps1).
 
 > Because this is a **pre-release**, GitHub's "latest" excludes it from some tooling — the installers above resolve the newest release *including* betas, so they pick this up automatically.
 
@@ -233,17 +105,17 @@ The installers auto-detect your OS + CPU, download the matching binary from this
 
 | OS | Architecture | Asset |
 |----|--------------|-------|
-| macOS | Apple Silicon (M1+) | `zode-0.1.0-beta.6-arm64-mac.tar.gz` |
-| macOS | Intel | `zode-0.1.0-beta.6-x64-mac.tar.gz` |
-| Linux | x86_64 | `zode-0.1.0-beta.6-x64-linux.tar.gz` |
-| Linux | ARM64 (aarch64) | `zode-0.1.0-beta.6-arm64-linux.tar.gz` |
-| Windows | x64 | `zode-0.1.0-beta.6-x64-windows.zip` |
-| Windows | ARM64 | `zode-0.1.0-beta.6-arm64-windows.zip` |
+| macOS | Apple Silicon (M1+) | `zode-0.1.0-beta.7-arm64-mac.tar.gz` |
+| macOS | Intel | `zode-0.1.0-beta.7-x64-mac.tar.gz` |
+| Linux | x86_64 | `zode-0.1.0-beta.7-x64-linux.tar.gz` |
+| Linux | ARM64 (aarch64) | `zode-0.1.0-beta.7-arm64-linux.tar.gz` |
+| Windows | x64 | `zode-0.1.0-beta.7-x64-windows.zip` |
+| Windows | ARM64 | `zode-0.1.0-beta.7-arm64-windows.zip` |
 
 Unpack and move `zode` (or `zode.exe`) onto your PATH:
 
 ```sh
-tar -xzf zode-0.1.0-beta.6-x64-linux.tar.gz
+tar -xzf zode-0.1.0-beta.7-x64-linux.tar.gz
 sudo mv zode /usr/local/bin/
 ```
 
@@ -291,10 +163,12 @@ see the [README](https://github.com/ZSeven-W/zode#readme) for full usage.
 
 - Multi-provider chat (Anthropic / OpenAI-compatible / Ollama), large-output & 1M-context aware
 - Full tool surface: file read/write/edit, code & content search, fg/bg shells, git, web fetch, notebooks, TODOs
+- Browser and desktop automation, recurring `/loop` & `/schedule` tasks with a background watchdog
 - Non-blocking permission gate + OS sandbox (`sandbox-exec` / `bwrap` on
   macOS/Linux; restricted-token / AppContainer tiers on Windows)
-- Full-screen TUI: streaming markdown, syntax highlighting, diff previews, autocomplete, history, themes, 15-language UI
-- Multi-session tabs, sub-agents & workflows, skills + MCP servers, hooks, three-level instructions
+- Full-screen TUI: streaming markdown, syntax highlighting, diff previews, autocomplete, history, themes, 15-language UI, sandboxed UI plugins
+- Multi-session tabs, sub-agents, teams & workflows, skills + MCP servers, hooks, three-level instructions
+- Streaming JSON-RPC server mode with five SDKs (Rust / TypeScript / Python / Go / Kotlin)
 
 ## Supported platforms
 
@@ -307,12 +181,15 @@ runner.
 
 - Linux builds are **glibc** (dynamically linked) — they run on mainstream distributions (Ubuntu/Debian/Fedora/Arch, …). A static musl build is not part of this beta.
 - The OS sandbox is enforced with `sandbox-exec` on macOS and `bwrap` on Linux.
-  Windows uses the new restricted-token Tier 1 by default; this
-  limits filesystem access but not network access. Opt into AppContainer Tier 2
-  with `sandbox.windowsTier: "elevated"` when network denial
-  (including loopback) is required. Continue reviewing tool calls on every OS.
+  Windows uses the restricted-token Tier 1 by default; this limits filesystem
+  access but not network access. Opt into AppContainer Tier 2 with
+  `sandbox.windowsTier: "elevated"` when network denial (including loopback) is
+  required. Continue reviewing tool calls on every OS.
+- Desktop automation uses OS accessibility APIs and may prompt for permission
+  (e.g. macOS Accessibility). The ghost-cursor overlay is macOS-only; other
+  platforms still run desktop actions without the visualization.
 - macOS binaries are ad-hoc signed but not notarized — **no Apple Developer certificate is required to run zode**. The `curl` / `irm` installers don't trip Gatekeeper (curl doesn't quarantine downloads). Only a **manual browser download** of the tarball is quarantined; if so, run `xattr -dr com.apple.quarantine ./zode` once.
 
 ---
 
-**Full changelog:** https://github.com/ZSeven-W/zode/compare/v0.1.0-beta.5...v0.1.0-beta.6
+**Full changelog:** https://github.com/ZSeven-W/zode/compare/v0.1.0-beta.6...v0.1.0-beta.7

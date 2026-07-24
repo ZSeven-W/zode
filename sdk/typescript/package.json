@@ -1,6 +1,6 @@
 {
   "name": "@zseven-w/zode-sdk",
-  "version": "0.1.0-beta.6",
+  "version": "0.1.0-beta.7",
   "description": "TypeScript SDK for the zode app-server JSON-RPC protocol.",
   "license": "MIT",
   "repository": {

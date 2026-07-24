@@ -696,6 +696,54 @@ Zode 提供 `tools:browser` 工具组：
 
 扩展加载、更新、CRX 打包和 smoke test 步骤见 [`extensions/chrome/README.md`](../../extensions/chrome/README.md)。
 
+## 桌面控制
+
+Zode 还能通过操作系统的无障碍(accessibility)API 驱动原生桌面应用,不局限于浏览器:
+
+- `desktop_read`:读取无障碍树(窗口、元素及其 ref)。
+- `desktop_act`:按元素点击、输入、滚动、设值。
+- `desktop_screenshot`:截屏。
+
+只读读取无需审批;有副作用的桌面操作走与其他工具相同的 允许一次/始终/拒绝 审批流。
+
+各平台后端:
+
+- **macOS** — Accessibility(AX)API。
+- **Windows** — UI Automation(UIA)。
+- **Linux** — AT-SPI。
+- **Electron 应用** — 通过 Chrome DevTools Protocol 附加。
+
+**假光标与 Esc 急停。** Zode 从不移动你的真实鼠标。macOS 上一个零权限的覆盖层
+(`zode-overlay`)会画一个*假*光标,沿平滑的 Dubins 路径飞向每个操作目标,方便你
+跟踪 Agent 的动作(输入的文本不会显示在覆盖层里)。桌面自动化进行时,全局 **Esc**
+会中断所有正在运行的回合并隐藏覆盖层(与 TUI 的 Esc 同一条急停路径)。其他平台
+照常执行桌面操作,只是没有可视化。
+
+没有 US 布局键码的字符(CJK、部分标点)通过系统剪贴板投递(写入 → 合成粘贴 →
+还原原剪贴板),使自定义按键处理的应用也能收到真实字符。
+
+```bash
+/desktop          # 显示桌面目标与权限状态
+/desktop status   # 同上
+```
+
+配置位于 `~/.zode/config.json` 的 `desktop.*`:
+
+```json
+{
+  "desktop": {
+    "ghostCursor": true,
+    "escCancel": true,
+    "overlayHelperPath": null
+  }
+}
+```
+
+`ghostCursor`(默认 `true`)绘制 macOS 覆盖层光标;`escCancel`(默认 `true`)在自动化
+期间启用全局 Esc 中断;`overlayHelperPath`(默认 `null`)覆盖 `zode-overlay` 助手
+路径——助手缺失时仅关闭可视化。桌面自动化首次使用可能会请求系统权限(如 macOS
+辅助功能)。
+
 ## 常用斜杠命令
 
 | 命令 | 作用 |

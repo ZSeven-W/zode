@@ -7,7 +7,7 @@ Rust SDK for `zode server` stdio JSON-RPC.
 From the tagged Git repository:
 
 ```toml
-zode-sdk-rust = { git = "https://github.com/ZSeven-W/zode.git", tag = "v0.1.0-beta.6" }
+zode-sdk-rust = { git = "https://github.com/ZSeven-W/zode.git", tag = "v0.1.0-beta.7" }
 ```
 
 Inside this repository it is also a workspace crate:
@@ -107,7 +107,7 @@ handler denies.
 
 ## Version
 
-This crate is versioned with the zode workspace (currently `0.1.0-beta.6`).
+This crate is versioned with the zode workspace (currently `0.1.0-beta.7`).
 
 ## Test
 

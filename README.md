@@ -938,6 +938,57 @@ Useful commands:
 See [`extensions/chrome/README.md`](extensions/chrome/README.md) for extension
 loading, update, CRX packaging, and smoke-test steps.
 
+## Desktop Control
+
+Zode can drive native desktop applications through OS accessibility APIs, not
+just the browser. The agent uses `desktop_read` to read the accessibility tree
+(windows, elements, and their refs), `desktop_act` to click, type, scroll, and
+set values by element, and `desktop_screenshot` to capture the screen.
+Read-only reads are ungated; mutating desktop actions use the same
+allow-once / always / deny approval flow as other side-effecting tools.
+
+Backends are selected per platform:
+
+- **macOS** — the Accessibility (AX) API.
+- **Windows** — UI Automation (UIA).
+- **Linux** — AT-SPI.
+- **Electron apps** — attach over the Chrome DevTools Protocol.
+
+**Ghost cursor and Esc stop.** Zode never moves your real mouse. On macOS a
+zero-permission overlay (`zode-overlay`) draws a *fake* cursor that flies along
+a smooth Dubins path to each action's target, so you can follow what the agent
+is doing; typed text is never shown in the overlay. While desktop automation is
+active, a global **Esc** interrupts every running turn and hides the overlay
+(the same stop path as the TUI's Esc). Other platforms run desktop actions
+without the visualization.
+
+CJK and other text without a US-layout keycode is delivered via the system
+pasteboard (write → synthesize paste → restore the previous clipboard) so apps
+with custom key handling receive the real characters.
+
+```bash
+/desktop            # show desktop target and permission state
+/desktop status     # same, explicit
+```
+
+Config lives under `desktop.*` in `~/.zode/config.json`:
+
+```json
+{
+  "desktop": {
+    "ghostCursor": true,
+    "escCancel": true,
+    "overlayHelperPath": null
+  }
+}
+```
+
+`ghostCursor` (default `true`) draws the macOS overlay cursor; `escCancel`
+(default `true`) arms the global-Esc interrupt during automation;
+`overlayHelperPath` (default `null`) overrides the `zode-overlay` helper
+location — a missing helper simply disables the visualization. Desktop
+automation may prompt for OS permission (e.g. macOS Accessibility) on first use.
+
 ## Background Turn Watchdog
 
 Scheduler-owned `/loop` and `/schedule` turns run under an in-process liveness
