@@ -200,10 +200,18 @@ fn header_line(title: &str, width: u16, theme: &Theme) -> Paragraph<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zode_core::plugin::PluginManager;
+    use zode_core::plugin::{PackageEntry, PluginManager};
 
     fn sample() -> Vec<Plugin> {
         PluginManager::default().list(
+            // An installed package is in the source list; the dialog must keep
+            // filtering everything that isn't an MCP server.
+            &[PackageEntry {
+                name: "ui-demo".into(),
+                description: "sidebar demo".into(),
+                detail: "0.3.0".into(),
+                enabled: true,
+            }],
             &[("deepwiki".into(), true), ("ctx7".into(), false)],
             &[("review".into(), "review".into())],
             &["rust".into()],

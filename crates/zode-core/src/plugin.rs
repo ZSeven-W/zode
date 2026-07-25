@@ -14,6 +14,11 @@ use crate::config::ZodeConfig;
 /// What a plugin provides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginKind {
+    /// An installed plugin package (`zode plugin install`), which may bundle
+    /// skills, commands, agents, hooks, MCP/LSP servers, and UI renderers.
+    /// Unlike the other kinds its on/off state lives in the install registry,
+    /// not in `plugins.disabled`.
+    Package,
     /// A category of built-in tools (filesystem, shell, git, …).
     Tools,
     /// An MCP server (its tools are surfaced as `mcp__<server>__<tool>`).
@@ -27,6 +32,7 @@ pub enum PluginKind {
 impl PluginKind {
     pub fn prefix(self) -> &'static str {
         match self {
+            PluginKind::Package => "plugin",
             PluginKind::Tools => "tools",
             PluginKind::Mcp => "mcp",
             PluginKind::Skill => "skill",
@@ -36,6 +42,7 @@ impl PluginKind {
 
     pub fn label(self) -> &'static str {
         match self {
+            PluginKind::Package => "plugin package",
             PluginKind::Tools => "tool group",
             PluginKind::Mcp => "MCP server",
             PluginKind::Skill => "skill",
@@ -55,6 +62,19 @@ pub struct Plugin {
     pub enabled: bool,
     /// One-line status detail (member count, connection state, …).
     pub detail: String,
+}
+
+/// An installed plugin package, flattened for the picker. Its `enabled` flag
+/// comes from the install registry (`plugin_package::installed_package_entries`),
+/// which is the sole authority — `plugins.disabled` never governs a package.
+#[derive(Debug, Clone)]
+pub struct PackageEntry {
+    pub name: String,
+    /// Manifest description, or a components summary when it has none.
+    pub description: String,
+    /// One-line detail: the version, or `plugin` when unversioned.
+    pub detail: String,
+    pub enabled: bool,
 }
 
 /// Built-in tool categories: group name → member tool names. Tools not in any
@@ -221,16 +241,28 @@ impl PluginManager {
         v
     }
 
-    /// Enumerate every plugin given what was discovered at assembly: MCP
-    /// servers (name, connected), skills (name, description), LSP servers
-    /// (language key). Tool groups are always present.
+    /// Enumerate every plugin given what was discovered at assembly: installed
+    /// packages, MCP servers (name, connected), skills (name, description), LSP
+    /// servers (language key). Tool groups are always present.
     pub fn list(
         &self,
+        packages: &[PackageEntry],
         mcp_servers: &[(String, bool)],
         skills: &[(String, String)],
         lsp_servers: &[String],
     ) -> Vec<Plugin> {
         let mut out = Vec::new();
+        for pkg in packages {
+            out.push(Plugin {
+                id: format!("plugin:{}", pkg.name),
+                kind: PluginKind::Package,
+                name: pkg.name.clone(),
+                description: pkg.description.clone(),
+                // Registry-backed: `plugins.disabled` has no say here.
+                enabled: pkg.enabled,
+                detail: pkg.detail.clone(),
+            });
+        }
         for (group, desc, members) in TOOL_GROUPS {
             let id = format!("tools:{group}");
             out.push(Plugin {
@@ -342,15 +374,48 @@ mod tests {
     fn lists_all_kinds() {
         let pm = PluginManager::default();
         let plugins = pm.list(
+            &[PackageEntry {
+                name: "ui-demo".into(),
+                description: "sidebar demo".into(),
+                detail: "0.3.0".into(),
+                enabled: true,
+            }],
             &[("deepwiki".into(), true)],
             &[("review".into(), "review code".into())],
             &["rust".into()],
         );
+        assert!(plugins.iter().any(|p| p.id == "plugin:ui-demo"));
         assert!(plugins.iter().any(|p| p.id == "tools:git"));
         assert!(plugins
             .iter()
             .any(|p| p.id == "mcp:deepwiki" && p.detail == "connected"));
         assert!(plugins.iter().any(|p| p.id == "skill:review"));
         assert!(plugins.iter().any(|p| p.id == "lsp:rust"));
+    }
+
+    /// A package row's state comes from the install registry, so a stray
+    /// `plugin:*` entry in `plugins.disabled` must not switch it off.
+    #[test]
+    fn package_state_ignores_disabled_config() {
+        let mut cfg = ZodeConfig::default();
+        cfg.plugins.disabled = vec!["plugin:ui-demo".into()];
+        let pm = PluginManager::from_config(&cfg);
+        let plugins = pm.list(
+            &[PackageEntry {
+                name: "ui-demo".into(),
+                description: "sidebar demo".into(),
+                detail: "0.3.0".into(),
+                enabled: true,
+            }],
+            &[],
+            &[],
+            &[],
+        );
+        let package = plugins
+            .iter()
+            .find(|p| p.id == "plugin:ui-demo")
+            .expect("package row");
+        assert!(package.enabled);
+        assert_eq!(package.kind, PluginKind::Package);
     }
 }

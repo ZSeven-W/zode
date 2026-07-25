@@ -16,7 +16,8 @@ use zode_core::plugin::{Plugin, PluginKind};
 use crate::theme::Theme;
 
 /// Kinds in the order they're sectioned in the list.
-const KIND_ORDER: [PluginKind; 4] = [
+const KIND_ORDER: [PluginKind; 5] = [
+    PluginKind::Package,
     PluginKind::Tools,
     PluginKind::Mcp,
     PluginKind::Skill,
@@ -33,7 +34,11 @@ pub struct PluginPicker {
     plugins: Vec<Plugin>,
     /// Disabled-id set captured when the picker opened, so the app can tell
     /// whether the user actually changed anything before reassembling.
+    /// Package rows are excluded — their state lives in the install registry.
     original_disabled: Vec<String>,
+    /// Package enable states captured when the picker opened, so only the ones
+    /// the user actually flipped are written back to the install registry.
+    original_packages: Vec<(String, bool)>,
     /// Index into `visible_indices()` (navigable items only, no headers).
     selected: usize,
     filter: String,
@@ -43,18 +48,38 @@ impl PluginPicker {
     pub fn new(plugins: Vec<Plugin>) -> Self {
         Self {
             original_disabled: disabled_of(&plugins),
+            original_packages: packages_of(&plugins),
             plugins,
             selected: 0,
             filter: String::new(),
         }
     }
 
-    /// Every plugin id the picker presents — the set it can authoritatively set
-    /// on/off. Ids in config but outside this set (e.g. a project-scoped MCP
-    /// server, or an `lsp:*` for a server not available on this machine) must be
-    /// preserved, not clobbered, on save.
+    /// Every config-backed plugin id the picker presents — the set it can
+    /// authoritatively set on/off in `plugins.disabled`. Ids in config but
+    /// outside this set (e.g. a project-scoped MCP server, or an `lsp:*` for a
+    /// server not available on this machine) must be preserved, not clobbered,
+    /// on save. Package rows are excluded: the install registry owns them.
     pub fn all_ids(&self) -> Vec<String> {
-        self.plugins.iter().map(|p| p.id.clone()).collect()
+        self.plugins
+            .iter()
+            .filter(|p| p.kind != PluginKind::Package)
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    /// Installed packages the user flipped, as `(name, enabled)` — applied to
+    /// the install registry, which moves the package directory.
+    pub fn package_changes(&self) -> Vec<(String, bool)> {
+        let original: std::collections::HashMap<&str, bool> = self
+            .original_packages
+            .iter()
+            .map(|(name, on)| (name.as_str(), *on))
+            .collect();
+        packages_of(&self.plugins)
+            .into_iter()
+            .filter(|(name, on)| original.get(name.as_str()) != Some(on))
+            .collect()
     }
 
     pub fn next(&mut self) {
@@ -90,14 +115,15 @@ impl PluginPicker {
         Some((p.name.clone(), p.enabled))
     }
 
-    /// Sorted ids of plugins currently OFF — persisted to `plugins.disabled`.
+    /// Sorted ids of config-backed plugins currently OFF — persisted to
+    /// `plugins.disabled`.
     pub fn disabled_ids(&self) -> Vec<String> {
         disabled_of(&self.plugins)
     }
 
     /// Whether the user changed any enable/disable state since opening.
     pub fn is_dirty(&self) -> bool {
-        self.disabled_ids() != self.original_disabled
+        self.disabled_ids() != self.original_disabled || !self.package_changes().is_empty()
     }
 
     /// Indices of plugins matching the current filter, in list order.
@@ -246,15 +272,24 @@ impl PluginPicker {
 fn disabled_of(plugins: &[Plugin]) -> Vec<String> {
     let mut v: Vec<String> = plugins
         .iter()
-        .filter(|p| !p.enabled)
+        .filter(|p| !p.enabled && p.kind != PluginKind::Package)
         .map(|p| p.id.clone())
         .collect();
     v.sort();
     v
 }
 
+fn packages_of(plugins: &[Plugin]) -> Vec<(String, bool)> {
+    plugins
+        .iter()
+        .filter(|p| p.kind == PluginKind::Package)
+        .map(|p| (p.name.clone(), p.enabled))
+        .collect()
+}
+
 fn section_title(kind: PluginKind) -> &'static str {
     match kind {
+        PluginKind::Package => crate::tr("Installed plugins"),
         PluginKind::Tools => crate::tr("Tool groups"),
         PluginKind::Mcp => crate::tr("MCP servers"),
         PluginKind::Skill => crate::tr("Skills"),
@@ -368,10 +403,16 @@ fn pad_to_width(value: String, width: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zode_core::plugin::PluginManager;
+    use zode_core::plugin::{PackageEntry, PluginManager};
 
     fn sample() -> Vec<Plugin> {
         PluginManager::default().list(
+            &[PackageEntry {
+                name: "ui-demo".into(),
+                description: "sidebar demo".into(),
+                detail: "0.3.0".into(),
+                enabled: true,
+            }],
             &[("deepwiki".into(), true)],
             &[("review".into(), "review code".into())],
             &["rust".into()],
@@ -382,13 +423,34 @@ mod tests {
     fn toggle_flips_and_tracks_dirty() {
         let mut p = PluginPicker::new(sample());
         assert!(!p.is_dirty());
-        // Select the first item (a tool group) and toggle it off.
+        // Skip the installed-package section to land on a tool group.
+        p.next();
         let (_name, enabled) = p.toggle_selected().expect("has a selectable row");
         assert!(!enabled);
         assert!(p.is_dirty());
         assert!(p.disabled_ids().iter().any(|id| id.starts_with("tools:")));
         // Toggling back clears the dirty flag.
         p.toggle_selected();
+        assert!(!p.is_dirty());
+    }
+
+    #[test]
+    fn package_toggle_routes_to_registry_not_config() {
+        let mut p = PluginPicker::new(sample());
+        // The first row is the installed package.
+        let (name, enabled) = p.toggle_selected().expect("package row is selectable");
+        assert_eq!(name, "ui-demo");
+        assert!(!enabled);
+        assert!(p.is_dirty());
+        // Registry-owned: it must never reach `plugins.disabled`, and the
+        // config-owned id set must not claim it either (that would let the
+        // save path clobber unrelated ids).
+        assert!(p.disabled_ids().is_empty());
+        assert!(!p.all_ids().iter().any(|id| id == "plugin:ui-demo"));
+        assert_eq!(p.package_changes(), vec![("ui-demo".to_string(), false)]);
+        // Flipping back leaves nothing to apply.
+        p.toggle_selected();
+        assert!(p.package_changes().is_empty());
         assert!(!p.is_dirty());
     }
 
@@ -432,6 +494,8 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(content.contains("Manage plugins"));
+        assert!(content.contains("Installed plugins"));
+        assert!(content.contains("ui-demo"));
         assert!(content.contains("Tool groups"));
         assert!(content.contains("MCP servers"));
         assert!(content.contains("Skills"));

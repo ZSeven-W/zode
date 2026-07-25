@@ -117,8 +117,9 @@ pub fn plugin_list(cwd: &Path) -> ServerResult<PluginListResponse> {
         .map(|server| (server.name, server.connected))
         .collect::<Vec<_>>();
     let (skills, _enabled) = skills(cwd)?;
+    let packages = zode_core::plugin_package::installed_package_entries();
     let plugins = manager
-        .list(&mcp_servers, &skills, &[])
+        .list(&packages, &mcp_servers, &skills, &[])
         .into_iter()
         .map(|plugin| PluginSummary {
             id: plugin.id,

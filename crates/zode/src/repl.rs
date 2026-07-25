@@ -518,6 +518,20 @@ fn stamp_title(engine: &ZodeEngine, id: &str, prompt: &str) {
 /// it. Returns the new enabled state. Applies on the next launch (the running
 /// engine's tool set is already assembled).
 fn toggle_plugin(id: &str) -> Result<bool, zode_core::CoreError> {
+    // Installed packages are owned by the install registry, not by
+    // `plugins.disabled`; route them there so the directory move happens too.
+    if let Some(name) = id.strip_prefix("plugin:") {
+        let manager = zode_core::plugin_package::PluginPackageManager::open_default()?;
+        let currently = manager
+            .registry()?
+            .plugins
+            .get(name)
+            .map(|record| record.enabled)
+            .unwrap_or(true);
+        return manager
+            .set_enabled(name, !currently)
+            .map(|record| record.enabled);
+    }
     let mut cfg = ConfigManager::load_global()?;
     let was_disabled = cfg.plugins.disabled.iter().any(|d| d == id);
     if was_disabled {

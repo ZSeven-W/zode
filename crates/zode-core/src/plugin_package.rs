@@ -403,6 +403,47 @@ pub fn installed_package_configs(kind: PackageConfigKind) -> Vec<PackageConfigCo
         .collect()
 }
 
+/// Every installed package (enabled or not), flattened for the `/plugin`
+/// picker. Best-effort: an unreadable registry yields an empty list rather
+/// than failing the caller, exactly like the discovery helpers above.
+pub fn installed_package_entries() -> Vec<crate::plugin::PackageEntry> {
+    let Ok(manager) = PluginPackageManager::open_default() else {
+        return Vec::new();
+    };
+    let Ok(registry) = manager.registry() else {
+        return Vec::new();
+    };
+    registry
+        .plugins
+        .into_values()
+        .map(|record| {
+            let description = record
+                .description
+                .filter(|d| !d.trim().is_empty())
+                .unwrap_or_else(|| {
+                    if record.components.is_empty() {
+                        "plugin package".to_string()
+                    } else {
+                        record.components.join(", ")
+                    }
+                });
+            crate::plugin::PackageEntry {
+                // An untrusted package contributes nothing at runtime even when
+                // the registry says enabled — say so instead of silently
+                // rendering it as a working plugin.
+                description: if record.trusted {
+                    description
+                } else {
+                    format!("(untrusted) {description}")
+                },
+                detail: record.version.unwrap_or_else(|| "plugin".to_string()),
+                enabled: record.enabled,
+                name: record.name,
+            }
+        })
+        .collect()
+}
+
 /// Resolve trusted, enabled JavaScript renderers declared by managed plugins.
 /// Paths are containment-checked during validation and revalidated whenever
 /// the registry is loaded.

@@ -1764,8 +1764,17 @@ impl ZodeEngine {
     /// groups, MCP servers (with live connection state), skills, LSP servers.
     pub fn plugin_list(&self) -> Vec<crate::plugin::Plugin> {
         let mcp_servers = self.mcp_status();
-        self.plugins
-            .list(&mcp_servers, &self.all_skill_meta, &self.lsp_langs)
+        // Installed packages come straight off the install registry (a small
+        // file read on picker open), not from assembly state: a package
+        // enabled/disabled by the `zode plugin` CLI since startup must show
+        // its real state.
+        let packages = crate::plugin_package::installed_package_entries();
+        self.plugins.list(
+            &packages,
+            &mcp_servers,
+            &self.all_skill_meta,
+            &self.lsp_langs,
+        )
     }
 
     /// Inject a pre-loaded MessageStore (for `--continue` / `--resume`).

@@ -3078,8 +3078,14 @@ impl TuiApp {
             return;
         };
         if dialog.is_dirty() {
-            self.apply_plugins(dialog.disabled_ids(), dialog.all_ids(), agent_tx)
-                .await;
+            // MCP-scoped dialog: it never shows packages, so nothing to flip.
+            self.apply_plugins(
+                dialog.disabled_ids(),
+                dialog.all_ids(),
+                Vec::new(),
+                agent_tx,
+            )
+            .await;
         }
     }
 
@@ -6420,8 +6426,13 @@ impl TuiApp {
                     return;
                 };
                 if picker.is_dirty() {
-                    self.apply_plugins(picker.disabled_ids(), picker.all_ids(), agent_tx)
-                        .await;
+                    self.apply_plugins(
+                        picker.disabled_ids(),
+                        picker.all_ids(),
+                        picker.package_changes(),
+                        agent_tx,
+                    )
+                    .await;
                 }
             }
             KeyCode::Up => {
@@ -6597,10 +6608,15 @@ impl TuiApp {
     /// project-scoped MCP server or skill from a different workspace, or the
     /// not-yet-shown `lsp:*` rows) are preserved verbatim — replacing the whole
     /// list with just `disabled` would silently re-enable them.
+    ///
+    /// `packages` are installed plugin packages the user flipped. Those live in
+    /// the install registry (enabling moves the package directory back under
+    /// `plugins/`), never in `plugins.disabled`.
     async fn apply_plugins(
         &mut self,
         disabled: Vec<String>,
         owned: Vec<String>,
+        packages: Vec<(String, bool)>,
         agent_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
         if self.active_tab().is_busy() {
@@ -6609,6 +6625,11 @@ impl TuiApp {
             )));
             return;
         }
+        // A package that failed to flip (its directory is gone, or the
+        // destination already exists) must not abort the rest: whatever DID
+        // change still has to reach the running tab. Report it after the
+        // reassemble instead of the success toast.
+        let package_error = self.apply_plugin_packages(packages);
         let owned: std::collections::HashSet<String> = owned.into_iter().collect();
         let merged = match ConfigManager::load_global() {
             Ok(mut cfg) => {
@@ -6641,13 +6662,35 @@ impl TuiApp {
             }
         };
         let t = self.template.with_plugins_disabled(merged);
+        let notice = package_error.unwrap_or_else(|| crate::tr("plugins updated").to_string());
         self.start_reassemble_active(
             t,
-            ReassembleEffect::Notify(ReassembleNotify::Toast(
-                crate::tr("plugins updated").to_string(),
-            )),
+            ReassembleEffect::Notify(ReassembleNotify::Toast(notice)),
             agent_tx,
         );
+    }
+
+    /// Flip installed plugin packages in the install registry. Returns the
+    /// first failure's message; the remaining packages are still attempted, so
+    /// one bad row can't strand the others.
+    fn apply_plugin_packages(&self, packages: Vec<(String, bool)>) -> Option<String> {
+        if packages.is_empty() {
+            return None;
+        }
+        let manager = match zode_core::plugin_package::PluginPackageManager::open_default() {
+            Ok(manager) => manager,
+            Err(e) => return Some(format!("{}: {e}", crate::tr("plugin update failed"))),
+        };
+        let mut error = None;
+        for (name, enabled) in packages {
+            if let Err(e) = manager.set_enabled(&name, enabled) {
+                error.get_or_insert(format!(
+                    "{}: {name}: {e}",
+                    crate::tr("plugin update failed")
+                ));
+            }
+        }
+        error
     }
 
     fn apply_completion(&mut self) {
