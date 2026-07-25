@@ -3,12 +3,13 @@ import {
   Bot,
   Brain,
   Check,
-  CheckCircle2,
   CircleAlert,
   FileText,
   FolderGit2,
   Image as ImageIcon,
+  Inspect,
   LoaderCircle,
+  MousePointerSquareDashed,
   Paperclip,
   Plus,
   RotateCcw,
@@ -40,9 +41,11 @@ import type {
   PanelController,
   PanelMessage,
   PanelModel,
+  PanelSelectedElement,
   PanelState,
   PanelTask,
   PanelTool,
+  PanelTurnImage,
 } from "./types";
 
 const ACCEPTED_ATTACHMENTS =
@@ -96,7 +99,13 @@ function toolOutput(tool: PanelTool) {
   }
 }
 
-function MessageCard({ message }: { message: PanelMessage }) {
+function MessageCard({
+  message,
+  images = [],
+}: {
+  message: PanelMessage;
+  images?: PanelTurnImage[];
+}) {
   const isUser = message.role === "user";
   const text = String(message.text || message.content || "");
 
@@ -129,6 +138,19 @@ function MessageCard({ message }: { message: PanelMessage }) {
         >
           {isUser ? <p className="whitespace-pre-wrap">{text}</p> : <Markdown value={text} />}
         </div>
+        {images.length > 0 && (
+          <div className={cn("mt-2 flex flex-wrap gap-2", isUser && "justify-end")}>
+            {images.map((image) => (
+              <img
+                key={image.url}
+                src={image.url}
+                alt={image.name}
+                title={image.name}
+                className="max-h-40 max-w-full rounded-lg border border-border object-contain"
+              />
+            ))}
+          </div>
+        )}
       </div>
     </article>
   );
@@ -291,6 +313,7 @@ function AttachmentChip({
   onRemove: () => void;
 }) {
   const isImage = attachment.mime.startsWith("image/");
+  const preview = isImage ? attachment.previewUrl : null;
   const detail =
     attachment.status === "error"
       ? attachment.error || "Upload failed"
@@ -307,7 +330,13 @@ function AttachmentChip({
         attachment.status === "error" ? "border-destructive/25" : "border-border",
       )}
     >
-      {isImage ? (
+      {preview ? (
+        <img
+          src={preview}
+          alt={attachment.name}
+          className="size-9 shrink-0 rounded-md border border-border object-cover"
+        />
+      ) : isImage ? (
         <ImageIcon className="size-4 shrink-0 text-primary" />
       ) : (
         <FileText className="size-4 shrink-0 text-primary" />
@@ -340,6 +369,74 @@ function AttachmentChip({
   );
 }
 
+const PASTE_EXTENSIONS: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+};
+
+// Clipboard images arrive as unnamed blobs (or as "image.png" for every
+// screenshot), so give each one a distinct, extension-correct name before it
+// reaches the upload validator.
+function clipboardImages(data: DataTransfer | null): File[] {
+  if (!data) return [];
+  const files: File[] = [];
+  for (const item of Array.from(data.items || [])) {
+    if (item.kind !== "file") continue;
+    const type = item.type.toLowerCase();
+    if (!PASTE_EXTENSIONS[type]) continue;
+    const file = item.getAsFile();
+    if (!file) continue;
+    const stamp = `${Date.now().toString(36)}-${files.length + 1}`;
+    files.push(new File([file], `pasted-${stamp}.${PASTE_EXTENSIONS[type]}`, { type }));
+  }
+  return files;
+}
+
+function elementDetail(element: PanelSelectedElement) {
+  const parts = [element.selector || "无稳定选择器"];
+  if (element.rect) parts.push(`${element.rect.width}×${element.rect.height}`);
+  if (element.inFrame) parts.push("iframe 内");
+  return parts.join(" · ");
+}
+
+function SelectedElementChip({
+  element,
+  disabled,
+  onRemove,
+}: {
+  element: PanelSelectedElement;
+  disabled: boolean;
+  onRemove: () => void;
+}) {
+  return (
+    <article className="flex min-w-0 items-center gap-2 rounded-lg border border-primary/25 bg-primary/5 py-1.5 pr-1.5 pl-2">
+      <Inspect className="size-4 shrink-0 text-primary" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[11px] font-semibold" title={element.html || element.label}>
+          {element.label || element.tag || "元素"}
+          {element.text ? ` · ${element.text}` : ""}
+        </span>
+        <span className="block truncate text-[9px] text-muted-foreground" title={element.selector}>
+          {elementDetail(element)}
+        </span>
+      </span>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className="size-6 rounded-md"
+        aria-label="Remove selected element"
+        disabled={disabled}
+        onClick={onRemove}
+      >
+        <X className="size-3.5" />
+      </Button>
+    </article>
+  );
+}
+
 function Composer({ state, controller }: { state: PanelState; controller: PanelController }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const task = globalThis.ZodePanelState.taskById(state, state.currentTaskId);
@@ -356,6 +453,8 @@ function Composer({ state, controller }: { state: PanelState; controller: PanelC
   const notice = controller.getAttachmentNotice(taskId);
   const uploading = controller.isUploadingAttachments(taskId);
   const readyAttachment = attachments.some((attachment) => attachment.status === "ready");
+  const selectedElement = controller.getSelectedElement(taskId);
+  const picking = controller.isPickingElement(taskId);
   const interactionLocked = controller.isNavigating() || controller.isMutating(taskId);
   const controlDisabled =
     !connected || !task || action !== "send" || interactionLocked;
@@ -366,7 +465,7 @@ function Composer({ state, controller }: { state: PanelState; controller: PanelC
     !connected ||
     !taskId ||
     uploading ||
-    (!stopping && draft.trim().length === 0 && !readyAttachment);
+    (!stopping && draft.trim().length === 0 && !readyAttachment && !selectedElement);
   const validModels = state.models.filter((model) => modelId(model));
   const modelValue = task?.model || modelId(validModels[0] || "");
   const sendLabel = loading
@@ -378,6 +477,17 @@ function Composer({ state, controller }: { state: PanelState; controller: PanelC
         : stopping
           ? "Stop"
           : "Send";
+
+  // The page keeps focus during a pick, so Esc only reaches the panel when the
+  // user comes back to it — the picker also self-cancels after two minutes.
+  useEffect(() => {
+    if (!picking) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") ignoreFailure(() => controller.cancelElementPick());
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [picking, controller]);
 
   return (
     <footer className="composer-shell">
@@ -391,6 +501,30 @@ function Composer({ state, controller }: { state: PanelState; controller: PanelC
         <label className="sr-only" htmlFor="composer-react">
           Task message
         </label>
+
+        {attachments.length > 0 && (
+          <div className="grid grid-cols-2 gap-2 max-[390px]:grid-cols-1">
+            {attachments.map((attachment) => (
+              <AttachmentChip
+                key={attachment.localId}
+                attachment={attachment}
+                disabled={interactionLocked}
+                onRemove={() =>
+                  ignoreFailure(() => controller.removeAttachment(attachment.localId))
+                }
+              />
+            ))}
+          </div>
+        )}
+
+        {selectedElement && (
+          <SelectedElementChip
+            element={selectedElement}
+            disabled={interactionLocked}
+            onRemove={() => ignoreFailure(() => controller.clearSelectedElement(taskId))}
+          />
+        )}
+
         <textarea
           id="composer-react"
           rows={2}
@@ -409,22 +543,22 @@ function Composer({ state, controller }: { state: PanelState; controller: PanelC
               if (!sendDisabled) ignoreFailure(() => controller.submit());
             }
           }}
+          onPaste={(event) => {
+            if (controlDisabled) return;
+            const files = clipboardImages(event.clipboardData);
+            if (!files.length) return;
+            // Only swallow the paste once an image is actually taken, so
+            // pasting text (or a file plus its text) still fills the draft.
+            event.preventDefault();
+            ignoreFailure(() => controller.addFiles(files));
+          }}
           className="min-h-14 w-full resize-none bg-transparent px-2 py-1 text-[13px] leading-5 outline-none placeholder:text-muted-foreground/65"
         />
 
-        {attachments.length > 0 && (
-          <div className="grid grid-cols-2 gap-2 max-[390px]:grid-cols-1">
-            {attachments.map((attachment) => (
-              <AttachmentChip
-                key={attachment.localId}
-                attachment={attachment}
-                disabled={interactionLocked}
-                onRemove={() =>
-                  ignoreFailure(() => controller.removeAttachment(attachment.localId))
-                }
-              />
-            ))}
-          </div>
+        {picking && (
+          <p role="status" aria-live="polite" className="text-[10px] text-primary">
+            在页面上点击要提问的元素，再次点击按钮可取消。
+          </p>
         )}
 
         {notice && (
@@ -457,6 +591,23 @@ function Composer({ state, controller }: { state: PanelState; controller: PanelC
             onClick={() => fileInput.current?.click()}
           >
             <Paperclip />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={picking ? "Cancel element picker" : "Select a page element"}
+            aria-pressed={picking}
+            title={picking ? "取消选择元素" : "选择页面元素提问"}
+            disabled={controlDisabled}
+            className={cn(picking && "bg-primary/10 text-primary hover:bg-primary/15")}
+            onClick={() =>
+              ignoreFailure(() =>
+                picking ? controller.cancelElementPick() : controller.pickElement(),
+              )
+            }
+          >
+            <MousePointerSquareDashed />
           </Button>
 
           {task ? (
@@ -689,8 +840,11 @@ function Panel({
   }
   const error = globalThis.ZodePanelState.errorForCurrent(state);
   const terminal = globalThis.ZodePanelState.terminalForCurrent(state);
+  // A successful turn already speaks for itself through the reply, so only an
+  // unusual ending (interrupted/stopped) earns a banner.
+  const terminalNotice = terminal && terminal.status !== "completed" ? terminal : null;
   const hasActivity =
-    messages.length > 0 || tools.length > 0 || approvals.length > 0 || error || terminal;
+    messages.length > 0 || tools.length > 0 || approvals.length > 0 || error || terminalNotice;
   const taskBusy = currentTask?.status === "running" || currentTask?.status === "stopping";
   const statusLabel = connected
     ? "已连接"
@@ -845,7 +999,20 @@ function Panel({
                   if (item.value.role === "thinking") {
                     return <ThinkingCard key={key} message={item.value} />;
                   }
-                  return <MessageCard key={key} message={item.value} />;
+                  return (
+                    <MessageCard
+                      key={key}
+                      message={item.value}
+                      images={
+                        item.value.role === "user"
+                          ? controller.getTurnImages(
+                              item.value.taskId || state.currentTaskId,
+                              item.value.turnId,
+                            )
+                          : []
+                      }
+                    />
+                  );
                 }
                 if (item.kind === "approval") {
                   return (
@@ -861,7 +1028,7 @@ function Panel({
                 return null;
               })}
 
-              {(error || terminal) && (
+              {(error || terminalNotice) && (
                 <section aria-label="Task status and errors" aria-live="polite">
                   {error ? (
                     <article className="flex gap-3 rounded-xl border border-destructive/25 bg-destructive/5 p-3.5">
@@ -879,9 +1046,9 @@ function Panel({
                       </div>
                     </article>
                   ) : (
-                    <div className="flex items-center gap-2 rounded-lg border border-success/20 bg-success/5 px-3 py-2.5 text-xs text-success">
-                      <CheckCircle2 className="size-4" />
-                      Turn {terminal?.status || "completed"}
+                    <div className="flex items-center gap-2 rounded-lg border border-warning/25 bg-warning/5 px-3 py-2.5 text-xs text-warning">
+                      <CircleAlert className="size-4" />
+                      Turn {terminalNotice?.status}
                     </div>
                   )}
                 </section>

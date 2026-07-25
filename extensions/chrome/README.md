@@ -27,8 +27,13 @@ Tailwind CSS, and local shadcn/ui components. Source files live in
 `extensions/chrome/src/`; Vite writes the CSP-safe extension assets to
 `extensions/chrome/dist/`. The existing task controller and protocol state
 machine remain framework-independent and continue to be covered by the Node
-test suite. Version 0.5.0 adds Native Messaging auto-start; the daemon uses the
-last workspace registered by a normal zode launch.
+test suite. The extension ships with zode and carries the same version: the
+manifest's `version_name` is the full workspace version (for example
+`0.1.0-beta.7`) and `version` is its numeric core, because Chrome only accepts
+dotted integers there. Native Messaging auto-start (the daemon uses the last
+workspace registered by a normal zode launch) and the element picker described
+below both arrived with this numbering; extensions built before it used an
+independent 0.x line that ran ahead of zode's.
 
 Side-panel tasks are shared with the TUI sessions: creating or selecting a task
 does not switch the terminal's focused tab, and the same history remains
@@ -47,6 +52,29 @@ phrases such as “this” or “current page” trigger a page read before an a
 while the local workspace is used only when the prompt explicitly asks about
 the project, code, or files.
 
+The composer's element button starts a DevTools-style picker on that page:
+hover highlights elements, a click captures the one under the cursor, and the
+picked element rides along with the next turn as a chip above the input. The
+picker uses the debugger access the bridge already holds, so it needs no extra
+permission and no content script; it runs on `http`, `https`, and `file` pages
+only. A pick is cancelled by pressing the button again, pressing Esc in the
+panel, navigating or closing the page, or after two minutes. zode receives the
+element's unique CSS selector, tag, visible text, bounding box, attributes, and
+a capped `outerHTML` snippet, plus the page title and URL, and can act on it
+with `browser_read`, `browser_act`, and `browser_eval`. The value of a password
+input is never captured. Sending a picked element requires a zode build that
+understands it; an older zode reports that the selection is unsupported and the
+chip is kept so the turn can be retried without it.
+
+Images can be pasted straight into the composer: a clipboard screenshot
+becomes an attachment named `pasted-<stamp>.<ext>` and is previewed as a
+thumbnail above the input, next to any element chip. Pasting text still fills
+the draft as usual — only an actual image on the clipboard is intercepted.
+After the turn is sent, the same picture is shown inside its user message in
+the transcript. Those previews are panel-local `blob:` URLs held for the last
+40 turns, so they disappear when the panel reloads or reloads its history from
+an authoritative snapshot; the image itself still reached the model.
+
 Each turn accepts at most 8 files and 20 MiB total. Supported images are PNG,
 JPEG, GIF, and WebP, up to 5 MiB each. UTF-8 text and code files are supported
 up to 1 MiB each, including Markdown, JSON, Rust, JavaScript/TypeScript, Python,
@@ -54,9 +82,12 @@ Go, Java/Kotlin, shell, CSS, HTML, TOML, and YAML. PDF, Office documents,
 archives, executables, and non-UTF-8 text are rejected.
 
 After updating the extension, use the Reload button on `chrome://extensions`
-before testing the side panel. Older extension versions remain compatible with
-existing browser automation, but they do not contain the task side panel;
-reload or update to version 0.3.0 or newer for task dispatch.
+before testing the side panel. An older extension version remains compatible
+with existing browser automation, but a previous version may not contain the
+task side panel; reload it from this directory for task dispatch. Because the
+version now tracks zode, it is numerically lower than the extension's old
+independent line — Chrome refuses to *update* a packed install to a lower
+version, so remove that install and load this directory unpacked instead.
 
 After the first pairing, the extension stores a token. If zode is not running,
 the extension starts an extension-only background daemon through Chrome Native
@@ -119,9 +150,9 @@ from `assets/logo-light.png` at the repo root with `sips -Z <size>`.
 
 After changing files in this directory, open `chrome://extensions` and click
 the Reload button on the zode card (the extension is named "zode"; it was
-previously listed as "zode browser bridge"). Version 0.3.0 adds the native
-task side panel and its permission, so an older extension must be reloaded or
-updated before clicking the toolbar icon can open it. The manifest embeds a
+previously listed as "zode browser bridge"). The side panel and its permission
+are not in every older build, so a stale extension must be reloaded before
+clicking the toolbar icon can open it. The manifest embeds a
 public key so unpacked and packed installs keep the same extension ID, which
 zode uses for the WebSocket Origin check.
 

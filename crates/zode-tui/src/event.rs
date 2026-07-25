@@ -117,6 +117,7 @@ pub enum ExtensionTaskRequest {
         task_id: String,
         input: String,
         attachment_ids: Vec<String>,
+        selection: Option<Box<ExtensionSelectedElement>>,
     },
     AttachmentBegin {
         task_id: String,
@@ -145,6 +146,32 @@ pub enum ExtensionTaskRequest {
         approval_id: String,
         decision: ExtensionApprovalDecision,
     },
+}
+
+/// An HTML element the user picked in the side panel before sending a turn.
+/// Every field is already capped by the extension and re-capped on intake, so
+/// the model sees a bounded description of the element and its page.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExtensionSelectedElement {
+    pub selector: String,
+    pub label: String,
+    pub tag: String,
+    pub text: String,
+    pub value: String,
+    pub html: String,
+    pub url: String,
+    pub title: String,
+    pub in_frame: bool,
+    pub rect: Option<ExtensionElementRect>,
+    pub attributes: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExtensionElementRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

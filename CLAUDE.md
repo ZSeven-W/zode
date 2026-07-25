@@ -485,6 +485,50 @@ is the primary context, that ambiguous/deictic page questions should call
 workspace unless the user explicitly asks about project code or files. The
 block is sent to the engine but omitted from the panel's displayed user text.
 
+The extension version tracks the workspace crate version: `package.json` and
+the manifest's `version_name` carry the full value (`0.1.0-beta.7`) while the
+manifest's `version` carries its numeric core, since Chrome only accepts dotted
+integers there. `manifest.test.js` reads `Cargo.toml` and enforces this.
+
+Clipboard images paste into the composer (`clipboardImages` in `App.tsx` renames
+each blob to `pasted-<stamp>.<ext>` before the normal attachment upload path).
+Image attachments carry a `previewUrl` object URL: the composer chip renders it
+as a thumbnail, and on submit `rememberTurnImages` moves it into a bounded
+(40-turn) `taskId:turnId` map that `MessageCard` reads, so the sent picture also
+shows inside its user bubble. These previews are panel-local — snapshot
+`HistoryMessage`s carry neither `turnId` nor image data, so a reload or an
+authoritative snapshot refresh drops them.
+
+### Side-panel element picker
+
+The composer's element button ("选择页面元素提问") starts a DevTools-style
+picker on the page beside the panel. It is pure CDP — `DOM.enable` +
+`Overlay.setInspectMode {searchForNode}` on the already-attached debugger
+session — so it adds no manifest permission, no `host_permissions`, and no
+content script. The click arrives as `Overlay.inspectNodeRequested`;
+`background.js` resolves the backend node, runs one `Runtime.callFunctionOn`
+that returns the element summary (unique CSS selector, label, tag, text,
+bounding box, attributes, capped `outerHTML`, page title/URL, iframe flag),
+and broadcasts `zode-element-picked`. A password input's value is never
+captured.
+
+Starting a pick makes the active tab the controlled tab (the same retarget a
+side-panel turn performs), so the selector the model receives and the tab
+`browser_*` tools drive are the same page. Picks are broadcast, but only the
+panel that started one adopts it, so a second window can't steal it. A pick is
+cancelled by the button, Esc in the panel, page navigation/close, debugger
+detach, or a two-minute timeout.
+
+The panel holds one picked element per task beside the draft, and `submit()`
+adds it to `turn/start` as `selection` **only when present** — an older zode
+(whose `TurnStartParams` is `deny_unknown_fields`) therefore keeps accepting
+ordinary turns, and the panel maps its `unknown field \`selection\`` error to a
+"upgrade zode" notice while keeping the chip for retry. `arm_extension_turn`
+turns the selection into a hidden `<browser_selected_element>` content block
+(sent to the model, omitted from the panel transcript) plus a
+`[Selected element: …]` line in the displayed text, mirroring attachments. A
+selection alone is a valid turn.
+
 The toolbar icon is theme-adaptive: an offscreen document (`offscreen.html`,
 `MATCH_MEDIA` reason, `offscreen` permission) posts `zode-theme` messages on
 load/change/ping and the worker calls `chrome.action.setIcon` to swap between

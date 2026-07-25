@@ -16,6 +16,13 @@
   const ATTACHMENT_TOTAL_LIMIT = 20 * 1024 * 1024;
   const ATTACHMENT_MAX_FILES = 8;
   const PENDING_TURN_DELTA_LIMIT = 64;
+  const TURN_IMAGE_HISTORY_LIMIT = 40;
+  const ELEMENT_TEXT_CAP = 400;
+  const ELEMENT_HTML_CAP = 2000;
+  const ELEMENT_ATTR_CAP = 24;
+  const ELEMENT_ATTR_VALUE_CAP = 200;
+  const ELEMENT_SELECTION_UNSUPPORTED =
+    "无法发送任务：当前 zode 版本不支持选中元素提问。请升级 zode，或移除选中的元素后重试。";
   const APPROVAL_DECISIONS = new Set(["allow", "allowAlways", "deny"]);
   const IMAGE_MIMES = new Set([
     "image/png",
@@ -84,6 +91,28 @@
   ]);
   const STRICT_MIME = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
 
+  function createPreviewUrl(file) {
+    if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
+      return null;
+    }
+    try {
+      return URL.createObjectURL(file);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function revokePreviewUrl(url) {
+    if (!url || typeof URL === "undefined" || typeof URL.revokeObjectURL !== "function") {
+      return;
+    }
+    try {
+      URL.revokeObjectURL(url);
+    } catch (_) {
+      // Revoking a URL the page already dropped is best effort.
+    }
+  }
+
   function invoke(operation) {
     return Promise.resolve().then(operation);
   }
@@ -100,7 +129,83 @@
     if (error && error.code === "attachments_not_supported") {
       return "无法发送任务：当前 zode 版本不支持文件附件。请升级 zode，或移除附件后仅发送文本任务。";
     }
+    if (isUnsupportedSelection(error)) {
+      return ELEMENT_SELECTION_UNSUPPORTED;
+    }
     return actionableError("无法发送任务", error);
+  }
+
+  function clampText(value, cap) {
+    const text = String(value == null ? "" : value).trim();
+    return text.length > cap ? `${text.slice(0, cap)}…` : text;
+  }
+
+  function elementRect(rect) {
+    if (!rect || typeof rect !== "object") {
+      return null;
+    }
+    const numbers = ["x", "y", "width", "height"].map((key) => Number(rect[key]));
+    if (numbers.some((value) => !Number.isFinite(value))) {
+      return null;
+    }
+    const [x, y, width, height] = numbers.map((value) => Math.round(value));
+    return { x, y, width, height };
+  }
+
+  function elementAttributes(attributes) {
+    if (!Array.isArray(attributes)) {
+      return [];
+    }
+    const normalized = [];
+    for (const attribute of attributes) {
+      if (!attribute || typeof attribute !== "object") {
+        continue;
+      }
+      const name = clampText(attribute.name, 64);
+      if (!name || normalized.length >= ELEMENT_ATTR_CAP) {
+        continue;
+      }
+      normalized.push({ name, value: clampText(attribute.value, ELEMENT_ATTR_VALUE_CAP) });
+    }
+    return normalized;
+  }
+
+  // The picked element crosses a runtime message boundary, so the panel caps
+  // and re-shapes it here rather than trusting the page-side summary.
+  function normalizePickedElement(element) {
+    if (!element || typeof element !== "object") {
+      return null;
+    }
+    const tag = clampText(element.tag, 64).toLowerCase();
+    const label = clampText(element.label, 120) || tag;
+    const html = clampText(element.html, ELEMENT_HTML_CAP);
+    const text = clampText(element.text, ELEMENT_TEXT_CAP);
+    if (!tag && !html && !text) {
+      return null;
+    }
+    return {
+      selector: clampText(element.selector, 1024),
+      label,
+      tag,
+      text,
+      value: clampText(element.value, ELEMENT_ATTR_VALUE_CAP),
+      html,
+      url: clampText(element.url, 2048),
+      title: clampText(element.title, 200),
+      inFrame: Boolean(element.inFrame),
+      rect: elementRect(element.rect),
+      attributes: elementAttributes(element.attributes),
+    };
+  }
+
+  function isUnsupportedSelection(error) {
+    const message = messageOf(error);
+    return (
+      Boolean(error) &&
+      error.code === "invalid_params" &&
+      message.includes("unknown field") &&
+      message.includes("selection")
+    );
   }
 
   function isUnsupportedTaskClient(error) {
@@ -253,6 +358,9 @@
     let taskAuthorityGeneration = 0;
     const attachmentsByTask = new Map();
     const attachmentNotices = new Map();
+    const elementsByTask = new Map();
+    const turnImagesByKey = new Map();
+    let elementPickFlight = null;
     let attachmentSequence = 0;
     let uploadQueue = Promise.resolve();
     let controller = null;
@@ -407,6 +515,7 @@
         uploadId: entry.uploadId || null,
         attachmentId: entry.attachmentId || null,
         error: entry.error || null,
+        previewUrl: entry.previewUrl || null,
       };
     }
 
@@ -667,6 +776,8 @@
           attachmentId: null,
           error: validation.error,
           file: validation.error ? null : file,
+          previewUrl:
+            validation.error || validation.kind !== "image" ? null : createPreviewUrl(file),
           removed: false,
           invalidated: false,
           cancelSent: false,
@@ -692,6 +803,8 @@
       }
       const entry = entries[index];
       entry.removed = true;
+      revokePreviewUrl(entry.previewUrl);
+      entry.previewUrl = null;
       entries.splice(index, 1);
       if (entries.length < ATTACHMENT_MAX_FILES) {
         attachmentNotices.delete(attachmentKey(taskId));
@@ -705,6 +818,34 @@
       return true;
     }
 
+    // A submitted image keeps its object URL so the transcript bubble can show
+    // the same picture the composer previewed. The map is bounded; evicting an
+    // entry revokes its URLs.
+    function rememberTurnImages(taskId, turnId, entries) {
+      const images = entries
+        .filter((entry) => entry.previewUrl && String(entry.mime).startsWith("image/"))
+        .map((entry) => ({ name: entry.name, mime: entry.mime, url: entry.previewUrl }));
+      if (!turnId || images.length === 0) {
+        return;
+      }
+      const key = `${taskId}:${turnId}`;
+      turnImagesByKey.set(key, images);
+      while (turnImagesByKey.size > TURN_IMAGE_HISTORY_LIMIT) {
+        const oldest = turnImagesByKey.keys().next().value;
+        for (const image of turnImagesByKey.get(oldest) || []) {
+          revokePreviewUrl(image.url);
+        }
+        turnImagesByKey.delete(oldest);
+      }
+    }
+
+    function getTurnImages(taskId, turnId) {
+      if (!taskId || !turnId) {
+        return [];
+      }
+      return (turnImagesByKey.get(`${taskId}:${turnId}`) || []).map((image) => ({ ...image }));
+    }
+
     function consumeAttachments(taskId, attachmentIds) {
       if (!attachmentIds.length) {
         return;
@@ -716,6 +857,133 @@
       attachmentsByTask.set(attachmentKey(taskId), remaining);
       attachmentNotices.delete(attachmentKey(taskId));
       notifyAttachments(taskId);
+    }
+
+    // A picked page element lives beside the draft: per task, client-side only,
+    // and consumed by the next turn the way a ready attachment is.
+    function getSelectedElement(taskId = state.currentTaskId) {
+      const element = elementsByTask.get(attachmentKey(taskId));
+      return element ? cloneElement(element) : null;
+    }
+
+    function cloneElement(element) {
+      return {
+        ...element,
+        rect: element.rect ? { ...element.rect } : null,
+        attributes: element.attributes.map((attribute) => ({ ...attribute })),
+      };
+    }
+
+    function isPickingElement(taskId = state.currentTaskId) {
+      return Boolean(elementPickFlight && elementPickFlight.key === attachmentKey(taskId));
+    }
+
+    function notifyElement(taskId, type) {
+      notify({ type, taskId: taskId || null });
+    }
+
+    function setSelectedElement(taskId, element) {
+      const key = attachmentKey(taskId);
+      if (element) {
+        elementsByTask.set(key, element);
+      } else {
+        elementsByTask.delete(key);
+      }
+    }
+
+    function clearSelectedElement(taskId = state.currentTaskId) {
+      const key = attachmentKey(taskId);
+      if (!elementsByTask.has(key)) {
+        return Promise.resolve(false);
+      }
+      elementsByTask.delete(key);
+      notifyElement(taskId, "element/cleared");
+      return Promise.resolve(true);
+    }
+
+    function pickElement() {
+      try {
+        assertConnected();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      const taskId = state.currentTaskId;
+      if (!taskId) {
+        return Promise.reject(new Error("select a task before picking an element"));
+      }
+      if (mutationByTask.has(taskId) || State.primaryAction(state, taskId) !== "send") {
+        return Promise.reject(new Error("task is busy; wait before picking an element"));
+      }
+      const previous = elementPickFlight;
+      if (previous && previous.key === attachmentKey(taskId)) {
+        return Promise.resolve(null);
+      }
+      // Picking from another task retargets: the worker restarts inspect mode,
+      // so the old flight can never claim the element that lands next.
+      const flight = { key: attachmentKey(taskId), taskId };
+      elementPickFlight = flight;
+      if (previous) {
+        notifyElement(previous.taskId, "element/pick-canceled");
+      }
+      attachmentNotices.delete(flight.key);
+      notifyElement(taskId, "element/picking");
+      return invoke(async () => {
+        const response = await runtimeMessage({ type: "zode-pick-element" });
+        if (!response || !response.ok) {
+          throw new Error((response && response.error) || "element picker failed");
+        }
+        return response.target || null;
+      }).catch((error) => {
+        if (elementPickFlight === flight) {
+          elementPickFlight = null;
+          setAttachmentNotice(taskId, messageOf(error));
+        }
+        throw error;
+      });
+    }
+
+    function cancelElementPick() {
+      const flight = elementPickFlight;
+      if (!flight) {
+        return Promise.resolve(false);
+      }
+      elementPickFlight = null;
+      notifyElement(flight.taskId, "element/pick-canceled");
+      return invoke(async () => {
+        const response = await runtimeMessage({ type: "zode-pick-cancel" });
+        return Boolean(response && response.ok);
+      }).catch((error) => {
+        console.debug("zode element pick cancel failed", error);
+        return false;
+      });
+    }
+
+    // Picks are broadcast to every open panel; only the one that started this
+    // pick may consume it, so a second window never steals the element.
+    function handlePickedElement(message) {
+      const flight = elementPickFlight;
+      if (!flight) {
+        return;
+      }
+      elementPickFlight = null;
+      const element = normalizePickedElement(message && message.element);
+      if (!element) {
+        setAttachmentNotice(flight.taskId, "无法读取选中的元素，请重试。");
+        return;
+      }
+      setSelectedElement(flight.taskId, element);
+      attachmentNotices.delete(flight.key);
+      notifyElement(flight.taskId, "element/picked");
+    }
+
+    function handlePickCanceled(message) {
+      const flight = elementPickFlight;
+      if (!flight) {
+        return;
+      }
+      elementPickFlight = null;
+      const reason = String((message && message.reason) || "element pick canceled");
+      setAttachmentNotice(flight.taskId, `已取消选择元素：${reason}`);
     }
 
     function writePersistence(values) {
@@ -946,6 +1214,14 @@
             }
           }
         }
+        return false;
+      }
+      if (message.type === "zode-element-picked") {
+        handlePickedElement(message);
+        return false;
+      }
+      if (message.type === "zode-element-pick-canceled") {
+        handlePickCanceled(message);
         return false;
       }
       if (message.type === "zode-task-disconnected") {
@@ -1673,7 +1949,8 @@
       }
       const submittedAttachments = readyAttachmentEntries(taskId);
       const attachmentIds = submittedAttachments.map((entry) => entry.attachmentId);
-      if (!input && attachmentIds.length === 0) {
+      const selection = getSelectedElement(taskId);
+      if (!input && attachmentIds.length === 0 && !selection) {
         return Promise.resolve(null);
       }
 
@@ -1682,6 +1959,11 @@
           const params = { taskId, input };
           if (attachmentIds.length) {
             params.attachmentIds = attachmentIds;
+          }
+          // Omitted unless the user actually picked an element, so an older
+          // zode keeps accepting plain turns from this extension.
+          if (selection) {
+            params.selection = selection;
           }
           const result = await requestTurnStart(flight, params);
           if (result && result.turnId) {
@@ -1706,7 +1988,11 @@
           if (state.drafts[taskId] === originalDraft) {
             await setDraftForTask(taskId, "");
           }
+          rememberTurnImages(taskId, result && result.turnId, submittedAttachments);
           consumeAttachments(taskId, attachmentIds);
+          if (selection) {
+            await clearSelectedElement(taskId);
+          }
           return result;
         } catch (error) {
           if (error && error.code === "stale_turn_start") {
@@ -1741,6 +2027,12 @@
       isRetrying,
       isRespondingApproval,
       isUploadingAttachments,
+      isPickingElement,
+      getTurnImages,
+      getSelectedElement,
+      pickElement,
+      cancelElementPick,
+      clearSelectedElement,
       retryConnection,
       setDraft,
       toggleTool,

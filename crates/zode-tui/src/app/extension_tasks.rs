@@ -47,6 +47,7 @@ const EXTENSION_SHUTDOWN_MESSAGE: &str = "server is shutting down";
 pub(super) const SIDE_PANEL_BROWSER_CONTEXT: &str = r#"<browser_side_panel_context>
 This turn was submitted from the browser side panel. The active browser page beside the panel is the primary context for the request. If the request could reasonably refer to that page—including phrases such as "this", "this page", "current page", "summarize", "what is this about", "这个", "这个页面", "当前页面", "讲的是什么", or "帮我看看"—inspect the page with browser_read before answering. Do not read or search the local workspace to guess what the page contains. Use local files only when the user explicitly asks about the project, code, workspace, or a local file.
 </browser_side_panel_context>"#;
+pub(super) const SELECTED_ELEMENT_GUIDANCE: &str = "The user picked this element on the active page before sending the turn. Unless they clearly mean something else, it is the subject of the request. Reach it with the CSS selector below (browser_read snapshot, browser_act click/type, browser_eval); re-read the page if the selector no longer matches.";
 
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
@@ -967,6 +968,52 @@ struct TurnStartParams {
     input: String,
     #[serde(default)]
     attachment_ids: Vec<String>,
+    #[serde(default)]
+    selection: Option<SelectionParams>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SelectionParams {
+    #[serde(default)]
+    selector: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    tag: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    value: String,
+    #[serde(default)]
+    html: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    in_frame: bool,
+    #[serde(default)]
+    rect: Option<SelectionRectParams>,
+    #[serde(default)]
+    attributes: Vec<SelectionAttributeParams>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SelectionRectParams {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SelectionAttributeParams {
+    name: String,
+    #[serde(default)]
+    value: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1653,8 +1700,9 @@ impl TuiApp {
                 task_id,
                 input,
                 attachment_ids,
+                selection,
             } => self
-                .arm_extension_turn(connection_id, task_id, input, attachment_ids)
+                .arm_extension_turn(connection_id, task_id, input, attachment_ids, selection)
                 .map(Box::new)
                 .map(PreparedExtensionDirectRequest::Start),
             ExtensionTaskRequest::TurnInterrupt { task_id, turn_id } => {
@@ -1837,7 +1885,7 @@ impl TuiApp {
         task_id: String,
         input: String,
     ) -> Result<PreparedExtensionTurn, ExtensionTaskError> {
-        self.arm_extension_turn(connection_id, task_id, input, Vec::new())
+        self.arm_extension_turn(connection_id, task_id, input, Vec::new(), None)
     }
 
     fn arm_extension_turn(
@@ -1846,6 +1894,7 @@ impl TuiApp {
         task_id: String,
         input: String,
         attachment_ids: Vec<String>,
+        selection: Option<Box<crate::event::ExtensionSelectedElement>>,
     ) -> Result<PreparedExtensionTurn, ExtensionTaskError> {
         let Some(tab_idx) = self.tabs.iter().position(|tab| tab.session_id == task_id) else {
             return Err(ExtensionTaskError::not_found(format!(
@@ -1960,6 +2009,12 @@ impl TuiApp {
                     images.push(image);
                 }
             }
+        }
+        if let Some(element) = selection.as_ref() {
+            summaries.push(selected_element_summary(element));
+            content.push(ContentBlock::Text {
+                text: selected_element_block(element),
+            });
         }
         // This context is sent to the model but intentionally omitted from
         // display_text, so the panel keeps showing only the user's words.
@@ -3521,9 +3576,16 @@ fn parse_extension_request(
         "turn/start" => {
             let params: TurnStartParams = parse_params(params)?;
             validate_task_id(&params.task_id)?;
-            if params.input.trim().is_empty() && params.attachment_ids.is_empty() {
+            let selection = params
+                .selection
+                .map(|selection| selected_element(selection).map(Box::new))
+                .transpose()?;
+            if params.input.trim().is_empty()
+                && params.attachment_ids.is_empty()
+                && selection.is_none()
+            {
                 return Err(ExtensionTaskError::invalid_params(
-                    "input or attachmentIds must be non-empty",
+                    "input, attachmentIds, or selection must be non-empty",
                 ));
             }
             if params
@@ -3539,6 +3601,7 @@ fn parse_extension_request(
                 task_id: params.task_id,
                 input: params.input,
                 attachment_ids: params.attachment_ids,
+                selection,
             })
         }
         "attachment/begin" => {
@@ -3733,6 +3796,165 @@ fn extension_completion_frames(
         frames.push(extension_connection_error_frame(code, message));
     }
     frames
+}
+
+const SELECTION_SELECTOR_CAP: usize = 1024;
+const SELECTION_LABEL_CAP: usize = 200;
+const SELECTION_TEXT_CAP: usize = 600;
+const SELECTION_HTML_CAP: usize = 4000;
+const SELECTION_URL_CAP: usize = 2048;
+const SELECTION_ATTRIBUTE_CAP: usize = 24;
+const SELECTION_ATTRIBUTE_VALUE_CAP: usize = 256;
+
+/// Truncate on a char boundary; the extension already caps these strings, so
+/// this only defends against a hand-rolled or stale client.
+fn cap_selection_text(value: &str, cap: usize) -> String {
+    let trimmed = value.trim();
+    match trimmed.char_indices().nth(cap) {
+        Some((index, _)) => format!("{}…", &trimmed[..index]),
+        None => trimmed.to_string(),
+    }
+}
+
+fn selected_element(
+    params: SelectionParams,
+) -> Result<crate::event::ExtensionSelectedElement, ExtensionTaskError> {
+    let selector = cap_selection_text(&params.selector, SELECTION_SELECTOR_CAP);
+    let tag = cap_selection_text(&params.tag, 64).to_lowercase();
+    let text = cap_selection_text(&params.text, SELECTION_TEXT_CAP);
+    let html = cap_selection_text(&params.html, SELECTION_HTML_CAP);
+    if selector.is_empty() && tag.is_empty() && html.is_empty() && text.is_empty() {
+        return Err(ExtensionTaskError::invalid_params(
+            "selection must describe an element",
+        ));
+    }
+    let label = {
+        let label = cap_selection_text(&params.label, SELECTION_LABEL_CAP);
+        if label.is_empty() {
+            tag.clone()
+        } else {
+            label
+        }
+    };
+    let attributes = params
+        .attributes
+        .into_iter()
+        .filter_map(|attribute| {
+            let name = cap_selection_text(&attribute.name, 64);
+            (!name.is_empty()).then(|| {
+                (
+                    name,
+                    cap_selection_text(&attribute.value, SELECTION_ATTRIBUTE_VALUE_CAP),
+                )
+            })
+        })
+        .take(SELECTION_ATTRIBUTE_CAP)
+        .collect();
+    let rect = params.rect.and_then(|rect| {
+        let values = [rect.x, rect.y, rect.width, rect.height];
+        values
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(crate::event::ExtensionElementRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+            })
+    });
+    Ok(crate::event::ExtensionSelectedElement {
+        selector,
+        label,
+        tag,
+        text,
+        value: cap_selection_text(&params.value, SELECTION_ATTRIBUTE_VALUE_CAP),
+        html,
+        url: cap_selection_text(&params.url, SELECTION_URL_CAP),
+        title: cap_selection_text(&params.title, SELECTION_LABEL_CAP),
+        in_frame: params.in_frame,
+        rect,
+        attributes,
+    })
+}
+
+/// The `<browser_selected_element>` block sent to the model. Like the side
+/// panel context block it is never shown in the panel transcript.
+fn selected_element_block(element: &crate::event::ExtensionSelectedElement) -> String {
+    let mut block = String::from("<browser_selected_element>\n");
+    block.push_str(SELECTED_ELEMENT_GUIDANCE);
+    block.push('\n');
+    if !element.url.is_empty() || !element.title.is_empty() {
+        let title = if element.title.is_empty() {
+            "(untitled)"
+        } else {
+            &element.title
+        };
+        block.push_str(&format!("page: {title} — {}\n", element.url));
+    }
+    if element.selector.is_empty() {
+        block.push_str(
+            "selector: (none — no unique CSS selector; identify it from the html below)\n",
+        );
+    } else {
+        block.push_str(&format!("selector: {}\n", element.selector));
+    }
+    if !element.label.is_empty() {
+        block.push_str(&format!("element: {}\n", element.label));
+    }
+    if element.in_frame {
+        block.push_str(
+            "frame: inside an iframe — the selector resolves in that frame's document, not the top document\n",
+        );
+    }
+    if let Some(rect) = element.rect {
+        block.push_str(&format!(
+            "box: {}x{} at ({}, {})\n",
+            rect.width.round(),
+            rect.height.round(),
+            rect.x.round(),
+            rect.y.round()
+        ));
+    }
+    if !element.text.is_empty() {
+        block.push_str(&format!("text: {}\n", element.text));
+    }
+    if !element.value.is_empty() {
+        block.push_str(&format!("value: {}\n", element.value));
+    }
+    if !element.attributes.is_empty() {
+        let attributes = element
+            .attributes
+            .iter()
+            .map(|(name, value)| format!("{name}=\"{value}\""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        block.push_str(&format!("attributes: {attributes}\n"));
+    }
+    if !element.html.is_empty() {
+        block.push_str(&format!("html:\n{}\n", element.html));
+    }
+    block.push_str("</browser_selected_element>");
+    block
+}
+
+/// The one-line marker appended to the turn's display text, mirroring how
+/// attachments announce themselves in the transcript.
+fn selected_element_summary(element: &crate::event::ExtensionSelectedElement) -> String {
+    let label = if element.label.is_empty() {
+        if element.selector.is_empty() {
+            "element".to_string()
+        } else {
+            element.selector.clone()
+        }
+    } else {
+        element.label.clone()
+    };
+    let text = cap_selection_text(&element.text, 60);
+    if text.is_empty() {
+        format!("[Selected element: {label}]")
+    } else {
+        format!("[Selected element: {label} — {text}]")
+    }
 }
 
 fn parse_params<T: for<'de> Deserialize<'de>>(params: Value) -> Result<T, ExtensionTaskError> {
@@ -6652,7 +6874,9 @@ mod tests {
                     task_id,
                     input: parsed_input,
                     attachment_ids,
+                    selection,
                 } => {
+                    assert!(selection.is_none());
                     assert_eq!(task_id, "task-1");
                     assert_eq!(parsed_input, input, "submit preserves original text");
                     assert!(attachment_ids.is_empty());
@@ -6759,6 +6983,7 @@ mod tests {
                 task_id,
                 input,
                 attachment_ids,
+                selection: None,
             } if task_id == "task-1"
                 && input == "   "
                 && attachment_ids == ["zode_attachment_1"]
@@ -6953,6 +7178,119 @@ mod tests {
         );
     }
 
+    #[test]
+    fn turn_start_selection_is_parsed_capped_and_password_free() {
+        let long_text = "x".repeat(super::SELECTION_TEXT_CAP + 50);
+        let parsed = super::parse_extension_request(
+            "turn/start",
+            serde_json::json!({
+                "taskId": "task-1",
+                "input": "what does this do?",
+                "selection": {
+                    "selector": "#buy",
+                    "label": "button#buy.primary",
+                    "tag": "BUTTON",
+                    "text": long_text,
+                    "html": "<button id=\"buy\">Buy</button>",
+                    "url": "https://example.com/pricing",
+                    "title": "Pricing",
+                    "inFrame": true,
+                    "rect": {"x": 12.4, "y": 40.6, "width": 120.0, "height": 36.0},
+                    "attributes": [{"name": "id", "value": "buy"}]
+                }
+            }),
+        )
+        .expect("a selection turn is valid");
+        let crate::event::ExtensionTaskRequest::TurnStart { selection, .. } = parsed else {
+            panic!("expected a turn start");
+        };
+        let selection = selection.expect("selection is preserved");
+        assert_eq!(selection.selector, "#buy");
+        assert_eq!(selection.tag, "button");
+        assert!(selection.in_frame);
+        assert!(selection.value.is_empty());
+        assert_eq!(
+            selection.text.chars().count(),
+            super::SELECTION_TEXT_CAP + 1
+        );
+        assert!(selection.text.ends_with('…'));
+        assert_eq!(selection.attributes, vec![("id".into(), "buy".into())]);
+        assert_eq!(selection.rect.expect("rect survives").width, 120.0);
+
+        // A selection alone is a complete turn, but an empty one is not.
+        assert!(super::parse_extension_request(
+            "turn/start",
+            serde_json::json!({
+                "taskId": "task-1",
+                "input": "  ",
+                "selection": {"selector": "#buy", "tag": "button"}
+            }),
+        )
+        .is_ok());
+        let error = super::parse_extension_request(
+            "turn/start",
+            serde_json::json!({
+                "taskId": "task-1",
+                "input": "  ",
+                "selection": {"selector": "  "}
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_params");
+    }
+
+    #[tokio::test]
+    async fn extension_turn_sends_selected_element_context_without_showing_it() {
+        let (mut app, _tx, _rx, _cwd) = make_test_app().await;
+        let task_id = app.tabs[0].session_id.clone();
+        let selection = crate::event::ExtensionSelectedElement {
+            selector: "#buy".into(),
+            label: "button#buy.primary".into(),
+            tag: "button".into(),
+            text: "Buy now".into(),
+            html: "<button id=\"buy\" class=\"primary\">Buy now</button>".into(),
+            url: "https://example.com/pricing".into(),
+            title: "Pricing".into(),
+            rect: Some(crate::event::ExtensionElementRect {
+                x: 12.0,
+                y: 40.0,
+                width: 120.0,
+                height: 36.0,
+            }),
+            attributes: vec![("id".into(), "buy".into())],
+            ..Default::default()
+        };
+
+        let prepared = app
+            .arm_extension_turn(
+                881,
+                task_id,
+                "what happens when I click this?".into(),
+                Vec::new(),
+                Some(Box::new(selection)),
+            )
+            .expect("a selection turn is armed");
+
+        assert!(matches!(
+            &prepared.content[1],
+            ContentBlock::Text { text }
+                if text.contains("<browser_selected_element>")
+                    && text.contains("selector: #buy")
+                    && text.contains("element: button#buy.primary")
+                    && text.contains("box: 120x36 at (12, 40)")
+                    && text.contains("page: Pricing — https://example.com/pricing")
+                    && text.contains("<button id=\"buy\" class=\"primary\">Buy now</button>")
+        ));
+        assert!(matches!(
+            &prepared.content[2],
+            ContentBlock::Text { text } if text.contains("<browser_side_panel_context>")
+        ));
+        let shown = app.tabs[0].chat.messages().last().unwrap().text.clone();
+        assert!(shown.contains("what happens when I click this?"));
+        assert!(shown.contains("[Selected element: button#buy.primary — Buy now]"));
+        assert!(!shown.contains("browser_selected_element"));
+    }
+
     #[tokio::test]
     async fn extension_turn_transactionally_consumes_utf8_attachment_into_content_blocks() {
         let (mut app, _tx, _rx, _cwd) = make_test_app().await;
@@ -6993,6 +7331,7 @@ mod tests {
                 task_id.clone(),
                 "review this".into(),
                 vec![receipt.attachment_id.clone()],
+                None,
             )
             .expect("finished UTF-8 attachment starts a turn");
 
@@ -7063,6 +7402,7 @@ mod tests {
                 task_id.clone(),
                 String::new(),
                 vec![receipt.attachment_id.clone()],
+                None,
             )
             .err()
             .expect("unsupported image route must fail");

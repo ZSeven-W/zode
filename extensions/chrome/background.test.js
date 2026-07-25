@@ -25,6 +25,7 @@ function makeChrome(storage = {}) {
   const listeners = {
     tabRemoved: [],
     debuggerDetach: [],
+    debuggerEvent: [],
     webNavCommitted: [],
     downloadCreated: [],
     downloadChanged: [],
@@ -64,6 +65,9 @@ function makeChrome(storage = {}) {
     },
     fireDebuggerDetach(source, reason) {
       listeners.debuggerDetach.forEach((listener) => listener(source, reason));
+    },
+    fireDebuggerEvent(source, method, params) {
+      listeners.debuggerEvent.forEach((listener) => listener(source, method, params));
     },
     fireNavCommitted(details) {
       listeners.webNavCommitted.forEach((listener) => listener(details));
@@ -163,7 +167,7 @@ function makeChrome(storage = {}) {
         return {};
       },
       onDetach: { addListener: (listener) => listeners.debuggerDetach.push(listener) },
-      onEvent: { addListener: () => {} },
+      onEvent: { addListener: (listener) => listeners.debuggerEvent.push(listener) },
     },
     offscreen: {
       createDocument: async (opts) => {
@@ -312,6 +316,7 @@ function makeRpcHarness(storage = { zodePort: 17657, zodeToken: "token" }) {
 
   return {
     chrome,
+    describeElementSource: () => vm.runInNewContext("DESCRIBE_ELEMENT_FN", sandbox),
     frames,
     sockets,
     timers,
@@ -1600,6 +1605,161 @@ async function testDownloadCancellationAndLimitValidation() {
   assert.match(invalid.error, /limit/);
 }
 
+async function testElementPickInspectsActivePageAndBroadcastsTheElement() {
+  const h = makeRpcHarness();
+  h.chrome.addTab({ id: 7, url: "https://human.example/pricing", active: true });
+  await h.connect();
+  h.chrome.commandHandler = async (_target, method) => {
+    if (method === "DOM.resolveNode") {
+      return { object: { objectId: "obj-1" } };
+    }
+    if (method === "Runtime.callFunctionOn") {
+      return { result: { value: { selector: "#buy", tag: "button", text: "Buy now" } } };
+    }
+    return {};
+  };
+
+  const started = await h.runtime({ type: "zode-pick-element" });
+  assert.deepEqual(plain(started), {
+    ok: true,
+    target: { tabId: "7", url: "https://human.example/pricing", title: "" },
+  });
+  assert.equal(h.chrome.calls.created.length, 0, "picking must not open a new tab");
+  assert.equal(h.chrome.calls.attached.at(-1), 7);
+  const inspect = h.chrome.calls.commands.find((call) => call.method === "Overlay.setInspectMode");
+  assert.equal(inspect.params.mode, "searchForNode");
+
+  h.chrome.fireDebuggerEvent({ tabId: 7 }, "Overlay.inspectNodeRequested", { backendNodeId: 42 });
+  await flushImmediates(10);
+
+  const picked = h.chrome.calls.runtimeSent.find((message) => message.type === "zode-element-picked");
+  assert.deepEqual(plain(picked.element), { selector: "#buy", tag: "button", text: "Buy now" });
+  assert.equal(
+    h.chrome.calls.commands.filter((call) => call.method === "Overlay.setInspectMode").at(-1).params
+      .mode,
+    "none",
+    "inspect mode is turned off once the element is picked",
+  );
+  assert.ok(
+    h.chrome.calls.commands.some((call) => call.method === "Runtime.releaseObject"),
+    "the resolved node handle is released",
+  );
+
+  // A second inspect event without an active pick is ignored.
+  const before = h.chrome.calls.runtimeSent.length;
+  h.chrome.fireDebuggerEvent({ tabId: 7 }, "Overlay.inspectNodeRequested", { backendNodeId: 43 });
+  await flushImmediates(10);
+  assert.equal(h.chrome.calls.runtimeSent.length, before, "a stale inspect event is ignored");
+}
+
+async function testElementPickRejectsUndebuggablePagesAndCancelsOnNavigation() {
+  const h = makeRpcHarness();
+  h.chrome.addTab({ id: 8, url: "chrome://settings", active: true });
+  await h.connect();
+
+  const rejected = await h.runtime({ type: "zode-pick-element" });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error, /cannot be inspected/);
+  assert.equal(h.chrome.calls.attached.length, 0, "an unsupported page never attaches");
+
+  h.chrome.addTab({ id: 9, url: "https://human.example/", active: true });
+  assert.equal((await h.runtime({ type: "zode-pick-element" })).ok, true);
+  h.chrome.fireNavCommitted({ tabId: 9, frameId: 0, transitionType: "link" });
+  await flushImmediates();
+  const canceled = h.chrome.calls.runtimeSent.filter(
+    (message) => message.type === "zode-element-pick-canceled",
+  );
+  assert.equal(canceled.length, 1);
+  assert.match(canceled[0].reason, /navigated/);
+
+  // The pick is gone, so a late inspect event cannot resurrect it.
+  const before = h.chrome.calls.runtimeSent.length;
+  h.chrome.fireDebuggerEvent({ tabId: 9 }, "Overlay.inspectNodeRequested", { backendNodeId: 1 });
+  await flushImmediates(10);
+  assert.equal(h.chrome.calls.runtimeSent.length, before);
+}
+
+function fakeElementTree() {
+  const index = new Map();
+  const doc = {
+    title: "Pricing",
+    querySelectorAll: (selector) => index.get(selector) || [],
+  };
+  const view = { location: { href: "https://x/pricing" }, CSS: { escape: (value) => value } };
+  view.top = view;
+  doc.defaultView = view;
+
+  const element = (tag, attrs = {}, extra = {}) => {
+    const node = {
+      nodeType: 1,
+      tagName: tag.toUpperCase(),
+      ownerDocument: doc,
+      parentElement: null,
+      children: [],
+      className: attrs.class || "",
+      attributes: Object.entries(attrs).map(([name, value]) => ({ name, value })),
+      getAttribute: (name) => (Object.hasOwn(attrs, name) ? attrs[name] : null),
+      getBoundingClientRect: () => ({ left: 12.4, top: 40.6, width: 120, height: 36 }),
+      outerHTML: `<${tag}>${extra.text || ""}</${tag}>`,
+      ...extra,
+    };
+    return node;
+  };
+  const append = (parent, child) => {
+    parent.children.push(child);
+    child.parentElement = parent;
+    return child;
+  };
+  return { doc, view, index, element, append };
+}
+
+function testPickedElementSummaryIsSelectorAccurateAndPasswordSafe() {
+  const h = makeRpcHarness();
+  const describe = new Function(`return (${h.describeElementSource()})`)();
+  const dom = fakeElementTree();
+
+  const withId = dom.element(
+    "button",
+    { id: "buy", class: "primary cta" },
+    { text: " Buy  now ", innerText: " Buy  now " },
+  );
+  dom.index.set("#buy", [withId]);
+  const described = describe.call(withId);
+  assert.equal(described.selector, "#buy");
+  assert.equal(described.label, "button#buy.primary.cta");
+  assert.equal(described.tag, "button");
+  assert.equal(described.text, "Buy now");
+  assert.equal(described.url, "https://x/pricing");
+  assert.equal(described.title, "Pricing");
+  assert.equal(described.inFrame, false);
+  assert.deepEqual(described.rect, { x: 12, y: 41, width: 120, height: 36 });
+  assert.deepEqual(described.attributes, [
+    { name: "id", value: "buy" },
+    { name: "class", value: "primary cta" },
+  ]);
+
+  // No usable id: the path walks up until querySelectorAll proves it unique.
+  const root = dom.element("div", { id: "root" });
+  const twin = dom.append(root, dom.element("span"));
+  const target = dom.append(root, dom.element("span", {}, { innerText: "second" }));
+  dom.index.set("#root", [root]);
+  dom.index.set("span:nth-of-type(2)", [twin, target]);
+  dom.index.set("#root > span:nth-of-type(2)", [target]);
+  const nested = describe.call(target);
+  assert.equal(nested.selector, "#root > span:nth-of-type(2)");
+  assert.equal(nested.label, "span");
+
+  // A text node resolves to its element, and a password value is never read.
+  const password = dom.element("input", { type: "password" }, { type: "password", value: "hunter2" });
+  password.tagName = "INPUT";
+  assert.equal(describe.call(password).value, "");
+  const search = dom.element("input", { type: "search" }, { type: "search", value: "zode" });
+  search.tagName = "INPUT";
+  assert.equal(describe.call(search).value, "zode");
+  assert.equal(describe.call({ nodeType: 3, parentElement: withId }).selector, "#buy");
+  assert.equal(describe.call(null), null);
+}
+
 (async () => {
   await testStartupCreatesThemeWatcher();
   await testStartupPingsExistingThemeWatcher();
@@ -1638,5 +1798,8 @@ async function testDownloadCancellationAndLimitValidation() {
   await testScreenshotActivatesControlledTabAndRestores();
   await testDownloadsAreConnectionLocalAndNewestFirst();
   await testDownloadCancellationAndLimitValidation();
+  await testElementPickInspectsActivePageAndBroadcastsTheElement();
+  await testElementPickRejectsUndebuggablePagesAndCancelsOnNavigation();
+  testPickedElementSummaryIsSelectorAccurateAndPasswordSafe();
   console.log("background tests passed");
 })();

@@ -57,6 +57,27 @@ export interface PanelAttachment {
   uploadId?: string | null;
   attachmentId?: string | null;
   error?: string | null;
+  previewUrl?: string | null;
+}
+
+export interface PanelTurnImage {
+  name: string;
+  mime: string;
+  url: string;
+}
+
+export interface PanelSelectedElement {
+  selector: string;
+  label: string;
+  tag: string;
+  text: string;
+  value: string;
+  html: string;
+  url: string;
+  title: string;
+  inFrame: boolean;
+  rect: { x: number; y: number; width: number; height: number } | null;
+  attributes: Array<{ name: string; value: string }>;
 }
 
 export interface PanelFeedback {
@@ -130,6 +151,12 @@ export interface PanelController {
   isRetrying(): boolean;
   isRespondingApproval(approvalId: string): boolean;
   isUploadingAttachments(taskId?: string | null): boolean;
+  isPickingElement(taskId?: string | null): boolean;
+  getTurnImages(taskId?: string | null, turnId?: string | null): PanelTurnImage[];
+  getSelectedElement(taskId?: string | null): PanelSelectedElement | null;
+  pickElement(): Promise<unknown>;
+  cancelElementPick(): Promise<unknown>;
+  clearSelectedElement(taskId?: string | null): Promise<unknown>;
   retryConnection(): Promise<unknown>;
   setDraft(value: string): Promise<unknown>;
   toggleTool(toolId: string): Promise<unknown>;

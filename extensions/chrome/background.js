@@ -14,6 +14,12 @@ const NATIVE_START_TIMEOUT_MS = 30_000;
 const BUF_CAP = 500;
 const PENDING_REQUEST_CAP = 500;
 const DOWNLOAD_LIMIT_CAP = 100;
+const ELEMENT_PICK_TIMEOUT_MS = 120_000;
+const ELEMENT_TEXT_CAP = 400;
+const ELEMENT_HTML_CAP = 2000;
+const ELEMENT_ATTR_VALUE_CAP = 200;
+const ELEMENT_ATTR_CAP = 24;
+const PICKABLE_SCHEMES = ["http:", "https:", "file:"];
 const ZODE_TAB_GROUP_TITLE = "zode";
 const ZODE_TAB_GROUP_COLOR = "blue";
 const DARK_ICONS = {
@@ -49,6 +55,7 @@ let authAttempt = null;
 let nativePort = null;
 let nativeStatus = null;
 let nativeStartPromise = null;
+let elementPick = null;
 
 async function getStored(keys) {
   return await chrome.storage.local.get(keys);
@@ -828,6 +835,290 @@ function cdp(method, params) {
   return chrome.debugger.sendCommand({ tabId: attachedTabId }, method, params);
 }
 
+// DevTools-style element picker, driven entirely through CDP so it needs no
+// host permissions or content script beyond the debugger access the bridge
+// already holds. Overlay.setInspectMode draws the hover highlight; the click
+// arrives as Overlay.inspectNodeRequested.
+const INSPECT_HIGHLIGHT = {
+  contentColor: { r: 111, g: 168, b: 220, a: 0.4 },
+  paddingColor: { r: 147, g: 196, b: 125, a: 0.35 },
+  borderColor: { r: 255, g: 229, b: 153, a: 0.4 },
+  marginColor: { r: 246, g: 178, b: 107, a: 0.35 },
+  showInfo: true,
+  showExtensionLines: false,
+};
+
+// Runs in the page with `this` bound to the picked node. Returns the plain
+// summary the side panel attaches to its next turn.
+const DESCRIBE_ELEMENT_FN = `function () {
+  var TEXT_CAP = ${ELEMENT_TEXT_CAP};
+  var HTML_CAP = ${ELEMENT_HTML_CAP};
+  var ATTR_VALUE_CAP = ${ELEMENT_ATTR_VALUE_CAP};
+  var ATTR_CAP = ${ELEMENT_ATTR_CAP};
+  var node = this;
+  if (node && node.nodeType === 3) {
+    node = node.parentElement;
+  }
+  if (!node || node.nodeType !== 1) {
+    return null;
+  }
+  var doc = node.ownerDocument;
+  var view = doc && doc.defaultView;
+
+  function clamp(value, cap) {
+    var text = String(value == null ? "" : value);
+    return text.length > cap ? text.slice(0, cap) + "\\u2026" : text;
+  }
+
+  function esc(value) {
+    if (view && view.CSS && typeof view.CSS.escape === "function") {
+      return view.CSS.escape(String(value));
+    }
+    return String(value).replace(/[^a-zA-Z0-9_-]/g, function (ch) {
+      return "\\\\" + ch;
+    });
+  }
+
+  function isUnique(selector) {
+    try {
+      return doc.querySelectorAll(selector).length === 1;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function selectorFor(el) {
+    var parts = [];
+    var current = el;
+    var depth = 0;
+    while (current && current.nodeType === 1 && depth < 12) {
+      depth += 1;
+      var id = current.getAttribute ? current.getAttribute("id") : null;
+      if (id && isUnique("#" + esc(id))) {
+        parts.unshift("#" + esc(id));
+        var rooted = parts.join(" > ");
+        return isUnique(rooted) ? rooted : "";
+      }
+      var part = current.tagName.toLowerCase();
+      var parent = current.parentElement;
+      if (parent) {
+        var twins = [];
+        for (var i = 0; i < parent.children.length; i += 1) {
+          if (parent.children[i].tagName === current.tagName) {
+            twins.push(parent.children[i]);
+          }
+        }
+        if (twins.length > 1) {
+          part += ":nth-of-type(" + (twins.indexOf(current) + 1) + ")";
+        }
+      }
+      parts.unshift(part);
+      var candidate = parts.join(" > ");
+      if (isUnique(candidate)) {
+        return candidate;
+      }
+      current = parent;
+    }
+    var fallback = parts.join(" > ");
+    return isUnique(fallback) ? fallback : "";
+  }
+
+  function labelFor(el) {
+    var label = el.tagName.toLowerCase();
+    var id = el.getAttribute("id");
+    if (id) {
+      label += "#" + id;
+    }
+    var className = typeof el.className === "string" ? el.className : "";
+    var classes = className.split(/\\s+/).filter(Boolean).slice(0, 3);
+    for (var i = 0; i < classes.length; i += 1) {
+      label += "." + classes[i];
+    }
+    return clamp(label, 120);
+  }
+
+  var attributes = [];
+  var attrs = node.attributes || [];
+  for (var i = 0; i < attrs.length && attributes.length < ATTR_CAP; i += 1) {
+    var attr = attrs[i];
+    if (!attr || !attr.name) {
+      continue;
+    }
+    attributes.push({ name: clamp(attr.name, 64), value: clamp(attr.value, ATTR_VALUE_CAP) });
+  }
+
+  var isPassword = node.tagName === "INPUT" && String(node.type).toLowerCase() === "password";
+  var value = "";
+  if (!isPassword && typeof node.value === "string") {
+    value = clamp(node.value, ATTR_VALUE_CAP);
+  }
+
+  var rect = null;
+  try {
+    var box = node.getBoundingClientRect();
+    rect = {
+      x: Math.round(box.left),
+      y: Math.round(box.top),
+      width: Math.round(box.width),
+      height: Math.round(box.height),
+    };
+  } catch (_) {
+    rect = null;
+  }
+
+  var text = String(node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim();
+
+  return {
+    selector: selectorFor(node),
+    label: labelFor(node),
+    tag: node.tagName.toLowerCase(),
+    text: clamp(text, TEXT_CAP),
+    value: value,
+    html: clamp(node.outerHTML || "", HTML_CAP),
+    url: view && view.location ? String(view.location.href) : "",
+    title: doc && doc.title ? clamp(doc.title, 200) : "",
+    inFrame: Boolean(view && view.top && view.top !== view),
+    rect: rect,
+    attributes: attributes,
+  };
+}`;
+
+function isPickableUrl(url) {
+  const value = String(url || "");
+  return PICKABLE_SCHEMES.some((scheme) => value.startsWith(scheme));
+}
+
+function clearElementPick() {
+  if (!elementPick) {
+    return null;
+  }
+  const pick = elementPick;
+  elementPick = null;
+  clearTimeout(pick.timeout);
+  return pick;
+}
+
+async function stopInspectMode() {
+  if (attachedTabId == null) {
+    return;
+  }
+  try {
+    await cdp("Overlay.setInspectMode", { mode: "none", highlightConfig: INSPECT_HIGHLIGHT });
+  } catch (_) {
+    // The tab may have navigated or detached while inspect mode was on.
+  }
+  try {
+    await cdp("Overlay.disable", {});
+  } catch (_) {
+    // Disabling an already-gone overlay is best effort.
+  }
+}
+
+async function cancelElementPick(reason, broadcast = true) {
+  const pick = clearElementPick();
+  if (!pick) {
+    return false;
+  }
+  if (attachedTabId === pick.tabId) {
+    await stopInspectMode();
+  }
+  if (broadcast) {
+    broadcastRuntime({
+      type: "zode-element-pick-canceled",
+      reason: String(reason || "element pick canceled"),
+    });
+  }
+  return true;
+}
+
+// Dropping the pick without touching the debugger: the tab is already gone or
+// the session detached, so there is no inspect mode left to turn off.
+function abandonElementPick(tabId, reason) {
+  if (!elementPick || (tabId != null && elementPick.tabId !== tabId)) {
+    return;
+  }
+  clearElementPick();
+  broadcastRuntime({ type: "zode-element-pick-canceled", reason: String(reason) });
+}
+
+async function startElementPick() {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab || tab.id == null) {
+    throw new Error("no active tab to pick an element from");
+  }
+  if (!isPickableUrl(tab.url)) {
+    throw new Error("this page cannot be inspected; open a normal http(s) page first");
+  }
+  await cancelElementPick("element pick restarted", false);
+  if (controlledTabId !== tab.id) {
+    await detachAttached();
+    controlledTabId = tab.id;
+  }
+  await attachTo(tab.id);
+  await cdp("DOM.enable", {});
+  await cdp("Overlay.enable", {});
+  await cdp("Overlay.setInspectMode", {
+    mode: "searchForNode",
+    highlightConfig: INSPECT_HIGHLIGHT,
+  });
+  elementPick = {
+    tabId: tab.id,
+    timeout: setTimeout(() => {
+      void cancelElementPick("element pick timed out").catch(() => {});
+    }, ELEMENT_PICK_TIMEOUT_MS),
+  };
+  return { tabId: String(tab.id), url: tab.url || "", title: tab.title || "" };
+}
+
+async function describePickedNode(backendNodeId) {
+  if (!Number.isInteger(backendNodeId)) {
+    throw new Error("element pick returned no node");
+  }
+  const resolved = await cdp("DOM.resolveNode", { backendNodeId });
+  const objectId = resolved && resolved.object ? resolved.object.objectId : null;
+  if (!objectId) {
+    throw new Error("the picked element could not be resolved");
+  }
+  try {
+    const evaluated = await cdp("Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration: DESCRIBE_ELEMENT_FN,
+      returnByValue: true,
+    });
+    if (evaluated && evaluated.exceptionDetails) {
+      throw new Error("the picked element could not be described");
+    }
+    const value = evaluated && evaluated.result ? evaluated.result.value : null;
+    if (!value || typeof value !== "object") {
+      throw new Error("the picked element could not be described");
+    }
+    return value;
+  } finally {
+    try {
+      await cdp("Runtime.releaseObject", { objectId });
+    } catch (_) {
+      // Releasing a handle from a navigated page is best effort.
+    }
+  }
+}
+
+async function completeElementPick(params) {
+  const pick = clearElementPick();
+  if (!pick) {
+    return;
+  }
+  await stopInspectMode();
+  try {
+    const element = await describePickedNode(params && params.backendNodeId);
+    broadcastRuntime({ type: "zode-element-picked", element });
+  } catch (error) {
+    broadcastRuntime({
+      type: "zode-element-pick-canceled",
+      reason: String((error && error.message) || error),
+    });
+  }
+}
+
 function toTabInfo(tab) {
   return {
     id: String(tab.id),
@@ -973,13 +1264,16 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (reason === "canceled_by_user" && source.tabId === controlledTabId) {
     controlledTabId = null;
   }
+  abandonElementPick(source.tabId, "debugger detached from the page");
 });
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId !== attachedTabId) {
     return;
   }
-  if (method === "Runtime.consoleAPICalled") {
+  if (method === "Overlay.inspectNodeRequested") {
+    void completeElementPick(params);
+  } else if (method === "Runtime.consoleAPICalled") {
     push(consoleBuf, {
       level: params.type || "log",
       text: (params.args || []).map(argText).join(" "),
@@ -1022,6 +1316,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   if (tabId === controlledTabId) {
     controlledTabId = null;
   }
+  abandonElementPick(tabId, "the page was closed");
 });
 
 const HUMAN_TRANSITIONS = new Set(["typed", "auto_bookmark", "keyword", "generated"]);
@@ -1036,6 +1331,9 @@ function isHumanNavigation(details) {
 
 if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
   chrome.webNavigation.onCommitted.addListener((details) => {
+    if (details.frameId === 0) {
+      abandonElementPick(details.tabId, "the page navigated");
+    }
     if (details.tabId === controlledTabId && isHumanNavigation(details)) {
       controlledTabId = null;
       detachAttached();
@@ -1100,6 +1398,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
         sendResponse(response);
       });
+    return true;
+  }
+  if (message.type === "zode-pick-element") {
+    startElementPick()
+      .then((target) => sendResponse({ ok: true, target }))
+      .catch((error) => {
+        void cancelElementPick("element pick failed", false).catch(() => {});
+        sendResponse({ ok: false, error: String((error && error.message) || error) });
+      });
+    return true;
+  }
+  if (message.type === "zode-pick-cancel") {
+    cancelElementPick("element pick canceled")
+      .then((canceled) => sendResponse({ ok: true, canceled }))
+      .catch((error) => sendResponse({ ok: false, error: String((error && error.message) || error) }));
     return true;
   }
   if (message.type === "zode-theme") {

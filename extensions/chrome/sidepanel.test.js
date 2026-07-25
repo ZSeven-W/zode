@@ -15,6 +15,8 @@ function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+const objectUrls = { created: [], revoked: [] };
+
 function loadApis() {
   const sandbox = {
     console: { ...console, debug: () => {} },
@@ -22,6 +24,16 @@ function loadApis() {
     setTimeout,
     clearTimeout,
     btoa: (value) => Buffer.from(value, "binary").toString("base64"),
+    URL: {
+      createObjectURL(file) {
+        const url = `blob:zode/${objectUrls.created.length + 1}`;
+        objectUrls.created.push({ url, name: file && file.name });
+        return url;
+      },
+      revokeObjectURL(url) {
+        objectUrls.revoked.push(url);
+      },
+    },
   };
   sandbox.globalThis = sandbox;
   vm.runInNewContext(stateSource, sandbox, { filename: "sidepanel-state.js" });
@@ -818,6 +830,17 @@ function testHtmlAndSourceContracts() {
     /<input[\s\S]{0,200}type=["']file["'][\s\S]{0,100}multiple[\s\S]{0,100}hidden/,
   );
   assert.match(reactSource, /ACCEPTED_ATTACHMENTS/);
+  // Clipboard images: the composer must take the paste and preview both the
+  // pending chip and the submitted message.
+  assert.match(reactSource, /onPaste=\{\(event\)/);
+  assert.match(reactSource, /clipboardImages\(event\.clipboardData\)/);
+  assert.match(reactSource, /controller\.addFiles\(files\)/);
+  assert.match(reactSource, /controller\.getTurnImages\(/);
+  assert.match(reactSource, /src=\{preview\}/);
+  assert.match(reactSource, /src=\{image\.url\}/);
+  // A plain success is silent: only a non-completed terminal draws a banner.
+  assert.match(reactSource, /terminal\.status !== "completed"/);
+  assert.doesNotMatch(reactSource, /Turn \{terminal\?\.status \|\| "completed"\}/);
   assert.match(css, /@media\s*\(prefers-color-scheme:\s*dark\)/);
   assert.match(css, /@media\s*\(max-width:\s*380px\)/);
   assert.doesNotMatch(css, /body\s*\{[^}]*min-width:\s*(?:3\d\d|[4-9]\d\d)px/s);
@@ -3219,6 +3242,7 @@ async function testAttachmentUploadChunksSequentiallyAndSubmitsIds(App) {
       {
         localId: "file-1",
         name: "main.rs",
+        previewUrl: null,
         mime: "text/plain",
         size,
         status: "ready",
@@ -3920,6 +3944,178 @@ async function testRemovalCancelsUploadsAcrossProtocolGates(App) {
   }
 }
 
+async function testPickedElementRidesTheNextTurnAndIsConsumedOnce(App) {
+  const runtime = makeRuntime((message) => {
+    if (message.type === "zode-pick-element") {
+      return Promise.resolve({ ok: true, target: { tabId: "7", url: "https://x/", title: "X" } });
+    }
+    if (message.method === "turn/start") {
+      return Promise.resolve({ ok: true, result: { turnId: "turn-1" } });
+    }
+    return Promise.resolve({ ok: true, result: {} });
+  });
+  const controller = App.createController({ runtime, storage: makeStorage(), render: () => {} });
+  await controller.start();
+  controller.dispatch({ type: "connected" });
+  controller.dispatch({ type: "snapshot", snapshot: snapshot("s1") });
+  const listener = runtime.listeners[0];
+
+  await controller.pickElement();
+  assert.equal(controller.isPickingElement("s1"), true);
+  listener({
+    type: "zode-element-picked",
+    element: {
+      selector: "#buy",
+      label: "button#buy",
+      tag: "BUTTON",
+      text: "  Buy   now ",
+      html: "<button id=\"buy\">Buy now</button>",
+      url: "https://x/pricing",
+      title: "Pricing",
+      inFrame: false,
+      rect: { x: 1.4, y: 2.6, width: 10, height: 4 },
+      attributes: [{ name: "id", value: "buy" }, { name: "", value: "dropped" }],
+      surprise: "ignored",
+    },
+  });
+  assert.equal(controller.isPickingElement("s1"), false);
+  const selected = controller.getSelectedElement("s1");
+  assert.equal(selected.tag, "button");
+  assert.equal(selected.text, "Buy   now");
+  assert.deepEqual(plain(selected.rect), { x: 1, y: 3, width: 10, height: 4 });
+  assert.deepEqual(plain(selected.attributes), [{ name: "id", value: "buy" }]);
+  assert.equal(selected.surprise, undefined, "unknown fields never reach turn/start");
+  assert.equal(controller.getSelectedElement("s2"), null, "picks stay on their own task");
+
+  await controller.setDraft("what does this do?");
+  await controller.submit();
+  const start = runtime.calls.find((call) => call.method === "turn/start");
+  assert.equal(start.params.selection.selector, "#buy");
+  assert.equal(start.params.selection.tag, "button");
+  assert.equal(controller.getSelectedElement("s1"), null, "a sent element is consumed");
+
+  controller.dispatch({
+    type: "turn/completed",
+    params: { taskId: "s1", turnId: "turn-1", status: "completed" },
+  });
+  await controller.setDraft("follow up");
+  await controller.submit();
+  const starts = runtime.calls.filter((call) => call.method === "turn/start");
+  assert.equal(starts.length, 2);
+  assert.equal(starts[1].params.selection, undefined, "the next turn carries no selection");
+}
+
+async function testElementPickIsScopedCancelableAndSurfacesOldZode(App) {
+  const runtime = makeRuntime((message) => {
+    if (message.type === "zode-pick-element" || message.type === "zode-pick-cancel") {
+      return Promise.resolve({ ok: true });
+    }
+    if (message.method === "turn/start") {
+      return Promise.resolve({
+        ok: false,
+        code: "invalid_params",
+        error: "unknown field `selection`, expected one of `taskId`, `input`, `attachmentIds`",
+      });
+    }
+    return Promise.resolve({ ok: true, result: {} });
+  });
+  const controller = App.createController({ runtime, storage: makeStorage(), render: () => {} });
+  await controller.start();
+  controller.dispatch({ type: "connected" });
+  controller.dispatch({ type: "snapshot", snapshot: snapshot("s1") });
+  const listener = runtime.listeners[0];
+
+  // A broadcast nobody asked for is never adopted.
+  listener({ type: "zode-element-picked", element: { selector: "#stray", tag: "div" } });
+  assert.equal(controller.getSelectedElement("s1"), null);
+
+  await controller.pickElement();
+  await controller.cancelElementPick();
+  assert.equal(controller.isPickingElement("s1"), false);
+  assert.ok(runtime.calls.some((call) => call.type === "zode-pick-cancel"));
+  listener({ type: "zode-element-picked", element: { selector: "#late", tag: "div" } });
+  assert.equal(controller.getSelectedElement("s1"), null, "a canceled pick cannot land late");
+
+  await controller.pickElement();
+  listener({ type: "zode-element-pick-canceled", reason: "the page navigated" });
+  assert.equal(controller.isPickingElement("s1"), false);
+  assert.match(controller.getAttachmentNotice("s1"), /the page navigated/);
+
+  await controller.pickElement();
+  listener({ type: "zode-element-picked", element: { selector: "#buy", tag: "button" } });
+  await controller.setDraft("explain");
+  await controller.submit().then(
+    () => assert.fail("an old zode must reject the selection"),
+    () => {},
+  );
+  assert.match(controller.getState().errorsByTask.s1.message, /不支持选中元素提问/);
+  assert.notEqual(controller.getSelectedElement("s1"), null, "a rejected element is kept for retry");
+}
+
+async function testPastedImagesPreviewInComposerAndTranscript(App) {
+  const runtime = makeRuntime((message) => {
+    if (message.method === "attachment/begin") {
+      return Promise.resolve({ ok: true, result: { uploadId: "paste-1" } });
+    }
+    if (message.method === "attachment/chunk") {
+      return Promise.resolve({ ok: true, result: { nextSequence: message.params.sequence + 1 } });
+    }
+    if (message.method === "attachment/finish") {
+      return Promise.resolve({ ok: true, result: { attachmentId: "paste-attachment-1" } });
+    }
+    if (message.method === "turn/start") {
+      return Promise.resolve({ ok: true, result: { turnId: "turn-9" } });
+    }
+    return Promise.resolve({ ok: true, result: {} });
+  });
+  const controller = connectedAttachmentController(App, runtime);
+
+  // A clipboard screenshot: an image file the composer previews inline.
+  await controller.addFiles([fakeFile("pasted-abc-1.png", "image/png", 8)]);
+  await flushAsync();
+  const [pending] = controller.getAttachments();
+  assert.equal(pending.mime, "image/png");
+  assert.equal(pending.status, "ready");
+  assert.match(pending.previewUrl, /^blob:zode\//);
+  const previewUrl = pending.previewUrl;
+
+  // A text attachment gets no preview, and its removal revokes nothing.
+  await controller.addFiles([fakeFile("notes.md", "text/markdown", 4)]);
+  await flushAsync();
+  const text = controller.getAttachments().find((item) => item.name === "notes.md");
+  assert.equal(text.previewUrl, null);
+  const revokedBefore = objectUrls.revoked.length;
+  await controller.removeAttachment(text.localId);
+  assert.equal(objectUrls.revoked.length, revokedBefore);
+
+  await controller.setDraft("what is wrong here?");
+  await controller.submit();
+  assert.deepEqual(
+    plain(controller.getTurnImages("s1", "turn-9")),
+    [{ name: "pasted-abc-1.png", mime: "image/png", url: previewUrl }],
+    "the submitted image stays addressable by its turn",
+  );
+  assert.deepEqual(plain(controller.getTurnImages("s1", "turn-8")), []);
+  assert.deepEqual(plain(controller.getTurnImages("s2", "turn-9")), []);
+  assert.equal(controller.getAttachments().length, 0, "sending clears the composer chips");
+  assert.equal(
+    objectUrls.revoked.includes(previewUrl),
+    false,
+    "a sent image keeps its URL alive for the transcript",
+  );
+
+  // Removing an unsent image releases its blob immediately.
+  controller.dispatch({
+    type: "turn/completed",
+    params: { taskId: "s1", turnId: "turn-9", status: "completed" },
+  });
+  await controller.addFiles([fakeFile("second.png", "image/png", 8)]);
+  await flushAsync();
+  const second = controller.getAttachments()[0];
+  await controller.removeAttachment(second.localId);
+  assert.equal(objectUrls.revoked.includes(second.previewUrl), true);
+}
+
 async function testAttachmentUploadsAreSerialAndPickerRendersRemovableChips(App) {
   const firstFinish = deferred();
   let uploadNumber = 0;
@@ -4113,6 +4309,9 @@ async function testSubmittedAttachmentsCannotBeCancelledInFlight(App) {
   await testConnectionInvalidationCannotReviveGatedUploads(App);
   await testRemovalCancelsUploadsAcrossProtocolGates(App);
   await testAttachmentUploadsAreSerialAndPickerRendersRemovableChips(App);
+  await testPickedElementRidesTheNextTurnAndIsConsumedOnce(App);
+  await testPastedImagesPreviewInComposerAndTranscript(App);
+  await testElementPickIsScopedCancelableAndSurfacesOldZode(App);
   await testSubmittedAttachmentsCannotBeCancelledInFlight(App);
   console.log("sidepanel tests passed");
 })().catch((error) => {

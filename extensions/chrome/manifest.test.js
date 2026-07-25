@@ -13,6 +13,16 @@ const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 const packScript = fs.readFileSync(packScriptPath, "utf8");
 const extensionReadme = fs.readFileSync(extensionReadmePath, "utf8");
 const rootReadme = fs.readFileSync(rootReadmePath, "utf8");
+const packageJson = JSON.parse(
+  fs.readFileSync(path.join(extensionDir, "package.json"), "utf8"),
+);
+const workspaceCargo = fs.readFileSync(
+  path.join(extensionDir, "..", "..", "Cargo.toml"),
+  "utf8",
+);
+const zodeVersion = /\[workspace\.package\][\s\S]*?\nversion = "([^"]+)"/.exec(
+  workspaceCargo,
+)[1];
 const expectedKey =
   "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq75hQkQsowKh9E3NxJQ0BwYW1dxTQj0f76xEOgtIAaJIK/+OXGCBpaVREH/HMHf741lyW4SM5Ltz59R5trKVnraaeUEd+jbJxyfhyScejezm6HhRMgQ+r38rcJov3DG5m97KFhjlNncMYBpEREyapLPPoqTihQq7BMwemzdMlKGfkCNFS0DH7MnM3l1F22LMonwKkLWDAqMPLn0Xx8vs+/SufrAHwpe3kE9r7znUnOt2aNL+1BGsTWuI0H3V3ezo12FNrTUT9LZiYXd9bIKadl1XZMnVywM1khkbhcTYSBjNzk45QQrSjDhwmCMdPILmaaIYZH94wvOSBzxUPyecdQIDAQAB";
 
@@ -98,8 +108,24 @@ function testNativeMessagingAutostartContract() {
   assert.match(background, /reconnectOrStart\(message\.port\)/);
 }
 
+// The extension ships with zode, so its version follows the workspace crate
+// version. Chrome only accepts dotted integers in `version`, so a prerelease
+// tag such as `0.1.0-beta.7` lives in `version_name` and `version` carries the
+// numeric core.
+function testExtensionVersionTracksTheZodeVersion() {
+  assert.match(zodeVersion, /^\d+\.\d+\.\d+/, "workspace version is unreadable");
+  const numericCore = /^(\d+(?:\.\d+){0,3})/.exec(zodeVersion)[1];
+  assert.equal(packageJson.version, zodeVersion);
+  assert.equal(manifest.version, numericCore);
+  assert.match(manifest.version, /^\d+(\.\d+){0,3}$/, "Chrome rejects non-numeric versions");
+  if (zodeVersion === numericCore) {
+    assert.equal(Object.hasOwn(manifest, "version_name"), false);
+  } else {
+    assert.equal(manifest.version_name, zodeVersion);
+  }
+}
+
 function testManifestUsesNativeActionOpenedSidePanel() {
-  assert.equal(manifest.version, "0.5.0");
   assert.equal(manifest.minimum_chrome_version, "116");
   assert.deepEqual(manifest.side_panel, { default_path: "sidepanel.html" });
   assert.equal(Object.hasOwn(manifest.action, "default_popup"), false);
@@ -280,6 +306,7 @@ function testManifestNameIsZodeAndDeclaresSidePanelCommand() {
   testManifestNameIsZodeAndDeclaresSidePanelCommand();
   testManifestDeclaresRequiredPermissions();
   testNativeMessagingAutostartContract();
+  testExtensionVersionTracksTheZodeVersion();
   testManifestUsesNativeActionOpenedSidePanel();
   testTaskSidePanelDocumentationCoversOperationAndCompatibility();
   testPackScriptCopiesDeclaredIconDirectory();
