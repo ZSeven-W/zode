@@ -525,6 +525,12 @@ zode.ui.statusLine((ctx) => ({
 `{ "env": "NAME", "prefix": "Bearer " }`。环境变量还必须列在
 `permissions.env` 中，只会由 Rust 请求层在发送时读取，永远不会返回给 JS。
 
+`request.headers` 也可以是一个**函数**，用于动态鉴权（如 HMAC-SHA256 签名）。
+Zode 会在每次请求前调用该函数，传入上下文对象（`method`、`url`、`body`、
+`timestamp`、`secrets`），并使用返回的 header 键值对。`zode.crypto` 全局对象
+（`sha256hex`、`hmacSha256Hex`、`hmacSha256HexKey`）提供加密原语，使任意签名
+算法均可用纯 JS 实现——包括火山引擎 HMAC-SHA256 和 AWS SigV4 派生密钥链。
+
 Zode 会禁用重定向和代理、校验并固定公网 DNS、拒绝 localhost/私网、把响应限制为
 256 KiB、把请求超时限制在 500 ms 到 10 秒，并将刷新间隔限制在 10 秒到 1 小时。
 `*.example.com` 只匹配子域名，不匹配裸域名 `example.com`。
