@@ -186,16 +186,6 @@ spec deltas); run `openspec validate` before implementing; implement the tasks; 
 then `openspec archive <name>` once done. Use `openspec list`/`openspec show` to \
 inspect existing specs and changes.\n";
 
-/// Appended after the skills index (when skills exist + the toggle is on) to
-/// nudge the "use skills first" discipline. Generic — names no specific skill,
-/// so it adapts to whatever is installed.
-const SKILL_DISCIPLINE: &str = "\n### Using skills\n\
-Before starting non-trivial work, scan the Available Skills above; if one plausibly \
-applies, invoke it with the Skill tool FIRST and state which you're using. For \
-multi-step features or changes, prefer a plan-first flow — use any available \
-planning/brainstorming skill before writing code, and follow test-driven development \
-if a testing skill applies.\n";
-
 /// Appended when the `AskUserQuestion` tool is available, so multiple-choice
 /// questions route to the interactive arrow-key picker instead of plain
 /// `A)/B)` text the user must retype.
@@ -345,15 +335,10 @@ pub fn build_system_prompt(
         }
     }
 
-    if !skills_index.is_empty() {
-        s.push_str("\n## Available Skills\n");
-        s.push_str("Invoke a skill by name with the Skill tool to load its full instructions:\n");
-        s.push_str(skills_index);
-        s.push('\n');
-        if flags.skill_discipline {
-            s.push_str(SKILL_DISCIPLINE);
-        }
-    }
+    s.push_str(&crate::skills::skills_prompt_from_index(
+        skills_index,
+        flags.skill_discipline,
+    ));
     if flags.ask_user_question {
         s.push_str(ASK_USER_QUESTION);
     }

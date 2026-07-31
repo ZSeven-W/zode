@@ -24,6 +24,7 @@ use crate::external_agents::{
     ExternalAgentRegistry, Fingerprint, GrantCheck, GrantStore,
 };
 use crate::process_supervision::{run_captured, CaptureError};
+use crate::task_mode::{is_inherit_mode, requested_task_mode, INHERIT_MODE};
 
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const VERSION_PROBE_OUTPUT_CAP: usize = 64 * 1024;
@@ -73,30 +74,58 @@ impl ZodeTaskTool {
         }
     }
 
-    /// The structured trust view shown to approval gates (`_kind` marks it
-    /// for the dedicated renderers; prompt is summarized, never full argv).
-    fn trust_view(def: &ExternalAgentDef, fp: &Fingerprint, prompt: &str) -> serde_json::Value {
+    /// The structured trust view shown to approval gates. Original Task fields
+    /// remain available to scoped policy matchers; `_kind` and the trusted
+    /// metadata drive dedicated renderers, which show only `_prompt`'s summary.
+    fn trust_view(
+        def: &ExternalAgentDef,
+        fp: &Fingerprint,
+        task_input: &serde_json::Value,
+    ) -> serde_json::Value {
         let argv = std::iter::once(def.command.display().to_string())
             .chain(def.args.iter().cloned())
             .collect::<Vec<_>>()
             .join(" ");
-        serde_json::json!({
-            "_kind": "external-agent",
-            "_agent": def.name,
-            "_command": argv,
-            "_cwd": fp.cwd.display().to_string(),
-            "_env": fp.env_names,
-            "_sandbox": fp.effective_sandbox,
-            "_version": fp.version_output.clone().unwrap_or_else(|| "unverified".to_string()),
-            "_hash": &fp.content_hash[..16.min(fp.content_hash.len())],
-            "_prompt": prompt.chars().take(200).collect::<String>(),
-        })
+        let prompt = task_input
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let mut view = task_input.as_object().cloned().unwrap_or_default();
+        view.insert("_kind".to_string(), serde_json::json!("external-agent"));
+        view.insert("_agent".to_string(), serde_json::json!(def.name));
+        view.insert("_command".to_string(), serde_json::json!(argv));
+        view.insert(
+            "_cwd".to_string(),
+            serde_json::json!(fp.cwd.display().to_string()),
+        );
+        view.insert("_env".to_string(), serde_json::json!(fp.env_names));
+        view.insert(
+            "_sandbox".to_string(),
+            serde_json::json!(fp.effective_sandbox),
+        );
+        view.insert(
+            "_version".to_string(),
+            serde_json::json!(fp
+                .version_output
+                .clone()
+                .unwrap_or_else(|| "unverified".to_string())),
+        );
+        view.insert(
+            "_hash".to_string(),
+            serde_json::json!(&fp.content_hash[..16.min(fp.content_hash.len())]),
+        );
+        view.insert(
+            "_prompt".to_string(),
+            serde_json::json!(prompt.chars().take(200).collect::<String>()),
+        );
+        serde_json::Value::Object(view)
     }
 
     async fn call_external(
         &self,
         ctx: &ToolUseContext,
         def: &ExternalAgentDef,
+        task_input: &serde_json::Value,
         prompt: String,
         description: Option<String>,
     ) -> Result<serde_json::Value, AgentError> {
@@ -133,7 +162,7 @@ impl ZodeTaskTool {
                     )));
                 }
             } else {
-                let view = Self::trust_view(def, &fp, &prompt);
+                let view = Self::trust_view(def, &fp, task_input);
                 match self
                     .gate
                     .approve_scoped("Task", &view, ApprovalScope::CarryFingerprintGrant)
@@ -200,7 +229,7 @@ impl ZodeTaskTool {
             self.observer.clone(),
             &def.name,
             description.as_deref(),
-            ctx.task_depth + 1,
+            ctx.task_depth,
         );
         let obs_id = observation.id();
         let observer = self.observer.clone();
@@ -351,6 +380,19 @@ impl Tool for ZodeTaskTool {
             // Internal route: verbatim pass-through (Phase A red line).
             return self.inner.call(ctx, input).await;
         };
+        // External CLIs run in-place and do not inherit Zode's immutable
+        // child-loop tool registry, so Zode cannot enforce modes such as
+        // `plan` for them. Reject every capability-changing mode before
+        // fingerprinting, approval, version probing, or spawning the command.
+        // Internal agent types remain routed through the inner Task mode
+        // router above.
+        let requested_mode = requested_task_mode(&input)?;
+        if !is_inherit_mode(requested_mode) {
+            return Err(AgentError::other(format!(
+                "external agent_type '{agent_type}' does not support Task mode \
+                 '{requested_mode}'; use 'inherit' or 'default'"
+            )));
+        }
         let prompt = input
             .get("prompt")
             .and_then(|v| v.as_str())
@@ -361,9 +403,23 @@ impl Tool for ZodeTaskTool {
             .and_then(|v| v.as_str())
             .map(str::to_string);
         let def = def.clone();
-        self.call_external(ctx, &def, prompt, description).await
+        let mut output = self
+            .call_external(ctx, &def, &input, prompt, description)
+            .await?;
+        if let Some(object) = output.as_object_mut() {
+            object.insert(
+                "requested_mode".to_string(),
+                serde_json::json!(requested_mode),
+            );
+            object.insert("mode".to_string(), serde_json::json!(INHERIT_MODE));
+        }
+        Ok(output)
     }
 }
+
+#[cfg(test)]
+#[path = "task-tool-policy-tests.rs"]
+mod policy_tests;
 
 #[cfg(test)]
 mod tests {
@@ -450,12 +506,21 @@ mod tests {
         gate: FixedGate,
         grants: Arc<GrantStore>,
     ) -> ZodeTaskTool {
+        tool_with_observer(registry, gate, grants, Arc::new(NullObserver))
+    }
+
+    fn tool_with_observer(
+        registry: Arc<ExternalAgentRegistry>,
+        gate: FixedGate,
+        grants: Arc<GrantStore>,
+        observer: Arc<dyn TaskObserver>,
+    ) -> ZodeTaskTool {
         ZodeTaskTool::new(
             Arc::new(StubInner::default()),
             registry,
             grants,
             Arc::new(gate),
-            Arc::new(NullObserver),
+            observer,
             Arc::new(FileStateCache::new(
                 std::num::NonZeroUsize::new(8).unwrap(),
                 1 << 20,
@@ -472,27 +537,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn internal_agent_type_passes_through_untouched() {
-        let inner = Arc::new(StubInner::default());
-        let tool = ZodeTaskTool::new(
-            inner.clone(),
-            Arc::new(ExternalAgentRegistry::default()),
-            Arc::new(GrantStore::default()),
-            Arc::new(FixedGate(Approval::Deny, true)),
-            Arc::new(NullObserver),
-            Arc::new(FileStateCache::new(
-                std::num::NonZeroUsize::new(8).unwrap(),
-                1 << 20,
-            )),
-            ExternalRuntimeCfg {
-                timeout: Duration::from_secs(1),
-                max_concurrent: 1,
-            },
+    #[cfg(unix)]
+    async fn external_non_inherit_modes_are_rejected_before_command_start() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("command-started");
+        let script = dir.path().join("external-agent.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf started > '{}'\nprintf '%s\\n' \
+                 '{{\"type\":\"result\",\"result\":\"unexpected\"}}'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let mut cfg = ExternalAgentsConfig::default();
+        cfg.agents.insert(
+            "mode-probe".to_string(),
+            serde_json::from_value(json!({
+                "command": script.display().to_string(),
+                "args": [],
+                "promptTransport": "stdin",
+                "output": "jsonl-claude",
+                "trusted": true,
+            }))
+            .unwrap(),
         );
-        let input = json!({"agent_type":"general","prompt":"hi"});
-        let out = tool.call(&ctx(), input.clone()).await.unwrap();
-        assert_eq!(out["output"], "internal-ok");
-        assert_eq!(inner.calls.lock().unwrap()[0], input);
+        let registry = Arc::new(crate::external_agents::discover(&cfg, &[]));
+        assert!(registry.get("mode-probe").is_some());
+        let tool = tool_with(
+            registry,
+            FixedGate(Approval::AllowOnce, false),
+            Default::default(),
+        );
+
+        for mode in ["plan", "read-only"] {
+            let error = tool
+                .call(
+                    &ctx(),
+                    json!({
+                        "agent_type": "mode-probe",
+                        "prompt": "do not run",
+                        "mode": mode
+                    }),
+                )
+                .await
+                .unwrap_err();
+
+            let message = error.to_string();
+            assert!(message.contains("mode-probe"), "{message}");
+            assert!(message.contains(mode), "{message}");
+            assert!(message.contains("inherit"), "{message}");
+        }
+        assert!(
+            !marker.exists(),
+            "external command (including its version probe) must not start"
+        );
     }
 
     #[tokio::test]
@@ -518,13 +624,34 @@ mod tests {
     async fn external_trusted_profile_runs_under_bypass() {
         let reg = registry_with("fake-ext", "fake-claude.sh", true);
         let grants = Arc::new(GrantStore::default());
-        let tool = tool_with(reg, FixedGate(Approval::AllowOnce, false), grants);
+        let observed = crate::subagents::SubAgentRegistry::new();
+        let tool = tool_with_observer(
+            reg,
+            FixedGate(Approval::AllowOnce, false),
+            grants,
+            observed.observer(),
+        );
+        let mut context = ctx();
+        context.task_depth = 1;
         let out = tool
-            .call(&ctx(), json!({"agent_type":"fake-ext","prompt":"go"}))
+            .call(
+                &context,
+                json!({
+                    "agent_type":"fake-ext",
+                    "prompt":"go",
+                    "description":"nested external",
+                    "mode":"default"
+                }),
+            )
             .await
             .unwrap();
         assert_eq!(out["__external_agent__"]["profile"], "fake-ext");
         assert_eq!(out["session_id"], "sess-0001");
+        assert_eq!(out["requested_mode"], "default");
+        assert_eq!(out["mode"], "inherit");
+        let agents = observed.snapshot();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].depth, 1);
     }
 
     #[tokio::test]

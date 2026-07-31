@@ -51,7 +51,7 @@
 - **V1 兼容的持久会话**：保留原有 `<id>.jsonl` 会话协议，同时以旁路数据增加 journal、checkpoint、rewind、fork 和隔离 Git worktree。
 - **自动化接口**：稳定的 JSON/JSONL headless 输出、精确会话定位、工具过滤、确定性退出码、stdio ACP 和本地 dashboard。
 - **多会话标签页**：用 `Ctrl+T` 并排运行多个隔离会话，并可恢复历史会话。
-- **子代理、团队与工作流**：通过 Task 委派一次性任务，手动注册内部或外部 CLI 队友，并用 `/agents`、`/team`、`/workflows` 管理。
+- **子代理、团队与工作流**：通过 Task 委派一次性任务；子代理也能继续委派（最多三层），还可手动注册内部或外部 CLI 队友，并用 `/agents`、`/team`、`/workflows` 管理。
 - **技能、MCP 与 hooks**：按需加载 `SKILL.md`，连接 MCP 服务器，并在工具事件上运行外部脚本。
 
 ## 安装
@@ -137,6 +137,34 @@ zode server                   # 通过 stdio 运行 JSON-RPC app-server
 zode acp                      # 通过 stdio 运行 ACP agent
 zode dashboard                # 查看本地会话、checkpoint 和 worktree
 ```
+
+## Task 模式
+
+Task 的执行模式与 `agent_type` 正交：任意内置或自定义 agent 类型都可组合
+已注册的 `plan` 和 `read-only` 子模式。省略 `mode` 时使用 `inherit`；
+`default` 是相同行为的别名。
+
+```json
+{
+  "agent_type": "my-custom-agent",
+  "description": "设计迁移方案",
+  "prompt": "检查当前 schema，并返回实施计划。",
+  "mode": "plan"
+}
+```
+
+`inherit` 保留调用方的能力上限。`read-only` 在该上限内仅保留只读工具，但仍
+正常完成任务；`plan` 使用相同的只读边界，并要求子代理返回实施计划。两者都不能
+获得调用方原本没有的权限、写入能力或网络访问，也不会切换调用方自身的模式。
+`bypass`/`yolo`、关闭沙盒等提升能力的状态不会成为子模式。外部 CLI Task
+worker 目前仅支持 `inherit`（包括省略 `mode` 或使用 `default`）；非 inherit
+模式会被拒绝。
+
+内部 Task 子代理还会继承调用方最终注册工具集中的所有已启用 Skill 和 MCP 工具。
+子代理提示包含相同的 Skill 索引，重建后的 ToolSearch 也能发现继承的 `Skill`
+与 `mcp__<server>__<tool>`。父级 plugin/tool filter 始终有效；`plan` 和
+`read-only` 会保留 Skill，但会剔除副作用未知的 MCP 工具。外部 CLI worker
+不会继承 Zode 进程内工具。
 
 ## 手动注册外部 CLI 队友
 

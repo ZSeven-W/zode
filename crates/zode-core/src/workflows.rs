@@ -162,11 +162,12 @@ pub fn delete_workflow_def(name: &str) -> Result<bool, CoreError> {
 /// The scripting surface documented for the model (and `/help`): kept in one
 /// place so `define_workflow`'s description and prompts stay in sync.
 pub const WORKFLOW_JS_API: &str = "The script body runs in a sandboxed JS runtime \
-    (no fs/net) with: `await agent(prompt, {type, description})` → run one sub-agent \
-    and get its final text; `parallel([...thunks])` → run thunks concurrently (failed \
-    ones resolve to null); `pipeline(items, ...stages)` → per-item stage chains; \
-    `log(msg)` → progress line; `args` → the invocation's arguments value. Use \
-    top-level `await` and `return` the final result.";
+    (no fs/net) with: `await agent(prompt, {type, description, mode})` → run one \
+    sub-agent and get its final text (`mode` is forwarded unchanged to `Task`, which \
+    validates it); `parallel([...thunks])` → run thunks concurrently (failed ones \
+    resolve to null); `pipeline(items, ...stages)` → per-item stage chains; `log(msg)` \
+    → progress line; `args` → the invocation's arguments value. Use top-level `await` \
+    and `return` the final result.";
 
 /// Tool that lets the agent create a reusable JS workflow (autonomous
 /// orchestration). Registered only when `autonomous_orchestration` is on.
@@ -306,6 +307,7 @@ impl Tool for RunWorkflowTool {
             ctx.permissions.clone(),
             ctx.hooks.clone(),
             ctx.abort.clone(),
+            ctx.task_depth,
         ));
         let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = logs.clone();
@@ -325,6 +327,38 @@ impl Tool for RunWorkflowTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct DepthRecordingTask {
+        seen: Arc<AtomicUsize>,
+        input: Arc<std::sync::Mutex<Option<Value>>>,
+    }
+
+    #[async_trait]
+    impl Tool for DepthRecordingTask {
+        fn name(&self) -> &str {
+            "Task"
+        }
+
+        fn description(&self) -> &str {
+            "record Task depth"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        fn safety_class(&self) -> SafetyClass {
+            SafetyClass::Mutating
+        }
+
+        async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
+            self.seen.store(ctx.task_depth, Ordering::SeqCst);
+            *self.input.lock().unwrap() = Some(input);
+            Ok(json!({"output": "ok"}))
+        }
+    }
 
     #[test]
     fn parses_name_description_and_script() {
@@ -365,5 +399,49 @@ mod tests {
     fn slug_sanitizes_names() {
         assert_eq!(slug_of("review & fix!"), "review---fix-");
         assert_eq!(slug_of("ok-name_1"), "ok-name_1");
+    }
+
+    #[tokio::test]
+    async fn run_workflow_preserves_the_callers_task_depth_for_agent_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_dir = dir.path().join(".zode").join("workflows");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+        std::fs::write(
+            workflow_dir.join("depth-flow.js"),
+            "---\nname: depth-flow\ndescription: depth test\n---\n\
+             return await agent(\"nested\", { type: \"reviewer\", description: \"inspect\", \
+             mode: \"future-mode\" });\n",
+        )
+        .unwrap();
+
+        let seen = Arc::new(AtomicUsize::new(usize::MAX));
+        let seen_input = Arc::new(std::sync::Mutex::new(None));
+        let mut registry = agent::tool::ToolRegistry::new();
+        registry.register(Arc::new(DepthRecordingTask {
+            seen: seen.clone(),
+            input: seen_input.clone(),
+        }));
+        let tools: ParentToolsCell = Arc::new(std::sync::OnceLock::new());
+        tools.set(Arc::new(registry)).unwrap();
+        let tool = RunWorkflowTool::new(tools);
+        let mut ctx = ToolUseContext::new(dir.path());
+        ctx.permissions = Arc::new(
+            agent::permission::PermissionManager::new()
+                .allow(agent::permission::RuleSource::User, "Task"),
+        );
+        ctx.task_depth = 2;
+
+        let output = tool
+            .call(&ctx, json!({"name": "depth-flow"}))
+            .await
+            .unwrap();
+
+        assert_eq!(output["result"], "ok");
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+        let input = seen_input.lock().unwrap().clone().unwrap();
+        assert_eq!(input["prompt"], "nested");
+        assert_eq!(input["agent_type"], "reviewer");
+        assert_eq!(input["description"], "inspect");
+        assert_eq!(input["mode"], "future-mode");
     }
 }

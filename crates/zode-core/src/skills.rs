@@ -168,6 +168,36 @@ pub fn skills_index(registry: &SkillRegistry) -> String {
         .join("\n")
 }
 
+const SKILL_DISCIPLINE: &str = "\n### Using skills\n\
+Before starting non-trivial work, scan the Available Skills above; if one plausibly \
+applies, invoke it with the Skill tool FIRST and state which you're using. For \
+multi-step features or changes, prefer a plan-first flow — use any available \
+planning/brainstorming skill before writing code, and follow test-driven development \
+if a testing skill applies.\n";
+
+/// Provider-ready skills section shared by root and Task child prompts.
+/// Keeping one renderer prevents child agents from seeing a different set of
+/// registered skill names or different invocation discipline than the caller.
+pub fn skills_prompt_from_index(index: &str, discipline: bool) -> String {
+    if index.is_empty() {
+        return String::new();
+    }
+    let mut prompt = String::from(
+        "\n\n## Available Skills\n\
+Invoke a skill by name with the Skill tool to load its full instructions:\n",
+    );
+    prompt.push_str(index);
+    prompt.push('\n');
+    if discipline {
+        prompt.push_str(SKILL_DISCIPLINE);
+    }
+    prompt
+}
+
+pub fn skills_prompt(registry: &SkillRegistry, discipline: bool) -> String {
+    skills_prompt_from_index(&skills_index(registry), discipline)
+}
+
 /// Tool that renders a skill's full prompt on demand (progressive
 /// disclosure): the model calls Skill{name} and gets the rendered body back.
 #[derive(Debug)]

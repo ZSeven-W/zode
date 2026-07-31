@@ -57,6 +57,8 @@ pub mod sessions;
 pub mod skills;
 pub mod subagents;
 pub mod task_factory;
+#[path = "task-mode.rs"]
+pub mod task_mode;
 pub mod task_tool;
 pub mod team;
 pub mod telemetry;

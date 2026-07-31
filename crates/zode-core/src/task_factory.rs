@@ -1,9 +1,11 @@
 //! Sub-agent factory for the Task tool. Resolves an `agent_type` string to a
 //! child loop config that reuses the parent provider/model/permissions and —
-//! critically — the parent's FINAL gated + sandboxed tool registry (minus the
-//! Task tool itself, for recursion safety). The child therefore inherits the
-//! same approval gate, sandbox, and hooks (edit history / background-shell
-//! tracking / external blockers) as the parent — no security bypass.
+//! critically — the parent's FINAL gated + sandboxed tool registry. Plain
+//! children keep the Task tool so they can delegate further sub-tasks; the
+//! runtime's explicit depth counter bounds recursion. The child therefore
+//! inherits the same approval gate, sandbox, and hooks (edit history /
+//! background-shell tracking / external blockers) as the parent — no security
+//! bypass.
 //!
 //! The gated registry only exists after the engine finishes wrapping tools, so
 //! it is late-bound through a shared `OnceLock` the engine populates at the end
@@ -17,7 +19,7 @@ use agent::file_cache::FileStateCache;
 use agent::hook::HookRunner;
 use agent::permission::PermissionManager;
 use agent::provider::Provider;
-use agent::tool::ToolRegistry;
+use agent::tool::{SafetyClass, ToolRegistry};
 use agent_tools_code::{TaskAgentConfig, TaskAgentFactory, ToolSearchTool};
 use async_trait::async_trait;
 
@@ -33,6 +35,29 @@ pub fn resolve_subagent_max_iterations(configured: Option<u32>) -> Option<usize>
 
 /// Shared late-bound handle to the parent's final gated tool registry.
 pub type ParentToolsCell = Arc<OnceLock<Arc<ToolRegistry>>>;
+
+/// An immutable execution policy for one Task child loop. Modes may only
+/// preserve or narrow the parent's final capability ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentMode {
+    Inherit,
+    Plan,
+    ReadOnly,
+}
+
+impl SubagentMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Plan => "plan",
+            Self::ReadOnly => "read-only",
+        }
+    }
+
+    const fn restricts_to_read_only(self) -> bool {
+        matches!(self, Self::Plan | Self::ReadOnly)
+    }
+}
 
 #[derive(Clone)]
 pub struct ModelRuntimeSnapshot {
@@ -82,10 +107,9 @@ impl std::fmt::Debug for ModelRuntimeState {
 pub const TEAM_ORCHESTRATION_TOOLS: &[&str] =
     &["team_hire", "team_send", "team_dismiss", "team_list"];
 
-/// The full exclusion set for a PLAIN Task sub-agent (no team role): Task
-/// plus every team_* tool.
-pub const TEAM_TOOL_NAMES_WITH_TASK: [&str; 10] = [
-    "Task",
+/// Team tools a plain Task sub-agent may not hold. Task itself remains
+/// available so the child can spawn another bounded child.
+pub const TEAM_TOOL_NAMES: [&str; 9] = [
     "team_hire",
     "team_send",
     "team_dismiss",
@@ -97,22 +121,73 @@ pub const TEAM_TOOL_NAMES_WITH_TASK: [&str; 10] = [
     "team_release",
 ];
 
+/// Internal teammates also lose direct and workflow-mediated Task dispatch:
+/// teammate orchestration stays with the leader, while plain one-shot Task
+/// sub-agents may recursively delegate.
+pub const TEAM_TOOL_NAMES_WITH_TASK: [&str; 11] = [
+    "Task",
+    "run_workflow",
+    "team_hire",
+    "team_send",
+    "team_dismiss",
+    "team_list",
+    "team_board_read",
+    "team_board_update",
+    "team_board_append",
+    "team_claim",
+    "team_release",
+];
+
+/// Host-control channels belong to the owning loop, not a delegated child.
+/// Although these tools are classified read-only for approval purposes, they
+/// can stop the caller's autonomous goal loop or wait on the caller's UI.
+const CHILD_HOST_CONTROL_TOOLS: &[&str] = &["goal_complete", "AskUserQuestion"];
+
+/// Read-classified tools that consume shared parent state are unsafe in an
+/// immutable plan child even though they do not write external resources.
+const READ_ONLY_MODE_EXCLUDED_TOOLS: &[&str] = &["BashOutput"];
+const READ_ONLY_MODE_EXCLUDED_PREFIXES: &[&str] = &["lsp_"];
+
 /// Build a child tool registry from the parent's final gated registry,
 /// excluding `exclude` by name and rebuilding ToolSearch over the FILTERED
 /// set (so an excluded tool can't leak back in through search).
 pub fn shared_child_tools(parent_tools: &ParentToolsCell, exclude: &[&str]) -> Arc<ToolRegistry> {
+    shared_child_tools_for_mode(parent_tools, exclude, SubagentMode::Inherit)
+}
+
+fn shared_child_tools_for_mode(
+    parent_tools: &ParentToolsCell,
+    exclude: &[&str],
+    mode: SubagentMode,
+) -> Arc<ToolRegistry> {
     let mut reg = ToolRegistry::new();
+    let mut rebuild_tool_search = false;
     if let Some(parent) = parent_tools.get() {
+        rebuild_tool_search = parent.get("ToolSearch").is_some();
         for tool in parent.list() {
             let name = tool.name();
-            if name == "ToolSearch" || exclude.contains(&name) {
+            if name == "ToolSearch"
+                || exclude.contains(&name)
+                || CHILD_HOST_CONTROL_TOOLS.contains(&name)
+            {
+                continue;
+            }
+            if mode.restricts_to_read_only()
+                && (!matches!(tool.safety_class(), SafetyClass::ReadOnly)
+                    || READ_ONLY_MODE_EXCLUDED_TOOLS.contains(&name)
+                    || READ_ONLY_MODE_EXCLUDED_PREFIXES
+                        .iter()
+                        .any(|prefix| name.starts_with(prefix)))
+            {
                 continue;
             }
             reg.register(tool);
         }
     }
-    let candidates = Arc::new(reg.clone());
-    reg.register(Arc::new(ToolSearchTool::new(candidates)));
+    if rebuild_tool_search {
+        let candidates = Arc::new(reg.clone());
+        reg.register(Arc::new(ToolSearchTool::new(candidates)));
+    }
     Arc::new(reg)
 }
 
@@ -124,15 +199,38 @@ pub struct ZodeTaskFactory {
     file_cache: Arc<FileStateCache>,
     hooks: Arc<HookRunner>,
     /// The parent's FINAL gated+sandboxed registry, set by the engine after
-    /// assembly. The child gets these tools minus "Task".
+    /// assembly. Plain children retain its gated Task tool.
     parent_tools: ParentToolsCell,
     /// User-defined agent definitions (`~/.zode/agents` etc.). Consulted before
     /// the built-in types so users can add/override sub-agents.
     defs: Vec<crate::agents::AgentDef>,
+    /// Exact enabled-skill index and invocation discipline shown to the root
+    /// agent. Appended only when the final child registry still contains the
+    /// shared Skill tool.
+    skills_prompt: String,
+    /// Host routes discovered after factory construction (currently external
+    /// CLI profiles). Nested children use this shared catalog in their prompt.
+    additional_agent_types: RwLock<Vec<(String, String)>>,
     /// Per-engine sub-agent registry; the Task observer writes here.
     subagents: crate::subagents::SubAgentRegistry,
     /// Per-child model/tool round-trip cap. `None` means unbounded.
     max_iterations: Option<usize>,
+}
+
+/// Adapts the same persona/model factory to a specific child execution mode.
+/// A separate upstream TaskTool owns each adapter, while
+/// [`crate::task_mode::TaskModeRouter`] selects the adapter from the
+/// provider-facing `Task.mode` field.
+#[derive(Debug)]
+pub struct ZodeTaskModeFactory {
+    inner: Arc<ZodeTaskFactory>,
+    mode: SubagentMode,
+}
+
+impl ZodeTaskModeFactory {
+    pub fn new(inner: Arc<ZodeTaskFactory>, mode: SubagentMode) -> Self {
+        Self { inner, mode }
+    }
 }
 
 impl ZodeTaskFactory {
@@ -145,6 +243,7 @@ impl ZodeTaskFactory {
         hooks: Arc<HookRunner>,
         parent_tools: ParentToolsCell,
         defs: Vec<crate::agents::AgentDef>,
+        skills_prompt: String,
         subagents: crate::subagents::SubAgentRegistry,
         max_iterations: Option<usize>,
     ) -> Self {
@@ -156,17 +255,23 @@ impl ZodeTaskFactory {
             hooks,
             parent_tools,
             defs,
+            skills_prompt,
+            additional_agent_types: RwLock::new(Vec::new()),
             subagents,
             max_iterations,
         }
     }
 
-    /// Child tool registry: the parent's gated+sandboxed tools minus "Task"
-    /// (recursion guard). Empty until the engine has populated the cell.
-    fn child_tools(&self) -> Arc<ToolRegistry> {
-        // A plain Task sub-agent gets none of the orchestration tools —
-        // Task (recursion) or any team_* (recursive hire / cross-team leak).
-        shared_child_tools(&self.parent_tools, &TEAM_TOOL_NAMES_WITH_TASK)
+    /// Child tool registry: the parent's gated+sandboxed tools, including
+    /// Task, minus team orchestration/collaboration tools. Empty until the
+    /// engine has populated the cell.
+    fn child_tools(&self, mode: SubagentMode) -> Arc<ToolRegistry> {
+        // A plain Task sub-agent may recursively delegate through the same
+        // gated Task tool. It still gets no team_* tools, preventing recursive
+        // hiring or cross-team collaboration leaks. Plan/read-only mode applies
+        // a second read-only filter to this already-gated parent ceiling, which
+        // also removes Task itself because Task is mutating.
+        shared_child_tools_for_mode(&self.parent_tools, &TEAM_TOOL_NAMES, mode)
     }
 
     /// The sub-agent types the Task tool can spawn: (name, one-line summary).
@@ -188,6 +293,17 @@ for: no greetings, no questions, no offers of further help. The prompt you \
 received is your ONLY context — you cannot see the parent conversation and \
 nobody can answer questions mid-run. If the task cannot be completed with the \
 given context, state precisely what is missing as your result.";
+
+    const NESTED_DELEGATION_CONTRACT: &str = "\n\nYou may use the Task tool to \
+delegate independent sub-tasks to another sub-agent; nested delegation is \
+bounded by the runtime recursion limit.";
+
+    const PLAN_MODE_PROMPT: &str = "\n\n## Plan mode\n\
+You are in PLAN MODE for this delegated task. Only read-only tools are \
+available. Investigate the supplied task thoroughly, then return a concise, \
+concrete implementation plan to the calling agent. Do not modify files, run \
+commands with side effects, or ask the human to switch modes. Completing this \
+Task automatically returns control to the caller's unchanged mode.";
 
     fn builtin_system_for(agent_type: &str) -> Option<String> {
         let prompt = match agent_type {
@@ -218,16 +334,35 @@ given context, state precisely what is missing as your result.";
                 out.push((name.to_string(), desc.to_string()));
             }
         }
+        let additional = match self.additional_agent_types.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        for (name, description) in additional {
+            if !out.iter().any(|(existing, _)| existing == &name) {
+                out.push((name, description));
+            }
+        }
         out
     }
-}
 
-#[async_trait]
-impl TaskAgentFactory for ZodeTaskFactory {
-    async fn build(&self, agent_type: &str) -> Result<TaskAgentConfig, AgentError> {
+    /// Publish host routes that become known after factory construction.
+    pub fn set_additional_agent_types(&self, types: Vec<(String, String)>) {
+        match self.additional_agent_types.write() {
+            Ok(mut guard) => *guard = types,
+            Err(poisoned) => *poisoned.into_inner() = types,
+        }
+    }
+
+    fn build_for_mode(
+        &self,
+        agent_type: &str,
+        mode: SubagentMode,
+    ) -> Result<TaskAgentConfig, AgentError> {
         let runtime = self.runtime.snapshot();
         // User definitions take precedence over the built-in types, and may
-        // override the model.
+        // override the model. Mode policy is applied afterwards, so even a
+        // custom agent named "plan" cannot replace the read-only boundary.
         let (system, model) = match self.defs.iter().find(|d| d.name == agent_type) {
             Some(def) => (
                 def.system.clone(),
@@ -245,11 +380,36 @@ impl TaskAgentFactory for ZodeTaskFactory {
                 (system, runtime.model.clone())
             }
         };
-        let system = format!("{system}{}", Self::SUBAGENT_CONTRACT);
+        let tools = self.child_tools(mode);
+        let mut system = format!("{system}{}", Self::SUBAGENT_CONTRACT);
+        if tools.get("Skill").is_some() {
+            system.push_str(&self.skills_prompt);
+        }
+        if tools.names().any(|name| name.starts_with("mcp__")) {
+            system.push_str(
+                "\n\nRegistered MCP tools inherited from the caller are available under \
+                 their `mcp__<server>__<tool>` names. Call them directly, or use \
+                 ToolSearch to discover them when ToolSearch is available.",
+            );
+        }
+        if mode == SubagentMode::Inherit {
+            let nested_types = self
+                .agent_types()
+                .into_iter()
+                .map(|(name, description)| format!("- {name}: {description}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            system.push_str(Self::NESTED_DELEGATION_CONTRACT);
+            system.push_str("\n\n## Available sub-agent types\n");
+            system.push_str(&nested_types);
+        } else if mode == SubagentMode::Plan {
+            system.push_str(Self::PLAN_MODE_PROMPT);
+        }
+
         Ok(TaskAgentConfig {
             provider: runtime.provider,
             model,
-            tools: self.child_tools(),
+            tools,
             system: Some(system),
             // `None` deliberately leaves the child's QueryLoop unbounded so
             // iterative engineering can reach its natural completion. A user
@@ -266,6 +426,24 @@ impl TaskAgentFactory for ZodeTaskFactory {
     }
 }
 
+#[async_trait]
+impl TaskAgentFactory for ZodeTaskFactory {
+    async fn build(&self, agent_type: &str) -> Result<TaskAgentConfig, AgentError> {
+        self.build_for_mode(agent_type, SubagentMode::Inherit)
+    }
+}
+
+#[async_trait]
+impl TaskAgentFactory for ZodeTaskModeFactory {
+    async fn build(&self, agent_type: &str) -> Result<TaskAgentConfig, AgentError> {
+        self.inner.build_for_mode(agent_type, self.mode)
+    }
+}
+
+#[cfg(test)]
+#[path = "task-factory-mode-tests.rs"]
+mod mode_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,10 +453,9 @@ mod tests {
     use agent::permission::PermissionMode;
     use agent::stream::{Event as AgentEvent, ResultData};
     use agent::testing::{FakeTool, MockProvider};
-    use agent::tool::{SafetyClass, Tool, ToolUseContext};
+    use agent::tool::{Tool, ToolUseContext};
     use agent_tools_code::TaskTool;
-    use async_trait::async_trait;
-    use serde_json::{json, Value};
+    use serde_json::json;
     use std::num::NonZeroUsize;
 
     fn provider() -> Arc<dyn Provider> {
@@ -291,28 +468,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap()
-    }
-
-    /// Minimal stub so we can register a tool with an arbitrary name.
-    #[derive(Debug)]
-    struct StubTool(&'static str);
-    #[async_trait]
-    impl Tool for StubTool {
-        fn name(&self) -> &str {
-            self.0
-        }
-        fn description(&self) -> &str {
-            "stub"
-        }
-        fn input_schema(&self) -> Value {
-            json!({"type": "object"})
-        }
-        fn safety_class(&self) -> SafetyClass {
-            SafetyClass::ReadOnly
-        }
-        async fn call(&self, _ctx: &ToolUseContext, _input: Value) -> Result<Value, AgentError> {
-            Ok(json!({}))
-        }
     }
 
     fn factory_with_limit(cell: ParentToolsCell, max_iterations: Option<usize>) -> ZodeTaskFactory {
@@ -328,6 +483,7 @@ mod tests {
             Arc::new(HookRunner::new()),
             cell,
             Vec::new(),
+            String::new(),
             crate::subagents::SubAgentRegistry::new(),
             max_iterations,
         )
@@ -440,6 +596,7 @@ mod tests {
             hooks.clone(),
             parent_tools,
             Vec::new(),
+            String::new(),
             crate::subagents::SubAgentRegistry::new(),
             resolve_subagent_max_iterations(None),
         );
@@ -468,19 +625,155 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn child_tools_exclude_task_but_keep_others() {
-        // Populate the cell with a registry containing a "Task" tool and a
-        // peer; the child set must drop Task and keep the peer.
+    async fn child_can_spawn_a_nested_plan_subagent_and_resume_its_mode() {
+        let provider = Arc::new(MockProvider::with_turns(vec![
+            vec![
+                AgentEvent::ToolUse {
+                    id: "spawn-grandchild".into(),
+                    name: "Task".into(),
+                    input: json!({
+                        "description": "nested work",
+                        "prompt": "return the nested result",
+                        "agent_type": "general",
+                        "mode": "plan"
+                    }),
+                },
+                AgentEvent::Result {
+                    data: ResultData {
+                        stop_reason: Some("tool_use".into()),
+                        ..Default::default()
+                    },
+                },
+            ],
+            vec![
+                AgentEvent::TextDelta {
+                    delta: "grandchild result".into(),
+                },
+                AgentEvent::Result {
+                    data: ResultData {
+                        stop_reason: Some("end_turn".into()),
+                        ..Default::default()
+                    },
+                },
+            ],
+            vec![
+                AgentEvent::ToolUse {
+                    id: "call-inherited-mcp".into(),
+                    name: "mcp__registered__inspect".into(),
+                    input: json!({"subject": "nested result"}),
+                },
+                AgentEvent::Result {
+                    data: ResultData {
+                        stop_reason: Some("tool_use".into()),
+                        ..Default::default()
+                    },
+                },
+            ],
+            vec![
+                AgentEvent::ToolUse {
+                    id: "resume-parent-mode".into(),
+                    name: "EngineeringStep".into(),
+                    input: json!({"after": "plan"}),
+                },
+                AgentEvent::Result {
+                    data: ResultData {
+                        stop_reason: Some("tool_use".into()),
+                        ..Default::default()
+                    },
+                },
+            ],
+            vec![
+                AgentEvent::TextDelta {
+                    delta: "child result".into(),
+                },
+                AgentEvent::Result {
+                    data: ResultData {
+                        stop_reason: Some("end_turn".into()),
+                        ..Default::default()
+                    },
+                },
+            ],
+        ]));
+        let cwd = std::env::temp_dir();
+        let file_cache = Arc::new(FileStateCache::new(
+            NonZeroUsize::new(8).unwrap(),
+            1024 * 1024,
+        ));
+        let permissions = Arc::new(PermissionManager::new().with_mode(PermissionMode::Bypass));
+        let hooks = Arc::new(HookRunner::new());
+        let registry = crate::subagents::SubAgentRegistry::new();
+        let parent_tools: ParentToolsCell = Arc::new(OnceLock::new());
+        let factory = Arc::new(ZodeTaskFactory::new(
+            ModelRuntimeState::new(provider.clone(), "nested-model".into()),
+            permissions.clone(),
+            cwd.clone(),
+            file_cache.clone(),
+            hooks.clone(),
+            parent_tools.clone(),
+            Vec::new(),
+            String::new(),
+            registry.clone(),
+            resolve_subagent_max_iterations(None),
+        ));
+        let inherit_task: Arc<dyn Tool> = Arc::new(TaskTool::new(factory.clone()));
+        let plan_task: Arc<dyn Tool> = Arc::new(TaskTool::new(Arc::new(ZodeTaskModeFactory::new(
+            factory,
+            SubagentMode::Plan,
+        ))));
+        let task: Arc<dyn Tool> = Arc::new(
+            crate::task_mode::TaskModeRouter::new(inherit_task)
+                .with_mode(SubagentMode::Plan.as_str(), plan_task),
+        );
+        let engineering_step = Arc::new(FakeTool::new("EngineeringStep", json!({"ok": true})));
+        let inherited_mcp = Arc::new(FakeTool::new(
+            "mcp__registered__inspect",
+            json!({"ok": true}),
+        ));
         let mut parent = ToolRegistry::new();
-        parent.register(Arc::new(StubTool("Task")));
-        parent.register(Arc::new(StubTool("FileRead")));
-        let cell: ParentToolsCell = Arc::new(OnceLock::new());
-        cell.set(Arc::new(parent)).unwrap();
+        parent.register(task.clone());
+        parent.register(engineering_step.clone());
+        parent.register(inherited_mcp.clone());
+        parent_tools.set(Arc::new(parent)).unwrap();
 
-        let f = factory_with(cell);
-        let cfg = f.build("researcher").await.unwrap();
-        assert!(cfg.tools.get("Task").is_none());
-        assert!(cfg.tools.get("FileRead").is_some());
+        let ctx = ToolUseContext {
+            cwd,
+            abort: AbortController::new(),
+            file_cache,
+            permissions,
+            hooks,
+            task_depth: 0,
+        };
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            task.call(
+                &ctx,
+                json!({
+                    "description": "outer work",
+                    "prompt": "delegate the nested part",
+                    "agent_type": "general"
+                }),
+            ),
+        )
+        .await
+        .expect("nested Task chain should not deadlock")
+        .unwrap();
+
+        assert_eq!(output["output"], "child result");
+        assert_eq!(provider.remaining_turns(), 0);
+        assert_eq!(inherited_mcp.call_count(), 1);
+        assert_eq!(
+            engineering_step.call_count(),
+            1,
+            "returning from plan mode must restore the caller's normal tools"
+        );
+        let agents = registry.snapshot();
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].description.as_deref(), Some("outer work"));
+        assert_eq!(agents[0].depth, 0);
+        assert_eq!(agents[0].status, crate::subagents::SubAgentStatus::Done);
+        assert_eq!(agents[1].description.as_deref(), Some("nested work"));
+        assert_eq!(agents[1].depth, 1);
+        assert_eq!(agents[1].status, crate::subagents::SubAgentStatus::Done);
     }
 
     #[tokio::test]
@@ -490,6 +783,10 @@ mod tests {
         let system = cfg.system.unwrap();
         assert!(system.contains("returned VERBATIM to the calling agent"));
         assert!(system.contains("cannot see the parent conversation"));
+        assert!(system.contains("Task tool to delegate independent sub-tasks"));
+        assert!(system.contains("- general:"));
+        assert!(system.contains("- researcher:"));
+        assert!(system.contains("- reviewer:"));
         // The base persona is still present, contract is appended not replacing.
         assert!(system.contains("focused sub-agent"));
     }

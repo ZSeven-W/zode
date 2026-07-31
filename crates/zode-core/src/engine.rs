@@ -49,8 +49,10 @@ use crate::plugin::PluginManager;
 use crate::provider::build_provider;
 use crate::skills::{skills_dirs, skills_index, SkillTool};
 use crate::task_factory::{
-    resolve_subagent_max_iterations, ModelRuntimeState, ParentToolsCell, ZodeTaskFactory,
+    resolve_subagent_max_iterations, ModelRuntimeState, ParentToolsCell, SubagentMode,
+    ZodeTaskFactory, ZodeTaskModeFactory,
 };
+use crate::task_mode::{TaskModeRouter, TaskPreflightTool};
 
 const EDIT_HISTORY_CAPACITY: usize = 50;
 
@@ -424,6 +426,7 @@ fn render_runtime_system_prompt(
     has_question_tool: bool,
     has_todo_tool: bool,
     has_run_check_tool: bool,
+    has_skill_tool: bool,
     model: &str,
     skills: &SkillRegistry,
     agent_type_list: &[(String, String)],
@@ -435,7 +438,11 @@ fn render_runtime_system_prompt(
     // detect inline (the synchronous hot-swap path).
     git_branch: Option<Option<String>>,
 ) -> String {
-    let skills_idx = skills_index(skills);
+    let skills_idx = if has_skill_tool {
+        skills_index(skills)
+    } else {
+        String::new()
+    };
     let mut env = match git_branch {
         Some(b) => gather_env_with_branch(cwd, date, b),
         None => gather_env(cwd, date),
@@ -1013,9 +1020,10 @@ impl ZodeEngine {
                     config.servers.retain(|name, _| {
                         explicit_mcp_names.contains(name) || plugins.mcp_enabled(name)
                     });
-                    // Plan mode filters MCP tools out anyway → skip the connect
-                    // (process spawn / network).
-                    if plan_mode || config.servers.is_empty() {
+                    // Plan/read-only modes filter today's Unknown-classified MCP
+                    // tools out anyway, so do not start their process/network
+                    // connections merely to discard them later.
+                    if plan_mode || read_only_tools || config.servers.is_empty() {
                         None
                     } else {
                         Some(tokio::spawn(
@@ -1237,10 +1245,11 @@ impl ZodeEngine {
         let permissions = Arc::new(pm);
 
         // Task sub-agent tool. The child inherits the parent's FINAL gated +
-        // sandboxed registry (minus Task — recursion guard), plus the same
-        // permissions/hooks/cwd/file_cache. The gated registry only exists
-        // after wrapping, so it is late-bound through a OnceLock the engine
-        // populates below. Registered LAST among base tools.
+        // sandboxed registry, including Task for depth-bounded nested
+        // delegation, plus the same permissions/hooks/cwd/file_cache. The
+        // gated registry only exists after wrapping, so it is late-bound
+        // through a OnceLock the engine populates below. Registered LAST among
+        // base tools.
         let task_tools: ParentToolsCell = Arc::new(OnceLock::new());
         // Per-engine sub-agent registry; shared between engine and factory so
         // the Task observer writes here and the TUI reads a snapshot.
@@ -1265,6 +1274,7 @@ impl ZodeEngine {
             hooks.clone(),
             task_tools.clone(),
             agent_defs,
+            crate::skills::skills_prompt(&skills, cfg.skill_discipline()),
             subagents.clone(),
             resolve_subagent_max_iterations(cfg.subagent_max_iterations),
         ));
@@ -1286,7 +1296,29 @@ impl ZodeEngine {
                 &conflicts,
             ))
         };
-        let raw_task: Arc<dyn Tool> = Arc::new(TaskTool::new(task_factory));
+        let external_agent_types = external_registry.agent_types();
+        task_factory.set_additional_agent_types(external_agent_types.clone());
+        agent_type_list.extend(external_agent_types);
+        // One provider-facing Task tool routes to immutable child-loop modes.
+        // `agent_type` still selects the persona/model; `mode` independently
+        // selects a capability policy. The plan factory starts from the same
+        // final parent registry and only narrows it to read-only tools.
+        let inherit_task: Arc<dyn Tool> = Arc::new(TaskTool::new(task_factory.clone()));
+        let plan_factory = Arc::new(ZodeTaskModeFactory::new(
+            task_factory.clone(),
+            SubagentMode::Plan,
+        ));
+        let plan_task: Arc<dyn Tool> = Arc::new(TaskTool::new(plan_factory));
+        let read_only_factory = Arc::new(ZodeTaskModeFactory::new(
+            task_factory,
+            SubagentMode::ReadOnly,
+        ));
+        let read_only_task: Arc<dyn Tool> = Arc::new(TaskTool::new(read_only_factory));
+        let raw_task: Arc<dyn Tool> = Arc::new(
+            TaskModeRouter::new(inherit_task)
+                .with_mode(SubagentMode::Plan.as_str(), plan_task)
+                .with_mode(SubagentMode::ReadOnly.as_str(), read_only_task),
+        );
         if external_registry.is_empty() {
             // No external agents: register the upstream tool exactly as
             // before — it flows through wrap_mutating_tools unchanged.
@@ -1299,14 +1331,16 @@ impl ZodeEngine {
             // the EXTERNAL route runs its own trust approval. "Task" then
             // joins the self-gated skip set so the outer pass never adds a
             // second, context-blind gate on top.
-            let force_ask = cfg.permissions.ask.iter().any(|a| a == "Task");
+            let force_ask = permission_rules.iter().any(|rule| {
+                rule.tool_name == "Task"
+                    && rule.behavior == agent::permission::PermissionBehavior::Ask
+            });
             let auto_allowed = !force_ask && cfg.permissions.allow.iter().any(|a| a == "Task");
             let inner: Arc<dyn Tool> = if auto_allowed {
                 raw_task
             } else {
                 Arc::new(PermissionGatedTool::new(raw_task, gate.clone()))
             };
-            agent_type_list.extend(external_registry.agent_types());
             base.register(Arc::new(crate::task_tool::ZodeTaskTool::new(
                 inner,
                 external_registry.clone(),
@@ -1516,6 +1550,15 @@ impl ZodeEngine {
         let self_gated: &[&str] = &self_gated_names;
         let mut gated = wrap_mutating_tools(base, &gate, &mutating_allow, &force_ask, self_gated);
 
+        // Depth/type validation must run outside Task's permission/trust gate:
+        // an impossible nested call should fail without prompting the user.
+        if let Some(task) = gated.get("Task") {
+            gated.register(Arc::new(TaskPreflightTool::new(
+                task,
+                agent_tools_code::TASK_DEFAULT_MAX_DEPTH,
+            )));
+        }
+
         // 3. ToolSearch over the full set (candidates = snapshot of the
         //    gated registry, taken before ToolSearch itself is added).
         //    A tool filter that excludes ToolSearch skips it entirely.
@@ -1554,6 +1597,7 @@ impl ZodeEngine {
             has_question_tool,
             has_todo_tool,
             has_run_check_tool,
+            tools.get("Skill").is_some(),
             &model,
             &skills,
             &agent_type_list,
@@ -1756,6 +1800,7 @@ impl ZodeEngine {
             self.permissions.clone(),
             self.hooks.clone(),
             abort,
+            0,
         ));
         crate::workflows_js::run_js_workflow(&def.script, args, runner, log).await
     }
@@ -3041,6 +3086,7 @@ impl EngineTemplate {
             self.question_queue.is_some(),
             engine.tools.get("TodoWrite").is_some(),
             engine.tools.get("run_check").is_some(),
+            engine.tools.get("Skill").is_some(),
             model,
             &engine.skills,
             &engine.agent_types,
@@ -4551,6 +4597,11 @@ mod tests {
         .unwrap();
         let task = eng.tools.get("Task").expect("Task tool registered");
         assert!(!matches!(task.safety_class(), SafetyClass::ReadOnly));
+        assert_eq!(
+            task.input_schema()["properties"]["mode"]["enum"],
+            serde_json::json!(["inherit", "default", "plan", "read-only"]),
+            "assembled Task must expose child execution modes"
+        );
         // Cost tracker is wired to the configured model.
         assert!(eng.cost.report().await.contains("MiniMax-M1"));
     }
@@ -4700,6 +4751,78 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("denied"), "{err}");
         assert_eq!(count.load(Ordering::SeqCst), before + 1);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn scoped_task_ask_still_gates_internal_mode_when_external_routes_exist() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug)]
+        struct CountingDenyGate(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl ApprovalGate for CountingDenyGate {
+            fn interactive(&self) -> bool {
+                true
+            }
+
+            async fn approve(&self, _tool: &str, _input: &serde_json::Value) -> Approval {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Approval::Deny
+            }
+        }
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/extagent/fake-claude.sh");
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_cfg();
+        cfg.permissions.allow.push("Task".to_string());
+        cfg.permissions
+            .rules
+            .push(crate::permission_rules::PermissionRuleSpec {
+                behavior: agent::permission::PermissionBehavior::Ask,
+                tool: "Task".into(),
+                matcher: agent::permission::PermissionMatcher::field_glob("/mode", "plan"),
+            });
+        cfg.external_agents.agents.insert(
+            "fake-ext".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "command": fixture.display().to_string(),
+                "args": [],
+                "promptTransport": "stdin",
+                "output": "jsonl-claude",
+            }))
+            .unwrap(),
+        );
+        let count = Arc::new(AtomicUsize::new(0));
+        let eng = ZodeEngine::assemble(
+            &cfg,
+            dir.path().to_path_buf(),
+            Arc::new(CountingDenyGate(count.clone())),
+            None,
+            "2026-07-27",
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = eng.tools.get("Task").expect("Task registered");
+        let error = task
+            .call(
+                &agent::tool::ToolUseContext::new(dir.path()),
+                serde_json::json!({
+                    "agent_type": "general",
+                    "prompt": "plan safely",
+                    "mode": "plan"
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("denied"), "{error}");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

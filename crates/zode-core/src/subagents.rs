@@ -123,17 +123,7 @@ impl SubAgentRegistry {
                 turn_input: 0,
                 turn_output: 0,
             });
-            let cap = s.cap;
-            while s.agents.len() > cap {
-                // Prefer evicting the oldest FINISHED agent so a running
-                // sub-agent's live transcript is never dropped mid-flight.
-                let victim = s
-                    .agents
-                    .iter()
-                    .position(|a| a.status != SubAgentStatus::Running)
-                    .unwrap_or(0);
-                s.agents.remove(victim);
-            }
+            trim_finished_overflow(&mut s);
         }
         id
     }
@@ -165,7 +155,24 @@ impl SubAgentRegistry {
                     }
                 }
             }
+            trim_finished_overflow(&mut s);
         }
+    }
+}
+
+/// Enforce the retention cap without ever evicting a live agent. Nested
+/// fan-out may temporarily exceed the cap; rows are trimmed as children
+/// finish, preferring the oldest finished record.
+fn trim_finished_overflow(state: &mut State) {
+    while state.agents.len() > state.cap {
+        let Some(victim) = state
+            .agents
+            .iter()
+            .position(|a| a.status != SubAgentStatus::Running)
+        else {
+            break;
+        };
+        state.agents.remove(victim);
     }
 }
 
@@ -408,5 +415,31 @@ mod tests {
         // The finished run1 was evicted; the still-running run2 + new run3 remain.
         let names: Vec<String> = snap.iter().map(|a| a.agent_type.clone()).collect();
         assert_eq!(names, vec!["run2".to_string(), "run3".to_string()]);
+    }
+
+    #[test]
+    fn cap_temporarily_overflows_instead_of_evicting_running_agents() {
+        let reg = SubAgentRegistry::with_cap(2);
+        let obs = reg.observer();
+        let r1 = obs.on_start("run1", None, 0);
+        let _r2 = obs.on_start("run2", None, 1);
+        let _r3 = obs.on_start("run3", None, 2);
+
+        let running = reg.snapshot();
+        assert_eq!(running.len(), 3);
+        assert!(running
+            .iter()
+            .all(|agent| agent.status == SubAgentStatus::Running));
+
+        obs.on_finish(r1, "done", None);
+        let trimmed = reg.snapshot();
+        assert_eq!(trimmed.len(), 2);
+        assert_eq!(
+            trimmed
+                .iter()
+                .map(|agent| agent.agent_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["run2", "run3"]
+        );
     }
 }

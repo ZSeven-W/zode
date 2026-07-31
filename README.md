@@ -49,7 +49,7 @@
 - **Durable, V1-compatible sessions** — keep the existing `<id>.jsonl` transcript contract while adding journals, checkpoints, rewind, fork, and isolated Git worktrees as sidecar data
 - **Automation surfaces** — stable JSON/JSONL headless output, exact session targeting, tool filters, deterministic exit codes, ACP over stdio, and a local operations dashboard
 - **Multi-session tabs** — run several conversations side by side (`Ctrl+T`), each an isolated agent; resume past sessions with full history replay
-- **Sub-agents, teams & workflows** — delegate one-shot work through the Task tool, hire persistent internal or external-CLI teammates, coordinate them with a shared board and file claims, and manage the surfaces with `/agents`, `/team`, and `/workflows`
+- **Sub-agents, teams & workflows** — delegate one-shot work through the Task tool (sub-agents can delegate again, with a three-level depth limit), hire persistent internal or external-CLI teammates, coordinate them with a shared board and file claims, and manage the surfaces with `/agents`, `/team`, and `/workflows`
 - **Portable local configuration** — reads direct skills and MCP configuration from Claude Code, Codex, Cursor, opencode, and Gemini, while never importing their installed plugin trees or caches
 - **Skills & MCP** — load `SKILL.md` instruction packs on demand and connect MCP servers (`mcp__<server>__<tool>`); created agents, skills, and MCP tools surface as slash commands
 - **Hooks** — run a shell script or a sandboxed JavaScript hook on agent events (e.g. block dangerous commands, lint after edits)
@@ -186,6 +186,37 @@ zode dashboard             # local sessions/checkpoints/worktrees overview
 You can also point at any provider without editing the config by exporting the
 matching key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …); for Ollama the
 `baseUrl` is taken from the environment when unset.
+
+## Task Modes
+
+Task execution mode is orthogonal to `agent_type`: any built-in or custom agent
+type can use the registered child modes `plan` and `read-only`. Omitting `mode`
+uses `inherit`; `default` is an alias for the same behavior.
+
+```json
+{
+  "agent_type": "my-custom-agent",
+  "description": "Design the migration",
+  "prompt": "Inspect the current schema and return an implementation plan.",
+  "mode": "plan"
+}
+```
+
+`inherit` preserves the caller's capability ceiling. `read-only` narrows that
+ceiling to read-only tools while completing the task normally; `plan` applies
+the same read-only boundary and asks the child to return an implementation
+plan. Neither can gain permissions, write access, or network access the caller
+does not have, and neither changes the caller's mode. Capability-increasing
+states such as bypass/yolo or sandbox-off are not child modes. External CLI Task
+workers currently support only `inherit` (including omitted `mode` or
+`default`); non-inherit modes are rejected.
+
+Internal Task children also inherit every enabled Skill and every MCP tool in
+the caller's final registered tool set. Their prompt contains the same Skill
+index, and their rebuilt ToolSearch can discover the inherited `Skill` and
+`mcp__<server>__<tool>` entries. Parent plugin/tool filters remain authoritative;
+`plan` and `read-only` keep Skills but exclude MCP tools whose side effects are
+unknown. External CLI workers do not inherit Zode's in-process tools.
 
 ## External CLI Teammates
 
