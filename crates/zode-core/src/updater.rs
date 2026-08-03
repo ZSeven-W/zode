@@ -40,8 +40,9 @@ pub fn platform_suffix() -> Option<&'static str> {
     })
 }
 
-/// Query the latest release (including pre-releases — betas are pre-releases) and
-/// resolve this platform's asset URL.
+/// Query the latest release (pre-releases INCLUDED — zode betas ship as
+/// pre-releases, and the auto-updater must move between them) and resolve this
+/// platform's asset URL.
 pub async fn latest_release() -> Result<ReleaseInfo, CoreError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
@@ -58,18 +59,25 @@ pub async fn latest_release() -> Result<ReleaseInfo, CoreError> {
         .json()
         .await
         .map_err(|e| CoreError::Other(format!("parse releases: {e}")))?;
-    let first = releases
-        .as_array()
-        .and_then(|a| a.first())
-        .ok_or_else(|| CoreError::Other("no releases published yet".into()))?;
-    let tag = first
-        .get("tag_name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| CoreError::Other("release is missing tag_name".into()))?
-        .to_string();
+    pick_latest_release(&releases)
+        .ok_or_else(|| CoreError::Other("no releases published yet".into()))
+}
+
+/// Pick the release with the HIGHEST version from the API's release list —
+/// stable and pre-release alike — rather than trusting the list's
+/// creation-date order: backfilling or re-publishing an old tag must never
+/// hide a newer build. Drafts are skipped (the unauthenticated API doesn't
+/// return them, but the guard is kept explicit).
+fn pick_latest_release(releases: &serde_json::Value) -> Option<ReleaseInfo> {
+    let (release, tag) = releases
+        .as_array()?
+        .iter()
+        .filter(|r| !r.get("draft").and_then(|v| v.as_bool()).unwrap_or(false))
+        .filter_map(|r| Some((r, r.get("tag_name")?.as_str()?.to_string())))
+        .max_by_key(|(_, tag)| version_key(tag))?;
     let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
-    Ok(ReleaseInfo {
-        asset_url: asset_url_for_platform(first, &version),
+    Some(ReleaseInfo {
+        asset_url: asset_url_for_platform(release, &version),
         tag,
         version,
     })
@@ -141,13 +149,11 @@ fn version_key(v: &str) -> (u64, u64, u64, u8, u64) {
 /// was applied, `Ok(None)` when there was nothing to do, `Err` on a best-effort
 /// failure the caller can log and ignore.
 pub async fn auto_update_if_available(current: &str) -> Result<Option<String>, CoreError> {
-    // Windows can't reliably replace a running .exe from within the process, so
-    // the silent auto-swap is Unix-only. `zode doctor` still reports that an
-    // update is available on Windows; the user updates manually there.
-    if cfg!(windows) {
-        return Ok(None);
-    }
     let exe = std::env::current_exe().map_err(|e| CoreError::Other(format!("current_exe: {e}")))?;
+    // A previous Windows swap leaves the old image as `zode.old` (a running
+    // .exe can be renamed but not deleted). Clear it on the next launch —
+    // best-effort: it stays locked while an older instance is still running.
+    cleanup_stale_update_artifacts(&exe);
     if looks_like_dev_build(&exe) {
         return Ok(None);
     }
@@ -160,6 +166,33 @@ pub async fn auto_update_if_available(current: &str) -> Result<Option<String>, C
     };
     download_and_apply(url).await?;
     Ok(Some(rel.tag))
+}
+
+/// Remove leftovers of a previous self-update beside `exe`: the Windows
+/// `.old` image and any orphaned `.zode.new.<pid>` staging file from a swap
+/// that died mid-way. Best-effort by design.
+pub fn cleanup_stale_update_artifacts(exe: &Path) {
+    let _ = std::fs::remove_file(exe.with_extension("old"));
+    let (Some(dir), Some(bin_name)) = (exe.parent(), exe.file_name().and_then(|n| n.to_str()))
+    else {
+        return;
+    };
+    let stale_prefixes = [format!(".{bin_name}.new."), format!(".{bin_name}.update.")];
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if stale_prefixes.iter().any(|p| name.starts_with(p)) {
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
 }
 
 /// Heuristic: a binary launched straight from a Cargo build dir must NOT be
@@ -206,10 +239,10 @@ pub async fn download_and_apply(asset_url: &str) -> Result<(), CoreError> {
     result
 }
 
-/// Extract the `zode` binary from an in-memory `.tar.gz` into a temp file beside
-/// `exe` (same dir, so the later rename stays on one filesystem). Unix-only (the
-/// auto path skips Windows). The staging dir is ALWAYS removed — on success and
-/// on every error branch.
+/// Extract the `zode` binary from an in-memory release archive (`.tar.gz`, or
+/// `.zip` on Windows) into a temp file beside `exe` (same dir, so the later
+/// rename stays on one filesystem). The staging dir is ALWAYS removed — on
+/// success and on every error branch.
 fn extract_zode_binary(tarball: &[u8], exe: &Path) -> Result<PathBuf, CoreError> {
     let dir = exe.parent().unwrap_or_else(|| Path::new("."));
     let bin_name = exe.file_name().and_then(|n| n.to_str()).unwrap_or("zode");
@@ -221,27 +254,41 @@ fn extract_zode_binary(tarball: &[u8], exe: &Path) -> Result<PathBuf, CoreError>
     outcome.map(|()| staged_bin)
 }
 
-/// Unpack the tarball inside `stage` and move the binary to `staged_bin`.
+/// The binary member name inside a release archive for this platform.
+fn archive_member() -> &'static str {
+    if cfg!(windows) {
+        "zode.exe"
+    } else {
+        "zode"
+    }
+}
+
+/// Unpack the archive inside `stage` and move the binary to `staged_bin`.
 /// Separated so the caller can clean `stage` on any failure.
 fn extract_into(tarball: &[u8], stage: &Path, staged_bin: &Path) -> Result<(), CoreError> {
     std::fs::create_dir_all(stage).map_err(|e| CoreError::Other(format!("stage dir: {e}")))?;
-    let tgz = stage.join("zode.tar.gz");
-    std::fs::write(&tgz, tarball).map_err(|e| CoreError::Other(format!("write tarball: {e}")))?;
-    // Extract ONLY the `zode` member: a hostile archive's other entries (absolute
-    // paths, `..`, symlinks) are never written, since tar only unpacks the name
-    // we ask for and `zode` cannot traverse out of `-C stage`.
+    let archive = stage.join(format!("zode{}", asset_ext()));
+    std::fs::write(&archive, tarball)
+        .map_err(|e| CoreError::Other(format!("write archive: {e}")))?;
+    // Extract ONLY the platform's binary member: a hostile archive's other
+    // entries (absolute paths, `..`, symlinks) are never written, since tar
+    // only unpacks the name we ask for and it cannot traverse out of
+    // `-C stage`. Plain `-xf` lets bsdtar/GNU tar auto-detect the format —
+    // `.tar.gz` everywhere, and the `.zip` Windows releases ship (Windows 10+
+    // bundles bsdtar as `tar.exe`, which reads zip).
+    let member = archive_member();
     let status = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(&tgz)
+        .arg("-xf")
+        .arg(&archive)
         .arg("-C")
         .arg(stage)
-        .arg("zode")
+        .arg(member)
         .status()
         .map_err(|e| CoreError::Other(format!("run tar: {e}")))?;
     if !status.success() {
-        return Err(CoreError::Other("tar extraction failed".into()));
+        return Err(CoreError::Other("archive extraction failed".into()));
     }
-    let candidate = stage.join("zode");
+    let candidate = stage.join(member);
     if !candidate.is_file() {
         return Err(CoreError::Other(
             "archive did not contain a zode binary".into(),
@@ -305,6 +352,53 @@ mod tests {
         )));
         assert!(!looks_like_dev_build(Path::new("/usr/local/bin/zode")));
         assert!(!looks_like_dev_build(Path::new("/home/x/.local/bin/zode")));
+    }
+
+    #[test]
+    fn pick_latest_release_prefers_highest_version_and_includes_prereleases() {
+        // List order is creation order on the API — a backfilled stable
+        // created AFTER a newer beta must not shadow it.
+        let releases = serde_json::json!([
+            { "tag_name": "v0.1.0", "assets": [] },
+            { "tag_name": "v0.1.0-beta.9", "assets": [] },
+            { "tag_name": "v0.1.1-beta.2", "prerelease": true, "assets": [] },
+            { "tag_name": "v0.1.1-beta.1", "prerelease": true, "assets": [] },
+            { "tag_name": "v0.1.1-beta.3", "prerelease": true, "draft": true, "assets": [] },
+        ]);
+        let rel = pick_latest_release(&releases).expect("a release is picked");
+        assert_eq!(rel.tag, "v0.1.1-beta.2", "highest non-draft version wins");
+        assert_eq!(rel.version, "0.1.1-beta.2");
+
+        // A stable that IS the highest version wins over older betas.
+        let releases = serde_json::json!([
+            { "tag_name": "v0.2.0-beta.1", "prerelease": true, "assets": [] },
+            { "tag_name": "v0.2.0", "assets": [] },
+        ]);
+        assert_eq!(pick_latest_release(&releases).unwrap().tag, "v0.2.0");
+
+        // Empty / malformed lists pick nothing.
+        assert!(pick_latest_release(&serde_json::json!([])).is_none());
+        assert!(pick_latest_release(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn cleanup_removes_old_image_and_orphaned_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("zode");
+        std::fs::write(&exe, b"bin").unwrap();
+        std::fs::write(dir.path().join("zode.old"), b"old").unwrap();
+        std::fs::write(dir.path().join(".zode.new.12345"), b"staged").unwrap();
+        std::fs::create_dir(dir.path().join(".zode.update.12345")).unwrap();
+        // An unrelated neighbor must survive.
+        std::fs::write(dir.path().join("zode.json"), b"cfg").unwrap();
+
+        cleanup_stale_update_artifacts(&exe);
+
+        assert!(exe.exists(), "the binary itself is untouched");
+        assert!(dir.path().join("zode.json").exists());
+        assert!(!dir.path().join("zode.old").exists());
+        assert!(!dir.path().join(".zode.new.12345").exists());
+        assert!(!dir.path().join(".zode.update.12345").exists());
     }
 
     #[test]

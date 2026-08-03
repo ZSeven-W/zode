@@ -42,6 +42,7 @@ const EXTRA: &[[&str; 15]] = &[
     // Status-bar mode labels new since the table was generated. (ready/running/
     // idle/thinking/streaming/error already live in the generated table — their
     // zh placeholders are fixed there, in i18n_data.rs, not here.)
+    ["self-updated to {tag} — restart to apply", "已自动更新到 {tag} — 重启后生效", "已自動更新到 {tag} — 重新啟動後生效", "{tag} に自動更新しました — 再起動で適用", "{tag}(으)로 자동 업데이트됨 — 재시작 시 적용", "actualizado automáticamente a {tag} — reinicia para aplicar", "mise à jour automatique vers {tag} — redémarrez pour appliquer", "automatisch auf {tag} aktualisiert — Neustart zum Anwenden", "atualizado automaticamente para {tag} — reinicie para aplicar", "автообновление до {tag} — перезапустите для применения", "{tag} में स्वतः अपडेट हो गया — लागू करने के लिए पुनः आरंभ करें", "diperbarui otomatis ke {tag} — mulai ulang untuk menerapkan", "อัปเดตอัตโนมัติเป็น {tag} แล้ว — รีสตาร์ตเพื่อใช้งาน", "{tag} sürümüne otomatik güncellendi — uygulamak için yeniden başlatın", "đã tự cập nhật lên {tag} — khởi động lại để áp dụng"],
     ["compacting", "压缩中", "壓縮中", "圧縮中", "압축 중", "compactando", "compactage", "komprimiert", "compactando", "сжатие", "संकुचन", "memadatkan", "กำลังบีบอัด", "sıkıştırılıyor", "đang nén"],
     ["switching", "切换中", "切換中", "切り替え中", "전환 중", "cambiando", "changement", "wechselt", "alternando", "переключение", "स्विच कर रहा है", "beralih", "กำลังสลับ", "değiştiriliyor", "đang chuyển"],
     // Sidebar section headers + value labels (were hardcoded English).
