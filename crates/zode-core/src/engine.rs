@@ -465,6 +465,15 @@ fn render_runtime_system_prompt(
         verify_tool: has_run_check_tool,
     };
     let mut system = build_system_prompt(&instructions, &skills_idx, &env, &flags);
+    // Repository map: directory-level file counts so the model targets reads
+    // and searches instead of cold-start grepping the whole tree (and
+    // re-exploring after every compaction — the system prompt survives
+    // compaction by construction).
+    if cfg.repo_map() {
+        if let Some(map) = crate::instructions::repo_map(cwd) {
+            system.push_str(&map);
+        }
+    }
     // Declare the live sandbox / write policy so the agent knows whether it may
     // write outside cwd or reach the network.
     system.push_str(&sandbox_prompt_note(sandbox));

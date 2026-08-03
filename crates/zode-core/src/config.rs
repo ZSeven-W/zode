@@ -779,6 +779,11 @@ pub struct ZodeConfig {
     /// → ON. Set `"openspecAwareness": false` to disable even when detected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub openspec_awareness: Option<bool>,
+    /// Inject a compact repository map (tracked-file counts per directory)
+    /// into the system prompt so the model targets reads/searches instead of
+    /// exploring blind. `None` → ON. Set `"repoMap": false` to disable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_map: Option<bool>,
     #[serde(skip_serializing_if = "is_default")]
     pub permissions: PermissionsConfig,
     #[serde(skip_serializing_if = "is_default")]
@@ -968,6 +973,12 @@ impl ZodeConfig {
     /// prompt (when the project uses OpenSpec). Defaults to `true`.
     pub fn openspec_awareness(&self) -> bool {
         self.openspec_awareness.unwrap_or(true)
+    }
+
+    /// Whether to inject the repository map (tracked-file counts per
+    /// directory) into the system prompt. Defaults to `true`.
+    pub fn repo_map(&self) -> bool {
+        self.repo_map.unwrap_or(true)
     }
 
     /// Whether RTK-style Bash stdout compression is on. Default true.
@@ -1395,6 +1406,9 @@ impl ZodeConfig {
         }
         if other.mouse_capture.is_some() {
             self.mouse_capture = other.mouse_capture;
+        }
+        if other.repo_map.is_some() {
+            self.repo_map = other.repo_map;
         }
         if other.autonomous_orchestration.is_some() {
             self.autonomous_orchestration = other.autonomous_orchestration;

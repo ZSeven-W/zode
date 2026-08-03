@@ -5,6 +5,7 @@
 //! (AGENTS.md > CLAUDE.md) → cwd (if different from the root). Mirrors the
 //! design spec §8 hierarchy.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::ConfigManager;
@@ -215,6 +216,22 @@ earlier result. Never end your turn on an unexecuted plan or promise: if your \
 last paragraph says you WILL do something next, do it now with tool calls \
 instead of stopping.\n";
 
+/// Search/exploration discipline. Unconditional: strong models follow it for
+/// free; weak ones NEED it — the observed failure mode is one speculative
+/// grep at a time, re-issued verbatim after it already returned nothing,
+/// ignoring a user-imposed scope. Complements the runtime loop guard (which
+/// brakes exact repeats after the fact).
+const EXPLORATION_DISCIPLINE: &str = "\n### Exploration discipline\n\
+Search deliberately, not speculatively. Before searching, know exactly what \
+you are looking for; batch related patterns into one command instead of firing \
+guesses one at a time. NEVER re-issue a command you already ran — its output \
+is above in the conversation and will not change. If two attempts at the same \
+goal come up empty, stop guessing keywords and switch strategy: list the \
+directory, read the most likely file, or ask the user. Keep track of which \
+files you have already read; do not re-read them unless told they changed. \
+When the user limits scope (\"only look in X\", \"don't touch Y\"), every \
+later search and edit must respect that limit until they lift it.\n";
+
 /// Verification sentence naming the `run_check` tool. Split out of
 /// `WORKING_STYLE` because plan mode strips `run_check` from the tool
 /// registry (`SafetyClass::Mutating`, dropped by `filter_read_only`) —
@@ -271,6 +288,74 @@ the whole project. Positions are 0-based. `lsp_rename` and `lsp_format` return a
 PREVIEW of the server's edits — apply them yourself with FileEdit. A server \
 starts on first use and may take a few seconds to index.\n";
 
+/// Directory depth the repo map aggregates to, and its line budget. Depth 3
+/// resolves `src/features/mcp/` -grade paths; ~40 lines ≈ a few hundred
+/// tokens, cached across the session.
+const REPO_MAP_DEPTH: usize = 3;
+const REPO_MAP_MAX_LINES: usize = 40;
+
+/// A compact map of the repository for the system prompt, or `None` outside a
+/// git repo / when `git` fails. One line per directory (depth-capped) with
+/// its tracked-file count. Weak models otherwise cold-start by grepping the
+/// whole tree one guess at a time — and redo it after every compaction; a map
+/// in the SYSTEM prompt survives compaction by construction. Deterministic
+/// for a given tree (biggest directories win the line budget, display is
+/// re-sorted lexicographically) so prompt caching stays effective.
+pub fn repo_map(cwd: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let listing = String::from_utf8_lossy(&out.stdout);
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut total = 0usize;
+    for path in listing.split('\0').filter(|p| !p.is_empty()) {
+        total += 1;
+        let dir = match path.rsplit_once('/') {
+            None => ".".to_string(),
+            Some((dir, _file)) => dir
+                .split('/')
+                .take(REPO_MAP_DEPTH)
+                .collect::<Vec<_>>()
+                .join("/"),
+        };
+        *counts.entry(dir).or_insert(0) += 1;
+    }
+    if total == 0 {
+        return None;
+    }
+    // Budget by size, display by name (stable for caching).
+    let mut dirs: Vec<(String, usize)> = counts.into_iter().collect();
+    dirs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let omitted = dirs.len().saturating_sub(REPO_MAP_MAX_LINES);
+    dirs.truncate(REPO_MAP_MAX_LINES);
+    dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut s = String::from(
+        "\n### Repository map\n\
+         Tracked files per directory (use this to target reads and searches \
+         instead of exploring blind):\n",
+    );
+    for (dir, n) in &dirs {
+        if dir == "." {
+            s.push_str(&format!("- ./ ({n} files at the root)\n"));
+        } else {
+            s.push_str(&format!("- {dir}/ ({n})\n"));
+        }
+    }
+    if omitted > 0 {
+        s.push_str(&format!(
+            "- … +{omitted} smaller directories not listed ({total} tracked files total)\n"
+        ));
+    } else {
+        s.push_str(&format!("({total} tracked files total)\n"));
+    }
+    Some(s)
+}
+
 /// The language-server section, or empty when no server is enabled.
 pub fn lsp_prompt_note(langs: &[String]) -> String {
     if langs.is_empty() {
@@ -321,6 +406,7 @@ pub fn build_system_prompt(
         s.push_str(&format!("- git branch (at session start): {b}\n"));
     }
     s.push_str(TOKEN_HYGIENE);
+    s.push_str(EXPLORATION_DISCIPLINE);
     s.push_str(WORKING_STYLE);
     if flags.verify_tool {
         s.push_str(VERIFY_TOOL);
@@ -527,6 +613,60 @@ mod tests {
             prompt.to_lowercase().contains("do not cat")
                 || prompt.contains("avoid dumping whole files")
         );
+    }
+
+    #[test]
+    fn system_prompt_includes_exploration_discipline() {
+        let env = EnvInfo {
+            cwd: "/p".into(),
+            platform: "linux".into(),
+            date: "2026-08-03".into(),
+            git_branch: None,
+            model: String::new(),
+        };
+        let prompt = build_system_prompt(&[], "", &env, &PromptFlags::default());
+        assert!(prompt.contains("Exploration discipline"));
+        assert!(prompt.contains("NEVER re-issue a command you already ran"));
+        assert!(prompt.contains("switch strategy"));
+    }
+
+    #[test]
+    fn repo_map_counts_tracked_files_by_capped_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("README.md"), "r").unwrap();
+        std::fs::create_dir_all(root.join("src/features/mcp/pages")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "m").unwrap();
+        std::fs::write(root.join("src/features/mcp/pages/a.tsx"), "a").unwrap();
+        std::fs::write(root.join("src/features/mcp/pages/b.tsx"), "b").unwrap();
+        git(&["add", "."]);
+
+        let map = repo_map(root).expect("repo map for a git repo");
+        assert!(map.contains("### Repository map"));
+        assert!(map.contains("./ (1 files at the root)"));
+        assert!(map.contains("- src/ (1)"));
+        // Depth capped at 3: pages/ folds into its depth-3 parent.
+        assert!(map.contains("- src/features/mcp/ (2)"));
+        assert!(map.contains("(4 tracked files total)"));
+
+        // Outside a git repo → None.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(repo_map(plain.path()).is_none());
     }
 
     #[test]

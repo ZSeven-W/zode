@@ -16,6 +16,13 @@ use agent_tools_code::{TodoState, TodoStatus};
 const TODO_STALE_TURNS: u32 = 5;
 /// Cap tracked files so a long session cannot grow the map unboundedly.
 const MAX_TRACKED_FILES: usize = 256;
+/// Read-set recap: first fires once this many distinct files were touched,
+/// then again each time the count doubles (8, 16, 32, …). Reminds weak models
+/// that those contents are already in the conversation, curbing re-reads and
+/// re-searches.
+const FILES_RECAP_MIN: usize = 8;
+/// How many most-recent paths the recap lists.
+const FILES_RECAP_LIST: usize = 12;
 
 #[derive(Debug, Default)]
 struct Inner {
@@ -27,6 +34,8 @@ struct Inner {
     turns_since_todo_write: u32,
     /// Last git branch reported to (or baked into) the prompt.
     git_branch: Option<Option<String>>,
+    /// Tracked-file count at the last read-set recap (0 = none yet).
+    files_recap_at: usize,
 }
 
 /// Tracks external file drift, todo-list staleness, and (via
@@ -123,6 +132,28 @@ impl ReminderTracker {
                     g.file_mtimes.remove(&path);
                     g.file_order.retain(|p| p != &path);
                 }
+            }
+        }
+        // --- session read-set recap ---
+        {
+            let mut g = self.inner.lock().unwrap();
+            let n = g.file_order.len();
+            let due = n >= FILES_RECAP_MIN.max(g.files_recap_at.saturating_mul(2));
+            if due {
+                let recent: Vec<String> = g
+                    .file_order
+                    .iter()
+                    .rev()
+                    .take(FILES_RECAP_LIST)
+                    .map(|p| p.display().to_string())
+                    .collect();
+                notices.push(format!(
+                    "You have already read or edited {n} file(s) this session — their \
+                     contents are in the conversation above. Do not re-read or re-search \
+                     them unless a reminder says one changed. Most recent: {}.",
+                    recent.join(", ")
+                ));
+                g.files_recap_at = n;
             }
         }
         // --- todo staleness ---
@@ -302,6 +333,60 @@ mod tests {
         assert_eq!(notices.len(), 1);
         assert!(notices[0].contains("b.txt"));
         assert!(notices[0].contains("changed on disk"));
+    }
+
+    #[tokio::test]
+    async fn read_set_recap_fires_at_threshold_then_doubles() {
+        let tracker = ReminderTracker::default();
+        let todo = TodoState::new();
+        let hook = tracker.hook();
+        let dir = tempfile::tempdir().unwrap();
+        let read_file = |i: usize| {
+            let p = dir.path().join(format!("f{i}.txt"));
+            std::fs::write(&p, "x").unwrap();
+            agent::hook::HookEvent::AfterToolUse {
+                tool: "FileRead".into(),
+                input: serde_json::json!({}),
+                output: serde_json::json!({ "path": p.display().to_string() }),
+                ok: true,
+            }
+        };
+        // 7 files: below the threshold, no recap.
+        for i in 0..7 {
+            hook.handle(&read_file(i)).await;
+        }
+        assert!(
+            !tracker
+                .pre_turn(&todo)
+                .await
+                .iter()
+                .any(|n| n.contains("already read or edited")),
+            "no recap below the threshold"
+        );
+        // 8th file → recap fires once, listing recent paths.
+        hook.handle(&read_file(7)).await;
+        let notices = tracker.pre_turn(&todo).await;
+        let recap = notices
+            .iter()
+            .find(|n| n.contains("already read or edited"))
+            .expect("recap at 8 files");
+        assert!(recap.contains("8 file(s)"));
+        assert!(recap.contains("f7.txt"));
+        // Not again until the count doubles.
+        for i in 8..15 {
+            hook.handle(&read_file(i)).await;
+        }
+        assert!(!tracker
+            .pre_turn(&todo)
+            .await
+            .iter()
+            .any(|n| n.contains("already read or edited")));
+        hook.handle(&read_file(15)).await;
+        assert!(tracker
+            .pre_turn(&todo)
+            .await
+            .iter()
+            .any(|n| n.contains("16 file(s)")));
     }
 
     #[tokio::test]
