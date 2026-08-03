@@ -4188,6 +4188,7 @@ mod tests {
                 sandbox: false,
                 provider_names: Vec::new(),
                 needs_setup: false,
+                update_applied: None,
             },
             approval_rx,
             question_rx,

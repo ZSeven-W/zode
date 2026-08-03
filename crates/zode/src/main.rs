@@ -348,7 +348,10 @@ async fn run(args: Args) -> i32 {
 
     // Silently check GitHub Releases in the background and swap in a newer build
     // for the next launch (best-effort; never blocks or interrupts the session).
-    spawn_auto_update(&cfg);
+    // The cell carries the applied tag so the TUI can show a one-time
+    // "restart to apply" notice; the REPL stays log-only.
+    let update_applied: std::sync::Arc<std::sync::OnceLock<String>> = Default::default();
+    spawn_auto_update(&cfg, update_applied.clone());
 
     // Plain REPL when asked, or when stdout isn't a tty (piped/CI).
     if !args.browser_native_host && (args.no_tui || !std::io::stdout().is_terminal()) {
@@ -414,9 +417,16 @@ async fn run(args: Args) -> i32 {
     // being blocked at startup. TUI-only: headless surfaces above keep the
     // strict MissingApiKey / no-model errors. `needs_setup` drives a hint.
     let needs_setup = cfg.prepare_for_interactive_launch();
+    // A `/yolo` toggle persisted in the global config (written by the TUI like
+    // the sandbox toggle; project config/state can override per workspace)
+    // re-applies on the next TUI launch; the explicit `--yolo` flag also turns
+    // it on. TUI-ONLY on purpose: the headless surfaces above keep
+    // flag-explicit gating, so a `-p` script run never silently bypasses
+    // approvals because of an interactive toggle.
+    let yolo = args.yolo || cfg.yolo.unwrap_or(false);
     // The TUI keeps a template so Ctrl+T / resume / hot-switch can (re)assemble
     // engines.
-    let template = EngineTemplate::new(cfg.clone(), cwd, Some(queue), args.yolo, sandbox, today)
+    let template = EngineTemplate::new(cfg.clone(), cwd, Some(queue), yolo, sandbox, today)
         .with_question_queue(Some(question_queue))
         .with_tool_filter(tui_tool_filter);
     // Tab 0 is assembled here; the app assigns it id 0, so label it "0".
@@ -436,11 +446,12 @@ async fn run(args: Args) -> i32 {
     let (engine, resumed_id) = attach_session(engine, resume_meta).await;
     let ui = zode_tui::UiConfig {
         theme_id: cfg.theme.clone(),
-        yolo: args.yolo,
+        yolo,
         initial_access: engine_template.tool_access(),
         sandbox: args.sandbox,
         provider_names: cfg.providers.keys().cloned().collect(),
         needs_setup,
+        update_applied: Some(update_applied),
     };
     let app = zode_tui::TuiApp::new(
         engine,
@@ -483,13 +494,19 @@ async fn run(args: Args) -> i32 {
 /// Spawn the silent background self-updater. No-op when disabled via
 /// `autoUpdate: false` or `ZODE_NO_UPDATE`. Fully best-effort: it logs at debug
 /// and never surfaces UI, per the "silently pull in the background" intent.
-fn spawn_auto_update(cfg: &zode_core::config::ZodeConfig) {
+fn spawn_auto_update(
+    cfg: &zode_core::config::ZodeConfig,
+    applied: std::sync::Arc<std::sync::OnceLock<String>>,
+) {
     if !cfg.auto_update() || std::env::var_os("ZODE_NO_UPDATE").is_some() {
         return;
     }
-    tokio::spawn(async {
+    tokio::spawn(async move {
         match zode_core::updater::auto_update_if_available(env!("CARGO_PKG_VERSION")).await {
-            Ok(Some(tag)) => tracing::info!("zode self-updated to {tag} (restart to apply)"),
+            Ok(Some(tag)) => {
+                tracing::info!("zode self-updated to {tag} (restart to apply)");
+                let _ = applied.set(tag);
+            }
             Ok(None) => {}
             Err(e) => tracing::debug!("auto-update skipped: {e}"),
         }

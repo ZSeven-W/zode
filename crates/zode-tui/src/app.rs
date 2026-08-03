@@ -403,6 +403,11 @@ pub struct UiConfig {
     /// No provider credentials are configured yet — show a one-time setup hint
     /// in the transcript pointing the user at `/connect`.
     pub needs_setup: bool,
+    /// Set by the background self-updater when a new build was swapped in
+    /// (value = the release tag). The TUI polls it on its tick and shows a
+    /// one-time "restart to apply" notice. `None` → no updater wired (tests,
+    /// or update disabled).
+    pub update_applied: Option<std::sync::Arc<std::sync::OnceLock<String>>>,
 }
 
 /// Identifies which scheduler job queued a prompt, for turn-outcome
@@ -664,6 +669,10 @@ pub struct TuiApp {
     show_help: bool,
     toast: Option<Toast>,
     provider_names: Vec<String>,
+    /// See [`UiConfig::update_applied`]; polled on the tick.
+    update_applied: Option<std::sync::Arc<std::sync::OnceLock<String>>>,
+    /// The "self-updated — restart to apply" notice fires exactly once.
+    update_notice_shown: bool,
     /// Chat display prefs (`/thinking`, `/tool-details`), persisted in config
     /// and applied to the active tab's chat each frame.
     show_thinking: bool,
@@ -1211,6 +1220,8 @@ impl TuiApp {
             show_help: false,
             toast: None,
             provider_names: ui.provider_names,
+            update_applied: ui.update_applied,
+            update_notice_shown: false,
             show_thinking,
             show_tool_details,
             queued_edit_index: None,
@@ -1226,6 +1237,27 @@ impl TuiApp {
             #[cfg(test)]
             _test_config_isolation: None,
         }
+    }
+
+    /// Show the one-time "self-updated — restart to apply" notice once the
+    /// background updater reports a swapped-in build. Runs on the tick (both
+    /// the TUI loop and the extension daemon poll it; only the TUI shows it).
+    fn maybe_notice_self_update(&mut self) {
+        if self.update_notice_shown {
+            return;
+        }
+        let Some(tag) = self
+            .update_applied
+            .as_ref()
+            .and_then(|cell| cell.get())
+            .cloned()
+        else {
+            return;
+        };
+        self.update_notice_shown = true;
+        let msg = crate::tr("self-updated to {tag} — restart to apply").replace("{tag}", &tag);
+        self.active_tab_mut().chat.push_system(&msg);
+        self.toast = Some(Toast::info(msg));
     }
 
     /// Record a submitted prompt for Up/Down recall (skips blanks and exact
@@ -2877,6 +2909,17 @@ impl TuiApp {
             ReassembleEffect::Sandbox => self.apply_sandbox_reassemble_effect(tab_idx),
             ReassembleEffect::Yolo { access, notify } => {
                 self.tabs[tab_idx].extension_access = access;
+                // Persist the choice GLOBALLY (`~/.zode/config.json`) so every
+                // workspace's next launch starts with it. Applied only here —
+                // after the reassemble actually succeeded. Also drop any older
+                // per-project state entry: project layers override global at
+                // load, so a stale value would shadow this new choice.
+                let on = matches!(access, zode_core::ToolAccessMode::Auto);
+                self.persist_global_toggle(|cfg| cfg.yolo = Some(on));
+                let cwd = self.tabs[tab_idx].engine.cwd.clone();
+                let _ = zode_core::config::ConfigManager::update_project_state(&cwd, |s| {
+                    s.remove("yolo");
+                });
                 self.apply_reassemble_notify(tab_idx, notify);
             }
         }
@@ -2915,6 +2958,35 @@ impl TuiApp {
             .push_system(&format!("{} → {id}", crate::tr("model")));
     }
 
+    fn toggle_yolo(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        // Toggle the active task's effective access, not the clean global
+        // default: resumed/extension tasks can intentionally diverge from that
+        // default and must switch on the first use.
+        let on = !matches!(
+            self.active_tab().extension_access,
+            zode_core::ToolAccessMode::Auto
+        );
+        let template = self.template.with_yolo(on);
+        let access = if on {
+            zode_core::ToolAccessMode::Auto
+        } else {
+            zode_core::ToolAccessMode::Prompt
+        };
+        let message = if on {
+            crate::tr("yolo: ON — tools auto-approve (deny rules still apply)")
+        } else {
+            crate::tr("yolo: OFF — tools prompt for approval")
+        };
+        self.start_reassemble_active(
+            template,
+            ReassembleEffect::Yolo {
+                access,
+                notify: ReassembleNotify::System(message.to_string()),
+            },
+            agent_tx,
+        );
+    }
+
     fn persist_active_model_choice(&mut self, id: &str) {
         #[cfg(test)]
         {
@@ -2943,6 +3015,23 @@ impl TuiApp {
         }
     }
 
+    /// Best-effort global-config update for runtime toggles (`/yolo`,
+    /// `/sandbox`): load → mutate → atomic save, so the choice applies to
+    /// EVERY workspace's next launch. A failure surfaces as a toast but never
+    /// breaks the toggle itself (this run's in-memory state already switched).
+    fn persist_global_toggle(&mut self, f: impl FnOnce(&mut zode_core::config::ZodeConfig)) {
+        let result = ConfigManager::load_global().and_then(|mut cfg| {
+            f(&mut cfg);
+            ConfigManager::save_global(&cfg)
+        });
+        if let Err(e) = result {
+            self.toast = Some(Toast::error(format!(
+                "{}: {e}",
+                crate::tr("save config failed")
+            )));
+        }
+    }
+
     fn apply_sandbox_reassemble_effect(&mut self, tab_idx: usize) {
         use zode_core::sandbox::SandboxMode;
 
@@ -2955,15 +3044,22 @@ impl TuiApp {
         });
         let network = new_sandbox.as_ref().map(|c| c.allow_network());
         let enabled = new_sandbox.is_some();
+        // Persist GLOBALLY so the toggle applies to every workspace's next
+        // launch. Disabling only records `enabled=false` — mode/network keep
+        // their previous values so re-enabling restores the old shape. Drop
+        // any older per-project state entry (project layers override global
+        // at load, so a stale value would shadow this new choice).
+        self.persist_global_toggle(|cfg| {
+            cfg.sandbox.enabled = Some(enabled);
+            if let Some(mode) = mode {
+                cfg.sandbox.mode = Some(mode.to_string());
+            }
+            if let Some(network) = network {
+                cfg.sandbox.network = Some(network);
+            }
+        });
         let _ = zode_core::config::ConfigManager::update_project_state(&cwd, |s| {
-            s.insert(
-                "sandbox".into(),
-                serde_json::json!({
-                    "enabled": enabled,
-                    "mode": mode,
-                    "network": network,
-                }),
-            );
+            s.remove("sandbox");
         });
         let line = sandbox_status_line(new_sandbox.as_ref());
         self.tabs[tab_idx].chat.push_system(&line);
@@ -3670,6 +3766,7 @@ impl TuiApp {
                 }
                 _ = ticker.tick() => {
                     self.cleanup_extension_attachments_at(std::time::Instant::now());
+                    self.maybe_notice_self_update();
                 }
                 _ = &mut shutdown => break,
             }
@@ -3912,6 +4009,7 @@ impl TuiApp {
                 }
                 _ = ticker.tick() => {
                     self.status.tick();
+                    self.maybe_notice_self_update();
                     let ui_data_revision = self.ui_extensions.data_revision();
                     let ui_data_changed = ui_data_revision != self.ui_data_revision;
                     self.ui_data_revision = ui_data_revision;
@@ -4733,6 +4831,15 @@ impl TuiApp {
                 self.tabs[self.active].chat.toggle_all_collapsed();
                 return;
             }
+            // Terminals report Shift+Tab either as BackTab (with or without
+            // the Shift modifier) or as Tab+Shift. Both toggle the active
+            // task between prompt-for-approval (ask) and auto-approve (yolo).
+            (KeyCode::BackTab, KeyModifiers::NONE)
+            | (KeyCode::BackTab, KeyModifiers::SHIFT)
+            | (KeyCode::Tab, KeyModifiers::SHIFT) => {
+                self.toggle_yolo(agent_tx);
+                return;
+            }
             // Ctrl+1..9 jumps to a tab by position; macOS Command/SUPER is an
             // accepted alias where terminals deliver it.
             (KeyCode::Char(c), m) if is_primary_mod(m) && c.is_ascii_digit() && c != '0' => {
@@ -5009,11 +5116,16 @@ impl TuiApp {
                 if self.finish_queued_edit(text.clone()) {
                     return;
                 }
-                if !text.trim().is_empty() {
+                // An empty composer still submits when image chips are
+                // attached — an image-only turn (submit() titles it from the
+                // image name). Without this, Enter over attached chips did
+                // nothing and the chips looked stuck above the input box.
+                let has_pending_images = !self.active_tab().pending_images.is_empty();
+                if !text.trim().is_empty() || has_pending_images {
                     // A follow-up typed while the tab is busy will be QUEUED by
                     // submit(); queued follow-ups are intentionally never
                     // recorded — neither persisted nor added to Up/Down recall.
-                    if !self.active_tab().is_busy() {
+                    if !text.trim().is_empty() && !self.active_tab().is_busy() {
                         self.record_prompt_history(&text);
                     }
                     self.submit(&text, agent_tx).await;
@@ -8241,8 +8353,13 @@ impl TuiApp {
             // model sees it on its next round-trip, Claude-Code style, instead
             // of waiting for the whole turn to finish. Text-only and only for a
             // live turn (not a reassemble/draining tab); images/empties fall
-            // through to the queue.
-            let live_turn = self.active_tab().turn_abort.is_some();
+            // through to the queue. A LOCAL op (compaction, `!cmd` shell) also
+            // holds `turn_abort` so Esc can cancel it, but it runs no
+            // QueryLoop — a message steered then would sit in the steer buffer
+            // unread until some LATER turn starts, instead of dispatching from
+            // the queue the moment the op finishes.
+            let live_turn = self.active_tab().turn_abort.is_some()
+                && self.active_tab().active_local_op_id.is_none();
             if live_turn
                 && !submitted_text.trim().is_empty()
                 && self.active_tab().pending_images.is_empty()
@@ -8258,22 +8375,31 @@ impl TuiApp {
                     return false;
                 }
             }
-            if !submitted_text.trim().is_empty() {
+            // Queue even an image-only submission (empty text, pending image
+            // chips): the dispatched entry re-enters `submit()` on the idle
+            // tab and `start_turn_on_tab` consumes the pending images there —
+            // the same turn an idle Enter would have started. Without this,
+            // Enter-with-images while busy only toasted "attached" with
+            // nothing scheduled to send them, stranding the chips above the
+            // composer until the user typed another message. Skip stacking a
+            // second empty entry — one drains all pending images already.
+            let image_only = submitted_text.trim().is_empty();
+            let already_queued = image_only
+                && self
+                    .active_tab()
+                    .queued_input
+                    .iter()
+                    .any(|queued| queued.trim().is_empty());
+            if !already_queued {
                 self.active_tab_mut()
                     .queued_input
                     .push_back(submitted_text.to_string());
-                let n = self.active_tab().queued_input.len();
-                self.toast = Some(Toast::info(
-                    crate::tr("queued ({n}) — sends when the turn finishes (Esc to interrupt now)")
-                        .replace("{n}", &n.to_string()),
-                ));
-            } else if pasted_count > 0 {
-                self.toast = Some(Toast::info(format!(
-                    "{} {pasted_count} {}",
-                    crate::tr("attached"),
-                    crate::tr("images")
-                )));
             }
+            let n = self.active_tab().queued_input.len();
+            self.toast = Some(Toast::info(
+                crate::tr("queued ({n}) — sends when the turn finishes (Esc to interrupt now)")
+                    .replace("{n}", &n.to_string()),
+            ));
             return false;
         }
 
@@ -8882,8 +9008,7 @@ impl TuiApp {
                     // Ok reset the breaker and maybe_auto_compact re-fired
                     // on the next event-loop pass, looping useless LLM
                     // calls forever with the context pinned at ~100%.
-                    let stuck =
-                        auto && needs_auto_compact(tab.context_tokens, tab.engine.model_max_tokens);
+                    let stuck = auto && tab.engine.needs_pre_turn_compact(tab.context_tokens);
                     if stuck {
                         tab.auto_compact_failures = tab.auto_compact_failures.saturating_add(1);
                         if tab.auto_compact_failures == AUTO_COMPACT_MAX_FAILURES {
@@ -10107,32 +10232,7 @@ impl TuiApp {
                 }
             }
             "yolo" => {
-                // Toggle the active task's effective access, not the clean
-                // global default: resumed/extension tasks can intentionally
-                // diverge from that default and must switch on the first use.
-                let on = !matches!(
-                    self.active_tab().extension_access,
-                    zode_core::ToolAccessMode::Auto
-                );
-                let t = self.template.with_yolo(on);
-                let access = if on {
-                    zode_core::ToolAccessMode::Auto
-                } else {
-                    zode_core::ToolAccessMode::Prompt
-                };
-                let msg = if on {
-                    crate::tr("yolo: ON — tools auto-approve (deny rules still apply)")
-                } else {
-                    crate::tr("yolo: OFF — tools prompt for approval")
-                };
-                self.start_reassemble_active(
-                    t,
-                    ReassembleEffect::Yolo {
-                        access,
-                        notify: ReassembleNotify::System(msg.to_string()),
-                    },
-                    agent_tx,
-                );
+                self.toggle_yolo(agent_tx);
             }
             "sandbox" => {
                 // No args → open the picker (the options are too many to type);
@@ -10693,12 +10793,15 @@ impl TuiApp {
     }
 
     /// Auto-compact any idle tab whose REAL context occupancy (the badge value,
-    /// from the last Usage event) has reached [`AUTO_COMPACT_CONTEXT_PERCENT`].
-    /// The runtime's own auto-compaction keys off a byte estimate that
-    /// under-counts (especially CJK), so a long conversation can sail past the
-    /// provider's input limit and get a hard 400 before the runtime ever trips.
-    /// This guard uses the accurate post-turn count instead, and runs between
-    /// turns (before any queued input is dispatched).
+    /// from the last Usage event) plus the configured completion budget has
+    /// reached the engine's pre-turn threshold
+    /// ([`zode_core::ZodeEngine::needs_pre_turn_compact`]). The runtime's own
+    /// auto-compaction keys off a store estimate that can under-count, so a
+    /// long conversation could otherwise start its next turn with so little
+    /// headroom that the completion gets clamped to the floor and truncates
+    /// mid tool call (or hard-400s on `prompt + max_tokens`). This guard uses
+    /// the accurate post-turn count plus the output budget instead, and runs
+    /// between turns (before any queued input is dispatched).
     fn maybe_auto_compact(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         for idx in 0..self.tabs.len() {
             let tab = &self.tabs[idx];
@@ -10712,7 +10815,7 @@ impl TuiApp {
             if tab.auto_compact_failures >= AUTO_COMPACT_MAX_FAILURES {
                 continue;
             }
-            if needs_auto_compact(tab.context_tokens, tab.engine.model_max_tokens) {
+            if tab.engine.needs_pre_turn_compact(tab.context_tokens) {
                 self.start_compaction(idx, agent_tx, true);
             }
         }
@@ -11426,21 +11529,9 @@ fn windows_burst_needs_clipboard(events: &[CtEvent]) -> bool {
     false
 }
 
-/// Context occupancy (real tokens / model window, as a percent) at which zode
-/// auto-compacts the conversation. Kept just under 100 so compaction happens
-/// before the prompt hits the provider's hard input limit.
-const AUTO_COMPACT_CONTEXT_PERCENT: u64 = 98;
-
 /// Consecutive auto-compaction failures per tab before the auto trigger stops
 /// firing (manual `/compact` stays available; any success resets the count).
 const AUTO_COMPACT_MAX_FAILURES: u32 = 3;
-
-/// Whether a tab's real context occupancy has reached the auto-compact
-/// threshold. Pure (no side effects) so the decision is unit-testable. A zero
-/// window (unknown model size) never triggers.
-fn needs_auto_compact(context_tokens: u32, window: u32) -> bool {
-    window != 0 && (context_tokens as u64 * 100 / window as u64) >= AUTO_COMPACT_CONTEXT_PERCENT
-}
 
 /// Halt the goal auto-loop for a tab: clear the active flag, reset the turn
 /// counter, and PURGE any goal-loop prompts still sitting in the input queue so
@@ -13518,6 +13609,7 @@ mod tests {
                 sandbox: false,
                 provider_names: Vec::new(),
                 needs_setup: false,
+                update_applied: None,
             },
             approval_rx,
             question_rx,
@@ -13572,6 +13664,7 @@ mod tests {
                 sandbox: false,
                 provider_names: Vec::new(),
                 needs_setup: false,
+                update_applied: None,
             },
             approval_rx,
             question_rx,
@@ -14622,10 +14715,9 @@ mod tests {
         let tab_id = app.tabs[0].id;
         // Pin the gauge over the auto threshold for a known window.
         app.tabs[0].context_tokens = u32::MAX;
-        assert!(needs_auto_compact(
-            app.tabs[0].context_tokens,
-            app.tabs[0].engine.model_max_tokens
-        ));
+        assert!(app.tabs[0]
+            .engine
+            .needs_pre_turn_compact(app.tabs[0].context_tokens));
 
         for _ in 0..AUTO_COMPACT_MAX_FAILURES {
             let op_id = arm_local_op_for_test(&mut app, 0);
@@ -14709,10 +14801,9 @@ mod tests {
                 "a no-progress success must advance the breaker"
             );
         }
-        assert!(needs_auto_compact(
-            app.tabs[0].context_tokens,
-            app.tabs[0].engine.model_max_tokens
-        ));
+        assert!(app.tabs[0]
+            .engine
+            .needs_pre_turn_compact(app.tabs[0].context_tokens));
 
         // Breaker open: the trigger must NOT start another compaction.
         app.maybe_auto_compact(&agent_tx);
@@ -14939,6 +15030,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shift_tab_toggles_yolo_and_ask_modes() {
+        let (mut app, _unused_tx, _dir) = make_test_app_with_dir().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        for (code, modifiers, expected) in [
+            (
+                KeyCode::BackTab,
+                KeyModifiers::SHIFT,
+                zode_core::ToolAccessMode::Auto,
+            ),
+            (
+                KeyCode::Tab,
+                KeyModifiers::SHIFT,
+                zode_core::ToolAccessMode::Prompt,
+            ),
+        ] {
+            send_key(&mut app, &tx, code, modifiers).await;
+            let event = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+                .await
+                .expect("Shift+Tab reassembly finishes")
+                .expect("event channel stays open");
+            app.handle_agent_event(event);
+
+            assert_eq!(app.tabs[0].extension_access, expected);
+            assert_eq!(app.template.tool_access(), expected);
+
+            // The toggle persists GLOBALLY so the next launch in ANY
+            // workspace starts with the same access mode; any per-project
+            // state entry is removed so it can't shadow the new choice.
+            let cfg = zode_core::config::ConfigManager::load_global().unwrap();
+            assert_eq!(
+                cfg.yolo,
+                Some(expected == zode_core::ToolAccessMode::Auto),
+                "yolo toggle must persist to the global config"
+            );
+            let state_path =
+                zode_core::config::ConfigManager::project_state_path(&app.tabs[0].engine.cwd);
+            let state_yolo = std::fs::read_to_string(&state_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("yolo").cloned());
+            assert_eq!(state_yolo, None, "stale per-project yolo must be cleared");
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_toggle_persists_globally() {
+        // The sandbox reassemble effect must record the new state in the
+        // GLOBAL config (so every workspace's next launch keeps it) and clear
+        // any per-project state entry that would shadow it.
+        let (mut app, _unused_tx, _dir) = make_test_app_with_dir().await;
+        let cwd = app.tabs[0].engine.cwd.clone();
+        zode_core::config::ConfigManager::update_project_state(&cwd, |s| {
+            s.insert("sandbox".into(), serde_json::json!({"enabled": true}));
+        })
+        .unwrap();
+
+        app.template = app.template.with_sandbox(None); // "/sandbox off"
+        app.apply_sandbox_reassemble_effect(0);
+
+        let cfg = zode_core::config::ConfigManager::load_global().unwrap();
+        assert_eq!(
+            cfg.sandbox.enabled,
+            Some(false),
+            "sandbox off must persist to the global config"
+        );
+        let state_path = zode_core::config::ConfigManager::project_state_path(&cwd);
+        let state_sandbox = std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("sandbox").cloned());
+        assert_eq!(
+            state_sandbox, None,
+            "stale per-project sandbox must be cleared"
+        );
+    }
+
+    #[tokio::test]
     async fn goal_set_hot_swaps_prompt_and_starts_loop_immediately() {
         let (mut app, agent_tx) = make_test_app().await;
 
@@ -14989,27 +15158,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn auto_compact_triggers_only_near_full_context() {
-        // The threshold is a PERCENT of the model's own window, not an absolute
-        // token count — so it scales with model_max_tokens.
-
-        // 200K model → ~196K trigger.
-        assert!(!needs_auto_compact(0, 200_000));
-        assert!(!needs_auto_compact(180_000, 200_000)); // 90%
-        assert!(!needs_auto_compact(195_999, 200_000)); // 97% (integer floor)
-        assert!(needs_auto_compact(196_000, 200_000)); // 98%
-        assert!(needs_auto_compact(200_000, 200_000)); // 100%
-
-        // 1M model → ~980K trigger, NOT 196K.
-        assert!(!needs_auto_compact(196_000, 1_000_000)); // ~20%, nowhere near
-        assert!(!needs_auto_compact(900_000, 1_000_000)); // 90%
-        assert!(needs_auto_compact(980_000, 1_000_000)); // 98%
-        assert!(needs_auto_compact(1_000_000, 1_000_000)); // 100%
-
-        // Unknown window (badge hidden) never triggers.
-        assert!(!needs_auto_compact(196_000, 0));
-    }
+    // The auto-compact threshold decision itself (occupancy + output budget
+    // vs. the window) lives in zode-core: `pre_turn_compact_needed`, exposed
+    // as `ZodeEngine::needs_pre_turn_compact`, with unit tests beside it.
 
     #[test]
     fn format_elapsed_is_compact() {
@@ -16180,6 +16331,101 @@ mod tests {
             .any(|m| m.role == Role::User && m.text == "also handle the edge case"));
         // The live turn keeps running (not superseded).
         assert_eq!(app.active_tab().active_turn_id, 1);
+    }
+
+    #[tokio::test]
+    async fn image_only_interjection_queues_a_send_instead_of_stranding_chips() {
+        // Regression: Enter while busy with image chips attached and no text
+        // only toasted "attached N images" — nothing was queued, so when the
+        // turn finished nothing sent the images and the chips sat above the
+        // composer indefinitely. It must queue a (single) image-only entry;
+        // dispatch re-enters submit() on the idle tab, whose turn-start path
+        // consumes the pending images exactly like an idle image-only Enter.
+        let (mut app, agent_tx) = make_test_app().await;
+        app.tabs[0].prompt_history.clear();
+        app.active_tab_mut().titled = true;
+        app.input.take();
+        let png = [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
+        let img = zode_core::images::image_attachment_from_bytes(&png, "clipboard image").unwrap();
+        app.active_tab_mut().pending_images.push(img);
+        // Simulate a live turn (busy, no local op).
+        app.active_tab_mut().turn_seq = 1;
+        app.active_tab_mut().active_turn_id = 1;
+        app.active_tab_mut().turn_abort = Some(AbortController::new());
+
+        send_key(&mut app, &agent_tx, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert_eq!(
+            app.active_tab().queued_input.len(),
+            1,
+            "image-only interjection must queue a send"
+        );
+        assert!(app.active_tab().queued_input[0].trim().is_empty());
+        assert_eq!(
+            app.active_tab().pending_images.len(),
+            1,
+            "chips stay visible while queued — they ride the dispatched turn"
+        );
+
+        // A second image-only Enter must not stack another empty entry (one
+        // drains all pending images already).
+        send_key(&mut app, &agent_tx, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert_eq!(app.active_tab().queued_input.len(), 1);
+
+        // A real message still queues behind it.
+        app.input.set_text("and a follow-up");
+        send_key(&mut app, &agent_tx, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert_eq!(app.active_tab().queued_input.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn submit_during_compaction_queues_instead_of_steering() {
+        // Regression: a local op (compaction, `!cmd` shell) holds `turn_abort`
+        // so Esc can cancel it, but runs no QueryLoop. Steering a message then
+        // parks it in the steer buffer unread — the user saw their message in
+        // chat, compaction finished, and nothing continued until they typed
+        // again (the NEXT turn drained the buffer). It must queue instead, so
+        // the post-op `dispatch_queued_input` pass sends it immediately.
+        let (mut app, agent_tx) = make_test_app().await;
+        app.tabs[0].prompt_history.clear();
+        app.active_tab_mut().titled = true;
+        let tab_id = app.tabs[0].id;
+        let op_id = arm_local_op_for_test(&mut app, 0);
+        assert!(app.active_tab().is_busy());
+
+        app.input.set_text("follow-up during compaction");
+        send_key(&mut app, &agent_tx, KeyCode::Enter, KeyModifiers::NONE).await;
+
+        // Queued — NOT steered into a loop that isn't running, and not yet
+        // echoed as a chat user bubble (the queue renders its own preview).
+        assert_eq!(
+            app.active_tab().queued_input.front().map(String::as_str),
+            Some("follow-up during compaction")
+        );
+        assert!(!app
+            .active_tab()
+            .chat
+            .messages()
+            .iter()
+            .any(|m| m.role == Role::User && m.text == "follow-up during compaction"));
+
+        // Compaction finishes → the very next queue drain starts the turn.
+        app.handle_agent_event(AppEvent::CompactDone {
+            tab_id,
+            op_id,
+            result: Ok("compacted 2 messages · ~10 → ~5 tokens".into()),
+            auto: false,
+        });
+        assert!(!app.active_tab().is_busy());
+        app.dispatch_queued_input(&agent_tx).await;
+
+        assert!(app.active_tab().queued_input.is_empty());
+        assert!(app.active_tab().is_busy(), "queued follow-up starts a turn");
+        assert!(app
+            .active_tab()
+            .chat
+            .messages()
+            .iter()
+            .any(|m| m.role == Role::User && m.text == "follow-up during compaction"));
     }
 
     #[tokio::test]

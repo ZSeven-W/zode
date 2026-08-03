@@ -783,6 +783,14 @@ pub struct ZodeConfig {
     pub permissions: PermissionsConfig,
     #[serde(skip_serializing_if = "is_default")]
     pub sandbox: SandboxSettings,
+    /// Persisted `/yolo` toggle: tools auto-approve without prompting (deny
+    /// rules still apply). The TUI writes it to the GLOBAL `~/.zode/config.json`
+    /// on toggle — like the sandbox toggle — so the choice applies to every
+    /// workspace's next launch (project config/state layers can still override
+    /// it per project). An explicit `--yolo` or `--permission-mode` CLI flag
+    /// overrides it for that run. `None` → off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yolo: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     /// Runaway backstop on agent-loop iterations. Absent or `0` = UNBOUNDED: the
@@ -1343,6 +1351,9 @@ impl ZodeConfig {
             self.sandbox.windows_tier = other.sandbox.windows_tier;
         }
         self.sandbox.profiles.extend(other.sandbox.profiles);
+        if other.yolo.is_some() {
+            self.yolo = other.yolo;
+        }
         if other.max_output_tokens.is_some() {
             self.max_output_tokens = other.max_output_tokens;
         }
@@ -1901,6 +1912,7 @@ mod tests {
 
         ConfigManager::update_project_state(cwd.path(), |s| {
             s.insert("sandbox".into(), serde_json::json!({"enabled": false}));
+            s.insert("yolo".into(), serde_json::json!(true));
             s.insert(
                 "permissions".into(),
                 serde_json::json!({"allow": ["Bash", "FileWrite"]}),
@@ -1913,6 +1925,7 @@ mod tests {
         std::env::remove_var("ZODE_CONFIG_DIR");
 
         assert_eq!(cfg.sandbox.enabled, Some(false), "sandbox state loaded");
+        assert_eq!(cfg.yolo, Some(true), "yolo state loaded");
         assert!(cfg.permissions.allow.contains(&"Bash".to_string()));
         assert!(cfg.permissions.allow.contains(&"FileWrite".to_string()));
     }
