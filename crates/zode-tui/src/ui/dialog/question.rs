@@ -14,7 +14,14 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use zode_core::question::{QuestionRequest, QuestionSpec};
 
+use super::question_layout::{
+    modal_height, modal_rect, modal_width, scroll_start, strip_scroll, text_width, wrap_text,
+};
 use crate::theme::Theme;
+
+/// Columns taken by an option row's prefix (`▌ ◉ `): continuation lines indent
+/// by the same amount so wrapped text stays flush under the label.
+const OPT_INDENT: u16 = 4;
 
 /// What the user picked for one question.
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +48,33 @@ fn is_custom_like(label: &str) -> bool {
     ]
     .iter()
     .any(|p| l.starts_with(p))
+}
+
+/// One rendered body line. `tag` marks the focusable option a line belongs to
+/// — every visual line of a wrapped option carries the same tag, so focus and
+/// click hit-testing cover the whole block. `submit` marks the Submit action.
+struct BodyLine {
+    line: Line<'static>,
+    tag: Option<usize>,
+    submit: bool,
+}
+
+impl BodyLine {
+    fn plain(line: Line<'static>) -> Self {
+        Self {
+            line,
+            tag: None,
+            submit: false,
+        }
+    }
+
+    fn tagged(line: Line<'static>, tag: usize) -> Self {
+        Self {
+            line,
+            tag: Some(tag),
+            submit: false,
+        }
+    }
 }
 
 /// Screen geometry recorded on render so mouse clicks can hit-test: the popup
@@ -388,80 +422,127 @@ impl QuestionDialog {
         (Line::from(spans), chips)
     }
 
-    /// Body lines for the active tab. `Some(row)` tags focusable rows.
-    fn body_rows(&self, theme: &Theme) -> Vec<(Line<'static>, Option<usize>)> {
+    /// Question `q`'s free-text row label: the typed answer (with a cursor
+    /// glyph while that row is being edited) or the placeholder hint.
+    fn other_label(&self, q: usize) -> String {
+        let editing = self.editing && q == self.tab;
+        if !self.customs[q].is_empty() || editing {
+            format!("{}{}", self.customs[q], if editing { "▏" } else { "" })
+        } else {
+            crate::tr("Other (type a custom answer)").to_string()
+        }
+    }
+
+    /// The Submit tab's summary text for one question: `(marker, name, answer)`.
+    fn summary_parts(&self, q: usize) -> (&'static str, String, String) {
+        let spec = &self.specs[q];
+        let name = spec.header.clone().unwrap_or_else(|| spec.question.clone());
+        match &self.selections[q] {
+            Some(Sel::Opt(i)) => ("✓", name, spec.options.get(*i).cloned().unwrap_or_default()),
+            Some(Sel::Other) => ("✓", name, self.customs[q].clone()),
+            None => ("○", name, "—".to_string()),
+        }
+    }
+
+    fn submit_label(&self) -> String {
+        if self.all_answered() {
+            format!(" ➤ {}", crate::tr("Submit"))
+        } else {
+            format!(" ➤ {}", crate::tr("Submit (answer all questions first)"))
+        }
+    }
+
+    /// Widest body line across ALL tabs, unwrapped, so the popup can be sized
+    /// once and stay that size while the user moves between tabs.
+    fn natural_width(&self) -> u16 {
+        let mut w = 0u16;
+        for (q, spec) in self.specs.iter().enumerate() {
+            w = w.max(1 + text_width(&spec.question));
+            for label in &spec.options {
+                w = w.max(OPT_INDENT + text_width(label));
+            }
+            w = w.max(OPT_INDENT + text_width(&self.other_label(q)));
+            let (mark, name, answer) = self.summary_parts(q);
+            w = w.max(text_width(&format!(" {mark} {name}  {answer}")));
+        }
+        w.max(text_width(&self.submit_label()))
+    }
+
+    /// Body lines for the active tab, wrapped to `width` columns.
+    fn body_rows(&self, width: u16, theme: &Theme) -> Vec<BodyLine> {
         let bg = Style::default().bg(theme.bg_secondary);
-        let mut rows: Vec<(Line<'static>, Option<usize>)> = Vec::new();
+        let mut rows: Vec<BodyLine> = Vec::new();
         if let Some(spec) = self.specs.get(self.tab) {
-            rows.push((
-                Line::from(Span::styled(
-                    format!(" {}", spec.question),
-                    bg.fg(theme.fg_white).add_modifier(Modifier::BOLD),
-                )),
-                None,
-            ));
-            rows.push((Line::from(Span::styled(String::new(), bg)), None));
+            let head = bg.fg(theme.fg_white).add_modifier(Modifier::BOLD);
+            for seg in wrap_text(&spec.question, width.saturating_sub(1)) {
+                rows.push(BodyLine::plain(Line::from(Span::styled(
+                    format!(" {seg}"),
+                    head,
+                ))));
+            }
+            rows.push(BodyLine::plain(Line::from(Span::styled(String::new(), bg))));
             for (opt, label) in spec.options.iter().enumerate() {
                 let chosen = self.selections[self.tab] == Some(Sel::Opt(opt));
-                rows.push((self.option_line(opt, label, chosen, theme), Some(opt)));
+                for line in self.option_lines(opt, label, chosen, width, theme) {
+                    rows.push(BodyLine::tagged(line, opt));
+                }
             }
             let other_row = spec.options.len();
             let other_chosen = self.selections[self.tab] == Some(Sel::Other);
-            let editing_here = self.editing;
-            let label = if !self.customs[self.tab].is_empty() || editing_here {
-                format!(
-                    "{}{}",
-                    self.customs[self.tab],
-                    if editing_here { "▏" } else { "" }
-                )
-            } else {
-                crate::tr("Other (type a custom answer)").to_string()
-            };
-            rows.push((
-                self.option_line(other_row, &label, other_chosen, theme),
-                Some(other_row),
-            ));
+            let label = self.other_label(self.tab);
+            for line in self.option_lines(other_row, &label, other_chosen, width, theme) {
+                rows.push(BodyLine::tagged(line, other_row));
+            }
         } else {
             // Submit tab: a summary of every answer.
-            for (q, spec) in self.specs.iter().enumerate() {
-                let name = spec.header.clone().unwrap_or_else(|| spec.question.clone());
-                let (mark, answer, style) = match &self.selections[q] {
-                    Some(sel) => {
-                        let a = match sel {
-                            Sel::Opt(i) => spec.options.get(*i).cloned().unwrap_or_default(),
-                            Sel::Other => self.customs[q].clone(),
-                        };
-                        ("✓", a, bg.fg(theme.fg_text))
-                    }
-                    None => ("○", "—".to_string(), bg.fg(theme.fg_subtle)),
+            for q in 0..self.specs.len() {
+                let (mark, name, answer) = self.summary_parts(q);
+                let answered = self.selections[q].is_some();
+                let style = if answered {
+                    bg.fg(theme.fg_text)
+                } else {
+                    bg.fg(theme.fg_subtle)
                 };
-                rows.push((
-                    Line::from(vec![
-                        Span::styled(format!(" {mark} {name}  "), bg.fg(theme.fg_subtle)),
-                        Span::styled(answer, style),
-                    ]),
-                    None,
-                ));
+                rows.extend(
+                    summary_lines(&format!(" {mark} {name}  "), &answer, width, bg, style)
+                        .into_iter()
+                        .map(BodyLine::plain),
+                );
             }
-            rows.push((Line::from(Span::styled(String::new(), bg)), None));
+            rows.push(BodyLine::plain(Line::from(Span::styled(String::new(), bg))));
             let ready = self.all_answered();
-            let submit = if ready {
-                format!(" ➤ {}", crate::tr("Submit"))
-            } else {
-                format!(" ➤ {}", crate::tr("Submit (answer all questions first)"))
-            };
             let style = if ready {
                 bg.fg(theme.accent).add_modifier(Modifier::BOLD)
             } else {
                 bg.fg(theme.fg_subtle)
             };
-            rows.push((Line::from(Span::styled(submit, style)), None));
+            // Wrapped at the indent width so continuation lines still fit.
+            for (i, seg) in wrap_text(&self.submit_label(), width.saturating_sub(3))
+                .into_iter()
+                .enumerate()
+            {
+                let text = if i == 0 { seg } else { format!("   {seg}") };
+                rows.push(BodyLine {
+                    line: Line::from(Span::styled(text, style)),
+                    tag: None,
+                    submit: true,
+                });
+            }
         }
         rows
     }
 
-    /// One selectable row: focus bar + radio marker + label.
-    fn option_line(&self, row: usize, label: &str, chosen: bool, theme: &Theme) -> Line<'static> {
+    /// One selectable row: focus bar + radio marker + label, wrapped to
+    /// `width`. Continuation lines keep the focus bar and indent under the
+    /// label so a long option reads as one block.
+    fn option_lines(
+        &self,
+        row: usize,
+        label: &str,
+        chosen: bool,
+        width: u16,
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
         let focused = !self.on_submit_tab() && self.cursor == row;
         let row_bg = if focused {
             theme.bg_input
@@ -483,18 +564,33 @@ impl QuestionDialog {
         } else {
             Style::default().bg(row_bg).fg(theme.fg_text)
         };
-        Line::from(vec![
-            Span::styled(
-                bar.to_string(),
-                Style::default().bg(row_bg).fg(theme.accent),
-            ),
-            Span::styled(" ".to_string(), Style::default().bg(row_bg)),
-            Span::styled(
-                marker.to_string(),
-                Style::default().bg(row_bg).fg(marker_fg),
-            ),
-            Span::styled(format!(" {label}"), label_style),
-        ])
+        let bar_style = Style::default().bg(row_bg).fg(theme.accent);
+        let text_w = width.saturating_sub(OPT_INDENT);
+        wrap_text(label, text_w)
+            .into_iter()
+            .enumerate()
+            .map(|(i, seg)| {
+                let pad = if focused {
+                    // Pad the focus background across the row so a wrapped
+                    // block reads as a single highlighted selection.
+                    " ".repeat((text_w as usize).saturating_sub(text_width(&seg) as usize))
+                } else {
+                    String::new()
+                };
+                let mut spans = vec![Span::styled(bar.to_string(), bar_style)];
+                if i == 0 {
+                    spans.push(Span::styled(" ".to_string(), Style::default().bg(row_bg)));
+                    spans.push(Span::styled(
+                        marker.to_string(),
+                        Style::default().bg(row_bg).fg(marker_fg),
+                    ));
+                    spans.push(Span::styled(format!(" {seg}{pad}"), label_style));
+                } else {
+                    spans.push(Span::styled(format!("   {seg}{pad}"), label_style));
+                }
+                Line::from(spans)
+            })
+            .collect()
     }
 
     fn footer(&self, theme: &Theme) -> Line<'static> {
@@ -531,10 +627,16 @@ impl QuestionDialog {
         if self.request.is_none() {
             return;
         }
-        let body = self.body_rows(theme);
+        // Width first: wrapping (and therefore the height) depends on it.
+        // borders(2) + one column of padding per side(2).
+        let (strip, chips) = self.tab_strip(theme);
+        let strip_w = chips.last().map(|&(_, x1, _)| x1).unwrap_or(0);
+        let width = modal_width(area, self.natural_width().max(strip_w).saturating_add(4));
+        let text_w = width.saturating_sub(4);
+        let body = self.body_rows(text_w, theme);
         // borders(2) + tabs(1) + blank(1) + body + blank(1) + footer(1).
         let want_h = (body.len() as u16).saturating_add(6);
-        let popup = modal_area(area, 76, want_h);
+        let popup = modal_rect(area, width, modal_height(area, want_h));
         self.hits.popup = popup;
         f.render_widget(Clear, popup);
 
@@ -563,16 +665,19 @@ impl QuestionDialog {
             inner.height,
         );
 
-        // Tab strip (chips recorded for click hit-testing).
-        let (strip, chips) = self.tab_strip(theme);
+        // Tab strip, scrolled so the active chip stays visible; chips are
+        // recorded (clipped to the visible span) for click hit-testing.
+        let off = strip_scroll(&chips, self.tab, inner.width);
         self.hits.strip_row = inner.y;
         self.hits.chips = chips
             .into_iter()
-            .filter(|(_, x1, _)| *x1 <= inner.width)
-            .map(|(x0, x1, t)| (inner.x + x0, inner.x + x1, t))
+            .filter_map(|(x0, x1, t)| {
+                let (x0, x1) = (x0.max(off), x1.min(off + inner.width));
+                (x1 > x0).then(|| (inner.x + x0 - off, inner.x + x1 - off, t))
+            })
             .collect();
         f.render_widget(
-            Paragraph::new(strip).style(bg),
+            Paragraph::new(strip).style(bg).scroll((0, off)),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
 
@@ -580,23 +685,45 @@ impl QuestionDialog {
         // keep the focused row visible.
         let body_top = inner.y + 2;
         let body_h = inner.height.saturating_sub(4) as usize;
+        // Scroll by the FIRST visual line of the focused option, so a wrapped
+        // block is entered from its top.
         let cursor_row = body
             .iter()
-            .position(|(_, row)| *row == Some(self.cursor))
+            .position(|b| b.tag == Some(self.cursor))
             .unwrap_or(0);
         let start = scroll_start(cursor_row, body.len(), body_h);
         let mut y = body_top;
-        for (idx, (line, tag)) in body.iter().enumerate().skip(start).take(body_h) {
-            self.hits.rows.push((y, *tag));
-            // On the Submit tab the action row is the last body row.
-            if self.on_submit_tab() && idx == body.len() - 1 {
+        for b in body.iter().skip(start).take(body_h) {
+            self.hits.rows.push((y, b.tag));
+            if b.submit {
                 self.hits.submit_row = Some(y);
             }
             f.render_widget(
-                Paragraph::new(line.clone()).style(bg),
+                Paragraph::new(b.line.clone()).style(bg),
                 Rect::new(inner.x, y, inner.width, 1),
             );
             y = y.saturating_add(1);
+        }
+
+        // Scroll hints go on the blank rows framing the body, so they never
+        // overwrite content.
+        let hint = Style::default().fg(theme.fg_subtle).bg(theme.bg_secondary);
+        if start > 0 {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled("↑", hint))).style(bg),
+                Rect::new(inner.x + inner.width.saturating_sub(1), inner.y + 1, 1, 1),
+            );
+        }
+        if start + body_h < body.len() {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled("↓", hint))).style(bg),
+                Rect::new(
+                    inner.x + inner.width.saturating_sub(1),
+                    inner.y + inner.height - 2,
+                    1,
+                    1,
+                ),
+            );
         }
 
         // Footer.
@@ -607,26 +734,45 @@ impl QuestionDialog {
     }
 }
 
-fn scroll_start(cursor_row: usize, total: usize, height: usize) -> usize {
-    if height == 0 || total <= height {
-        return 0;
+/// A Submit-tab summary row: `label` in subtle ink, then the answer. The
+/// answer wraps under itself while the label leaves room; when the label alone
+/// eats the width, it wraps first and the answer follows, indented.
+fn summary_lines(
+    label: &str,
+    answer: &str,
+    width: u16,
+    label_style: Style,
+    answer_style: Style,
+) -> Vec<Line<'static>> {
+    let lw = text_width(label);
+    if width.saturating_sub(lw) >= 8 {
+        let indent = " ".repeat(lw as usize);
+        return wrap_text(answer, width - lw)
+            .into_iter()
+            .enumerate()
+            .map(|(i, seg)| {
+                let head = if i == 0 {
+                    label.to_string()
+                } else {
+                    indent.clone()
+                };
+                Line::from(vec![
+                    Span::styled(head, label_style),
+                    Span::styled(seg, answer_style),
+                ])
+            })
+            .collect();
     }
-    let max_start = total - height;
-    // Keep the cursor row within the window, biased so it isn't on the last line.
-    cursor_row.saturating_sub(height / 2).min(max_start)
-}
-
-fn modal_area(area: Rect, target_width: u16, target_height: u16) -> Rect {
-    let max_w = area.width.saturating_sub(6);
-    let max_h = area.height.saturating_sub(4);
-    let width = max_w.min(target_width).max(max_w.min(40));
-    let height = max_h.min(target_height).max(max_h.min(8));
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    }
+    let mut lines: Vec<Line<'static>> = wrap_text(label.trim_end(), width)
+        .into_iter()
+        .map(|seg| Line::from(Span::styled(seg, label_style)))
+        .collect();
+    lines.extend(
+        wrap_text(answer, width.saturating_sub(3))
+            .into_iter()
+            .map(|seg| Line::from(Span::styled(format!("   {seg}"), answer_style))),
+    );
+    lines
 }
 
 #[cfg(test)]
@@ -827,6 +973,161 @@ mod tests {
         dialog.dismiss();
 
         assert_eq!(asker.await.unwrap(), None);
+    }
+
+    /// Columns a rendered line occupies.
+    fn line_width(line: &Line<'_>) -> u16 {
+        line.spans.iter().map(|s| text_width(&s.content)).sum()
+    }
+
+    /// Draw once on a `w`×`h` test terminal and hand back the dialog's body,
+    /// re-wrapped at exactly the width the render chose.
+    fn draw(d: &mut QuestionDialog, w: u16, h: u16) -> (Vec<BodyLine>, Rect) {
+        use crate::theme::ThemeStore;
+        use ratatui::{backend::TestBackend, Terminal};
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| d.render(f, f.area(), &theme)).unwrap();
+        let popup = d.hits.popup;
+        (d.body_rows(popup.width - 4, &theme), popup)
+    }
+
+    #[tokio::test]
+    async fn long_cjk_content_wraps_inside_the_body_width() {
+        let long = "请从下面的方案里挑选一个你希望我们采用的实现路径，选定之后我会立刻开始动手改造相关模块并补齐测试";
+        let (queue, mut rx) = question_queue();
+        let _asker = tokio::spawn(async move {
+            queue
+                .ask_specs(vec![spec(long, &[long, "短选项"])], None)
+                .await
+        });
+        let req = rx.next().await.unwrap();
+        let mut d = QuestionDialog::new(req);
+        let (body, popup) = draw(&mut d, 90, 40);
+        let text_w = popup.width - 4;
+
+        // The question alone needs several lines, and nothing overflows.
+        assert!(body.iter().filter(|b| b.tag.is_none()).count() > 2);
+        for b in &body {
+            assert!(
+                line_width(&b.line) <= text_w,
+                "line wider than {text_w}: {:?}",
+                b.line
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn clicking_a_wrapped_options_continuation_line_selects_it() {
+        let long = "使用增量式的迁移方案，先把新的渲染管线挂在旧接口后面跑一段时间，确认没有回归之后再删掉旧实现";
+        let (queue, mut rx) = question_queue();
+        let asker = tokio::spawn(async move {
+            queue
+                .ask_specs(vec![spec("怎么做", &[long, "直接重写"])], None)
+                .await
+        });
+        let req = rx.next().await.unwrap();
+        let mut d = QuestionDialog::new(req);
+        draw(&mut d, 90, 40);
+
+        // Every visual line of the wrapped option carries its tag.
+        let rows: Vec<u16> = d
+            .hits
+            .rows
+            .iter()
+            .filter(|(_, tag)| *tag == Some(0))
+            .map(|(y, _)| *y)
+            .collect();
+        assert!(rows.len() > 1, "option should wrap: {rows:?}");
+
+        // Clicking a continuation line picks that option (single question →
+        // straight to the Submit tab).
+        d.cursor = 1;
+        assert!(!d.on_mouse(d.hits.popup.x + 3, rows[1]));
+        assert!(d.on_submit_tab());
+        assert!(d.on_key(KeyCode::Enter));
+        assert_eq!(asker.await.unwrap(), Some(vec![long.to_string()]));
+    }
+
+    #[tokio::test]
+    async fn popup_widens_for_long_content_but_stays_inside_the_terminal() {
+        let (queue, mut rx) = question_queue();
+        let _asker =
+            tokio::spawn(
+                async move { queue.ask_specs(vec![spec("pick", &["a", "b"])], None).await },
+            );
+        let req = rx.next().await.unwrap();
+        let mut d = QuestionDialog::new(req);
+        let (_, short) = draw(&mut d, 90, 40);
+        assert_eq!(short.width, 76, "short content keeps the classic width");
+
+        let long =
+            "把整条渲染链路拆成可组合的小步骤，并为每一步补上独立的快照测试与回归基线".repeat(2);
+        let (queue, mut rx) = question_queue();
+        let _asker =
+            tokio::spawn(
+                async move { queue.ask_specs(vec![spec(&long, &["a", "b"])], None).await },
+            );
+        let req = rx.next().await.unwrap();
+        let mut d = QuestionDialog::new(req);
+        let (body, wide) = draw(&mut d, 90, 40);
+        assert!(wide.width > 76, "long content should widen: {}", wide.width);
+        assert!(wide.width <= 90 - 6, "popup must fit the terminal");
+        assert!(wide.x + wide.width <= 90);
+        for b in &body {
+            assert!(line_width(&b.line) <= wide.width - 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_summary_wraps_and_keeps_its_action_row_clickable() {
+        let long = "先补齐单元测试，再逐步替换旧的实现，最后清理掉不再使用的兼容分支和相关配置项";
+        let (queue, mut rx) = question_queue();
+        let asker =
+            tokio::spawn(async move { queue.ask_specs(vec![spec("怎么做", &[long])], None).await });
+        let req = rx.next().await.unwrap();
+        let mut d = QuestionDialog::new(req);
+        assert!(!d.on_key(KeyCode::Enter)); // answer → Submit tab
+        let (body, popup) = draw(&mut d, 60, 40);
+        for b in &body {
+            assert!(line_width(&b.line) <= popup.width - 4);
+        }
+        let row = d.hits.submit_row.expect("submit row rendered");
+        assert!(d.on_mouse(popup.x + 3, row));
+        assert_eq!(asker.await.unwrap(), Some(vec![long.to_string()]));
+    }
+
+    #[tokio::test]
+    async fn active_tab_chip_stays_visible_when_the_strip_overflows() {
+        let names = ["渲染管线的重构方式", "测试覆盖策略", "发布节奏", "回滚方案"];
+        let (queue, mut rx) = question_queue();
+        let _asker = tokio::spawn(async move {
+            let specs = names
+                .iter()
+                .map(|n| QuestionSpec {
+                    question: "pick".to_string(),
+                    header: Some(n.to_string()),
+                    options: vec!["a".to_string(), "b".to_string()],
+                })
+                .collect();
+            queue.ask_specs(specs, None).await
+        });
+        let req = rx.next().await.unwrap();
+        let mut d = QuestionDialog::new(req);
+        d.goto_tab(d.submit_tab());
+        draw(&mut d, 60, 40);
+        let popup = d.hits.popup;
+        let chip = d
+            .hits
+            .chips
+            .iter()
+            .find(|(_, _, t)| *t == d.submit_tab())
+            .copied()
+            .expect("active chip visible");
+        assert!(chip.0 >= popup.x && chip.1 <= popup.x + popup.width);
+        // Clicking it still lands on the same tab.
+        assert!(!d.on_mouse(chip.0, d.hits.strip_row));
+        assert!(d.on_submit_tab());
     }
 
     #[tokio::test]
