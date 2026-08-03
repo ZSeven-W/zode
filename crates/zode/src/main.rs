@@ -98,6 +98,10 @@ fn launches_full_tui(args: &Args, stdout_is_tty: bool) -> bool {
 /// Map CLI flags onto the embedder-shared bootstrap overrides. Desktop
 /// embedders build the same struct directly; keeping the mapping here (and
 /// tested below) pins the flag semantics the app runtime relies on.
+///
+/// `main` threads these flags through individually rather than calling this,
+/// so the only callers are the tests that pin the mapping.
+#[allow(dead_code)]
 fn bootstrap_overrides(args: &Args) -> BootstrapOverrides {
     BootstrapOverrides {
         provider: args.provider.clone(),

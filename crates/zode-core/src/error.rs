@@ -16,6 +16,16 @@ pub enum CoreError {
     UnknownDialect(String),
     #[error("agent: {0}")]
     Agent(#[from] agent::error::AgentError),
+    /// Transcript I/O from `agent::Session`. Kept as its own variant (rather
+    /// than flattened into `Io`) so callers can tell a transcript failure
+    /// apart from config/index I/O when mapping to a transport error.
+    #[error(transparent)]
+    Session(#[from] agent::session::SessionError),
+    /// A cross-process lock on a state file could not be taken. Distinct from
+    /// `Io` because it is transient: the caller should retry, not surface a
+    /// hard failure.
+    #[error("resource busy: {0}")]
+    Busy(String),
     #[error("{0}")]
     Other(String),
 }

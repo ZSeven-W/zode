@@ -10,7 +10,7 @@ mod integrations;
 mod local_endpoint;
 mod node;
 mod node_identity;
-mod persistence;
+pub mod persistence;
 mod plugin_market;
 mod runtime_policy;
 mod session_repository;

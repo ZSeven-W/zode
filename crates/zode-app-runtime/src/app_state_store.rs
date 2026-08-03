@@ -3,16 +3,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::persistence::{write_atomic, AdvisoryFileLock};
 use serde::{Deserialize, Deserializer, Serialize};
 use zode_app_model::{
     ProjectDisplayMode, ProjectSortMode, ThemePreference, UiPreferences,
     DEFAULT_PRIMARY_SIDEBAR_WIDTH, DEFAULT_SECONDARY_SIDEBAR_WIDTH,
 };
-use zode_core::{
-    config::ConfigManager,
-    persistence::{write_atomic, AdvisoryFileLock},
-    CoreError,
-};
+use zode_core::{config::ConfigManager, CoreError};
 use zode_node_protocol::WorkspaceUri;
 
 const APP_STATE_VERSION: u32 = 1;

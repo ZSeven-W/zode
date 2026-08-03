@@ -299,7 +299,8 @@ fn update_preserves_unrelated_state_fields() {
 
 #[test]
 fn update_holds_the_advisory_lock_while_mutating() {
-    use zode_core::{persistence::AdvisoryFileLock, CoreError};
+    use zode_app_runtime::persistence::AdvisoryFileLock;
+    use zode_core::CoreError;
 
     let directory = tempfile::tempdir().unwrap();
     let store = AppStateStore::new(directory.path());

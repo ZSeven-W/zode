@@ -8173,6 +8173,7 @@ dependencies = [
  "serial_test",
  "tempfile",
  "tokio",
+ "tracing",
  "zode-app-model",
  "zode-core",
  "zode-node-protocol",

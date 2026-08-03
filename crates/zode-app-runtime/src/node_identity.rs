@@ -3,8 +3,8 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use crate::persistence::{write_atomic, AdvisoryFileLock};
 use serde_json::{Map, Value};
-use zode_core::persistence::{write_atomic, AdvisoryFileLock};
 use zode_core::CoreError;
 use zode_node_protocol::NodeId;
 

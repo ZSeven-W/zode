@@ -38,8 +38,56 @@ struct LoadedIndex {
 }
 
 impl SessionIndex {
+    /// Sessions directory beneath an explicit config dir.
+    ///
+    /// The `*_in` / `*_path` family below serves a front end that owns its own
+    /// config dir and its own cross-process lock — `zode_app_runtime`'s
+    /// `session_store`. That store deliberately runs a *stricter* index policy
+    /// than the ambient [`Self::load`] used by the CLI and TUI: it refuses to
+    /// touch an index it cannot parse instead of salvaging one, so a corrupt
+    /// file is preserved for the user rather than rewritten underneath them.
+    /// Keeping the two policies as separate entry points is intentional.
+    pub fn sessions_dir_in(config_dir: &Path) -> PathBuf {
+        config_dir.join("sessions")
+    }
+
+    pub fn index_path_in(config_dir: &Path) -> PathBuf {
+        Self::sessions_dir_in(config_dir).join("index.json")
+    }
+
+    pub fn session_path_in(config_dir: &Path, id: &str) -> Result<PathBuf, CoreError> {
+        validate_session_id(id)?;
+        Ok(Self::sessions_dir_in(config_dir).join(format!("{id}.jsonl")))
+    }
+
+    /// Read an index from an explicit path, for a caller that already holds the
+    /// cross-process lock on it.
+    ///
+    /// Strict by contract: a missing file reads as an empty index, but a
+    /// malformed one is an error, never a silent default. Callers publish a
+    /// transcript only after this succeeds, so returning a default here would
+    /// let a corrupt index be overwritten and its sessions lost. This is the
+    /// deliberate counterpart to [`Self::load`]'s salvage-and-repair policy.
+    pub fn load_from_path(path: &Path) -> Result<Self, CoreError> {
+        match std::fs::read(path) {
+            Ok(raw) => Ok(serde_json::from_slice(&raw)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(CoreError::Io(error)),
+        }
+    }
+
+    /// Publish this index to an explicit path whose lock the caller holds.
+    pub fn save_to_path_locked(&self, path: &Path) -> Result<(), CoreError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_vec_pretty(self)?;
+        write_atomic(path, &json)?;
+        Ok(())
+    }
+
     fn sessions_dir() -> Result<PathBuf, CoreError> {
-        Ok(ConfigManager::config_dir()?.join("sessions"))
+        Ok(Self::sessions_dir_in(&ConfigManager::config_dir()?))
     }
 
     fn index_path() -> Result<PathBuf, CoreError> {

@@ -17,6 +17,10 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 fs4 = { workspace = true }
+tracing = { workspace = true }
+# Runtime (not just dev): `persistence::write_atomic` publishes state files
+# through a NamedTempFile + rename.
+tempfile = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

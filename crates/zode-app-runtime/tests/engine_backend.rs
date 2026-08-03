@@ -51,6 +51,10 @@ fn scripted_subagent(
         input_tokens,
         output_tokens,
         transcript: Vec::new(),
+        committed_input: 0,
+        committed_output: 0,
+        turn_input: 0,
+        turn_output: 0,
         final_output: None,
     }
 }
@@ -77,6 +81,10 @@ fn scripted_finished_subagent(
         input_tokens: 1,
         output_tokens: 1,
         transcript: Vec::new(),
+        committed_input: 0,
+        committed_output: 0,
+        turn_input: 0,
+        turn_output: 0,
         final_output: final_output.map(str::to_owned),
     }
 }
