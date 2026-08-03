@@ -1883,6 +1883,17 @@ impl ZodeEngine {
         self.cost.last_prompt_tokens().await
     }
 
+    /// Whether `input_tokens` (accurate, provider-reported occupancy) plus the
+    /// configured completion budget crosses the pre-turn compaction threshold.
+    /// The TUI's between-turn guard uses this so it shares one definition of
+    /// "too full" with the headless pre-turn check — comparing occupancy alone
+    /// against the window ignores the output budget and lets a turn start with
+    /// so little headroom that the completion gets clamped to the floor and
+    /// truncates mid tool call.
+    pub fn needs_pre_turn_compact(&self, input_tokens: u32) -> bool {
+        pre_turn_compact_needed(input_tokens, self.model_max_tokens, self.max_output_tokens)
+    }
+
     /// Read-and-clear the goal-loop completion signal. Returns `true` exactly
     /// once per `goal_complete` call: the host polls this after each turn to
     /// decide whether the autonomous goal loop should stop.
