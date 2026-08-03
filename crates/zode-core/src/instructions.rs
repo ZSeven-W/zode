@@ -80,22 +80,18 @@ fn pick_in_dir(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-pub fn discover_instructions(cwd: &Path) -> Vec<InstructionFile> {
-    let mut out = Vec::new();
-    let mut seen: Vec<PathBuf> = Vec::new();
+/// The instruction files that apply to `cwd`, with their level, in load order.
+/// Existence checks only — no contents are read, so a UI can poll this cheaply
+/// for a file count. [`discover_instructions`] is this walk plus the reads.
+pub fn instruction_paths(cwd: &Path) -> Vec<(PathBuf, Level)> {
+    let mut out: Vec<(PathBuf, Level)> = Vec::new();
 
     // 1. Global (~/.zode/AGENTS.md or instructions.md).
     if let Ok(global_dir) = ConfigManager::config_dir() {
         for name in ["AGENTS.md", "instructions.md"] {
             let p = global_dir.join(name);
-            if let Some((content, truncated)) = read_capped(&p) {
-                seen.push(p.clone());
-                out.push(InstructionFile {
-                    path: p,
-                    content,
-                    level: Level::Global,
-                    truncated,
-                });
+            if p.is_file() {
+                out.push((p, Level::Global));
                 break;
             }
         }
@@ -122,29 +118,36 @@ pub fn discover_instructions(cwd: &Path) -> Vec<InstructionFile> {
     let last = chain.len().saturating_sub(1);
     for (i, dir) in chain.iter().enumerate() {
         if let Some(p) = pick_in_dir(dir) {
-            if seen.contains(&p) {
+            if out.iter().any(|(seen, _)| *seen == p) {
                 continue;
             }
-            if let Some((content, truncated)) = read_capped(&p) {
-                seen.push(p.clone());
-                let level = if i == 0 {
-                    Level::ProjectRoot
-                } else if i == last {
-                    Level::Cwd
-                } else {
-                    Level::Intermediate
-                };
-                out.push(InstructionFile {
-                    path: p,
-                    content,
-                    level,
-                    truncated,
-                });
-            }
+            let level = if i == 0 {
+                Level::ProjectRoot
+            } else if i == last {
+                Level::Cwd
+            } else {
+                Level::Intermediate
+            };
+            out.push((p, level));
         }
     }
 
     out
+}
+
+pub fn discover_instructions(cwd: &Path) -> Vec<InstructionFile> {
+    instruction_paths(cwd)
+        .into_iter()
+        .filter_map(|(path, level)| {
+            let (content, truncated) = read_capped(&path)?;
+            Some(InstructionFile {
+                path,
+                content,
+                level,
+                truncated,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]

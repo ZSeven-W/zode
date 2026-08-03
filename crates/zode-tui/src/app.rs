@@ -581,6 +581,11 @@ pub struct TuiApp {
     ui_extensions: zode_core::ui_extensions::UiExtensionHost,
     ui_data_revision: u64,
     status_rows: u16,
+    /// Cached `agent type → declared model` from the on-disk agent definitions,
+    /// for the HUD's `[model]` label. Reloading walks every agent-def directory,
+    /// so it is refreshed on a slow TTL and only while sub-agent rows show.
+    agent_models: HashMap<String, String>,
+    agent_models_at: Option<std::time::Instant>,
     theme_store: ThemeStore,
     theme: Theme,
     should_quit: bool,
@@ -655,6 +660,8 @@ pub struct TuiApp {
     sidebar_area: Option<Rect>,
     /// When the last sidebar data poll (git stat + MCP state) started.
     last_sidebar_poll: Option<std::time::Instant>,
+    /// When the last status-HUD data poll (background shells) started.
+    last_hud_poll: Option<std::time::Instant>,
     /// Whether any overlay (modal/panel/toast) was open on the previous frame.
     /// When one closes, the next frame forces a FULL terminal repaint: diff
     /// rendering never re-sends "unchanged" cells, so a terminal that dropped
@@ -1174,6 +1181,8 @@ impl TuiApp {
             },
             ui_data_revision: 0,
             status_rows: 1,
+            agent_models: HashMap::new(),
+            agent_models_at: None,
             theme_store,
             theme,
             should_quit: false,
@@ -1214,6 +1223,7 @@ impl TuiApp {
             sidebar_hits: crate::ui::tabs::SidebarHits::default(),
             sidebar_area: None,
             last_sidebar_poll: None,
+            last_hud_poll: None,
             overlay_was_open: false,
             force_redraw: false,
             skip_next_draw: false,
@@ -3527,14 +3537,52 @@ impl TuiApp {
         self.subagents.reverse();
     }
 
+    /// Whether any cached sub-agent still qualifies for a status-HUD row —
+    /// running, or finished inside the recency window.
+    fn has_hud_subagent_rows(&self) -> bool {
+        let now = now_secs();
+        self.subagents
+            .iter()
+            .any(|agent| crate::ui::hud::is_hud_visible(agent, now))
+    }
+
+    /// Reload the agent-definition model map on a slow TTL, and only while a
+    /// sub-agent could use it — the load reads every agent-definition file.
+    fn refresh_agent_models(&mut self) {
+        const TTL: Duration = Duration::from_secs(30);
+        if self.subagents.is_empty() || self.agent_models_at.is_some_and(|t| t.elapsed() < TTL) {
+            return;
+        }
+        self.agent_models_at = Some(std::time::Instant::now());
+        self.agent_models = zode_core::agents::load_agent_defs(&self.active_tab().engine.cwd)
+            .into_iter()
+            .filter_map(|def| def.model.map(|model| (def.name, model)))
+            .collect();
+    }
+
+    /// The status HUD's sub-agent rows for this frame, with the count that did
+    /// not fit. `None` when the HUD is suppressed (terminal too short).
+    fn hud_subagent_rows(
+        &self,
+        terminal_height: u16,
+    ) -> Option<(Vec<crate::ui::hud::SubAgentRow>, usize)> {
+        if terminal_height < crate::ui::hud::MIN_HEIGHT_FOR_HUD {
+            return None;
+        }
+        let tab = &self.tabs[self.active];
+        Some(crate::ui::hud::subagent_rows(
+            &self.subagents,
+            now_secs(),
+            &self.agent_models,
+            &tab.engine.model,
+        ))
+    }
+
     /// Refresh the active tab's sidebar section data on a slow cadence: the
     /// MCP connection snapshot (sync, cheap) and a spawned git working-tree
     /// poll (subprocess — never run on the UI loop, one in flight per tab).
     fn refresh_sidebar_sections(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         const INTERVAL: Duration = Duration::from_secs(2);
-        if !should_show_sidebar(self.tabs.len(), self.sidebar_visibility) {
-            return;
-        }
         if self
             .last_sidebar_poll
             .is_some_and(|t| t.elapsed() < INTERVAL)
@@ -3543,8 +3591,18 @@ impl TuiApp {
         }
         self.last_sidebar_poll = Some(std::time::Instant::now());
         let tab = &mut self.tabs[self.active];
+        // MCP/LSP snapshots and the instruction-file count are in-memory or
+        // existence-check cheap, and the status HUD shows them with the sidebar
+        // closed — so they are polled regardless of sidebar visibility.
         tab.mcp_status = tab.engine.mcp_status();
         tab.lsp_status = tab.engine.lsp_status();
+        tab.instruction_files = zode_core::instructions::instruction_paths(&tab.engine.cwd).len();
+        // The git working-tree poll spawns a subprocess — only pay for it when
+        // the sidebar that renders it is actually on screen.
+        if !should_show_sidebar(self.tabs.len(), self.sidebar_visibility) {
+            return;
+        }
+        let tab = &mut self.tabs[self.active];
         if tab.git_poll_inflight {
             return;
         }
@@ -4032,12 +4090,27 @@ impl TuiApp {
                     // its panel is open) — skip the per-tab lock+clone traffic
                     // when fully idle rather than paying it 10×/second.
                     let any_busy = self.tabs.iter().any(|t| t.is_busy());
-                    if self.tasks_panel.is_some() {
+                    // Background shells feed the status HUD's mode row, so the
+                    // snapshot is refreshed on a slow cadence even with the
+                    // tasks panel closed.
+                    const HUD_POLL: Duration = Duration::from_secs(2);
+                    let hud_due = self.last_hud_poll.is_none_or(|t| t.elapsed() >= HUD_POLL);
+                    if hud_due {
+                        self.last_hud_poll = Some(std::time::Instant::now());
+                    }
+                    if self.tasks_panel.is_some() || hud_due {
                         self.refresh_bg_shells().await;
                     }
-                    if any_busy || self.subagents_panel.is_some() {
+                    // Sub-agent HUD rows outlive the turn that spawned them
+                    // (finished agents linger briefly), so keep polling while
+                    // any cached row is still displayable.
+                    if any_busy
+                        || self.subagents_panel.is_some()
+                        || self.has_hud_subagent_rows()
+                    {
                         self.refresh_subagents();
                     }
+                    self.refresh_agent_models();
                     if any_busy {
                         for i in 0..self.tabs.len() {
                             let engine = self.tabs[i].engine.clone();
@@ -4254,7 +4327,37 @@ impl TuiApp {
             };
             (status, sidebar)
         };
-        self.status_rows = if status_extensions.is_empty() { 1 } else { 2 };
+        // Adaptive status HUD: extra rows stacked above the main status line.
+        // `hud_subagent_rows` returns None when the terminal is too short.
+        let hud_subagents = self.hud_subagent_rows(area.height);
+        let hud_input = hud_subagents
+            .as_ref()
+            .map(|(rows, overflow)| crate::ui::hud::HudInput {
+                tally: self.tabs[self.active].hud_tally(),
+                subagents: rows,
+                subagent_overflow: *overflow,
+                mode: self.tabs[self.active].extension_access,
+                infra: crate::ui::hud::InfraCounts {
+                    shells: self.bg_shells.iter().filter(|s| !s.killed).count(),
+                    mcps: self.tabs[self.active]
+                        .mcp_status
+                        .iter()
+                        .filter(|(_, connected)| *connected)
+                        .count(),
+                    instruction_files: self.tabs[self.active].instruction_files,
+                },
+            });
+        // Render the rows to owned lines right away so the HUD's borrow of the
+        // active tab ends before the chat view takes it mutably below.
+        let (hud_rows, hud_lines) = match &hud_input {
+            Some(input) => (
+                crate::ui::hud::row_count(input, area.height),
+                crate::ui::hud::hud_lines(input, &theme),
+            ),
+            None => (0, Vec::new()),
+        };
+        let plugin_rows = u16::from(!status_extensions.is_empty());
+        self.status_rows = hud_rows.saturating_add(1).saturating_add(plugin_rows);
         let areas = split_main(area, show_sidebar, self.status_rows);
         if let Some(header) = areas.header {
             render_header(
@@ -4380,8 +4483,17 @@ impl TuiApp {
             completion_placeholder,
             self.active_input_selection,
         );
-        self.status
-            .render(f, areas.status, &theme, &status_extensions);
+        // The HUD occupies the top of the status region; the classic status
+        // line (plus any plugin row) keeps the bottom.
+        let mut bar_area = areas.status;
+        let hud_h = hud_rows.min(bar_area.height.saturating_sub(1));
+        if hud_h > 0 {
+            let hud_area = Rect::new(bar_area.x, bar_area.y, bar_area.width, hud_h);
+            crate::ui::hud::render_lines(f, hud_area, &theme, hud_lines);
+            bar_area.y = bar_area.y.saturating_add(hud_h);
+            bar_area.height = bar_area.height.saturating_sub(hud_h);
+        }
+        self.status.render(f, bar_area, &theme, &status_extensions);
         // Autocomplete popup floats above the input row.
         self.autocomplete.render(f, input_area, &theme);
         // @-mention popup occupies the same band; the two are mutually exclusive
@@ -4434,9 +4546,16 @@ impl TuiApp {
         if self.subagents_panel.is_some() {
             let now = now_secs();
             let agents = std::mem::take(&mut self.subagents);
+            let session_model = self.tabs[self.active].engine.model.clone();
+            let defs = std::mem::take(&mut self.agent_models);
             if let Some(panel) = &mut self.subagents_panel {
-                panel.render(f, area, &agents, now, &theme);
+                let models = crate::ui::dialog::subagents::ModelLabels {
+                    defs: &defs,
+                    session: &session_model,
+                };
+                panel.render(f, area, &agents, now, models, &theme);
             }
+            self.agent_models = defs;
             self.subagents = agents;
         }
         // Full modified-files overlay. Same take/restore dance so the panel
@@ -5487,6 +5606,20 @@ impl TuiApp {
             || self.files_panel.is_some()
             || self.show_help
         {
+            return;
+        }
+
+        // The floating "jump to bottom" pill overlays the transcript, so it
+        // takes a left click before any row underneath it. It hit-tests against
+        // the rect it was painted into, so it works regardless of selection
+        // mode and without recomputing the chat area.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.tabs[self.active]
+                .chat
+                .jump_pill_hit(mouse.column, mouse.row)
+        {
+            self.tabs[self.active].chat.scroll_to_bottom();
+            self.active_selection = None;
             return;
         }
 
@@ -7934,6 +8067,7 @@ impl TuiApp {
                 scheduled_job = tab.active_sched_job.take();
                 tab.turn_started_at = None;
                 tab.turn_tool_count = 0;
+                tab.settle_turn_tools();
                 tab.active_tool_names.clear();
                 tab.active_tool_api_names.clear();
                 tab.active_tool_started.clear();
@@ -8595,6 +8729,7 @@ impl TuiApp {
         // Fresh turn: arm the completion-footer clock and tool counter.
         tab.turn_started_at = Some(std::time::Instant::now());
         tab.turn_tool_count = 0;
+        tab.turn_tools.clear();
         tab.watchdog_recorder = None;
         tab.watchdog_activity = None;
 
@@ -9244,6 +9379,7 @@ impl TuiApp {
                     let scheduled_job = tab.active_sched_job.take();
                     tab.turn_started_at = None;
                     tab.turn_tool_count = 0;
+                    tab.settle_turn_tools();
                     tab.active_tool_names.clear();
                     tab.active_tool_api_names.clear();
                     tab.active_tool_started.clear();
@@ -9321,6 +9457,9 @@ impl TuiApp {
                         // no-progress detection).
                         tab.turn_used_tools = true;
                         tab.turn_tool_count = tab.turn_tool_count.saturating_add(1);
+                        // The HUD tally counts a call the moment it starts, so
+                        // an in-flight call is already visible (running glyph).
+                        tab.turn_tools.record_start(name);
                         let title = tool_call_title(name, input);
                         tab.active_tool_names.insert(id.clone(), title);
                         tab.active_tool_api_names.insert(id.clone(), name.clone());
@@ -9336,13 +9475,19 @@ impl TuiApp {
                             tab.recent_tools.pop_front();
                         }
                         if let Some(line) = process_line_for_event(&event, None) {
-                            tab.chat.push_tool(&line);
+                            tab.chat.push_tool_call(&line, name);
                         }
                     }
                     Event::ToolResult { ref id, .. } => {
                         let known_tool = tab.active_tool_names.remove(id);
-                        tab.active_tool_api_names.remove(id);
+                        let api_name = tab.active_tool_api_names.remove(id);
                         let started = tab.active_tool_started.remove(id);
+                        if let Some(name) = api_name {
+                            tab.turn_tools.record_result(
+                                &name,
+                                matches!(&event, Event::ToolResult { ok: true, .. }),
+                            );
+                        }
                         if let Some(activity) = tab
                             .recent_tools
                             .iter_mut()
@@ -9374,7 +9519,7 @@ impl TuiApp {
                                 ),
                                 None => line,
                             };
-                            tab.chat.push_tool(&line);
+                            tab.chat.push_tool_result(&line);
                         }
                     }
                     Event::Usage {
@@ -9397,7 +9542,7 @@ impl TuiApp {
                             tab.context_tokens = prompt;
                         }
                         if let Some(line) = process_line_for_event(&event, None) {
-                            tab.chat.push_tool(&line);
+                            tab.chat.push_usage(&line);
                         }
                     }
                     // API-retry notices are the whole point of showing retries —
@@ -9461,6 +9606,7 @@ impl TuiApp {
                 tab.active_tool_started.clear();
                 let turn_elapsed = tab.turn_started_at.take().map(|t| t.elapsed());
                 let tool_count = std::mem::take(&mut tab.turn_tool_count);
+                tab.settle_turn_tools();
                 let ok = result.is_ok();
                 let scheduled_job = tab.active_sched_job.take();
                 let watchdog_failure = if self.watchdog.enabled() && scheduled_job.is_some() {
@@ -12514,11 +12660,12 @@ fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
                         ContentBlock::ToolUse { name, input, .. } => {
                             let title = tool_call_title(name, input);
                             let summary = tool_input_summary(name, input);
-                            if summary.is_empty() {
-                                chat.push_tool(&title);
+                            let line = if summary.is_empty() {
+                                title
                             } else {
-                                chat.push_tool(&format!("{title} {summary}"));
-                            }
+                                format!("{title} {summary}")
+                            };
+                            chat.push_tool_call(&line, name);
                         }
                         _ => {}
                     }
@@ -14621,6 +14768,165 @@ mod tests {
         );
     }
 
+    /// Drive one complete tool call through the event pipeline.
+    fn run_tool(app: &mut TuiApp, tab_id: usize, turn_id: u64, id: &str, name: &str, ok: bool) {
+        app.handle_agent_event(AppEvent::Agent {
+            tab_id,
+            turn_id,
+            cost_label: None,
+            event: Event::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input: serde_json::json!({}),
+            },
+        });
+        app.handle_agent_event(AppEvent::Agent {
+            tab_id,
+            turn_id,
+            cost_label: None,
+            event: Event::ToolResult {
+                id: id.into(),
+                ok,
+                output: serde_json::Value::Null,
+            },
+        });
+    }
+
+    fn tally_cells(tally: &crate::ui::hud::ToolTally) -> Vec<String> {
+        let (cells, overflow) = tally.top(crate::ui::hud::MAX_TALLY_CELLS);
+        let mut out: Vec<String> = cells
+            .into_iter()
+            .map(crate::ui::hud::tally_cell_text)
+            .collect();
+        if overflow > 0 {
+            out.push(format!("+{overflow} more"));
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn hud_tally_aggregates_per_turn_tool_events() {
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].active_turn_id = 7;
+
+        run_tool(&mut app, tab_id, 7, "b1", "Bash", true);
+        run_tool(&mut app, tab_id, 7, "b2", "Bash", true);
+        run_tool(&mut app, tab_id, 7, "e1", "Edit", false);
+        run_tool(&mut app, tab_id, 7, "r1", "Read", true);
+        run_tool(&mut app, tab_id, 7, "g1", "Grep", true);
+        run_tool(&mut app, tab_id, 7, "w1", "WebFetch", true);
+        // A call still in flight is counted immediately, under the running mark.
+        app.handle_agent_event(AppEvent::Agent {
+            tab_id,
+            turn_id: 7,
+            cost_label: None,
+            event: Event::ToolUse {
+                id: "b3".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({}),
+            },
+        });
+
+        assert_eq!(
+            tally_cells(app.tabs[0].hud_tally()),
+            [
+                "◐ Bash ×3",
+                "✗ Edit ×1",
+                "✓ Read ×1",
+                "✓ Grep ×1",
+                "+1 more"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn hud_tally_survives_turn_end_and_resets_on_the_next_turn() {
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].active_turn_id = 7;
+        app.tabs[0].turn_started_at = Some(std::time::Instant::now());
+
+        run_tool(&mut app, tab_id, 7, "b1", "Bash", true);
+        app.handle_agent_event(AppEvent::TurnDone {
+            tab_id,
+            turn_id: 7,
+            result: Ok(()),
+        });
+        // The live tally is cleared, but the completed turn's story stays on
+        // the HUD while the tab is idle.
+        assert!(app.tabs[0].turn_tools.is_empty());
+        assert_eq!(tally_cells(app.tabs[0].hud_tally()), ["✓ Bash ×1"]);
+
+        // A turn that used no tools must not blank the row a second time.
+        app.tabs[0].active_turn_id = 8;
+        app.handle_agent_event(AppEvent::TurnDone {
+            tab_id,
+            turn_id: 8,
+            result: Ok(()),
+        });
+        assert_eq!(tally_cells(app.tabs[0].hud_tally()), ["✓ Bash ×1"]);
+
+        // The next turn's first tool call takes the row over.
+        app.tabs[0].active_turn_id = 9;
+        app.tabs[0].turn_tools.clear();
+        run_tool(&mut app, tab_id, 9, "r1", "Read", true);
+        assert_eq!(tally_cells(app.tabs[0].hud_tally()), ["✓ Read ×1"]);
+    }
+
+    #[tokio::test]
+    async fn hud_tally_settles_on_the_draining_turn_path() {
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].active_turn_id = 7;
+        run_tool(&mut app, tab_id, 7, "b1", "Bash", false);
+
+        // Interrupt: active_turn_id is cleared and the turn drains separately.
+        app.tabs[0].active_turn_id = 0;
+        app.tabs[0].draining_turn_id = Some(7);
+        app.handle_agent_event(AppEvent::TurnDone {
+            tab_id,
+            turn_id: 7,
+            result: Ok(()),
+        });
+
+        assert!(app.tabs[0].turn_tools.is_empty());
+        assert_eq!(tally_cells(app.tabs[0].hud_tally()), ["✗ Bash ×1"]);
+    }
+
+    #[tokio::test]
+    async fn hud_subagent_rows_stay_fresh_while_a_finished_agent_lingers() {
+        let (mut app, _tx) = make_test_app().await;
+        assert!(
+            !app.has_hud_subagent_rows(),
+            "no sub-agents → nothing to poll for"
+        );
+        let now = now_secs();
+        app.subagents = vec![zode_core::SubAgent {
+            id: 1,
+            agent_type: "general-purpose".into(),
+            description: Some("scan".into()),
+            depth: 0,
+            status: zode_core::SubAgentStatus::Done,
+            started_at: now.saturating_sub(30),
+            finished_at: Some(now.saturating_sub(5)),
+            input_tokens: 0,
+            output_tokens: 0,
+            transcript: Vec::new(),
+            committed_input: 0,
+            committed_output: 0,
+            turn_input: 0,
+            turn_output: 0,
+        }];
+        assert!(app.has_hud_subagent_rows(), "a recent finisher still shows");
+        app.subagents[0].finished_at =
+            Some(now.saturating_sub(crate::ui::hud::SUBAGENT_RECENT_SECS + 5));
+        assert!(
+            !app.has_hud_subagent_rows(),
+            "an aged-out row stops polling"
+        );
+    }
+
     fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
         MouseEvent {
             kind,
@@ -14628,6 +14934,151 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    /// Rows of the painted frame, as plain strings.
+    fn painted_rows(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> Vec<String> {
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn row_containing(rows: &[String], needle: &str) -> Option<u16> {
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .map(|y| y as u16)
+    }
+
+    #[tokio::test]
+    async fn status_hud_stacks_above_the_status_line_and_yields_on_short_terminals() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let (mut app, _tx) = make_test_app().await;
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].active_turn_id = 7;
+        app.tabs[0].extension_access = zode_core::ToolAccessMode::Auto;
+        app.tabs[0].mcp_status = vec![("alpha".into(), true), ("beta".into(), false)];
+        app.tabs[0].instruction_files = 2;
+        run_tool(&mut app, tab_id, 7, "b1", "Bash", true);
+        run_tool(&mut app, tab_id, 7, "e1", "Edit", false);
+
+        let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        let rows = painted_rows(&term);
+        let tally = row_containing(&rows, "✓ Bash ×1").expect("tally row: {rows:?}");
+        let mode = row_containing(&rows, "auto mode on").expect("mode row: {rows:?}");
+        let bar = row_containing(&rows, "F1 help").expect("status line: {rows:?}");
+        assert!(rows[tally as usize].contains("✗ Edit ×1"), "{rows:?}");
+        // Exactly one MCP is connected, so the segment counts one, not two.
+        assert!(rows[mode as usize].contains("1 MCP"), "{rows:?}");
+        assert!(rows[mode as usize].contains("2 CLAUDE.md"), "{rows:?}");
+        assert!(tally < mode && mode < bar, "HUD sits above the status line");
+        assert_eq!(app.status_rows, 3);
+
+        // Too short for the HUD: the classic single status row comes back.
+        let mut short = Terminal::new(TestBackend::new(120, 16)).unwrap();
+        short.draw(|f| app.draw(f)).unwrap();
+        let rows = painted_rows(&short);
+        assert_eq!(app.status_rows, 1);
+        assert!(row_containing(&rows, "✓ Bash ×1").is_none(), "{rows:?}");
+        assert!(row_containing(&rows, "auto mode on").is_none(), "{rows:?}");
+        assert!(row_containing(&rows, "F1 help").is_some(), "{rows:?}");
+    }
+
+    #[tokio::test]
+    async fn clicking_a_tool_activity_summary_expands_the_calls_behind_it() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let (mut app, agent_tx) = make_test_app().await;
+        // One finished call as the event stream records it: call row, result
+        // row, usage row — all folded behind a single summary line.
+        app.tabs[0]
+            .chat
+            .push_tool_call("Tool Bash cargo build", "Bash");
+        app.tabs[0].chat.push_tool_result("Tool Bash ok");
+        app.tabs[0].chat.push_usage("Usage ↑10 ↓5");
+        app.tabs[0].chat.end_turn();
+
+        let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        let rows = painted_rows(&term);
+        assert!(
+            row_containing(&rows, "cargo build").is_none(),
+            "the call row must be folded away by default: {rows:?}"
+        );
+        let summary = row_containing(&rows, "Ran 1 shell command")
+            .expect("a collapsed summary line should be painted");
+
+        // A plain click (press + release, no drag) on that row opens the group.
+        app.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 6, summary),
+            &agent_tx,
+        );
+        app.handle_mouse(
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 6, summary),
+            &agent_tx,
+        );
+
+        term.draw(|f| app.draw(f)).unwrap();
+        let rows = painted_rows(&term);
+        assert!(
+            row_containing(&rows, "cargo build").is_some(),
+            "clicking the summary should reveal the calls: {rows:?}"
+        );
+        assert!(
+            row_containing(&rows, "Usage").is_some(),
+            "the usage row lives inside the expanded group: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clicking_the_jump_pill_returns_to_the_tail() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let (mut app, agent_tx) = make_test_app().await;
+        for i in 0..120 {
+            app.tabs[0].chat.push_user(&format!("question number {i}"));
+        }
+        app.tabs[0].chat.push_user("FINAL_TAIL_MARKER");
+
+        let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        assert!(
+            row_containing(&painted_rows(&term), "Jump to bottom").is_none(),
+            "no pill while following the tail"
+        );
+
+        // Scroll well past two viewports: the pill floats over the bottom row.
+        app.tabs[0].chat.scroll_up(200);
+        term.draw(|f| app.draw(f)).unwrap();
+        let rows = painted_rows(&term);
+        let pill = row_containing(&rows, "Jump to bottom").expect("pill painted: {rows:?}");
+        assert!(
+            row_containing(&rows, "FINAL_TAIL_MARKER").is_none(),
+            "scrolled away from the tail"
+        );
+
+        app.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 60, pill),
+            &agent_tx,
+        );
+        app.handle_mouse(
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 60, pill),
+            &agent_tx,
+        );
+
+        term.draw(|f| app.draw(f)).unwrap();
+        let rows = painted_rows(&term);
+        assert!(
+            row_containing(&rows, "FINAL_TAIL_MARKER").is_some(),
+            "the pill click should jump back to the newest output: {rows:?}"
+        );
+        assert!(
+            row_containing(&rows, "Jump to bottom").is_none(),
+            "the pill retires once the tail is in view"
+        );
     }
 
     #[tokio::test]

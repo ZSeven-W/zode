@@ -147,6 +147,30 @@ const EXTRA: &[[&str; 15]] = &[
 /// to fall back to English for these keys.
 #[rustfmt::skip]
 const ZH_ONLY: &[(&str, &str, &str)] = &[
+    // Collapsed tool-activity summaries in the chat transcript. `{n}` and
+    // `{tool}` are substituted by the caller after lookup.
+    ("ran 1 shell command", "运行了 1 条 shell 命令", "執行了 1 條 shell 命令"),
+    ("ran {n} shell commands", "运行了 {n} 条 shell 命令", "執行了 {n} 條 shell 命令"),
+    ("searched for 1 pattern", "搜索了 1 个模式", "搜尋了 1 個模式"),
+    ("searched for {n} patterns", "搜索了 {n} 个模式", "搜尋了 {n} 個模式"),
+    ("read 1 file", "读取了 1 个文件", "讀取了 1 個檔案"),
+    ("read {n} files", "读取了 {n} 个文件", "讀取了 {n} 個檔案"),
+    ("edited 1 file", "编辑了 1 个文件", "編輯了 1 個檔案"),
+    ("edited {n} files", "编辑了 {n} 个文件", "編輯了 {n} 個檔案"),
+    ("used {tool} once", "使用了 {tool} 1 次", "使用了 {tool} 1 次"),
+    ("used {tool} {n} times", "使用了 {tool} {n} 次", "使用了 {tool} {n} 次"),
+    ("{n} tool calls", "{n} 次工具调用", "{n} 次工具呼叫"),
+    ("Jump to bottom", "跳到底部", "跳到底部"),
+    // Adaptive status HUD rows. `{n}` is substituted by the caller after lookup.
+    ("+{n} more", "还有 {n} 项", "還有 {n} 項"),
+    ("auto mode on", "自动模式已开启", "自動模式已開啟"),
+    ("prompt mode on", "询问模式已开启", "詢問模式已開啟"),
+    ("read-only mode on", "只读模式已开启", "唯讀模式已開啟"),
+    ("{n} shell", "{n} 个 shell", "{n} 個 shell"),
+    ("{n} shells", "{n} 个 shell", "{n} 個 shell"),
+    ("{n} MCP", "{n} 个 MCP", "{n} 個 MCP"),
+    ("{n} MCPs", "{n} 个 MCP", "{n} 個 MCP"),
+    ("{n} CLAUDE.md", "{n} 个 CLAUDE.md", "{n} 個 CLAUDE.md"),
     ("Switch the display currency for cost (USD, CNY, EUR, …)", "切换费用显示货币（USD、CNY、EUR 等）", "切換費用顯示貨幣（USD、CNY、EUR 等）"),
     ("Drive OpenPencil (e.g. /op status, /op generate <prompt>)", "驱动 OpenPencil（例如 /op status、/op generate <prompt>）", "驅動 OpenPencil（例如 /op status、/op generate <prompt>）"),
     ("Browser control panel and commands (e.g. /browser, /browser status)", "浏览器控制面板和命令（例如 /browser、/browser status）", "瀏覽器控制面板和命令（例如 /browser、/browser status）"),
@@ -560,6 +584,30 @@ mod tests {
             );
         }
         set_language(Lang::En);
+    }
+
+    #[test]
+    #[serial]
+    fn status_hud_rows_translate_to_chinese() {
+        set_language(Lang::Zh);
+        for key in [
+            "+{n} more",
+            "auto mode on",
+            "prompt mode on",
+            "read-only mode on",
+            "{n} shell",
+            "{n} shells",
+            "{n} MCP",
+            "{n} MCPs",
+            "{n} CLAUDE.md",
+        ] {
+            assert_ne!(t(key), key, "{key:?} is not translated");
+            assert!(t(key).contains("{n}") || !key.contains("{n}"));
+        }
+        set_language(Lang::ZhTw);
+        assert_eq!(t("read-only mode on"), "唯讀模式已開啟");
+        set_language(Lang::En);
+        assert_eq!(t("auto mode on"), "auto mode on");
     }
 
     #[test]

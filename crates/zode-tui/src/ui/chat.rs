@@ -17,6 +17,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
 use crate::ui::markdown::render_markdown;
+use crate::ui::tool_groups::{activity_runs, jump_pill_visible, summarize, ToolActivity};
 
 /// Approximate the number of wrapped rows a line occupies at `width`
 /// columns (ratatui wraps on words, so this char-width estimate is close
@@ -56,6 +57,27 @@ pub struct ChatMessage {
     /// shows a single `▸ …` header until clicked open. Ignored for roles
     /// that never collapse (user/assistant/system).
     pub collapsed: bool,
+    /// Set on tool rows that take part in the collapsed activity summary (a
+    /// call, its result, a usage row). `None` keeps the row out of any group,
+    /// so it renders on its own line exactly as before.
+    pub activity: Option<ToolActivity>,
+    /// Fold state of the activity GROUP this message anchors — only the first
+    /// member of a run reads it. Kept apart from `collapsed` so opening a
+    /// group reveals its per-call rows still folded, one row each.
+    pub group_open: bool,
+}
+
+impl ChatMessage {
+    fn new(role: Role, text: String) -> Self {
+        Self {
+            role,
+            text,
+            images: Vec::new(),
+            collapsed: false,
+            activity: None,
+            group_open: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +132,10 @@ pub struct ChatView {
     /// thinking block never coalesces into a previous turn's reasoning even if it
     /// happens to be the tail message.
     thinking_open: bool,
+    /// True while the transcript's tail is a run of tool-activity rows that is
+    /// still growing. That run renders expanded so in-flight work is visible;
+    /// anything else arriving (text, a notice, a new turn) folds it away.
+    live_tail: bool,
     active_assistant_index: Option<usize>,
     /// Lines scrolled up from the bottom (0 = following the tail).
     scroll_back: usize,
@@ -127,6 +153,9 @@ pub struct ChatView {
     hide_tool_details: bool,
     revision: u64,
     render_cache: Option<RenderCache>,
+    /// Screen rect of the floating "jump to bottom" pill on the last paint,
+    /// for mouse hit-testing. `None` when the pill isn't showing.
+    last_pill: Option<Rect>,
     /// Per-message rendered-line cache, keyed by a hash of (role, text, width,
     /// theme, language). Lets a rebuild reuse unchanged messages' lines instead
     /// of re-parsing markdown for the whole transcript on every content change.
@@ -157,6 +186,17 @@ struct RenderCache {
     /// (a Tool message that renders taller than one row). Clicking that
     /// row toggles the message's fold state.
     toggles: HashMap<usize, usize>,
+    /// Summary-row line index → the message that anchors that activity group.
+    /// Clicking the row toggles the whole group open or shut.
+    group_toggles: HashMap<usize, usize>,
+}
+
+/// Output of one transcript build: the painted lines plus the two click maps.
+#[derive(Debug)]
+struct BuiltLines {
+    lines: Vec<Line<'static>>,
+    toggles: HashMap<usize, usize>,
+    group_toggles: HashMap<usize, usize>,
 }
 
 fn message_cache_key(
@@ -199,33 +239,57 @@ impl ChatView {
         self.streaming = false;
         self.active_assistant_index = None;
         self.thinking_open = false;
-        self.messages.push(ChatMessage {
-            role: Role::User,
-            text: text.to_string(),
-            images,
-            collapsed: false,
-        });
+        self.live_tail = false;
+        let mut msg = ChatMessage::new(Role::User, text.to_string());
+        msg.images = images;
+        self.messages.push(msg);
         self.scroll_back = 0;
         self.bump_revision();
     }
 
     pub fn push_system(&mut self, text: &str) {
-        self.messages.push(ChatMessage {
-            role: Role::System,
-            text: text.to_string(),
-            images: Vec::new(),
-            collapsed: false,
-        });
+        self.live_tail = false;
+        self.messages
+            .push(ChatMessage::new(Role::System, text.to_string()));
         self.bump_revision();
     }
 
     pub fn push_tool(&mut self, text: &str) {
-        self.push_process_message(ChatMessage {
-            role: Role::Tool,
-            text: text.to_string(),
-            images: Vec::new(),
-            collapsed: true,
-        });
+        self.push_activity_row(text, None);
+    }
+
+    /// A tool invocation row. `tool` is the runtime tool name — it drives the
+    /// wording of the collapsed group summary, so it must be the API name
+    /// (`Bash`, `mcp__server__tool`), not the display title.
+    pub fn push_tool_call(&mut self, text: &str, tool: &str) {
+        self.push_activity_row(
+            text,
+            Some(ToolActivity::Call {
+                tool: tool.to_string(),
+            }),
+        );
+    }
+
+    /// The result row for the call above it. Folded under the group summary;
+    /// it never contributes to the counts.
+    pub fn push_tool_result(&mut self, text: &str) {
+        self.push_activity_row(text, Some(ToolActivity::Result));
+    }
+
+    /// A `Usage ↑… ↓…` row. Only ever visible inside an expanded group.
+    pub fn push_usage(&mut self, text: &str) {
+        self.push_activity_row(text, Some(ToolActivity::Usage));
+    }
+
+    fn push_activity_row(&mut self, text: &str, activity: Option<ToolActivity>) {
+        // The trailing run stays expanded only while tool activity is what's
+        // arriving; the next answer, notice or user turn ends the live tail and
+        // the run folds into its summary.
+        self.live_tail = activity.is_some();
+        let mut msg = ChatMessage::new(Role::Tool, text.to_string());
+        msg.collapsed = true;
+        msg.activity = activity;
+        self.push_process_message(msg);
         self.bump_revision();
     }
 
@@ -248,24 +312,19 @@ impl ChatView {
                 msg.text.push_str(delta);
             }
         } else {
-            self.push_process_message(ChatMessage {
-                role: Role::Tool,
-                text: format!("{THINKING_PREFIX}{delta}"),
-                images: Vec::new(),
-                collapsed: true,
-            });
+            let mut msg = ChatMessage::new(Role::Tool, format!("{THINKING_PREFIX}{delta}"));
+            msg.collapsed = true;
+            self.push_process_message(msg);
         }
+        self.live_tail = false;
         self.thinking_open = true;
         self.bump_revision();
     }
 
     pub fn begin_assistant(&mut self) {
-        self.messages.push(ChatMessage {
-            role: Role::Assistant,
-            text: String::new(),
-            images: Vec::new(),
-            collapsed: false,
-        });
+        self.live_tail = false;
+        self.messages
+            .push(ChatMessage::new(Role::Assistant, String::new()));
         self.active_assistant_index = self.messages.len().checked_sub(1);
         self.streaming = true;
         self.thinking_open = false;
@@ -278,18 +337,15 @@ impl ChatView {
                 idx
             }
             _ => {
-                self.messages.push(ChatMessage {
-                    role: Role::Assistant,
-                    text: String::new(),
-                    images: Vec::new(),
-                    collapsed: false,
-                });
+                self.messages
+                    .push(ChatMessage::new(Role::Assistant, String::new()));
                 self.messages.len() - 1
             }
         };
         self.active_assistant_index = Some(idx);
         self.streaming = true;
         self.thinking_open = false;
+        self.live_tail = false;
         if let Some(msg) = self.messages.get_mut(idx) {
             msg.text.push_str(delta);
         }
@@ -321,6 +377,12 @@ impl ChatView {
         self.streaming = false;
         self.active_assistant_index = None;
         self.thinking_open = false;
+        // The tail run is finished: bump so the next paint rebuilds it as a
+        // collapsed summary instead of the expanded live rows.
+        if self.live_tail {
+            self.live_tail = false;
+            self.bump_revision();
+        }
     }
 
     pub fn scroll_up(&mut self, n: u16) {
@@ -407,6 +469,45 @@ impl ChatView {
             .block(Block::default().borders(Borders::NONE))
             .style(Style::default().bg(theme.bg_primary).fg(theme.fg_text));
         f.render_widget(para, area);
+        self.render_jump_pill(f, area, theme, viewport);
+    }
+
+    /// Float a "jump to bottom" pill on the bottom edge while the tail is far
+    /// out of view. It overlays only one row and only while scrolled up, so it
+    /// can never permanently hide the newest line.
+    fn render_jump_pill(&mut self, f: &mut Frame, area: Rect, theme: &Theme, viewport: usize) {
+        self.last_pill = None;
+        if !jump_pill_visible(self.scroll_back, viewport) || area.height == 0 {
+            return;
+        }
+        let label = format!(" ↓ {} · End ", crate::tr("Jump to bottom"));
+        let label_width = UnicodeWidthStr::width(label.as_str());
+        if label_width > area.width as usize {
+            return;
+        }
+        let width = label_width as u16;
+        let rect = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + area.height - 1,
+            width,
+            1,
+        );
+        let style = Style::default().bg(theme.bg_secondary).fg(theme.fg_subtle);
+        f.render_widget(
+            Paragraph::new(Line::styled(label, style)).style(style),
+            rect,
+        );
+        self.last_pill = Some(rect);
+    }
+
+    /// Whether the last painted "jump to bottom" pill covers this cell.
+    pub fn jump_pill_hit(&self, column: u16, row: u16) -> bool {
+        self.last_pill.is_some_and(|pill| {
+            column >= pill.x
+                && column < pill.x.saturating_add(pill.width)
+                && row >= pill.y
+                && row < pill.y.saturating_add(pill.height)
+        })
     }
 
     pub fn selection_point_at(
@@ -503,11 +604,12 @@ impl ChatView {
             .as_ref()
             .is_none_or(|cache| cache.key != cache_key)
         {
-            let (lines, toggles) = self.build_lines(theme, meta, width);
+            let built = self.build_lines(theme, meta, width);
             self.render_cache = Some(RenderCache {
                 key: cache_key,
-                lines,
-                toggles,
+                lines: built.lines,
+                toggles: built.toggles,
+                group_toggles: built.group_toggles,
             });
             #[cfg(test)]
             {
@@ -526,6 +628,9 @@ impl ChatView {
             .any(|m| m.role == Role::Tool && m.collapsed);
         for m in self.messages.iter_mut().filter(|m| m.role == Role::Tool) {
             m.collapsed = !any_collapsed;
+            // Group summaries follow the same chord: expanding everything must
+            // also reveal the rows a summary line is standing in for.
+            m.group_open = any_collapsed;
         }
         self.bump_revision();
         any_collapsed
@@ -551,6 +656,20 @@ impl ChatView {
                 row.saturating_sub(area.y)
                     .min(area.height.saturating_sub(1)),
             );
+        // A group summary row wins over a per-message header: it's the row the
+        // user sees, and while a group is collapsed no member header is painted.
+        if let Some(&anchor) = self
+            .render_cache
+            .as_ref()
+            .and_then(|c| c.group_toggles.get(&line))
+        {
+            let Some(msg) = self.messages.get_mut(anchor) else {
+                return false;
+            };
+            msg.group_open = !msg.group_open;
+            self.bump_revision();
+            return true;
+        }
         let Some(&msg_idx) = self
             .render_cache
             .as_ref()
@@ -566,78 +685,36 @@ impl ChatView {
         true
     }
 
-    fn build_lines(
-        &self,
-        theme: &Theme,
-        meta: ChatRenderMeta<'_>,
-        width: u16,
-    ) -> (Vec<Line<'static>>, HashMap<usize, usize>) {
-        let mut toggles: HashMap<usize, usize> = HashMap::new();
-        let mut lines: Vec<Line<'static>> = if self.messages.is_empty() {
+    fn build_lines(&self, theme: &Theme, meta: ChatRenderMeta<'_>, width: u16) -> BuiltLines {
+        let mut built = BuiltLines {
+            lines: Vec::new(),
+            toggles: HashMap::new(),
+            group_toggles: HashMap::new(),
+        };
+        let lines = if self.messages.is_empty() {
             self.render_empty(theme, meta)
         } else {
-            let mut out = vec![Line::from("")];
-            let mut prev_role: Option<&Role> = None;
-            let last = self.messages.len().saturating_sub(1);
-            for (i, msg) in self.messages.iter().enumerate() {
-                // Display-preference filters: thinking lines and tool-detail
-                // lines are both Role::Tool, told apart by the THINKING_PREFIX.
-                if msg.role == Role::Tool {
-                    let is_thinking = msg.text.starts_with(THINKING_PREFIX);
-                    if (is_thinking && self.hide_thinking)
-                        || (!is_thinking && self.hide_tool_details)
-                    {
-                        continue;
-                    }
-                }
-                if let Some(prev) = prev_role {
-                    if should_insert_message_gap(prev, &msg.role) {
-                        out.push(Line::from(""));
-                    }
-                }
-                // The actively-streaming message (the assistant being filled, or
-                // the growing tail during a stream) changes every delta — never
-                // cache it; everything else reuses its cached lines.
-                let skip_cache =
-                    Some(i) == self.active_assistant_index || (self.streaming && i == last);
-                let full =
-                    self.render_message_cached(msg, theme, width, meta.theme_name, skip_cache);
-                // A tool/thinking block taller than one row is collapsible:
-                // its first painted row becomes a click target, and while
-                // collapsed only a `▸ …` header renders.
-                if msg.role == Role::Tool && full.len() > 1 {
-                    toggles.insert(out.len(), i);
-                    if msg.collapsed {
-                        out.extend(render_tool_collapsed(
-                            &msg.text,
-                            full.len().saturating_sub(1),
-                            theme,
-                            width,
-                        ));
-                    } else {
-                        out.extend(render_tool_line_marked(&msg.text, theme, width, '▾'));
-                    }
-                } else {
-                    out.extend(full);
-                }
-                prev_role = Some(&msg.role);
-            }
-            out
+            self.render_transcript(theme, meta, width, &mut built)
         };
+        built.lines = lines;
 
-        if lines.is_empty() {
-            lines.push(Line::from(""));
+        if built.lines.is_empty() {
+            built.lines.push(Line::from(""));
         }
 
         // If the conversation is non-empty but the display filters
         // (`/thinking`, `/tool-details`) hid every visible message, the screen
-        // would otherwise go completely blank — show why instead.
+        // would otherwise go completely blank — show why instead. Collapsed
+        // activity groups can empty the view too, but that isn't the filters'
+        // doing, so the hint stays out of it.
         if !self.messages.is_empty()
-            && !lines
+            && (self.hide_thinking || self.hide_tool_details)
+            && !built
+                .lines
                 .iter()
                 .any(|l| l.spans.iter().any(|s| !s.content.trim().is_empty()))
         {
-            lines.push(Line::styled(
+            built.lines.push(Line::styled(
                 format!(
                     "  {}",
                     crate::tr(
@@ -648,9 +725,158 @@ impl ChatView {
             ));
         }
         if !self.messages.is_empty() {
-            lines.push(Line::from(""));
+            built.lines.push(Line::from(""));
         }
-        (lines, toggles)
+        built
+    }
+
+    /// Paint the message list, folding each run of consecutive tool-activity
+    /// rows into one summary line unless that group is open.
+    fn render_transcript(
+        &self,
+        theme: &Theme,
+        meta: ChatRenderMeta<'_>,
+        width: u16,
+        built: &mut BuiltLines,
+    ) -> Vec<Line<'static>> {
+        // Grouping runs over what is VISIBLE, so hiding thinking merges the
+        // runs those blocks used to separate.
+        let visible: Vec<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, msg)| self.is_visible(msg))
+            .map(|(i, _)| i)
+            .collect();
+        let kinds: Vec<Option<ToolActivity>> = visible
+            .iter()
+            .map(|&i| self.messages[i].activity.clone())
+            .collect();
+        let runs = activity_runs(&kinds);
+
+        let mut out = vec![Line::from("")];
+        let mut prev_role: Option<Role> = None;
+        let mut pos = 0usize;
+        while pos < visible.len() {
+            let Some(run) = runs.iter().find(|r| r.start == pos).cloned() else {
+                self.emit_message(
+                    visible[pos],
+                    theme,
+                    meta,
+                    width,
+                    true,
+                    &mut out,
+                    built,
+                    &mut prev_role,
+                );
+                pos += 1;
+                continue;
+            };
+            let anchor = visible[run.start];
+            // The still-growing tail run renders open so in-flight work stays
+            // visible; it folds itself as soon as the turn moves on.
+            let open =
+                self.messages[anchor].group_open || (self.live_tail && run.end == visible.len());
+            let tools: Vec<&str> = run
+                .clone()
+                .filter_map(|k| match &kinds[k] {
+                    Some(ToolActivity::Call { tool }) => Some(tool.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let summary = summarize(&tools);
+            if summary.is_empty() && !open {
+                // Pure token accounting with no call to describe: nothing to
+                // say, so nothing renders until Ctrl+E expands everything.
+                pos = run.end;
+                continue;
+            }
+            if !summary.is_empty() {
+                if prev_role.is_some() {
+                    out.push(Line::from(""));
+                }
+                built.group_toggles.insert(out.len(), anchor);
+                let marker = if open { '▾' } else { '▸' };
+                out.extend(render_group_summary(&summary, marker, theme, width));
+                prev_role = Some(Role::Tool);
+            }
+            if open {
+                for (nth, k) in run.clone().enumerate() {
+                    // The first member sits directly under its own header — no
+                    // blank line between a group's title and its contents.
+                    let gap = nth > 0 || summary.is_empty();
+                    self.emit_message(
+                        visible[k],
+                        theme,
+                        meta,
+                        width,
+                        gap,
+                        &mut out,
+                        built,
+                        &mut prev_role,
+                    );
+                }
+            }
+            pos = run.end;
+        }
+        out
+    }
+
+    fn is_visible(&self, msg: &ChatMessage) -> bool {
+        // Thinking lines and tool-detail lines are both Role::Tool, told apart
+        // by the THINKING_PREFIX; each has its own display preference.
+        if msg.role != Role::Tool {
+            return true;
+        }
+        let is_thinking = msg.text.starts_with(THINKING_PREFIX);
+        !((is_thinking && self.hide_thinking) || (!is_thinking && self.hide_tool_details))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_message(
+        &self,
+        i: usize,
+        theme: &Theme,
+        meta: ChatRenderMeta<'_>,
+        width: u16,
+        gap: bool,
+        out: &mut Vec<Line<'static>>,
+        built: &mut BuiltLines,
+        prev_role: &mut Option<Role>,
+    ) {
+        let msg = &self.messages[i];
+        if gap {
+            if let Some(prev) = prev_role.as_ref() {
+                if should_insert_message_gap(prev, &msg.role) {
+                    out.push(Line::from(""));
+                }
+            }
+        }
+        // The actively-streaming message (the assistant being filled, or the
+        // growing tail during a stream) changes every delta — never cache it;
+        // everything else reuses its cached lines.
+        let last = self.messages.len().saturating_sub(1);
+        let skip_cache = Some(i) == self.active_assistant_index || (self.streaming && i == last);
+        let full = self.render_message_cached(msg, theme, width, meta.theme_name, skip_cache);
+        // A tool/thinking block taller than one row is collapsible: its first
+        // painted row becomes a click target, and while collapsed only a
+        // `▸ …` header renders.
+        if msg.role == Role::Tool && full.len() > 1 {
+            built.toggles.insert(out.len(), i);
+            if msg.collapsed {
+                out.extend(render_tool_collapsed(
+                    &msg.text,
+                    full.len().saturating_sub(1),
+                    theme,
+                    width,
+                ));
+            } else {
+                out.extend(render_tool_line_marked(&msg.text, theme, width, '▾'));
+            }
+        } else {
+            out.extend(full);
+        }
+        *prev_role = Some(msg.role.clone());
     }
 
     fn render_empty(&self, theme: &Theme, _meta: ChatRenderMeta<'_>) -> Vec<Line<'static>> {
@@ -1068,6 +1294,19 @@ fn render_tool_line_marked(
     )
 }
 
+/// The one dim row that stands in for a run of tool-activity rows. Fully
+/// muted — it is process chrome, not something to read — and marked with the
+/// same fold glyphs as the per-message blocks so it reads as clickable.
+fn render_group_summary(
+    summary: &str,
+    marker: char,
+    theme: &Theme,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let muted = Style::default().fg(theme.fg_subtle);
+    render_tool_process_line(&format!("{marker} "), summary, muted, muted, width)
+}
+
 /// Single-row header for a collapsed block: `▸ <first line, truncated> …
 /// (+N)` where N is the number of rows hidden by the fold.
 fn render_tool_collapsed(
@@ -1213,6 +1452,11 @@ fn wrap_spans_with_prefix(
     out
 }
 
+/// Coverage for the collapsed tool-activity summaries and the jump pill.
+#[cfg(test)]
+#[path = "chat-group-tests.rs"]
+mod group_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1279,6 +1523,8 @@ mod tests {
             text: "Thinking: inspecting cache".to_string(),
             images: Vec::new(),
             collapsed: false,
+            activity: None,
+            group_open: false,
         };
         assert_ne!(
             message_cache_key(&message, 80, "minimal", zode_core::i18n::Lang::En),
@@ -1312,7 +1558,8 @@ mod tests {
 
         // Collapsed by default: a single ▸ header with the hidden-row count;
         // the output lines stay hidden.
-        let (lines, toggles) = chat.build_lines(&theme, meta, 80);
+        let built = chat.build_lines(&theme, meta, 80);
+        let (lines, toggles) = (built.lines, built.toggles);
         let text = joined_text(&lines);
         assert!(text.contains("▸"), "collapsed block shows the fold marker");
         assert!(text.contains("Bash done"), "header keeps the first line");
@@ -1323,7 +1570,8 @@ mod tests {
         // Expanding shows the whole block, marked with ▾.
         chat.messages[0].collapsed = false;
         chat.bump_revision();
-        let (lines, _) = chat.build_lines(&theme, meta, 80);
+        let built = chat.build_lines(&theme, meta, 80);
+        let (lines, _) = (built.lines, built.toggles);
         let text = joined_text(&lines);
         assert!(text.contains("▾"));
         assert!(text.contains("line two"));
@@ -1335,7 +1583,8 @@ mod tests {
         let theme = ThemeStore::with_builtins().resolve(None);
         let mut chat = ChatView::new();
         chat.push_tool("Usage ↑10 ↓5");
-        let (lines, toggles) = chat.build_lines(&theme, test_meta(), 80);
+        let built = chat.build_lines(&theme, test_meta(), 80);
+        let (lines, toggles) = (built.lines, built.toggles);
         let text = joined_text(&lines);
         assert!(!text.contains("▸") && !text.contains("▾"));
         assert!(toggles.is_empty(), "nothing to toggle on a one-row line");
@@ -1346,7 +1595,8 @@ mod tests {
         let theme = ThemeStore::with_builtins().resolve(None);
         let mut chat = ChatView::new();
         chat.push_thinking_delta(&"reasoning ".repeat(50));
-        let (lines, toggles) = chat.build_lines(&theme, test_meta(), 40);
+        let built = chat.build_lines(&theme, test_meta(), 40);
+        let (lines, toggles) = (built.lines, built.toggles);
         let text = joined_text(&lines);
         assert!(text.contains("Thinking"));
         assert!(text.contains("▸") && text.contains("(+"));
@@ -1401,7 +1651,8 @@ mod tests {
             .draw(|f| chat.render(f, area, &theme, meta))
             .unwrap();
 
-        let (_, toggles) = chat.build_lines(&theme, meta, 80);
+        let built = chat.build_lines(&theme, meta, 80);
+        let (_, toggles) = (built.lines, built.toggles);
         let (&header_line, &msg_idx) = toggles.iter().next().expect("one collapsible block");
         assert!(chat.messages[msg_idx].collapsed);
 
@@ -1843,7 +2094,8 @@ mod tests {
             cwd: std::path::Path::new("/tmp/zode"),
         };
 
-        let (lines, _) = view.build_lines(&theme, meta, 40);
+        let built = view.build_lines(&theme, meta, 40);
+        let (lines, _) = (built.lines, built.toggles);
         let last = lines.last().expect("chat should render lines");
 
         assert!(
@@ -2055,6 +2307,8 @@ mod tests {
                 text: "hello".into(),
                 images: Vec::new(),
                 collapsed: false,
+                activity: None,
+                group_open: false,
             },
             &theme,
             80,
@@ -2079,6 +2333,8 @@ mod tests {
                 text: "hello".into(),
                 images: Vec::new(),
                 collapsed: false,
+                activity: None,
+                group_open: false,
             },
             &theme,
             80,
@@ -2102,6 +2358,8 @@ mod tests {
                 text: "第一段\n\n第二段".into(),
                 images: Vec::new(),
                 collapsed: false,
+                activity: None,
+                group_open: false,
             },
             &theme,
             80,
@@ -2137,6 +2395,8 @@ mod tests {
                 text: "| Type | 示例 |\n|---|---|\n| Fact | API 地址 |\n".into(),
                 images: Vec::new(),
                 collapsed: false,
+                activity: None,
+                group_open: false,
             },
             &theme,
             80,
@@ -2308,6 +2568,8 @@ mod tests {
                 text: "Bash cargo build".into(),
                 images: Vec::new(),
                 collapsed: false,
+                activity: None,
+                group_open: false,
             },
             &theme,
             80,
@@ -2334,6 +2596,8 @@ mod tests {
                 text: "Thinking: checking context".into(),
                 images: Vec::new(),
                 collapsed: false,
+                activity: None,
+                group_open: false,
             },
             &theme,
             80,

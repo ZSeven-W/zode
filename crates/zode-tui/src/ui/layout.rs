@@ -22,6 +22,11 @@ pub struct ChromeAreas {
 const TAB_RAIL_WIDTH: u16 = 36;
 const MIN_WIDTH_FOR_TAB_RAIL: u16 = 96;
 
+/// Ceiling on the status region: the classic status line, the adaptive status
+/// HUD above it (tool tally + up to 4 sub-agent rows + mode/infra), and the
+/// optional plugin row.
+pub const MAX_STATUS_ROWS: u16 = 8;
+
 #[derive(Debug, Clone, Copy)]
 pub struct HeaderInfo<'a> {
     pub theme_name: &'a str,
@@ -50,7 +55,12 @@ pub fn split_main(area: Rect, show_tabs: bool, status_rows: u16) -> ChromeAreas 
     } else {
         0
     };
-    let status_h = status_rows.clamp(1, 2);
+    // Never let the status region squeeze out the composer and the last row of
+    // conversation, however many HUD rows the caller asks for.
+    let status_h = status_rows
+        .clamp(1, MAX_STATUS_ROWS)
+        .min(area.height.saturating_sub(header_h + 2))
+        .max(1);
     let reserved_without_chat = header_h + status_h;
     let remaining = area.height.saturating_sub(reserved_without_chat);
     let composer_h = if area.height >= 8 {
@@ -215,6 +225,34 @@ mod tests {
         assert_eq!(split.chat, Rect::new(0, 1, 64, 23));
         assert_eq!(split.composer, Rect::new(0, 24, 64, 4));
         assert_eq!(split.status, Rect::new(0, 28, 64, 2));
+    }
+
+    #[test]
+    fn split_main_gives_the_status_hud_up_to_eight_rows() {
+        let area = Rect::new(0, 0, 100, 30);
+        let split = split_main(area, true, MAX_STATUS_ROWS);
+        assert_eq!(split.status, Rect::new(0, 22, 64, 8));
+        assert_eq!(split.composer, Rect::new(0, 18, 64, 4));
+        assert_eq!(split.chat, Rect::new(0, 1, 64, 17));
+        // Beyond the ceiling the region stops growing.
+        assert_eq!(split_main(area, true, 40).status.height, MAX_STATUS_ROWS);
+    }
+
+    #[test]
+    fn split_main_caps_status_rows_to_keep_chat_and_composer_alive() {
+        // A caller asking for a tall status region on a small terminal must not
+        // starve the conversation or the composer.
+        let split = split_main(Rect::new(0, 0, 80, 10), false, MAX_STATUS_ROWS);
+        assert_eq!(split.status.height, 7);
+        assert!(split.chat.height >= 1);
+        assert!(split.composer.height >= 1);
+        assert_eq!(
+            split.header.unwrap().height
+                + split.chat.height
+                + split.composer.height
+                + split.status.height,
+            10
+        );
     }
 
     #[test]

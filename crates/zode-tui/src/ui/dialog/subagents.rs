@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use std::collections::HashMap;
 use zode_core::{SubAgent, SubAgentLine, SubAgentStatus};
 
 use crate::theme::Theme;
@@ -20,8 +21,26 @@ fn status_glyph(s: SubAgentStatus) -> char {
     }
 }
 
-/// One left-list row: glyph + depth indent + `type · desc` + elapsed + tokens.
-pub(crate) fn list_row(a: &SubAgent, now: u64) -> String {
+/// Where a sub-agent's `[model]` label comes from: the agent definitions'
+/// declared models, with the session model covering types that inherit.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelLabels<'a> {
+    pub defs: &'a HashMap<String, String>,
+    pub session: &'a str,
+}
+
+impl<'a> ModelLabels<'a> {
+    pub fn of(&self, agent_type: &str) -> &'a str {
+        self.defs
+            .get(agent_type)
+            .map(String::as_str)
+            .unwrap_or(self.session)
+    }
+}
+
+/// One left-list row: glyph + depth indent + `type [model] · desc` + elapsed
+/// + tokens.
+pub(crate) fn list_row(a: &SubAgent, now: u64, models: ModelLabels<'_>) -> String {
     let indent = "  ".repeat(a.depth);
     let desc = a
         .description
@@ -31,9 +50,10 @@ pub(crate) fn list_row(a: &SubAgent, now: u64) -> String {
     let end = a.finished_at.unwrap_or(now);
     let elapsed = end.saturating_sub(a.started_at);
     format!(
-        "{}{indent}{}{desc} · {}  ↑{} ↓{}",
+        "{}{indent}{} [{}]{desc} · {}  ↑{} ↓{}",
         status_glyph(a.status),
         a.agent_type,
+        models.of(&a.agent_type),
         zode_core::duration_fmt::format_duration_ms(elapsed.saturating_mul(1000)),
         a.input_tokens,
         a.output_tokens
@@ -142,6 +162,7 @@ impl SubAgentsPanel {
         area: Rect,
         agents: &[SubAgent],
         now: u64,
+        models: ModelLabels<'_>,
         theme: &Theme,
     ) {
         let outer = centered(area, 90, 85);
@@ -184,7 +205,7 @@ impl SubAgentsPanel {
                     SubAgentStatus::Done => theme.fg_subtle,
                     SubAgentStatus::Failed => Color::Red,
                 };
-                ListItem::new(list_row(a, now)).style(Style::default().fg(color))
+                ListItem::new(list_row(a, now, models)).style(Style::default().fg(color))
             })
             .collect();
         let mut state = ListState::default();
@@ -243,7 +264,12 @@ mod tests {
         let mut a = agent(1, "researcher", SubAgentStatus::Running);
         a.started_at = 100;
         a.finished_at = None;
-        let row = list_row(&a, 130); // now=130, started=100 -> 30s
+        let defs = HashMap::new();
+        let models = ModelLabels {
+            defs: &defs,
+            session: "sonnet",
+        };
+        let row = list_row(&a, 130, models); // now=130, started=100 -> 30s
         assert!(row.contains("researcher"));
         assert!(row.contains("desc"));
         assert!(row.contains("30.0s"));
@@ -252,8 +278,36 @@ mod tests {
         assert!(row.starts_with('◐')); // running glyph
 
         // Test longer duration: 125 seconds = 2m 05s
-        let row2 = list_row(&a, 100 + 125);
+        let row2 = list_row(&a, 100 + 125, models);
         assert!(row2.contains("2m 05s"));
+    }
+
+    #[test]
+    fn list_row_labels_the_model_with_a_session_fallback() {
+        let mut a = agent(1, "researcher", SubAgentStatus::Running);
+        a.started_at = 100;
+        a.finished_at = None;
+        // No agent definition for this type → the session model is shown.
+        let empty = HashMap::new();
+        let row = list_row(
+            &a,
+            100,
+            ModelLabels {
+                defs: &empty,
+                session: "sonnet",
+            },
+        );
+        assert!(row.contains("researcher [sonnet]"), "{row}");
+        let defs = HashMap::from([("researcher".to_string(), "opus".to_string())]);
+        let row = list_row(
+            &a,
+            100,
+            ModelLabels {
+                defs: &defs,
+                session: "sonnet",
+            },
+        );
+        assert!(row.contains("researcher [opus]"), "{row}");
     }
 
     #[test]
@@ -299,7 +353,19 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| panel.render(f, f.area(), &agents, 130, &theme))
+            .draw(|f| {
+                panel.render(
+                    f,
+                    f.area(),
+                    &agents,
+                    130,
+                    ModelLabels {
+                        defs: &HashMap::new(),
+                        session: "sonnet",
+                    },
+                    &theme,
+                )
+            })
             .unwrap();
         let content: String = terminal
             .backend()

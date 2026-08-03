@@ -6,6 +6,7 @@ pub mod chat;
 pub mod dialog;
 pub mod diff;
 pub mod help;
+pub mod hud;
 pub mod input;
 pub mod layout;
 pub mod markdown;
@@ -17,6 +18,8 @@ pub mod subagents_sidebar;
 pub mod tabs;
 pub mod toast;
 pub mod todo;
+#[path = "tool-groups.rs"]
+pub mod tool_groups;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 

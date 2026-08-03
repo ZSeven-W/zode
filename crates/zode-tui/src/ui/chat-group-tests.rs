@@ -1,0 +1,267 @@
+//! Chat-view tests for the collapsed tool-activity summaries and the
+//! floating "jump to bottom" pill. Split out of `chat.rs`, which is already
+//! far past the per-file size guideline.
+
+use super::*;
+use crate::theme::ThemeStore;
+use ratatui::{backend::TestBackend, Terminal};
+
+fn test_meta() -> ChatRenderMeta<'static> {
+    ChatRenderMeta {
+        theme_name: "minimal",
+        model: "m",
+        cwd: std::path::Path::new("."),
+    }
+}
+
+fn joined_text(lines: &[Line<'static>]) -> String {
+    lines
+        .iter()
+        .map(plain_line_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One finished tool call as the transcript records it: the call row, its
+/// result row, and the token row the API reported alongside them.
+fn push_finished_call(chat: &mut ChatView, tool: &str, detail: &str) {
+    chat.push_tool_call(&format!("Tool {tool} {detail}"), tool);
+    chat.push_tool_result(&format!("Tool {tool} ok\n    some output"));
+    chat.push_usage("Usage ↑10 ↓5 · cache 15% (2)");
+}
+
+#[test]
+fn a_finished_run_of_tool_rows_collapses_to_one_summary_line() {
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    chat.push_user("build it");
+    push_finished_call(&mut chat, "Bash", "cargo build");
+    chat.end_turn();
+
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    let text = joined_text(&built.lines);
+    assert!(
+        text.contains("Ran 1 shell command"),
+        "three rows should read as one summary: {text}"
+    );
+    assert!(!text.contains("cargo build"), "call row must be folded");
+    assert!(!text.contains("some output"), "result row must be folded");
+    assert!(!text.contains("Usage"), "usage row must never stand alone");
+    assert_eq!(built.group_toggles.len(), 1, "the summary is clickable");
+}
+
+#[test]
+fn a_mixed_run_reads_as_one_sentence() {
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    push_finished_call(&mut chat, "Grep", "pattern=fn main");
+    push_finished_call(&mut chat, "Bash", "cargo test");
+    push_finished_call(&mut chat, "Bash", "cargo fmt");
+    chat.end_turn();
+
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    let text = joined_text(&built.lines);
+    assert!(
+        text.contains("Searched for 1 pattern, ran 2 shell commands"),
+        "one line for the whole run: {text}"
+    );
+    assert_eq!(built.group_toggles.len(), 1, "adjacent rows are one group");
+}
+
+#[test]
+fn assistant_prose_between_tools_splits_the_groups() {
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    push_finished_call(&mut chat, "Bash", "cargo build");
+    chat.push_delta("that failed, let me look");
+    push_finished_call(&mut chat, "Read", "src/main.rs");
+    chat.end_turn();
+
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    let text = joined_text(&built.lines);
+    assert!(text.contains("Ran 1 shell command"));
+    assert!(text.contains("Read 1 file"));
+    assert!(text.contains("that failed"), "prose stays between them");
+    assert_eq!(built.group_toggles.len(), 2);
+}
+
+#[test]
+fn a_bare_usage_row_renders_nothing_at_all() {
+    // The token row that trails a plain answer has no call to describe —
+    // it must not leave a stray summary line behind either.
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    chat.push_delta("here is the answer");
+    chat.push_usage("Usage ↑378 ↓46");
+    chat.end_turn();
+
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    let text = joined_text(&built.lines);
+    assert!(text.contains("here is the answer"));
+    assert!(
+        !text.contains("Usage"),
+        "usage leaked into the view: {text}"
+    );
+    assert!(built.group_toggles.is_empty(), "nothing to click");
+}
+
+#[test]
+fn the_running_group_stays_open_until_the_turn_ends() {
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    chat.push_user("build it");
+    push_finished_call(&mut chat, "Bash", "cargo build");
+
+    // Mid-turn: the tail run is live, so its rows are still on screen
+    // under an already-expanded header.
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    let text = joined_text(&built.lines);
+    assert!(
+        text.contains("▾ Ran 1 shell command"),
+        "live header: {text}"
+    );
+    assert!(text.contains("cargo build"), "in-flight rows stay visible");
+
+    // The turn ends: the same run folds itself away.
+    chat.end_turn();
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    let text = joined_text(&built.lines);
+    assert!(
+        text.contains("▸ Ran 1 shell command"),
+        "folded header: {text}"
+    );
+    assert!(!text.contains("cargo build"));
+}
+
+#[test]
+fn clicking_a_group_summary_reveals_the_rows_it_stands_for() {
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let meta = test_meta();
+    let mut chat = ChatView::new();
+    push_finished_call(&mut chat, "Bash", "cargo build");
+    chat.end_turn();
+    let area = Rect::new(0, 0, 80, 24);
+
+    // Paint once so last_render_start reflects a real frame.
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| chat.render(f, area, &theme, meta))
+        .unwrap();
+
+    let built = chat.build_lines(&theme, meta, 80);
+    let (&summary_line, &anchor) = built
+        .group_toggles
+        .iter()
+        .next()
+        .expect("one activity group");
+    assert!(!chat.messages[anchor].group_open);
+
+    assert!(chat.toggle_collapse_at(&theme, meta, area, summary_line as u16));
+    assert!(chat.messages[anchor].group_open, "click opens the group");
+
+    let built = chat.build_lines(&theme, meta, 80);
+    let text = joined_text(&built.lines);
+    assert!(text.contains("cargo build"), "call row revealed: {text}");
+    assert!(text.contains("Usage"), "usage row revealed too: {text}");
+    // The rows inside keep their own folds, one line each.
+    assert!(text.contains("(+1)"), "result output still folded: {text}");
+
+    // Clicking the header again folds the group back up.
+    assert!(chat.toggle_collapse_at(&theme, meta, area, summary_line as u16));
+    assert!(!chat.messages[anchor].group_open);
+}
+
+#[test]
+fn expand_all_reveals_grouped_rows_too() {
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    push_finished_call(&mut chat, "Bash", "cargo build");
+    chat.end_turn();
+
+    assert!(chat.toggle_all_collapsed(), "first press expands all");
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    let text = joined_text(&built.lines);
+    assert!(text.contains("cargo build"), "group opened: {text}");
+    assert!(
+        text.contains("some output"),
+        "inner folds opened too: {text}"
+    );
+
+    assert!(!chat.toggle_all_collapsed(), "second press folds all");
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    assert!(!joined_text(&built.lines).contains("cargo build"));
+}
+
+#[test]
+fn hiding_thinking_merges_the_runs_it_separated() {
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    push_finished_call(&mut chat, "Bash", "cargo build");
+    chat.push_thinking_delta("now let me search");
+    push_finished_call(&mut chat, "Grep", "pattern=fn main");
+    chat.end_turn();
+
+    // Thinking shown: it breaks the run in two, as any prose would.
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    assert_eq!(built.group_toggles.len(), 2);
+
+    // Thinking hidden: the two runs are adjacent and read as one line.
+    chat.set_display_prefs(false, true);
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    assert_eq!(built.group_toggles.len(), 1);
+    assert!(joined_text(&built.lines).contains("Ran 1 shell command, searched for 1 pattern"));
+}
+
+#[test]
+fn the_jump_pill_floats_over_the_bottom_row_only_when_far_from_the_tail() {
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let meta = test_meta();
+    let mut view = ChatView::new();
+    for i in 0..80 {
+        view.push_user(&format!("question number {i}"));
+    }
+    let backend = TestBackend::new(40, 10);
+    let mut term = Terminal::new(backend).unwrap();
+    let painted = |term: &Terminal<TestBackend>| -> String {
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    };
+
+    // Following the tail, and a small scroll-up: no pill.
+    term.draw(|f| view.render(f, f.area(), &theme, meta))
+        .unwrap();
+    assert!(!painted(&term).contains("Jump to bottom"));
+    assert!(!view.jump_pill_hit(20, 9));
+
+    view.scroll_up(15);
+    term.draw(|f| view.render(f, f.area(), &theme, meta))
+        .unwrap();
+    assert!(
+        !painted(&term).contains("Jump to bottom"),
+        "a one-and-a-half viewport scroll must not flash the pill"
+    );
+
+    // Well past two viewports: the pill appears on the bottom row and is
+    // clickable there.
+    view.scroll_up(40);
+    term.draw(|f| view.render(f, f.area(), &theme, meta))
+        .unwrap();
+    let content = painted(&term);
+    assert!(content.contains("Jump to bottom"), "no pill: {content}");
+    let pill = view.last_pill.expect("pill rect recorded");
+    assert_eq!(pill.y, 9, "pill sits on the bottom row of the viewport");
+    assert!(view.jump_pill_hit(pill.x, pill.y));
+    assert!(!view.jump_pill_hit(pill.x, pill.y - 1));
+
+    // Jumping back to the tail retires it.
+    view.scroll_to_bottom();
+    term.draw(|f| view.render(f, f.area(), &theme, meta))
+        .unwrap();
+    assert!(!painted(&term).contains("Jump to bottom"));
+    assert!(view.last_pill.is_none());
+}

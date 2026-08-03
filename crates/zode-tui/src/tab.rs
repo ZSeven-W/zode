@@ -188,6 +188,15 @@ pub struct SessionTab {
     pub turn_started_at: Option<std::time::Instant>,
     /// Tool calls seen during the in-flight turn, for the completion footer.
     pub turn_tool_count: u32,
+    /// Per-tool tally for the in-flight turn, driving the status HUD's tally
+    /// row. Cleared when a turn starts; moved into `last_turn_tools` when the
+    /// turn ends, so the row keeps telling the last turn's story while idle.
+    pub turn_tools: crate::ui::hud::ToolTally,
+    /// The most recent COMPLETED turn's tally, shown between turns.
+    pub last_turn_tools: crate::ui::hud::ToolTally,
+    /// Cached count of the instruction files (AGENTS.md / CLAUDE.md) that apply
+    /// to this tab's cwd, refreshed on the throttled section poll.
+    pub instruction_files: usize,
     /// The scheduler job (if any) that queued the CURRENT/just-started turn's
     /// prompt. Set from `App::sched_pending` at submit time, consumed at
     /// `TurnDone` to update `App::sched_fail_streak` — a user-typed prompt
@@ -251,7 +260,31 @@ impl SessionTab {
             goal_started_at: None,
             turn_started_at: None,
             turn_tool_count: 0,
+            turn_tools: Default::default(),
+            last_turn_tools: Default::default(),
+            instruction_files: 0,
             active_sched_job: None,
+        }
+    }
+
+    /// Roll the in-flight turn's tool tally into `last_turn_tools` so the HUD
+    /// keeps showing it while the tab is idle. A turn that used no tools leaves
+    /// the previous tally alone, so a second end-of-turn path (forced stop then
+    /// `TurnDone`) can't blank the row.
+    pub fn settle_turn_tools(&mut self) {
+        let finished = std::mem::take(&mut self.turn_tools);
+        if !finished.is_empty() {
+            self.last_turn_tools = finished;
+        }
+    }
+
+    /// The tally the HUD should show: the live turn's while it has anything,
+    /// otherwise the last completed turn's.
+    pub fn hud_tally(&self) -> &crate::ui::hud::ToolTally {
+        if self.turn_tools.is_empty() {
+            &self.last_turn_tools
+        } else {
+            &self.turn_tools
         }
     }
 
