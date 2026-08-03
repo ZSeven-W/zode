@@ -18,6 +18,7 @@ pub enum ActionId {
     OpenSubAgents,
     ToggleSidebar,
     ToggleFold,
+    ToggleYolo,
     NewTab,
     CloseTab,
     SwitchTab,
@@ -99,6 +100,11 @@ pub static KEYMAP: &[Binding] = &[
         help: "Expand/collapse tool & thinking blocks",
     },
     Binding {
+        keys: "Shift+Tab",
+        action: ActionId::ToggleYolo,
+        help: "Toggle bypass-approval mode",
+    },
+    Binding {
         keys: "Ctrl+T",
         action: ActionId::NewTab,
         help: "New session tab",
@@ -134,5 +140,6 @@ mod tests {
         assert!(KEYMAP.iter().any(|b| b.action == ActionId::Submit));
         assert!(KEYMAP.iter().any(|b| b.action == ActionId::OpenSettings));
         assert!(KEYMAP.iter().any(|b| b.action == ActionId::OpenHelp));
+        assert!(KEYMAP.iter().any(|b| b.action == ActionId::ToggleYolo));
     }
 }

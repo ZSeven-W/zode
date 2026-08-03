@@ -1193,6 +1193,7 @@ slash commands (e.g. `/<name>`) and can be invoked directly.
 | `Cmd/Ctrl+1`–`9` / `Cmd/Ctrl+Tab` | Jump to / cycle tabs |
 | `Cmd/Ctrl+B` | Background tasks panel |
 | `Cmd/Ctrl+G` | Toggle the sidebar |
+| `Shift+Tab` | Toggle between YOLO (auto-approve) and ask mode |
 | `F1` | Help |
 | `PgUp` / `PgDn` | Scroll the conversation |
 | `Home` / `End` | Jump to the top / latest of the conversation |
