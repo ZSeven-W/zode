@@ -1692,19 +1692,24 @@ impl ConfigManager {
     /// Update `<cwd>/.zode/state.json` via a closure on its JSON object,
     /// creating `.zode/` as needed. Used to persist sandbox state and
     /// allow-always tool permissions per project so they survive restarts.
+    ///
+    /// The whole read-modify-write runs under a cross-process advisory lock and
+    /// publishes through an atomic rename, so two zode processes finishing a
+    /// turn at the same time cannot lose each other's fields to a
+    /// last-writer-wins race.
     pub fn update_project_state(
         cwd: &Path,
         f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
     ) -> Result<(), CoreError> {
         std::fs::create_dir_all(cwd.join(".zode"))?;
+        let path = Self::project_state_path(cwd);
+        let _lock = StateFileLock::acquire(&path)?;
         let mut state = Self::read_project_state(cwd);
         if let Some(obj) = state.as_object_mut() {
             f(obj);
         }
-        std::fs::write(
-            Self::project_state_path(cwd),
-            serde_json::to_string_pretty(&state)?,
-        )?;
+        let json = serde_json::to_string_pretty(&state)?;
+        write_atomic(&path, json.as_bytes())?;
         Ok(())
     }
 
@@ -1757,6 +1762,47 @@ impl ConfigManager {
         let json = serde_json::to_string_pretty(cfg)?;
         write_atomic(&Self::global_path_in(config_dir), json.as_bytes())?;
         Ok(())
+    }
+}
+
+/// Exclusive cross-process advisory lock held for a state file's whole
+/// read-modify-write.
+///
+/// The lock lives in a sibling `<target>.lock` rather than on the target
+/// itself, so [`write_atomic`]'s rename can replace the target while the guard
+/// is alive. Deliberately minimal and private: session persistence now lives in
+/// `zode-app-runtime` (whose `persistence::AdvisoryFileLock` this mirrors), and
+/// `zode-core` cannot depend on that crate — the dependency runs the other way.
+struct StateFileLock {
+    file: std::fs::File,
+}
+
+impl StateFileLock {
+    /// Blocks until the lock is available.
+    fn acquire(target: &Path) -> Result<Self, CoreError> {
+        let mut lock_path = target.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        let lock_path = PathBuf::from(lock_path);
+        if let Some(parent) = lock_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        fs4::fs_std::FileExt::lock_exclusive(&file)?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for StateFileLock {
+    fn drop(&mut self) {
+        let _ = fs4::fs_std::FileExt::unlock(&self.file);
     }
 }
 
