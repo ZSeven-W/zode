@@ -8498,8 +8498,11 @@ impl TuiApp {
                 && !submitted_text.trim().is_empty()
                 && self.active_tab().pending_images.is_empty()
             {
+                // The model sees the wrapped form (an interjection outranks
+                // the current plan — weak models otherwise note it and keep
+                // going); the chat bubble below shows only the user's text.
                 let blocks = vec![agent::message::ContentBlock::Text {
-                    text: submitted_text.to_string(),
+                    text: steer_payload(&submitted_text),
                 }];
                 if self.active_tab().engine.steer(blocks) {
                     self.active_tab_mut().chat.push_user(&submitted_text);
@@ -11678,6 +11681,18 @@ fn windows_burst_needs_clipboard(events: &[CtEvent]) -> bool {
 /// Consecutive auto-compaction failures per tab before the auto trigger stops
 /// firing (manual `/compact` stays available; any success resets the count).
 const AUTO_COMPACT_MAX_FAILURES: u32 = 3;
+
+/// Wrap a mid-turn interjection for the model: an explicit priority framing so
+/// the running turn treats it as an override, not a side note — weak models
+/// otherwise acknowledge a steered constraint ("only search in X") and keep
+/// executing the old plan. The chat transcript shows only the raw user text.
+fn steer_payload(text: &str) -> String {
+    format!(
+        "<system-reminder>The user interjected mid-task with the instruction below. It takes \
+         precedence over your current plan and any earlier approach — comply with it \
+         immediately, starting with your very next action.</system-reminder>\n{text}"
+    )
+}
 
 /// Halt the goal auto-loop for a tab: clear the active flag, reset the turn
 /// counter, and PURGE any goal-loop prompts still sitting in the input queue so
