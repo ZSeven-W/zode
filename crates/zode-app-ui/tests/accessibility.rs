@@ -313,6 +313,7 @@ fn typed_secondary_panes_expose_only_visible_shared_geometry() {
             turn_id: TurnId::new(),
             completed_at_ms: None,
             result_summary: None,
+            model: None,
         }];
     }
     let overflow = WorkspaceSnapshot::build(&state, 1800.0, 1080.0, Insets::ZERO);

@@ -12,10 +12,11 @@ use zode_core::config::ConfigManager;
 use zode_core::plugin_market::installer::{self, plugins_root};
 use zode_core::plugin_market::manifest::{Capability, PluginManifest};
 use zode_core::plugin_market::trust::{TrustStatus, TrustStore};
+use zode_core::plugin_market::update::{self, PendingUpdate, UpdateCheck};
 use zode_core::plugin_market::PluginMarketError;
 use zode_node_protocol::{
     InstalledPluginSummary, PluginCapabilityKind, PluginCapabilitySummary, PluginTrustItem,
-    PluginTrustReview, PluginTrustState,
+    PluginTrustReview, PluginTrustState, PluginUpdateAvailable, PluginUpdateCheck,
 };
 
 pub(crate) async fn install_plugin(
@@ -28,6 +29,60 @@ pub(crate) async fn install_plugin(
         .await
         .map(|_| ())
         .map_err(plugin_market_error_message)
+}
+
+/// Fetches the plugin's pinned ref and reports whether the remote moved
+/// ahead. Read-only - the worktree is only touched by [`apply_plugin_update`].
+/// Slow (network I/O), so it runs on the same background task as the install.
+pub(crate) async fn check_plugin_update(
+    plugin_id: &str,
+    config_dir: Option<&Path>,
+) -> Result<PluginUpdateCheck, String> {
+    let config_dir = resolve_config_dir(config_dir)?;
+    let check = update::check_update(plugin_id, &config_dir)
+        .await
+        .map_err(plugin_market_error_message)?;
+    Ok(PluginUpdateCheck {
+        plugin_id: plugin_id.to_string(),
+        available: match check {
+            UpdateCheck::UpToDate { .. } => None,
+            UpdateCheck::Available(pending) => Some(PluginUpdateAvailable {
+                summary: update_summary(&pending),
+                target_commit: pending.to,
+            }),
+        },
+    })
+}
+
+/// Fast-forwards the plugin to its ref's current remote tip and re-scans its
+/// capabilities. Trust records are deliberately left alone: the caller
+/// refreshes the installed list right after, and the existing drift check
+/// re-gates any capability whose executable content changed.
+pub(crate) async fn apply_plugin_update(
+    plugin_id: &str,
+    config_dir: Option<&Path>,
+) -> Result<(), String> {
+    let config_dir = resolve_config_dir(config_dir)?;
+    update::apply_update(plugin_id, &config_dir)
+        .await
+        .map(|_| ())
+        .map_err(plugin_market_error_message)
+}
+
+/// zh-CN rendering of `PendingUpdate` - core keeps the structured fields and
+/// an English fallback; the user-facing string is composed here alongside
+/// every other localized plugin-market message.
+fn update_summary(pending: &PendingUpdate) -> String {
+    let head = format!(
+        "{} → {}",
+        update::short_commit(&pending.from),
+        update::short_commit(&pending.to)
+    );
+    match pending.commits {
+        Some(count) if pending.commits_truncated => format!("{head}（{count}+ 个提交）"),
+        Some(count) => format!("{head}（{count} 个提交）"),
+        None => head,
+    }
 }
 
 pub(crate) fn uninstall_plugin(plugin_id: &str, config_dir: Option<&Path>) -> Result<(), String> {
@@ -193,6 +248,9 @@ fn plugin_market_error_message(error: PluginMarketError) -> String {
         PluginMarketError::UnsafePath(message) => format!("插件来源不安全：{message}"),
         PluginMarketError::GitFailed(message) => format!("Git 操作失败：{message}"),
         PluginMarketError::NotInstalled(id) => format!("插件未安装：{id}"),
+        PluginMarketError::NotGitBacked(id) => {
+            format!("插件 {id} 不是通过 git 安装的，无法检查更新")
+        }
         PluginMarketError::Io(error) => format!("文件操作失败：{error}"),
         PluginMarketError::Manifest(message) => format!("插件清单格式错误：{message}"),
     }
@@ -349,6 +407,88 @@ mod tests {
         assert!(list_installed_plugins(Some(config_dir.path()))
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_check_then_apply_resyncs_and_re_gates_the_changed_hook() {
+        let fixture = tempfile::tempdir().unwrap();
+        init_fixture_repo(fixture.path());
+        let config_dir = tempfile::tempdir().unwrap();
+        let spec = fixture.path().to_string_lossy().to_string();
+        install_plugin(&spec, None, Some(config_dir.path()))
+            .await
+            .unwrap();
+        let plugin_id = list_installed_plugins(Some(config_dir.path())).unwrap()[0]
+            .id
+            .clone();
+        grant_plugin_trust(&plugin_id, None, Some(config_dir.path())).unwrap();
+
+        assert_eq!(
+            check_plugin_update(&plugin_id, Some(config_dir.path()))
+                .await
+                .unwrap()
+                .available,
+            None
+        );
+
+        std::fs::write(
+            fixture.path().join("hooks/check.sh"),
+            "#!/bin/sh\necho rewritten\n",
+        )
+        .unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .current_dir(fixture.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "rewrite the hook"]);
+
+        let check = check_plugin_update(&plugin_id, Some(config_dir.path()))
+            .await
+            .unwrap();
+        let available = check.available.expect("an update should be available");
+        assert!(available.summary.contains('→'));
+        assert!(available.summary.contains("1 个提交"), "{available:?}");
+
+        apply_plugin_update(&plugin_id, Some(config_dir.path()))
+            .await
+            .unwrap();
+
+        match &list_installed_plugins(Some(config_dir.path())).unwrap()[0].trust {
+            PluginTrustState::Drifted(keys) => {
+                assert_eq!(
+                    keys,
+                    &vec!["hook:before_tool_use:Bash:hooks/check.sh".to_string()]
+                );
+            }
+            other => panic!("expected the rewritten hook to need re-review, got {other:?}"),
+        }
+        let review = plugin_trust_review(&plugin_id, Some(config_dir.path())).unwrap();
+        assert!(review
+            .items
+            .iter()
+            .any(|item| item.content.contains("rewritten")));
+    }
+
+    #[tokio::test]
+    async fn update_check_on_a_hand_placed_plugin_dir_is_reported_in_chinese() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let dir = plugins_root(config_dir.path()).join("acme__manual");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{"repo":"acme/manual","ref":"HEAD","installedAt":0,"capabilities":[]}"#,
+        )
+        .unwrap();
+
+        let error = check_plugin_update("acme__manual", Some(config_dir.path()))
+            .await
+            .unwrap_err();
+        assert!(error.contains("无法检查更新"), "{error}");
     }
 
     #[tokio::test]

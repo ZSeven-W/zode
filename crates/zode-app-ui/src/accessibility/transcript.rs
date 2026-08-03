@@ -5,9 +5,14 @@ use std::collections::BTreeMap;
 use zode_app_model::{MessageFeedback, TranscriptItem, ZodeAppState};
 
 use crate::widgets::transcript::{
-    item_has_turn_divider, preview_available, turn_label, TRANSCRIPT_BACK_TO_BOTTOM_ID,
+    item_has_turn_divider, preview_available, subagent_chip_label, turn_label,
+    TRANSCRIPT_BACK_TO_BOTTOM_ID,
 };
-use crate::{AnchorRail, ApprovalCard, ThreadTranscript, ToolCard, WorkspaceLayout};
+use crate::{
+    AnchorRail, ApprovalCard, ThreadTranscript, ToolCard, TranscriptFindBar, WorkspaceLayout,
+    TRANSCRIPT_FIND_CLOSE_ID, TRANSCRIPT_FIND_INPUT_ID, TRANSCRIPT_FIND_NEXT_ID,
+    TRANSCRIPT_FIND_PREVIOUS_ID, TRANSCRIPT_FIND_SURFACE_ID,
+};
 
 use super::{next_order, node, InteractionNode};
 
@@ -337,6 +342,16 @@ pub(super) fn append_transcript_nodes(
                 None,
                 CursorHint::Default,
             )),
+            TranscriptItem::SubagentChip(chip) => nodes.push(node(
+                ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
+                item_layout.visible_rect,
+                Role::Status,
+                &subagent_chip_label(chip),
+                None,
+                Vec::new(),
+                None,
+                CursorHint::Default,
+            )),
             TranscriptItem::Status { message, .. } => nodes.push(node(
                 ThreadTranscript::semantic_widget_id(session, item_layout.index, item),
                 item_layout.visible_rect,
@@ -401,6 +416,81 @@ pub(super) fn append_transcript_nodes(
             vec![Action::Click, Action::Focus],
             next_order(focus_order),
             CursorHint::Pointer,
+        ));
+    }
+
+    append_find_bar_nodes(nodes, layout, focus_order, state);
+}
+
+/// The find bar floats over the transcript, so its nodes must come *after*
+/// every item node above: `WorkspaceSnapshot::hit_test` scans in reverse and
+/// takes the last match, which is what keeps a click on the bar from falling
+/// through to the message underneath it.
+fn append_find_bar_nodes(
+    nodes: &mut Vec<InteractionNode>,
+    layout: &WorkspaceLayout,
+    focus_order: &mut u32,
+    state: &ZodeAppState,
+) {
+    let Some(bar) = TranscriptFindBar::layout(layout.transcript, state) else {
+        return;
+    };
+    // Blocks blank-surface pointer hits from reaching the transcript behind
+    // the bar, the same job `GLOBAL_SEARCH_SURFACE_ID` does for its overlay.
+    // The match counter has no node of its own - it is not interactive, and
+    // folding it into this group's name is how a screen reader hears it
+    // without an extra stop.
+    nodes.push(node(
+        TRANSCRIPT_FIND_SURFACE_ID,
+        bar.surface,
+        Role::Group,
+        &format!("在对话中查找，{}", bar.counter_label),
+        None,
+        vec![Action::Focus],
+        None,
+        CursorHint::Default,
+    ));
+    nodes.push(node(
+        TRANSCRIPT_FIND_INPUT_ID,
+        bar.input,
+        Role::SearchInput,
+        "在对话中查找",
+        Some(
+            state
+                .current_session_presentation()
+                .map(|presentation| presentation.find.query.clone())
+                .unwrap_or_default(),
+        ),
+        vec![Action::Focus, Action::SetValue],
+        next_order(focus_order),
+        CursorHint::Text,
+    ));
+    for (id, rect, label) in [
+        (TRANSCRIPT_FIND_PREVIOUS_ID, bar.previous, "上一个匹配"),
+        (TRANSCRIPT_FIND_NEXT_ID, bar.next, "下一个匹配"),
+        (TRANSCRIPT_FIND_CLOSE_ID, bar.close, "关闭查找"),
+    ] {
+        // A stepper with nothing to step through registers as a plain label:
+        // no actions means `hit_test` skips it, so it cannot be clicked or
+        // focused into while it paints disabled.
+        let enabled = bar.navigable || id == TRANSCRIPT_FIND_CLOSE_ID;
+        nodes.push(node(
+            id,
+            rect,
+            if enabled { Role::Button } else { Role::Label },
+            label,
+            None,
+            if enabled {
+                vec![Action::Click, Action::Focus]
+            } else {
+                Vec::new()
+            },
+            enabled.then(|| next_order(focus_order)).flatten(),
+            if enabled {
+                CursorHint::Pointer
+            } else {
+                CursorHint::Default
+            },
         ));
     }
 }

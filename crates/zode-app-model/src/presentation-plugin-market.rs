@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use zode_node_protocol::{InstalledPluginSummary, PluginTrustReview};
+use zode_node_protocol::{InstalledPluginSummary, PluginTrustReview, PluginUpdateAvailable};
 
 use crate::LoadState;
 
@@ -26,10 +26,11 @@ pub enum PluginAddStatus {
 pub struct PluginDetailState {
     pub plugin_id: String,
     pub mode: PluginDetailMode,
-    /// A plain client-side notice - currently only used by the "检查更新"
-    /// M1 stub (real update/drift detection is M2, see
-    /// `docs/proposals/plugin-marketplace.md`).
+    /// A plain client-side notice line above the overlay's footer buttons -
+    /// the slot every one-off outcome (uninstall failure, trust-grant
+    /// failure, a finished update) writes to.
     pub notice: Option<String>,
+    pub update: PluginUpdateState,
 }
 
 impl PluginDetailState {
@@ -38,6 +39,52 @@ impl PluginDetailState {
             plugin_id: plugin_id.into(),
             mode: PluginDetailMode::Overview,
             notice: None,
+            update: PluginUpdateState::Idle,
+        }
+    }
+}
+
+/// The update check/apply state machine driving the overlay's "检查更新" and
+/// "更新" buttons.
+///
+/// ```text
+///   Idle --CheckPluginUpdate--> Checking
+///   Checking --query ok, remote unchanged--> UpToDate
+///   Checking --query ok, remote ahead-----> Available
+///   Checking --query failed---------------> CheckFailed
+///   UpToDate | Available | CheckFailed --CheckPluginUpdate--> Checking
+///   Available --ApplyPluginUpdate--> Applying
+///   Applying --ok-----> UpToDate    (+ notice)
+///   Applying --failed-> Available   (+ notice, checkout rolled back)
+/// ```
+///
+/// Closing or reopening the overlay rebuilds `PluginDetailState`, so the
+/// machine always restarts at `Idle` for a freshly opened plugin.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PluginUpdateState {
+    #[default]
+    Idle,
+    Checking,
+    UpToDate,
+    Available(PluginUpdateAvailable),
+    /// Carries the update being applied so the overlay keeps showing what is
+    /// about to land while the git fetch/reset runs.
+    Applying(PluginUpdateAvailable),
+    CheckFailed(String),
+}
+
+impl PluginUpdateState {
+    /// True while a git operation is in flight - the overlay disables both
+    /// buttons so a second click cannot race the first.
+    pub fn busy(&self) -> bool {
+        matches!(self, Self::Checking | Self::Applying(_))
+    }
+
+    /// The update an "更新" press would apply, if one is pending.
+    pub fn pending(&self) -> Option<&PluginUpdateAvailable> {
+        match self {
+            Self::Available(available) | Self::Applying(available) => Some(available),
+            _ => None,
         }
     }
 }

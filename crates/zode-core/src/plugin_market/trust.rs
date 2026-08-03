@@ -213,6 +213,8 @@ mod tests {
             repo: "acme/tools".into(),
             reference: reference.into(),
             installed_at: 0,
+            commit: None,
+            updated_at: None,
             capabilities: caps,
         }
     }

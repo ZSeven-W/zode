@@ -3,7 +3,7 @@
 //! concurrently; "current tab" is session state — see spec).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use async_trait::async_trait;
 
@@ -11,6 +11,7 @@ use crate::config::BrowserConfig;
 
 use super::backend::{BrowserBackend, BrowserError, BrowserTarget, ScreencastFrame};
 use super::bridge::{BridgeBackend, BridgeServer, PairingHandle, TaskReceiver, TaskServerFrame};
+use super::site_auth::SiteAuthStore;
 
 #[async_trait]
 pub trait BackendFactory: Send + Sync + std::fmt::Debug {
@@ -26,6 +27,10 @@ pub struct BrowserSession {
     target: StdMutex<BrowserTarget>,
     slot: tokio::sync::Mutex<Option<Arc<dyn BrowserBackend>>>,
     perm_flags: StdMutex<Vec<(String, Arc<AtomicBool>)>>,
+    /// Per-origin "allow always" grants, loaded from disk on first use —
+    /// lazily, so merely constructing a session (tests do it a lot) does
+    /// no I/O.
+    site_auth: OnceLock<Arc<SiteAuthStore>>,
 }
 
 /// Holding a lease holds the slot mutex: backend ops performed through
@@ -58,7 +63,15 @@ impl BrowserSession {
             target: StdMutex::new(target),
             slot: tokio::sync::Mutex::new(None),
             perm_flags: StdMutex::new(Vec::new()),
+            site_auth: OnceLock::new(),
         })
+    }
+
+    /// Shared per-origin grant store for the gated browser tools.
+    pub fn site_auth(&self) -> Arc<SiteAuthStore> {
+        self.site_auth
+            .get_or_init(SiteAuthStore::load_default)
+            .clone()
     }
 
     pub async fn lease(&self) -> Result<BackendLease<'_>, BrowserError> {

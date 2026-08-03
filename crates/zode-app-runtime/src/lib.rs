@@ -26,7 +26,7 @@ pub use computer_status::{
 };
 pub use engine_backend::{
     persist_project_allow, DriverEventStream, EngineBackend, EngineDriver, EventNormalizer,
-    PersistedApproval,
+    PersistedApproval, SubagentModels,
 };
 pub use event_sink::EventSink;
 pub use local_endpoint::LocalAgentEndpoint;

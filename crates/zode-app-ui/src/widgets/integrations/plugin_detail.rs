@@ -5,12 +5,11 @@
 //! per-item or all-at-once grant) - rather than a stack of separate dialogs,
 //! per the design doc's "hard gate before enabling" requirement.
 
-use jian_widgets::{HorizontalAlign, Painter, Rect};
-use zode_app_model::{LoadState, PluginDetailMode, ZodeAppState};
+use jian_widgets::Rect;
+use zode_app_model::{LoadState, PluginDetailMode, PluginUpdateState, ZodeAppState};
 use zode_node_protocol::{PluginCapabilityKind, PluginCapabilitySummary, PluginTrustState};
 
-use crate::theme::paint_elevated_surface;
-use crate::{paint_single_line, stable_widget_id, Button, ButtonVariant, WidgetId, ZodeTheme};
+use crate::{stable_widget_id, WidgetId};
 
 pub const PLUGIN_DETAIL_CLOSE_ID: WidgetId = WidgetId(305);
 pub const PLUGIN_DETAIL_UNINSTALL_ID: WidgetId = WidgetId(306);
@@ -20,13 +19,16 @@ pub const PLUGIN_DETAIL_CHECK_UPDATE_ID: WidgetId = WidgetId(309);
 pub const PLUGIN_DETAIL_TRUST_ALL_ID: WidgetId = WidgetId(310);
 pub const PLUGIN_DETAIL_TRUST_CANCEL_ID: WidgetId = WidgetId(311);
 pub const PLUGIN_DETAIL_TRUST_GRANT_SELECTED_ID: WidgetId = WidgetId(312);
+pub const PLUGIN_DETAIL_APPLY_UPDATE_ID: WidgetId = WidgetId(313);
 
 const PANEL_W: f32 = 520.0;
-const PAD: f32 = 20.0;
-const HEADER_H: f32 = 64.0;
+pub(super) const PAD: f32 = 20.0;
+pub(super) const HEADER_H: f32 = 64.0;
 const ROW_H: f32 = 30.0;
 const BUTTON_H: f32 = 32.0;
 const FOOTER_H: f32 = 64.0;
+/// Height one stacked text line above the footer buttons occupies.
+pub(super) const NOTICE_LINE_H: f32 = 22.0;
 /// Mirrors `plugin_rows::MAX_VISIBLE_PLUGIN_ROWS`'s "show a few, don't build
 /// a second scroll region" convention.
 const MAX_VISIBLE_ROWS: usize = 8;
@@ -66,11 +68,33 @@ pub struct TrustItemRowLayout {
     pub rect: Rect,
 }
 
+/// The overview footer's update controls, derived from
+/// [`PluginUpdateState`]. `apply` only exists once a check reported a
+/// pending update - there is nothing to apply before that.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateControls {
+    pub check: Rect,
+    pub check_label: String,
+    pub check_disabled: bool,
+    pub apply: Option<Rect>,
+    pub apply_label: String,
+    pub apply_disabled: bool,
+    pub status: Option<UpdateStatusLine>,
+}
+
+/// One line above the footer reporting the last check/apply outcome.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateStatusLine {
+    pub text: String,
+    /// Painted in the destructive color - a failed check, never a summary.
+    pub error: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PluginDetailBody {
     Overview {
         capabilities: Vec<CapabilityRowLayout>,
-        check_update: Rect,
+        update: UpdateControls,
         uninstall: Rect,
         notice: Option<String>,
     },
@@ -116,9 +140,16 @@ impl PluginDetailOverlayLayout {
                 .unwrap_or(1),
             PluginDetailMode::ConfirmUninstall | PluginDetailMode::Uninstalling => 0,
         };
+        let update_status = update_status_line(&detail.update);
         let extra = match detail.mode {
             PluginDetailMode::ConfirmUninstall => 64.0,
             PluginDetailMode::Uninstalling => 40.0,
+            // The status line and the notice stack above the footer buttons;
+            // each one present grows the panel so neither overlaps them.
+            PluginDetailMode::Overview => {
+                (usize::from(update_status.is_some()) + usize::from(detail.notice.is_some())) as f32
+                    * NOTICE_LINE_H
+            }
             _ => 0.0,
         };
         let panel_h = HEADER_H + (body_rows as f32) * ROW_H + FOOTER_H + extra + PAD;
@@ -158,7 +189,12 @@ impl PluginDetailOverlayLayout {
                 let footer_y = panel.origin.y + panel.size.y - FOOTER_H + 12.0;
                 PluginDetailBody::Overview {
                     capabilities,
-                    check_update: Rect::xywh(panel.origin.x + PAD, footer_y, 96.0, BUTTON_H),
+                    update: update_controls(
+                        &detail.update,
+                        update_status,
+                        panel.origin.x + PAD,
+                        footer_y,
+                    ),
                     uninstall: Rect::xywh(
                         panel.origin.x + panel.size.x - PAD - 88.0,
                         footer_y,
@@ -250,6 +286,63 @@ impl PluginDetailOverlayLayout {
     }
 }
 
+const CHECK_BUTTON_W: f32 = 96.0;
+const APPLY_BUTTON_W: f32 = 76.0;
+const BUTTON_GAP: f32 = 8.0;
+
+/// Maps the update state machine onto the footer's two buttons and its
+/// status line. Both buttons are disabled while git is running so a second
+/// press cannot race the in-flight operation.
+fn update_controls(
+    update: &PluginUpdateState,
+    status: Option<UpdateStatusLine>,
+    left_x: f32,
+    footer_y: f32,
+) -> UpdateControls {
+    let busy = update.busy();
+    let applying = matches!(update, PluginUpdateState::Applying(_));
+    UpdateControls {
+        check: Rect::xywh(left_x, footer_y, CHECK_BUTTON_W, BUTTON_H),
+        check_label: if matches!(update, PluginUpdateState::Checking) {
+            "检查中…".to_owned()
+        } else {
+            "检查更新".to_owned()
+        },
+        check_disabled: busy,
+        apply: update.pending().map(|_| {
+            Rect::xywh(
+                left_x + CHECK_BUTTON_W + BUTTON_GAP,
+                footer_y,
+                APPLY_BUTTON_W,
+                BUTTON_H,
+            )
+        }),
+        apply_label: if applying {
+            "更新中…".to_owned()
+        } else {
+            "更新".to_owned()
+        },
+        apply_disabled: busy,
+        status,
+    }
+}
+
+fn update_status_line(update: &PluginUpdateState) -> Option<UpdateStatusLine> {
+    let (text, error) = match update {
+        PluginUpdateState::Idle => return None,
+        PluginUpdateState::Checking => ("正在检查更新…".to_owned(), false),
+        PluginUpdateState::UpToDate => ("已是最新版本".to_owned(), false),
+        PluginUpdateState::Available(available) => {
+            (format!("发现更新：{}", available.summary), false)
+        }
+        PluginUpdateState::Applying(available) => {
+            (format!("正在更新到 {}…", available.summary), false)
+        }
+        PluginUpdateState::CheckFailed(reason) => (format!("检查更新失败：{reason}"), true),
+    };
+    Some(UpdateStatusLine { text, error })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn capability_row(
     plugin_id: &str,
@@ -309,358 +402,4 @@ fn catalog_enabled(state: &ZodeAppState, source_id: &str) -> Option<bool> {
         .all_entries()
         .find(|entry| entry.source_id.as_deref() == Some(source_id))
         .map(|entry| entry.availability != zode_app_model::Availability::Disabled)
-}
-
-pub fn paint(
-    painter: &mut dyn Painter,
-    scrim: Rect,
-    layout: &PluginDetailOverlayLayout,
-    theme: &ZodeTheme,
-) {
-    painter.fill_rect(scrim, theme.tokens.background.with_alpha(0.5));
-    paint_elevated_surface(painter, layout.panel, 14.0, theme);
-    painter.fill_round_rect(layout.panel, 14.0, theme.tokens.card);
-    painter.stroke_round_rect(layout.panel, 14.0, theme.tokens.border, 1.0);
-
-    paint_single_line(
-        painter,
-        &layout.repo,
-        Rect::xywh(
-            layout.panel.origin.x + PAD,
-            layout.panel.origin.y + 16.0,
-            layout.panel.size.x - PAD * 2.0 - 40.0,
-            22.0,
-        ),
-        15.0,
-        650,
-        theme.tokens.foreground,
-        HorizontalAlign::Start,
-    );
-    paint_single_line(
-        painter,
-        &format!("ref: {}", layout.reference),
-        Rect::xywh(
-            layout.panel.origin.x + PAD,
-            layout.panel.origin.y + 38.0,
-            layout.panel.size.x - PAD * 2.0 - 40.0,
-            16.0,
-        ),
-        11.0,
-        400,
-        theme.tokens.muted_foreground,
-        HorizontalAlign::Start,
-    );
-    Button::paint(
-        painter,
-        layout.close,
-        8.0,
-        "关闭",
-        None,
-        ButtonVariant::Ghost,
-        false,
-        &theme.tokens,
-    );
-
-    match &layout.body {
-        PluginDetailBody::Overview {
-            capabilities,
-            check_update,
-            uninstall,
-            notice,
-        } => {
-            for row in capabilities {
-                paint_capability_row(painter, row, theme);
-            }
-            if let Some(notice) = notice {
-                paint_single_line(
-                    painter,
-                    notice,
-                    Rect::xywh(
-                        layout.panel.origin.x + PAD,
-                        check_update.origin.y - 22.0,
-                        layout.panel.size.x - PAD * 2.0,
-                        18.0,
-                    ),
-                    11.0,
-                    450,
-                    theme.tokens.muted_foreground,
-                    HorizontalAlign::Start,
-                );
-            }
-            Button::paint(
-                painter,
-                *check_update,
-                8.0,
-                "检查更新",
-                None,
-                ButtonVariant::Secondary,
-                false,
-                &theme.tokens,
-            );
-            Button::paint(
-                painter,
-                *uninstall,
-                8.0,
-                "删除",
-                None,
-                ButtonVariant::Destructive,
-                false,
-                &theme.tokens,
-            );
-        }
-        PluginDetailBody::ConfirmUninstall { confirm, cancel } => {
-            paint_single_line(
-                painter,
-                "确认删除该插件？将删除本地文件与信任记录。",
-                Rect::xywh(
-                    layout.panel.origin.x + PAD,
-                    layout.panel.origin.y + HEADER_H,
-                    layout.panel.size.x - PAD * 2.0,
-                    40.0,
-                ),
-                13.0,
-                450,
-                theme.tokens.foreground,
-                HorizontalAlign::Start,
-            );
-            Button::paint(
-                painter,
-                *cancel,
-                8.0,
-                "取消",
-                None,
-                ButtonVariant::Secondary,
-                false,
-                &theme.tokens,
-            );
-            Button::paint(
-                painter,
-                *confirm,
-                8.0,
-                "确认删除",
-                None,
-                ButtonVariant::Destructive,
-                false,
-                &theme.tokens,
-            );
-        }
-        PluginDetailBody::Uninstalling => {
-            paint_single_line(
-                painter,
-                "正在删除…",
-                Rect::xywh(
-                    layout.panel.origin.x + PAD,
-                    layout.panel.origin.y + HEADER_H,
-                    layout.panel.size.x - PAD * 2.0,
-                    24.0,
-                ),
-                13.0,
-                450,
-                theme.tokens.muted_foreground,
-                HorizontalAlign::Start,
-            );
-        }
-        PluginDetailBody::TrustReview {
-            items,
-            trust_all,
-            grant_selected,
-            grant_selected_enabled,
-            cancel,
-            loading,
-            error,
-        } => {
-            paint_single_line(
-                painter,
-                "以下能力将执行代码，请核对原文后再启用：",
-                Rect::xywh(
-                    layout.panel.origin.x + PAD,
-                    layout.panel.origin.y + HEADER_H - 20.0,
-                    layout.panel.size.x - PAD * 2.0,
-                    18.0,
-                ),
-                12.0,
-                500,
-                theme.tokens.muted_foreground,
-                HorizontalAlign::Start,
-            );
-            if *loading {
-                paint_single_line(
-                    painter,
-                    "正在加载审查内容…",
-                    Rect::xywh(
-                        layout.panel.origin.x + PAD,
-                        layout.panel.origin.y + HEADER_H,
-                        layout.panel.size.x - PAD * 2.0,
-                        20.0,
-                    ),
-                    12.0,
-                    450,
-                    theme.tokens.muted_foreground,
-                    HorizontalAlign::Start,
-                );
-            }
-            if let Some(error) = error {
-                paint_single_line(
-                    painter,
-                    error,
-                    Rect::xywh(
-                        layout.panel.origin.x + PAD,
-                        layout.panel.origin.y + HEADER_H,
-                        layout.panel.size.x - PAD * 2.0,
-                        20.0,
-                    ),
-                    12.0,
-                    450,
-                    theme.tokens.destructive,
-                    HorizontalAlign::Start,
-                );
-            }
-            for item in items {
-                paint_trust_item(painter, item, theme);
-            }
-            Button::paint(
-                painter,
-                *cancel,
-                8.0,
-                "取消",
-                None,
-                ButtonVariant::Secondary,
-                false,
-                &theme.tokens,
-            );
-            Button::paint(
-                painter,
-                *grant_selected,
-                8.0,
-                "信任所选",
-                None,
-                ButtonVariant::Secondary,
-                !grant_selected_enabled,
-                &theme.tokens,
-            );
-            Button::paint(
-                painter,
-                *trust_all,
-                8.0,
-                "全部信任",
-                None,
-                ButtonVariant::Primary,
-                false,
-                &theme.tokens,
-            );
-        }
-    }
-}
-
-fn paint_capability_row(painter: &mut dyn Painter, row: &CapabilityRowLayout, theme: &ZodeTheme) {
-    let kind_label = match row.capability.kind {
-        PluginCapabilityKind::Skill => "技能",
-        PluginCapabilityKind::Mcp => "MCP",
-        PluginCapabilityKind::Hook => "Hook",
-    };
-    paint_single_line(
-        painter,
-        &format!("[{kind_label}] {}", row.capability.label),
-        Rect::xywh(
-            row.rect.origin.x,
-            row.rect.origin.y,
-            row.rect.size.x * 0.6,
-            row.rect.size.y,
-        ),
-        12.0,
-        500,
-        theme.tokens.foreground,
-        HorizontalAlign::Start,
-    );
-    let action_rect = Rect::xywh(
-        row.rect.origin.x + row.rect.size.x - 88.0,
-        row.rect.origin.y + (row.rect.size.y - 24.0) / 2.0,
-        88.0,
-        24.0,
-    );
-    if let Some(action) = row.toggle_action {
-        let label = if row.gated {
-            "审查"
-        } else if action.currently_enabled {
-            "停用"
-        } else {
-            "启用"
-        };
-        Button::paint(
-            painter,
-            action_rect,
-            8.0,
-            label,
-            None,
-            if row.gated {
-                ButtonVariant::Destructive
-            } else {
-                ButtonVariant::Secondary
-            },
-            false,
-            &theme.tokens,
-        );
-    } else {
-        paint_single_line(
-            painter,
-            &row.status_label,
-            action_rect,
-            11.0,
-            500,
-            theme.tokens.muted_foreground,
-            HorizontalAlign::Center,
-        );
-    }
-}
-
-fn paint_trust_item(painter: &mut dyn Painter, item: &TrustItemRowLayout, theme: &ZodeTheme) {
-    let checkbox = Rect::xywh(item.rect.origin.x, item.rect.origin.y + 4.0, 16.0, 16.0);
-    painter.fill_round_rect(
-        checkbox,
-        4.0,
-        if item.selected {
-            theme.tokens.primary
-        } else {
-            theme.tokens.muted
-        },
-    );
-    painter.stroke_round_rect(checkbox, 4.0, theme.tokens.border, 1.0);
-    let key_rect = Rect::xywh(
-        checkbox.origin.x + 24.0,
-        item.rect.origin.y,
-        item.rect.size.x - 24.0,
-        16.0,
-    );
-    paint_single_line(
-        painter,
-        &item.key,
-        key_rect,
-        11.0,
-        550,
-        theme.tokens.foreground,
-        HorizontalAlign::Start,
-    );
-    let content_rect = Rect::xywh(
-        checkbox.origin.x + 24.0,
-        item.rect.origin.y + 15.0,
-        item.rect.size.x - 24.0,
-        14.0,
-    );
-    // Verbatim, unsummarized text - see the module doc comment and the
-    // design doc's "show the exact text" security requirement. Long content
-    // is left-aligned and clipped by the row's own bounds rather than
-    // truncated with an ellipsis that could hide a trailing malicious
-    // argument; a real scrollable/wrapping viewer is a follow-up.
-    painter.save();
-    painter.clip_rect(content_rect);
-    paint_single_line(
-        painter,
-        &item.content,
-        content_rect,
-        11.0,
-        400,
-        theme.tokens.muted_foreground,
-        HorizontalAlign::Start,
-    );
-    painter.restore();
 }

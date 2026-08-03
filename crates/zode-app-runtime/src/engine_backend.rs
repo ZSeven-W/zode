@@ -86,6 +86,29 @@ fn permission_pending_detail(name: &str, output: &serde_json::Value) -> Option<S
 /// loop doesn't flood the event stream with per-delta updates.
 const SUBAGENT_TOKEN_THROTTLE: Duration = Duration::from_secs(1);
 
+/// Which model each `Task`-spawned sub-agent runs under, mirroring the
+/// resolution `zode_core::ZodeTaskFactory::build` performs: an agent
+/// definition that pins `model:` in its frontmatter wins, everything else
+/// inherits the session's active model. Snapshotted per diff rather than
+/// per agent so one registry pass costs one driver call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubagentModels {
+    /// The session engine's active model. `None` for drivers that don't run
+    /// one (test doubles), which makes every resolution `None` too.
+    pub session_model: Option<String>,
+    /// Agent type → the model its definition pins.
+    pub overrides: HashMap<String, String>,
+}
+
+impl SubagentModels {
+    pub fn resolve(&self, agent_type: &str) -> Option<String> {
+        self.overrides
+            .get(agent_type)
+            .cloned()
+            .or_else(|| self.session_model.clone())
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CachedTool {
     name: String,
@@ -141,6 +164,7 @@ impl EventNormalizer {
         snapshot: &[SubAgent],
         turn_id: TurnId,
         now: Instant,
+        models: &SubagentModels,
     ) -> Vec<AgentEventKind> {
         let mut updates = Vec::new();
         for agent in snapshot {
@@ -166,7 +190,7 @@ impl EventNormalizer {
                 },
             );
             updates.push(AgentEventKind::SubagentUpdate {
-                subagent: to_wire_subagent(agent, tokens, turn_id),
+                subagent: to_wire_subagent(agent, tokens, turn_id, models),
             });
         }
         updates
@@ -389,7 +413,12 @@ fn task_tool_summary(input: &serde_json::Map<String, serde_json::Value>) -> Opti
 
 /// Converts a core registry snapshot entry into the wire representation,
 /// stamped with the turn during which the diff was observed.
-fn to_wire_subagent(agent: &SubAgent, tokens: u64, turn_id: TurnId) -> SubagentSnapshot {
+fn to_wire_subagent(
+    agent: &SubAgent,
+    tokens: u64,
+    turn_id: TurnId,
+    models: &SubagentModels,
+) -> SubagentSnapshot {
     let display_name = agent
         .description
         .as_deref()
@@ -419,6 +448,7 @@ fn to_wire_subagent(agent: &SubAgent, tokens: u64, turn_id: TurnId) -> SubagentS
                 .saturating_mul(1_000)
         }),
         result_summary: agent.final_output.as_deref().map(summarize_result),
+        model: models.resolve(&agent.agent_type),
     }
 }
 
@@ -510,6 +540,13 @@ pub trait EngineDriver: Send + Sync + 'static {
     /// their own) simply report no sub-agents.
     fn subagents_snapshot(&self, _session: &SessionLocator) -> Vec<SubAgent> {
         Vec::new()
+    }
+
+    /// Which model this session's sub-agents run under, by agent type. See
+    /// [`SubagentModels`]. Default empty — a driver that reports no
+    /// sub-agents has no models to disclose either.
+    fn subagent_models(&self, _session: &SessionLocator) -> SubagentModels {
+        SubagentModels::default()
     }
 
     /// Snapshot the session's tracked background shells (`BashRun`
@@ -773,6 +810,7 @@ async fn drive_turn(
                             &driver.subagents_snapshot(&session),
                             turn_id,
                             Instant::now(),
+                            &driver.subagent_models(&session),
                         )
                     } else {
                         Vec::new()
@@ -824,6 +862,7 @@ async fn drive_turn(
         &driver.subagents_snapshot(&session),
         turn_id,
         Instant::now(),
+        &driver.subagent_models(&session),
     ) {
         let _ = events.send(session.clone(), turn_id, update).await;
     }

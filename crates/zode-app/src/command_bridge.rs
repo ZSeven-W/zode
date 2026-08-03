@@ -15,6 +15,8 @@ use crate::window_state::AppWake;
 mod approval;
 mod first_submit;
 mod integrations;
+#[path = "command_bridge/model-switch-notice.rs"]
+mod model_switch_notice;
 mod plugin_market;
 #[path = "command_bridge/result-projection.rs"]
 mod result_projection;
@@ -409,6 +411,10 @@ pub fn prepare_dispatch(
             let parts = plugin_market::prepare_grant(state, keys)?;
             (parts.session, None, parts.kind, parts.completion)
         }
+        AppCommand::ApplyPluginUpdate => {
+            let parts = plugin_market::prepare_apply_update(state)?;
+            (parts.session, None, parts.kind, parts.completion)
+        }
         AppCommand::SetModel(model) => {
             let session = state.current_session.clone().filter(|session| {
                 !session.session_id.starts_with("local-error-")
@@ -430,6 +436,7 @@ pub fn prepare_dispatch(
             };
             ensure_runtime_idle(state, &session)?;
             state.composer.footer_menu = None;
+            model_switch_notice::note_model_switch(state, &session, &model);
             (
                 session.clone(),
                 None,

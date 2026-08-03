@@ -94,6 +94,38 @@ pub(crate) fn paint_single_line(
         .paint(painter, rect);
 }
 
+/// End-anchored ellipsis truncation (unlike `environment/row.rs`'s
+/// `middle_ellipsize`, which favors keeping both a path's ends visible) -
+/// a task name, a result summary or a chip headline reads better with its
+/// beginning intact.
+pub(crate) fn ellipsize_end(
+    painter: &mut dyn Painter,
+    value: &str,
+    max_width: f32,
+    font_size: f32,
+    weight: u16,
+) -> String {
+    if max_width <= 0.0 {
+        return String::new();
+    }
+    if painter.measure_text_weighted(value, font_size, weight) <= max_width {
+        return value.to_owned();
+    }
+    const ELLIPSIS: &str = "…";
+    if painter.measure_text_weighted(ELLIPSIS, font_size, weight) > max_width {
+        return String::new();
+    }
+    let characters = value.chars().collect::<Vec<_>>();
+    for kept in (0..characters.len()).rev() {
+        let mut candidate = characters[..kept].iter().collect::<String>();
+        candidate.push('…');
+        if painter.measure_text_weighted(&candidate, font_size, weight) <= max_width {
+            return candidate;
+        }
+    }
+    ELLIPSIS.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

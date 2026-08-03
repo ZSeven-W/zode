@@ -228,6 +228,7 @@ impl DesktopApp {
                 self.session_rename_controller.input_state(),
                 workspace_hovered,
                 self.modifiers.super_key(),
+                Some(self.transcript_find_controller.input_state()),
                 &theme,
             );
             PrimarySidebarPreviewWidget::paint(

@@ -22,6 +22,9 @@ pub(super) enum PresentationRefresh {
     PaneOpened,
     IntegrationsOpened,
     PluginTrustReviewOpened(String),
+    /// The detail overlay's "检查更新" was pressed; the reducer already moved
+    /// it to `PluginUpdateState::Checking`, this fetches the answer.
+    PluginUpdateCheckRequested(String),
     SessionChanged,
     CommandCompleted,
     DiffInvalidated(SessionLocator),
@@ -50,6 +53,10 @@ pub(super) fn reduce_local_presentation_command(
         } else if matches!(&command, AppCommand::RequestPluginTrustReview) {
             state.presentation.plugin_detail.as_ref().map(|detail| {
                 PresentationRefresh::PluginTrustReviewOpened(detail.plugin_id.clone())
+            })
+        } else if matches!(&command, AppCommand::CheckPluginUpdate) {
+            state.presentation.plugin_detail.as_ref().map(|detail| {
+                PresentationRefresh::PluginUpdateCheckRequested(detail.plugin_id.clone())
             })
         } else if matches!(
             &command,
@@ -96,6 +103,9 @@ pub(super) fn presentation_queries_for_refresh(
     }
     if let PresentationRefresh::PluginTrustReviewOpened(plugin_id) = refresh {
         return vec![PresentationQuery::PluginTrustReview { plugin_id }];
+    }
+    if let PresentationRefresh::PluginUpdateCheckRequested(plugin_id) = refresh {
+        return vec![PresentationQuery::PluginUpdateCheck { plugin_id }];
     }
     let Some(session) = state.current_session.as_ref().cloned() else {
         return Vec::new();
@@ -239,6 +249,16 @@ pub(super) fn mark_presentation_query_failed(
                 {
                     *review = LoadState::Failed(message);
                 }
+            }
+        }
+        PresentationQuery::PluginUpdateCheck { plugin_id } => {
+            if let Some(detail) = state
+                .presentation
+                .plugin_detail
+                .as_mut()
+                .filter(|detail| detail.plugin_id == plugin_id)
+            {
+                detail.update = zode_app_model::PluginUpdateState::CheckFailed(message);
             }
         }
         PresentationQuery::PullRequest { session, .. } => {

@@ -18,6 +18,10 @@ mod sidebar_navigation;
 mod state;
 mod task_navigation;
 mod transcript;
+#[path = "transcript-find.rs"]
+mod transcript_find;
+#[path = "transcript-subagent-chip.rs"]
+mod transcript_subagent_chip;
 
 pub use command::{AppCommand, QueueReorderOp};
 pub use external_application::{
@@ -41,5 +45,9 @@ pub use transcript::{
     FileArtifact, GoalProgress, ImageItem, MessageFeedback, ToolCategory, TranscriptItem,
     TranscriptState, TranscriptTurnStatus, TranscriptVisualKind, TurnSummary,
 };
+pub use transcript_find::{
+    find_matches, item_search_fields, TranscriptFindMatch, TranscriptFindState,
+};
+pub use transcript_subagent_chip::{SubagentChip, SubagentChipPhase};
 
 pub const CRATE_READY: bool = true;

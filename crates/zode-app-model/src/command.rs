@@ -164,6 +164,27 @@ pub enum AppCommand {
     StepLightboxZoom {
         increase: bool,
     },
+    /// Opens the in-conversation find bar above `session`'s transcript
+    /// (Cmd+F on macOS, Ctrl+F elsewhere). Ignored when it is already open.
+    OpenTranscriptFind {
+        session: SessionLocator,
+    },
+    /// Closes the find bar and clears its query, dropping every highlight.
+    CloseTranscriptFind {
+        session: SessionLocator,
+    },
+    /// Replaces the find query. Resets the active match to the first hit and
+    /// scrolls to it.
+    SetTranscriptFindQuery {
+        session: SessionLocator,
+        query: String,
+    },
+    /// Steps to the next (`forward`) or previous match, wrapping at both
+    /// ends, and scrolls the transcript to it.
+    StepTranscriptFindMatch {
+        session: SessionLocator,
+        forward: bool,
+    },
     SetToolExpanded {
         session: SessionLocator,
         tool_id: String,
@@ -369,10 +390,16 @@ pub enum AppCommand {
     GrantPluginTrust {
         keys: Option<Vec<String>>,
     },
-    /// M1 stub - re-sync/drift-detection is not implemented yet (see
-    /// `docs/proposals/plugin-marketplace.md` M2). Surfaces a plain notice
-    /// rather than silently doing nothing.
+    /// Starts an update check for the plugin in `presentation.plugin_detail`:
+    /// the reducer parks the overlay in `PluginUpdateState::Checking` and the
+    /// desktop crate fetches the answer via
+    /// `PresentationQuery::PluginUpdateCheck`.
     CheckPluginUpdate,
+    /// Applies the update reported by the last `CheckPluginUpdate`: pulls the
+    /// plugin to its ref's remote tip, re-scans capabilities, and refreshes
+    /// the installed list so changed hooks/MCP commands re-enter the trust
+    /// gate before they can run again.
+    ApplyPluginUpdate,
     RunEnvironmentAction {
         session: SessionLocator,
         action: EnvironmentActionKind,

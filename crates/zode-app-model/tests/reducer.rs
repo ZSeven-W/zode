@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use zode_app_model::{
     demo_state, reduce_agent_event, reduce_agent_event_at, reduce_settings_command,
     reduce_tool_command, AppCommand, LoadState, ReduceOutcome, SettingsCommandOutcome,
-    ToolCommandOutcome, TranscriptItem, TranscriptState, TranscriptTurnStatus, ZodeAppState,
+    SubagentChipPhase, ToolCommandOutcome, TranscriptItem, TranscriptState, TranscriptTurnStatus,
+    ZodeAppState,
 };
 use zode_node_protocol::{
     AgentEvent, AgentEventKind, SessionLocator, SubagentSnapshot, SubagentStatus, ThreadStatus,
@@ -68,6 +69,7 @@ fn subagent(id: &str, status: SubagentStatus, tokens: u64, turn_id: TurnId) -> S
         turn_id,
         completed_at_ms: None,
         result_summary: None,
+        model: None,
     }
 }
 
@@ -738,6 +740,90 @@ fn subagent_update_replaces_the_same_id_in_place() {
     assert_eq!(subagents.len(), 1);
     assert_eq!(subagents[0].status, SubagentStatus::Completed);
     assert_eq!(subagents[0].tokens, 42);
+}
+
+#[test]
+fn subagent_updates_write_inline_chips_into_the_transcript() {
+    let (mut state, session, turn_id) = active_state();
+
+    for (sequence, tokens) in [(1, 0), (2, 40), (3, 80)] {
+        reduce_agent_event(
+            &mut state,
+            event(
+                &session,
+                turn_id,
+                sequence,
+                AgentEventKind::SubagentUpdate {
+                    subagent: subagent("1", SubagentStatus::Running, tokens, turn_id),
+                },
+            ),
+        );
+    }
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            4,
+            AgentEventKind::SubagentUpdate {
+                subagent: subagent("1", SubagentStatus::Completed, 90, turn_id),
+            },
+        ),
+    );
+
+    let phases = state.transcripts[&session]
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::SubagentChip(chip) => Some(chip.phase),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        phases,
+        vec![
+            SubagentChipPhase::Started,
+            SubagentChipPhase::Progress,
+            SubagentChipPhase::Finished
+        ],
+        "three updates while running still leave one progress chip",
+    );
+}
+
+#[test]
+fn an_interrupted_turn_closes_the_chip_of_an_agent_still_running() {
+    let (mut state, session, turn_id) = active_state();
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            1,
+            AgentEventKind::SubagentUpdate {
+                subagent: subagent("1", SubagentStatus::Running, 5, turn_id),
+            },
+        ),
+    );
+
+    reduce_agent_event(
+        &mut state,
+        event(
+            &session,
+            turn_id,
+            2,
+            AgentEventKind::TurnFinished { interrupted: true },
+        ),
+    );
+
+    let last_chip = state.transcripts[&session]
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::SubagentChip(chip) => Some(chip.phase),
+            _ => None,
+        })
+        .next_back();
+    assert_eq!(last_chip, Some(SubagentChipPhase::Failed));
 }
 
 #[test]

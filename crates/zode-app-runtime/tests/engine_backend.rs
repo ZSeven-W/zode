@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::time::timeout;
 use zode_app_runtime::{
     DriverEventStream, EngineBackend, EngineDriver, EventNormalizer, EventSink, NodeBackend,
+    SubagentModels,
 };
 use zode_core::{SubAgent, SubAgentStatus};
 use zode_node_protocol::{
@@ -18,6 +19,18 @@ use zode_node_protocol::{
     SessionLocator, SubagentStatus as WireSubagentStatus, ToolStatus, TurnId, UserContent,
     WorkspaceUri, PROTOCOL_VERSION,
 };
+
+/// The session model every scripted sub-agent inherits unless its own
+/// agent type pins one. Mirrors what `ZodeEngineDriver::subagent_models`
+/// reports for a live session.
+fn models() -> SubagentModels {
+    SubagentModels {
+        session_model: Some("session-model".into()),
+        overrides: [("reviewer".to_owned(), "pinned-model".to_owned())]
+            .into_iter()
+            .collect(),
+    }
+}
 
 /// A scripted `SubAgent` registry entry for exercising `diff_subagents`
 /// without spinning up a real `Task` tool call.
@@ -349,7 +362,7 @@ fn diff_subagents_emits_a_new_running_agent_on_first_sight() {
     let turn_id = TurnId::new();
     let snapshot = vec![scripted_subagent(1, SubAgentStatus::Running, 10, 5)];
 
-    let updates = normalizer.diff_subagents(&snapshot, turn_id, Instant::now());
+    let updates = normalizer.diff_subagents(&snapshot, turn_id, Instant::now(), &models());
 
     assert_eq!(updates.len(), 1);
     let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
@@ -369,8 +382,18 @@ fn diff_subagents_does_not_re_emit_when_nothing_changed() {
     let snapshot = vec![scripted_subagent(1, SubAgentStatus::Running, 10, 5)];
     let now = Instant::now();
 
-    assert_eq!(normalizer.diff_subagents(&snapshot, turn_id, now).len(), 1);
-    assert_eq!(normalizer.diff_subagents(&snapshot, turn_id, now).len(), 0);
+    assert_eq!(
+        normalizer
+            .diff_subagents(&snapshot, turn_id, now, &models())
+            .len(),
+        1
+    );
+    assert_eq!(
+        normalizer
+            .diff_subagents(&snapshot, turn_id, now, &models())
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -379,20 +402,27 @@ fn diff_subagents_throttles_token_only_changes_within_the_coalescing_window() {
     let turn_id = TurnId::new();
     let start = Instant::now();
     let first = vec![scripted_subagent(1, SubAgentStatus::Running, 10, 5)];
-    assert_eq!(normalizer.diff_subagents(&first, turn_id, start).len(), 1);
+    assert_eq!(
+        normalizer
+            .diff_subagents(&first, turn_id, start, &models())
+            .len(),
+        1
+    );
 
     // Tokens changed but under a second elapsed: throttled, no re-emit.
     let more_tokens = vec![scripted_subagent(1, SubAgentStatus::Running, 40, 5)];
     let soon = start + Duration::from_millis(200);
     assert_eq!(
-        normalizer.diff_subagents(&more_tokens, turn_id, soon).len(),
+        normalizer
+            .diff_subagents(&more_tokens, turn_id, soon, &models())
+            .len(),
         0,
         "a token-only change inside the throttle window must be coalesced"
     );
 
     // Same token change, now past the throttle window: emitted.
     let later = start + Duration::from_secs(2);
-    let updates = normalizer.diff_subagents(&more_tokens, turn_id, later);
+    let updates = normalizer.diff_subagents(&more_tokens, turn_id, later, &models());
     assert_eq!(updates.len(), 1);
     let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
         panic!("expected SubagentUpdate");
@@ -406,12 +436,18 @@ fn diff_subagents_always_emits_immediately_on_a_status_change() {
     let turn_id = TurnId::new();
     let now = Instant::now();
     let running = vec![scripted_subagent(1, SubAgentStatus::Running, 10, 5)];
-    assert_eq!(normalizer.diff_subagents(&running, turn_id, now).len(), 1);
+    assert_eq!(
+        normalizer
+            .diff_subagents(&running, turn_id, now, &models())
+            .len(),
+        1
+    );
 
     // Status flips to Done a moment later — well inside the token throttle
     // window, but a status change always bypasses it.
     let done = vec![scripted_subagent(1, SubAgentStatus::Done, 10, 5)];
-    let updates = normalizer.diff_subagents(&done, turn_id, now + Duration::from_millis(50));
+    let updates =
+        normalizer.diff_subagents(&done, turn_id, now + Duration::from_millis(50), &models());
     assert_eq!(updates.len(), 1);
     let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
         panic!("expected SubagentUpdate");
@@ -426,7 +462,7 @@ fn diff_subagents_maps_failed_and_caps_depth_at_u8_max() {
     let mut failed = scripted_subagent(1, SubAgentStatus::Failed, 1, 1);
     failed.depth = 9_000; // far past u8::MAX, must saturate rather than panic/wrap.
 
-    let updates = normalizer.diff_subagents(&[failed], turn_id, Instant::now());
+    let updates = normalizer.diff_subagents(&[failed], turn_id, Instant::now(), &models());
 
     let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
         panic!("expected SubagentUpdate");
@@ -447,7 +483,7 @@ fn diff_subagents_maps_display_name_completed_at_and_result_summary() {
         Some("Found 3 large directories under ~\nSecond line is ignored."),
     );
 
-    let updates = normalizer.diff_subagents(&[agent], turn_id, Instant::now());
+    let updates = normalizer.diff_subagents(&[agent], turn_id, Instant::now(), &models());
 
     let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
         panic!("expected SubagentUpdate");
@@ -467,7 +503,7 @@ fn diff_subagents_falls_back_display_name_to_agent_type_without_a_description() 
     let turn_id = TurnId::new();
     let agent = scripted_finished_subagent(1, SubAgentStatus::Running, None, None, None);
 
-    let updates = normalizer.diff_subagents(&[agent], turn_id, Instant::now());
+    let updates = normalizer.diff_subagents(&[agent], turn_id, Instant::now(), &models());
 
     let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
         panic!("expected SubagentUpdate");
@@ -475,6 +511,52 @@ fn diff_subagents_falls_back_display_name_to_agent_type_without_a_description() 
     assert_eq!(subagent.display_name, "researcher");
     assert_eq!(subagent.completed_at_ms, None);
     assert_eq!(subagent.result_summary, None);
+}
+
+#[test]
+fn diff_subagents_discloses_the_pinned_model_and_otherwise_the_session_model() {
+    let mut normalizer = EventNormalizer::new();
+    let turn_id = TurnId::new();
+
+    let inherits = scripted_subagent(1, SubAgentStatus::Running, 1, 1);
+    let mut pinned = scripted_subagent(2, SubAgentStatus::Running, 1, 1);
+    pinned.agent_type = "reviewer".into();
+
+    let updates =
+        normalizer.diff_subagents(&[inherits, pinned], turn_id, Instant::now(), &models());
+
+    let models: Vec<Option<String>> = updates
+        .iter()
+        .map(|update| match update {
+            AgentEventKind::SubagentUpdate { subagent } => subagent.model.clone(),
+            _ => panic!("expected SubagentUpdate"),
+        })
+        .collect();
+    assert_eq!(
+        models,
+        vec![
+            Some("session-model".to_owned()),
+            Some("pinned-model".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn diff_subagents_leaves_the_model_unknown_when_the_driver_reports_none() {
+    let mut normalizer = EventNormalizer::new();
+    let agent = scripted_subagent(1, SubAgentStatus::Running, 1, 1);
+
+    let updates = normalizer.diff_subagents(
+        &[agent],
+        TurnId::new(),
+        Instant::now(),
+        &SubagentModels::default(),
+    );
+
+    let AgentEventKind::SubagentUpdate { subagent } = &updates[0] else {
+        panic!("expected SubagentUpdate");
+    };
+    assert_eq!(subagent.model, None);
 }
 
 fn scripted_shell(shell_id: &str, command: &str, killed: bool) -> zode_core::bg_shells::BgShell {

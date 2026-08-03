@@ -17,6 +17,8 @@ use super::{prepare_dispatch, reject_dispatch, CommandBridge};
 
 #[path = "command_bridge_tests/integrations.rs"]
 mod integrations;
+#[path = "command_bridge_tests/plugin_update.rs"]
+mod plugin_update;
 #[path = "command_bridge_tests/provider_reload.rs"]
 mod provider_reload;
 #[path = "command_bridge_tests/queue.rs"]

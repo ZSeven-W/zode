@@ -652,6 +652,12 @@ pub struct ZodeEngine {
     /// Spawnable sub-agent types (name, summary): user defs + built-ins.
     /// Surfaced by `/agents`.
     pub agent_types: Vec<(String, String)>,
+    /// Agent types whose definition pins a `model:` in its frontmatter, and
+    /// the model it pins. Every other type inherits [`Self::model`] — the
+    /// same resolution `ZodeTaskFactory::build` performs when it spawns the
+    /// child loop. Kept here so a host can disclose "which model is this
+    /// sub-agent using" without re-reading the definition files.
+    pub agent_model_overrides: std::collections::HashMap<String, String>,
     /// Saved workflows (name, description). Surfaced by `/workflows`.
     pub workflows: Vec<(String, String)>,
     /// User/plugin slash commands (`commands/<name>.md`) — dynamic commands
@@ -1299,6 +1305,10 @@ impl ZodeEngine {
                     .map(|d| (d.name.clone(), (d.model.clone(), d.system.clone())))
                     .collect(),
             );
+        let agent_model_overrides = agent_defs
+            .iter()
+            .filter_map(|def| Some((def.name.clone(), def.model.clone()?)))
+            .collect();
         let task_factory = Arc::new(ZodeTaskFactory::new(
             model_runtime.clone(),
             permissions.clone(),
@@ -1710,6 +1720,7 @@ impl ZodeEngine {
             all_skill_meta,
             lsp_langs,
             agent_types: agent_type_list,
+            agent_model_overrides,
             workflows: workflow_defs
                 .into_iter()
                 .map(|w| (w.name, w.description))
@@ -3675,6 +3686,7 @@ mod tests {
             all_skill_meta: Vec::new(),
             lsp_langs: Vec::new(),
             agent_types: Vec::new(),
+            agent_model_overrides: Default::default(),
             workflows: Vec::new(),
             user_commands: Vec::new(),
             openpencil: Default::default(),

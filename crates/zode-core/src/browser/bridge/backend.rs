@@ -1,7 +1,7 @@
 use super::{BridgeServer, RpcKind};
 use crate::browser::backend::{
-    BrowserBackend, BrowserError, ClickTarget, ConsoleEntry, DownloadEntry, NetworkEntry,
-    Screenshot, TabInfo,
+    classify_net_error, net_error_token, BrowserBackend, BrowserError, ClickTarget, ConsoleEntry,
+    DownloadEntry, NavigationOutcome, NetworkEntry, Screenshot, TabInfo,
 };
 use crate::browser::snapshot_js::SNAPSHOT_JS;
 use async_trait::async_trait;
@@ -38,10 +38,33 @@ impl BridgeBackend {
 
 #[async_trait]
 impl BrowserBackend for BridgeBackend {
-    async fn navigate(&self, url: &str) -> Result<String, BrowserError> {
-        self.cdp("Page.navigate", serde_json::json!({ "url": url }))
+    async fn navigate(&self, url: &str) -> Result<NavigationOutcome, BrowserError> {
+        // `Page.navigate` reports load failures in its result's
+        // `errorText`, not as an RPC error, so a refused connection comes
+        // back as a perfectly successful call.
+        let payload = self
+            .cdp("Page.navigate", serde_json::json!({ "url": url }))
             .await?;
-        self.current_url().await
+        let error_text = payload
+            .get("errorText")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        match error_text {
+            None => Ok(NavigationOutcome::ok(self.current_url().await?)),
+            Some(text) => {
+                // The page we ended up on still matters (usually the
+                // previous one), but a failure to read it must not mask
+                // the classification we already have.
+                let current = self.current_url().await.unwrap_or_default();
+                let detail = net_error_token(&text).unwrap_or(&text).to_string();
+                Ok(NavigationOutcome::failed(
+                    current,
+                    classify_net_error(&text),
+                    detail,
+                ))
+            }
+        }
     }
 
     async fn screenshot(&self) -> Result<Screenshot, BrowserError> {

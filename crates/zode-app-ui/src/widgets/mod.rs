@@ -32,6 +32,8 @@ mod thread_header;
 mod thread_header_overlay;
 mod tool_card;
 pub(crate) mod transcript;
+#[path = "transcript-find-bar.rs"]
+mod transcript_find_bar;
 mod unavailable_secondary;
 mod usage_chip;
 mod window_chrome;
@@ -87,11 +89,12 @@ pub use integrations::{
     CapabilityRowLayout, CatalogSectionLayout, InstalledIconLayout, IntegrationRowLayout,
     IntegrationScopeLayout, IntegrationTabLayout, IntegrationsPage, IntegrationsPageLayout,
     PluginAddFormLayout, PluginDetailBody, PluginDetailOverlayLayout, PluginRowLayout,
-    TrustItemRowLayout, INTEGRATIONS_ADD_PLUGIN_ID, INTEGRATIONS_PERSONAL_SCOPE_ID,
-    INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_PUBLIC_SCOPE_ID, INTEGRATIONS_SEARCH_ID,
-    INTEGRATIONS_SKILLS_TAB_ID, PLUGIN_ADD_CANCEL_ID, PLUGIN_ADD_REFERENCE_INPUT_ID,
-    PLUGIN_ADD_SPEC_INPUT_ID, PLUGIN_ADD_SUBMIT_ID, PLUGIN_DETAIL_CHECK_UPDATE_ID,
-    PLUGIN_DETAIL_CLOSE_ID, PLUGIN_DETAIL_TRUST_ALL_ID, PLUGIN_DETAIL_TRUST_CANCEL_ID,
+    TrustItemRowLayout, UpdateControls, UpdateStatusLine, INTEGRATIONS_ADD_PLUGIN_ID,
+    INTEGRATIONS_PERSONAL_SCOPE_ID, INTEGRATIONS_PLUGINS_TAB_ID, INTEGRATIONS_PUBLIC_SCOPE_ID,
+    INTEGRATIONS_SEARCH_ID, INTEGRATIONS_SKILLS_TAB_ID, PLUGIN_ADD_CANCEL_ID,
+    PLUGIN_ADD_REFERENCE_INPUT_ID, PLUGIN_ADD_SPEC_INPUT_ID, PLUGIN_ADD_SUBMIT_ID,
+    PLUGIN_DETAIL_APPLY_UPDATE_ID, PLUGIN_DETAIL_CHECK_UPDATE_ID, PLUGIN_DETAIL_CLOSE_ID,
+    PLUGIN_DETAIL_TRUST_ALL_ID, PLUGIN_DETAIL_TRUST_CANCEL_ID,
     PLUGIN_DETAIL_TRUST_GRANT_SELECTED_ID, PLUGIN_DETAIL_UNINSTALL_CANCEL_ID,
     PLUGIN_DETAIL_UNINSTALL_CONFIRM_ID, PLUGIN_DETAIL_UNINSTALL_ID,
 };
@@ -173,6 +176,11 @@ pub use tool_card::{ToolCard, ToolTone};
 pub use transcript::{
     corrected_card_height, AnchorRail, AnchorTick, ThreadTranscript, TranscriptImageBytes,
     TranscriptImageSource, TranscriptItemLayout, TRANSCRIPT_BACK_TO_BOTTOM_ID,
+};
+pub use transcript_find_bar::{
+    TranscriptFindBar, TranscriptFindBarLayout, TranscriptFindController, TranscriptFindOutcome,
+    FIND_BAR_HEIGHT, TRANSCRIPT_FIND_CLOSE_ID, TRANSCRIPT_FIND_INPUT_ID, TRANSCRIPT_FIND_NEXT_ID,
+    TRANSCRIPT_FIND_PREVIOUS_ID, TRANSCRIPT_FIND_SURFACE_ID,
 };
 pub use unavailable_secondary::{UnavailableSecondaryPanel, UNAVAILABLE_SECONDARY_CLOSE_ID};
 pub use usage_chip::{UsageChip, UsageDisplay};

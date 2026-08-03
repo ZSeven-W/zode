@@ -12,7 +12,8 @@ use super::{
     EmptyState, EnvironmentPanel, GlobalSearch, GlobalSearchViewState, IntegrationsPage, Lightbox,
     PanelPicker, ProjectPicker, ProjectPickerViewState, ProjectSidebar, ReviewPanel, SettingsPanel,
     SubagentsPanel, TerminalGrid, TerminalPanel, TerminalSecondaryPanel, TerminalSelection,
-    ThreadHeader, ThreadTranscript, TranscriptImageSource, UnavailableSecondaryPanel, WindowChrome,
+    ThreadHeader, ThreadTranscript, TranscriptFindBar, TranscriptImageSource,
+    UnavailableSecondaryPanel, WindowChrome,
 };
 use crate::{
     Insets, PinnedSummaryMode, RectExt, WidgetId, WorkspaceLayout, WorkspaceSnapshot, ZodeTheme,
@@ -48,6 +49,7 @@ impl WorkspaceShell {
             None,
             false,
             Some((&project_picker, &project_search)),
+            None,
             None,
             None,
             None,
@@ -90,6 +92,7 @@ impl WorkspaceShell {
             None,
             None,
             None,
+            None,
             theme,
         )
     }
@@ -116,6 +119,7 @@ impl WorkspaceShell {
             None,
             None,
             false,
+            None,
             None,
             None,
             None,
@@ -172,6 +176,7 @@ impl WorkspaceShell {
             None,
             None,
             None,
+            None,
             theme,
         )
     }
@@ -198,6 +203,7 @@ impl WorkspaceShell {
             None,
             hovered,
             false,
+            None,
             None,
             None,
             None,
@@ -248,6 +254,7 @@ impl WorkspaceShell {
             session_rename_input,
             hovered,
             show_sidebar_shortcuts,
+            None,
             theme,
         )
     }
@@ -273,6 +280,7 @@ impl WorkspaceShell {
         session_rename_input: &TextInputState,
         hovered: Option<WidgetId>,
         show_sidebar_shortcuts: bool,
+        transcript_find_input: Option<&TextInputState>,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
         Self::paint_snapshot_content(
@@ -290,6 +298,7 @@ impl WorkspaceShell {
             Some((global_search, global_search_input)),
             Some(branch_search_input),
             Some(session_rename_input),
+            transcript_find_input,
             theme,
         )
     }
@@ -310,6 +319,7 @@ impl WorkspaceShell {
         global_search: Option<(&GlobalSearchViewState, &TextInputState)>,
         branch_search_input: Option<&TextInputState>,
         session_rename_input: Option<&TextInputState>,
+        transcript_find_input: Option<&TextInputState>,
         theme: &ZodeTheme,
     ) -> WorkspaceLayout {
         let geometry = snapshot.layout;
@@ -452,6 +462,27 @@ impl WorkspaceShell {
             }
         }
 
+        // Above the transcript it searches, below the header/global-search/
+        // lightbox overlays painted after this. Suppressed on the split
+        // fallback, where the primary surface shows a secondary pane instead
+        // of the transcript.
+        if state.presentation.route == ShellRoute::Conversation && !split_fallback {
+            if let Some(find_layout) = TranscriptFindBar::layout(geometry.transcript, state) {
+                let fallback_find_input = TextInputState::with_text(
+                    TranscriptFindBar::active(state)
+                        .map(|(_, _, find)| find.query.clone())
+                        .unwrap_or_default(),
+                );
+                TranscriptFindBar::paint(
+                    painter,
+                    &find_layout,
+                    transcript_find_input.unwrap_or(&fallback_find_input),
+                    snapshot.focused,
+                    hovered,
+                    theme,
+                );
+            }
+        }
         if state.presentation.route == ShellRoute::Conversation {
             if geometry.pinned_summary != PinnedSummaryMode::Hidden
                 && geometry.context_panel.size.x > 0.0

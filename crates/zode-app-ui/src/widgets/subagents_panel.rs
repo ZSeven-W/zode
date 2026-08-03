@@ -17,7 +17,7 @@ use zode_node_protocol::{SubagentSnapshot, SubagentStatus};
 
 use super::subagent_avatar::subagent_avatar_color;
 use super::transcript::relative_time;
-use crate::{paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme};
+use crate::{ellipsize_end, paint_single_line, RectExt, SemanticIcon, WidgetId, ZodeTheme};
 
 pub const SUBAGENTS_PANEL_CLOSE_ID: WidgetId = WidgetId(260);
 pub const SUBAGENTS_PANEL_SHOW_MORE_ID: WidgetId = WidgetId(261);
@@ -272,19 +272,17 @@ impl SubagentsPanel {
             theme.tokens.muted_foreground,
             HorizontalAlign::End,
         );
-        if let Some(summary) = row.subagent.result_summary.as_deref() {
-            if !summary.is_empty() {
-                let visible = ellipsize_end(painter, summary, text_width, 12.0, 400);
-                paint_single_line(
-                    painter,
-                    &visible,
-                    Rect::xywh(text_x, row.rect.origin.y + 25.0, text_width, 16.0),
-                    12.0,
-                    400,
-                    theme.tokens.muted_foreground,
-                    HorizontalAlign::Start,
-                );
-            }
+        if let Some(secondary) = row_secondary_label(&row.subagent) {
+            let visible = ellipsize_end(painter, &secondary, text_width, 12.0, 400);
+            paint_single_line(
+                painter,
+                &visible,
+                Rect::xywh(text_x, row.rect.origin.y + 25.0, text_width, 16.0),
+                12.0,
+                400,
+                theme.tokens.muted_foreground,
+                HorizontalAlign::Start,
+            );
         }
     }
 
@@ -344,6 +342,29 @@ fn row_trailing_label(subagent: &SubagentSnapshot) -> String {
     }
 }
 
+/// The row's second line: what the agent reported, and which model it ran
+/// under. Both are optional and either can stand alone - a running agent has
+/// no result yet, and a snapshot from a runtime that could not resolve a
+/// model has nothing to disclose.
+pub(crate) fn row_secondary_label(subagent: &SubagentSnapshot) -> Option<String> {
+    let summary = subagent
+        .result_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty());
+    let model = subagent
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(|model| format!("使用 {model}"));
+    match (summary, model) {
+        (Some(summary), Some(model)) => Some(format!("{summary} · {model}")),
+        (Some(summary), None) => Some(summary.to_owned()),
+        (None, model) => model,
+    }
+}
+
 /// Splits the current session's live sub-agents into (running, completed),
 /// with completed sorted by `completed_at_ms` descending (most recent
 /// first, per `docs/proposals/subagent-panel-m2.md`), plus how many
@@ -391,37 +412,6 @@ fn layout_rows(
         .collect()
 }
 
-/// End-anchored ellipsis truncation (unlike `environment/row.rs`'s
-/// `middle_ellipsize`, which favors keeping both a path's ends visible) -
-/// a task name or result summary reads better with its beginning intact.
-fn ellipsize_end(
-    painter: &mut dyn Painter,
-    value: &str,
-    max_width: f32,
-    font_size: f32,
-    weight: u16,
-) -> String {
-    if max_width <= 0.0 {
-        return String::new();
-    }
-    if painter.measure_text_weighted(value, font_size, weight) <= max_width {
-        return value.to_owned();
-    }
-    const ELLIPSIS: &str = "…";
-    if painter.measure_text_weighted(ELLIPSIS, font_size, weight) > max_width {
-        return String::new();
-    }
-    let characters = value.chars().collect::<Vec<_>>();
-    for kept in (0..characters.len()).rev() {
-        let mut candidate = characters[..kept].iter().collect::<String>();
-        candidate.push('…');
-        if painter.measure_text_weighted(&candidate, font_size, weight) <= max_width {
-            return candidate;
-        }
-    }
-    ELLIPSIS.into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +433,7 @@ mod tests {
             turn_id: TurnId::new(),
             completed_at_ms,
             result_summary: Some("done".into()),
+            model: None,
         }
     }
 
@@ -458,6 +449,27 @@ mod tests {
             },
         );
         state
+    }
+
+    #[test]
+    fn the_second_row_line_discloses_the_model_alongside_any_result() {
+        let mut agent = subagent("a", SubagentStatus::Completed, Some(1));
+        assert_eq!(row_secondary_label(&agent).as_deref(), Some("done"));
+
+        agent.model = Some("claude-opus-5".into());
+        assert_eq!(
+            row_secondary_label(&agent).as_deref(),
+            Some("done · 使用 claude-opus-5")
+        );
+
+        agent.result_summary = None;
+        assert_eq!(
+            row_secondary_label(&agent).as_deref(),
+            Some("使用 claude-opus-5")
+        );
+
+        agent.model = None;
+        assert_eq!(row_secondary_label(&agent), None);
     }
 
     #[test]

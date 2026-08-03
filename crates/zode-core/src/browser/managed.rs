@@ -8,18 +8,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use base64::Engine as _;
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
 use chromiumoxide::cdp::browser_protocol::input::{DispatchKeyEventParams, DispatchKeyEventType};
-use chromiumoxide::cdp::browser_protocol::network::{
-    EventRequestWillBeSent, EventResponseReceived, RequestId,
-};
 use chromiumoxide::cdp::browser_protocol::page::{
-    EventScreencastFrame, ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams,
-    StopScreencastParams,
+    StartScreencastFormat, StartScreencastParams, StopScreencastParams,
 };
-use chromiumoxide::cdp::js_protocol::runtime::EventConsoleApiCalled;
 use chromiumoxide::cdp::js_protocol::runtime::{EvaluateParams, ReleaseObjectParams};
 use chromiumoxide::handler::viewport::Viewport;
 use chromiumoxide::layout::Point;
@@ -31,14 +25,12 @@ use crate::config::BrowserConfig;
 
 use super::backend::*;
 use super::executable::locate_managed_executable;
+use super::managed_events::{attach_listeners, attach_screencast_listener};
 use super::session::BackendFactory;
 use super::snapshot_js::SNAPSHOT_JS;
 
 const OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const NAV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-/// Cap for the console/network ring buffers and the request-correlation
-/// pending queue; oldest entries are evicted once exceeded.
-const LOG_BUFFER_CAP: usize = 500;
 /// JPEG quality for the spectator screencast (M1 route A) — a compromise
 /// between panel legibility and bandwidth/CPU; matches the proposal's
 /// suggested value.
@@ -290,157 +282,27 @@ impl ManagedBackend {
         self.screencast_max_width.store(max_width, Ordering::SeqCst);
         Ok(())
     }
-}
 
-/// Spawns the screencast frame listener task for `page`: decodes each
-/// base64 JPEG frame, stores it in the single-slot `frame` cell (overwrite,
-/// never queue — a slow consumer sees only the newest frame), bumps
-/// `sequence`, and acks the frame so Chrome keeps streaming (CDP pauses
-/// screencast delivery until each frame is acknowledged). A frame that
-/// fails to base64-decode is skipped but still acked, so one malformed
-/// frame can't stall the stream. Returns the task handle so the caller can
-/// abort it on stop / tab swap / restart.
-fn attach_screencast_listener(
-    page: Page,
-    frame: Arc<StdMutex<Option<ScreencastFrame>>>,
-    sequence: Arc<AtomicU64>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let Ok(mut events) = page.event_listener::<EventScreencastFrame>().await else {
-            return;
-        };
-        while let Some(event) = events.next().await {
-            let raw: &[u8] = event.data.as_ref();
-            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(raw) {
-                let next = sequence.fetch_add(1, Ordering::SeqCst) + 1;
-                *frame.lock().unwrap() = Some(ScreencastFrame {
-                    data: Arc::new(bytes),
-                    sequence: next,
-                });
-            }
-            let ack = ScreencastFrameAckParams::new(event.session_id);
-            if page.execute(ack).await.is_err() {
-                break;
-            }
-        }
-    })
-}
-
-/// Push `item` onto the back of a ring buffer, evicting the oldest entry
-/// once `LOG_BUFFER_CAP` is reached.
-fn push_capped<T>(buf: &StdMutex<VecDeque<T>>, item: T) {
-    let mut guard = buf.lock().unwrap();
-    if guard.len() >= LOG_BUFFER_CAP {
-        guard.pop_front();
-    }
-    guard.push_back(item);
-}
-
-/// Builds a [`ConsoleEntry`] from a `Runtime.consoleAPICalled` event: level
-/// is the call type (`log`/`error`/...), text joins each argument's JSON
-/// `value` (falling back to its `description`) with spaces.
-fn console_entry_from_event(ev: Arc<EventConsoleApiCalled>) -> ConsoleEntry {
-    let level = ev.r#type.as_ref().to_string();
-    let text = ev
-        .args
-        .iter()
-        .map(|arg| match &arg.value {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(other) => other.to_string(),
-            None => arg.description.clone().unwrap_or_default(),
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    ConsoleEntry { level, text }
-}
-
-/// Builds a [`NetworkEntry`] from a `Network.responseReceived` event,
-/// recovering the HTTP method from the matching `Network.requestWillBeSent`
-/// entry in `pending` (removed once consumed). If no match is found (e.g.
-/// listener attached mid-flight), `method` is left empty.
-fn network_entry_from_event(
-    pending: &StdMutex<VecDeque<(RequestId, String, String)>>,
-    ev: Arc<EventResponseReceived>,
-) -> NetworkEntry {
-    let method = {
-        let mut guard = pending.lock().unwrap();
-        guard
+    /// Best-effort main-document HTTP status for `url`, recovered from the
+    /// network ring buffer (CDP's navigation result carries no status).
+    /// The newest matching response wins; `None` when the response event
+    /// has not been observed — `data:`/`about:` URLs, a navigation that
+    /// never hit the network, or a response that landed after we looked.
+    fn last_status_for(&self, url: &str) -> Option<u16> {
+        self.network_buf
+            .lock()
+            .unwrap()
             .iter()
-            .position(|(id, _, _)| *id == ev.request_id)
-            .map(|idx| guard.remove(idx).expect("index in bounds").1)
-            .unwrap_or_default()
-    };
-    NetworkEntry {
-        method,
-        url: ev.response.url.clone(),
-        status: u16::try_from(ev.response.status).ok(),
-        mime: Some(ev.response.mime_type.clone()),
+            .rev()
+            .find(|e| e.url == url)
+            .and_then(|e| e.status)
     }
 }
 
-/// Spawns console + network log listener tasks for `page` and returns their
-/// join handles so the caller ([`ManagedBackend::replace_listeners`]) can
-/// abort them once `page` is no longer current. chromiumoxide scopes event
-/// listeners to a single `Page`, so this must be re-run every time
-/// `self.page` is swapped (see `tab_new`/`tab_select`) or the new tab's
-/// activity won't be captured — and the PREVIOUS page's tasks must be
-/// aborted or they keep running (and writing into the shared buffers)
-/// indefinitely, since the old `Page` handle isn't dropped, only replaced.
-fn attach_listeners(
-    page: &Page,
-    console_buf: Arc<StdMutex<VecDeque<ConsoleEntry>>>,
-    network_buf: Arc<StdMutex<VecDeque<NetworkEntry>>>,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    let mut handles = Vec::with_capacity(3);
-
-    let console_page = page.clone();
-    handles.push(tokio::spawn(async move {
-        if let Ok(mut events) = console_page.event_listener::<EventConsoleApiCalled>().await {
-            while let Some(ev) = events.next().await {
-                push_capped(&console_buf, console_entry_from_event(ev));
-            }
-        }
-    }));
-
-    // Network entries need both the request (method) and response
-    // (status/mime) events; correlate them through a small pending queue
-    // shared between the two listener tasks.
-    let pending: Arc<StdMutex<VecDeque<(RequestId, String, String)>>> =
-        Arc::new(StdMutex::new(VecDeque::new()));
-
-    let request_page = page.clone();
-    let request_pending = pending.clone();
-    handles.push(tokio::spawn(async move {
-        if let Ok(mut events) = request_page
-            .event_listener::<EventRequestWillBeSent>()
-            .await
-        {
-            while let Some(ev) = events.next().await {
-                push_capped(
-                    &request_pending,
-                    (
-                        ev.request_id.clone(),
-                        ev.request.method.clone(),
-                        ev.request.url.clone(),
-                    ),
-                );
-            }
-        }
-    }));
-
-    let response_page = page.clone();
-    handles.push(tokio::spawn(async move {
-        if let Ok(mut events) = response_page
-            .event_listener::<EventResponseReceived>()
-            .await
-        {
-            while let Some(ev) = events.next().await {
-                push_capped(&network_buf, network_entry_from_event(&pending, ev));
-            }
-        }
-    }));
-
-    handles
+/// Whether a URL represents a real committed document, as opposed to the
+/// empty/blank state a failed navigation leaves behind.
+fn has_document(url: &str) -> bool {
+    !url.is_empty() && url != "about:blank"
 }
 
 /// Presses a single key via a raw `Input.dispatchKeyEvent` keydown+keyup
@@ -487,20 +349,50 @@ async fn dispatch_type_str(page: &Page, text: &str) -> Result<(), BrowserError> 
 
 #[async_trait]
 impl BrowserBackend for ManagedBackend {
-    async fn navigate(&self, url: &str) -> Result<String, BrowserError> {
+    async fn navigate(&self, url: &str) -> Result<NavigationOutcome, BrowserError> {
         let page = self.page.lock().await;
         let nav = page.goto(url);
-        match tokio::time::timeout(NAV_TIMEOUT, nav).await {
-            Ok(r) => {
-                r.map_err(|e| BrowserError::Protocol(e.to_string()))?;
+        // chromiumoxide turns the CDP `Page.navigate` `errorText` into a
+        // `CdpError::ChromeMessage`, so the net error name survives in the
+        // Display form — that string is the whole classification input.
+        let failure = match tokio::time::timeout(NAV_TIMEOUT, nav).await {
+            Ok(Ok(_)) => None,
+            Ok(Err(e)) => {
+                let raw = e.to_string();
+                let detail = net_error_token(&raw).unwrap_or(&raw).to_string();
+                Some((classify_net_error(&raw), detail))
             }
-            Err(_) => { /* load timeout: return current state, not an error */ }
-        }
-        tokio::time::timeout(OP_TIMEOUT, page.url())
+            Err(_) => Some((
+                LoadClass::Timeout,
+                format!("no load event within {}s", NAV_TIMEOUT.as_secs()),
+            )),
+        };
+        let current = tokio::time::timeout(OP_TIMEOUT, page.url())
             .await
             .map_err(|_| BrowserError::Timeout("navigate: url".into()))?
             .map_err(|e| BrowserError::Protocol(e.to_string()))?
-            .ok_or_else(|| BrowserError::Protocol("no url after navigation".into()))
+            .ok_or_else(|| BrowserError::Protocol("no url after navigation".into()))?;
+        drop(page);
+
+        Ok(match failure {
+            None => {
+                let mut outcome = NavigationOutcome::ok(current.as_str());
+                outcome.http_status = self.last_status_for(&current);
+                if outcome.http_status.is_some_and(|code| code >= 400) {
+                    // The document loaded; its status is the problem.
+                    outcome.class = LoadClass::HttpError;
+                }
+                outcome
+            }
+            Some((class, detail)) => {
+                let mut outcome = NavigationOutcome::failed(current.as_str(), class, detail);
+                // A timeout that still committed a document is the lenient
+                // "slow but loading" case the caller must not treat as a
+                // hard error; every other class left us with no new page.
+                outcome.loaded = class == LoadClass::Timeout && has_document(&current);
+                outcome
+            }
+        })
     }
 
     async fn screenshot(&self) -> Result<Screenshot, BrowserError> {
@@ -826,6 +718,14 @@ impl BrowserBackend for ManagedBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn has_document_rejects_blank_states() {
+        assert!(has_document("https://x.test/"));
+        assert!(has_document("data:text/html,<h1>hi</h1>"));
+        assert!(!has_document(""));
+        assert!(!has_document("about:blank"));
+    }
 
     #[test]
     fn profile_dir_defaults_under_zode_home() {

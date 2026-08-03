@@ -70,10 +70,25 @@ pub struct PluginManifest {
     pub repo: String,
     /// The ref this install is pinned to (branch/tag/sha, or `"HEAD"` when
     /// the caller didn't pin one — the default branch at clone time).
+    ///
+    /// Deliberately NOT rewritten to a commit sha by an update: the trust
+    /// store keys drift on this field, so pinning it to a moving sha would
+    /// force a full re-review of every capability on every update. The
+    /// per-capability content hashes already catch the changes that matter
+    /// (see `trust::TrustStore::status`).
     #[serde(rename = "ref")]
     pub reference: String,
     /// Epoch milliseconds.
     pub installed_at: u64,
+    /// The commit `reference` resolved to when the tree was last written —
+    /// recorded at install and refreshed by [`super::update::apply_update`].
+    /// Optional so a manifest written before this field existed still loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Epoch milliseconds of the last successful re-sync, absent while the
+    /// install still sits at its original clone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<u64>,
     pub capabilities: Vec<Capability>,
 }
 
@@ -149,6 +164,8 @@ mod tests {
             repo: "acme/tools".into(),
             reference: "main".into(),
             installed_at: 1_700_000_000_000,
+            commit: Some("abc1234".into()),
+            updated_at: None,
             capabilities: vec![Capability::Skill {
                 name: "review".into(),
                 path: "skills/review".into(),
@@ -157,6 +174,19 @@ mod tests {
         manifest.save(dir.path()).unwrap();
         let loaded = PluginManifest::load(dir.path()).unwrap();
         assert_eq!(manifest, loaded);
+    }
+
+    #[test]
+    fn manifest_without_commit_metadata_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            PluginManifest::path_in(dir.path()),
+            r#"{"repo":"acme/tools","ref":"main","installedAt":1,"capabilities":[]}"#,
+        )
+        .unwrap();
+        let loaded = PluginManifest::load(dir.path()).unwrap();
+        assert_eq!(loaded.commit, None);
+        assert_eq!(loaded.updated_at, None);
     }
 
     #[test]

@@ -2,6 +2,7 @@ mod add_form;
 mod catalog;
 mod installed;
 mod plugin_detail;
+mod plugin_detail_paint;
 mod plugin_rows;
 mod row;
 
@@ -24,10 +25,10 @@ pub use catalog::CatalogSectionLayout;
 pub use installed::InstalledIconLayout;
 pub use plugin_detail::{
     CapabilityRowLayout, PluginDetailBody, PluginDetailOverlayLayout, TrustItemRowLayout,
-    PLUGIN_DETAIL_CHECK_UPDATE_ID, PLUGIN_DETAIL_CLOSE_ID, PLUGIN_DETAIL_TRUST_ALL_ID,
-    PLUGIN_DETAIL_TRUST_CANCEL_ID, PLUGIN_DETAIL_TRUST_GRANT_SELECTED_ID,
-    PLUGIN_DETAIL_UNINSTALL_CANCEL_ID, PLUGIN_DETAIL_UNINSTALL_CONFIRM_ID,
-    PLUGIN_DETAIL_UNINSTALL_ID,
+    UpdateControls, UpdateStatusLine, PLUGIN_DETAIL_APPLY_UPDATE_ID, PLUGIN_DETAIL_CHECK_UPDATE_ID,
+    PLUGIN_DETAIL_CLOSE_ID, PLUGIN_DETAIL_TRUST_ALL_ID, PLUGIN_DETAIL_TRUST_CANCEL_ID,
+    PLUGIN_DETAIL_TRUST_GRANT_SELECTED_ID, PLUGIN_DETAIL_UNINSTALL_CANCEL_ID,
+    PLUGIN_DETAIL_UNINSTALL_CONFIRM_ID, PLUGIN_DETAIL_UNINSTALL_ID,
 };
 pub use plugin_rows::PluginRowLayout;
 pub use row::IntegrationRowLayout;
@@ -126,7 +127,7 @@ impl IntegrationsPage {
             }
         }
         if let Some(detail) = Self::plugin_detail_layout(rect, state) {
-            plugin_detail::paint(painter, rect, &detail, theme);
+            plugin_detail_paint::paint(painter, rect, &detail, theme);
         }
     }
 
@@ -463,7 +464,18 @@ fn plugin_market_command_for_widget(state: &ZodeAppState, id: WidgetId) -> Optio
                 return Some(AppCommand::RequestUninstallPlugin);
             }
             if id == PLUGIN_DETAIL_CHECK_UPDATE_ID {
-                return Some(AppCommand::CheckPluginUpdate);
+                // Both update buttons go dead while a fetch/reset is in
+                // flight - see `PluginUpdateState::busy`.
+                return (!detail.update.busy()).then_some(AppCommand::CheckPluginUpdate);
+            }
+            if id == PLUGIN_DETAIL_APPLY_UPDATE_ID {
+                // Only live once a check reported something to apply; the
+                // button is not painted at all before that.
+                return detail
+                    .update
+                    .pending()
+                    .filter(|_| !detail.update.busy())
+                    .map(|_| AppCommand::ApplyPluginUpdate);
             }
             let pending_keys = match &plugin.trust {
                 zode_node_protocol::PluginTrustState::Trusted => &[][..],

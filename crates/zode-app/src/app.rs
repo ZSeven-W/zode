@@ -96,6 +96,7 @@ mod sidebar_menu;
 mod sidebar_motion;
 mod startup;
 mod terminal;
+mod transcript_find;
 #[path = "app/transcript-images.rs"]
 mod transcript_images;
 mod window;
@@ -114,6 +115,11 @@ pub struct DesktopApp {
     agent_events: Option<AgentEventBridge>,
     composer: ComposerController,
     global_search_controller: GlobalSearchController,
+    /// Editable buffer for the in-conversation find bar. A separate
+    /// controller from `global_search_controller` even though both are the
+    /// same type: the two fields are visible at the same time and must keep
+    /// independent carets, selections and IME compositions.
+    transcript_find_controller: zode_app_ui::TranscriptFindController,
     project_picker_controller: ProjectPickerController,
     branch_picker_controller: ProjectPickerController,
     session_rename_controller: SessionRenameController,
@@ -345,6 +351,7 @@ impl DesktopApp {
             agent_events: None,
             composer,
             global_search_controller,
+            transcript_find_controller: zode_app_ui::TranscriptFindController::default(),
             project_picker_controller,
             branch_picker_controller,
             session_rename_controller: SessionRenameController::default(),

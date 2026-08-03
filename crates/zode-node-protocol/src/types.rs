@@ -216,6 +216,30 @@ pub struct PluginTrustReview {
     pub items: Vec<PluginTrustItem>,
 }
 
+/// Result of fetching an installed plugin's pinned ref and comparing it with
+/// the local checkout. A failed check is not modelled here - it surfaces as
+/// the query's error, which the caller renders in the same notice slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUpdateCheck {
+    pub plugin_id: String,
+    /// `None` when the checkout already sits at the ref's remote tip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available: Option<PluginUpdateAvailable>,
+}
+
+/// What applying the update would move the checkout to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUpdateAvailable {
+    /// A short, already-localized one-liner for the detail overlay, e.g.
+    /// `"abc1234 → def5678（2 个提交）"`.
+    pub summary: String,
+    /// The commit the update would land on - shown so the user can tell two
+    /// consecutive checks apart, and logged with the applied update.
+    pub target_commit: String,
+}
+
 /// A versioned command sent to a Zode node.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -378,6 +402,13 @@ pub enum AgentCommandKind {
         plugin_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         keys: Option<Vec<String>>,
+    },
+    /// Fast-forwards an installed plugin to its pinned ref's current remote
+    /// tip and re-scans its capabilities. Slow (network I/O), like
+    /// `InstallPlugin`. Trust is not carried over: capabilities whose
+    /// executable content changed re-enter the trust-review gate.
+    ApplyPluginUpdate {
+        plugin_id: String,
     },
 }
 
@@ -630,6 +661,13 @@ pub struct SubagentSnapshot {
     /// (~120 chars). Extracted once at the terminal transition, never
     /// streamed mid-run. `None` while running or after a failure.
     pub result_summary: Option<String>,
+    /// Model this sub-agent runs under, driving the panel's per-agent
+    /// disclosure. Resolved host-side from the agent definition's `model:`
+    /// override, falling back to the session's active model; `None` when the
+    /// producer cannot determine either. `#[serde(default)]` so snapshots
+    /// written before this field existed still deserialize.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Lifecycle status for one host-tracked background process (a shell

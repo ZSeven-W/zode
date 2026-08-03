@@ -262,7 +262,11 @@ impl Tool for BrowserActTool {
 
     fn description(&self) -> &str {
         "Act in the controlled browser: navigate, click, type, press keys, scroll. Click \
-         targets: CSS selector, snapshot ref, or x/y."
+         targets: CSS selector, snapshot ref, or x/y. navigate returns {url, ok, class, \
+         loaded, message}; class is one of ok, dns_failure, connection_refused, \
+         connection_failed, offline, tls_error, proxy_error, http_error (with http_status), \
+         timeout, aborted, blocked, invalid_url, unknown. A timeout with loaded=true means \
+         the page committed and is still loading — retry a read rather than the navigation."
     }
 
     fn input_schema(&self) -> Value {
@@ -304,8 +308,8 @@ impl Tool for BrowserActTool {
                     .get("url")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| AgentError::other("navigate: 'url' required"))?;
-                let final_url = await_browser_response(ctx, backend.navigate(url)).await?;
-                Ok(json!({ "url": final_url }))
+                let outcome = await_browser_response(ctx, backend.navigate(url)).await?;
+                Ok(outcome.to_json())
             }
             "click" => {
                 let target = click_target(&input)?;
@@ -593,6 +597,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(nav["url"], "https://example.test");
+        assert_eq!(nav["ok"], true);
+        assert_eq!(nav["class"], "ok");
+        assert_eq!(nav["loaded"], true);
         t.call(&ctx(), json!({"action": "click", "ref": 1}))
             .await
             .unwrap();

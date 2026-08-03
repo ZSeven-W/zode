@@ -118,6 +118,7 @@ pub fn conversation_artifacts_scene(theme: ThemePreference, viewport_width: u32)
         turn_id: TurnId::new(),
         completed_at_ms: Some(1_752_700_000_000),
         result_summary: Some("未发现 Codex 品牌资源残留".into()),
+        model: None,
     }];
     presentation.background_processes = vec![BackgroundProcessSnapshot {
         id: "artifact-snapshot-render".into(),

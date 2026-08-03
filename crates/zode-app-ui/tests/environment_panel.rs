@@ -147,6 +147,7 @@ fn ready_presentation(session: &SessionLocator) -> SessionPresentationState {
             turn_id: TurnId::new(),
             completed_at_ms: Some(1_752_700_000_000),
             result_summary: Some("完成环境面板紧凑行样式".into()),
+            model: None,
         }],
         background_processes: vec![BackgroundProcessSnapshot {
             id: "process-1".into(),

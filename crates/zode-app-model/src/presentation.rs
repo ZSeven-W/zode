@@ -607,6 +607,10 @@ pub struct SessionPresentationState {
     /// Kept per-session so paging through one task's history never leaks
     /// into another's.
     pub subagents_shown: usize,
+    /// In-conversation find bar (Cmd/Ctrl+F). Per-session for the same
+    /// reason `subagents_shown` is: searching one task must not carry a
+    /// query, a match position or a scroll jump into another.
+    pub find: crate::TranscriptFindState,
 }
 
 /// Typed route, pane selection, and session-isolated presentation data.

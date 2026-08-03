@@ -375,6 +375,7 @@ fn all_known_event_variants_have_golden_camel_case_wire_shapes() {
                     turn_id: turn_id(),
                     completed_at_ms: None,
                     result_summary: None,
+                    model: None,
                 },
             }),
             json!({
@@ -392,7 +393,8 @@ fn all_known_event_variants_have_golden_camel_case_wire_shapes() {
                     "tokens": 1234,
                     "turnId": TURN_ID,
                     "completedAtMs": null,
-                    "resultSummary": null
+                    "resultSummary": null,
+                    "model": null
                 }
             }),
         ),
@@ -408,6 +410,7 @@ fn all_known_event_variants_have_golden_camel_case_wire_shapes() {
                     turn_id: turn_id(),
                     completed_at_ms: Some(1_752_700_000_000),
                     result_summary: Some("Found 3 large directories under ~".into()),
+                    model: None,
                 },
             }),
             json!({
@@ -425,7 +428,8 @@ fn all_known_event_variants_have_golden_camel_case_wire_shapes() {
                     "tokens": 9001,
                     "turnId": TURN_ID,
                     "completedAtMs": 1752700000000i64,
-                    "resultSummary": "Found 3 large directories under ~"
+                    "resultSummary": "Found 3 large directories under ~",
+                    "model": null
                 }
             }),
         ),
@@ -660,6 +664,24 @@ fn invalid_workspace_uri_wire_is_a_protocol_decode_error() {
             Err(ProtocolError::Decode(_))
         ));
     }
+}
+
+#[test]
+fn a_subagent_snapshot_without_a_model_still_decodes() {
+    let snapshot: SubagentSnapshot = serde_json::from_value(json!({
+        "id": "1",
+        "agentType": "researcher",
+        "displayName": "researcher",
+        "depth": 0,
+        "status": "running",
+        "tokens": 1234,
+        "turnId": TURN_ID,
+        "completedAtMs": null,
+        "resultSummary": null
+    }))
+    .expect("a snapshot written before the model field existed must still decode");
+
+    assert_eq!(snapshot.model, None);
 }
 
 #[test]

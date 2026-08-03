@@ -2,7 +2,7 @@
 //!   ZODE_BROWSER_IT=1 cargo test -p zode-core --test browser_it -- --ignored
 use agent::tool::{Tool, ToolUseContext};
 use zode_core::browser::{
-    BrowserReadTool, BrowserSession, BrowserToolDeps, ClickTarget, ManagedFactory,
+    BrowserReadTool, BrowserSession, BrowserToolDeps, ClickTarget, LoadClass, ManagedFactory,
 };
 use zode_core::config::BrowserConfig;
 
@@ -35,8 +35,9 @@ async fn managed_end_to_end() {
     let session = BrowserSession::new(cfg, std::sync::Arc::new(ManagedFactory));
     let lease = session.lease().await.expect("launch");
     let b = lease.backend();
-    let url = b.navigate("data:text/html,<h1 id=t>hi</h1>").await.unwrap();
-    assert!(url.starts_with("data:"));
+    let nav = b.navigate("data:text/html,<h1 id=t>hi</h1>").await.unwrap();
+    assert!(nav.url.starts_with("data:"));
+    assert!(nav.is_ok(), "unexpected load class: {nav:?}");
     assert_eq!(b.evaluate("1+1").await.unwrap(), serde_json::json!(2));
     let shot = b.screenshot().await.unwrap();
     assert!(
@@ -59,6 +60,41 @@ async fn managed_end_to_end() {
     );
     let tabs = b.tabs().await.unwrap();
     assert_eq!(tabs.len(), 1);
+
+    drop(lease);
+    session.close().await;
+}
+
+/// Real Chrome must produce the net errors the load classifier keys on.
+/// The mapping table itself is unit-tested; this checks the wiring —
+/// that chromiumoxide still surfaces `errorText` where we read it, and
+/// that a failed load comes back as a classified outcome rather than an
+/// `Err` or a silent "here is the current URL".
+#[tokio::test]
+#[ignore]
+async fn navigation_failures_are_classified() {
+    if std::env::var("ZODE_BROWSER_IT").as_deref() != Ok("1") {
+        eprintln!("skipped: set ZODE_BROWSER_IT=1");
+        return;
+    }
+    let (_profile_dir, cfg) = isolated_headless_cfg();
+    let session = BrowserSession::new(cfg, std::sync::Arc::new(ManagedFactory));
+    let lease = session.lease().await.expect("launch");
+    let b = lease.backend();
+
+    // `.invalid` is reserved by RFC 2606 and never resolves.
+    let dns = b.navigate("http://nothing.invalid/").await.unwrap();
+    assert_eq!(dns.class, LoadClass::DnsFailure, "outcome: {dns:?}");
+    assert!(!dns.loaded);
+
+    // Nothing listens on this loopback port (and it is not one of
+    // Chrome's restricted ports, which would report as `blocked`).
+    let refused = b.navigate("http://127.0.0.1:45789/").await.unwrap();
+    assert_eq!(
+        refused.class,
+        LoadClass::ConnectionRefused,
+        "outcome: {refused:?}"
+    );
 
     drop(lease);
     session.close().await;

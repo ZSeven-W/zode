@@ -62,6 +62,9 @@ impl DesktopApp {
                 if self.handle_global_search_ime(event.clone()) {
                     return;
                 }
+                if self.handle_transcript_find_ime(event.clone()) {
+                    return;
+                }
                 if self.handle_integration_search_ime(&event) {
                     return;
                 }
@@ -201,6 +204,16 @@ impl DesktopApp {
             return;
         };
         if self.paste_session_rename_from_clipboard(clipboard.as_ref()) {
+            return;
+        }
+        if self.focused_widget == Some(zode_app_ui::TRANSCRIPT_FIND_INPUT_ID) {
+            match clipboard.read_text() {
+                Ok(Some(text)) if !text.is_empty() => {
+                    let _ = self.paste_transcript_find_text(&text);
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("zode-app: clipboard read failed: {error}"),
+            }
             return;
         }
         if self.app_state.global_search.open && self.focused_widget == Some(GLOBAL_SEARCH_INPUT_ID)
@@ -366,6 +379,9 @@ impl DesktopApp {
     pub(super) fn activate_widget(&mut self, id: WidgetId) {
         if id == SIDEBAR_TOGGLE_ID {
             self.dismiss_primary_sidebar_preview();
+        }
+        if self.activate_transcript_find_widget(id) {
+            return;
         }
         if let Some(prompt) = EmptyState::suggestion_prompt(id) {
             self.composer.set_text(prompt);
@@ -751,6 +767,12 @@ impl DesktopApp {
             return;
         }
         if self.handle_settings_search_key(&event) {
+            return;
+        }
+        if self.handle_transcript_find_shortcut(&event) {
+            return;
+        }
+        if self.handle_transcript_find_key(&event) {
             return;
         }
         if self.handle_sidebar_shortcut(&event) {

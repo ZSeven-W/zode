@@ -6,10 +6,10 @@ use crate::{
     IntegrationsPage, PluginDetailBody, ThreadTranscript, WorkspaceLayout,
     INTEGRATIONS_ADD_PLUGIN_ID, INTEGRATIONS_SEARCH_ID, PLUGIN_ADD_CANCEL_ID,
     PLUGIN_ADD_REFERENCE_INPUT_ID, PLUGIN_ADD_SPEC_INPUT_ID, PLUGIN_ADD_SUBMIT_ID,
-    PLUGIN_DETAIL_CHECK_UPDATE_ID, PLUGIN_DETAIL_CLOSE_ID, PLUGIN_DETAIL_TRUST_ALL_ID,
-    PLUGIN_DETAIL_TRUST_CANCEL_ID, PLUGIN_DETAIL_TRUST_GRANT_SELECTED_ID,
-    PLUGIN_DETAIL_UNINSTALL_CANCEL_ID, PLUGIN_DETAIL_UNINSTALL_CONFIRM_ID,
-    PLUGIN_DETAIL_UNINSTALL_ID,
+    PLUGIN_DETAIL_APPLY_UPDATE_ID, PLUGIN_DETAIL_CHECK_UPDATE_ID, PLUGIN_DETAIL_CLOSE_ID,
+    PLUGIN_DETAIL_TRUST_ALL_ID, PLUGIN_DETAIL_TRUST_CANCEL_ID,
+    PLUGIN_DETAIL_TRUST_GRANT_SELECTED_ID, PLUGIN_DETAIL_UNINSTALL_CANCEL_ID,
+    PLUGIN_DETAIL_UNINSTALL_CONFIRM_ID, PLUGIN_DETAIL_UNINSTALL_ID,
 };
 
 use super::{next_order, node, visible_rect, InteractionNode, INTEGRATIONS_ROOT_ID};
@@ -253,7 +253,7 @@ pub(super) fn append_integration_nodes(
         match &detail.body {
             PluginDetailBody::Overview {
                 capabilities,
-                check_update,
+                update,
                 uninstall,
                 ..
             } => {
@@ -278,16 +278,38 @@ pub(super) fn append_integration_nodes(
                         ));
                     }
                 }
+                // A disabled button still gets a node (so it stays readable
+                // and keeps its place in the focus order) but offers no
+                // Click action while git is running.
+                let actions = |disabled: bool| {
+                    if disabled {
+                        vec![Action::Focus]
+                    } else {
+                        vec![Action::Click, Action::Focus]
+                    }
+                };
                 nodes.push(node(
                     PLUGIN_DETAIL_CHECK_UPDATE_ID,
-                    *check_update,
+                    update.check,
                     Role::Button,
-                    "检查更新",
+                    &update.check_label,
                     None,
-                    vec![Action::Click, Action::Focus],
+                    actions(update.check_disabled),
                     next_order(focus_order),
                     CursorHint::Pointer,
                 ));
+                if let Some(apply) = update.apply {
+                    nodes.push(node(
+                        PLUGIN_DETAIL_APPLY_UPDATE_ID,
+                        apply,
+                        Role::Button,
+                        &update.apply_label,
+                        None,
+                        actions(update.apply_disabled),
+                        next_order(focus_order),
+                        CursorHint::Pointer,
+                    ));
+                }
                 nodes.push(node(
                     PLUGIN_DETAIL_UNINSTALL_ID,
                     *uninstall,

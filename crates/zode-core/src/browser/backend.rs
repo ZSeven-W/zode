@@ -99,7 +99,15 @@ impl fmt::Debug for ScreencastFrame {
     }
 }
 
+pub use super::load_error::{classify_net_error, net_error_token, LoadClass, NavigationOutcome};
+
 /// Browser operation errors.
+///
+/// These are failures of the *browser control channel* — a missing
+/// executable, a dead process, a protocol error. A page that fails to
+/// load is not one of them: navigation reports its result through
+/// [`NavigationOutcome`], which carries a [`LoadClass`] the caller can
+/// branch on.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BrowserError {
     NotFound(String),
@@ -128,8 +136,11 @@ impl std::error::Error for BrowserError {}
 /// Implementers must be object-safe (`Send + Sync + Debug`).
 #[async_trait]
 pub trait BrowserBackend: Send + Sync + std::fmt::Debug {
-    /// Navigate to a URL; returns the final URL (may differ after redirects).
-    async fn navigate(&self, url: &str) -> Result<String, BrowserError>;
+    /// Navigate to a URL. The outcome carries the final URL (which may
+    /// differ after redirects) plus how the load ended — see
+    /// [`NavigationOutcome`]. An `Err` here means the browser itself
+    /// could not be driven, never that the page failed to load.
+    async fn navigate(&self, url: &str) -> Result<NavigationOutcome, BrowserError>;
 
     /// Take a screenshot of the current tab.
     async fn screenshot(&self) -> Result<Screenshot, BrowserError>;
@@ -278,8 +289,8 @@ pub(crate) mod mock {
 
     #[async_trait::async_trait]
     impl BrowserBackend for MockBackend {
-        async fn navigate(&self, url: &str) -> Result<String, BrowserError> {
-            self.track(Ok(url.to_string())).await
+        async fn navigate(&self, url: &str) -> Result<NavigationOutcome, BrowserError> {
+            self.track(Ok(NavigationOutcome::ok(url))).await
         }
         async fn screenshot(&self) -> Result<Screenshot, BrowserError> {
             self.track(Ok(Screenshot {

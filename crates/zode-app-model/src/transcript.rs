@@ -3,6 +3,8 @@ use std::time::{Duration, Instant};
 
 use zode_node_protocol::{ToolCall, ToolStatus, TurnId};
 
+use crate::SubagentChip;
+
 mod anchors;
 pub use anchors::ConversationAnchor;
 
@@ -213,6 +215,7 @@ pub enum TranscriptVisualKind {
     Attachment,
     Image,
     GoalProgress,
+    SubagentChip,
     Approval,
     Status,
     Error,
@@ -303,6 +306,9 @@ pub enum TranscriptItem {
     Attachment(AttachmentMetadata),
     Image(ImageItem),
     GoalProgress(GoalProgress),
+    /// One `Task` sub-agent lifecycle one-liner. See
+    /// [`crate::SubagentChip`].
+    SubagentChip(SubagentChip),
     Approval {
         id: String,
         tool: String,
@@ -398,6 +404,7 @@ impl TranscriptItem {
             Self::Attachment(_) => TranscriptVisualKind::Attachment,
             Self::Image(_) => TranscriptVisualKind::Image,
             Self::GoalProgress(_) => TranscriptVisualKind::GoalProgress,
+            Self::SubagentChip(_) => TranscriptVisualKind::SubagentChip,
             Self::Approval { .. } => TranscriptVisualKind::Approval,
             Self::Status { .. } => TranscriptVisualKind::Status,
             Self::Error { .. } => TranscriptVisualKind::Error,
@@ -417,6 +424,9 @@ impl TranscriptItem {
             Self::Attachment(attachment) => format!("attachment:{}", attachment.id),
             Self::Image(image) => format!("image:{}", image.id),
             Self::GoalProgress(goal) => format!("goal:{}", goal.id),
+            Self::SubagentChip(chip) => {
+                format!("subagent:{}:{}", chip.agent_id, chip.phase.key())
+            }
             Self::Approval { id, .. } => format!("approval:{id}"),
             Self::UserText { .. } => format!("user:{index}"),
             Self::AssistantText { .. } => format!("assistant:{index}"),

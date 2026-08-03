@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use tokio::sync::mpsc;
 use zode_app_model::{
-    integration_catalog, EnvironmentSnapshot, LoadState, PluginDetailMode, PreviewKind,
-    PreviewState, PreviewTarget, PullRequestStatus, ZodeAppState,
+    integration_catalog, EnvironmentSnapshot, LoadState, PluginDetailMode, PluginUpdateState,
+    PreviewKind, PreviewState, PreviewTarget, PullRequestStatus, ZodeAppState,
 };
 use zode_app_runtime::{
     git_status::{fetch_pull_request_status, SystemCommandRunner},
@@ -11,7 +11,8 @@ use zode_app_runtime::{
 };
 use zode_node_protocol::{
     AgentEndpoint, AgentQuery, AgentSnapshot, DiffSnapshot, InstalledPluginSummary,
-    IntegrationRegistrySnapshot, PluginTrustReview, SessionLocator, WorkspaceUri,
+    IntegrationRegistrySnapshot, PluginTrustReview, PluginUpdateCheck, SessionLocator,
+    WorkspaceUri,
 };
 
 use crate::{
@@ -42,6 +43,12 @@ pub enum PresentationQuery {
     PluginTrustReview {
         plugin_id: String,
     },
+    /// Git-fetches the plugin's pinned ref and compares it with the local
+    /// checkout. Slow, so it rides the same background pump as every other
+    /// presentation query rather than blocking the window loop.
+    PluginUpdateCheck {
+        plugin_id: String,
+    },
     PullRequest {
         session: SessionLocator,
         workspace_uri: WorkspaceUri,
@@ -57,6 +64,7 @@ impl PresentationQuery {
             Self::Integrations { .. } => QueryKey::Integrations,
             Self::InstalledPlugins => QueryKey::InstalledPlugins,
             Self::PluginTrustReview { .. } => QueryKey::PluginTrustReview,
+            Self::PluginUpdateCheck { .. } => QueryKey::PluginUpdateCheck,
             Self::PullRequest { session, .. } => QueryKey::PullRequest(session.clone()),
         }
     }
@@ -70,6 +78,7 @@ enum QueryKey {
     Integrations,
     InstalledPlugins,
     PluginTrustReview,
+    PluginUpdateCheck,
     PullRequest(SessionLocator),
 }
 
@@ -115,6 +124,11 @@ enum BridgeItem {
         plugin_id: String,
         result: Result<PluginTrustReview, String>,
     },
+    PluginUpdateCheck {
+        generation: u64,
+        plugin_id: String,
+        result: Result<PluginUpdateCheck, String>,
+    },
     PullRequest {
         generation: u64,
         session: SessionLocator,
@@ -137,6 +151,7 @@ impl BridgeItem {
             Self::Integrations { .. } => QueryKey::Integrations,
             Self::InstalledPlugins { .. } => QueryKey::InstalledPlugins,
             Self::PluginTrustReview { .. } => QueryKey::PluginTrustReview,
+            Self::PluginUpdateCheck { .. } => QueryKey::PluginUpdateCheck,
             Self::PullRequest { session, .. } => QueryKey::PullRequest(session.clone()),
         }
     }
@@ -149,6 +164,7 @@ impl BridgeItem {
             | Self::Integrations { generation, .. }
             | Self::InstalledPlugins { generation, .. }
             | Self::PluginTrustReview { generation, .. }
+            | Self::PluginUpdateCheck { generation, .. }
             | Self::PullRequest { generation, .. } => *generation,
         }
     }
@@ -386,6 +402,27 @@ impl PresentationQueryBridge {
                         applied += 1;
                     }
                 }
+                BridgeItem::PluginUpdateCheck {
+                    plugin_id, result, ..
+                } => {
+                    // Only land the answer on the overlay that asked for it
+                    // and is still waiting - the user may have closed it,
+                    // opened another plugin, or pressed 更新 in the meantime.
+                    let waiting = state.presentation.plugin_detail.as_mut().filter(|detail| {
+                        detail.plugin_id == plugin_id
+                            && detail.update == PluginUpdateState::Checking
+                    });
+                    if let Some(detail) = waiting {
+                        detail.update = match result {
+                            Ok(check) => match check.available {
+                                Some(available) => PluginUpdateState::Available(available),
+                                None => PluginUpdateState::UpToDate,
+                            },
+                            Err(message) => PluginUpdateState::CheckFailed(message),
+                        };
+                        applied += 1;
+                    }
+                }
                 BridgeItem::PullRequest {
                     session, status, ..
                 } => {
@@ -492,6 +529,28 @@ async fn execute_work(
                 result,
             }
         }
+        PresentationQuery::PluginUpdateCheck { plugin_id } => {
+            let result = match endpoint
+                .query(AgentQuery::PluginUpdateCheck {
+                    plugin_id: plugin_id.clone(),
+                })
+                .await
+            {
+                Ok(AgentSnapshot::PluginUpdateCheck(check)) if check.plugin_id == plugin_id => {
+                    Ok(check)
+                }
+                Ok(AgentSnapshot::PluginUpdateCheck(_)) => {
+                    Err("the endpoint returned an update check for the wrong plugin".into())
+                }
+                Ok(_) => Err("the endpoint returned the wrong update-check snapshot".into()),
+                Err(error) => Err(error.to_string()),
+            };
+            BridgeItem::PluginUpdateCheck {
+                generation,
+                plugin_id,
+                result,
+            }
+        }
         PresentationQuery::PullRequest {
             session,
             workspace_uri,
@@ -563,6 +622,19 @@ fn mark_loading(state: &mut ZodeAppState, request: PresentationQuery) {
                 if let PluginDetailMode::TrustReview { review, .. } = &mut detail.mode {
                     *review = LoadState::Loading;
                 }
+            }
+        }
+        PresentationQuery::PluginUpdateCheck { plugin_id } => {
+            // `AppCommand::CheckPluginUpdate` already parked the overlay in
+            // `Checking`; this only covers a query enqueued from anywhere
+            // else, and never overwrites an apply that started meanwhile.
+            if let Some(detail) = state
+                .presentation
+                .plugin_detail
+                .as_mut()
+                .filter(|detail| detail.plugin_id == plugin_id && !detail.update.busy())
+            {
+                detail.update = PluginUpdateState::Checking;
             }
         }
         PresentationQuery::PullRequest { session, .. } => {

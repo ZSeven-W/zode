@@ -407,7 +407,8 @@ mod tests {
                 AgentQuery::Capabilities
                 | AgentQuery::Diff { .. }
                 | AgentQuery::InstalledPlugins
-                | AgentQuery::PluginTrustReview { .. } => unreachable!(),
+                | AgentQuery::PluginTrustReview { .. }
+                | AgentQuery::PluginUpdateCheck { .. } => unreachable!(),
             }
         }
 

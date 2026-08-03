@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 use jian_widgets::{Color, Painter, Point2D, Rect, TextLayout};
 use zode_app_model::{
-    AppCommand, MessageFeedback, TranscriptItem, TranscriptState, TranscriptTurnStatus,
-    TurnSummary, ZodeAppState,
+    AppCommand, MessageFeedback, TranscriptFindState, TranscriptItem, TranscriptState,
+    TranscriptTurnStatus, TurnSummary, ZodeAppState,
 };
 use zode_node_protocol::SessionLocator;
 
@@ -19,6 +19,8 @@ mod activity;
 mod anchor_rail;
 mod attachment;
 mod file_card;
+#[path = "find-highlight.rs"]
+mod find_highlight;
 mod goal;
 mod image;
 mod markdown;
@@ -26,6 +28,8 @@ mod markdown;
 pub(crate) mod message_actions;
 #[path = "relative-time.rs"]
 pub(crate) mod relative_time;
+#[path = "subagent-chip.rs"]
+mod subagent_chip;
 mod timestamp;
 mod turn;
 
@@ -33,6 +37,7 @@ pub use anchor_rail::{AnchorRail, AnchorTick};
 pub use image::{
     corrected_card_height, image_source_id, TranscriptImageBytes, TranscriptImageSource,
 };
+pub(crate) use subagent_chip::accessibility_label as subagent_chip_label;
 
 const DEFAULT_ITEM_GAP: f32 = 12.0;
 
@@ -188,6 +193,7 @@ impl ThreadTranscript {
             TranscriptItem::Attachment(_) => attachment::HEIGHT,
             TranscriptItem::Image(item) => image::estimated_height(item, width),
             TranscriptItem::GoalProgress(_) => goal::HEIGHT,
+            TranscriptItem::SubagentChip(_) => subagent_chip::HEIGHT,
             TranscriptItem::Approval { .. } => 66.0,
             TranscriptItem::Status { .. } => 34.0,
             TranscriptItem::Error { .. } => 50.0,
@@ -407,6 +413,9 @@ impl ThreadTranscript {
                 stable_widget_id(0x17, &(session, &attachment.id))
             }
             TranscriptItem::GoalProgress(goal) => stable_widget_id(0x18, &(session, &goal.id)),
+            TranscriptItem::SubagentChip(chip) => {
+                stable_widget_id(0x1a, &(session, &chip.agent_id, chip.phase.key()))
+            }
             TranscriptItem::Image(item) => stable_widget_id(0x19, &(session, &item.id)),
         }
     }
@@ -599,6 +608,15 @@ impl ThreadTranscript {
 
         let empty = BTreeMap::new();
         let tool_expanded = state.tool_expanded.get(session).unwrap_or(&empty);
+        // Highlights only exist while this session's find bar is open, so a
+        // closed bar costs nothing - `TranscriptFindState::matches` is never
+        // consulted and the band painting is skipped entirely.
+        let find = state
+            .presentation
+            .sessions
+            .get(session)
+            .map(|presentation| &presentation.find)
+            .filter(|find| find.open);
         paint_items(
             painter,
             rect,
@@ -607,6 +625,7 @@ impl ThreadTranscript {
             tool_expanded,
             hovered,
             image_source,
+            find,
             theme,
         );
         if let Some(button) = Self::back_to_bottom_layout(rect, transcript, tool_expanded) {
@@ -658,6 +677,7 @@ fn paint_items(
     tool_expanded: &BTreeMap<String, bool>,
     hovered: Option<WidgetId>,
     image_source: Option<&dyn image::TranscriptImageSource>,
+    find: Option<&TranscriptFindState>,
     theme: &ZodeTheme,
 ) {
     let now_ms = timestamp::now_ms();
@@ -665,6 +685,16 @@ fn paint_items(
     for item_layout in
         ThreadTranscript::visible_item_layout_with_tools(rect, transcript, tool_expanded)
     {
+        if let Some(find) = find {
+            find_highlight::paint(
+                painter,
+                item_layout.rect,
+                transcript,
+                find,
+                item_layout.index,
+                theme,
+            );
+        }
         paint_item(
             painter,
             item_layout.rect,
@@ -796,6 +826,9 @@ fn paint_item(
             image::paint(painter, content_rect, item, image_source, theme)
         }
         TranscriptItem::GoalProgress(goal) => goal::paint(painter, content_rect, goal, theme),
+        TranscriptItem::SubagentChip(chip) => {
+            subagent_chip::paint(painter, content_rect, chip, theme)
+        }
         TranscriptItem::Approval { tool, .. } => {
             ApprovalCard::paint(painter, content_rect, tool, theme)
         }
@@ -828,6 +861,7 @@ fn is_lightweight_activity(item: &TranscriptItem) -> bool {
             | TranscriptItem::ActivityGroup(_)
             | TranscriptItem::Tool(_)
             | TranscriptItem::Status { .. }
+            | TranscriptItem::SubagentChip(_)
     )
 }
 

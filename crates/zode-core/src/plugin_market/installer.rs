@@ -7,9 +7,12 @@
 //! libgit2 dependency), the same approach as the environment panel's git
 //! data source (`crate::git_stat`).
 //!
+//! Updating an existing install (fetch + re-sync + trust re-review) lives in
+//! [`super::update`], which reuses this module's git-subprocess plumbing
+//! (`run_git`, `classify_git_failure`, `GIT_TIMEOUT`).
+//!
 //! Not implemented in this wave (out of the approved v1 scope, see the
-//! design doc): sparse-checkout paths, and `fetch`/re-sync for an existing
-//! install (M2 — trust-review-gated update flow).
+//! design doc): sparse-checkout paths.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -21,11 +24,12 @@ use tokio::io::AsyncReadExt;
 use super::manifest::PluginManifest;
 use super::scan::scan_capabilities;
 use super::trust::TrustStore;
+use super::update;
 use super::PluginMarketError;
 
 /// Shallow-clone timeout — a hung/unreachable remote must never hang the
 /// install indefinitely.
-const GIT_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Directory name a plugin installs under, plus its metadata after install.
 #[derive(Debug, Clone)]
@@ -90,10 +94,15 @@ pub async fn install(
     }
 
     let capabilities = scan_capabilities(&dest_canon);
+    // Best-effort: a manifest without a commit still installs and still
+    // updates later (the update path re-resolves `HEAD` itself).
+    let commit = update::rev_parse(&dest_canon, "HEAD").await.ok();
     let manifest = PluginManifest {
         repo: spec.to_string(),
         reference: reference.unwrap_or("HEAD").to_string(),
         installed_at: now_millis(),
+        commit,
+        updated_at: None,
         capabilities,
     };
     manifest.save(&dest_canon)?;
@@ -131,7 +140,7 @@ pub fn uninstall(id: &str, config_dir: &Path) -> Result<(), PluginMarketError> {
     Ok(())
 }
 
-fn now_millis() -> u64 {
+pub(super) fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -139,7 +148,7 @@ fn now_millis() -> u64 {
 }
 
 /// Run one `git` subprocess bounded by `timeout`.
-async fn run_git(
+pub(super) async fn run_git(
     args: &[&str],
     cwd: Option<&Path>,
     timeout: Duration,
@@ -215,7 +224,7 @@ async fn run_timed(
 
 /// Map git's stderr text to a structured error. Best-effort pattern match on
 /// git's (not machine-stable, but long-unchanged) English error strings.
-fn classify_git_failure(stderr: &[u8]) -> PluginMarketError {
+pub(super) fn classify_git_failure(stderr: &[u8]) -> PluginMarketError {
     let text = String::from_utf8_lossy(stderr).to_lowercase();
     if text.contains("repository not found")
         || text.contains("not found")
@@ -405,6 +414,7 @@ mod tests {
         let content = std::fs::read_to_string(installed.dir.join("README.md")).unwrap();
         assert_eq!(content, "fixture plugin\n");
         assert_eq!(installed.manifest.reference, "v1");
+        assert!(installed.manifest.commit.is_some());
     }
 
     #[tokio::test]

@@ -16,14 +16,15 @@
 //! `crate::plugin::PluginManager` under its usual `skill:<name>` /
 //! `mcp:<server>` id. No parallel enable mechanism is introduced here.
 //!
-//! This wave (M1 + the M2 trust data layer) is `zode-core` only: installer,
-//! manifest, capability scan, and trust store. The install/uninstall UI, the
-//! plugin detail page, and the trust-review dialog are later, UI-crate waves.
+//! `zode-core`'s half is the installer, manifest, capability scan, trust
+//! store, and the fetch/re-sync update path ([`update`]); the install UI,
+//! detail page, and trust-review dialog live in the app crates.
 
 pub mod installer;
 pub mod manifest;
 pub mod scan;
 pub mod trust;
+pub mod update;
 
 use thiserror::Error;
 
@@ -48,6 +49,10 @@ pub enum PluginMarketError {
     AlreadyInstalled(String),
     #[error("plugin not installed: {0}")]
     NotInstalled(String),
+    /// The install directory exists but has no `.git` — nothing to fetch, so
+    /// it can never be checked for updates or re-synced.
+    #[error("plugin is not a git checkout: {0}")]
+    NotGitBacked(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("manifest: {0}")]

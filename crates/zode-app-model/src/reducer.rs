@@ -9,6 +9,10 @@ use zode_node_protocol::{
 mod presentation_integrations;
 #[path = "reducer/presentation-plugin-market.rs"]
 mod presentation_plugin_market;
+#[path = "reducer/subagent-chips.rs"]
+mod subagent_chips;
+#[path = "reducer/transcript-find.rs"]
+mod transcript_find;
 
 const UNKNOWN_EVENT_CODE: &str = "agent.event.unknown";
 const UNKNOWN_EVENT_MESSAGE: &str = "Ignored an unknown agent event";
@@ -529,6 +533,9 @@ pub fn reduce_transcript_command(
     state: &mut ZodeAppState,
     command: AppCommand,
 ) -> TranscriptCommandOutcome {
+    if let Some(outcome) = transcript_find::reduce_transcript_find_command(state, &command) {
+        return outcome;
+    }
     match command {
         AppCommand::SetTranscriptViewport {
             session,
@@ -796,6 +803,7 @@ pub fn reduce_agent_event_at(
             state.approvals.insert(approval_id, session);
         }
         AgentEventKind::SubagentUpdate { subagent } => {
+            subagent_chips::apply_subagent_chip(transcript, &subagent);
             upsert_subagent(
                 &mut state
                     .presentation
@@ -839,16 +847,20 @@ pub fn reduce_agent_event_at(
             transcript.touch_layout();
         }
         AgentEventKind::TurnFinished { interrupted } => {
-            let _ = transcript.finish_turn_at(turn_id, interrupted, received_at);
-            transcript.busy = false;
-            state.active_turns.remove(&session);
             // Safety net: the runtime already emits an authoritative final
             // `SubagentUpdate` from the registry before `TurnFinished`, but a
             // dangling `Running` row must never linger if that diff was
             // missed (e.g. the registry itself hadn't observed the abort yet).
+            // Runs before the turn is closed below so a chip written by that
+            // correction still lands inside this turn's item range, ahead of
+            // the turn divider rather than orphaned after it.
             if let Some(presentation) = state.presentation.sessions.get_mut(&session) {
                 finalize_running_subagents(&mut presentation.subagents, interrupted);
+                subagent_chips::finalize_subagent_chips(transcript, &presentation.subagents);
             }
+            let _ = transcript.finish_turn_at(turn_id, interrupted, received_at);
+            transcript.busy = false;
+            state.active_turns.remove(&session);
         }
         AgentEventKind::Error { message, retryable } => {
             if !retryable {

@@ -1,7 +1,7 @@
 use crate::{
     AgentCommand, AgentEvent, CapabilityManifest, DiffSnapshot, EndpointError,
-    InstalledPluginSummary, IntegrationRegistrySnapshot, PluginTrustReview, RuntimeOptions,
-    SessionLocator, ThreadHistory, ThreadSummary, WorkspaceUri,
+    InstalledPluginSummary, IntegrationRegistrySnapshot, PluginTrustReview, PluginUpdateCheck,
+    RuntimeOptions, SessionLocator, ThreadHistory, ThreadSummary, WorkspaceUri,
 };
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -13,14 +13,32 @@ pub type AgentEventStream = Pin<Box<dyn Stream<Item = Result<AgentEvent, Endpoin
 pub enum AgentQuery {
     Capabilities,
     Threads,
-    History { session: SessionLocator },
-    Diff { session: SessionLocator },
+    History {
+        session: SessionLocator,
+    },
+    Diff {
+        session: SessionLocator,
+    },
     RuntimeOptions,
-    SessionRuntimeOptions { session: SessionLocator },
-    ProjectPermissions { workspace_uri: WorkspaceUri },
-    Integrations { workspace_uri: WorkspaceUri },
+    SessionRuntimeOptions {
+        session: SessionLocator,
+    },
+    ProjectPermissions {
+        workspace_uri: WorkspaceUri,
+    },
+    Integrations {
+        workspace_uri: WorkspaceUri,
+    },
     InstalledPlugins,
-    PluginTrustReview { plugin_id: String },
+    PluginTrustReview {
+        plugin_id: String,
+    },
+    /// Fetches the plugin's pinned ref and compares it with the local
+    /// checkout. A query rather than a command because it only reads: the
+    /// worktree is untouched until `AgentCommandKind::ApplyPluginUpdate`.
+    PluginUpdateCheck {
+        plugin_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +56,7 @@ pub enum AgentSnapshot {
     Integrations(IntegrationRegistrySnapshot),
     InstalledPlugins(Vec<InstalledPluginSummary>),
     PluginTrustReview(PluginTrustReview),
+    PluginUpdateCheck(PluginUpdateCheck),
 }
 
 #[async_trait]

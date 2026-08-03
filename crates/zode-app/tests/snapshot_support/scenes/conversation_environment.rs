@@ -102,6 +102,7 @@ pub fn conversation_environment_scene(
             turn_id: TurnId::new(),
             completed_at_ms: None,
             result_summary: None,
+            model: None,
         },
         SubagentSnapshot {
             id: "visual-audit".into(),
@@ -113,6 +114,7 @@ pub fn conversation_environment_scene(
             turn_id: TurnId::new(),
             completed_at_ms: Some(1_752_700_000_000),
             result_summary: Some("未发现视觉问题".into()),
+            model: None,
         },
     ];
     presentation.background_processes = vec![BackgroundProcessSnapshot {

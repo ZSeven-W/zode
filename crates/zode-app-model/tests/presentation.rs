@@ -508,6 +508,7 @@ fn environment_sections_render_one_compact_avatar_and_count_row_for_subagents() 
                     turn_id: turn,
                     completed_at_ms: None,
                     result_summary: None,
+                    model: None,
                 },
                 SubagentSnapshot {
                     id: "2".into(),
@@ -519,6 +520,7 @@ fn environment_sections_render_one_compact_avatar_and_count_row_for_subagents() 
                     turn_id: turn,
                     completed_at_ms: Some(1_752_700_000_000),
                     result_summary: Some("Found 3 large directories".into()),
+                    model: None,
                 },
             ],
             ..SessionPresentationState::default()
@@ -565,6 +567,7 @@ fn environment_sections_subagent_count_omits_running_when_all_are_done() {
                 turn_id: turn,
                 completed_at_ms: Some(1),
                 result_summary: None,
+                model: None,
             }],
             ..SessionPresentationState::default()
         },
@@ -618,6 +621,7 @@ fn subagent_entry_labels_by_display_name_and_demotes_agent_type_to_the_value() {
         turn_id: TurnId::new(),
         completed_at_ms: Some(1_752_700_000_000),
         result_summary: Some("Found 3 large directories".into()),
+        model: None,
     };
 
     let entry = subagent_entry(&subagent);

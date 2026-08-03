@@ -23,7 +23,7 @@ use zode_node_protocol::{
 
 use crate::{
     runtime_policy, workspace_uri_to_path, DriverEventStream, EngineDriver, LoadedSession,
-    LocalSessionRepository,
+    LocalSessionRepository, SubagentModels,
 };
 
 /// Serializable pieces needed to persist or rebuild one session engine.
@@ -57,6 +57,12 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// empty for test doubles that don't model sub-agents.
     fn subagents_snapshot(&self) -> Vec<zode_core::SubAgent> {
         Vec::new()
+    }
+
+    /// Which model this engine's sub-agents run under, by agent type.
+    /// Default empty for test doubles, mirroring `subagents_snapshot`.
+    fn subagent_models(&self) -> SubagentModels {
+        SubagentModels::default()
     }
 
     /// Snapshot the engine's tracked background shells (`BashRun` sessions).
@@ -194,6 +200,13 @@ impl SessionEngine for RealSessionEngine {
 
     fn subagents_snapshot(&self) -> Vec<zode_core::SubAgent> {
         self.engine.subagents.snapshot()
+    }
+
+    fn subagent_models(&self) -> SubagentModels {
+        SubagentModels {
+            session_model: Some(self.engine.model.clone()),
+            overrides: self.engine.agent_model_overrides.clone(),
+        }
     }
 
     async fn background_processes_snapshot(&self) -> Vec<zode_core::bg_shells::BgShell> {
@@ -659,6 +672,11 @@ impl EngineDriver for ZodeEngineDriver {
                 )
                 .map_err(map_internal)
             }
+            AgentCommandKind::ApplyPluginUpdate { plugin_id } => {
+                crate::plugin_market::apply_plugin_update(&plugin_id, self.config_dir.as_deref())
+                    .await
+                    .map_err(map_internal)
+            }
             AgentCommandKind::Approve { .. }
             | AgentCommandKind::StartTurn { .. }
             | AgentCommandKind::InterruptTurn => Err(invalid(
@@ -759,6 +777,12 @@ impl EngineDriver for ZodeEngineDriver {
             .unwrap_or_default()
     }
 
+    fn subagent_models(&self, session: &SessionLocator) -> SubagentModels {
+        self.runtime_engine(session)
+            .map(|engine| engine.subagent_models())
+            .unwrap_or_default()
+    }
+
     async fn background_processes_snapshot(
         &self,
         session: &SessionLocator,
@@ -811,6 +835,15 @@ impl EngineDriver for ZodeEngineDriver {
                 )
                 .map_err(map_internal)?;
                 Ok(AgentSnapshot::PluginTrustReview(review))
+            }
+            AgentQuery::PluginUpdateCheck { plugin_id } => {
+                let check = crate::plugin_market::check_plugin_update(
+                    &plugin_id,
+                    self.config_dir.as_deref(),
+                )
+                .await
+                .map_err(map_internal)?;
+                Ok(AgentSnapshot::PluginUpdateCheck(check))
             }
         }
     }

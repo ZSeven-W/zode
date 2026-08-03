@@ -2,10 +2,11 @@ use accesskit::Action;
 use jian_widgets::{Point2D, Rect};
 use zode_app_model::ShellPage;
 use zode_app_ui::{
-    FocusDirection, Key, KeyEvent, TouchEvent, TouchPhase, WidgetId, WorkspaceSnapshot,
+    FocusDirection, Key, KeyEvent, Modifiers, TouchEvent, TouchPhase, WidgetId, WorkspaceSnapshot,
     ARCHIVED_TASK_SEARCH_ID, COMPOSER_BRANCH_SEARCH_ID, COMPOSER_ID, GLOBAL_SEARCH_INPUT_ID,
     HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID, PLUGIN_ADD_REFERENCE_INPUT_ID,
     PLUGIN_ADD_SPEC_INPUT_ID, PROJECT_PICKER_SEARCH_ID, SETTINGS_SEARCH_ID, TERMINAL_ID,
+    TRANSCRIPT_FIND_INPUT_ID,
 };
 
 use crate::event_map::{route_key_event, InputRoute};
@@ -110,6 +111,16 @@ pub fn settings_scroll_delta_for_action(action: Action, viewport_height: f32) ->
     }
 }
 
+/// Cmd+F on macOS, Ctrl+F elsewhere - `Modifiers::primary()` is how this
+/// codebase already expresses that split (see `is_new_task_shortcut` and
+/// `terminal_shortcut_command`), so the platform never has to be named here.
+pub fn is_transcript_find_shortcut(event: &KeyEvent) -> bool {
+    event.pressed
+        && event.modifiers.primary()
+        && !event.modifiers.contains(Modifiers::ALT)
+        && matches!(&event.key, Key::Character(value) if value.eq_ignore_ascii_case("f"))
+}
+
 pub fn dispatch_key(
     snapshot: &WorkspaceSnapshot,
     focused: Option<WidgetId>,
@@ -157,6 +168,7 @@ pub fn ime_allowed_for_focus(
                 || focused == Some(PLUGIN_ADD_SPEC_INPUT_ID)
                 || focused == Some(PLUGIN_ADD_REFERENCE_INPUT_ID)
                 || focused == Some(GLOBAL_SEARCH_INPUT_ID)
+                || focused == Some(TRANSCRIPT_FIND_INPUT_ID)
         }
     }
 }
@@ -165,11 +177,57 @@ pub fn ime_allowed_for_focus(
 mod tests {
     use zode_app_model::ShellPage;
     use zode_app_ui::{
-        WidgetId, ARCHIVED_TASK_SEARCH_ID, COMPOSER_BRANCH_SEARCH_ID, GLOBAL_SEARCH_INPUT_ID,
-        HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID, SETTINGS_SEARCH_ID,
+        Key, KeyEvent, Modifiers, WidgetId, ARCHIVED_TASK_SEARCH_ID, COMPOSER_BRANCH_SEARCH_ID,
+        GLOBAL_SEARCH_INPUT_ID, HEADER_RENAME_INPUT_ID, INTEGRATIONS_SEARCH_ID, SETTINGS_SEARCH_ID,
+        TRANSCRIPT_FIND_INPUT_ID,
     };
 
-    use super::ime_allowed_for_focus;
+    use super::{ime_allowed_for_focus, is_transcript_find_shortcut};
+
+    fn key(character: &str, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key: Key::Character(character.into()),
+            modifiers,
+            pressed: true,
+        }
+    }
+
+    #[test]
+    fn find_is_bound_to_the_platform_primary_modifier_plus_f() {
+        assert!(is_transcript_find_shortcut(&key("f", Modifiers::SUPER)));
+        assert!(is_transcript_find_shortcut(&key("F", Modifiers::CONTROL)));
+        assert!(!is_transcript_find_shortcut(&key("f", Modifiers::NONE)));
+        assert!(!is_transcript_find_shortcut(&key("g", Modifiers::SUPER)));
+        // Alt+Cmd+F belongs to whatever else may claim it, not the find bar.
+        assert!(!is_transcript_find_shortcut(&key(
+            "f",
+            Modifiers::SUPER | Modifiers::ALT,
+        )));
+        let released = KeyEvent {
+            pressed: false,
+            ..key("f", Modifiers::SUPER)
+        };
+        assert!(!is_transcript_find_shortcut(&released));
+    }
+
+    #[test]
+    fn the_find_field_enables_ime_on_conversation_surfaces_only() {
+        assert!(ime_allowed_for_focus(
+            ShellPage::Conversation,
+            Some(TRANSCRIPT_FIND_INPUT_ID),
+            true,
+        ));
+        assert!(!ime_allowed_for_focus(
+            ShellPage::Conversation,
+            Some(TRANSCRIPT_FIND_INPUT_ID),
+            false,
+        ));
+        assert!(!ime_allowed_for_focus(
+            ShellPage::Settings,
+            Some(TRANSCRIPT_FIND_INPUT_ID),
+            true,
+        ));
+    }
 
     #[test]
     fn task_rename_input_enables_ime_only_while_the_window_is_focused() {
