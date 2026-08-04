@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.zseven.zode"
-version = "0.1.0-beta.7"
+version = "0.1.0-beta.8"
 
 publishing {
     publications {

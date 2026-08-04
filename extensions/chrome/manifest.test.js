@@ -110,7 +110,7 @@ function testNativeMessagingAutostartContract() {
 
 // The extension ships with zode, so its version follows the workspace crate
 // version. Chrome only accepts dotted integers in `version`, so a prerelease
-// tag such as `0.1.0-beta.7` lives in `version_name` and `version` carries the
+// tag such as `0.1.0-beta.8` lives in `version_name` and `version` carries the
 // numeric core.
 function testExtensionVersionTracksTheZodeVersion() {
   assert.match(zodeVersion, /^\d+\.\d+\.\d+/, "workspace version is unreadable");

@@ -54,7 +54,7 @@ pub fn fixture_messages() -> Vec<FixtureMessage> {
                 "jsonrpc": "2.0",
                 "id": "init",
                 "result": {
-                    "serverInfo": {"name": "zode", "version": "0.1.0-beta.7"},
+                    "serverInfo": {"name": "zode", "version": "0.1.0-beta.8"},
                     "zodeHome": "/tmp/zode",
                     "platformFamily": "unix",
                     "platformOs": "macos",

@@ -486,7 +486,7 @@ workspace unless the user explicitly asks about project code or files. The
 block is sent to the engine but omitted from the panel's displayed user text.
 
 The extension version tracks the workspace crate version: `package.json` and
-the manifest's `version_name` carry the full value (`0.1.0-beta.7`) while the
+the manifest's `version_name` carry the full value (`0.1.0-beta.8`) while the
 manifest's `version` carries its numeric core, since Chrome only accepts dotted
 integers there. `manifest.test.js` reads `Cargo.toml` and enforces this.
 
