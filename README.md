@@ -699,6 +699,14 @@ headers are strings; a secret header uses
 appear in `permissions.env`, is read only by Rust when building the request,
 and is never returned to JavaScript.
 
+`request.headers` can also be a **function** for dynamic authentication
+(e.g. HMAC-SHA256 signing). Zode calls it before each request with a context
+object (`method`, `url`, `body`, `timestamp`, `secrets`) and uses the returned
+header key-value pairs. The `zode.crypto` global (`sha256hex`,
+`hmacSha256Hex`, `hmacSha256HexKey`) provides crypto primitives so any signing
+algorithm can be implemented in pure JS — including Volcano Engine HMAC-SHA256
+and AWS SigV4 derived-key chains.
+
 Zode disables redirects and proxies, validates and pins public DNS addresses,
 rejects localhost/private networks, caps responses at 256 KiB, clamps request
 timeouts to 500 ms–10 seconds, and clamps refresh intervals to
