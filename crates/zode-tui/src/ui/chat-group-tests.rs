@@ -142,25 +142,34 @@ fn a_bare_usage_row_renders_nothing_at_all() {
 }
 
 #[test]
-fn the_running_group_stays_open_until_the_turn_ends() {
+fn the_running_group_shows_only_what_is_still_in_flight() {
     let theme = ThemeStore::with_builtins().resolve(None);
     let mut chat = ChatView::new();
     chat.push_user("build it");
     push_finished_call(&mut chat, "Bash", "cargo build");
     push_finished_call(&mut chat, "Bash", "cargo test");
-    push_finished_call(&mut chat, "Bash", "cargo fmt");
+    // A third call starts and has not answered yet (three calls total, so
+    // the run is past the small-run threshold and summarizes).
+    chat.push_tool_call("Tool Bash cargo fmt", "Bash");
 
-    // Mid-turn: the tail run is live, so its rows are still on screen
-    // under an already-expanded header.
     let built = chat.build_lines(&theme, test_meta(), 80);
     let text = joined_text(&built.lines);
     assert!(
         text.contains("▾ Ran 3 shell commands"),
-        "live header: {text}"
+        "live header counts every call: {text}"
     );
-    assert!(text.contains("cargo build"), "in-flight rows stay visible");
+    assert!(text.contains("cargo fmt"), "the running call stays visible");
+    assert!(
+        !text.contains("cargo build") && !text.contains("cargo test"),
+        "finished calls belong to the count, not the screen: {text}"
+    );
+    assert!(
+        !text.contains("some output") && !text.contains("Usage"),
+        "results and usage rows are manual-expand only: {text}"
+    );
 
-    // The turn ends: the same run folds itself away.
+    // The turn ends: the same run folds itself away entirely.
+    chat.push_tool_result("Tool Bash ok\n    some output");
     chat.end_turn();
     let built = chat.build_lines(&theme, test_meta(), 80);
     let text = joined_text(&built.lines);
@@ -168,7 +177,115 @@ fn the_running_group_stays_open_until_the_turn_ends() {
         text.contains("▸ Ran 3 shell commands"),
         "folded header: {text}"
     );
-    assert!(!text.contains("cargo build"));
+    assert!(!text.contains("cargo build") && !text.contains("cargo test"));
+}
+
+#[test]
+fn the_live_summary_count_ticks_up_as_calls_start() {
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    chat.push_tool_call("Tool Bash cargo build", "Bash");
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    assert!(joined_text(&built.lines).contains("▾ Ran 1 shell command"));
+
+    chat.push_tool_result("Tool Bash ok\n    some output");
+    chat.push_tool_call("Tool Grep pattern=fn main", "Grep");
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    let text = joined_text(&built.lines);
+    assert!(
+        text.contains("▾ Ran 1 shell command, searched for 1 pattern"),
+        "the header tracks the run as it grows: {text}"
+    );
+}
+
+#[test]
+fn manually_expanding_a_live_group_still_reveals_every_row() {
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let meta = test_meta();
+    let mut chat = ChatView::new();
+    push_finished_call(&mut chat, "Bash", "cargo build");
+    chat.push_tool_call("Tool Bash cargo test", "Bash");
+    let area = Rect::new(0, 0, 80, 24);
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| chat.render(f, area, &theme, meta))
+        .unwrap();
+
+    let built = chat.build_lines(&theme, meta, 80);
+    let (&summary_line, _) = built
+        .group_toggles
+        .iter()
+        .next()
+        .expect("one activity group");
+    assert!(chat.toggle_collapse_at(&theme, meta, area, summary_line as u16));
+
+    let built = chat.build_lines(&theme, meta, 80);
+    let text = joined_text(&built.lines);
+    assert!(
+        text.contains("cargo build"),
+        "finished call revealed: {text}"
+    );
+    assert!(
+        text.contains("cargo test"),
+        "running call still shown: {text}"
+    );
+    assert!(text.contains("Usage"), "usage row revealed: {text}");
+}
+
+#[test]
+fn a_thinking_block_with_no_visible_text_neither_renders_nor_splits_a_run() {
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    push_finished_call(&mut chat, "Bash", "cargo build");
+    push_finished_call(&mut chat, "Bash", "cargo test");
+    // Some providers emit thinking blocks that carry nothing but whitespace.
+    chat.push_thinking_delta("\n\n");
+    chat.push_thinking_delta("   ");
+    push_finished_call(&mut chat, "Grep", "pattern=fn main");
+    chat.end_turn();
+
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    let text = joined_text(&built.lines);
+    assert!(
+        !text.contains("Thinking"),
+        "an empty thinking label must not paint: {text}"
+    );
+    assert_eq!(
+        built.group_toggles.len(),
+        1,
+        "the runs on either side merge past the small-run threshold: {text}"
+    );
+    assert!(text.contains("Ran 2 shell commands, searched for 1 pattern"));
+}
+
+#[test]
+fn thinking_that_arrives_after_blank_deltas_still_splits_the_run() {
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    push_finished_call(&mut chat, "Bash", "cargo build");
+    push_finished_call(&mut chat, "Bash", "cargo check");
+    push_finished_call(&mut chat, "Bash", "cargo test");
+    // The block opens on whitespace, then real reasoning streams in.
+    chat.push_thinking_delta("  ");
+    chat.push_thinking_delta("now let me search");
+    push_finished_call(&mut chat, "Grep", "pattern=fn main");
+    push_finished_call(&mut chat, "Grep", "pattern=fn run");
+    push_finished_call(&mut chat, "Grep", "pattern=fn check");
+    chat.end_turn();
+
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    let text = joined_text(&built.lines);
+    assert!(
+        text.contains("now let me search"),
+        "reasoning shows: {text}"
+    );
+    assert_eq!(
+        built.group_toggles.len(),
+        2,
+        "content breaks the run into two summarized groups: {text}"
+    );
 }
 
 #[test]

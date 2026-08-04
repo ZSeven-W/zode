@@ -50,6 +50,40 @@ pub fn activity_runs(kinds: &[Option<ToolActivity>]) -> Vec<Range<usize>> {
     runs
 }
 
+/// Whether a thinking block has anything worth painting. Some providers emit
+/// thinking blocks whose visible text is empty or pure whitespace; painting
+/// their bare `Thinking:` label adds a noise row AND — since thinking is not
+/// activity — splits the surrounding tool run into a ladder of tiny groups.
+/// Blank ones are treated as absent, so the runs around them merge.
+pub fn thinking_has_content(body: &str) -> bool {
+    !body.trim().is_empty()
+}
+
+/// Positions within a run (relative to its start) of the calls still waiting
+/// on a result — the only rows a live, auto-opened group paints.
+///
+/// Results carry no identity on the transcript row, so the match is
+/// positional: the first `results` calls count as finished. Calls that run in
+/// parallel therefore leave exactly as many rows on screen as there are
+/// outstanding calls, which is the number the user is waiting on.
+pub fn in_flight_rows(kinds: &[Option<ToolActivity>]) -> Vec<usize> {
+    let results = kinds
+        .iter()
+        .filter(|k| matches!(k, Some(ToolActivity::Result)))
+        .count();
+    let mut calls = 0usize;
+    let mut out = Vec::new();
+    for (i, kind) in kinds.iter().enumerate() {
+        if matches!(kind, Some(ToolActivity::Call { .. })) {
+            calls += 1;
+            if calls > results {
+                out.push(i);
+            }
+        }
+    }
+    out
+}
+
 /// A summary bucket. The four named kinds get purpose-written wording; every
 /// other tool is counted under its own name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,6 +250,36 @@ mod tests {
         assert_eq!(activity_runs(&kinds), vec![1..2]);
         assert!(activity_runs(&[None, None]).is_empty());
         assert!(activity_runs(&[]).is_empty());
+    }
+
+    #[test]
+    fn only_thinking_with_visible_text_counts_as_present() {
+        assert!(thinking_has_content("weighing the options"));
+        assert!(!thinking_has_content(""));
+        assert!(!thinking_has_content("   \n\t "));
+    }
+
+    #[test]
+    fn a_live_run_shows_only_the_calls_still_waiting_on_a_result() {
+        // Finished call, then a second one still running: only the second row.
+        let kinds = vec![
+            call("Bash"),
+            Some(ToolActivity::Result),
+            Some(ToolActivity::Usage),
+            call("Grep"),
+        ];
+        assert_eq!(in_flight_rows(&kinds), vec![3]);
+
+        // Everything answered: nothing is in flight.
+        assert!(in_flight_rows(&kinds[0..3]).is_empty());
+
+        // Two calls started before either answered, then one result lands.
+        let parallel = vec![call("Bash"), call("Bash"), Some(ToolActivity::Result)];
+        assert_eq!(in_flight_rows(&parallel), vec![1]);
+        assert_eq!(in_flight_rows(&parallel[0..2]), vec![0, 1]);
+
+        // A run of pure token accounting has nothing to show.
+        assert!(in_flight_rows(&[Some(ToolActivity::Usage)]).is_empty());
     }
 
     #[test]

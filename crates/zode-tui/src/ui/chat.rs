@@ -17,7 +17,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
 use crate::ui::markdown::render_markdown;
-use crate::ui::tool_groups::{activity_runs, jump_pill_visible, summarize, ToolActivity};
+use crate::ui::tool_groups::{
+    activity_runs, in_flight_rows, jump_pill_visible, summarize, thinking_has_content, ToolActivity,
+};
 
 /// Approximate the number of wrapped rows a line occupies at `width`
 /// columns (ratatui wraps on words, so this char-width estimate is close
@@ -312,7 +314,17 @@ impl ChatView {
                 msg.text.push_str(delta);
             }
         } else {
-            let mut msg = ChatMessage::new(Role::Tool, format!("{THINKING_PREFIX}{delta}"));
+            // A block that opens with nothing but whitespace has no visible
+            // text to label. Dropping it here — instead of pushing a bare
+            // `Thinking:` row — also leaves `live_tail` alone, so the tool run
+            // it landed in keeps streaming as ONE group instead of splitting.
+            if !thinking_has_content(delta) {
+                return;
+            }
+            let mut msg = ChatMessage::new(
+                Role::Tool,
+                format!("{THINKING_PREFIX}{}", delta.trim_start()),
+            );
             msg.collapsed = true;
             self.push_process_message(msg);
         }
@@ -773,10 +785,14 @@ impl ChatView {
                 continue;
             };
             let anchor = visible[run.start];
-            // The still-growing tail run renders open so in-flight work stays
-            // visible; it folds itself as soon as the turn moves on.
-            let open =
-                self.messages[anchor].group_open || (self.live_tail && run.end == visible.len());
+            // A group opens for two different reasons, and they show different
+            // things. A MANUAL expand (click / Ctrl+E) reveals the whole run —
+            // calls, results and usage rows. The still-growing TAIL run opens
+            // by itself, but only far enough to show the work in flight: what
+            // already finished is what the summary count is for, and usage
+            // rows are manual-expand-only by design.
+            let manual_open = self.messages[anchor].group_open;
+            let live = !manual_open && self.live_tail && run.end == visible.len();
             let tools: Vec<&str> = run
                 .clone()
                 .filter_map(|k| match &kinds[k] {
@@ -785,7 +801,7 @@ impl ChatView {
                 })
                 .collect();
             let summary = summarize(&tools);
-            if summary.is_empty() && !open {
+            if summary.is_empty() && !manual_open {
                 // Pure token accounting with no call to describe: nothing to
                 // say, so nothing renders until Ctrl+E expands everything.
                 pos = run.end;
@@ -793,8 +809,10 @@ impl ChatView {
             }
             // Small runs stay visible cc-style: their call/result rows carry
             // the pattern / file / command detail a count line would erase.
-            // Only the Usage rows fold away (Ctrl+E still reveals them).
-            if !open && tools.len() <= crate::ui::tool_groups::SMALL_RUN_MAX_CALLS {
+            // Only the Usage rows fold away (Ctrl+E still reveals them). A
+            // still-streaming run is handled below instead, so a live small
+            // run shows its header plus the in-flight call only.
+            if !manual_open && !live && tools.len() <= crate::ui::tool_groups::SMALL_RUN_MAX_CALLS {
                 for k in run.clone() {
                     if matches!(kinds[k], Some(ToolActivity::Usage)) {
                         continue;
@@ -818,26 +836,34 @@ impl ChatView {
                     out.push(Line::from(""));
                 }
                 built.group_toggles.insert(out.len(), anchor);
-                let marker = if open { '▾' } else { '▸' };
+                let marker = if manual_open || live { '▾' } else { '▸' };
                 out.extend(render_group_summary(&summary, marker, theme, width));
                 prev_role = Some(Role::Tool);
             }
-            if open {
-                for (nth, k) in run.clone().enumerate() {
-                    // The first member sits directly under its own header — no
-                    // blank line between a group's title and its contents.
-                    let gap = nth > 0 || summary.is_empty();
-                    self.emit_message(
-                        visible[k],
-                        theme,
-                        meta,
-                        width,
-                        gap,
-                        &mut out,
-                        built,
-                        &mut prev_role,
-                    );
-                }
+            let members: Vec<usize> = if manual_open {
+                run.clone().collect()
+            } else if live {
+                in_flight_rows(&kinds[run.start..run.end])
+                    .into_iter()
+                    .map(|rel| run.start + rel)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for (nth, k) in members.into_iter().enumerate() {
+                // The first member sits directly under its own header — no
+                // blank line between a group's title and its contents.
+                let gap = nth > 0 || summary.is_empty();
+                self.emit_message(
+                    visible[k],
+                    theme,
+                    meta,
+                    width,
+                    gap,
+                    &mut out,
+                    built,
+                    &mut prev_role,
+                );
             }
             pos = run.end;
         }
@@ -850,8 +876,13 @@ impl ChatView {
         if msg.role != Role::Tool {
             return true;
         }
-        let is_thinking = msg.text.starts_with(THINKING_PREFIX);
-        !((is_thinking && self.hide_thinking) || (!is_thinking && self.hide_tool_details))
+        match msg.text.strip_prefix(THINKING_PREFIX) {
+            // A thinking block with no visible text is treated as absent: it
+            // paints nothing, and — because grouping runs over what is visible
+            // — the activity runs on either side of it merge.
+            Some(body) => !self.hide_thinking && thinking_has_content(body),
+            None => !self.hide_tool_details,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
