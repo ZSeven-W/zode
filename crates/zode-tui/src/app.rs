@@ -680,6 +680,11 @@ pub struct TuiApp {
     update_applied: Option<std::sync::Arc<std::sync::OnceLock<String>>>,
     /// The "self-updated — restart to apply" notice fires exactly once.
     update_notice_shown: bool,
+    /// The area of the most recently painted frame. Mouse hit-testing and
+    /// selection copy resolve against this — the layout the user actually
+    /// saw — falling back to a live terminal query only before the first
+    /// draw. `Rect::default()` until then.
+    last_frame_area: Rect,
     /// Chat display prefs (`/thinking`, `/tool-details`), persisted in config
     /// and applied to the active tab's chat each frame.
     show_thinking: bool,
@@ -1232,6 +1237,7 @@ impl TuiApp {
             provider_names: ui.provider_names,
             update_applied: ui.update_applied,
             update_notice_shown: false,
+            last_frame_area: Rect::default(),
             show_thinking,
             show_tool_details,
             queued_edit_index: None,
@@ -4140,6 +4146,10 @@ impl TuiApp {
         // borrow. Cheap relative to a frame at 10fps.
         let theme = self.theme.clone();
         let area = f.area();
+        // Remember the painted frame: mouse hit-testing must resolve against
+        // what the user actually saw, and headless/test environments have no
+        // tty for a live `terminal::size()` query.
+        self.last_frame_area = area;
         // Mirror the active tab's live mode/token counts into the status bar.
         {
             let tab = &self.tabs[self.active];
@@ -5533,6 +5543,19 @@ impl TuiApp {
         false
     }
 
+    /// The frame rect mouse coordinates should be resolved against: the last
+    /// painted frame, or (before any draw) a live terminal query. `None` when
+    /// neither is available — the event is then ignored, since there is no
+    /// layout it could meaningfully hit.
+    fn hit_test_area(&self) -> Option<Rect> {
+        if self.last_frame_area.width > 0 && self.last_frame_area.height > 0 {
+            return Some(self.last_frame_area);
+        }
+        crossterm::terminal::size()
+            .ok()
+            .map(|(width, height)| Rect::new(0, 0, width, height))
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         if let Some(picker) = &mut self.session_picker {
             match session_picker_scroll_from_mouse(mouse.kind) {
@@ -5633,10 +5656,9 @@ impl TuiApp {
             return;
         }
 
-        let Ok((width, height)) = crossterm::terminal::size() else {
+        let Some(area) = self.hit_test_area() else {
             return;
         };
-        let area = Rect::new(0, 0, width, height);
         let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_visibility);
         let areas = split_main(area, show_sidebar, self.status_rows);
         let input_area = self.input_area_for_composer(areas.composer);
@@ -5827,10 +5849,9 @@ impl TuiApp {
         if let Some(selection) = self.active_selection.filter(|s| s.anchor != s.focus) {
             // Recompute the chat area exactly like `handle_mouse` does, so
             // `selected_text` resolves against the painted width.
-            let Ok((width, height)) = crossterm::terminal::size() else {
+            let Some(area) = self.hit_test_area() else {
                 return;
             };
-            let area = Rect::new(0, 0, width, height);
             let show_sidebar = should_show_sidebar(self.tabs.len(), self.sidebar_visibility);
             let chat_area = split_main(area, show_sidebar, self.status_rows).chat;
             self.copy_chat_selection(selection, chat_area);
