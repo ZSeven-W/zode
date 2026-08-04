@@ -1,113 +1,79 @@
-# zode v0.1.0-beta.8
+# zode v0.1.0-beta.9
 
 **zode** is an open-source, AI-native coding assistant for your terminal: it reads your code, runs commands, searches files, and manages git — all from a fast Rust TUI, with non-blocking permissions and an on-by-default OS sandbox.
 
 > ⚠️ **Beta.** APIs, config, and behavior may change before 1.0. Please file issues!
 
-This release is about **reliability with long sessions and smaller models**: zode now compacts before the context window can strangle a turn, brakes degenerate tool-call loops, and gives every model a map of your repository instead of letting it explore blind.
+This release makes zode **work well with weak/fast models automatically**, and
+lands a large batch of UX and reliability fixes on top of beta.8.
 
-## Long-session reliability
+## Weak-model support — automatic, zero config
 
-- **Compaction fires before the window is full, not after it hurts.** The
-  runtime's reactive auto-compaction now uses the same usage-calibrated
-  occupancy as the per-request output clamp, so a near-full context compacts
-  instead of squeezing `max_tokens` to the floor and truncating a tool call
-  mid-JSON (the `tool_use input was cut off …` error at ~96% ctx). The TUI's
-  between-turn guard also budgets for the completion, not just the prompt.
-- **Compaction keeps your instructions.** Summaries now restate user-issued
-  directives verbatim ("only look in X", "don't touch Y") under a *Standing
-  user constraints* line — they stay binding after older turns are replaced.
-- **Interjections take precedence.** A message typed mid-turn is delivered to
-  the model with explicit override framing, so a steered correction changes
-  the plan instead of being noted and ignored.
-- **Input during compaction is queued, not lost.** Typing while zode compacts
-  (or runs a `!cmd`) queues the message and auto-sends it the moment the
-  operation finishes — previously it could sit unread until some later turn.
-  Image-only messages (a pasted screenshot with no text) now send on Enter,
-  and queue like text when the tab is busy.
+Fast/distilled models (deepseek-flash, glm, mini/haiku-class) degrade on long
+tasks in ways frontier models don't: they lose the plot, pick the wrong tool,
+and spiral into repetition. zode now detects them and adapts — **you don't
+configure anything**.
 
-## Tool-loop guard
+- **Automatic profile.** A model is treated as *lite* when its name says so
+  (flash/mini/nano/haiku/air as whole segments), when config sets
+  `profile: "lite"` (per provider or per model), or — the important part —
+  when its **runtime behavior** trips a loop guard. The verdict is remembered
+  in `~/.zode/model-profiles.json` and the tab reassembles on the spot, so
+  the next session starts adapted. `profile: "standard"` always opts out.
+- **What lite does:** caps the effective context at 96k and compacts at 70%
+  (capability decays with length faster than the window fills), narrows the
+  visible tool surface (the rest stays reachable via ToolSearch), tightens the
+  output budget, uses a stricter loop guard, and periodically re-anchors the
+  todo plan so the model doesn't drift.
+- **Loop guards, tiered.** Beyond the identical-call guard, a same-tool streak
+  guard catches the "guess another keyword" spiral (a `ToolSearch` hunt for a
+  tool that doesn't exist), and `ToolSearch` now returns the **complete tool
+  roster** with a stop-searching hint on a miss — the hunt ends instead of
+  looping.
 
-Weak models can collapse into replaying the identical tool call verbatim —
-observed in the wild as 137 consecutive identical greps until the user pressed
-Esc. The query loop now hashes each iteration's calls *and* results: the 3rd
-identical iteration injects a visible "change your approach" nudge into the
-conversation, and the 6th ends the turn with an explicit `tool-call loop
-detected` error instead of burning API calls until interrupted.
+## Unified tool names
 
-## Exploration scaffolding
+All built-in tools are now CamelCase (`browser_read` → `BrowserRead`,
+`run_check` → `RunCheck`, `team_hire` → `TeamHire`, …), consistent with
+`FileRead`/`Bash`. Permission lists written with the old snake_case names are
+normalized automatically on config load, so existing `allow`/`deny` grants and
+`~/.zode/state.json` keep working.
 
-- **Repository map** (`repoMap`, default on) — the system prompt carries
-  tracked-file counts per directory, so cold starts target reads and searches
-  instead of grepping the whole tree one guess at a time. It lives in the
-  system prompt, so it survives compaction by construction.
-- **Exploration discipline** — batch related searches, never re-issue an
-  already-run command, switch strategy after two misses, honor user scope
-  limits until lifted.
-- **Read-set recap** — once 8 distinct files have been touched (then at each
-  doubling), a reminder lists them so the model stops re-reading what is
-  already in the conversation.
+## Prompt-cache stability
 
-## A calmer transcript
+For providers with prefix caching (DeepSeek, Anthropic), zode keeps the
+request prefix byte-stable across turns: the repository map is TTL-cached, the
+git branch is carried across engine reassembles, and a prefix-shape diagnostic
+names which of (system prompt, tool set) changed when a `/model` /`/yolo`
+/`/sandbox` toggle does force a cache reset.
 
-- **Grouped tool activity** — adjacent tool calls collapse into dim summary
-  lines ("ran 3 shell commands"), usage rows fold underneath, the streaming
-  tail stays open, and a jump-to-bottom pill appears when you scroll far up.
-  Click a summary to expand the calls behind it.
-- **Adaptive status HUD** — a compact block above the status line with the
-  per-turn tool tally, running subagents (with model labels), access mode,
-  live shells, and connected MCP servers.
-- **Question dialogs wrap** — long CJK questions and options wrap
-  unicode-width-aware instead of clipping at a fixed 76 columns.
-- **`Shift+Tab`** toggles YOLO (auto-approve) and ask mode.
+## Fixes & smaller changes
 
-## Toggles that stick
-
-`/yolo` and `/sandbox` changes now persist to the **global** config on
-success, so every workspace's next launch keeps your choice (project config
-and state can still override per repo; stale per-project entries are cleaned
-up automatically). Headless runs (`-p`, `--no-tui`) stay flag-explicit — a
-script never inherits an interactive bypass.
-
-## Auto-update, hardened
-
-- Picks the **highest version** across the release list — pre-releases
-  included — instead of trusting publish order, so a backfilled stable can
-  never hide a newer beta.
-- **Windows now self-updates** via a move-aside swap (the running exe is
-  renamed, the new build takes its place, leftovers are cleaned on the next
-  launch).
-- The TUI shows a one-time **"self-updated — restart to apply"** notice
-  instead of updating silently.
-
-## Plugins & automation
-
-- **Sandboxed JavaScript hooks** — a `hooks.json` entry ending in `.js` runs
-  in-process in the QuickJS sandbox (no fs/network/process access, 8 MiB +
-  100 ms bounds) instead of spawning an external process. Ships a runnable
-  demo plugin (`examples/plugins/zode-hook-demo`).
-- **Dynamic headers + `zode.crypto`** — `zode.data.define` header values can
-  be JS functions computed at request time (method/url/body/timestamp/secrets
-  in, headers out), with `sha256hex` / `hmacSha256Hex` bridges for signed API
-  requests. Contributed by **@Tifancy** — thanks!
-- **`/plugin` lists installed packages** — packages from
-  `zode plugin install` now appear with their own enable/disable section,
-  routed to the install registry.
-- **Pick a page element from the Chrome side panel** — a DevTools-style
-  picker (pure CDP, no new permissions, no content script) attaches the exact
-  element — unique selector included — to your question, so a follow-up click
-  or edit targets precisely what you pointed at. Password values are never
-  read.
-- **Nested subagent modes and tools** — Task-spawned subagents can carry
-  their own modes and tool sets.
-
-## Fixes
-
-- Mouse clicks resolve against the frame you actually saw (hit-testing no
-  longer queries the live terminal, which also made headless environments
-  swallow clicks).
-- SDK test flake (`ETXTBSY`) from the write-script-then-exec race fixed by
-  serializing script setup with spawns.
+- **Compaction can't wedge anymore.** A hung summarize call (provider 5xx
+  storm) no longer pins a tab on "compacting" forever — a hard timeout plus a
+  breaker on interrupt recover it.
+- **`MemoryImport` tool.** Memory stays built-in and automatic (recall is
+  injected per turn, facts are remembered on their own); this new tool only
+  migrates memory notes from other tools. Asking to "migrate memories" no
+  longer sends the model hunting for a memory tool that didn't exist.
+- **`AskUserQuestion`** accepts `{label, description}` option objects and a
+  `choices` alias — the top cause of "the question tool keeps failing".
+- **Team hires fail loudly.** Hiring an unknown/unregistered agent errors once
+  with the full roster instead of silently creating a generic teammate the
+  model then loops on. Teammate/profile names are ASCII-only (documented).
+- **Paste keeps its shape.** CR / CRLF line endings are normalized, so a
+  multi-line paste no longer scrambles into one wrapped line.
+- **Chrome Web Store ready.** The bridge extension's accepted IDs are now
+  config-driven (`browser.extensionIds`), so a store-published copy (which
+  gets a new ID) works without a code change; `pack-store.sh` builds the store
+  upload.
+- **More transcript detail.** Short tool runs (≤2 calls) show their real
+  rows instead of a "ran 1 command" summary line, closer to Claude Code.
+- **Prompt recall is project-scoped** — Up/Down history is shared across
+  sessions in the same workspace again.
+- New **`/new`** alias for `/clear`; new **`zode update` / `zode upgrade`**
+  command; `/yolo` + `/sandbox` toggles persist to the global config;
+  `/clear` and model/access switches no longer stall the UI.
 
 ## Install
 
@@ -125,7 +91,7 @@ curl -fsSL https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.
 irm https://raw.githubusercontent.com/ZSeven-W/zode/main/scripts/install.ps1 | iex
 ```
 
-The installers auto-detect your OS + CPU, download the matching binary from this release, and drop `zode` on your PATH. Pin a version with `--version v0.1.0-beta.8` (sh) or `$env:ZODE_VERSION='v0.1.0-beta.8'` (ps1).
+The installers auto-detect your OS + CPU, download the matching binary from this release, and drop `zode` on your PATH. Pin a version with `--version v0.1.0-beta.9` (sh) or `$env:ZODE_VERSION='v0.1.0-beta.9'` (ps1).
 
 > Because this is a **pre-release**, GitHub's "latest" excludes it from some tooling — the installers above resolve the newest release *including* betas, so they pick this up automatically.
 
@@ -133,17 +99,17 @@ The installers auto-detect your OS + CPU, download the matching binary from this
 
 | OS | Architecture | Asset |
 |----|--------------|-------|
-| macOS | Apple Silicon (M1+) | `zode-0.1.0-beta.8-arm64-mac.tar.gz` |
-| macOS | Intel | `zode-0.1.0-beta.8-x64-mac.tar.gz` |
-| Linux | x86_64 | `zode-0.1.0-beta.8-x64-linux.tar.gz` |
-| Linux | ARM64 (aarch64) | `zode-0.1.0-beta.8-arm64-linux.tar.gz` |
-| Windows | x64 | `zode-0.1.0-beta.8-x64-windows.zip` |
-| Windows | ARM64 | `zode-0.1.0-beta.8-arm64-windows.zip` |
+| macOS | Apple Silicon (M1+) | `zode-0.1.0-beta.9-arm64-mac.tar.gz` |
+| macOS | Intel | `zode-0.1.0-beta.9-x64-mac.tar.gz` |
+| Linux | x86_64 | `zode-0.1.0-beta.9-x64-linux.tar.gz` |
+| Linux | ARM64 (aarch64) | `zode-0.1.0-beta.9-arm64-linux.tar.gz` |
+| Windows | x64 | `zode-0.1.0-beta.9-x64-windows.zip` |
+| Windows | ARM64 | `zode-0.1.0-beta.9-arm64-windows.zip` |
 
 Unpack and move `zode` (or `zode.exe`) onto your PATH:
 
 ```sh
-tar -xzf zode-0.1.0-beta.8-x64-linux.tar.gz
+tar -xzf zode-0.1.0-beta.9-x64-linux.tar.gz
 sudo mv zode /usr/local/bin/
 ```
 
@@ -223,4 +189,4 @@ runner.
 
 ---
 
-**Full changelog:** https://github.com/ZSeven-W/zode/compare/v0.1.0-beta.7...v0.1.0-beta.8
+**Full changelog:** https://github.com/ZSeven-W/zode/compare/v0.1.0-beta.8...v0.1.0-beta.9

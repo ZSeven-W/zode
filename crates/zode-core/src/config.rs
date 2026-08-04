@@ -2180,8 +2180,10 @@ mod tests {
         assert_eq!(model_profile(&p, "glm-5.2"), ModelProfile::Lite);
         assert!(dir.path().join("model-profiles.json").exists());
         // Explicit standard still wins over the learned verdict.
-        let mut forced = ProviderConfig::default();
-        forced.profile = Some("standard".into());
+        let forced = ProviderConfig {
+            profile: Some("standard".into()),
+            ..Default::default()
+        };
         assert_eq!(model_profile(&forced, "glm-5.2"), ModelProfile::Standard);
 
         std::env::remove_var("ZODE_CONFIG_DIR");

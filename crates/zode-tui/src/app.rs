@@ -9718,7 +9718,7 @@ impl TuiApp {
                             tab.weak_signal_noted = true;
                             zode_core::config::learn_model_lite(&tab.engine.model);
                             if !tab.engine.lite_profile {
-                                tab.chat.push_system(&crate::tr(
+                                tab.chat.push_system(crate::tr(
                                     "weak-model behavior detected — lite accommodations will be enabled for this model (remembered for future sessions; set profile: \"standard\" in config to opt out)",
                                 ));
                             }
@@ -9805,7 +9805,7 @@ impl TuiApp {
                             tab.weak_signal_noted = true;
                             zode_core::config::learn_model_lite(&tab.engine.model);
                             if !tab.engine.lite_profile {
-                                tab.chat.push_system(&crate::tr(
+                                tab.chat.push_system(crate::tr(
                                     "weak-model behavior detected — lite accommodations will be enabled for this model (remembered for future sessions; set profile: \"standard\" in config to opt out)",
                                 ));
                             }
