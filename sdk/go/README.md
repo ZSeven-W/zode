@@ -13,7 +13,7 @@ github.com/ZSeven-W/zode/sdk/go
 Install the tagged module version:
 
 ```sh
-go get github.com/ZSeven-W/zode/sdk/go@v0.1.0-beta.8
+go get github.com/ZSeven-W/zode/sdk/go@v0.1.0-beta.9
 ```
 
 For local development, work inside `sdk/go`.
@@ -109,7 +109,7 @@ denies.
 
 ## Version
 
-Versioned by the module-aware git tag `sdk/go/v0.1.0-beta.8` for module
+Versioned by the module-aware git tag `sdk/go/v0.1.0-beta.9` for module
 `github.com/ZSeven-W/zode/sdk/go`.
 
 ## Test
