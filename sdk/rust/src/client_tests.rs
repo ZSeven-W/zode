@@ -159,6 +159,25 @@ impl Drop for TestDir {
     }
 }
 
+/// Serializes every "write executable script → spawn" sequence in this test
+/// binary. `fs::write` briefly holds the script open for writing; a fork from
+/// a CONCURRENT test inherits that fd for the instant before its exec, and
+/// exec'ing our script then fails ETXTBSY ("Text file busy") — the classic
+/// multithreaded write-then-execute race. Holding one lock across both steps
+/// removes the overlap; contention is microseconds per test.
+#[cfg(unix)]
+static SCRIPT_SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Write the scripted stand-in server and spawn it under
+/// [`SCRIPT_SPAWN_LOCK`], so no other test's fork can hold the script's
+/// write fd at exec time.
+#[cfg(unix)]
+async fn spawn_scripted(script_body: &str) -> crate::StdioZodeClient {
+    let _serialize = SCRIPT_SPAWN_LOCK.lock().await;
+    let client = scripted_client(script_body);
+    client.spawn_stdio().await.unwrap()
+}
+
 #[cfg(unix)]
 fn scripted_client(script_body: &str) -> ZodeClient {
     use std::os::unix::fs::PermissionsExt;
@@ -186,7 +205,7 @@ fn scripted_client(script_body: &str) -> ZodeClient {
 #[cfg(unix)]
 #[tokio::test]
 async fn dispatches_out_of_order_responses_and_notifications() {
-    let client = scripted_client(
+    let client = spawn_scripted(
         r#"
 read first
 read second
@@ -194,8 +213,8 @@ printf '%s\n' '{"jsonrpc":"2.0","method":"turn/started","params":{"turnId":"t1"}
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"value":"second"}}'
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"value":"first"}}'
 "#,
-    );
-    let client = client.spawn_stdio().await.unwrap();
+    )
+    .await;
     let notifications = Arc::new(Mutex::new(Vec::new()));
     let captured = Arc::clone(&notifications);
     client.on_notification(move |method, params| {
@@ -218,7 +237,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"value":"first"}}'
 #[cfg(unix)]
 #[tokio::test]
 async fn approval_handler_response_is_dispatched_without_blocking_reader() {
-    let client = scripted_client(
+    let client = spawn_scripted(
         r#"
 read request
 printf '%s\n' '{"jsonrpc":"2.0","id":"approval-1","method":"approval/request","params":{"approvalId":"a1","kind":"command","summary":"run"}}'
@@ -226,8 +245,8 @@ read approval
 case "$approval" in *'"decision":"allow"'*) result=ok;; *) result=wrong;; esac
 printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":\"$result\"}}"
 "#,
-    );
-    let client = client.spawn_stdio().await.unwrap();
+    )
+    .await;
     client.on_approval_request(|params| {
         assert_eq!(params.approval_id, "a1");
         ApprovalDecision::Allow
@@ -241,7 +260,7 @@ printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":\"$result\"}}
 #[tokio::test]
 async fn missing_or_panicking_approval_handler_denies() {
     for panic_handler in [false, true] {
-        let client = scripted_client(
+        let client = spawn_scripted(
             r#"
 read request
 printf '%s\n' '{"jsonrpc":"2.0","id":"approval-1","method":"approval/request","params":{"approvalId":"a1","kind":"tool","summary":"run"}}'
@@ -249,8 +268,8 @@ read approval
 case "$approval" in *'"decision":"deny"'*) result=denied;; *) result=wrong;; esac
 printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":\"$result\"}}"
 "#,
-        );
-        let client = client.spawn_stdio().await.unwrap();
+        )
+        .await;
         if panic_handler {
             client.on_approval_request(|_| panic!("handler panic"));
         }
@@ -278,26 +297,31 @@ async fn zode_bin_end_to_end_lifecycle() {
     .unwrap();
     let wrapper = config_dir.path().join("zode-e2e-wrapper.sh");
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
-    fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\nunset ANTHROPIC_API_KEY OPENAI_API_KEY\nexport ZODE_CONFIG_DIR={}\ncd {}\nexec {} \"$@\"\n",
-            quote(&config_dir.path().to_string_lossy()),
-            quote(&cwd.path().to_string_lossy()),
-            quote(&binary),
-        ),
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&wrapper).unwrap().permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&wrapper, permissions).unwrap();
+    // Same write-script-then-exec shape as `spawn_scripted` — hold the same
+    // lock so a concurrent test's fork can't make this exec fail ETXTBSY.
+    let client = {
+        let _serialize = SCRIPT_SPAWN_LOCK.lock().await;
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nunset ANTHROPIC_API_KEY OPENAI_API_KEY\nexport ZODE_CONFIG_DIR={}\ncd {}\nexec {} \"$@\"\n",
+                quote(&config_dir.path().to_string_lossy()),
+                quote(&cwd.path().to_string_lossy()),
+                quote(&binary),
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&wrapper).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&wrapper, permissions).unwrap();
 
-    let client = ZodeClient::new(ClientOptions {
-        binary: wrapper.to_string_lossy().into_owned(),
-    })
-    .spawn_stdio()
-    .await
-    .unwrap();
+        ZodeClient::new(ClientOptions {
+            binary: wrapper.to_string_lossy().into_owned(),
+        })
+        .spawn_stdio()
+        .await
+        .unwrap()
+    };
     let (notifications_tx, mut notifications_rx) = tokio::sync::mpsc::unbounded_channel();
     client.on_notification(move |method, params| {
         let _ = notifications_tx.send((method, params));
