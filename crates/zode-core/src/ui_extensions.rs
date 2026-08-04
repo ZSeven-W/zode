@@ -1051,11 +1051,12 @@ mod tests {
     // Split into fragments so the full credential strings do not appear
     // literally in source (avoids triggering GitHub push protection).
     const TEST_AK: &str = concat!(
-        "AKLT", "YWVi", "MTVm", "ZGYz", "M2E0", "NDI5", "Mzk2", "MDZj", "NjFm", "Mjc2", "MjRj", "Mzg"
+        "AKLT", "YWVi", "MTVm", "ZGYz", "M2E0", "NDI5", "Mzk2", "MDZj", "NjFm", "Mjc2", "MjRj",
+        "Mzg"
     );
     const TEST_SK: &str = concat!(
-        "WkRZ", "eE1E", "QmxP", "VGhs", "WWpW", "ak5H", "VmtN", "bUUx", "TXpZ", "eU9U", "VXlO", "MlE1",
-        "TmpZ", "eVlq", "TQ", "=="
+        "WkRZ", "eE1E", "QmxP", "VGhs", "WWpW", "ak5H", "VmtN", "bUUx", "TXpZ", "eU9U", "VXlO",
+        "MlE1", "TmpZ", "eVlq", "TQ", "=="
     );
 
     #[test]
