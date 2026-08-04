@@ -285,7 +285,7 @@ impl DesktopBackend for CdpBackend {
     }
 }
 
-/// Evaluate arbitrary JS on a CDP page (backs the `desktop_eval` tool).
+/// Evaluate arbitrary JS on a CDP page (backs the `DesktopEval` tool).
 impl CdpBackend {
     pub async fn evaluate(
         &self,

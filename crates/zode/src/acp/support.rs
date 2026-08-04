@@ -53,7 +53,7 @@ pub(super) fn tool_kind(name: &str) -> ToolKind {
         "Move" => ToolKind::Move,
         "Bash" | "BashRun" | "KillShell" | "Git" => ToolKind::Execute,
         name if name.contains("search") || name.contains("Search") => ToolKind::Search,
-        name if name.starts_with("browser_") || name.contains("fetch") => ToolKind::Fetch,
+        name if name.starts_with("Browser") || name.contains("fetch") => ToolKind::Fetch,
         _ => ToolKind::Other,
     }
 }

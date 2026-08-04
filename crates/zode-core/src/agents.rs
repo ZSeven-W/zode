@@ -17,7 +17,7 @@
 //! `<cwd>/.claude/agents` (later dirs override same-named earlier ones). The
 //! Task tool can then spawn them by `name`, alongside the built-in types, and
 //! `/agents` lists them. `write_agent_def` powers `/agents <name>` creation and
-//! the autonomous `define_agent` tool.
+//! the autonomous `DefineAgent` tool.
 
 use std::path::{Path, PathBuf};
 
@@ -208,7 +208,7 @@ pub struct DefineAgentTool;
 #[async_trait]
 impl Tool for DefineAgentTool {
     fn name(&self) -> &str {
-        "define_agent"
+        "DefineAgent"
     }
 
     fn description(&self) -> &str {
@@ -251,7 +251,7 @@ impl Tool for DefineAgentTool {
             .trim();
         if name.is_empty() || system.is_empty() {
             return Err(AgentError::other(
-                "define_agent requires non-empty name and system",
+                "DefineAgent requires non-empty name and system",
             ));
         }
         let path = write_agent_def(name, description, system)

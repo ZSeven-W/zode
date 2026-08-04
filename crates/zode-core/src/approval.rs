@@ -274,7 +274,7 @@ pub(crate) fn summarize_input(tool: &str, input: &serde_json::Value) -> String {
         "FileWrite" | "FileEdit" | "Remove" | "Move" | "Mkdir" => {
             format!("{tool} {}", pick("path"))
         }
-        "browser_act" => {
+        "BrowserAct" => {
             let target = pick("_target");
             let detail = match pick("action") {
                 "navigate" => pick("url").to_string(),
@@ -303,7 +303,7 @@ pub(crate) fn summarize_input(tool: &str, input: &serde_json::Value) -> String {
                 .trim()
                 .to_string()
         }
-        "browser_eval" => {
+        "BrowserEval" => {
             let t = pick("_target");
             let t = if t.is_empty() {
                 String::new()
@@ -312,10 +312,10 @@ pub(crate) fn summarize_input(tool: &str, input: &serde_json::Value) -> String {
             };
             format!("evaluate JS{t}: {}", pick("expression"))
         }
-        "browser_tabs" => format!("{} tab {}", pick("action"), pick("id"))
+        "BrowserTabs" => format!("{} tab {}", pick("action"), pick("id"))
             .trim()
             .to_string(),
-        "browser_upload" => {
+        "BrowserUpload" => {
             let target = pick("_target");
             let count = input.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
             let files = input
@@ -958,16 +958,16 @@ mod tests {
     #[test]
     fn summarize_browser_tools() {
         let s = summarize_input(
-            "browser_act",
+            "BrowserAct",
             &json!({"action":"navigate","url":"https://x.test","_target":"managed"}),
         );
         assert_eq!(s, "navigate https://x.test [managed]");
         let s = summarize_input(
-            "browser_eval",
+            "BrowserEval",
             &json!({"expression":"document.title","_target":"managed"}),
         );
         assert_eq!(s, "evaluate JS [managed]: document.title");
-        let s = summarize_input("browser_tabs", &json!({"action":"close","id":"t1"}));
+        let s = summarize_input("BrowserTabs", &json!({"action":"close","id":"t1"}));
         assert_eq!(s, "close tab t1");
     }
 }

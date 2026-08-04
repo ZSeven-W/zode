@@ -69,7 +69,7 @@ mod tests {
     #[async_trait::async_trait]
     impl agent::tool::Tool for Echo {
         fn name(&self) -> &str {
-            "desktop_act"
+            "DesktopAct"
         }
         fn description(&self) -> &str {
             "t"
@@ -99,6 +99,6 @@ mod tests {
         let ctx = agent::tool::ToolUseContext::new(std::env::temp_dir());
         let out = t.call(&ctx, json!({"action":"click"})).await.unwrap();
         assert_eq!(out, json!({"action":"click"})); // inner sees raw input
-        assert_eq!(s.perm_flags()[0].0, "desktop_act");
+        assert_eq!(s.perm_flags()[0].0, "DesktopAct");
     }
 }

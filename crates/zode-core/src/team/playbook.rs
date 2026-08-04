@@ -8,20 +8,20 @@
 pub fn render_playbook(external_agents: &[(String, String)]) -> String {
     let mut out = String::from(
         "\n## Team plays\n\
-         You can hire persistent teammates (team_hire) and coordinate them:\n\
+         You can hire persistent teammates (TeamHire) and coordinate them:\n\
          - 流水线 pipeline: split roles by strength (design → implement → review); \
-         relay review findings back into the implementer's session (team_send) and \
+         relay review findings back into the implementer's session (TeamSend) and \
          loop until the reviewer passes it.\n\
          - 辩论 debate: give the same problem to several teammates independently, \
          cross-relay their answers for critique (@ask relay), then synthesize a \
          ruling yourself. Prefer heterogeneous backends — external CLIs and \
          internal teammates on different providers catch each other's blind spots.\n\
-         - 蜂群 swarm: partition non-overlapping file scopes via `team_send` \
+         - 蜂群 swarm: partition non-overlapping file scopes via `TeamSend` \
          `claims` BEFORE parallel work; each teammate records conclusions to the \
          board when done (or reports them for you to record).\n\
          Board discipline: keep the goal and task assignments on the board \
-         (team_board_update, CAS revision); record durable conclusions with \
-         team_board_append; relay `@ask` lines you receive in tool results.\n",
+         (TeamBoardUpdate, CAS revision); record durable conclusions with \
+         TeamBoardAppend; relay `@ask` lines you receive in tool results.\n",
     );
     if !external_agents.is_empty() {
         out.push_str("External teammates available: ");

@@ -154,6 +154,13 @@ pub struct ServerArgs {
 pub enum Command {
     /// Diagnose environment / config problems and check for a newer release.
     Doctor,
+    /// Update zode to the latest release (pre-releases included).
+    #[command(alias = "upgrade")]
+    Update {
+        /// Only report what would happen; download nothing.
+        #[arg(long)]
+        check: bool,
+    },
     /// Run zode as a JSON-RPC app server.
     Server(ServerArgs),
     /// Run Zode as an Agent Client Protocol (ACP) agent over stdio.

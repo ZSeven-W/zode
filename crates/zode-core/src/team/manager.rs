@@ -70,6 +70,9 @@ pub struct TeamDeps {
     pub build_internal_tools: BuildInternalToolsFn,
     pub build_provider: BuildProviderFn,
     pub agent_def: AgentDefLookupFn,
+    /// Every defined internal agent-type name — for the unknown-agent error
+    /// roster (the lookup closure cannot enumerate).
+    pub agent_def_names: Vec<String>,
     /// Parent approval/permission manager — a teammate is gated by the same
     /// rules as the leader (no bypass).
     pub permissions: Arc<agent::permission::PermissionManager>,
@@ -145,6 +148,33 @@ impl TeamManager {
             // Internal: an AgentDef by this `agent` name contributes its model
             // and system prompt (both overridable by explicit hire args).
             let agent_def = (deps.agent_def)(&req.agent);
+            // A typo or an UNREGISTERED external CLI ("cc", "claude"…) used
+            // to fall through to a silent generic internal hire — the model
+            // believed it hired the CLI and spiralled. Unknown names now
+            // fail ONCE with the complete roster and the exact fix, so there
+            // is nothing left to guess.
+            let generic = matches!(req.agent.trim(), "" | "general" | "internal");
+            if agent_def.is_none() && !generic {
+                let mut externals: Vec<String> = deps
+                    .external_registry
+                    .agent_types()
+                    .into_iter()
+                    .map(|(n, _)| n)
+                    .collect();
+                externals.sort();
+                let mut defs = deps.agent_def_names.clone();
+                defs.sort();
+                return Err(TeamError::NameInvalid(format!(
+                    "unknown agent '{}'. Registered external profiles: [{}]. Defined internal \
+                     agent types: [{}]. Use one of those EXACT names, or agent \"general\" for \
+                     a plain internal teammate. To hire an external CLI (Claude Code, Codex, …) \
+                     it must be registered first: run /external-agents discover, or add it under \
+                     externalAgents.agents in config. Do NOT retry with guessed names.",
+                    req.agent,
+                    externals.join(", "),
+                    defs.join(", "),
+                )));
+            }
             let agent_def_model = agent_def.as_ref().and_then(|(m, _)| m.clone());
             let resolved = resolve_teammate_provider(
                 &deps.config,
@@ -739,6 +769,7 @@ mod tests {
             build_internal_tools: Arc::new(|_, _, _| Arc::new(ToolRegistry::new())),
             build_provider: Arc::new(|_| Err("no provider in test".into())),
             agent_def: Arc::new(|_| None),
+            agent_def_names: Vec::new(),
             permissions: Arc::new(agent::permission::PermissionManager::new()),
             hooks: Arc::new(agent::hook::HookRunner::new()),
             timeout: Duration::from_secs(30),

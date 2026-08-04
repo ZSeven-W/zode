@@ -4,7 +4,7 @@
 //!   cargo test -p zode-core --test lsp_live -- --ignored --nocapture
 //!
 //! Exercises the full stack: LspManager → lazily-spawned LspClient → the
-//! `lsp_diagnostics` / `lsp_hover` / `lsp_symbols` tools over JSON-RPC. clangd
+//! `LspDiagnostics` / `LspHover` / `LspSymbols` tools over JSON-RPC. clangd
 //! is used because it analyzes a single self-contained file without needing a
 //! build system, so the test is fast and deterministic.
 
@@ -49,7 +49,7 @@ async fn clangd_diagnostics_hover_symbols() {
     let ctx = ToolUseContext::new(root);
 
     // Diagnostics: also gives clangd time to parse before hover.
-    let diags = tool(&tools, "lsp_diagnostics")
+    let diags = tool(&tools, "LspDiagnostics")
         .call(&ctx, json!({ "file": "probe.c" }))
         .await
         .expect("diagnostics call ok");
@@ -70,7 +70,7 @@ async fn clangd_diagnostics_hover_symbols() {
     );
 
     // Hover over `greet` (line 0, the `g` of greet at column 4).
-    let hover = tool(&tools, "lsp_hover")
+    let hover = tool(&tools, "LspHover")
         .call(
             &ctx,
             json!({ "file": "probe.c", "line": 0, "character": 4 }),
@@ -85,7 +85,7 @@ async fn clangd_diagnostics_hover_symbols() {
     );
 
     // Document symbols: greet + bad should both appear.
-    let syms = tool(&tools, "lsp_symbols")
+    let syms = tool(&tools, "LspSymbols")
         .call(&ctx, json!({ "file": "probe.c" }))
         .await
         .expect("symbols call ok");
@@ -167,7 +167,7 @@ fn resolved_rust_analyzer_is_runnable() {
 
 /// The rust path end to end: `ensure()` provisions rust-analyzer via rustup
 /// (the step the dead proxy shim used to skip), the manager spawns it, and
-/// `lsp_symbols` comes back with the file's real symbols. Live: it may install
+/// `LspSymbols` comes back with the file's real symbols. Live: it may install
 /// the rustup component, and it drives a real rust-analyzer.
 #[tokio::test]
 #[ignore]
@@ -200,7 +200,7 @@ async fn rust_analyzer_serves_symbols_after_ensure() {
     let tools = lsp_tools(&mgr);
     let ctx = ToolUseContext::new(root);
 
-    let out: Value = tool(&tools, "lsp_symbols")
+    let out: Value = tool(&tools, "LspSymbols")
         .call(&ctx, json!({ "file": "src/lib.rs" }))
         .await
         .expect("rust-analyzer answers documentSymbol");

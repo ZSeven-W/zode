@@ -115,7 +115,7 @@ mod tests {
     #[async_trait::async_trait]
     impl agent::tool::Tool for EchoInput {
         fn name(&self) -> &str {
-            "browser_act"
+            "BrowserAct"
         }
         fn description(&self) -> &str {
             "t"
@@ -196,7 +196,7 @@ mod tests {
         t.call(&ctx, json!({})).await.unwrap();
         assert_eq!(gate.seen.lock().unwrap().len(), 1);
         let flags = s.perm_flags();
-        assert_eq!(flags[0].0, "browser_act");
+        assert_eq!(flags[0].0, "BrowserAct");
         assert!(flags[0].1.load(std::sync::atomic::Ordering::Relaxed));
     }
 

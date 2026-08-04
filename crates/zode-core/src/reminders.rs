@@ -36,6 +36,8 @@ struct Inner {
     git_branch: Option<Option<String>>,
     /// Tracked-file count at the last read-set recap (0 = none yet).
     files_recap_at: usize,
+    /// Turns since the last periodic task re-anchor (lite-model cadence).
+    turns_since_anchor: u32,
 }
 
 /// Tracks external file drift, todo-list staleness, and (via
@@ -106,6 +108,19 @@ impl ReminderTracker {
     /// Collect notices for the coming turn, advancing baselines so each
     /// notice fires once. Cheap: one `stat` per tracked file.
     pub async fn pre_turn(&self, todo: &TodoState) -> Vec<String> {
+        self.pre_turn_with_anchor(todo, None).await
+    }
+
+    /// [`Self::pre_turn`] plus, when `anchor_every` is set (the lite-model
+    /// accommodation), a periodic replay of the todo list every N turns —
+    /// weak models lose the plot on long tasks; re-anchoring the plan in the
+    /// user turn keeps them on the in-progress item without touching the
+    /// cached system-prompt prefix.
+    pub async fn pre_turn_with_anchor(
+        &self,
+        todo: &TodoState,
+        anchor_every: Option<u32>,
+    ) -> Vec<String> {
         let mut notices = Vec::new();
         // --- external file changes ---
         let tracked: Vec<(PathBuf, SystemTime)> = {
@@ -162,6 +177,37 @@ impl ReminderTracker {
             .iter()
             .filter(|t| matches!(t.status, TodoStatus::Pending | TodoStatus::InProgress))
             .count();
+        // --- periodic task re-anchor (lite cadence) ---
+        if let Some(every) = anchor_every.filter(|e| *e > 0) {
+            let due = {
+                let mut g = self.inner.lock().unwrap();
+                g.turns_since_anchor = g.turns_since_anchor.saturating_add(1);
+                if g.turns_since_anchor >= every && open > 0 {
+                    g.turns_since_anchor = 0;
+                    true
+                } else {
+                    false
+                }
+            };
+            if due {
+                let plan: Vec<String> = snapshot
+                    .iter()
+                    .map(|t| {
+                        let mark = match t.status {
+                            TodoStatus::Completed => "✓",
+                            TodoStatus::InProgress => "→",
+                            _ => "○",
+                        };
+                        format!("{mark} {}", t.subject)
+                    })
+                    .collect();
+                notices.push(format!(
+                    "Task re-anchor — the current plan: {}. Continue the → item; do not \
+                     redo ✓ items or drift into work that is not on this list.",
+                    plan.join("; ")
+                ));
+            }
+        }
         {
             let mut g = self.inner.lock().unwrap();
             if open > 0 {
@@ -387,6 +433,59 @@ mod tests {
             .await
             .iter()
             .any(|n| n.contains("16 file(s)")));
+    }
+
+    #[tokio::test]
+    async fn reanchor_replays_the_plan_every_n_turns_when_enabled() {
+        let tracker = ReminderTracker::default();
+        let todo = TodoState::new();
+        todo.set(vec![
+            TodoItem {
+                subject: "done step".into(),
+                description: None,
+                status: TodoStatus::Completed,
+                id: None,
+            },
+            TodoItem {
+                subject: "current step".into(),
+                description: None,
+                status: TodoStatus::InProgress,
+                id: None,
+            },
+        ])
+        .await;
+
+        // Turns 1-2: quiet. Turn 3: the anchor fires with the plan.
+        for _ in 0..2 {
+            let notices = tracker.pre_turn_with_anchor(&todo, Some(3)).await;
+            assert!(
+                !notices.iter().any(|n| n.contains("Task re-anchor")),
+                "no anchor before the cadence: {notices:?}"
+            );
+        }
+        let notices = tracker.pre_turn_with_anchor(&todo, Some(3)).await;
+        let anchor = notices
+            .iter()
+            .find(|n| n.contains("Task re-anchor"))
+            .expect("anchor fires on the cadence");
+        assert!(anchor.contains("✓ done step"));
+        assert!(anchor.contains("→ current step"));
+        // Counter reset — quiet again next turn.
+        assert!(!tracker
+            .pre_turn_with_anchor(&todo, Some(3))
+            .await
+            .iter()
+            .any(|n| n.contains("Task re-anchor")));
+
+        // Disabled (None / standard profile): never fires.
+        let tracker = ReminderTracker::default();
+        for _ in 0..10 {
+            assert!(!tracker
+                .pre_turn_with_anchor(&todo, None)
+                .await
+                .iter()
+                .any(|n| n.contains("Task re-anchor")));
+        }
     }
 
     #[tokio::test]

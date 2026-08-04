@@ -7,6 +7,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::config::ConfigManager;
 
@@ -171,8 +173,8 @@ pub struct PromptFlags {
     pub ask_user_question: bool,
     /// TodoWrite is registered — include the task-tracking discipline section.
     pub todo: bool,
-    /// The `run_check` tool is registered — include the verification
-    /// sentence that advertises it. Plan mode strips `run_check` from the
+    /// The `RunCheck` tool is registered — include the verification
+    /// sentence that advertises it. Plan mode strips `RunCheck` from the
     /// tool registry (it's `SafetyClass::Mutating`, filtered out by
     /// `filter_read_only`), so the prompt must not tell the model to call a
     /// tool it doesn't have.
@@ -206,7 +208,7 @@ where each `answer` is the chosen option text or the user's custom text. Use \
 plain prose only for open-ended questions that have no discrete options.\n";
 
 /// Parallel tool calls + anti-promise completion discipline. Unconditional —
-/// does not name `run_check` (which plan mode removes from the tool
+/// does not name `RunCheck` (which plan mode removes from the tool
 /// registry; see `VERIFY_TOOL` below for the gated sentence that does).
 const WORKING_STYLE: &str = "\n### Working style\n\
 When a response needs several INDEPENDENT tool calls (reading multiple files, \
@@ -232,13 +234,13 @@ files you have already read; do not re-read them unless told they changed. \
 When the user limits scope (\"only look in X\", \"don't touch Y\"), every \
 later search and edit must respect that limit until they lift it.\n";
 
-/// Verification sentence naming the `run_check` tool. Split out of
-/// `WORKING_STYLE` because plan mode strips `run_check` from the tool
+/// Verification sentence naming the `RunCheck` tool. Split out of
+/// `WORKING_STYLE` because plan mode strips `RunCheck` from the tool
 /// registry (`SafetyClass::Mutating`, dropped by `filter_read_only`) —
 /// advertising a tool the model doesn't have invites a failed call. Gated
 /// on `PromptFlags::verify_tool`.
 const VERIFY_TOOL: &str = "Before claiming work is complete or fixed, verify \
-it — run the relevant test/build/command (the `run_check` tool runs a \
+it — run the relevant test/build/command (the `RunCheck` tool runs a \
 command and evaluates explicit assertions, recording the evidence) and \
 report the actual result. If verification fails, say so plainly; never \
 claim success without fresh evidence.\n";
@@ -280,11 +282,11 @@ output is truncated.\n";
 /// so the model reached for grep and `cargo check` and left them unused.
 const LSP_TOOLS: &str = "\n### Language servers\n\
 Language servers are running for the languages listed below. For code questions \
-in those languages, prefer the `lsp_*` tools over text search: `lsp_definition` \
-and `lsp_references` resolve a symbol exactly (grep matches text, not bindings), \
-`lsp_hover` gives the real type signature, `lsp_symbols` outlines a file, and \
-`lsp_diagnostics` reports compiler/linter errors for one file without building \
-the whole project. Positions are 0-based. `lsp_rename` and `lsp_format` return a \
+in those languages, prefer the `lsp_*` tools over text search: `LspDefinition` \
+and `LspReferences` resolve a symbol exactly (grep matches text, not bindings), \
+`LspHover` gives the real type signature, `LspSymbols` outlines a file, and \
+`LspDiagnostics` reports compiler/linter errors for one file without building \
+the whole project. Positions are 0-based. `LspRename` and `LspFormat` return a \
 PREVIEW of the server's edits — apply them yourself with FileEdit. A server \
 starts on first use and may take a few seconds to index.\n";
 
@@ -294,14 +296,44 @@ starts on first use and may take a few seconds to index.\n";
 const REPO_MAP_DEPTH: usize = 3;
 const REPO_MAP_MAX_LINES: usize = 40;
 
+/// How long a rendered repo map is reused verbatim. The map sits inside the
+/// provider-cached system-prompt prefix: re-scanning on every engine
+/// reassembly (a `/yolo`, `/sandbox`, or `/model` toggle) would rewrite the
+/// prefix whenever a file was created meanwhile and forfeit the prompt-cache
+/// discount for the rest of the session. Freshness matters far less than
+/// byte stability here — new files are discoverable with one `ls`.
+const REPO_MAP_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// Per-cwd cache of the rendered map (process-wide, TTL above).
+static REPO_MAP_CACHE: Mutex<Option<HashMap<PathBuf, (String, Instant)>>> = Mutex::new(None);
+
 /// A compact map of the repository for the system prompt, or `None` outside a
 /// git repo / when `git` fails. One line per directory (depth-capped) with
 /// its tracked-file count. Weak models otherwise cold-start by grepping the
 /// whole tree one guess at a time — and redo it after every compaction; a map
 /// in the SYSTEM prompt survives compaction by construction. Deterministic
 /// for a given tree (biggest directories win the line budget, display is
-/// re-sorted lexicographically) so prompt caching stays effective.
+/// re-sorted lexicographically) and TTL-cached per cwd, so prompt caching
+/// stays effective across mid-session engine reassembles.
 pub fn repo_map(cwd: &Path) -> Option<String> {
+    {
+        let cache = REPO_MAP_CACHE.lock().ok()?;
+        if let Some((map, at)) = cache.as_ref().and_then(|c| c.get(cwd)) {
+            if at.elapsed() < REPO_MAP_TTL {
+                return Some(map.clone());
+            }
+        }
+    }
+    let rendered = render_repo_map(cwd)?;
+    if let Ok(mut cache) = REPO_MAP_CACHE.lock() {
+        cache
+            .get_or_insert_with(HashMap::new)
+            .insert(cwd.to_path_buf(), (rendered.clone(), Instant::now()));
+    }
+    Some(rendered)
+}
+
+fn render_repo_map(cwd: &Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["ls-files", "-z"])
         .current_dir(cwd)
@@ -570,7 +602,7 @@ mod tests {
     fn lsp_note_lists_enabled_languages_and_is_absent_when_none() {
         assert_eq!(lsp_prompt_note(&[]), "");
         let note = lsp_prompt_note(&["go".to_string(), "rust".to_string()]);
-        assert!(note.contains("lsp_definition"));
+        assert!(note.contains("LspDefinition"));
         assert!(note.contains("Enabled: go, rust."));
     }
 
@@ -853,7 +885,7 @@ mod tests {
         // Anti-promise completion discipline (unconditional).
         assert!(p.contains("Never end your turn on an unexecuted plan"));
         // run_check advertising — gated on verify_tool, on here.
-        assert!(p.contains("run_check"));
+        assert!(p.contains("RunCheck"));
         // Communication norms.
         assert!(p.contains("final message of a turn is what the user reads"));
         assert!(p.contains("`path:line`"));
@@ -863,7 +895,7 @@ mod tests {
         // Plan mode (verify_tool: false) must not advertise a tool it
         // removed from the registry.
         let without_verify = build_system_prompt(&[], "", &env, &PromptFlags::default());
-        assert!(!without_verify.contains("run_check"));
+        assert!(!without_verify.contains("RunCheck"));
         // The unconditional working-style text is still present.
         assert!(without_verify.contains("issue them together in one response"));
         assert!(without_verify.contains("Never end your turn on an unexecuted plan"));

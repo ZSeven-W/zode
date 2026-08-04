@@ -45,6 +45,7 @@ async fn hire_send_resume_dismiss_real_claude() {
         build_internal_tools: Arc::new(|_, _, _| Arc::new(agent::tool::ToolRegistry::new())),
         build_provider: Arc::new(|_| Err("n/a".into())),
         agent_def: Arc::new(|_| None),
+        agent_def_names: Vec::new(),
         permissions: Arc::new(agent::permission::PermissionManager::new()),
         hooks: Arc::new(agent::hook::HookRunner::new()),
         timeout: Duration::from_secs(300),

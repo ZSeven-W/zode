@@ -17,6 +17,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Engine,
     },
     SlashCommand {
+        name: "new",
+        description: "Start fresh — clear the conversation context (alias of /clear)",
+        usage: "/new",
+        action: CommandAction::Engine,
+    },
+    SlashCommand {
         name: "exit",
         description: "Quit zode",
         usage: "/exit",

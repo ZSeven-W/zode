@@ -1,7 +1,7 @@
 //! The `lsp_*` tools — the agent-facing surface of the LSP plugin. Each is a
 //! thin `Tool` impl that resolves the target file to a language server (via the
 //! [`LspManager`]), opens it, issues one LSP request, and returns a compact,
-//! model-friendly result. All are read-only: `lsp_rename` / `lsp_format` return
+//! model-friendly result. All are read-only: `LspRename` / `LspFormat` return
 //! the server's proposed edits as a *preview* rather than writing to disk, so
 //! the agent stays in control of mutations (apply them with FileEdit).
 
@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use crate::lsp::client::{LspClient, LspOperationGuard};
 use crate::lsp::manager::LspManager;
 
-/// How long `lsp_diagnostics` waits for the server's first publish.
+/// How long `LspDiagnostics` waits for the server's first publish.
 const DIAG_WAIT_SECS: u64 = 8;
 
 /// Build all seven tools over one manager.
@@ -229,7 +229,7 @@ struct LspDiagnosticsTool(Arc<LspManager>);
 #[async_trait]
 impl Tool for LspDiagnosticsTool {
     fn name(&self) -> &str {
-        "lsp_diagnostics"
+        "LspDiagnostics"
     }
     fn description(&self) -> &str {
         "Compiler/linter diagnostics (errors, warnings) for a file, from its language server."
@@ -272,7 +272,7 @@ struct LspHoverTool(Arc<LspManager>);
 #[async_trait]
 impl Tool for LspHoverTool {
     fn name(&self) -> &str {
-        "lsp_hover"
+        "LspHover"
     }
     fn description(&self) -> &str {
         "Type signature and docs for the symbol at a position (line/character, 0-based)."
@@ -302,7 +302,7 @@ struct LspDefinitionTool(Arc<LspManager>);
 #[async_trait]
 impl Tool for LspDefinitionTool {
     fn name(&self) -> &str {
-        "lsp_definition"
+        "LspDefinition"
     }
     fn description(&self) -> &str {
         "Jump to where the symbol at a position is defined. Returns file/line locations."
@@ -332,7 +332,7 @@ struct LspReferencesTool(Arc<LspManager>);
 #[async_trait]
 impl Tool for LspReferencesTool {
     fn name(&self) -> &str {
-        "lsp_references"
+        "LspReferences"
     }
     fn description(&self) -> &str {
         "Find all references to the symbol at a position across the workspace."
@@ -366,7 +366,7 @@ struct LspSymbolsTool(Arc<LspManager>);
 #[async_trait]
 impl Tool for LspSymbolsTool {
     fn name(&self) -> &str {
-        "lsp_symbols"
+        "LspSymbols"
     }
     fn description(&self) -> &str {
         "List the symbols (functions, types, fields) declared in a file."
@@ -396,7 +396,7 @@ struct LspRenameTool(Arc<LspManager>);
 #[async_trait]
 impl Tool for LspRenameTool {
     fn name(&self) -> &str {
-        "lsp_rename"
+        "LspRename"
     }
     fn description(&self) -> &str {
         "Preview a workspace-wide rename of the symbol at a position. Returns proposed edits (does not write files)."
@@ -439,7 +439,7 @@ struct LspFormatTool(Arc<LspManager>);
 #[async_trait]
 impl Tool for LspFormatTool {
     fn name(&self) -> &str {
-        "lsp_format"
+        "LspFormat"
     }
     fn description(&self) -> &str {
         "Get the language server's formatting edits for a file (preview; does not write the file)."

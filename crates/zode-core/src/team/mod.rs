@@ -125,7 +125,7 @@ pub struct Teammate {
     pub meta: TeammateMeta,
 }
 
-/// Read-only roster row for the `/team` panel and `team_list`.
+/// Read-only roster row for the `/team` panel and `TeamList`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TeammateSnapshot {
     pub name: String,
@@ -198,7 +198,7 @@ impl TeamManager {
     pub fn status_report(&self) -> String {
         let roster = self.roster();
         if roster.is_empty() {
-            return "No teammates. Use team_hire (via a task) to build a team.".to_string();
+            return "No teammates. Use TeamHire (via a task) to build a team.".to_string();
         }
         let mut out = format!("Team ({} teammate(s)):\n", roster.len());
         for t in &roster {

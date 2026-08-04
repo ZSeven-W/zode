@@ -156,13 +156,19 @@ impl AskUserQuestionTool {
     /// the first call fail deterministically before the model learned the
     /// batched shape from the error text.
     fn parse(input: &Value) -> Result<Vec<QuestionSpec>, AgentError> {
-        let arr = match input.get("questions").and_then(|v| v.as_array()) {
-            Some(arr) => arr,
+        let owned_arr;
+        let arr = match input.get("questions") {
+            Some(Value::Array(arr)) => arr,
+            // A bare object under `questions` — treat as a batch of one.
+            Some(obj @ Value::Object(_)) => {
+                owned_arr = vec![obj.clone()];
+                &owned_arr
+            }
             // Legacy single-question shape: top-level { question, options }.
-            None if input.get("question").is_some() => {
+            _ if input.get("question").is_some() => {
                 return Ok(vec![Self::parse_one(input)?]);
             }
-            None => {
+            _ => {
                 return Err(AgentError::other(format!(
                     "AskUserQuestion: provide a 'questions' array with {MIN_QUESTIONS}-{MAX_QUESTIONS} \
                      entries — batch related decisions into one call rather than asking one at a time"
@@ -175,6 +181,27 @@ impl AskUserQuestionTool {
             )));
         }
         arr.iter().map(Self::parse_one).collect()
+    }
+
+    /// The display text of one option. Models trained on other harnesses
+    /// often send `{label, description}` objects instead of plain strings —
+    /// rejecting those made "the tool often fails to ask" the single most
+    /// reported failure of this tool. Accept both.
+    fn option_text(v: &Value) -> Option<String> {
+        if let Some(s) = v.as_str() {
+            let s = s.trim();
+            return (!s.is_empty()).then(|| s.to_string());
+        }
+        let obj = v.as_object()?;
+        for key in ["label", "text", "value", "name", "title", "option"] {
+            if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+                let s = s.trim();
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        None
     }
 
     fn parse_one(v: &Value) -> Result<QuestionSpec, AgentError> {
@@ -190,16 +217,14 @@ impl AskUserQuestionTool {
             .filter(|s| !s.is_empty());
         let options: Vec<String> = v
             .get("options")
+            .or_else(|| v.get("choices"))
             .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
+            .map(|a| a.iter().filter_map(Self::option_text).collect())
             .unwrap_or_default();
         if options.len() < MIN_OPTIONS {
             return Err(AgentError::other(format!(
-                "AskUserQuestion: each question needs at least {MIN_OPTIONS} options"
+                "AskUserQuestion: each question needs at least {MIN_OPTIONS} options — plain \
+                 strings, or objects with a 'label' field"
             )));
         }
         if options.len() > MAX_OPTIONS {
@@ -296,6 +321,40 @@ mod tests {
             header: None,
             options: opts.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn parse_accepts_object_options_and_choice_aliases() {
+        // Claude-Code-style option objects.
+        let specs = AskUserQuestionTool::parse(&json!({
+            "questions": [{
+                "question": "which?",
+                "options": [
+                    {"label": "red", "description": "warm"},
+                    {"label": "blue"},
+                ],
+            }]
+        }))
+        .unwrap();
+        assert_eq!(specs[0].options, vec!["red", "blue"]);
+        // `choices` alias + mixed string/object entries.
+        let specs = AskUserQuestionTool::parse(&json!({
+            "questions": [{"question": "q", "choices": ["a", {"text": "b"}]}]
+        }))
+        .unwrap();
+        assert_eq!(specs[0].options, vec!["a", "b"]);
+        // A bare object under `questions` is a batch of one.
+        let specs = AskUserQuestionTool::parse(&json!({
+            "questions": {"question": "q", "options": ["a", "b"]}
+        }))
+        .unwrap();
+        assert_eq!(specs.len(), 1);
+        // Unusable options still fail with an instructive message.
+        let err = AskUserQuestionTool::parse(&json!({
+            "questions": [{"question": "q", "options": [1, 2]}]
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("label"));
     }
 
     #[tokio::test]

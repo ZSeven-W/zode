@@ -87,7 +87,7 @@ async fn cdp_attaches_snapshots_and_evals() {
     eprintln!("cdp snapshot:\n{}", snap.outline);
     assert!(snap.outline.contains("<button>") || snap.outline.contains("<input>"));
 
-    // eval verifies the desktop_eval path.
+    // eval verifies the DesktopEval path.
     let v = backend.evaluate(&win, "1+2").await.unwrap();
     assert_eq!(v, serde_json::json!(3));
 
@@ -132,7 +132,7 @@ fn ized_port() -> u16 {
 
 /// Verifies the two usability fixes together through the real tool layer:
 /// (#1) the permission ladder is populated via the approval gate, and (#2)
-/// `desktop_read` routes a `cdp#…` app identity to the CDP backend.
+/// `DesktopRead` routes a `cdp#…` app identity to the CDP backend.
 #[tokio::test]
 #[ignore]
 async fn desktop_read_tool_routes_to_cdp_after_attach() {
@@ -193,7 +193,7 @@ async fn desktop_read_tool_routes_to_cdp_after_attach() {
             let id = a["executable_identity"].as_str()?;
             id.starts_with("cdp").then(|| id.to_string())
         })
-        .expect("CDP app should appear in desktop_read apps");
+        .expect("CDP app should appear in DesktopRead apps");
     assert!(session.scopes().subsystem_consented());
 
     // #2: snapshot with the cdp identity routes to the CDP backend.
@@ -209,5 +209,5 @@ async fn desktop_read_tool_routes_to_cdp_after_attach() {
         outline.contains("<button>") || outline.contains("<input>"),
         "expected CDP DOM outline, got: {outline}"
     );
-    eprintln!("desktop_read → CDP routing OK: {cdp_id}");
+    eprintln!("DesktopRead → CDP routing OK: {cdp_id}");
 }

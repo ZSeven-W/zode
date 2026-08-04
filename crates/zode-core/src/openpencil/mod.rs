@@ -20,7 +20,7 @@ pub trait Consent: Send + Sync + std::fmt::Debug {
 
 /// Read-only OpenPencil MCP tools. A small write override handles create-like
 /// tools whose names otherwise match read prefixes; a curated read allowlist
-/// covers current non-prefix reads. Anything not read is routed to `op_write`
+/// covers current non-prefix reads. Anything not read is routed to `OpWrite`
 /// (gated).
 pub fn is_read_tool(name: &str) -> bool {
     const WRITE_TOOLS: &[&str] = &["export_nodes"];

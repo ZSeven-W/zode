@@ -1,7 +1,7 @@
 //! Workflow manager opened by `/workflows`: lists user-defined workflows, lets
 //! you delete one, and — per "let the main agent create workflows" — creates new
 //! ones via a one-line brief that the main agent turns into a workflow with the
-//! `define_workflow` tool (rather than a manual step form). Sibling of
+//! `DefineWorkflow` tool (rather than a manual step form). Sibling of
 //! [`super::agents_dialog`].
 
 use ratatui::layout::Rect;
@@ -30,7 +30,7 @@ enum Mode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowsAction {
     /// Submit a templated turn so the main agent builds the workflow (via the
-    /// `define_workflow` tool) from this brief.
+    /// `DefineWorkflow` tool) from this brief.
     AiCreate {
         brief: String,
     },

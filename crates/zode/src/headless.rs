@@ -240,7 +240,7 @@ pub(crate) fn tool_result_line(
         }
         return Some(line);
     }
-    if name == "run_check" {
+    if name == "RunCheck" {
         if let Some(command) = output.get("command").and_then(|v| v.as_str()) {
             return Some(format!("{name} passed: {}", compact_text(command, 120)));
         }
@@ -364,13 +364,13 @@ mod tests {
     #[test]
     fn tool_result_line_surfaces_failed_run_check() {
         let line = tool_result_line(
-            Some("run_check"),
+            Some("RunCheck"),
             true,
             &json!({"passed": false, "failures": ["expected stdout to contain ready"]}),
             None,
         )
         .unwrap();
-        assert!(line.contains("run_check failed"), "{line}");
+        assert!(line.contains("RunCheck failed"), "{line}");
         assert!(line.contains("expected stdout"), "{line}");
     }
 

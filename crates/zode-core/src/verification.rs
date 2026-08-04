@@ -1,9 +1,9 @@
-//! Harness-level verification state and the `run_check` tool.
+//! Harness-level verification state and the `RunCheck` tool.
 //!
-//! `run_check` turns "I think it works" into structured evidence. It runs a
+//! `RunCheck` turns "I think it works" into structured evidence. It runs a
 //! command, evaluates simple assertions over exit code / stdout / stderr, and
 //! records whether the latest verification is still fresh. Mutating tools mark
-//! that evidence stale, so `goal_complete` cannot stop an autonomous loop after
+//! that evidence stale, so `GoalComplete` cannot stop an autonomous loop after
 //! edits that have not been re-checked.
 
 use std::path::PathBuf;
@@ -76,17 +76,17 @@ impl VerificationState {
             .lock()
             .map_err(|_| "verification state poisoned".to_string())?;
         let Some(record) = state.last.clone() else {
-            return Err("run_check must pass before goal_complete can stop the loop".into());
+            return Err("RunCheck must pass before GoalComplete can stop the loop".into());
         };
         if !record.passed {
             return Err(format!(
-                "latest run_check did not pass: {}",
+                "latest RunCheck did not pass: {}",
                 record.failures.join("; ")
             ));
         }
         if record.generation != state.generation {
             return Err(
-                "run_check evidence is stale because files, commands, git state, or another mutating tool changed after it ran".into(),
+                "RunCheck evidence is stale because files, commands, git state, or another mutating tool changed after it ran".into(),
             );
         }
         Ok(record)
@@ -122,17 +122,17 @@ fn tool_invalidates_verification(tool: &str) -> bool {
             | "GitStash"
             | "GitWorktree"
             | "Task"
-            | "team_send"
-            | "define_agent"
-            | "define_workflow"
-            | "run_workflow"
-            | "browser_act"
-            | "browser_eval"
-            | "browser_tabs"
-            | "op_write"
-            | "op_design"
-            | "lsp_rename"
-            | "lsp_format"
+            | "TeamSend"
+            | "DefineAgent"
+            | "DefineWorkflow"
+            | "RunWorkflow"
+            | "BrowserAct"
+            | "BrowserEval"
+            | "BrowserTabs"
+            | "OpWrite"
+            | "OpDesign"
+            | "LspRename"
+            | "LspFormat"
     )
 }
 
@@ -173,11 +173,11 @@ fn default_expect_exit_code() -> i32 {
 #[async_trait]
 impl Tool for RunCheckTool {
     fn name(&self) -> &str {
-        "run_check"
+        "RunCheck"
     }
 
     fn description(&self) -> &str {
-        "Run a verification command and evaluate explicit assertions. Returns structured {passed, failures, stdout, stderr, exit_code}. Use before claiming success or calling goal_complete."
+        "Run a verification command and evaluate explicit assertions. Returns structured {passed, failures, stdout, stderr, exit_code}. Use before claiming success or calling GoalComplete."
     }
 
     fn input_schema(&self) -> Value {
@@ -205,9 +205,9 @@ impl Tool for RunCheckTool {
 
     async fn call(&self, ctx: &ToolUseContext, input: Value) -> Result<Value, AgentError> {
         let parsed: RunCheckInput = serde_json::from_value(input)
-            .map_err(|e| AgentError::other(format!("run_check invalid input: {e}")))?;
+            .map_err(|e| AgentError::other(format!("RunCheck invalid input: {e}")))?;
         if parsed.command.trim().is_empty() {
-            return Err(AgentError::other("run_check command must be non-empty"));
+            return Err(AgentError::other("RunCheck command must be non-empty"));
         }
         let timeout_secs = parsed
             .timeout_secs
@@ -239,7 +239,7 @@ impl Tool for RunCheckTool {
             Err(CaptureError::TimedOut) => {
                 let failures = vec![format!("command timed out after {timeout_secs}s")];
                 self.state
-                    .record("run_check", &parsed.command, false, failures.clone());
+                    .record("RunCheck", &parsed.command, false, failures.clone());
                 return Ok(json!({
                     "passed": false,
                     "command": parsed.command,
@@ -254,7 +254,7 @@ impl Tool for RunCheckTool {
             }
             Err(error) => {
                 return Err(AgentError::other(format!(
-                    "run_check execution failed: {error}"
+                    "RunCheck execution failed: {error}"
                 )));
             }
         };
@@ -267,7 +267,7 @@ impl Tool for RunCheckTool {
         let failures = evaluate_assertions(&parsed, exit_code, &stdout, &stderr);
         let passed = failures.is_empty();
         self.state
-            .record("run_check", &parsed.command, passed, failures.clone());
+            .record("RunCheck", &parsed.command, passed, failures.clone());
 
         Ok(json!({
             "passed": passed,
@@ -350,7 +350,7 @@ fn cap_output(raw: &str) -> (String, bool) {
         .unwrap_or(raw.len());
     (
         format!(
-            "{}\n... run_check output truncated: {} bytes elided ...\n{}",
+            "{}\n... RunCheck output truncated: {} bytes elided ...\n{}",
             &raw[..head_end],
             tail_start.saturating_sub(head_end),
             &raw[tail_start..]
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn mutating_tool_makes_prior_evidence_stale() {
         let state = VerificationState::default();
-        state.record_pass("run_check", "cargo test");
+        state.record_pass("RunCheck", "cargo test");
         assert!(state.completion_evidence().is_ok());
         state.mark_mutation("FileWrite");
         assert!(state.completion_evidence().unwrap_err().contains("stale"));

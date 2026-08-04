@@ -88,12 +88,12 @@ const PROMPT_HISTORY_LIMIT: usize = 100;
 /// First turn of the autonomous goal loop, queued when a goal is set.
 const GOAL_LOOP_START_PROMPT: &str =
     "Begin working toward the goal now. Take concrete steps. When it is fully \
-     complete, call the goal_complete tool with a short summary.";
+     complete, call the GoalComplete tool with a short summary.";
 /// Continuation turn, queued after each successful loop turn that did not signal
 /// completion.
 const GOAL_LOOP_CONTINUE_PROMPT: &str =
     "Continue working toward the goal. Take the next concrete step now. When it \
-     is fully complete, call the goal_complete tool with a short summary — do \
+     is fully complete, call the GoalComplete tool with a short summary — do \
      not call it prematurely.";
 
 /// Default cap on autonomous goal-loop turns when `autoLoopMaxTurns` is unset.
@@ -196,11 +196,18 @@ fn save_prompt_history_to_path(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    // Read-modify-write: preserve every OTHER session's bucket and migrate a
-    // legacy flat-array file, then replace only this session's entries. This is
-    // what keeps saving from one session from clearing another's records.
+    // Read-modify-write: preserve every OTHER bucket and migrate a legacy
+    // flat-array file. This session's own bucket is merged ADDITIVELY —
+    // buckets are project-scoped, so two live sessions in one workspace
+    // write the same key; replacing wholesale would drop whatever the other
+    // session recorded since this one was seeded.
     let mut map = load_history_map(path, history_key);
-    let entries = sanitize_prompt_history(history.to_vec());
+    let mut entries = map.remove(history_key).unwrap_or_default();
+    for entry in sanitize_prompt_history(history.to_vec()) {
+        if !entries.contains(&entry) {
+            record_prompt_history_entry(&mut entries, &entry);
+        }
+    }
     if entries.is_empty() {
         map.remove(history_key);
     } else {
@@ -238,7 +245,9 @@ fn record_prompt_history_entry(history: &mut Vec<String>, text: &str) -> bool {
 }
 
 fn seed_prompt_history_for_tab(tab: &mut SessionTab) {
-    tab.prompt_history_key = format!("session:{}", tab.session_id);
+    // PROJECT-scoped (see `SessionTab::new`): every session in the same
+    // workspace shares one Up/Down recall bucket, like Claude Code.
+    tab.prompt_history_key = format!("project:{}", tab.engine.cwd.display());
     let mut history = load_prompt_history(&tab.prompt_history_key);
     for msg in tab.chat.messages() {
         if msg.role == crate::ui::chat::Role::User {
@@ -275,7 +284,7 @@ enum BrowserOp {
     Launch,
     Close,
     /// `None` saves under the config dir's `screenshots/` with a timestamped
-    /// name (mirrors `browser_read`'s own screenshot-save path in zode-core).
+    /// name (mirrors `BrowserRead`'s own screenshot-save path in zode-core).
     Screenshot {
         path: Option<String>,
     },
@@ -1255,6 +1264,31 @@ impl TuiApp {
         }
     }
 
+    /// Apply a learned lite verdict to the ACTIVE tab once it is idle: the
+    /// loop-guard evidence arrived mid-turn (when reassembly is impossible),
+    /// so the profile switch happens here. Attempted once per tab — when
+    /// explicit `profile: "standard"` config keeps the assembly standard,
+    /// this must not spin.
+    fn maybe_apply_learned_profile(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
+        let tab = self.active_tab();
+        let model = tab.engine.model.clone();
+        if tab.is_busy()
+            || tab.lite_reassemble_attempted
+            || tab.engine.lite_profile
+            || !self.template.would_be_lite(&model)
+        {
+            return;
+        }
+        self.active_tab_mut().lite_reassemble_attempted = true;
+        self.start_reassemble_active(
+            self.template.clone(),
+            ReassembleEffect::Notify(ReassembleNotify::System(
+                crate::tr("lite accommodations applied for this model").to_string(),
+            )),
+            agent_tx,
+        );
+    }
+
     /// Show the one-time "self-updated — restart to apply" notice once the
     /// background updater reports a swapped-in build. Runs on the tick (both
     /// the TUI loop and the extension daemon poll it; only the TUI shows it).
@@ -2198,6 +2232,18 @@ impl TuiApp {
                 // Invalidate its generation immediately; its eventual
                 // completion/progress is stale even if another operation
                 // starts before the event arrives.
+                if std::mem::take(&mut tab.local_op_is_auto_compact) {
+                    // Interrupting an AUTO compaction must open the breaker:
+                    // the occupancy is still over threshold, so the trigger
+                    // would otherwise restart compaction on the very next
+                    // event and the tab would look stuck on "compacting"
+                    // forever. Manual /compact stays available; a later
+                    // successful compaction re-arms the trigger.
+                    tab.auto_compact_failures = AUTO_COMPACT_MAX_FAILURES;
+                    tab.chat.push_system(crate::tr(
+                        "auto-compact interrupted — paused for this session; run /compact to compact manually",
+                    ));
+                }
                 tab.active_local_op_id.take()
             } else {
                 None
@@ -2609,10 +2655,11 @@ impl TuiApp {
             global_candidate.tool_access() != self.template.tool_access();
         let (store, carry, cwd, id, seq, active_model, active_access, plan_mode) = {
             let tab = self.active_tab();
-            let store = match tab.engine.store.lock() {
-                Ok(s) => s.clone(),
-                Err(_) => return false,
-            };
+            // The Arc, not a clone: deep-copying a large transcript inline
+            // stalled the event loop on every /yolo //sandbox /model switch.
+            // The tab is marked reassemble_pending before the spawn below, so
+            // nothing mutates the store while the task snapshots it.
+            let store = tab.engine.store.clone();
             (
                 store,
                 // Carry the long-lived session state (cost, undo history, bg
@@ -2656,6 +2703,37 @@ impl TuiApp {
 
         let tx = agent_tx.clone();
         tokio::spawn(async move {
+            // Deep-copy the transcript HERE, off the event loop (the tab is
+            // reassemble_pending, so nothing mutates it meanwhile).
+            let store = match store.lock() {
+                Ok(s) => s.clone(),
+                Err(_) => {
+                    let _ = tx.send(AppEvent::ReassembleDone {
+                        tab_id: id,
+                        seq,
+                        effect,
+                        result: Err("store lock poisoned".to_string()),
+                    });
+                    return;
+                }
+            };
+            // A sandbox switch must prove the sandbox actually enforces
+            // before it is applied (fail-closed). Verified HERE, off the
+            // event loop — the inline `verify().await` used to freeze the
+            // UI for the sandbox-exec round trip.
+            if matches!(effect, ReassembleEffect::Sandbox) {
+                if let Some(sb) = engine_template.sandbox().cloned() {
+                    if let Err(e) = sb.verify().await {
+                        let _ = tx.send(AppEvent::ReassembleDone {
+                            tab_id: id,
+                            seq,
+                            effect,
+                            result: Err(format!("sandbox: {e}")),
+                        });
+                        return;
+                    }
+                }
+            }
             let result = match engine_template
                 .assemble_tab_with_carry(Some(cwd), Some(id.to_string()), carry)
                 .await
@@ -3297,10 +3375,10 @@ impl TuiApp {
             Some(WorkflowsAction::AiCreate { brief }) => {
                 self.workflows_dialog = None;
                 let prompt = format!(
-                    "Create a reusable JS workflow for me using the `define_workflow` tool. \
+                    "Create a reusable JS workflow for me using the `DefineWorkflow` tool. \
                      Here is what it should accomplish:\n\n{brief}\n\nWrite the orchestration \
                      script with agent()/parallel()/pipeline() so zode can execute it \
-                     deterministically with run_workflow, then call define_workflow."
+                     deterministically with RunWorkflow, then call DefineWorkflow."
                 );
                 self.submit(&prompt, agent_tx).await;
             }
@@ -3817,6 +3895,7 @@ impl TuiApp {
                     }
                     self.dispatch_extension_completions(&agent_tx);
                     self.maybe_auto_compact(&agent_tx);
+                    self.maybe_apply_learned_profile(&agent_tx);
                     self.dispatch_queued_input(&agent_tx).await;
                 }
                 Some(request) = self.approval_rx.next() => {
@@ -4057,6 +4136,7 @@ impl TuiApp {
                         // the auto-compact threshold, compact before anything new is
                         // sent, then flush any queued input.
                         self.maybe_auto_compact(&agent_tx);
+                        self.maybe_apply_learned_profile(&agent_tx);
                         self.dispatch_queued_input(&agent_tx).await;
                         // A turn going idle here may have been on a background
                         // tab — its own queued scheduler prompt (if any) needs
@@ -5265,11 +5345,18 @@ impl TuiApp {
                 if !self.edit_previous_queued_input() {
                     self.history_prev();
                 }
+                // Swapping the whole composer text invalidates arbitrary cells;
+                // during a streaming turn the terminal's incremental diff has
+                // been observed leaving stale glyphs from the previous (CJK-
+                // wide) entry behind. A full clear+repaint per browse keypress
+                // is cheap and runs inside the synchronized update (no flash).
+                self.force_redraw = true;
             }
             (KeyCode::Down, m) if m.is_empty() && self.input.cursor_on_last_line() => {
                 if !self.edit_next_queued_input() {
                     self.history_next();
                 }
+                self.force_redraw = true;
             }
             _ => {
                 self.active_input_selection = None;
@@ -5456,6 +5543,13 @@ impl TuiApp {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        // Normalize line endings FIRST: bracketed paste delivers newlines as
+        // `\r` in several terminals (iTerm2 among them), and Windows-origin
+        // clipboard text carries `\r\n` — the textarea splits lines on `\n`
+        // only, so stray CRs ended up embedded in one long line and wrecked
+        // wrapping/width ("paste scrambles formatting").
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let text = normalized.as_str();
         // The connect dialog accepts pasted text into its focused field (API key,
         // base URL, …) or, in the provider stage, its search filter.
         if let Some(dialog) = &mut self.connect {
@@ -6043,17 +6137,11 @@ impl TuiApp {
             }
         };
         if let Some(new_sandbox) = target {
-            // Prove the sandbox actually enforces before applying the toggle
-            // (some hosts have a backend that runs but does not confine).
-            // FAIL-CLOSED: report and keep the previous state.
-            if let Some(sb) = &new_sandbox {
-                if let Err(e) = sb.verify().await {
-                    self.active_tab_mut()
-                        .chat
-                        .push_system(&format!("{}: {e}", crate::tr("sandbox")));
-                    return;
-                }
-            }
+            // The sandbox must prove it actually enforces before the toggle
+            // applies (some hosts have a backend that runs but does not
+            // confine). FAIL-CLOSED, but verified inside the reassemble task
+            // (see `start_reassemble_active`) — awaiting the sandbox-exec
+            // round trip here froze the event loop.
             let t = self.template.with_sandbox(new_sandbox);
             if !self.start_reassemble_active(t, ReassembleEffect::Sandbox, agent_tx) {
                 self.active_tab_mut().chat.push_system(&format!(
@@ -6276,13 +6364,13 @@ impl TuiApp {
             }
             Some(AgentsAction::AiCreate { brief }) => {
                 // Close the dialog and ask the main agent to build the agent via
-                // the define_agent tool (requires orchestration, default on).
+                // the DefineAgent tool (requires orchestration, default on).
                 self.agents_dialog = None;
                 let prompt = format!(
-                    "Create a new sub-agent for me using the `define_agent` tool. \
+                    "Create a new sub-agent for me using the `DefineAgent` tool. \
                      Here is what it should do:\n\n{brief}\n\nChoose a concise \
                      kebab-case name, a one-line description, and a clear system \
-                     prompt, then call define_agent with them."
+                     prompt, then call DefineAgent with them."
                 );
                 self.submit(&prompt, agent_tx).await;
             }
@@ -8729,6 +8817,27 @@ impl TuiApp {
             self.selected_image = None;
         }
         let tab = &mut self.tabs[tab_idx];
+        // Prefix-cache shape check: a changed system prompt / tool set means
+        // this turn re-writes the provider's prompt cache. Name the cause
+        // once (reassembles — /model, /yolo, /sandbox, /goal — are the usual
+        // ones) so the cost blip in the usage row is explained.
+        let shape = tab.engine.prefix_shape();
+        if let Some(prev) = tab.last_prefix_shape {
+            if prev != shape {
+                let what = match (prev.0 != shape.0, prev.1 != shape.1) {
+                    (true, true) => "system prompt + tool set",
+                    (true, false) => "system prompt",
+                    _ => "tool set",
+                };
+                tab.chat.push_system(
+                    &crate::tr(
+                        "cache: {what} changed since the last turn — the prompt-cache prefix re-writes once",
+                    )
+                    .replace("{what}", what),
+                );
+            }
+        }
+        tab.last_prefix_shape = Some(shape);
         let images = if scheduler_owned {
             Vec::new()
         } else {
@@ -9147,6 +9256,7 @@ impl TuiApp {
             let tab = &mut self.tabs[tab_idx];
             tab.active_local_op_id = None;
             tab.turn_abort = None;
+            tab.local_op_is_auto_compact = false;
             let ok = result.is_ok();
             if ok {
                 // Refresh the context gauge immediately from the rewritten
@@ -9596,6 +9706,24 @@ impl TuiApp {
                             tab.chat.push_tool(&line);
                         }
                     }
+                    // A loop-guard nudge is runtime evidence of a weak model:
+                    // record the verdict (auto-lite, zero config) once. The
+                    // reassembly that applies it runs when the tab next goes
+                    // idle (`maybe_apply_learned_profile`).
+                    Event::Notice { ref code, .. } if code == "agent.loop.repeat" => {
+                        if let Some(line) = process_line_for_event(&event, None) {
+                            tab.chat.push_system(&line);
+                        }
+                        if !tab.weak_signal_noted {
+                            tab.weak_signal_noted = true;
+                            zode_core::config::learn_model_lite(&tab.engine.model);
+                            if !tab.engine.lite_profile {
+                                tab.chat.push_system(&crate::tr(
+                                    "weak-model behavior detected — lite accommodations will be enabled for this model (remembered for future sessions; set profile: \"standard\" in config to opt out)",
+                                ));
+                            }
+                        }
+                    }
                     Event::Notice { .. } | Event::Result { .. } | Event::Unknown => {
                         if let Some(line) = process_line_for_event(&event, None) {
                             tab.chat.push_tool(&line);
@@ -9669,6 +9797,19 @@ impl TuiApp {
                             ));
                         }
                         tab.chat.push_system(&line);
+                        // A tool-loop abort is definitive weak-model evidence
+                        // — record the learned verdict (auto-lite, no config;
+                        // see the agent.loop.repeat notice arm for the nudge
+                        // tier of the same signal).
+                        if e.contains("tool-call loop detected") && !tab.weak_signal_noted {
+                            tab.weak_signal_noted = true;
+                            zode_core::config::learn_model_lite(&tab.engine.model);
+                            if !tab.engine.lite_profile {
+                                tab.chat.push_system(&crate::tr(
+                                    "weak-model behavior detected — lite accommodations will be enabled for this model (remembered for future sessions; set profile: \"standard\" in config to opt out)",
+                                ));
+                            }
+                        }
                         Mode::Error
                     }
                 };
@@ -9711,7 +9852,7 @@ impl TuiApp {
                     }
                 }
                 // Goal auto-loop: keep taking turns toward the goal until the
-                // agent calls `goal_complete` — or the user interrupts / clears
+                // agent calls `GoalComplete` — or the user interrupts / clears
                 // the goal, or a turn fails. Only continues on a successful turn.
                 if tab.goal_loop_active {
                     // No-progress tracking: a turn with no tool call did no
@@ -9957,7 +10098,7 @@ impl TuiApp {
         match name {
             "exit" => self.should_quit = true,
             "help" => self.show_help = true,
-            "clear" => {
+            "clear" | "new" => {
                 // Mutating the store mid-turn races the running QueryLoop.
                 if self.active_tab().is_busy() {
                     self.toast = Some(Toast::info(crate::tr(
@@ -9965,10 +10106,20 @@ impl TuiApp {
                     )));
                 } else {
                     let tab = &mut self.tabs[self.active];
-                    tab.chat = ChatView::new();
-                    if let Ok(mut store) = tab.engine.store.lock() {
-                        *store = agent::message::MessageStore::new();
-                    }
+                    // Swap the old transcript out and free it OFF the event
+                    // loop: dropping a huge ChatView + MessageStore (hundreds
+                    // of thousands of small allocations) inline showed up as
+                    // a visible UI stall on /clear.
+                    let old_chat = std::mem::replace(&mut tab.chat, ChatView::new());
+                    let old_store = tab
+                        .engine
+                        .store
+                        .lock()
+                        .map(|mut store| {
+                            std::mem::replace(&mut *store, agent::message::MessageStore::new())
+                        })
+                        .ok();
+                    tokio::task::spawn_blocking(move || drop((old_chat, old_store)));
                     // The context gauge reflects the (now empty) store again
                     // only at the next Usage event — reset it here so the
                     // auto-compact trigger can't fire on a stale 98%+ badge.
@@ -10353,7 +10504,7 @@ impl TuiApp {
                         let session = self.active_tab().engine.desktop.clone();
                         let msg = match session.attach_cdp(port).await {
                             Ok(()) => format!(
-                                "desktop: attached CDP on 127.0.0.1:{port} — desktop_eval enabled"
+                                "desktop: attached CDP on 127.0.0.1:{port} — DesktopEval enabled"
                             ),
                             Err(e) => format!("desktop attach failed: {e}"),
                         };
@@ -10936,23 +11087,40 @@ impl TuiApp {
         // itself would 400 with context-overflow, deadlocking compaction).
         let context_tokens = tab.context_tokens;
         tab.mode = Mode::Compacting;
+        tab.local_op_is_auto_compact = auto;
         tab.chat
             .push_system(crate::tr("compacting the conversation…"));
         let tx = agent_tx.clone();
         tokio::spawn(async move {
-            let result = engine
-                .compact_sized((context_tokens > 0).then_some(context_tokens), abort)
-                .await
-                .map(|o| {
-                    format!(
-                        "compacted {} message{} · ~{} → ~{} tokens",
-                        o.replaced,
-                        if o.replaced == 1 { "" } else { "s" },
-                        o.pre_tokens,
-                        o.post_tokens,
-                    )
-                })
-                .map_err(|e| e.to_string());
+            // Hard deadline: the summarize call rides the provider's own
+            // retry/backoff ladder, and a 5xx storm kept tabs pinned on
+            // "compacting" for many minutes with no way to tell hung from
+            // slow. A timeout aborts the attempt and lands as a normal
+            // failure, so the breaker counts it and the tab recovers.
+            let compact = engine.compact_sized(
+                (context_tokens > 0).then_some(context_tokens),
+                abort.clone(),
+            );
+            let result = match tokio::time::timeout(COMPACT_OP_TIMEOUT, compact).await {
+                Ok(outcome) => outcome
+                    .map(|o| {
+                        format!(
+                            "compacted {} message{} · ~{} → ~{} tokens",
+                            o.replaced,
+                            if o.replaced == 1 { "" } else { "s" },
+                            o.pre_tokens,
+                            o.post_tokens,
+                        )
+                    })
+                    .map_err(|e| e.to_string()),
+                Err(_) => {
+                    abort.abort_with_reason("compaction timed out");
+                    Err(format!(
+                        "compaction timed out after {}s",
+                        COMPACT_OP_TIMEOUT.as_secs()
+                    ))
+                }
+            };
             let _ = tx.send(AppEvent::CompactDone {
                 tab_id,
                 op_id,
@@ -11703,6 +11871,11 @@ fn windows_burst_needs_clipboard(events: &[CtEvent]) -> bool {
 /// firing (manual `/compact` stays available; any success resets the count).
 const AUTO_COMPACT_MAX_FAILURES: u32 = 3;
 
+/// Hard deadline for one compaction operation (the summarize call plus store
+/// splice). Long enough for a slow model on a big transcript; short enough
+/// that a provider outage can't pin a tab on "compacting" indefinitely.
+const COMPACT_OP_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Wrap a mid-turn interjection for the model: an explicit priority framing so
 /// the running turn treats it as an override, not a side note — weak models
 /// otherwise acknowledge a steered constraint ("only search in X") and keep
@@ -11718,7 +11891,7 @@ fn steer_payload(text: &str) -> String {
 /// Halt the goal auto-loop for a tab: clear the active flag, reset the turn
 /// counter, and PURGE any goal-loop prompts still sitting in the input queue so
 /// a stale continuation can't dispatch after the loop was stopped (by
-/// `goal_complete`, the cap, a failed turn, an interrupt, or `/goal clear`).
+/// `GoalComplete`, the cap, a failed turn, an interrupt, or `/goal clear`).
 /// User-typed follow-ups in the queue are preserved.
 /// Await the desktop-Esc fire channel; pends forever once it's unavailable
 /// (a non-TUI owner took it, or a prior iteration dropped it) so the select
@@ -12874,11 +13047,28 @@ fn start_browser_bridge_listener(session: Arc<zode_core::browser::BrowserSession
     });
 }
 
+/// How long to wait for the extension to reconnect ON ITS OWN (saved port +
+/// stored token) before nudging it by opening its page in Chrome. Opening the
+/// page unconditionally made every zode launch pop a Chrome tab — the "why am
+/// I pairing again every time" complaint — even though the extension
+/// reconnects by itself within a few seconds in the common case.
+const BRIDGE_RECONNECT_GRACE: Duration = Duration::from_secs(8);
+
 async fn ensure_browser_bridge_and_maybe_reconnect(
     session: Arc<zode_core::browser::BrowserSession>,
 ) {
     match session.ensure_bridge_listening().await {
         Ok(port) if session.bridge_token_available() => {
+            let deadline = std::time::Instant::now() + BRIDGE_RECONNECT_GRACE;
+            while std::time::Instant::now() < deadline {
+                if session.bridge_connected() {
+                    return; // the extension found us — no Chrome tab needed
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            if session.bridge_connected() {
+                return;
+            }
             let url = browser_extension_connect_url(port);
             if let Err(e) = session.open_extension_url(&url).await {
                 tracing::debug!(error = %e, url = %url, "browser bridge reconnect page open failed");
@@ -15029,13 +15219,16 @@ mod tests {
     async fn clicking_a_tool_activity_summary_expands_the_calls_behind_it() {
         use ratatui::{backend::TestBackend, Terminal};
         let (mut app, agent_tx) = make_test_app().await;
-        // One finished call as the event stream records it: call row, result
-        // row, usage row — all folded behind a single summary line.
-        app.tabs[0]
-            .chat
-            .push_tool_call("Tool Bash cargo build", "Bash");
-        app.tabs[0].chat.push_tool_result("Tool Bash ok");
-        app.tabs[0].chat.push_usage("Usage ↑10 ↓5");
+        // Three finished calls as the event stream records them (call row,
+        // result row, usage row each) — a run long enough to fold behind a
+        // single summary line (small runs render their rows directly).
+        for cmd in ["cargo build", "cargo test", "cargo fmt"] {
+            app.tabs[0]
+                .chat
+                .push_tool_call(&format!("Tool Bash {cmd}"), "Bash");
+            app.tabs[0].chat.push_tool_result("Tool Bash ok");
+            app.tabs[0].chat.push_usage("Usage ↑10 ↓5");
+        }
         app.tabs[0].chat.end_turn();
 
         let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
@@ -15043,9 +15236,9 @@ mod tests {
         let rows = painted_rows(&term);
         assert!(
             row_containing(&rows, "cargo build").is_none(),
-            "the call row must be folded away by default: {rows:?}"
+            "the call rows must be folded away by default: {rows:?}"
         );
-        let summary = row_containing(&rows, "Ran 1 shell command")
+        let summary = row_containing(&rows, "Ran 3 shell commands")
             .expect("a collapsed summary line should be painted");
 
         // A plain click (press + release, no drag) on that row opens the group.
@@ -16405,6 +16598,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paste_normalizes_cr_and_crlf_into_real_lines() {
+        // Bracketed paste delivers newlines as `\r` in several terminals
+        // (iTerm2), and Windows-origin text carries `\r\n`; the textarea
+        // splits on `\n` only, so unnormalized CRs scrambled the composer.
+        let (mut app, _tx) = make_test_app().await;
+        app.input.take();
+        app.handle_paste("fn main() {\r\n    body\r}\r\ntail");
+        assert_eq!(app.input.text(), "fn main() {\n    body\n}\ntail");
+        assert!(
+            app.input.text().lines().nth(1) == Some("    body"),
+            "indentation survives"
+        );
+    }
+
+    #[tokio::test]
     async fn dragged_image_path_in_input_becomes_a_chip() {
         let (mut app, _tx) = make_test_app().await;
         let dir = tempfile::tempdir().unwrap();
@@ -16534,6 +16742,37 @@ mod tests {
         assert_eq!(
             load_prompt_history_from_path(&path, "session:b"),
             vec!["b1".to_string()]
+        );
+    }
+
+    #[test]
+    fn project_bucket_saves_merge_instead_of_replacing() {
+        // Buckets are project-scoped, so two live sessions in one workspace
+        // write the same key. A save from a session with a STALE in-memory
+        // view must not drop what the other session recorded meanwhile.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompt_history.json");
+        let key = "project:/w";
+
+        save_prompt_history_to_path(&path, key, &["a".into()]).unwrap();
+        // Session B (seeded with ["a"]) records "b".
+        save_prompt_history_to_path(&path, key, &["a".into(), "b".into()]).unwrap();
+        // Session A (still on ["a"]) records "c" — "b" must survive.
+        save_prompt_history_to_path(&path, key, &["a".into(), "c".into()]).unwrap();
+
+        assert_eq!(
+            load_prompt_history_from_path(&path, key),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_history_key_is_project_scoped() {
+        let (app, _tx) = make_test_app().await;
+        assert!(
+            app.tabs[0].prompt_history_key.starts_with("project:"),
+            "recall must be shared across sessions in the same workspace, got {}",
+            app.tabs[0].prompt_history_key
         );
     }
 

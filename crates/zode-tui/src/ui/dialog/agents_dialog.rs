@@ -48,7 +48,7 @@ pub enum AgentsAction {
         system: String,
     },
     /// AI-assisted create: submit a templated turn so the main agent builds the
-    /// agent (via the `define_agent` tool) from this brief.
+    /// agent (via the `DefineAgent` tool) from this brief.
     AiCreate {
         brief: String,
     },

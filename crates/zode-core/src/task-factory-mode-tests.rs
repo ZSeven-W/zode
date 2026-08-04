@@ -107,14 +107,14 @@ async fn inherited_children_keep_task_but_exclude_team_and_host_control_tools() 
     let search_result = search
         .call(
             &ToolUseContext::new(std::env::temp_dir()),
-            json!({"query": "select:Task,team_hire,goal_complete,AskUserQuestion,FileRead"}),
+            json!({"query": "select:Task,TeamHire,GoalComplete,AskUserQuestion,FileRead"}),
         )
         .await
         .unwrap();
     assert_eq!(search_result["matches"], json!(["Task", "FileRead"]));
     assert_eq!(
         search_result["missing"],
-        json!(["team_hire", "goal_complete", "AskUserQuestion"])
+        json!(["TeamHire", "GoalComplete", "AskUserQuestion"])
     );
 }
 
@@ -123,7 +123,7 @@ fn teammate_tools_block_direct_and_workflow_mediated_task_dispatch() {
     let mut parent = ToolRegistry::new();
     parent.register(Arc::new(ClassifiedStubTool("Task", SafetyClass::Mutating)));
     parent.register(Arc::new(ClassifiedStubTool(
-        "run_workflow",
+        "RunWorkflow",
         SafetyClass::Mutating,
     )));
     parent.register(Arc::new(ClassifiedStubTool(
@@ -136,7 +136,7 @@ fn teammate_tools_block_direct_and_workflow_mediated_task_dispatch() {
     let teammate_tools = shared_child_tools(&cell, &TEAM_TOOL_NAMES_WITH_TASK);
 
     assert!(teammate_tools.get("Task").is_none());
-    assert!(teammate_tools.get("run_workflow").is_none());
+    assert!(teammate_tools.get("RunWorkflow").is_none());
     assert!(teammate_tools.get("FileRead").is_some());
 }
 
@@ -367,10 +367,10 @@ async fn plan_mode_narrows_parent_ceiling_and_rebuilds_tool_search() {
     assert!(cfg.tools.get("Task").is_none());
     assert!(cfg.tools.get("FileWrite").is_none());
     assert!(cfg.tools.get("Unclassified").is_none());
-    assert!(cfg.tools.get("goal_complete").is_none());
+    assert!(cfg.tools.get("GoalComplete").is_none());
     assert!(cfg.tools.get("AskUserQuestion").is_none());
     assert!(cfg.tools.get("BashOutput").is_none());
-    assert!(cfg.tools.get("lsp_diagnostics").is_none());
+    assert!(cfg.tools.get("LspDiagnostics").is_none());
     assert!(!goal_completed.load(Ordering::SeqCst));
 
     let search = cfg.tools.get("ToolSearch").unwrap();
@@ -378,7 +378,7 @@ async fn plan_mode_narrows_parent_ceiling_and_rebuilds_tool_search() {
         .call(
             &ToolUseContext::new(std::env::temp_dir()),
             json!({
-                "query": "select:Task,FileRead,FileWrite,Unclassified,goal_complete,AskUserQuestion,BashOutput,lsp_diagnostics"
+                "query": "select:Task,FileRead,FileWrite,Unclassified,GoalComplete,AskUserQuestion,BashOutput,LspDiagnostics"
             }),
         )
         .await
@@ -390,10 +390,10 @@ async fn plan_mode_narrows_parent_ceiling_and_rebuilds_tool_search() {
             "Task",
             "FileWrite",
             "Unclassified",
-            "goal_complete",
+            "GoalComplete",
             "AskUserQuestion",
             "BashOutput",
-            "lsp_diagnostics"
+            "LspDiagnostics"
         ])
     );
 

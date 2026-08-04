@@ -1,6 +1,6 @@
 //! /desktop slash-command parser. `status` reports permission/health; `attach`
 //! connects a CDP backend to a running Electron/Chromium debug port (enables
-//! `desktop_eval`). The TUI panel and consent modals are deferred to M4.
+//! `DesktopEval`). The TUI panel and consent modals are deferred to M4.
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DesktopCommand {

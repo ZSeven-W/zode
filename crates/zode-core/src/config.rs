@@ -62,6 +62,13 @@ pub struct ProviderConfig {
     /// endpoints reject the parameter outright.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<bool>,
+    /// Capability profile: `"lite"` opts a weak/fast model (flash / mini /
+    /// haiku class) into the accommodations bundle — earlier compaction, a
+    /// capped context window, a narrowed tool surface, tighter output and
+    /// loop budgets, and periodic task re-anchoring. `"standard"` opts out.
+    /// Unset → inferred from the model name ([`is_lite_model_name`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     /// Per-provider token prices in USD per million tokens ($/MTok — the form
     /// providers publish). Optional so cost is computed for models the built-in
     /// catalog doesn't know (e.g. DeepSeek), instead of showing "cost n/a". The
@@ -93,6 +100,9 @@ pub struct ProviderConfig {
 pub struct ModelOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    /// See [`ProviderConfig::profile`] — per-model override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,11 +117,161 @@ pub struct ModelOverride {
     pub cache_write_price: Option<f64>,
 }
 
+/// Canonical (CamelCase) name for a tool, mapping the pre-unification
+/// snake_case names. Applied to permission lists on config load so grants
+/// and rules written before the rename keep working. MCP tools
+/// (`mcp__server__tool`) are a protocol namespace and pass through.
+pub fn canonical_tool_name(name: &str) -> &str {
+    match name {
+        "browser_act" => "BrowserAct",
+        "browser_eval" => "BrowserEval",
+        "browser_read" => "BrowserRead",
+        "browser_tabs" => "BrowserTabs",
+        "browser_upload" => "BrowserUpload",
+        "define_agent" => "DefineAgent",
+        "define_workflow" => "DefineWorkflow",
+        "desktop_act" => "DesktopAct",
+        "desktop_eval" => "DesktopEval",
+        "desktop_read" => "DesktopRead",
+        "desktop_screenshot" => "DesktopScreenshot",
+        "goal_complete" => "GoalComplete",
+        "lsp_definition" => "LspDefinition",
+        "lsp_diagnostics" => "LspDiagnostics",
+        "lsp_format" => "LspFormat",
+        "lsp_hover" => "LspHover",
+        "lsp_references" => "LspReferences",
+        "lsp_rename" => "LspRename",
+        "lsp_symbols" => "LspSymbols",
+        "op_design" => "OpDesign",
+        "op_read" => "OpRead",
+        "op_write" => "OpWrite",
+        "run_check" => "RunCheck",
+        "run_workflow" => "RunWorkflow",
+        "team_board_append" => "TeamBoardAppend",
+        "team_board_read" => "TeamBoardRead",
+        "team_board_update" => "TeamBoardUpdate",
+        "team_claim" => "TeamClaim",
+        "team_dismiss" => "TeamDismiss",
+        "team_hire" => "TeamHire",
+        "team_list" => "TeamList",
+        "team_release" => "TeamRelease",
+        "team_send" => "TeamSend",
+        other => other,
+    }
+}
+
+/// Capability tier the engine assembles for. `Lite` bundles the weak-model
+/// accommodations; `Standard` is today's behavior, unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelProfile {
+    Standard,
+    Lite,
+}
+
+/// Name heuristic for the lite tier: the fast/distilled SKU names vendors use
+/// (deepseek-…-flash, gemini-…-flash, gpt-…-mini/nano, claude-…-haiku,
+/// glm-…-air, …-lite). Matches whole delimiter-separated segments, not
+/// substrings — "MiniMax-M1" must NOT read as "mini". Deliberately
+/// conservative — an explicit `profile: "standard"` always wins, and runtime
+/// behavior learning catches what the names miss.
+pub fn is_lite_model_name(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|seg| matches!(seg, "flash" | "lite" | "mini" | "nano" | "haiku" | "air"))
+}
+
+/// Resolve the profile for the ACTIVE model: explicit config first (provider
+/// or per-model override, already folded into `provider`), then the LEARNED
+/// verdicts (runtime loop-guard evidence — see [`learn_model_lite`]), then
+/// the name heuristic. Unknown profile strings read as `Standard` (fail-open
+/// to today's behavior). Users never need to configure lite: obvious SKUs
+/// match by name, and everything else is caught by behavior at runtime.
+pub fn model_profile(provider: &ProviderConfig, model: &str) -> ModelProfile {
+    match provider.profile.as_deref().map(str::trim) {
+        Some(p) if p.eq_ignore_ascii_case("lite") => ModelProfile::Lite,
+        Some(_) => ModelProfile::Standard,
+        None if is_lite_model_name(model) => ModelProfile::Lite,
+        None if learned_model_is_lite(model) => ModelProfile::Lite,
+        None => ModelProfile::Standard,
+    }
+}
+
+/// Learned weak-model verdicts, persisted at
+/// `<config-dir>/model-profiles.json` as `{"<model>": "lite"}`. Written when
+/// runtime behavior (a loop-guard nudge or a tool-loop abort) exposes a weak
+/// model the name heuristic missed; consulted by [`model_profile`] below the
+/// explicit config, so `profile: "standard"` always overrides a learned
+/// verdict.
+static LEARNED_PROFILES: std::sync::Mutex<Option<HashMap<String, String>>> =
+    std::sync::Mutex::new(None);
+
+fn learned_profiles_path() -> Option<PathBuf> {
+    ConfigManager::config_dir()
+        .ok()
+        .map(|d| d.join("model-profiles.json"))
+}
+
+fn with_learned_profiles<R>(f: impl FnOnce(&mut HashMap<String, String>) -> R) -> R {
+    let mut guard = LEARNED_PROFILES.lock().expect("learned-profiles lock");
+    let map = guard.get_or_insert_with(|| {
+        learned_profiles_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    });
+    f(map)
+}
+
+/// Whether runtime evidence has marked `model` as lite.
+pub fn learned_model_is_lite(model: &str) -> bool {
+    with_learned_profiles(|m| m.get(model).is_some_and(|v| v.eq_ignore_ascii_case("lite")))
+}
+
+/// Test hook: reset the in-process learned-profile cache so a test observes
+/// only its own `ZODE_CONFIG_DIR` (the cache loads once per process).
+#[cfg(test)]
+pub(crate) fn reset_learned_profiles_for_test() {
+    *LEARNED_PROFILES.lock().expect("learned-profiles lock") = Some(HashMap::new());
+}
+
+/// Record a runtime weak-model verdict for `model` (idempotent, best-effort
+/// persistence). Returns `true` when this call newly recorded it.
+pub fn learn_model_lite(model: &str) -> bool {
+    let model = model.trim();
+    if model.is_empty() {
+        return false;
+    }
+    let newly = with_learned_profiles(|m| {
+        if m.get(model).is_some_and(|v| v.eq_ignore_ascii_case("lite")) {
+            return false;
+        }
+        m.insert(model.to_string(), "lite".to_string());
+        true
+    });
+    if newly {
+        if let Some(path) = learned_profiles_path() {
+            let json = with_learned_profiles(|m| serde_json::to_string_pretty(m).ok());
+            if let Some(json) = json {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::write(&path, json) {
+                    tracing::warn!(error = %e, "failed to persist learned model profile");
+                }
+            }
+        }
+    }
+    newly
+}
+
 impl ModelOverride {
     /// Apply the set (non-`None`) overrides onto a resolved provider config.
     fn apply_to(&self, p: &mut ProviderConfig) {
         if self.context_window.is_some() {
             p.context_window = self.context_window;
+        }
+        if self.profile.is_some() {
+            p.profile = self.profile.clone();
         }
         if self.max_output_tokens.is_some() {
             p.max_output_tokens = self.max_output_tokens;
@@ -348,11 +508,23 @@ pub struct BrowserConfig {
     pub profile_dir: Option<String>,
     pub default_target: Option<String>,
     pub viewport: Option<ViewportConfig>,
+    /// The bridge extension IDs zode accepts (WebSocket Origin check and the
+    /// native-messaging manifest). Unset → the developer-keyed build's ID.
+    /// Set this to REPLACE the list — e.g. add the Chrome-Web-Store-published
+    /// ID alongside the default, or drop the default entirely.
+    pub extension_ids: Option<Vec<String>>,
 }
 
 impl BrowserConfig {
     pub fn enabled(&self) -> bool {
         self.enabled.unwrap_or(true)
+    }
+    /// Effective bridge-extension accept list (see `extension_ids`).
+    pub fn extension_ids(&self) -> Vec<String> {
+        match &self.extension_ids {
+            Some(ids) if !ids.is_empty() => ids.clone(),
+            _ => vec![crate::browser::bridge::server::EXTENSION_ID.to_string()],
+        }
     }
     pub fn headless(&self) -> bool {
         self.headless.unwrap_or(false)
@@ -739,7 +911,7 @@ pub struct ZodeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
     /// Optional cap on how many turns the autonomous goal loop runs before it
-    /// stops on its own (the agent can still end it early via `goal_complete`,
+    /// stops on its own (the agent can still end it early via `GoalComplete`,
     /// and the user can always interrupt). `None` → unbounded (the default).
     #[serde(rename = "autoLoopMaxTurns", skip_serializing_if = "Option::is_none")]
     pub auto_loop_max_turns: Option<u32>,
@@ -765,7 +937,7 @@ pub struct ZodeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mouse_capture: Option<bool>,
     /// Autonomous orchestration: when on, the agent is told it may decompose a
-    /// task and spawn sub-agents (Task tool) on its own, and the `define_agent`
+    /// task and spawn sub-agents (Task tool) on its own, and the `DefineAgent`
     /// tool is registered so it can create new sub-agent types. `None` → ON
     /// (enabled by default). Toggled off via Settings / `/orchestration`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -953,6 +1125,23 @@ impl ZodeConfig {
                     }
                 }
                 ProviderKind::Ollama => {}
+            }
+        }
+        // Tool names were unified to CamelCase (browser_read → BrowserRead,
+        // run_check → RunCheck, …). Permission lists written before that —
+        // user config and the machine-managed project state's always-allow
+        // grants — keep working by normalizing here, at the single choke
+        // point every load path funnels through.
+        for list in [
+            &mut self.permissions.allow,
+            &mut self.permissions.deny,
+            &mut self.permissions.ask,
+        ] {
+            for entry in list.iter_mut() {
+                let canonical = canonical_tool_name(entry);
+                if canonical != entry {
+                    *entry = canonical.to_string();
+                }
             }
         }
     }
@@ -1163,6 +1352,7 @@ impl ZodeConfig {
             if let Some(old) = entry.model.take() {
                 let old_override = ModelOverride {
                     context_window: entry.context_window.take(),
+                    profile: entry.profile.take(),
                     max_output_tokens: entry.max_output_tokens.take(),
                     supports_images: entry.supports_images.take(),
                     input_price: entry.input_price.take(),
@@ -1319,6 +1509,9 @@ impl ZodeConfig {
         if op.reasoning.is_some() {
             self.provider.reasoning = op.reasoning;
         }
+        if op.profile.is_some() {
+            self.provider.profile = op.profile;
+        }
         self.providers.extend(other.providers);
         if other.images.mode.is_some() {
             self.images.mode = other.images.mode;
@@ -1457,6 +1650,7 @@ impl ZodeConfig {
         self.browser.profile_dir = b.profile_dir.or(self.browser.profile_dir.take());
         self.browser.default_target = b.default_target.or(self.browser.default_target.take());
         self.browser.viewport = b.viewport.or(self.browser.viewport.take());
+        self.browser.extension_ids = b.extension_ids.or(self.browser.extension_ids.take());
 
         // Desktop: each field present in the project layer overrides global.
         let d = other.desktop;
@@ -1942,6 +2136,56 @@ mod tests {
         assert_eq!(cfg.yolo, Some(true), "yolo state loaded");
         assert!(cfg.permissions.allow.contains(&"Bash".to_string()));
         assert!(cfg.permissions.allow.contains(&"FileWrite".to_string()));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn model_profile_resolves_override_then_name_heuristic() {
+        reset_learned_profiles_for_test();
+        let mut p = ProviderConfig::default();
+        // Heuristic: flash/mini/haiku-class names are lite.
+        assert_eq!(model_profile(&p, "deepseek-v4-flash"), ModelProfile::Lite);
+        assert_eq!(model_profile(&p, "gpt-5-mini"), ModelProfile::Lite);
+        assert_eq!(model_profile(&p, "claude-haiku-4-5"), ModelProfile::Lite);
+        assert_eq!(model_profile(&p, "deepseek-v4"), ModelProfile::Standard);
+        assert_eq!(model_profile(&p, "claude-opus-5"), ModelProfile::Standard);
+        // Segment matching, not substrings: MiniMax is not "mini".
+        assert_eq!(model_profile(&p, "MiniMax-M1"), ModelProfile::Standard);
+        assert_eq!(model_profile(&p, "kimi-flashback"), ModelProfile::Standard);
+        // Explicit config beats the heuristic, both ways.
+        p.profile = Some("standard".into());
+        assert_eq!(
+            model_profile(&p, "deepseek-v4-flash"),
+            ModelProfile::Standard
+        );
+        p.profile = Some("lite".into());
+        assert_eq!(model_profile(&p, "deepseek-v4"), ModelProfile::Lite);
+        // Unknown strings fail open to standard.
+        p.profile = Some("???".into());
+        assert_eq!(model_profile(&p, "x-flash"), ModelProfile::Standard);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn learned_verdicts_flow_into_model_profile_but_lose_to_explicit_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ZODE_CONFIG_DIR", dir.path());
+        reset_learned_profiles_for_test();
+
+        let p = ProviderConfig::default();
+        assert_eq!(model_profile(&p, "glm-5.2"), ModelProfile::Standard);
+        // Runtime evidence marks it lite — idempotently, and persisted.
+        assert!(learn_model_lite("glm-5.2"));
+        assert!(!learn_model_lite("glm-5.2"), "second learn is a no-op");
+        assert_eq!(model_profile(&p, "glm-5.2"), ModelProfile::Lite);
+        assert!(dir.path().join("model-profiles.json").exists());
+        // Explicit standard still wins over the learned verdict.
+        let mut forced = ProviderConfig::default();
+        forced.profile = Some("standard".into());
+        assert_eq!(model_profile(&forced, "glm-5.2"), ModelProfile::Standard);
+
+        std::env::remove_var("ZODE_CONFIG_DIR");
+        reset_learned_profiles_for_test();
     }
 
     #[test]

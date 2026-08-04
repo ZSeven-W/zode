@@ -1,6 +1,6 @@
 //! Team tools — the model-facing surface. Two families:
-//! * leader tools (registered in the main registry): team_hire / team_send /
-//!   team_dismiss / team_list / team_board_* / team_claim / team_release.
+//! * leader tools (registered in the main registry): TeamHire / TeamSend /
+//!   TeamDismiss / TeamList / team_board_* / TeamClaim / TeamRelease.
 //! * teammate collaboration tools ([`teammate_collab_tools`]): identity-bound
 //!   board + claim tools handed to an internal teammate's own registry.
 //!
@@ -73,11 +73,11 @@ pub fn filter_teammate_tools(
     let read_only = role_is_read_only(role);
     // Collaboration tools are always kept regardless of role/allow.
     const ALWAYS: &[&str] = &[
-        "team_board_read",
-        "team_board_update",
-        "team_board_append",
-        "team_claim",
-        "team_release",
+        "TeamBoardRead",
+        "TeamBoardUpdate",
+        "TeamBoardAppend",
+        "TeamClaim",
+        "TeamRelease",
         "ToolSearch",
     ];
     let mut out = agent::tool::ToolRegistry::new();
@@ -131,7 +131,7 @@ pub fn teammate_collab_tools(mgr: &Arc<TeamManager>, holder: &str) -> Vec<Arc<dy
 #[async_trait]
 impl Tool for TeamBoardReadTool {
     fn name(&self) -> &str {
-        "team_board_read"
+        "TeamBoardRead"
     }
     fn description(&self) -> &str {
         "Read the shared team board (goal, sections, notes, claims)."
@@ -154,7 +154,7 @@ impl Tool for TeamBoardReadTool {
 #[async_trait]
 impl Tool for TeamBoardUpdateTool {
     fn name(&self) -> &str {
-        "team_board_update"
+        "TeamBoardUpdate"
     }
     fn description(&self) -> &str {
         "CAS-update a board section: {section, content, revision}. On a \
@@ -186,7 +186,7 @@ impl Tool for TeamBoardUpdateTool {
 #[async_trait]
 impl Tool for TeamBoardAppendTool {
     fn name(&self) -> &str {
-        "team_board_append"
+        "TeamBoardAppend"
     }
     fn description(&self) -> &str {
         "Append a durable note to the board: {note}."
@@ -211,7 +211,7 @@ const CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(1800);
 #[async_trait]
 impl Tool for TeamClaimTool {
     fn name(&self) -> &str {
-        "team_claim"
+        "TeamClaim"
     }
     fn description(&self) -> &str {
         "Reserve file paths for your exclusive edits: {paths:[...]}. Whole \
@@ -247,7 +247,7 @@ impl Tool for TeamClaimTool {
 #[async_trait]
 impl Tool for TeamReleaseTool {
     fn name(&self) -> &str {
-        "team_release"
+        "TeamRelease"
     }
     fn description(&self) -> &str {
         "Release your claims: {paths:[...]} (omit to release all)."
@@ -317,13 +317,13 @@ pub fn leader_tools(ctx: LeaderCtx) -> Vec<Arc<dyn Tool>> {
 
 /// Names of every leader team tool (for plugin group + plan-mode filtering).
 pub const LEADER_TOOL_NAMES: &[&str] = &[
-    "team_hire",
-    "team_send",
-    "team_dismiss",
-    "team_list",
-    "team_board_read",
-    "team_board_update",
-    "team_board_append",
+    "TeamHire",
+    "TeamSend",
+    "TeamDismiss",
+    "TeamList",
+    "TeamBoardRead",
+    "TeamBoardUpdate",
+    "TeamBoardAppend",
 ];
 
 #[derive(Debug)]
@@ -352,12 +352,15 @@ impl TeamListTool {
 #[async_trait]
 impl Tool for TeamHireTool {
     fn name(&self) -> &str {
-        "team_hire"
+        "TeamHire"
     }
     fn description(&self) -> &str {
         "Hire a persistent teammate: {agent, name, role, provider?, model?, \
          tools?}. `agent` is an external CLI profile or a built-in/AgentDef \
-         type. External hires require a one-time trust approval."
+         type. External hires require a one-time trust approval. `agent` must be a \
+         REGISTERED external profile name (see /external-agents) or a defined internal \
+         agent type — or \"general\" for a plain internal teammate; unknown names error \
+         with the full roster."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["agent","name","role"],"properties":{
@@ -405,7 +408,7 @@ impl Tool for TeamHireTool {
                 match self
                     .ctx
                     .gate
-                    .approve_scoped("team_hire", &view, ApprovalScope::TeamMemberSession)
+                    .approve_scoped("TeamHire", &view, ApprovalScope::TeamMemberSession)
                     .await
                 {
                     Approval::Deny => {
@@ -437,7 +440,7 @@ impl Tool for TeamHireTool {
 #[async_trait]
 impl Tool for TeamSendTool {
     fn name(&self) -> &str {
-        "team_send"
+        "TeamSend"
     }
     fn description(&self) -> &str {
         "Send a task to a teammate and wait for the reply: {to, message, \
@@ -484,7 +487,7 @@ impl Tool for TeamSendTool {
 #[async_trait]
 impl Tool for TeamDismissTool {
     fn name(&self) -> &str {
-        "team_dismiss"
+        "TeamDismiss"
     }
     fn description(&self) -> &str {
         "Dismiss a teammate and release its claims: {name}."
@@ -508,7 +511,7 @@ impl Tool for TeamDismissTool {
 #[async_trait]
 impl Tool for TeamListTool {
     fn name(&self) -> &str {
-        "team_list"
+        "TeamList"
     }
     fn description(&self) -> &str {
         "List current teammates and their status."
@@ -590,7 +593,7 @@ mod tests {
         let mut src = agent::tool::ToolRegistry::new();
         src.register(Arc::new(Fake("FileRead", SafetyClass::ReadOnly)));
         src.register(Arc::new(Fake("FileWrite", SafetyClass::Mutating)));
-        src.register(Arc::new(Fake("team_board_read", SafetyClass::ReadOnly)));
+        src.register(Arc::new(Fake("TeamBoardRead", SafetyClass::ReadOnly)));
 
         // reviewer → mutating tool dropped, read-only kept, board always kept.
         let out = filter_teammate_tools(&src, "reviewer", None);
@@ -599,7 +602,7 @@ mod tests {
             out.get("FileWrite").is_none(),
             "mutating dropped for reviewer"
         );
-        assert!(out.get("team_board_read").is_some());
+        assert!(out.get("TeamBoardRead").is_some());
 
         // general role keeps everything; an allow-list only narrows.
         let out = filter_teammate_tools(&src, "general", Some(&["FileRead".to_string()]));

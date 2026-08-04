@@ -1,8 +1,8 @@
-//! Agent-facing browser tools: `browser_read` (screenshot / DOM snapshot /
-//! console / network / tabs / downloads), `browser_act` (navigate / click / type / key /
-//! scroll), `browser_eval` (arbitrary JS), and `browser_tabs` (open / close /
+//! Agent-facing browser tools: `BrowserRead` (screenshot / DOM snapshot /
+//! console / network / tabs / downloads), `BrowserAct` (navigate / click / type / key /
+//! scroll), `BrowserEval` (arbitrary JS), and `BrowserTabs` (open / close /
 //! select). All four share a `BrowserSession` lease per call, following the
-//! `op_read`/`op_write` pattern in `openpencil/tools.rs`.
+//! `OpRead`/`OpWrite` pattern in `openpencil/tools.rs`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -157,7 +157,7 @@ impl BrowserReadTool {
 #[async_trait]
 impl Tool for BrowserReadTool {
     fn name(&self) -> &str {
-        "browser_read"
+        "BrowserRead"
     }
 
     fn description(&self) -> &str {
@@ -257,7 +257,7 @@ impl BrowserActTool {
 #[async_trait]
 impl Tool for BrowserActTool {
     fn name(&self) -> &str {
-        "browser_act"
+        "BrowserAct"
     }
 
     fn description(&self) -> &str {
@@ -356,7 +356,7 @@ impl BrowserEvalTool {
 #[async_trait]
 impl Tool for BrowserEvalTool {
     fn name(&self) -> &str {
-        "browser_eval"
+        "BrowserEval"
     }
 
     fn description(&self) -> &str {
@@ -409,7 +409,7 @@ impl BrowserTabsTool {
 #[async_trait]
 impl Tool for BrowserTabsTool {
     fn name(&self) -> &str {
-        "browser_tabs"
+        "BrowserTabs"
     }
 
     fn description(&self) -> &str {

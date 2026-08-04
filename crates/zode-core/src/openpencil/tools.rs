@@ -1,4 +1,4 @@
-//! `op_read` (ReadOnly, ungated) and `op_write` (Mutating, gated) agent tools.
+//! `OpRead` (ReadOnly, ungated) and `OpWrite` (Mutating, gated) agent tools.
 //! `safety_class()` is static per tool, so read vs write must be two tools.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,9 +24,9 @@ pub struct OpToolDeps {
     pub tag: String,
 }
 
-/// Deps for `op_design` — SEPARATE from `OpToolDeps`. `op_read`/`op_write` are
+/// Deps for `OpDesign` — SEPARATE from `OpToolDeps`. `OpRead`/`OpWrite` are
 /// registered before the skills registry exists, so their deps stay narrow
-/// (cfg/consent/tag); only `op_design` (registered after skills) needs the
+/// (cfg/consent/tag); only `OpDesign` (registered after skills) needs the
 /// provider/model/skills to drive the design pipeline.
 #[derive(Clone, Debug)]
 pub struct OpDesignDeps {
@@ -211,7 +211,7 @@ impl OpWriteTool {
 #[async_trait]
 impl Tool for OpReadTool {
     fn name(&self) -> &str {
-        "op_read"
+        "OpRead"
     }
 
     fn description(&self) -> &str {
@@ -236,7 +236,7 @@ impl Tool for OpReadTool {
 #[async_trait]
 impl Tool for OpWriteTool {
     fn name(&self) -> &str {
-        "op_write"
+        "OpWrite"
     }
 
     fn description(&self) -> &str {
@@ -274,7 +274,7 @@ impl OpDesignTool {
 #[async_trait]
 impl Tool for OpDesignTool {
     fn name(&self) -> &str {
-        "op_design"
+        "OpDesign"
     }
 
     fn description(&self) -> &str {
@@ -466,9 +466,9 @@ mod tests {
             OpWriteTool::new_for_test().safety_class(),
             SafetyClass::Mutating
         );
-        assert_eq!(OpReadTool::new_for_test().name(), "op_read");
-        assert_eq!(OpWriteTool::new_for_test().name(), "op_write");
-        assert_eq!(OpDesignTool::new_for_test().name(), "op_design");
+        assert_eq!(OpReadTool::new_for_test().name(), "OpRead");
+        assert_eq!(OpWriteTool::new_for_test().name(), "OpWrite");
+        assert_eq!(OpDesignTool::new_for_test().name(), "OpDesign");
         assert_eq!(
             OpDesignTool::new_for_test().safety_class(),
             SafetyClass::Mutating

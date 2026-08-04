@@ -36,11 +36,27 @@ pub fn extension_origin() -> String {
     format!("chrome-extension://{EXTENSION_ID}/")
 }
 
+/// Every origin the native-messaging manifest allows: the developer-keyed
+/// extension plus registered extras (the Chrome-Web-Store-published ID).
+pub fn extension_origins() -> Vec<String> {
+    super::server::allowed_extension_ids()
+        .into_iter()
+        .map(|id| format!("chrome-extension://{id}/"))
+        .collect()
+}
+
 /// Chrome passes the caller origin as the first argument to a native host.
-/// Match the one shipped extension exactly so ordinary CLI input can never
-/// accidentally select daemon mode.
+/// Shape-checked (any `chrome-extension://<id>/` origin) rather than matched
+/// against the configured ID list: this runs BEFORE config loads, and it only
+/// selects daemon mode — real access is still gated by the native-messaging
+/// manifest's `allowed_origins` and the WebSocket token + Origin check.
 pub fn is_invocation_arg(value: &OsStr) -> bool {
-    value == OsStr::new(&extension_origin())
+    let Some(s) = value.to_str() else {
+        return false;
+    };
+    s.strip_prefix("chrome-extension://")
+        .and_then(|rest| rest.strip_suffix('/'))
+        .is_some_and(super::server::is_extension_id)
 }
 
 /// Register the running zode binary for Chrome/Chromium/Edge and remember the
@@ -82,7 +98,7 @@ fn install_into(
         description: "Start the local zode browser bridge on demand",
         path: executable,
         transport: "stdio",
-        allowed_origins: vec![extension_origin()],
+        allowed_origins: extension_origins(),
     };
     let bytes = serde_json::to_vec_pretty(&manifest)?;
     let mut installed = Vec::new();
@@ -184,6 +200,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial(bridge_extension_ids)]
     fn manifest_and_workspace_state_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
@@ -194,6 +211,11 @@ mod tests {
         let cwd = dir.path().join("workspace");
         std::fs::create_dir_all(&cwd).unwrap();
 
+        // The accept list is process-global; pin it to the default so a
+        // concurrent bridge test can't leave a store id installed.
+        crate::browser::bridge::server::set_allowed_extension_ids(vec![
+            crate::browser::bridge::server::EXTENSION_ID.to_string(),
+        ]);
         let installed = install_into(&config, &roots, &executable, &cwd).unwrap();
         assert_eq!(installed, vec![roots[0].join(format!("{HOST_NAME}.json"))]);
         let manifest: serde_json::Value =

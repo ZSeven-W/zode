@@ -9,7 +9,7 @@ use super::TeammateSnapshot;
 /// How this teammate reaches the board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoardAccess {
-    /// Internal teammate: use team_board_read/update/append + team_claim.
+    /// Internal teammate: use TeamBoardRead/update/append + TeamClaim.
     Tools,
     /// External teammate: the leader inlines board summaries into sends and
     /// writes conclusions back on the teammate's behalf.
@@ -44,9 +44,9 @@ pub fn render_preamble(
     match board_access {
         BoardAccess::Tools => out.push_str(
             "Board protocol: before starting, read the shared board \
-             (team_board_read); claim the files you will touch (team_claim) \
+             (TeamBoardRead); claim the files you will touch (TeamClaim) \
              and stay inside your claims; when done, record conclusions \
-             (team_board_append) and release claims you no longer need.\n",
+             (TeamBoardAppend) and release claims you no longer need.\n",
         ),
         BoardAccess::Inline => out.push_str(
             "Board protocol: the team lead includes the current board state \
@@ -87,13 +87,13 @@ mod tests {
             "implementer",
             "修复登录",
             "bob",
-            "team_claim",
+            "TeamClaim",
             "@ask",
         ] {
             assert!(p.contains(needle), "missing {needle}");
         }
         let p2 = render_preamble("codex-1", "builder", "", &[], BoardAccess::Inline);
         assert!(p2.contains("team lead includes"));
-        assert!(!p2.contains("team_board_read"));
+        assert!(!p2.contains("TeamBoardRead"));
     }
 }

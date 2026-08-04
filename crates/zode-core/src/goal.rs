@@ -1,8 +1,8 @@
-//! Goal auto-loop support: the `goal_complete` tool and its shared signal.
+//! Goal auto-loop support: the `GoalComplete` tool and its shared signal.
 //!
 //! When the user sets a persistent goal (`/goal <text>`), the TUI runs agent
 //! turns autonomously until the agent decides the goal is fully achieved. The
-//! agent signals completion by calling the `goal_complete` tool, which flips a
+//! agent signals completion by calling the `GoalComplete` tool, which flips a
 //! shared [`AtomicBool`] the TUI polls after each turn to stop the loop.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 use crate::verification::VerificationState;
 
-/// The `goal_complete` tool. Read-only in effect: it only flips a flag the host
+/// The `GoalComplete` tool. Read-only in effect: it only flips a flag the host
 /// reads to end the autonomous goal loop — it mutates nothing outside the agent.
 #[derive(Debug)]
 pub struct GoalCompleteTool {
@@ -23,10 +23,10 @@ pub struct GoalCompleteTool {
     /// same `Arc` is handed to the engine so the host can poll it after a turn.
     completed: Arc<AtomicBool>,
     verification: VerificationState,
-    /// Whether a fresh passing `run_check` is required before this tool will
-    /// succeed. `run_check` is `Mutating`, so plan-mode / read-only sessions
+    /// Whether a fresh passing `RunCheck` is required before this tool will
+    /// succeed. `RunCheck` is `Mutating`, so plan-mode / read-only sessions
     /// never register it — requiring its evidence there would make
-    /// `goal_complete` permanently unreachable. Callers in that shape of
+    /// `GoalComplete` permanently unreachable. Callers in that shape of
     /// session pass `false` so the tool can still legitimately end the loop.
     evidence_required: bool,
 }
@@ -48,7 +48,7 @@ impl GoalCompleteTool {
 #[async_trait]
 impl Tool for GoalCompleteTool {
     fn name(&self) -> &str {
-        "goal_complete"
+        "GoalComplete"
     }
 
     fn description(&self) -> &str {
@@ -56,12 +56,12 @@ impl Tool for GoalCompleteTool {
             "Call this ONLY when the current goal is fully achieved; it ends the \
              autonomous goal loop. Provide a short summary of what was accomplished. \
              Do not call it prematurely — if more work remains, keep going instead. \
-             A fresh passing run_check is required before this tool will succeed."
+             A fresh passing RunCheck is required before this tool will succeed."
         } else {
             "Call this ONLY when the current goal is fully achieved; it ends the \
              autonomous goal loop. Provide a short summary of what was accomplished. \
              Do not call it prematurely — if more work remains, keep going instead. \
-             A fresh passing run_check is required before this tool will succeed when \
+             A fresh passing RunCheck is required before this tool will succeed when \
              verification tooling is available in this session."
         }
     }
@@ -103,7 +103,7 @@ impl Tool for GoalCompleteTool {
                 },
                 "note": "goal marked complete; the autonomous goal loop will stop \
                          (verification tooling unavailable in this session; \
-                         completed without run_check evidence)"
+                         completed without RunCheck evidence)"
             }));
         }
         let evidence = self
@@ -131,7 +131,7 @@ mod tests {
     fn tool_metadata_is_stable() {
         let flag = Arc::new(AtomicBool::new(false));
         let tool = GoalCompleteTool::new(flag, VerificationState::default(), true);
-        assert_eq!(tool.name(), "goal_complete");
+        assert_eq!(tool.name(), "GoalComplete");
         assert_eq!(tool.safety_class(), SafetyClass::ReadOnly);
         let schema = tool.input_schema();
         assert_eq!(schema["required"][0], "summary");
@@ -147,15 +147,15 @@ mod tests {
         let premature = tool
             .call(&ctx, json!({ "summary": "did the thing" }))
             .await
-            .expect_err("goal_complete must reject completion before verification");
-        assert!(premature.to_string().contains("run_check"));
+            .expect_err("GoalComplete must reject completion before verification");
+        assert!(premature.to_string().contains("RunCheck"));
         assert!(!flag.load(Ordering::SeqCst));
 
-        verification.record_pass("run_check", "cargo test");
+        verification.record_pass("RunCheck", "cargo test");
         let out = tool
             .call(&ctx, json!({ "summary": "did the thing" }))
             .await
-            .expect("goal_complete should succeed");
+            .expect("GoalComplete should succeed");
         assert!(flag.load(Ordering::SeqCst), "flag must be set after call");
         assert_eq!(out["ok"], true);
         assert_eq!(out["summary"], "did the thing");
@@ -171,7 +171,7 @@ mod tests {
         let out = tool
             .call(&ctx, json!({ "summary": "did the thing" }))
             .await
-            .expect("goal_complete should succeed without run_check evidence");
+            .expect("GoalComplete should succeed without RunCheck evidence");
         assert!(flag.load(Ordering::SeqCst), "flag must be set after call");
         assert_eq!(out["ok"], true);
         assert_eq!(out["summary"], "did the thing");

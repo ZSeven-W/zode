@@ -160,6 +160,7 @@ fn base_url_for_kind(base: &str, kind: ProviderKind) -> Option<String> {
 fn model_override_from(p: &ProviderConfig) -> ModelOverride {
     ModelOverride {
         context_window: p.context_window,
+        profile: p.profile.clone(),
         max_output_tokens: p.max_output_tokens,
         supports_images: p.supports_images,
         input_price: p.input_price,

@@ -45,9 +45,9 @@ const EXTENSION_PENDING_APPROVAL_LIMIT: usize = 64;
 const EXTENSION_SHUTDOWN_CODE: &str = "server_shutting_down";
 const EXTENSION_SHUTDOWN_MESSAGE: &str = "server is shutting down";
 pub(super) const SIDE_PANEL_BROWSER_CONTEXT: &str = r#"<browser_side_panel_context>
-This turn was submitted from the browser side panel. The active browser page beside the panel is the primary context for the request. If the request could reasonably refer to that page—including phrases such as "this", "this page", "current page", "summarize", "what is this about", "这个", "这个页面", "当前页面", "讲的是什么", or "帮我看看"—inspect the page with browser_read before answering. Do not read or search the local workspace to guess what the page contains. Use local files only when the user explicitly asks about the project, code, workspace, or a local file.
+This turn was submitted from the browser side panel. The active browser page beside the panel is the primary context for the request. If the request could reasonably refer to that page—including phrases such as "this", "this page", "current page", "summarize", "what is this about", "这个", "这个页面", "当前页面", "讲的是什么", or "帮我看看"—inspect the page with BrowserRead before answering. Do not read or search the local workspace to guess what the page contains. Use local files only when the user explicitly asks about the project, code, workspace, or a local file.
 </browser_side_panel_context>"#;
-pub(super) const SELECTED_ELEMENT_GUIDANCE: &str = "The user picked this element on the active page before sending the turn. Unless they clearly mean something else, it is the subject of the request. Reach it with the CSS selector below (browser_read snapshot, browser_act click/type, browser_eval); re-read the page if the selector no longer matches.";
+pub(super) const SELECTED_ELEMENT_GUIDANCE: &str = "The user picked this element on the active page before sending the turn. Unless they clearly mean something else, it is the subject of the request. Reach it with the CSS selector below (BrowserRead snapshot, BrowserAct click/type, BrowserEval); re-read the page if the selector no longer matches.";
 
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
@@ -7350,7 +7350,7 @@ mod tests {
             &prepared.content[2],
             ContentBlock::Text { text }
                 if text.contains("<browser_side_panel_context>")
-                    && text.contains("browser_read")
+                    && text.contains("BrowserRead")
                     && text.contains("Do not read or search the local workspace")
         ));
         let shown = app.tabs[0].chat.messages().last().unwrap().text.clone();
@@ -8074,7 +8074,7 @@ mod tests {
         }));
         app.handle_agent_event(agent_event(agent::stream::Event::ToolUse {
             id: "t1".into(),
-            name: "browser_read".into(),
+            name: "BrowserRead".into(),
             input: serde_json::json!({"action":"snapshot"}),
         }));
         app.handle_agent_event(agent_event(agent::stream::Event::ToolResult {

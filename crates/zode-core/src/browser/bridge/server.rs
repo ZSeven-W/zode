@@ -19,7 +19,49 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::Message;
 
 pub const DEFAULT_BRIDGE_PORT: u16 = 17657;
+/// The developer-keyed extension ID (unpacked / packed CRX installs — the
+/// manifest embeds the public key so both share it). This is only the
+/// DEFAULT value of the `browser.extensionIds` config list — the runtime
+/// accept list is config-driven, never hardcoded: a Chrome-Web-Store install
+/// gets a store-minted ID, which users (or a future default) add there.
 pub const EXTENSION_ID: &str = "hcabdgpfhoclfgnknddadgfhhdnlkloc";
+
+/// The effective accept list, installed from `browser.extensionIds` at
+/// startup (before the listener accepts its first connection). `None` until
+/// then → falls back to the config default.
+static ALLOWED_EXTENSION_IDS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// Whether `id` has the shape of a Chrome extension ID (32 chars of a-p).
+pub fn is_extension_id(id: &str) -> bool {
+    id.len() == 32 && id.chars().all(|c| ('a'..='p').contains(&c))
+}
+
+/// Install the accept list from config (REPLACE semantics). Malformed
+/// entries are skipped rather than poisoning the Origin check; an empty
+/// result falls back to [`EXTENSION_ID`].
+pub fn set_allowed_extension_ids(ids: Vec<String>) {
+    let filtered: Vec<String> = ids
+        .into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| is_extension_id(id))
+        .collect();
+    let mut guard = ALLOWED_EXTENSION_IDS.lock().expect("extension-ids lock");
+    *guard = Some(if filtered.is_empty() {
+        vec![EXTENSION_ID.to_string()]
+    } else {
+        filtered
+    });
+}
+
+/// Every extension ID the bridge accepts (config-driven; defaults to the
+/// developer-keyed build's ID).
+pub fn allowed_extension_ids() -> Vec<String> {
+    ALLOWED_EXTENSION_IDS
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(|| vec![EXTENSION_ID.to_string()])
+}
 
 #[derive(Debug)]
 pub struct BridgeServer {
@@ -251,13 +293,16 @@ impl BridgeServer {
 
     #[allow(clippy::result_large_err)]
     async fn handle_connection(self: Arc<Self>, stream: TcpStream) -> Result<(), BrowserError> {
-        let expected_origin = format!("chrome-extension://{EXTENSION_ID}");
+        let expected_origins: Vec<String> = allowed_extension_ids()
+            .into_iter()
+            .map(|id| format!("chrome-extension://{id}"))
+            .collect();
         let mut ws = accept_hdr_async(stream, move |req: &Request, resp: Response| {
             let origin_ok = req
                 .headers()
                 .get("origin")
                 .and_then(|h| h.to_str().ok())
-                .map(|origin| origin == expected_origin)
+                .map(|origin| expected_origins.iter().any(|e| e == origin))
                 .unwrap_or(false);
             if origin_ok {
                 Ok(resp)
@@ -1194,6 +1239,30 @@ mod tests {
         req.headers_mut()
             .insert("Origin", "https://evil.example".parse().unwrap());
         assert!(tokio_tungstenite::connect_async(req).await.is_err());
+    }
+
+    #[test]
+    fn extension_id_shape_check() {
+        assert!(is_extension_id(EXTENSION_ID));
+        assert!(is_extension_id(&"a".repeat(32)));
+        assert!(!is_extension_id("tooshort"));
+        assert!(!is_extension_id(&"z".repeat(32)), "q-z are out of a-p");
+        assert!(!is_extension_id(&"A".repeat(32)), "uppercase rejected");
+    }
+
+    #[test]
+    #[serial_test::serial(bridge_extension_ids)]
+    fn config_accept_list_uses_replace_semantics() {
+        // REPLACE: a config list installs verbatim (dropping the developer
+        // default), and a store ID is honored.
+        let store = "abcdefghijklmnopabcdefghijklmnop";
+        set_allowed_extension_ids(vec![store.to_string()]);
+        assert_eq!(allowed_extension_ids(), vec![store.to_string()]);
+        // Malformed entries are skipped; an all-bad list falls back to default.
+        set_allowed_extension_ids(vec!["nope".into(), "  ".into()]);
+        assert_eq!(allowed_extension_ids(), vec![EXTENSION_ID.to_string()]);
+        // Restore the default for any later bridge test in this process.
+        set_allowed_extension_ids(vec![EXTENSION_ID.to_string()]);
     }
 
     #[tokio::test]

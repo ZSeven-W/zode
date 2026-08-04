@@ -791,6 +791,28 @@ impl ChatView {
                 pos = run.end;
                 continue;
             }
+            // Small runs stay visible cc-style: their call/result rows carry
+            // the pattern / file / command detail a count line would erase.
+            // Only the Usage rows fold away (Ctrl+E still reveals them).
+            if !open && tools.len() <= crate::ui::tool_groups::SMALL_RUN_MAX_CALLS {
+                for k in run.clone() {
+                    if matches!(kinds[k], Some(ToolActivity::Usage)) {
+                        continue;
+                    }
+                    self.emit_message(
+                        visible[k],
+                        theme,
+                        meta,
+                        width,
+                        true,
+                        &mut out,
+                        built,
+                        &mut prev_role,
+                    );
+                }
+                pos = run.end;
+                continue;
+            }
             if !summary.is_empty() {
                 if prev_role.is_some() {
                     out.push(Line::from(""));

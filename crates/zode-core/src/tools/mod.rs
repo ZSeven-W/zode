@@ -1,4 +1,5 @@
 //! Zode-specific product tools (not part of agent-tools-code): git
-//! operations, and the file-edit undo history hook.
+//! operations, memory import, and the file-edit undo history hook.
 
 pub mod git;
+pub mod memory;

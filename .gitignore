@@ -38,3 +38,5 @@ sdk/python/**/__pycache__
 .zode
 sdk/kotlin/.gradle
 .worktrees/
+extensions/chrome/*.zip
+extensions/chrome/bun.lock

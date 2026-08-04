@@ -31,7 +31,7 @@ struct UploadExecution {
 #[async_trait]
 impl Tool for UploadExecution {
     fn name(&self) -> &str {
-        "browser_upload"
+        "BrowserUpload"
     }
 
     fn description(&self) -> &str {
@@ -170,7 +170,7 @@ impl BrowserUploadTool {
 #[async_trait]
 impl Tool for BrowserUploadTool {
     fn name(&self) -> &str {
-        "browser_upload"
+        "BrowserUpload"
     }
 
     fn description(&self) -> &str {

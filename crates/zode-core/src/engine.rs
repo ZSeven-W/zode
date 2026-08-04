@@ -213,11 +213,16 @@ pub(crate) fn map_effort(
     }
 }
 
-fn pre_turn_compact_needed(input_tokens: u32, context_window: u32, max_output_tokens: u32) -> bool {
+fn pre_turn_compact_needed(
+    input_tokens: u32,
+    context_window: u32,
+    max_output_tokens: u32,
+    percent: u64,
+) -> bool {
     if context_window == 0 {
         return false;
     }
-    let threshold = ((context_window as u64) * PRE_TURN_COMPACT_PERCENT / 100) as u32;
+    let threshold = ((context_window as u64) * percent / 100) as u32;
     let output_budget = if context_window <= 1 {
         max_output_tokens
     } else {
@@ -242,6 +247,42 @@ fn resolve_max_api_retries(cfg: Option<u32>) -> u32 {
     cfg.unwrap_or(10)
 }
 const FILE_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Lite-profile accommodations (see `crate::config::ModelProfile`). Weak
+/// models' instruction-following and tool selection decay with context
+/// length far faster than frontier models' — the bundle keeps their working
+/// context short and their choice surface small.
+///
+/// Effective context cap: degradation is length-driven, so capability is
+/// worth more than window. Compaction thresholds all derive from this.
+const LITE_CONTEXT_CAP: u32 = 96_000;
+/// Output cap: less room for runaway thinking / degenerate repetition.
+const LITE_MAX_OUTPUT: u32 = 8_192;
+/// Occupancy percent for the pre-turn compact check (standard: 98).
+const LITE_PRE_TURN_COMPACT_PERCENT: u64 = 70;
+/// Re-anchor cadence: every N turns the per-turn reminder replays the todo
+/// list so the model doesn't lose the plot mid-task.
+const LITE_REANCHOR_EVERY: u32 = 5;
+/// The tool surface that stays VISIBLE under lite; everything else is
+/// reachable through ToolSearch. Names absent from a given assembly (plan
+/// mode, disabled groups) simply don't match.
+const LITE_VISIBLE_TOOLS: &[&str] = &[
+    "FileRead",
+    "FileWrite",
+    "FileEdit",
+    "Grep",
+    "Glob",
+    "Bash",
+    "BashOutput",
+    "KillShell",
+    "TodoWrite",
+    "Task",
+    "Skill",
+    "AskUserQuestion",
+    "RunCheck",
+    "GoalComplete",
+    "MemoryImport",
+];
 
 /// Test-only re-export so `fs_escalate`'s end-to-end test can build the very
 /// same confined / unconfined policies the engine assembles.
@@ -381,6 +422,10 @@ pub struct CarryState {
     pub tool_trace: Option<crate::tool_trace::ToolTrace>,
     pub reminders: Option<crate::reminders::ReminderTracker>,
     pub checkpoints: Option<crate::sessions::checkpoint::CheckpointTracker>,
+    /// The git branch baked into the session's system prompt at its start
+    /// (inner `None` = not a repo). Reused verbatim by a reassembly so the
+    /// prompt prefix stays byte-stable; `None` (not carried) = detect fresh.
+    pub session_git_branch: Option<Option<String>>,
 }
 
 impl ZodeEngine {
@@ -403,6 +448,7 @@ impl ZodeEngine {
             tool_trace: Some(self.tool_trace.clone()),
             reminders: Some(self.reminders.clone()),
             checkpoints: Some(self.checkpoints.clone()),
+            session_git_branch: self.session_git_branch.clone(),
         }
     }
 }
@@ -458,7 +504,7 @@ fn render_runtime_system_prompt(
         ask_user_question: has_question_tool,
         todo: has_todo_tool,
         // Reflect actual tool availability, exactly like `has_todo_tool`.
-        // `run_check` is Mutating and is filtered both by plan mode and by
+        // `RunCheck` is Mutating and is filtered both by plan mode and by
         // read-only mode (`filter_read_only`) — deriving this from the final
         // gated registry keeps the prompt in sync in both cases instead of
         // hardcoding only the plan-mode gate.
@@ -484,20 +530,20 @@ fn render_runtime_system_prompt(
     // A persistent goal (`/goal`) keeps the agent focused on one objective AND
     // drives an autonomous multi-turn loop.
     if let Some(goal) = cfg.goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
-        // `run_check` is Mutating and can be filtered out of the gated
+        // `RunCheck` is Mutating and can be filtered out of the gated
         // registry (plan mode / read-only mode) — only tell the model to
         // rely on it when it's actually available, same signal as
         // `flags.verify_tool` above.
         let verify_clause = if has_run_check_tool {
             "Before claiming completion, \
-             run the `run_check` tool with the exact verification command or \
+             run the `RunCheck` tool with the exact verification command or \
              invariant that proves the work is done. When — and only when — the \
-             goal is FULLY achieved and `run_check` has fresh passing evidence, \
-             call the `goal_complete` tool with a short summary to end the loop."
+             goal is FULLY achieved and `RunCheck` has fresh passing evidence, \
+             call the `GoalComplete` tool with a short summary to end the loop."
         } else {
             "Before claiming completion, verify the goal is achieved by the \
              means available to you. When — and only when — the goal is FULLY \
-             achieved, call the `goal_complete` tool with a short summary to \
+             achieved, call the `GoalComplete` tool with a short summary to \
              end the loop."
         };
         system.push_str(&format!(
@@ -507,7 +553,7 @@ fn render_runtime_system_prompt(
              Each turn, take the next concrete step (research, edit, run, verify) — \
              do not just describe what you would do; actually do it. The loop \
              continues automatically after every turn. {verify_clause} \
-             Do not call `goal_complete` prematurely, and do not stop early \
+             Do not call `GoalComplete` prematurely, and do not stop early \
              otherwise; if work remains, keep going on the next turn."
         ));
     }
@@ -583,12 +629,29 @@ pub struct ZodeEngine {
     steer_rx: Arc<std::sync::Mutex<futures::channel::mpsc::UnboundedReceiver<Vec<ContentBlock>>>>,
     pub model: String,
     pub system: Option<String>,
+    /// The git branch baked into this engine's system prompt (inner `None` =
+    /// not a repo). Carried across mid-session reassembles so a branch switch
+    /// can't silently rewrite the provider-cached prompt prefix — drift is
+    /// reported through the per-turn reminders instead.
+    pub session_git_branch: Option<Option<String>>,
     pub cwd: PathBuf,
     pub max_output_tokens: u32,
     /// The model's context window in tokens, driving auto-compaction / context
     /// thresholds. Configurable so 1M-context models use their full window
-    /// instead of compacting at the conservative 200K default.
+    /// instead of compacting at the conservative 200K default. Lite-profile
+    /// models are capped at [`LITE_CONTEXT_CAP`] — their capability decays
+    /// with length faster than the window fills.
     pub model_max_tokens: u32,
+    /// Occupancy percent for the pre-turn compact check (98 standard, 70
+    /// lite — see [`ModelProfile`](crate::config::ModelProfile)).
+    pub pre_turn_compact_percent: u64,
+    /// Lite: replay the todo list into the per-turn reminder every N turns.
+    pub reanchor_every: Option<u32>,
+    /// Lite: tighter tool-loop-guard thresholds in the QueryLoop.
+    pub strict_loop_guard: bool,
+    /// Whether this engine was assembled under the lite profile — lets the
+    /// host detect "the model has since been LEARNED lite" and reassemble.
+    pub lite_profile: bool,
     /// Runaway backstop on agent-loop iterations. The loop's real stop condition
     /// is "the model returned a turn with no tool calls" — this only guards
     /// against a model that never converges. Default is effectively unbounded;
@@ -681,12 +744,12 @@ pub struct ZodeEngine {
     /// the tools follow the session-wide `/browser target` selection.
     pub browser_target_override: Option<BrowserTarget>,
     /// Shared completion signal for the autonomous goal loop. The registered
-    /// `goal_complete` tool flips this; the TUI polls it after each turn to
+    /// `GoalComplete` tool flips this; the TUI polls it after each turn to
     /// decide whether to stop looping. Created fresh in `assemble` so a rebuilt
     /// engine and its tool always share the same `Arc`.
     goal_completed: Arc<AtomicBool>,
-    /// Verification evidence produced by `run_check`; mutating tools make it
-    /// stale and `goal_complete` requires it to be fresh.
+    /// Verification evidence produced by `RunCheck`; mutating tools make it
+    /// stale and `GoalComplete` requires it to be fresh.
     pub verification: crate::verification::VerificationState,
     /// Durable JSONL trace file for full tool inputs/outputs, referenced by export.
     pub tool_trace: crate::tool_trace::ToolTrace,
@@ -694,7 +757,7 @@ pub struct ZodeEngine {
     /// (via `check_branch_drift`) git branch drift.
     pub reminders: crate::reminders::ReminderTracker,
     /// Optional cap on autonomous goal-loop turns (`autoLoopMaxTurns`). `None`
-    /// means unbounded — the loop runs until `goal_complete` or user interrupt.
+    /// means unbounded — the loop runs until `GoalComplete` or user interrupt.
     auto_loop_max_turns: Option<u32>,
 }
 
@@ -880,6 +943,11 @@ impl ZodeEngine {
         // Reuse the caller's session (all tabs share ONE browser process) or
         // build a fresh one — cheap: the managed backend only launches
         // chromium lazily, on the first `lease()`.
+        // Install the config-driven bridge-extension accept list before any
+        // listener can take a connection (dev build ID by default; a Chrome
+        // Web Store install adds its store-minted ID via
+        // `browser.extensionIds`).
+        crate::browser::bridge::server::set_allowed_extension_ids(cfg.browser.extension_ids());
         let browser_session = browser
             .unwrap_or_else(|| BrowserSession::new(cfg.browser.clone(), Arc::new(ManagedFactory)));
         let active_provider_key = selected_provider_key.or_else(|| cfg.active_provider_key());
@@ -949,13 +1017,13 @@ impl ZodeEngine {
         base.register(Arc::new(KillShellTool::new(bash_sessions.clone())));
 
         // Goal auto-loop completion signal. Created BEFORE tool registration so
-        // the `goal_complete` tool and the engine struct share the SAME `Arc`:
+        // the `GoalComplete` tool and the engine struct share the SAME `Arc`:
         // the tool flips it, the host polls it after each turn to stop looping.
         // Always registered (cheap, read-only) so a goal can be set mid-session.
         let goal_completed = Arc::new(AtomicBool::new(false));
-        // `run_check` is Mutating (see below), so plan-mode / read-only
+        // `RunCheck` is Mutating (see below), so plan-mode / read-only
         // sessions never register it — requiring fresh evidence from it would
-        // make `goal_complete` permanently unreachable there. Only demand
+        // make `GoalComplete` permanently unreachable there. Only demand
         // evidence when the session can actually produce it.
         base.register(Arc::new(crate::goal::GoalCompleteTool::new(
             goal_completed.clone(),
@@ -971,6 +1039,17 @@ impl ZodeEngine {
             base.register(tool);
         }
 
+        // Memory import (migration from other tools' memory files). Memory
+        // itself stays BUILT-IN and automatic — recall is injected per turn,
+        // facts auto-remembered — so this is the only model-facing memory
+        // surface. Registered even when noema is disabled: a clean "memory is
+        // disabled" beats an undiscoverable capability (observed: 49
+        // ToolSearch calls hunting for a memory tool).
+        let noema = ZodeNoema::from_settings(&cfg.noema);
+        base.register(Arc::new(crate::tools::memory::MemoryImportTool::new(
+            noema.clone(),
+        )));
+
         // AskUserQuestion, only when a UI question channel is wired. Read-only
         // (never permission-gated) and not in any plugin group (always-on).
         // Capture availability before the move so the system prompt can nudge
@@ -985,7 +1064,7 @@ impl ZodeEngine {
         // Fallback consent: denies every lifecycle action when no UI question
         // channel is wired (so the bridge never installs or launches without an
         // interactive confirmation). Hoisted above the resolved-consent binding
-        // so the consent can be shared with the later `op_design` registration
+        // so the consent can be shared with the later `OpDesign` registration
         // (which happens after the skills registry is built).
         #[derive(Debug)]
         struct DenyConsent;
@@ -1369,7 +1448,7 @@ impl ZodeEngine {
         // Read-only modes keep only team_list / team_board_read; the mutating
         // team tools are self-gated (hire runs its own trust approval; the
         // rest carry no per-call prompt) so they skip the outer wrapper.
-        let team_enabled = plugins.tool_enabled("team_hire");
+        let team_enabled = plugins.tool_enabled("TeamHire");
         let team_manager: Option<Arc<crate::team::TeamManager>> = if team_enabled {
             Some(
                 carry
@@ -1425,6 +1504,7 @@ impl ZodeEngine {
                         build_provider: Arc::new(|pc| {
                             crate::provider::build_provider(pc).map_err(|e| e.to_string())
                         }),
+                        agent_def_names: adm.keys().cloned().collect(),
                         agent_def: Arc::new(move |name: &str| adm.get(name).cloned()),
                         permissions: parent_permissions.clone(),
                         hooks: parent_hooks.clone(),
@@ -1506,12 +1586,7 @@ impl ZodeEngine {
         // does not double-gate them behind a second, plain PermissionGatedTool.
         let mut mutating_allow = cfg.permissions.allow.clone();
         if cfg.browser.enabled() {
-            for name in [
-                "browser_act",
-                "browser_eval",
-                "browser_tabs",
-                "browser_upload",
-            ] {
+            for name in ["BrowserAct", "BrowserEval", "BrowserTabs", "BrowserUpload"] {
                 mutating_allow.push(name.to_string());
             }
         }
@@ -1549,11 +1624,11 @@ impl ZodeEngine {
         }
         if team_manager.is_some() && !(plan_mode || read_only_tools) {
             self_gated_names.extend_from_slice(&[
-                "team_hire",
-                "team_send",
-                "team_dismiss",
-                "team_board_update",
-                "team_board_append",
+                "TeamHire",
+                "TeamSend",
+                "TeamDismiss",
+                "TeamBoardUpdate",
+                "TeamBoardAppend",
             ]);
         }
         let self_gated: &[&str] = &self_gated_names;
@@ -1568,35 +1643,72 @@ impl ZodeEngine {
             )));
         }
 
+        // Weak-model (lite) profile: flash/mini/haiku-class models get the
+        // accommodations bundle — see `crate::config::model_profile`.
+        let lite = matches!(
+            crate::config::model_profile(&cfg.provider, &model),
+            crate::config::ModelProfile::Lite
+        );
+
         // 3. ToolSearch over the full set (candidates = snapshot of the
         //    gated registry, taken before ToolSearch itself is added).
         //    A tool filter that excludes ToolSearch skips it entirely.
-        if tool_filter.is_none_or(|filter| filter.allows("ToolSearch")) {
+        //
+        //    Lite: only a hand-picked core stays VISIBLE — dozens of tool
+        //    schemas measurably degrade a weak model's tool selection — while
+        //    everything else stays reachable through ToolSearch. When the
+        //    filter excludes ToolSearch (no recovery path), the full set is
+        //    kept instead of silently losing tools.
+        let tools = if lite && tool_filter.is_none_or(|filter| filter.allows("ToolSearch")) {
             let candidates = Arc::new(gated.clone());
-            gated.register(Arc::new(ToolSearchTool::new(candidates)));
-        }
-
-        let tools = Arc::new(gated);
+            let mut visible = ToolRegistry::new();
+            let keep: Vec<String> = candidates
+                .names()
+                .filter(|n| LITE_VISIBLE_TOOLS.contains(n))
+                .map(str::to_string)
+                .collect();
+            for name in keep {
+                if let Some(tool) = candidates.get(&name) {
+                    visible.register(tool);
+                }
+            }
+            visible.register(Arc::new(ToolSearchTool::new(candidates)));
+            Arc::new(visible)
+        } else {
+            if tool_filter.is_none_or(|filter| filter.allows("ToolSearch")) {
+                let candidates = Arc::new(gated.clone());
+                gated.register(Arc::new(ToolSearchTool::new(candidates)));
+            }
+            Arc::new(gated)
+        };
         // Late-bind the child sub-agent's tool set to the final gated+sandboxed
         // registry now that wrapping is complete.
         let _ = task_tools.set(tools.clone());
 
         // Detect the git branch off the runtime thread — `git rev-parse`
         // is a subprocess that shouldn't block a tokio worker during
-        // startup (slow on a huge repo / network filesystem).
-        let git_branch = {
-            let cwd = cwd.clone();
-            tokio::task::spawn_blocking(move || crate::instructions::detect_git_branch(&cwd))
-                .await
-                .ok()
-                .flatten()
+        // startup (slow on a huge repo / network filesystem). A carried
+        // session value (mid-session reassemble) is reused VERBATIM: baking
+        // the current branch would rewrite the provider-cached prompt prefix
+        // on every toggle after a branch switch; drift reaches the model via
+        // the per-turn reminder instead.
+        let git_branch = match carry.session_git_branch.clone() {
+            Some(session_branch) => session_branch,
+            None => {
+                let cwd = cwd.clone();
+                tokio::task::spawn_blocking(move || crate::instructions::detect_git_branch(&cwd))
+                    .await
+                    .ok()
+                    .flatten()
+            }
         };
         // Seed the drift-tracker baseline with the branch that's about to be
         // baked into the system prompt, so `check_branch_drift` only fires on
         // a REAL change observed after this prompt was rendered.
         reminders.note_git_branch(git_branch.clone());
+        let baked_git_branch = git_branch.clone();
         let has_todo_tool = tools.get("TodoWrite").is_some();
-        let has_run_check_tool = tools.get("run_check").is_some();
+        let has_run_check_tool = tools.get("RunCheck").is_some();
         let system = Some(render_runtime_system_prompt(
             cfg,
             &cwd,
@@ -1641,7 +1753,6 @@ impl ZodeEngine {
             cfg.provider.reasoning.unwrap_or(false),
         );
 
-        let noema = ZodeNoema::from_settings(&cfg.noema);
         let session_store = (cfg.compact.memory_sink() && noema.is_enabled()).then(|| {
             Arc::new(crate::compact_memory::NoemaSessionStore::new(
                 noema.clone(),
@@ -1667,25 +1778,48 @@ impl ZodeEngine {
             steer_rx,
             model,
             system,
+            session_git_branch: Some(baked_git_branch),
             cwd: cwd.clone(),
-            max_output_tokens: resolve_max_output(
-                &cfg.provider,
-                cfg.max_output_tokens,
-                active_provider_key,
-                cached_catalog(),
-                resolve_context_window(
+            max_output_tokens: {
+                let resolved = resolve_max_output(
+                    &cfg.provider,
+                    cfg.max_output_tokens,
+                    active_provider_key,
+                    cached_catalog(),
+                    resolve_context_window(
+                        &cfg.provider,
+                        cfg.context_window,
+                        active_provider_key,
+                        cached_catalog(),
+                    ),
+                );
+                if lite {
+                    resolved.min(LITE_MAX_OUTPUT)
+                } else {
+                    resolved
+                }
+            },
+            model_max_tokens: {
+                let resolved = resolve_context_window(
                     &cfg.provider,
                     cfg.context_window,
                     active_provider_key,
                     cached_catalog(),
-                ),
-            ),
-            model_max_tokens: resolve_context_window(
-                &cfg.provider,
-                cfg.context_window,
-                active_provider_key,
-                cached_catalog(),
-            ),
+                );
+                if lite {
+                    resolved.min(LITE_CONTEXT_CAP)
+                } else {
+                    resolved
+                }
+            },
+            pre_turn_compact_percent: if lite {
+                LITE_PRE_TURN_COMPACT_PERCENT
+            } else {
+                PRE_TURN_COMPACT_PERCENT
+            },
+            reanchor_every: lite.then_some(LITE_REANCHOR_EVERY),
+            strict_loop_guard: lite,
+            lite_profile: lite,
             max_iterations: resolve_max_iterations(cfg.max_iterations),
             max_api_retries: resolve_max_api_retries(cfg.max_api_retries),
             temperature: cfg.temperature,
@@ -1863,7 +1997,12 @@ impl ZodeEngine {
                 })
                 .unwrap_or(0)
         });
-        if !pre_turn_compact_needed(tokens, window, self.max_output_tokens) {
+        if !pre_turn_compact_needed(
+            tokens,
+            window,
+            self.max_output_tokens,
+            self.pre_turn_compact_percent,
+        ) {
             return false;
         }
         match self
@@ -1892,6 +2031,30 @@ impl ZodeEngine {
         self.cost.last_prompt_tokens().await
     }
 
+    /// Hashes of the request prefix this engine sends on every turn:
+    /// `(system prompt, serialized tool definitions)`. A byte-identical
+    /// prefix is the precondition for provider prompt-cache hits (DeepSeek
+    /// matches the exact byte prefix; Anthropic needs stable bytes under its
+    /// `cache_control` breakpoints), so the TUI compares shapes across turns
+    /// and names what changed — making an otherwise silent cache reset
+    /// diagnosable. Tool definitions are name-sorted upstream, and
+    /// `serde_json` renders object keys deterministically, so equal inputs
+    /// always hash equal.
+    pub fn prefix_shape(&self) -> (u64, u64) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.system.hash(&mut h);
+        let system = h.finish();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for def in self.tools.definitions() {
+            def.name.hash(&mut h);
+            def.description.hash(&mut h);
+            def.input_schema.to_string().hash(&mut h);
+        }
+        let tools = h.finish();
+        (system, tools)
+    }
+
     /// Whether `input_tokens` (accurate, provider-reported occupancy) plus the
     /// configured completion budget crosses the pre-turn compaction threshold.
     /// The TUI's between-turn guard uses this so it shares one definition of
@@ -1900,11 +2063,16 @@ impl ZodeEngine {
     /// so little headroom that the completion gets clamped to the floor and
     /// truncates mid tool call.
     pub fn needs_pre_turn_compact(&self, input_tokens: u32) -> bool {
-        pre_turn_compact_needed(input_tokens, self.model_max_tokens, self.max_output_tokens)
+        pre_turn_compact_needed(
+            input_tokens,
+            self.model_max_tokens,
+            self.max_output_tokens,
+            self.pre_turn_compact_percent,
+        )
     }
 
     /// Read-and-clear the goal-loop completion signal. Returns `true` exactly
-    /// once per `goal_complete` call: the host polls this after each turn to
+    /// once per `GoalComplete` call: the host polls this after each turn to
     /// decide whether the autonomous goal loop should stop.
     pub fn take_goal_completed(&self) -> bool {
         self.goal_completed.swap(false, Ordering::SeqCst)
@@ -2073,7 +2241,10 @@ impl ZodeEngine {
         let query = text_query(&content);
         self.restore_after_compact(&query);
         self.auto_remember_noema(&query);
-        let mut notices = self.reminders.pre_turn(&self.todo_state).await;
+        let mut notices = self
+            .reminders
+            .pre_turn_with_anchor(&self.todo_state, self.reanchor_every)
+            .await;
         if let Some(n) = self.check_branch_drift().await {
             notices.push(n);
         }
@@ -2118,6 +2289,7 @@ impl ZodeEngine {
             .max_api_retries(self.max_api_retries)
             .cwd(self.cwd.clone())
             .auto_compact(true)
+            .strict_loop_guard(self.strict_loop_guard)
             .microcompact(self.compact_settings.microcompact())
             .use_prompt_cache(self.prompt_cache)
             .steer(self.steer_rx.clone());
@@ -2800,6 +2972,17 @@ impl EngineTemplate {
         self.sandbox.as_ref()
     }
 
+    /// Whether assembling for `model` NOW would select the lite profile —
+    /// explicit config, learned runtime verdicts, and the name heuristic all
+    /// consulted. The TUI compares this against the running engine's
+    /// `lite_profile` to apply a mid-session learned verdict via reassembly.
+    pub fn would_be_lite(&self, model: &str) -> bool {
+        matches!(
+            crate::config::model_profile(&self.cfg.provider, model),
+            crate::config::ModelProfile::Lite
+        )
+    }
+
     /// Clone with the sandbox replaced (for runtime `/sandbox` toggles). The
     /// next `reassemble_active` re-wraps Bash/BashRun accordingly.
     pub fn with_sandbox(&self, sandbox: Option<crate::sandbox::SandboxConfig>) -> Self {
@@ -3089,13 +3272,17 @@ impl EngineTemplate {
             .as_ref()
             .map(|sb| sb.clone().with_cwd(&engine.cwd));
         let workflow_defs = crate::workflows::load_workflow_defs(&engine.cwd);
-        // Sync hot-swap path (user-triggered, off the startup critical path) —
-        // detect the branch inline, then re-seed the drift tracker so its
-        // baseline matches what's about to be baked into this fresh prompt.
-        // `engine.reminders` is carried across the hot-swap (not rebuilt), so
-        // without re-seeding, a branch change already reflected in this new
-        // prompt would still fire a stale/false drift notice on the next turn.
-        let git_branch = crate::instructions::detect_git_branch(&engine.cwd);
+        // Sync hot-swap path (user-triggered, off the startup critical path).
+        // Reuse the SESSION-START branch when the engine carries one: baking
+        // the current branch here would rewrite the provider-cached prompt
+        // prefix on every /goal after a branch switch — drift reaches the
+        // model via the per-turn reminder instead. Re-seed the tracker with
+        // the same value that lands in the prompt so drift keeps firing
+        // relative to what the model actually sees.
+        let git_branch = match engine.session_git_branch.clone() {
+            Some(session_branch) => session_branch,
+            None => crate::instructions::detect_git_branch(&engine.cwd),
+        };
         engine.reminders.note_git_branch(git_branch.clone());
         render_runtime_system_prompt(
             &self.cfg,
@@ -3105,7 +3292,7 @@ impl EngineTemplate {
             self.plan_mode,
             self.question_queue.is_some(),
             engine.tools.get("TodoWrite").is_some(),
-            engine.tools.get("run_check").is_some(),
+            engine.tools.get("RunCheck").is_some(),
             engine.tools.get("Skill").is_some(),
             model,
             &engine.skills,
@@ -3285,7 +3472,7 @@ fn wrap_mutating_tools(
         // browser_upload performs canonical-path preflight before its own
         // per-call approval and must never be wrapped by a gate outside that
         // validation boundary.
-        if tool.name() == "browser_upload" {
+        if tool.name() == "BrowserUpload" {
             out.register(tool);
             continue;
         }
@@ -3377,23 +3564,23 @@ mod tests {
         // ungated": a scoped ask rule on it must keep prompting non-matching
         // calls, never auto-allow them.
         let mut src = ToolRegistry::new();
-        src.register(Arc::new(RwTool("browser_eval")));
+        src.register(Arc::new(RwTool("BrowserEval")));
         src.register(Arc::new(RoTool("FileRead")));
         let scoped_ask =
-            std::collections::BTreeSet::from(["browser_eval".to_string(), "FileRead".to_string()]);
+            std::collections::BTreeSet::from(["BrowserEval".to_string(), "FileRead".to_string()]);
         // user_allow is the real permissions.allow — browser_eval is NOT in it
         // (it only lives in the browser double-gate marker list).
         let pass = compute_pass_unmatched(&src, &scoped_ask, &[]);
         assert!(
-            !pass.contains("browser_eval"),
+            !pass.contains("BrowserEval"),
             "force-gated mutating tool must not auto-allow unmatched calls"
         );
         // A read-only tool with a scoped ask rule still auto-allows unmatched.
         assert!(pass.contains("FileRead"));
         // A genuinely allow-listed mutating tool does auto-allow (it would run
         // unprompted anyway).
-        let pass_allowed = compute_pass_unmatched(&src, &scoped_ask, &["browser_eval".to_string()]);
-        assert!(pass_allowed.contains("browser_eval"));
+        let pass_allowed = compute_pass_unmatched(&src, &scoped_ask, &["BrowserEval".to_string()]);
+        assert!(pass_allowed.contains("BrowserEval"));
     }
 
     #[tokio::test]
@@ -3612,6 +3799,11 @@ mod tests {
             hooks: Arc::new(HookRunner::new()),
             checkpoints: crate::sessions::checkpoint::CheckpointTracker::default(),
             store: Arc::new(Mutex::new(MessageStore::new())),
+            session_git_branch: None,
+            pre_turn_compact_percent: PRE_TURN_COMPACT_PERCENT,
+            reanchor_every: None,
+            strict_loop_guard: false,
+            lite_profile: false,
             browser_target_override: None,
             file_cache: Arc::new(FileStateCache::new(
                 NonZeroUsize::new(1).expect("nonzero"),
@@ -4863,9 +5055,9 @@ mod tests {
         .await
         .unwrap();
         let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
-        assert!(names.contains(&"team_hire".to_string()), "{names:?}");
-        assert!(names.contains(&"team_send".to_string()));
-        assert!(names.contains(&"team_board_read".to_string()));
+        assert!(names.contains(&"TeamHire".to_string()), "{names:?}");
+        assert!(names.contains(&"TeamSend".to_string()));
+        assert!(names.contains(&"TeamBoardRead".to_string()));
         assert!(eng.team.is_some());
 
         // Plan mode: only the read-only team tools survive.
@@ -4883,10 +5075,10 @@ mod tests {
         .await
         .unwrap();
         let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
-        assert!(names.contains(&"team_list".to_string()), "{names:?}");
-        assert!(names.contains(&"team_board_read".to_string()));
-        assert!(!names.contains(&"team_hire".to_string()), "{names:?}");
-        assert!(!names.contains(&"team_send".to_string()));
+        assert!(names.contains(&"TeamList".to_string()), "{names:?}");
+        assert!(names.contains(&"TeamBoardRead".to_string()));
+        assert!(!names.contains(&"TeamHire".to_string()), "{names:?}");
+        assert!(!names.contains(&"TeamSend".to_string()));
     }
 
     #[tokio::test]
@@ -4969,14 +5161,14 @@ mod tests {
             !eng.system.as_deref().unwrap_or("").contains("# Plan mode"),
             "read-only access must not inject the plan-mode prompt"
         );
-        // read_only_tools filters `run_check` (Mutating) same as plan_mode;
+        // read_only_tools filters `RunCheck` (Mutating) same as plan_mode;
         // the prompt must not advertise a tool the model doesn't have.
         assert!(
-            eng.tools.get("run_check").is_none(),
+            eng.tools.get("RunCheck").is_none(),
             "run_check must be filtered under read-only tool access"
         );
         assert!(
-            !eng.system.as_deref().unwrap_or("").contains("run_check"),
+            !eng.system.as_deref().unwrap_or("").contains("RunCheck"),
             "run_check must not be advertised when read-only access filtered it out"
         );
     }
@@ -5157,15 +5349,15 @@ mod tests {
         let sys = eng.system.as_deref().unwrap_or("");
         assert!(sys.contains("Current goal"), "{sys}");
         assert!(sys.contains("ship v1 of the parser"), "{sys}");
-        assert!(sys.contains("run_check"), "{sys}");
+        assert!(sys.contains("RunCheck"), "{sys}");
         assert!(sys.contains("Effort: high"), "{sys}");
     }
 
     #[tokio::test]
     async fn goal_prompt_omits_run_check_when_tool_unavailable() {
-        // read-only access filters `run_check` (Mutating) the same way plan
+        // read-only access filters `RunCheck` (Mutating) the same way plan
         // mode does — the goal block must not tell the model to reach for a
-        // tool it doesn't have, but must still push it toward `goal_complete`.
+        // tool it doesn't have, but must still push it toward `GoalComplete`.
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_cfg();
         cfg.goal = Some("ship v1 of the parser".into());
@@ -5180,13 +5372,13 @@ mod tests {
         .with_tool_access(ToolAccessMode::ReadOnly);
         let eng = template.assemble().await.unwrap();
         assert!(
-            eng.tools.get("run_check").is_none(),
+            eng.tools.get("RunCheck").is_none(),
             "run_check must be filtered under read-only tool access"
         );
         let sys = eng.system.as_deref().unwrap_or("");
         assert!(sys.contains("Current goal"), "{sys}");
-        assert!(!sys.contains("run_check"), "{sys}");
-        assert!(sys.contains("goal_complete"), "{sys}");
+        assert!(!sys.contains("RunCheck"), "{sys}");
+        assert!(sys.contains("GoalComplete"), "{sys}");
         assert!(sys.contains("AUTONOMOUSLY"), "{sys}");
     }
 
@@ -5211,7 +5403,7 @@ mod tests {
         .await
         .unwrap();
         let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
-        assert!(names.contains(&"define_agent".to_string()), "{names:?}");
+        assert!(names.contains(&"DefineAgent".to_string()), "{names:?}");
         assert!(eng
             .system
             .as_deref()
@@ -5309,25 +5501,20 @@ mod tests {
         .unwrap();
         let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
         for t in [
-            "browser_read",
-            "browser_act",
-            "browser_eval",
-            "browser_tabs",
-            "browser_upload",
+            "BrowserRead",
+            "BrowserAct",
+            "BrowserEval",
+            "BrowserTabs",
+            "BrowserUpload",
         ] {
             assert!(names.iter().any(|n| n == t), "missing {t}: {names:?}");
         }
         // browser_read stays ReadOnly and un-gated; the mutating trio is
         // pre-wrapped via browser_gated (not double-wrapped by
         // wrap_mutating_tools).
-        let read = eng.tools.get("browser_read").expect("browser_read");
+        let read = eng.tools.get("BrowserRead").expect("BrowserRead");
         assert_eq!(read.safety_class(), SafetyClass::ReadOnly);
-        for t in [
-            "browser_act",
-            "browser_eval",
-            "browser_tabs",
-            "browser_upload",
-        ] {
+        for t in ["BrowserAct", "BrowserEval", "BrowserTabs", "BrowserUpload"] {
             let tool = eng.tools.get(t).unwrap_or_else(|| panic!("missing {t}"));
             assert_eq!(tool.safety_class(), SafetyClass::Mutating);
         }
@@ -5352,19 +5539,19 @@ mod tests {
         .unwrap();
         let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
         for t in [
-            "desktop_read",
-            "desktop_act",
-            "desktop_screenshot",
-            "desktop_eval",
+            "DesktopRead",
+            "DesktopAct",
+            "DesktopScreenshot",
+            "DesktopEval",
         ] {
             assert!(names.iter().any(|n| n == t), "missing {t}: {names:?}");
         }
         // desktop_read stays ReadOnly and un-gated (its own consent/allowlist
         // checks run inside); the mutating tools are pre-wrapped via
         // desktop_gated and NOT double-gated by wrap_mutating_tools.
-        let read = eng.tools.get("desktop_read").expect("desktop_read");
+        let read = eng.tools.get("DesktopRead").expect("DesktopRead");
         assert_eq!(read.safety_class(), SafetyClass::ReadOnly);
-        for t in ["desktop_act", "desktop_screenshot", "desktop_eval"] {
+        for t in ["DesktopAct", "DesktopScreenshot", "DesktopEval"] {
             let tool = eng.tools.get(t).unwrap_or_else(|| panic!("missing {t}"));
             assert_eq!(tool.safety_class(), SafetyClass::Mutating);
         }
@@ -5383,7 +5570,7 @@ mod tests {
         )
         .with_browser_target_override(Some(crate::browser::BrowserTarget::Bridge));
         let eng = template.assemble().await.unwrap();
-        let read = eng.tools.get("browser_read").expect("browser_read");
+        let read = eng.tools.get("BrowserRead").expect("BrowserRead");
         // The session default is managed; the pinned bridge target is
         // unpaired, so the tool must fail with the pairing hint instead of
         // launching a managed Chrome.
@@ -5416,10 +5603,7 @@ mod tests {
         .await
         .unwrap();
         let names: Vec<String> = eng.tools.names().map(|s| s.to_string()).collect();
-        assert!(
-            !names.iter().any(|n| n.starts_with("browser_")),
-            "{names:?}"
-        );
+        assert!(!names.iter().any(|n| n.starts_with("Browser")), "{names:?}");
     }
 
     #[test]
@@ -5609,13 +5793,15 @@ mod tests {
         // messages=871_190, completion=384_000, window=1_048_565.
         // Input alone is only ~83% of the window, so an input-only 98% guard
         // would skip compaction, but providers validate prompt + max_tokens.
-        assert!(pre_turn_compact_needed(871_190, 1_048_565, 384_000));
+        assert!(pre_turn_compact_needed(871_190, 1_048_565, 384_000, 98));
 
         // The same prompt with a normal 16k completion still has enough room.
-        assert!(!pre_turn_compact_needed(871_190, 1_048_565, 16_384));
+        assert!(!pre_turn_compact_needed(871_190, 1_048_565, 16_384, 98));
+        // The lite percent trips far earlier on the same occupancy.
+        assert!(pre_turn_compact_needed(871_190, 1_048_565, 16_384, 70));
 
         // Preserve the old near-full prompt behavior even with small outputs.
-        assert!(pre_turn_compact_needed(1_030_000, 1_048_565, 512));
+        assert!(pre_turn_compact_needed(1_030_000, 1_048_565, 512, 98));
     }
 
     #[test]

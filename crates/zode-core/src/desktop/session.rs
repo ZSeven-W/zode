@@ -79,7 +79,7 @@ pub struct DesktopSession {
     slot: Arc<tokio::sync::Mutex<()>>,
     perm_flags: StdMutex<Vec<(String, Arc<AtomicBool>)>>,
     /// Optional CDP attachment (an Electron/Chromium instance attached over its
-    /// debug port). When present, `desktop_eval` and CDP-routed calls use it.
+    /// debug port). When present, `DesktopEval` and CDP-routed calls use it.
     cdp: tokio::sync::Mutex<Option<Arc<super::cdp::CdpBackend>>>,
 }
 
@@ -133,7 +133,7 @@ impl DesktopSession {
     }
 
     /// Attach a CDP backend to a running Electron/Chromium debug port (loopback
-    /// only). Replaces any existing attachment. Enables `desktop_eval`.
+    /// only). Replaces any existing attachment. Enables `DesktopEval`.
     pub async fn attach_cdp(&self, port: u16) -> Result<(), DesktopError> {
         let backend = super::cdp::CdpBackend::attach(port).await?;
         *self.cdp.lock().await = Some(backend);
@@ -169,7 +169,7 @@ impl DesktopSession {
 
     /// Choose the backend for a target app: the CDP attachment when the app is
     /// addressed by a `cdp#…` identity and one is attached, else the platform
-    /// backend (behind the input lease). This is how `desktop_read`/`desktop_act`
+    /// backend (behind the input lease). This is how `DesktopRead`/`DesktopAct`
     /// route Electron apps to CDP and native apps to AX/UIA/AT-SPI2.
     pub async fn resolve_backend(
         self: &Arc<Self>,

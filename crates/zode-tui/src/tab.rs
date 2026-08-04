@@ -111,6 +111,21 @@ pub struct SessionTab {
     /// provider would otherwise loop compact attempts forever); any
     /// successful compaction resets it.
     pub auto_compact_failures: u32,
+    /// `(system, tools)` prefix hashes of the last started turn — see
+    /// [`zode_core::ZodeEngine::prefix_shape`]. A change between turns is
+    /// announced once so the prompt-cache reset it causes is explained.
+    pub last_prefix_shape: Option<(u64, u64)>,
+    /// The running local operation is an AUTO compaction. Interrupting it must
+    /// trip the auto-compact breaker — the occupancy is still over threshold,
+    /// so without this the trigger restarts compaction on the very next event
+    /// and the tab looks stuck on "compacting" forever.
+    pub local_op_is_auto_compact: bool,
+    /// A weak-model signal (loop-guard nudge / tool-loop abort) was already
+    /// noted for this tab — the learned-lite announcement fires once.
+    pub weak_signal_noted: bool,
+    /// A learned-lite reassembly was already attempted on this tab (guards
+    /// against a retry loop when explicit config keeps the model standard).
+    pub lite_reassemble_attempted: bool,
     pub cost_label: String,
     /// Per-turn process UI state: map tool results back to their visible tool
     /// call names.
@@ -166,7 +181,7 @@ pub struct SessionTab {
     /// uses appear; empty hides the section.
     pub lsp_status: Vec<(String, bool)>,
     /// Whether the autonomous goal loop is active on this tab. Set true when a
-    /// goal is set via `/goal <text>`; cleared on `goal_complete`, `/goal
+    /// goal is set via `/goal <text>`; cleared on `GoalComplete`, `/goal
     /// clear`, a failed turn, or a user interrupt (Esc/Ctrl+C).
     pub goal_loop_active: bool,
     /// How many turns the current goal loop has run (for the optional
@@ -206,7 +221,10 @@ pub struct SessionTab {
 
 impl SessionTab {
     pub fn new(id: usize, engine: Arc<ZodeEngine>, session_id: String) -> Self {
-        let prompt_history_key = format!("session:{session_id}");
+        // PROJECT-scoped: prompt recall must survive across sessions in the
+        // same workspace (a per-session bucket left every fresh session with
+        // an empty Up/Down history).
+        let prompt_history_key = format!("project:{}", engine.cwd.display());
         Self {
             id,
             title: format!("tab {}", id + 1),
@@ -233,6 +251,10 @@ impl SessionTab {
             output_tokens: 0,
             context_tokens: 0,
             auto_compact_failures: 0,
+            last_prefix_shape: None,
+            local_op_is_auto_compact: false,
+            weak_signal_noted: false,
+            lite_reassemble_attempted: false,
             cost_label: "$0.00".into(),
             active_tool_names: HashMap::new(),
             active_tool_api_names: HashMap::new(),

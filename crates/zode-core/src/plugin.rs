@@ -133,32 +133,32 @@ pub const TOOL_GROUPS: &[(&str, &str, &[&str])] = &[
     (
         "op",
         "Drive a live OpenPencil design (read + write + generate)",
-        &["op_read", "op_write", "op_design"],
+        &["OpRead", "OpWrite", "OpDesign"],
     ),
     (
         "browser",
         "Built-in browser control (navigate, screenshot, click, evaluate)",
         &[
-            "browser_read",
-            "browser_act",
-            "browser_eval",
-            "browser_tabs",
-            "browser_upload",
+            "BrowserRead",
+            "BrowserAct",
+            "BrowserEval",
+            "BrowserTabs",
+            "BrowserUpload",
         ],
     ),
     (
         "team",
         "Hire and coordinate a team of agents (persistent teammates + board)",
         &[
-            "team_hire",
-            "team_send",
-            "team_dismiss",
-            "team_list",
-            "team_board_read",
-            "team_board_update",
-            "team_board_append",
-            "team_claim",
-            "team_release",
+            "TeamHire",
+            "TeamSend",
+            "TeamDismiss",
+            "TeamList",
+            "TeamBoardRead",
+            "TeamBoardUpdate",
+            "TeamBoardAppend",
+            "TeamClaim",
+            "TeamRelease",
         ],
     ),
 ];
@@ -331,22 +331,22 @@ mod tests {
 
     #[test]
     fn op_tools_are_grouped() {
-        assert_eq!(group_of("op_read"), Some("op"));
-        assert_eq!(group_of("op_write"), Some("op"));
+        assert_eq!(group_of("OpRead"), Some("op"));
+        assert_eq!(group_of("OpWrite"), Some("op"));
     }
 
     #[test]
     fn op_design_is_grouped() {
-        assert_eq!(group_of("op_design"), Some("op"));
+        assert_eq!(group_of("OpDesign"), Some("op"));
     }
 
     #[test]
     fn browser_tools_are_grouped() {
-        assert_eq!(group_of("browser_read"), Some("browser"));
-        assert_eq!(group_of("browser_act"), Some("browser"));
-        assert_eq!(group_of("browser_eval"), Some("browser"));
-        assert_eq!(group_of("browser_tabs"), Some("browser"));
-        assert_eq!(group_of("browser_upload"), Some("browser"));
+        assert_eq!(group_of("BrowserRead"), Some("browser"));
+        assert_eq!(group_of("BrowserAct"), Some("browser"));
+        assert_eq!(group_of("BrowserEval"), Some("browser"));
+        assert_eq!(group_of("BrowserTabs"), Some("browser"));
+        assert_eq!(group_of("BrowserUpload"), Some("browser"));
     }
 
     #[test]

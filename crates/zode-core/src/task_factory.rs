@@ -104,21 +104,20 @@ impl std::fmt::Debug for ModelRuntimeState {
 /// hiring, sending, dismissing, listing). Collaboration tools
 /// (team_board_*, team_claim/release) are added back per-teammate,
 /// identity-bound. See [`shared_child_tools`].
-pub const TEAM_ORCHESTRATION_TOOLS: &[&str] =
-    &["team_hire", "team_send", "team_dismiss", "team_list"];
+pub const TEAM_ORCHESTRATION_TOOLS: &[&str] = &["TeamHire", "TeamSend", "TeamDismiss", "TeamList"];
 
 /// Team tools a plain Task sub-agent may not hold. Task itself remains
 /// available so the child can spawn another bounded child.
 pub const TEAM_TOOL_NAMES: [&str; 9] = [
-    "team_hire",
-    "team_send",
-    "team_dismiss",
-    "team_list",
-    "team_board_read",
-    "team_board_update",
-    "team_board_append",
-    "team_claim",
-    "team_release",
+    "TeamHire",
+    "TeamSend",
+    "TeamDismiss",
+    "TeamList",
+    "TeamBoardRead",
+    "TeamBoardUpdate",
+    "TeamBoardAppend",
+    "TeamClaim",
+    "TeamRelease",
 ];
 
 /// Internal teammates also lose direct and workflow-mediated Task dispatch:
@@ -126,27 +125,27 @@ pub const TEAM_TOOL_NAMES: [&str; 9] = [
 /// sub-agents may recursively delegate.
 pub const TEAM_TOOL_NAMES_WITH_TASK: [&str; 11] = [
     "Task",
-    "run_workflow",
-    "team_hire",
-    "team_send",
-    "team_dismiss",
-    "team_list",
-    "team_board_read",
-    "team_board_update",
-    "team_board_append",
-    "team_claim",
-    "team_release",
+    "RunWorkflow",
+    "TeamHire",
+    "TeamSend",
+    "TeamDismiss",
+    "TeamList",
+    "TeamBoardRead",
+    "TeamBoardUpdate",
+    "TeamBoardAppend",
+    "TeamClaim",
+    "TeamRelease",
 ];
 
 /// Host-control channels belong to the owning loop, not a delegated child.
 /// Although these tools are classified read-only for approval purposes, they
 /// can stop the caller's autonomous goal loop or wait on the caller's UI.
-const CHILD_HOST_CONTROL_TOOLS: &[&str] = &["goal_complete", "AskUserQuestion"];
+const CHILD_HOST_CONTROL_TOOLS: &[&str] = &["GoalComplete", "AskUserQuestion"];
 
 /// Read-classified tools that consume shared parent state are unsafe in an
 /// immutable plan child even though they do not write external resources.
 const READ_ONLY_MODE_EXCLUDED_TOOLS: &[&str] = &["BashOutput"];
-const READ_ONLY_MODE_EXCLUDED_PREFIXES: &[&str] = &["lsp_"];
+const READ_ONLY_MODE_EXCLUDED_PREFIXES: &[&str] = &["Lsp"];
 
 /// Build a child tool registry from the parent's final gated registry,
 /// excluding `exclude` by name and rebuilding ToolSearch over the FILTERED

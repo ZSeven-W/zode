@@ -103,6 +103,7 @@ async fn run(args: Args) -> i32 {
     if let Some(command) = &args.command {
         match command {
             args::Command::Doctor => return doctor::run(&cwd).await,
+            args::Command::Update { check } => return run_self_update(*check).await,
             args::Command::Server(server_args) => return server::run(server_args, &cwd).await,
             args::Command::Acp => return acp::run(&cwd).await,
             args::Command::Dashboard { json } => return dashboard::run(*json).await,
@@ -486,6 +487,67 @@ async fn run(args: Args) -> i32 {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("zode: {e}");
+            1
+        }
+    }
+}
+
+/// `zode update` / `zode upgrade`: explicit self-update with console output.
+/// Unlike the background auto-updater it ignores `autoUpdate: false` and
+/// `ZODE_NO_UPDATE` (running the command IS the consent), but still refuses to
+/// clobber a dev build. `--check` reports without downloading.
+async fn run_self_update(check_only: bool) -> i32 {
+    use zode_core::updater;
+    let current = env!("CARGO_PKG_VERSION");
+    let rel = match updater::latest_release().await {
+        Ok(rel) => rel,
+        Err(e) => {
+            eprintln!("zode: update check failed: {e}");
+            return 1;
+        }
+    };
+    if !updater::is_newer(&rel.version, current) {
+        println!(
+            "zode {current} is up to date (latest release: {}).",
+            rel.tag
+        );
+        return 0;
+    }
+    println!("zode {current} → {} available.", rel.tag);
+    if check_only {
+        println!("run `zode update` to install it.");
+        return 0;
+    }
+    match std::env::current_exe() {
+        Ok(exe) if updater::looks_like_dev_build(&exe) => {
+            eprintln!(
+                "zode: this looks like a dev build ({}) — refusing to overwrite it; \
+                 use `cargo build` or download the release manually",
+                exe.display()
+            );
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("zode: cannot locate the current executable: {e}");
+            return 1;
+        }
+        Ok(_) => {}
+    }
+    let Some(url) = rel.asset_url.as_deref() else {
+        eprintln!(
+            "zode: release {} has no prebuilt binary for this platform — update manually",
+            rel.tag
+        );
+        return 1;
+    };
+    println!("downloading {} …", rel.tag);
+    match updater::download_and_apply(url).await {
+        Ok(()) => {
+            println!("updated to {} — takes effect on the next launch.", rel.tag);
+            0
+        }
+        Err(e) => {
+            eprintln!("zode: update failed: {e}");
             1
         }
     }

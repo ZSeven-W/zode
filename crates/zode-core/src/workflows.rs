@@ -1,6 +1,6 @@
 //! User-defined workflows: reusable, named JS orchestration scripts the agent
-//! can create (`define_workflow`), list (`/workflows`), and RUN deterministically
-//! (`run_workflow` tool, or Enter in the `/workflows` dialog). Execution happens
+//! can create (`DefineWorkflow`), list (`/workflows`), and RUN deterministically
+//! (`RunWorkflow` tool, or Enter in the `/workflows` dialog). Execution happens
 //! in zode's QuickJS runtime ([`crate::workflows_js`]) — the script drives real
 //! sub-agents through `agent()` / `parallel()` / `pipeline()`; the model never
 //! "follows steps" on its own. (The old Markdown step-list format is retired:
@@ -160,7 +160,7 @@ pub fn delete_workflow_def(name: &str) -> Result<bool, CoreError> {
 }
 
 /// The scripting surface documented for the model (and `/help`): kept in one
-/// place so `define_workflow`'s description and prompts stay in sync.
+/// place so `DefineWorkflow`'s description and prompts stay in sync.
 pub const WORKFLOW_JS_API: &str = "The script body runs in a sandboxed JS runtime \
     (no fs/net) with: `await agent(prompt, {type, description, mode})` → run one \
     sub-agent and get its final text (`mode` is forwarded unchanged to `Task`, which \
@@ -177,13 +177,13 @@ pub struct DefineWorkflowTool;
 #[async_trait]
 impl Tool for DefineWorkflowTool {
     fn name(&self) -> &str {
-        "define_workflow"
+        "DefineWorkflow"
     }
 
     fn description(&self) -> &str {
         "Create a reusable, named JS workflow saved to ~/.zode/workflows/<name>.js. \
          The `script` is an orchestration body executed deterministically by zode \
-         (run it later with the run_workflow tool). Do NOT include frontmatter in \
+         (run it later with the RunWorkflow tool). Do NOT include frontmatter in \
          `script` — it is added from `name`/`description`."
     }
 
@@ -221,7 +221,7 @@ impl Tool for DefineWorkflowTool {
             .trim();
         if name.is_empty() || script.is_empty() {
             return Err(AgentError::other(
-                "define_workflow requires a name and a non-empty script",
+                "DefineWorkflow requires a name and a non-empty script",
             ));
         }
         // Parse-only validation (the body is wrapped in an async fn, so
@@ -232,7 +232,7 @@ impl Tool for DefineWorkflowTool {
         Ok(json!({
             "ok": true,
             "path": path.display().to_string(),
-            "note": "run it with the run_workflow tool (available after the next session rebuild for /workflows)"
+            "note": "run it with the RunWorkflow tool (available after the next session rebuild for /workflows)"
         }))
     }
 }
@@ -256,7 +256,7 @@ impl RunWorkflowTool {
 #[async_trait]
 impl Tool for RunWorkflowTool {
     fn name(&self) -> &str {
-        "run_workflow"
+        "RunWorkflow"
     }
 
     fn description(&self) -> &str {
@@ -292,14 +292,12 @@ impl Tool for RunWorkflowTool {
         let def = load_workflow_defs(&ctx.cwd)
             .into_iter()
             .find(|w| w.name == name)
-            .ok_or_else(|| {
-                AgentError::other(format!("run_workflow: no workflow named '{name}'"))
-            })?;
+            .ok_or_else(|| AgentError::other(format!("RunWorkflow: no workflow named '{name}'")))?;
         let tools = self
             .tools
             .get()
             .cloned()
-            .ok_or_else(|| AgentError::other("run_workflow: tool registry not ready"))?;
+            .ok_or_else(|| AgentError::other("RunWorkflow: tool registry not ready"))?;
         let runner = Arc::new(GatedTaskRunner::new(
             tools,
             ctx.cwd.clone(),

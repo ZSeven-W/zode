@@ -1,5 +1,5 @@
-//! Agent-facing desktop tools: `desktop_read` (apps / windows / snapshot),
-//! `desktop_act` (semantic + keyboard actions), and `desktop_screenshot`.
+//! Agent-facing desktop tools: `DesktopRead` (apps / windows / snapshot),
+//! `DesktopAct` (semantic + keyboard actions), and `DesktopScreenshot`.
 //! Reads are permission-laddered (subsystem consent → app allowlist), not
 //! un-gated ReadOnly — desktop reads span the whole login session (spec §权限).
 
@@ -117,7 +117,7 @@ async fn await_desktop_response<T>(
     }
 }
 
-/// Map a `desktop_act` action to its approval family. Total over the schema's
+/// Map a `DesktopAct` action to its approval family. Total over the schema's
 /// action enum; `None` for anything unknown. The registration-invariant test
 /// enumerates the schema and asserts every action maps to exactly one family.
 pub fn action_family(action: &str) -> Option<ActionFamily> {
@@ -194,7 +194,7 @@ impl DesktopReadTool {
 #[async_trait]
 impl Tool for DesktopReadTool {
     fn name(&self) -> &str {
-        "desktop_read"
+        "DesktopRead"
     }
 
     fn description(&self) -> &str {
@@ -292,7 +292,7 @@ impl DesktopActTool {
 #[async_trait]
 impl Tool for DesktopActTool {
     fn name(&self) -> &str {
-        "desktop_act"
+        "DesktopAct"
     }
 
     fn description(&self) -> &str {
@@ -424,7 +424,7 @@ impl DesktopScreenshotTool {
 #[async_trait]
 impl Tool for DesktopScreenshotTool {
     fn name(&self) -> &str {
-        "desktop_screenshot"
+        "DesktopScreenshot"
     }
 
     fn description(&self) -> &str {
@@ -482,7 +482,7 @@ impl DesktopEvalTool {
 #[async_trait]
 impl Tool for DesktopEvalTool {
     fn name(&self) -> &str {
-        "desktop_eval"
+        "DesktopEval"
     }
 
     fn description(&self) -> &str {
