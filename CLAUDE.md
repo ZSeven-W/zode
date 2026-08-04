@@ -106,7 +106,7 @@ Zode can drive a running OpenPencil instance over its local MCP endpoint.
 The feature is built across three crates:
 
 - `zode-core/src/openpencil/` — config, port-file discovery, transport,
-  client, installer, launcher, planner, tools (`op_read`/`op_write`).
+  client, installer, launcher, planner, tools (`OpRead`/`OpWrite`).
 - `zode-core/src/commands/op.rs` — `/op <design request>` parser.
 - `zode-tui/src/app.rs` — `/op` slash-command handler + consent modal.
 
@@ -133,11 +133,11 @@ names are intentionally not advertised in the user-facing command flow.
 
 `/op status` is a zode-side connection report, not an MCP `tools/call`.
 
-### `op_read` / `op_write` tools
+### `OpRead` / `OpWrite` tools
 
 The agent can call OpenPencil tools directly via two tool wrappers:
 
-- **`op_read`** — calls any tool that matches the read-only classification
+- **`OpRead`** — calls any tool that matches the read-only classification
   without requiring user approval. Classification uses a small write override
   for create-like tools such as `export_nodes`, then a curated read allowlist
   plus read prefixes (`get_`, `list_`, `snapshot_`, `count_`, `find_`,
@@ -146,7 +146,7 @@ The agent can call OpenPencil tools directly via two tool wrappers:
   `get_style_guide`, `get_screenshot`, `ToolSearch`, `find_empty_space`,
   `read_nodes`, `batch_get`, `export_design_md`, and
   `search_all_unique_properties`.
-- **`op_write`** — calls any other MCP tool; gated by the standard
+- **`OpWrite`** — calls any other MCP tool; gated by the standard
   `ApprovalGate` (asks the user before executing).
 
 Both tools are registered in the `op` tool group and connect to OpenPencil
@@ -180,7 +180,7 @@ Notes:
 
 All keys are optional; absent keys fall back to built-in defaults.
 
-### Design generation (`op_design` / `/op <prompt>`)
+### Design generation (`OpDesign` / `/op <prompt>`)
 
 Zode includes a deterministic design-pipeline orchestrator that generates a
 full OpenPencil page from a natural-language prompt. Zode owns all the op MCP
@@ -216,7 +216,7 @@ whitespace, and grid alignment. When the `frontend-design` or
 named headings via `load_guidance`. Missing skills are silently skipped (a
 debug log is emitted). The pipeline never errors if a skill is absent.
 
-**`op_design` tool** — registered in the `op` tool group (`plugin.rs`).
+**`OpDesign` tool** — registered in the `op` tool group (`plugin.rs`).
 Safety class: `Mutating`; requires user approval via `ApprovalGate`. Input:
 `{ "prompt": "<string>" }`. Drives the full pipeline against a live
 OpenPencil instance and returns `{ sections, failures, refine }`.
@@ -237,7 +237,7 @@ autocomplete does not advertise it.
 
 ### Connect / install / launch flow
 
-`OpConnection::ensure` runs on every `/op` subcommand or `op_read`/`op_write`
+`OpConnection::ensure` runs on every `/op` subcommand or `OpRead`/`OpWrite`
 tool call:
 
 1. **Discover** — reads `~/.openpencil/.op-mcp-port` for `{"port": N, "token": "..."}`.
@@ -298,11 +298,11 @@ Chrome extension:
 
 | Tool | Actions | Safety | Approval |
 |------|---------|--------|----------|
-| `browser_read` | `screenshot`, `snapshot`, `console`, `network`, `tabs`, `downloads` | `ReadOnly` | None — registered ungated, like `op_read` |
-| `browser_act` | `navigate`, `click`, `type`, `key`, `scroll` | `Mutating` | `PermissionGatedTool` + `BrowserGateView` |
-| `browser_eval` | arbitrary JS expression | `Mutating` | `PermissionGatedTool` + `BrowserGateView`, own independent always-allow flag |
-| `browser_tabs` | `new`, `close`, `select` | `Mutating` | `PermissionGatedTool` + `BrowserGateView` |
-| `browser_upload` | set absolute local paths on a file input selected by `selector` or `ref` | `Mutating` | Independent per-call approval; no always-allow |
+| `BrowserRead` | `screenshot`, `snapshot`, `console`, `network`, `tabs`, `downloads` | `ReadOnly` | None — registered ungated, like `OpRead` |
+| `BrowserAct` | `navigate`, `click`, `type`, `key`, `scroll` | `Mutating` | `PermissionGatedTool` + `BrowserGateView` |
+| `BrowserEval` | arbitrary JS expression | `Mutating` | `PermissionGatedTool` + `BrowserGateView`, own independent always-allow flag |
+| `BrowserTabs` | `new`, `close`, `select` | `Mutating` | `PermissionGatedTool` + `BrowserGateView` |
+| `BrowserUpload` | set absolute local paths on a file input selected by `selector` or `ref` | `Mutating` | Independent per-call approval; no always-allow |
 
 All browser tools take a lease on the session (`BrowserSession::lease`), which
 serializes every backend operation across tabs and concurrent tool calls —
@@ -312,11 +312,11 @@ from different agent turns would otherwise race.
 The mutating trio is wrapped in `browser_gated()` (`gate.rs`) *before*
 `wrap_mutating_tools` runs in `engine.rs`, and their names are added to the
 mutating-allow list passed into that pass, so they are never double-gated
-behind a second, context-blind `PermissionGatedTool`. `browser_eval` gets
+behind a second, context-blind `PermissionGatedTool`. `BrowserEval` gets
 its own `PermissionGatedTool` instance (and thus its own always-allow flag)
-independent of `browser_act`/`browser_tabs` — allowing "always allow" for
+independent of `BrowserAct`/`BrowserTabs` — allowing "always allow" for
 navigation doesn't silently also allow-always arbitrary JS execution.
-`browser_upload` canonicalizes and validates every path before prompting,
+`BrowserUpload` canonicalizes and validates every path before prompting,
 shows canonical paths and sizes in the approval, and deliberately treats an
 "always" response as one-call approval. Invalid paths never open a prompt.
 `BrowserGateView` enriches every approval prompt with `_target`
@@ -380,7 +380,7 @@ Defaults (all fields optional; getters supply these when absent):
 
 ### Screenshot return path (content-blocks sentinel)
 
-`browser_read` action `screenshot` always saves the JPEG to
+`BrowserRead` action `screenshot` always saves the JPEG to
 `<config-dir>/screenshots/shot-<millis>.jpg` and returns a JSON object
 shaped as the reserved `__agent_content_blocks__` sentinel (defined and
 consumed in the `agent` submodule, `query/loop_.rs`):
@@ -415,7 +415,7 @@ credential sharing with the user's everyday browser.
 
 Managed downloads are allowed into `<config-dir>/downloads` (normally
 `~/.zode/downloads`), which is created with owner-only permissions on Unix.
-`browser_read {"action":"downloads"}` returns only downloads observed by the
+`BrowserRead {"action":"downloads"}` returns only downloads observed by the
 current backend session, newest first. A completed entry includes `path` only
 when CDP reports the actual saved path.
 
@@ -424,7 +424,7 @@ when CDP reports the actual saved path.
 The bridge extension requires its `downloads` permission and must be reloaded
 or redistributed after this feature update. Its download cache starts when the
 bridge WebSocket connects and never queries `chrome.downloads` history, so
-downloads from before that connection cannot leak through `browser_read`.
+downloads from before that connection cannot leak through `BrowserRead`.
 Entries not provably caused by the controlled tab are marked with conservative
 `profile` or `unknown` attribution. An older extension returns an explicit
 `bridge extension too old / downloads unsupported` error.
@@ -447,7 +447,7 @@ continue to use the authenticated localhost WebSocket. Closing the native port
 shuts down the daemon.
 
 The bridge drives one sticky tab. A side-panel `turn/start` first targets the
-active page beside the panel, allowing `browser_read` to analyze that page
+active page beside the panel, allowing `BrowserRead` to analyze that page
 without creating or grouping a new tab. Standalone TUI/CLI bridge acquisition
 still creates a background `about:blank` tab in the "zode" tab group rather
 than taking over a human tab. Explicit human navigation of a controlled tab
@@ -481,12 +481,12 @@ as one compact activity group (one row per call).
 Extension turns append a hidden `browser_side_panel_context` text block in
 `zode-tui/src/app/extension_tasks.rs`. It tells the agent that the active page
 is the primary context, that ambiguous/deictic page questions should call
-`browser_read` before answering, and that it must not inspect the local
+`BrowserRead` before answering, and that it must not inspect the local
 workspace unless the user explicitly asks about project code or files. The
 block is sent to the engine but omitted from the panel's displayed user text.
 
 The extension version tracks the workspace crate version: `package.json` and
-the manifest's `version_name` carry the full value (`0.1.0-beta.8`) while the
+the manifest's `version_name` carry the full value (`0.1.0-beta.9`) while the
 manifest's `version` carries its numeric core, since Chrome only accepts dotted
 integers there. `manifest.test.js` reads `Cargo.toml` and enforces this.
 
@@ -535,10 +535,20 @@ load/change/ping and the worker calls `chrome.action.setIcon` to swap between
 the dark `icons/zode-*.png` and light `icons/zode-light-*.png` sets. Static
 manifest icons stay dark.
 
-Install and update details live in `extensions/chrome/README.md`. The shipped
-extension ID is `hcabdgpfhoclfgnknddadgfhhdnlkloc`; the manifest embeds the
-public key so unpacked and packed installs use the same ID, which the Rust
-bridge server checks in the WebSocket Origin header.
+Install and update details live in `extensions/chrome/README.md`. The
+developer-keyed ID is `hcabdgpfhoclfgnknddadgfhhdnlkloc`; the manifest embeds
+the public key so unpacked and packed installs share it. The Rust bridge
+server checks the extension ID in the WebSocket Origin header AND in the
+native-messaging manifest's `allowed_origins` — but the accept list is
+**config-driven, not hardcoded**: `browser.extensionIds` (an array; unset →
+the developer ID) is installed via
+`bridge::server::set_allowed_extension_ids` before any listener accepts a
+connection. The Chrome Web Store mints a NEW ID on publish (it ignores the
+manifest `key`), so a store install requires adding that store ID to
+`browser.extensionIds`. Store upload ZIP: `extensions/chrome/pack-store.sh`
+(strips the `key`); `is_invocation_arg` shape-checks any
+`chrome-extension://<id>/` origin (it runs before config loads; real access
+stays gated by the manifest allowlist + WS token/Origin).
 
 ### Integration tests
 
@@ -589,7 +599,7 @@ Rationale: apps with custom key handling (WeChat 4.x) read the keycode, not
 the payload — keycode 0 is kVK_ANSI_A, so payload-only synthesis rendered
 every such char as "a". Known limitation: a non-text pasteboard (image/files)
 cannot be saved and is lost on the paste path. Window tokens minted by
-`desktop_read windows` are the backend's window index and round-trip through
+`DesktopRead windows` are the backend's window index and round-trip through
 `DesktopSession::resolve_window` unchanged.
 
 ## /loop, /schedule & task timing
@@ -778,12 +788,12 @@ the external-agent layer. Design: `docs/superpowers/specs/2026-07-16-agent-team-
   registered agent CLI). Resumable external profiles preserve conversation
   context; one-shot profiles run as stateless teammates with a fresh process
   per send. The leader is the root model.
-- **Tools** (group `team`, `tools:team` to disable): `team_hire`
+- **Tools** (group `team`, `tools:team` to disable): `TeamHire`
   (`{agent,name,role,provider?,model?,tools?}` — external hires need a
   one-time TeamMemberSession trust approval; internal hires don't),
-  `team_send` (`{to,message,claims?}` — busy-check → atomic claim → dispatch,
-  returns the reply plus `@ask` relays), `team_dismiss`, `team_list`, and the
-  board/claim tools (`team_board_read/update/append`, `team_claim/release`).
+  `TeamSend` (`{to,message,claims?}` — busy-check → atomic claim → dispatch,
+  returns the reply plus `@ask` relays), `TeamDismiss`, `TeamList`, and the
+  board/claim tools (`TeamBoardRead/update/append`, `TeamClaim/release`).
 - **Board** is host-managed under `<cwd>/.zode/team/` (the `.zode` sandbox
   carveout stays read-only for tools): `board.json` written atomically under a
   stable `board.lock`, section updates CAS'd on a revision counter. Claims are
@@ -815,8 +825,8 @@ the external-agent layer. Design: `docs/superpowers/specs/2026-07-16-agent-team-
   in flight so long tasks keep their reservation.
 - **`/team`** — bare `/team` opens a read-only roster + board panel (↑↓ scroll,
   Esc close); `/team status` / `/team board` print text; `/team dismiss <name>`
-  removes a teammate. Plan/read-only mode keeps only `team_list` /
-  `team_board_read`.
+  removes a teammate. Plan/read-only mode keeps only `TeamList` /
+  `TeamBoardRead`.
 
 Opt-in real-CLI team test:
 

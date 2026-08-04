@@ -238,7 +238,7 @@ ID，后续派发使用 `resumeArgs`。
 
 ### 使用 team
 
-`team_hire` 和 `team_send` 是模型工具，不是斜杠命令。直接告诉 leader：
+`TeamHire` 和 `TeamSend` 是模型工具，不是斜杠命令。直接告诉 leader：
 
 ```text
 雇佣 `codex`，命名为 `implementer`，负责实现认证重构并运行测试。
@@ -248,6 +248,13 @@ ID，后续派发使用 `resumeArgs`。
 之后用 `/team`、`/team board` 查看名册和协作板，用
 `/team dismiss implementer` 移除队友。team 状态保存在
 `<cwd>/.zode/team/`，但外部 CLI 的信任授权不会跨 Zode 进程持久化。
+
+**命名规则**：队友名字（雇佣时的 `name`）只允许小写 ASCII——`a-z`、`0-9`、
+`-`，最长 32 字符；名字会出现在 `@ask 名字:` 转发行和会话文件名里，因此
+**不支持中文等非 ASCII 名字**，会直接报 NameInvalid。外部 profile 名
+（`externalAgents.agents` 的 key，即雇佣时 `agent` 引用的名字）同样请使用
+ASCII：`/external-agents discover` 注册的是固定英文预置名，中文等非 ASCII
+的自定义 key 未经测试、不受支持。
 
 ## 新功能使用指南
 
@@ -697,10 +704,10 @@ SDK 位于 [`sdk/`](../../sdk/)：
 
 Zode 提供 `tools:browser` 工具组：
 
-- `browser_read`：截图、DOM 快照、console/network 日志、标签页读取。
-- `browser_act`：导航、点击、输入、按键、滚动。
-- `browser_eval`：执行 JavaScript。
-- `browser_tabs`：管理标签页。
+- `BrowserRead`：截图、DOM 快照、console/network 日志、标签页读取。
+- `BrowserAct`：导航、点击、输入、按键、滚动。
+- `BrowserEval`：执行 JavaScript。
+- `BrowserTabs`：管理标签页。
 
 可选目标：
 
@@ -734,9 +741,9 @@ Zode 提供 `tools:browser` 工具组：
 
 Zode 还能通过操作系统的无障碍(accessibility)API 驱动原生桌面应用,不局限于浏览器:
 
-- `desktop_read`:读取无障碍树(窗口、元素及其 ref)。
-- `desktop_act`:按元素点击、输入、滚动、设值。
-- `desktop_screenshot`:截屏。
+- `DesktopRead`:读取无障碍树(窗口、元素及其 ref)。
+- `DesktopAct`:按元素点击、输入、滚动、设值。
+- `DesktopScreenshot`:截屏。
 
 只读读取无需审批;有副作用的桌面操作走与其他工具相同的 允许一次/始终/拒绝 审批流。
 

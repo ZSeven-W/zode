@@ -341,7 +341,7 @@ non-interactive resume invocation.
 
 ### Hire and work with the teammate
 
-Ask the leader in normal language; `team_hire` and `team_send` are model-facing
+Ask the leader in normal language; `TeamHire` and `TeamSend` are model-facing
 tools, not slash commands:
 
 ```text
@@ -352,6 +352,14 @@ Send `implementer` the task now and claim `src/auth/` for it before editing.
 
 Ask `implementer` to address the review findings while preserving its session context.
 ```
+
+**Naming rules.** Teammate names (the `name` you give a hire) must be
+lowercase ASCII: `a-z`, `0-9`, and `-`, at most 32 characters — they appear in
+`@ask name:` relay lines and session filenames, so non-ASCII (including
+Chinese) names are rejected. External profile names (the keys under
+`externalAgents.agents`, and what `agent` refers to in a hire) should also be
+ASCII: `/external-agents discover` registers the fixed English preset names,
+and non-ASCII custom profile keys are untested and unsupported.
 
 The first hire shows the resolved executable and arguments, working directory,
 and the CLI's effective sandbox. Approving it delegates work to that process in
@@ -915,9 +923,9 @@ cargo run -p zode-app-server-protocol --bin export -- sdk/fixtures/jsonrpc
 ## Browser Control
 
 Zode includes a `tools:browser` group for browser automation. The agent can use
-`browser_read` for screenshots, DOM snapshots, console logs, network logs, and
-tab reads; `browser_act` for navigation, clicks, typing, key presses, and
-scrolling; `browser_eval` for JavaScript; and `browser_tabs` for tab
+`BrowserRead` for screenshots, DOM snapshots, console logs, network logs, and
+tab reads; `BrowserAct` for navigation, clicks, typing, key presses, and
+scrolling; `BrowserEval` for JavaScript; and `BrowserTabs` for tab
 management. Read-only browser inspection is ungated; mutating browser actions
 use the same allow-once / always / deny approval flow as other side-effecting
 tools.
@@ -943,7 +951,7 @@ process is running. The pairing page remains a small code/token flow, and tasks
 stay shared with TUI sessions without changing terminal focus.
 
 Side-panel turns bind bridge browser tools to the page currently shown beside
-the panel, so requests such as “analyze this page” use `browser_read` on the
+the panel, so requests such as “analyze this page” use `BrowserRead` on the
 existing tab instead of opening a new one. Standalone TUI and CLI browser
 automation keeps using zode-owned tabs in the `zode` tab group. The active page
 is also the default context for ambiguous side-panel prompts; local project
@@ -980,9 +988,9 @@ loading, update, CRX packaging, and smoke-test steps.
 ## Desktop Control
 
 Zode can drive native desktop applications through OS accessibility APIs, not
-just the browser. The agent uses `desktop_read` to read the accessibility tree
-(windows, elements, and their refs), `desktop_act` to click, type, scroll, and
-set values by element, and `desktop_screenshot` to capture the screen.
+just the browser. The agent uses `DesktopRead` to read the accessibility tree
+(windows, elements, and their refs), `DesktopAct` to click, type, scroll, and
+set values by element, and `DesktopScreenshot` to capture the screen.
 Read-only reads are ungated; mutating desktop actions use the same
 allow-once / always / deny approval flow as other side-effecting tools.
 
