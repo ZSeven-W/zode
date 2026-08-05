@@ -57,6 +57,14 @@ Dependency direction: `zode` → `zode-tui` → `zode-core` → `vendor/agent`.
   `AfterToolUse` hook tracks fs-tool mtimes / TodoWrite calls; `turn_blocks`
   prepends a `<system-reminder>` block for external file changes, stale todo
   lists, and git-branch drift. Every notice fires once (baselines advance).
+- **Session ledger** (`zode-core/src/session_ledger.rs`): the L2 memory layer
+  between the transcript (L1) and noema (L3). Harness-maintained write-ahead
+  working state — user requests verbatim, shell-command heads with latest
+  outcomes (hook-fed), and compaction analysis bullets teed from the noema
+  sink (OPEN QUESTION included). Rendered (~2k-token cap) into the
+  post-compact restore message beside files + recall, so a lossy summary
+  can't erase session facts. Session-scoped: carried via `CarryState`,
+  wiped by `/clear`, never persisted to disk.
 - **Effort maps to real knobs**: `map_effort` (engine.rs) forwards `low|medium|high`
   when reasoning is opted in; on Anthropic, `/effort high` maps to a thinking
   budget on legacy models and to adaptive thinking (`thinking:{type:"adaptive"}`

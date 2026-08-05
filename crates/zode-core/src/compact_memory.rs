@@ -104,17 +104,28 @@ fn is_compaction_meta_noise(text: &str) -> bool {
 pub struct NoemaSessionStore {
     noema: ZodeNoema,
     cwd: PathBuf,
+    /// Optional tee into the session ledger (L2): every bullet — including
+    /// the kinds noema drops as non-durable, like OPEN QUESTION — is
+    /// working state the post-compact restore should carry.
+    ledger: Option<crate::session_ledger::SessionLedger>,
 }
 
 impl NoemaSessionStore {
-    pub fn new(noema: ZodeNoema, cwd: PathBuf) -> Self {
-        Self { noema, cwd }
+    pub fn new(
+        noema: ZodeNoema,
+        cwd: PathBuf,
+        ledger: Option<crate::session_ledger::SessionLedger>,
+    ) -> Self {
+        Self { noema, cwd, ledger }
     }
 }
 
 #[async_trait::async_trait]
 impl SessionMemoryStore for NoemaSessionStore {
     async fn append(&self, entry: SessionMemoryEntry) -> Result<(), SessionMemoryError> {
+        if let Some(ledger) = &self.ledger {
+            ledger.note_entry(&entry);
+        }
         let Some(candidate) = candidate_from_entry(&entry) else {
             return Ok(());
         };
@@ -245,17 +256,17 @@ pub fn read_attachments(paths: &[PathBuf], max: usize) -> Vec<FileAttachment> {
 pub fn build_restore_message(
     files: Vec<FileAttachment>,
     recall: Option<String>,
+    ledger: Option<String>,
     config: &PostCompactConfig,
 ) -> Option<(Message, String)> {
     let result = build_post_compact_message(files, config);
     let n_files = result.restored_paths.len();
     let has_recall = recall.is_some();
+    let has_ledger = ledger.is_some();
     let mut message = result.restored_message;
-    if let Some(recall_text) = recall {
-        let block = ContentBlock::Text {
-            text: format!("[Post-compaction memory recall]\n{recall_text}"),
-        };
-        message = Some(match message {
+    let append_block = |message: Option<Message>, text: String| {
+        let block = ContentBlock::Text { text };
+        Some(match message {
             Some(Message::User {
                 header,
                 mut content,
@@ -267,12 +278,22 @@ pub fn build_restore_message(
                 header: Header::new(),
                 content: vec![block],
             },
-        });
+        })
+    };
+    if let Some(recall_text) = recall {
+        message = append_block(
+            message,
+            format!("[Post-compaction memory recall]\n{recall_text}"),
+        );
+    }
+    if let Some(ledger_text) = ledger {
+        message = append_block(message, ledger_text);
     }
     let message = message?;
     let note = format!(
-        "post-compact restore: {n_files} file(s){}",
-        if has_recall { " + memory recall" } else { "" }
+        "post-compact restore: {n_files} file(s){}{}",
+        if has_recall { " + memory recall" } else { "" },
+        if has_ledger { " + session ledger" } else { "" }
     );
     Some((message, note))
 }
@@ -472,10 +493,11 @@ mod tests {
             path: PathBuf::from("/tmp/a.rs"),
             content: "fn a() {}".into(),
         }];
-        // Files + recall.
+        // Files + recall + ledger.
         let (msg, note) = build_restore_message(
             files.clone(),
             Some("- User prefers dark mode".into()),
+            Some("[Session ledger]\n1. build the thing".into()),
             &PostCompactConfig::default(),
         )
         .unwrap();
@@ -493,19 +515,37 @@ mod tests {
         assert!(texts
             .iter()
             .any(|t| t.starts_with("[Post-compaction memory recall]")));
-        assert_eq!(note, "post-compact restore: 1 file(s) + memory recall");
+        assert!(texts.iter().any(|t| t.starts_with("[Session ledger]")));
+        assert_eq!(
+            note,
+            "post-compact restore: 1 file(s) + memory recall + session ledger"
+        );
 
         // Recall only (all file reads failed).
         let (msg, note) = build_restore_message(
             Vec::new(),
             Some("- something".into()),
+            None,
             &PostCompactConfig::default(),
         )
         .unwrap();
         assert!(matches!(msg, Message::User { .. }));
         assert_eq!(note, "post-compact restore: 0 file(s) + memory recall");
 
+        // Ledger alone still produces a restore message.
+        let (msg, note) = build_restore_message(
+            Vec::new(),
+            None,
+            Some("[Session ledger]\n1. goal".into()),
+            &PostCompactConfig::default(),
+        )
+        .unwrap();
+        assert!(matches!(msg, Message::User { .. }));
+        assert_eq!(note, "post-compact restore: 0 file(s) + session ledger");
+
         // Nothing to restore.
-        assert!(build_restore_message(Vec::new(), None, &PostCompactConfig::default()).is_none());
+        assert!(
+            build_restore_message(Vec::new(), None, None, &PostCompactConfig::default()).is_none()
+        );
     }
 }

@@ -10144,6 +10144,10 @@ impl TuiApp {
                     if let Ok(mut s) = tab.engine.compact_state.lock() {
                         *s = agent::compact::AutoCompactState::default();
                     }
+                    // Same for the session ledger: a fresh conversation must
+                    // not have the discarded one's requests/notes re-injected
+                    // after its first compaction.
+                    tab.engine.ledger.clear();
                 }
             }
             "theme" => self.handle_theme(args),

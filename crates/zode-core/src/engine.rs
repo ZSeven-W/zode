@@ -444,6 +444,9 @@ pub struct CarryState {
     pub verification: Option<crate::verification::VerificationState>,
     pub tool_trace: Option<crate::tool_trace::ToolTrace>,
     pub reminders: Option<crate::reminders::ReminderTracker>,
+    /// Session working-state ledger — survives rebuilds so the post-compact
+    /// restore keeps its full-session view.
+    pub ledger: Option<crate::session_ledger::SessionLedger>,
     pub checkpoints: Option<crate::sessions::checkpoint::CheckpointTracker>,
     /// The git branch baked into the session's system prompt at its start
     /// (inner `None` = not a repo). Reused verbatim by a reassembly so the
@@ -470,6 +473,7 @@ impl ZodeEngine {
             verification: Some(self.verification.clone()),
             tool_trace: Some(self.tool_trace.clone()),
             reminders: Some(self.reminders.clone()),
+            ledger: Some(self.ledger.clone()),
             checkpoints: Some(self.checkpoints.clone()),
             session_git_branch: self.session_git_branch.clone(),
         }
@@ -777,6 +781,10 @@ pub struct ZodeEngine {
     pub verification: crate::verification::VerificationState,
     /// Durable JSONL trace file for full tool inputs/outputs, referenced by export.
     pub tool_trace: crate::tool_trace::ToolTrace,
+    /// Session working-state ledger (L2 memory): user requests, command
+    /// outcomes, and compaction analysis bullets, re-injected after every
+    /// compaction so the summary's omissions don't erase working state.
+    pub ledger: crate::session_ledger::SessionLedger,
     /// Per-turn system reminders: external file drift, todo staleness, and
     /// (via `check_branch_drift`) git branch drift.
     pub reminders: crate::reminders::ReminderTracker,
@@ -1012,6 +1020,7 @@ impl ZodeEngine {
             .clone()
             .unwrap_or_else(|| crate::tool_trace::ToolTrace::new(&cwd));
         let reminders = carry.reminders.clone().unwrap_or_default();
+        let ledger = carry.ledger.clone().unwrap_or_default();
         register_default_with_todo(&mut base, policy.clone(), todo_state.clone());
         // A sandbox-blocked file write must ask the user to escalate rather than
         // dead-end: otherwise the model retries the same write and finally works
@@ -1337,6 +1346,7 @@ impl ZodeEngine {
         )));
         hook_runner.register(Arc::new(tool_trace.hook()));
         hook_runner.register(Arc::new(reminders.hook()));
+        hook_runner.register(Arc::new(ledger.hook()));
         // External hooks.json scripts (global ⊕ project).
         for h in load_hook_handlers(&cwd) {
             hook_runner.register(h);
@@ -1781,6 +1791,7 @@ impl ZodeEngine {
             Arc::new(crate::compact_memory::NoemaSessionStore::new(
                 noema.clone(),
                 cwd.clone(),
+                Some(ledger.clone()),
             ))
         });
 
@@ -1863,6 +1874,7 @@ impl ZodeEngine {
             recent_files,
             restore_pending,
             last_restore_note: Arc::new(std::sync::Mutex::new(None)),
+            ledger,
             model_runtime,
             bash_sessions,
             todo_state,
@@ -2268,7 +2280,11 @@ impl ZodeEngine {
         abort: AbortController,
     ) -> Result<Box<dyn EventStream>, agent::error::AgentError> {
         let query = text_query(&content);
+        // Restore BEFORE recording: the injected ledger should reflect the
+        // session up to (not including) this prompt — the prompt itself
+        // lands in the transcript right after the restore message.
         self.restore_after_compact(&query);
+        self.ledger.note_user_request(&query);
         self.auto_remember_noema(&query);
         let mut notices = self
             .reminders
@@ -2379,9 +2395,12 @@ impl ZodeEngine {
             token_budget: cfg.restore_files_budget(),
             ..Default::default()
         };
-        let Some((message, note)) =
-            crate::compact_memory::build_restore_message(files, recall, &pc_config)
-        else {
+        let Some((message, note)) = crate::compact_memory::build_restore_message(
+            files,
+            recall,
+            self.ledger.render(),
+            &pc_config,
+        ) else {
             return;
         };
         if let Ok(mut store) = self.store.lock() {
@@ -3871,6 +3890,7 @@ mod tests {
                 std::env::temp_dir().join("zode-test-tool-trace.jsonl"),
             ),
             reminders: crate::reminders::ReminderTracker::default(),
+            ledger: crate::session_ledger::SessionLedger::default(),
             auto_loop_max_turns: None,
             max_api_retries: 10,
             temperature: None,
@@ -5497,8 +5517,8 @@ mod tests {
         .await
         .unwrap();
         // EditHistory + checkpoint + BgShell + compact-tracker + verification
-        // + tool-trace + reminders.
-        assert_eq!(eng.hooks.len(), 7);
+        // + tool-trace + reminders + session-ledger.
+        assert_eq!(eng.hooks.len(), 8);
         assert!(eng.undo().await.is_err()); // empty history
     }
 
@@ -5932,6 +5952,7 @@ mod tests {
         engine.session_store = Some(Arc::new(crate::compact_memory::NoemaSessionStore::new(
             adapter.clone(),
             PathBuf::from("."),
+            Some(engine.ledger.clone()),
         )));
         {
             let mut store = engine.store.lock().unwrap();
@@ -5969,6 +5990,14 @@ mod tests {
             .recall_for_turn("dark mode theme", Some(engine.cwd.as_path()))
             .unwrap();
         assert!(recalled.is_some(), "expected the sunk memory to recall");
+
+        // The same bullet was teed into the session ledger, so the NEXT
+        // post-compact restore carries it deterministically.
+        let ledger = engine.ledger.render().expect("ledger has the bullet");
+        assert!(
+            ledger.contains("REQUIREMENT: dark mode must be the default theme."),
+            "{ledger}"
+        );
     }
 
     #[tokio::test]
