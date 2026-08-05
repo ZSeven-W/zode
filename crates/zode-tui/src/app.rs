@@ -7162,7 +7162,15 @@ impl TuiApp {
         let engine_template = global_candidate
             .with_tool_access(self.tabs[tab_idx].extension_access)
             .with_plan_mode(self.tabs[tab_idx].plan_mode);
-        let hot_result = {
+        // A swap that crosses the standard↔lite boundary needs the full
+        // accommodation bundle (context/output caps, compact percent, tool
+        // trimming, re-anchor cadence) — only reassembly applies all of it,
+        // so the hot path is reserved for same-profile swaps.
+        let profile_changed =
+            self.tabs[tab_idx].engine.lite_profile != global_candidate.would_be_lite(id);
+        let hot_result = if profile_changed {
+            Ok(None)
+        } else {
             let tab = &mut self.tabs[tab_idx];
             match Arc::get_mut(&mut tab.engine) {
                 Some(engine) => engine_template
@@ -12413,31 +12421,53 @@ fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
         return String::new();
     };
 
-    for key in [
-        "path",
-        "file",
+    // The first matching primary key is the headline (a bare value when it
+    // is self-describing); the remaining simple-valued keys ride along as
+    // `key=value` so a call row leaks its other arguments too (a Grep's
+    // path beside its pattern). The what-was-asked keys outrank `path`: a
+    // Grep row led by its search root alone reads as "just a path". File
+    // PAYLOADS never make it onto the row — `content` and the edit
+    // old/new strings are arbitrary file substrings (potentially secrets),
+    // and edits already surface as diffs in the approval prompt.
+    const PRIMARY: [&str; 8] = [
         "command",
         "query",
         "pattern",
+        "path",
+        "file",
         "url",
         "title",
         "agent_type",
-    ] {
+    ];
+    const BARE: [&str; 4] = ["path", "file", "command", "url"];
+    const OMIT: [&str; 3] = ["content", "old_string", "new_string"];
+    const MAX_PARTS: usize = 3;
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut headline: Option<&str> = None;
+    for key in PRIMARY {
         if let Some(value) = obj.get(key).and_then(simple_value_summary) {
-            return if key == "path" || key == "file" || key == "command" || key == "url" {
+            parts.push(if BARE.contains(&key) {
                 value
             } else {
                 format!("{key}={value}")
-            };
+            });
+            headline = Some(key);
+            break;
         }
     }
-
-    obj.iter()
-        .filter(|(key, _)| !is_sensitive_key(key))
-        .filter_map(|(key, value)| simple_value_summary(value).map(|v| format!("{key}={v}")))
-        .take(2)
-        .collect::<Vec<_>>()
-        .join(" ")
+    for (key, value) in obj.iter() {
+        if parts.len() >= MAX_PARTS {
+            break;
+        }
+        if headline == Some(key.as_str()) || is_sensitive_key(key) || OMIT.contains(&key.as_str()) {
+            continue;
+        }
+        if let Some(v) = simple_value_summary(value).filter(|v| !v.is_empty()) {
+            parts.push(format!("{key}={v}"));
+        }
+    }
+    parts.join(" ")
 }
 
 fn simple_value_summary(value: &serde_json::Value) -> Option<String> {
@@ -12451,10 +12481,22 @@ fn simple_value_summary(value: &serde_json::Value) -> Option<String> {
 
 fn truncate_process_value(value: &str) -> String {
     const MAX_CHARS: usize = 80;
-    if value.chars().count() <= MAX_CHARS {
-        return value.to_string();
+    // Multi-line values (heredoc commands, edit payloads) must stay on the
+    // one-row summary — fold each line down to its trimmed content.
+    let flat: String = if value.contains('\n') {
+        value
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        value.to_string()
+    };
+    if flat.chars().count() <= MAX_CHARS {
+        return flat;
     }
-    format!("{}…", value.chars().take(MAX_CHARS).collect::<String>())
+    format!("{}…", flat.chars().take(MAX_CHARS).collect::<String>())
 }
 
 fn is_sensitive_key(key: &str) -> bool {
@@ -15219,13 +15261,13 @@ mod tests {
     async fn clicking_a_tool_activity_summary_expands_the_calls_behind_it() {
         use ratatui::{backend::TestBackend, Terminal};
         let (mut app, agent_tx) = make_test_app().await;
-        // Three finished calls as the event stream records them (call row,
+        // Nine finished calls as the event stream records them (call row,
         // result row, usage row each) — a run long enough to fold behind a
         // single summary line (small runs render their rows directly).
-        for cmd in ["cargo build", "cargo test", "cargo fmt"] {
+        for i in 0..9 {
             app.tabs[0]
                 .chat
-                .push_tool_call(&format!("Tool Bash {cmd}"), "Bash");
+                .push_tool_call(&format!("Tool Bash cargo step{i}"), "Bash");
             app.tabs[0].chat.push_tool_result("Tool Bash ok");
             app.tabs[0].chat.push_usage("Usage ↑10 ↓5");
         }
@@ -15235,10 +15277,10 @@ mod tests {
         term.draw(|f| app.draw(f)).unwrap();
         let rows = painted_rows(&term);
         assert!(
-            row_containing(&rows, "cargo build").is_none(),
+            row_containing(&rows, "cargo step0").is_none(),
             "the call rows must be folded away by default: {rows:?}"
         );
-        let summary = row_containing(&rows, "Ran 3 shell commands")
+        let summary = row_containing(&rows, "Ran 9 shell commands")
             .expect("a collapsed summary line should be painted");
 
         // A plain click (press + release, no drag) on that row opens the group.
@@ -15253,8 +15295,10 @@ mod tests {
 
         term.draw(|f| app.draw(f)).unwrap();
         let rows = painted_rows(&term);
+        // The expanded run is taller than the viewport; the tail of it — the
+        // last call and its usage row — is what stays on screen.
         assert!(
-            row_containing(&rows, "cargo build").is_some(),
+            row_containing(&rows, "cargo step8").is_some(),
             "clicking the summary should reveal the calls: {rows:?}"
         );
         assert!(
@@ -18881,6 +18925,47 @@ mod tests {
             process_line_for_event(&mcp, None).as_deref(),
             Some("MCP github.create_issue title=bug")
         );
+    }
+
+    #[test]
+    fn tool_input_summary_leaks_secondary_arguments() {
+        // The headline key renders bare; the other simple-valued arguments
+        // ride along (alphabetically) so a call row says more than a path.
+        let grep = serde_json::json!({
+            "pattern": "fn main",
+            "path": "src",
+            "output_mode": "content",
+        });
+        assert_eq!(
+            tool_input_summary("Grep", &grep),
+            "pattern=fn main path=src output_mode=content"
+        );
+
+        // File payloads (content / edit old+new strings) and secret-looking
+        // keys never appear — those are arbitrary file substrings; the
+        // simple flags still ride along.
+        let edit = serde_json::json!({
+            "path": "a.rs",
+            "old_string": "foo\n  bar",
+            "new_string": "let key = \"hunter2\";",
+            "replace_all": true,
+        });
+        assert_eq!(
+            tool_input_summary("FileEdit", &edit),
+            "a.rs replace_all=true"
+        );
+        let write = serde_json::json!({
+            "path": "a.rs",
+            "content": "either bulk payload",
+            "api_key": "hunter2",
+        });
+        assert_eq!(tool_input_summary("FileWrite", &write), "a.rs");
+
+        // Multi-line values elsewhere still flatten onto the one row.
+        let bash = serde_json::json!({
+            "command": "echo a\necho b",
+        });
+        assert_eq!(tool_input_summary("Bash", &bash), "echo a echo b");
     }
 
     #[test]

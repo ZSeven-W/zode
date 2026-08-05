@@ -1360,8 +1360,11 @@ fn render_group_summary(
     render_tool_process_line(&format!("{marker} "), summary, muted, muted, width)
 }
 
-/// Single-row header for a collapsed block: `▸ <first line, truncated> …
-/// (+N)` where N is the number of rows hidden by the fold.
+/// Single-row header for a collapsed block: `▸ <first line> · <first content
+/// line> … (+N)` where N is the number of rows hidden by the fold. The
+/// folded body's first non-empty line rides along so a collapsed result row
+/// still leaks what the tool actually returned ("Tool Bash done ·
+/// Compiling zode v0.1.0"), not just its status.
 fn render_tool_collapsed(
     text: &str,
     hidden_rows: usize,
@@ -1375,8 +1378,14 @@ fn render_tool_collapsed(
     let avail = (width as usize)
         .saturating_sub(2 + UnicodeWidthStr::width(label.as_str()))
         .saturating_sub(UnicodeWidthStr::width(suffix.as_str()));
-    let first = body.lines().next().unwrap_or_default();
-    let first = crate::ui::tabs::truncate_to_width(first, avail.max(1));
+    let mut body_lines = body.lines();
+    let first = body_lines.next().unwrap_or_default();
+    let peek = body_lines.map(str::trim).find(|l| !l.is_empty());
+    let first = match peek {
+        Some(content) => format!("{first} · {content}"),
+        None => first.to_string(),
+    };
+    let first = crate::ui::tabs::truncate_to_width(&first, avail.max(1));
     render_tool_process_line(
         &label,
         &format!("{first}{suffix}"),

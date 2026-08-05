@@ -35,18 +35,18 @@ fn a_finished_run_of_tool_rows_collapses_to_one_summary_line() {
     let theme = ThemeStore::with_builtins().resolve(None);
     let mut chat = ChatView::new();
     chat.push_user("build it");
-    push_finished_call(&mut chat, "Bash", "cargo build");
-    push_finished_call(&mut chat, "Bash", "cargo test");
-    push_finished_call(&mut chat, "Bash", "cargo fmt");
+    for i in 0..9 {
+        push_finished_call(&mut chat, "Bash", &format!("cargo step{i}"));
+    }
     chat.end_turn();
 
     let built = chat.build_lines(&theme, test_meta(), 80);
     let text = joined_text(&built.lines);
     assert!(
-        text.contains("Ran 3 shell commands"),
-        "nine rows should read as one summary: {text}"
+        text.contains("Ran 9 shell commands"),
+        "27 rows should read as one summary: {text}"
     );
-    assert!(!text.contains("cargo build"), "call rows must be folded");
+    assert!(!text.contains("cargo step0"), "call rows must be folded");
     assert!(!text.contains("some output"), "result rows must be folded");
     assert!(!text.contains("Usage"), "usage row must never stand alone");
     assert_eq!(built.group_toggles.len(), 1, "the summary is clickable");
@@ -83,18 +83,73 @@ fn small_runs_render_their_rows_instead_of_a_summary() {
 }
 
 #[test]
+fn mid_size_runs_keep_their_rows_visible() {
+    // A typical explore-then-edit turn (up to SMALL_RUN_MAX_CALLS calls)
+    // shows every call row — the path / command / pattern detail is the
+    // point of the transcript, and a count line would erase it.
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    chat.push_user("look around");
+    for i in 0..8 {
+        push_finished_call(&mut chat, "Bash", &format!("cargo step{i}"));
+    }
+    chat.end_turn();
+
+    let built = chat.build_lines(&theme, test_meta(), 80);
+    let text = joined_text(&built.lines);
+    for i in 0..8 {
+        assert!(
+            text.contains(&format!("cargo step{i}")),
+            "call row {i} stays visible: {text}"
+        );
+    }
+    assert!(
+        !text.contains("Ran 8 shell commands"),
+        "no count summary for a run at the threshold: {text}"
+    );
+    assert!(!text.contains("Usage"), "usage rows still fold: {text}");
+}
+
+#[test]
+fn a_collapsed_result_row_leaks_its_first_output_line() {
+    // The one-line fold of a result row carries the beginning of the output
+    // beside its status, so a closed transcript still says what came back.
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    chat.push_user("run it");
+    chat.push_tool_call("Tool Bash cargo build", "Bash");
+    chat.push_tool_result("Tool Bash done\n    Compiling zode v0.1.0\n    Finished dev");
+    chat.end_turn();
+
+    let built = chat.build_lines(&theme, test_meta(), 100);
+    let text = joined_text(&built.lines);
+    assert!(
+        text.contains("Tool Bash done · Compiling zode v0.1.0"),
+        "folded result leaks its first content line: {text}"
+    );
+    assert!(text.contains("(+2)"), "fold count still shown: {text}");
+    assert!(
+        !text.contains("Finished dev"),
+        "later output lines stay folded: {text}"
+    );
+}
+
+#[test]
 fn a_mixed_run_reads_as_one_sentence() {
     let theme = ThemeStore::with_builtins().resolve(None);
     let mut chat = ChatView::new();
-    push_finished_call(&mut chat, "Grep", "pattern=fn main");
-    push_finished_call(&mut chat, "Bash", "cargo test");
-    push_finished_call(&mut chat, "Bash", "cargo fmt");
+    for i in 0..4 {
+        push_finished_call(&mut chat, "Grep", &format!("pattern=fn main{i}"));
+    }
+    for i in 0..5 {
+        push_finished_call(&mut chat, "Bash", &format!("cargo step{i}"));
+    }
     chat.end_turn();
 
     let built = chat.build_lines(&theme, test_meta(), 80);
     let text = joined_text(&built.lines);
     assert!(
-        text.contains("Searched for 1 pattern, ran 2 shell commands"),
+        text.contains("Searched for 4 patterns, ran 5 shell commands"),
         "one line for the whole run: {text}"
     );
     assert_eq!(built.group_toggles.len(), 1, "adjacent rows are one group");
@@ -104,19 +159,19 @@ fn a_mixed_run_reads_as_one_sentence() {
 fn assistant_prose_between_tools_splits_the_groups() {
     let theme = ThemeStore::with_builtins().resolve(None);
     let mut chat = ChatView::new();
-    for detail in ["cargo build", "cargo test", "cargo fmt"] {
-        push_finished_call(&mut chat, "Bash", detail);
+    for i in 0..9 {
+        push_finished_call(&mut chat, "Bash", &format!("cargo step{i}"));
     }
     chat.push_delta("that failed, let me look");
-    for detail in ["src/main.rs", "src/lib.rs", "src/app.rs"] {
-        push_finished_call(&mut chat, "Read", detail);
+    for i in 0..9 {
+        push_finished_call(&mut chat, "Read", &format!("src/f{i}.rs"));
     }
     chat.end_turn();
 
     let built = chat.build_lines(&theme, test_meta(), 80);
     let text = joined_text(&built.lines);
-    assert!(text.contains("Ran 3 shell commands"));
-    assert!(text.contains("Read 3 files"));
+    assert!(text.contains("Ran 9 shell commands"));
+    assert!(text.contains("Read 9 files"));
     assert!(text.contains("that failed"), "prose stays between them");
     assert_eq!(built.group_toggles.len(), 2);
 }
@@ -146,21 +201,22 @@ fn the_running_group_shows_only_what_is_still_in_flight() {
     let theme = ThemeStore::with_builtins().resolve(None);
     let mut chat = ChatView::new();
     chat.push_user("build it");
-    push_finished_call(&mut chat, "Bash", "cargo build");
-    push_finished_call(&mut chat, "Bash", "cargo test");
-    // A third call starts and has not answered yet (three calls total, so
+    for i in 0..8 {
+        push_finished_call(&mut chat, "Bash", &format!("cargo step{i}"));
+    }
+    // A ninth call starts and has not answered yet (nine calls total, so
     // the run is past the small-run threshold and summarizes).
     chat.push_tool_call("Tool Bash cargo fmt", "Bash");
 
     let built = chat.build_lines(&theme, test_meta(), 80);
     let text = joined_text(&built.lines);
     assert!(
-        text.contains("▾ Ran 3 shell commands"),
+        text.contains("▾ Ran 9 shell commands"),
         "live header counts every call: {text}"
     );
     assert!(text.contains("cargo fmt"), "the running call stays visible");
     assert!(
-        !text.contains("cargo build") && !text.contains("cargo test"),
+        !text.contains("cargo step0") && !text.contains("cargo step7"),
         "finished calls belong to the count, not the screen: {text}"
     );
     assert!(
@@ -174,10 +230,10 @@ fn the_running_group_shows_only_what_is_still_in_flight() {
     let built = chat.build_lines(&theme, test_meta(), 80);
     let text = joined_text(&built.lines);
     assert!(
-        text.contains("▸ Ran 3 shell commands"),
+        text.contains("▸ Ran 9 shell commands"),
         "folded header: {text}"
     );
-    assert!(!text.contains("cargo build") && !text.contains("cargo test"));
+    assert!(!text.contains("cargo step0") && !text.contains("cargo step7"));
 }
 
 #[test]
@@ -238,12 +294,15 @@ fn manually_expanding_a_live_group_still_reveals_every_row() {
 fn a_thinking_block_with_no_visible_text_neither_renders_nor_splits_a_run() {
     let theme = ThemeStore::with_builtins().resolve(None);
     let mut chat = ChatView::new();
-    push_finished_call(&mut chat, "Bash", "cargo build");
-    push_finished_call(&mut chat, "Bash", "cargo test");
+    for i in 0..5 {
+        push_finished_call(&mut chat, "Bash", &format!("cargo step{i}"));
+    }
     // Some providers emit thinking blocks that carry nothing but whitespace.
     chat.push_thinking_delta("\n\n");
     chat.push_thinking_delta("   ");
-    push_finished_call(&mut chat, "Grep", "pattern=fn main");
+    for i in 0..4 {
+        push_finished_call(&mut chat, "Grep", &format!("pattern=fn main{i}"));
+    }
     chat.end_turn();
 
     let built = chat.build_lines(&theme, test_meta(), 80);
@@ -257,22 +316,22 @@ fn a_thinking_block_with_no_visible_text_neither_renders_nor_splits_a_run() {
         1,
         "the runs on either side merge past the small-run threshold: {text}"
     );
-    assert!(text.contains("Ran 2 shell commands, searched for 1 pattern"));
+    assert!(text.contains("Ran 5 shell commands, searched for 4 patterns"));
 }
 
 #[test]
 fn thinking_that_arrives_after_blank_deltas_still_splits_the_run() {
     let theme = ThemeStore::with_builtins().resolve(None);
     let mut chat = ChatView::new();
-    push_finished_call(&mut chat, "Bash", "cargo build");
-    push_finished_call(&mut chat, "Bash", "cargo check");
-    push_finished_call(&mut chat, "Bash", "cargo test");
+    for i in 0..9 {
+        push_finished_call(&mut chat, "Bash", &format!("cargo step{i}"));
+    }
     // The block opens on whitespace, then real reasoning streams in.
     chat.push_thinking_delta("  ");
     chat.push_thinking_delta("now let me search");
-    push_finished_call(&mut chat, "Grep", "pattern=fn main");
-    push_finished_call(&mut chat, "Grep", "pattern=fn run");
-    push_finished_call(&mut chat, "Grep", "pattern=fn check");
+    for i in 0..9 {
+        push_finished_call(&mut chat, "Grep", &format!("pattern=fn main{i}"));
+    }
     chat.end_turn();
 
     let built = chat.build_lines(&theme, test_meta(), 80);
@@ -293,9 +352,9 @@ fn clicking_a_group_summary_reveals_the_rows_it_stands_for() {
     let theme = ThemeStore::with_builtins().resolve(None);
     let meta = test_meta();
     let mut chat = ChatView::new();
-    push_finished_call(&mut chat, "Bash", "cargo build");
-    push_finished_call(&mut chat, "Bash", "cargo test");
-    push_finished_call(&mut chat, "Bash", "cargo fmt");
+    for i in 0..9 {
+        push_finished_call(&mut chat, "Bash", &format!("cargo step{i}"));
+    }
     chat.end_turn();
     let area = Rect::new(0, 0, 80, 24);
 
@@ -319,7 +378,7 @@ fn clicking_a_group_summary_reveals_the_rows_it_stands_for() {
 
     let built = chat.build_lines(&theme, meta, 80);
     let text = joined_text(&built.lines);
-    assert!(text.contains("cargo build"), "call row revealed: {text}");
+    assert!(text.contains("cargo step0"), "call row revealed: {text}");
     assert!(text.contains("Usage"), "usage row revealed too: {text}");
     // The rows inside keep their own folds, one line each.
     assert!(text.contains("(+1)"), "result output still folded: {text}");
@@ -333,15 +392,15 @@ fn clicking_a_group_summary_reveals_the_rows_it_stands_for() {
 fn expand_all_reveals_grouped_rows_too() {
     let theme = ThemeStore::with_builtins().resolve(None);
     let mut chat = ChatView::new();
-    push_finished_call(&mut chat, "Bash", "cargo build");
-    push_finished_call(&mut chat, "Bash", "cargo test");
-    push_finished_call(&mut chat, "Bash", "cargo fmt");
+    for i in 0..9 {
+        push_finished_call(&mut chat, "Bash", &format!("cargo step{i}"));
+    }
     chat.end_turn();
 
     assert!(chat.toggle_all_collapsed(), "first press expands all");
     let built = chat.build_lines(&theme, test_meta(), 80);
     let text = joined_text(&built.lines);
-    assert!(text.contains("cargo build"), "group opened: {text}");
+    assert!(text.contains("cargo step0"), "group opened: {text}");
     assert!(
         text.contains("some output"),
         "inner folds opened too: {text}"
@@ -349,32 +408,34 @@ fn expand_all_reveals_grouped_rows_too() {
 
     assert!(!chat.toggle_all_collapsed(), "second press folds all");
     let built = chat.build_lines(&theme, test_meta(), 80);
-    assert!(!joined_text(&built.lines).contains("cargo build"));
+    assert!(!joined_text(&built.lines).contains("cargo step0"));
 }
 
 #[test]
 fn hiding_thinking_merges_the_runs_it_separated() {
     let theme = ThemeStore::with_builtins().resolve(None);
     let mut chat = ChatView::new();
-    push_finished_call(&mut chat, "Bash", "cargo build");
-    push_finished_call(&mut chat, "Bash", "cargo test");
+    for i in 0..5 {
+        push_finished_call(&mut chat, "Bash", &format!("cargo step{i}"));
+    }
     chat.push_thinking_delta("now let me search");
-    push_finished_call(&mut chat, "Grep", "pattern=fn main");
-    push_finished_call(&mut chat, "Grep", "pattern=fn run");
+    for i in 0..4 {
+        push_finished_call(&mut chat, "Grep", &format!("pattern=fn main{i}"));
+    }
     chat.end_turn();
 
     // Thinking shown: it breaks the run in two SMALL runs, which render
     // their real rows (no summaries, nothing to toggle).
     let built = chat.build_lines(&theme, test_meta(), 80);
     assert!(built.group_toggles.is_empty());
-    assert!(joined_text(&built.lines).contains("cargo build"));
+    assert!(joined_text(&built.lines).contains("cargo step0"));
 
     // Thinking hidden: the runs merge past the small-run threshold and
     // read as one summary line.
     chat.set_display_prefs(false, true);
     let built = chat.build_lines(&theme, test_meta(), 80);
     assert_eq!(built.group_toggles.len(), 1);
-    assert!(joined_text(&built.lines).contains("Ran 2 shell commands, searched for 2 patterns"));
+    assert!(joined_text(&built.lines).contains("Ran 5 shell commands, searched for 4 patterns"));
 }
 
 #[test]

@@ -104,7 +104,9 @@ const MAX_NAMED_TOOLS: usize = 2;
 /// user actually wants to see) instead of a count line that erases them —
 /// "searched for 1 pattern" says strictly less than the row it replaced.
 /// Longer runs keep the one-line summary that kills wall-of-noise turns.
-pub const SMALL_RUN_MAX_CALLS: usize = 2;
+/// Eight covers the typical explore-then-edit turn; past that the run is
+/// genuinely a wall of process noise and the count line earns its keep.
+pub const SMALL_RUN_MAX_CALLS: usize = 8;
 
 fn bucket_for(tool: &str) -> Bucket {
     match tool {
