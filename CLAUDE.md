@@ -493,10 +493,12 @@ is the primary context, that ambiguous/deictic page questions should call
 workspace unless the user explicitly asks about project code or files. The
 block is sent to the engine but omitted from the panel's displayed user text.
 
-The extension version tracks the workspace crate version: `package.json` and
-the manifest's `version_name` carry the full value (`0.1.0-beta.9`) while the
-manifest's `version` carries its numeric core, since Chrome only accepts dotted
-integers there. `manifest.test.js` reads `Cargo.toml` and enforces this.
+The extension version tracks the workspace crate version: `package.json`
+carries the full value while the manifest's `version` carries its numeric
+core, since Chrome only accepts dotted integers there. On a pre-release
+(e.g. `0.1.0-beta.9`) the full value also goes in the manifest's
+`version_name`; on a stable release the two are equal and `version_name`
+is omitted. `manifest.test.js` reads `Cargo.toml` and enforces this.
 
 Clipboard images paste into the composer (`clipboardImages` in `App.tsx` renames
 each blob to `pasted-<stamp>.<ext>` before the normal attachment upload path).
