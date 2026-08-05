@@ -747,6 +747,11 @@ pub struct CompactSettings {
     /// Append a noema recall pack to the restoration message. Default true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recall_after_compact: Option<bool>,
+    /// Context-occupancy percent (prompt tokens vs the model window — the
+    /// badge value) at which the between-turn auto-compaction fires.
+    /// Clamped to 50–97; absent → the built-in default (85).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_compact_percent: Option<u64>,
 }
 
 impl CompactSettings {
@@ -764,6 +769,12 @@ impl CompactSettings {
     }
     pub fn recall_after_compact(&self) -> bool {
         self.recall_after_compact.unwrap_or(true)
+    }
+    /// Configured auto-compact occupancy percent, bounded so a typo can
+    /// neither compact every turn (< 50) nor push compaction past the
+    /// validation-safety guard (> 97). `None` → caller default.
+    pub fn auto_compact_percent(&self) -> Option<u64> {
+        self.auto_compact_percent.map(|p| p.clamp(50, 97))
     }
 }
 
@@ -1697,6 +1708,8 @@ impl ZodeConfig {
             c.restore_files_budget.or(self.compact.restore_files_budget);
         self.compact.recall_after_compact =
             c.recall_after_compact.or(self.compact.recall_after_compact);
+        self.compact.auto_compact_percent =
+            c.auto_compact_percent.or(self.compact.auto_compact_percent);
 
         let w = other.background_watchdog;
         self.background_watchdog.enabled = w.enabled.or(self.background_watchdog.enabled);
@@ -3281,6 +3294,22 @@ mod tests {
         assert!(bare.compact.restore_files());
         assert_eq!(bare.compact.restore_files_budget(), 50_000);
         assert!(bare.compact.recall_after_compact());
+        assert_eq!(bare.compact.auto_compact_percent(), None);
+
+        // The percent knob parses, clamps typos into the sane band, and
+        // merges by presence like the other keys.
+        let pct: ZodeConfig =
+            serde_json::from_str(r#"{"compact":{"autoCompactPercent":75}}"#).unwrap();
+        assert_eq!(pct.compact.auto_compact_percent(), Some(75));
+        let low: ZodeConfig =
+            serde_json::from_str(r#"{"compact":{"autoCompactPercent":5}}"#).unwrap();
+        assert_eq!(low.compact.auto_compact_percent(), Some(50));
+        let high: ZodeConfig =
+            serde_json::from_str(r#"{"compact":{"autoCompactPercent":100}}"#).unwrap();
+        assert_eq!(high.compact.auto_compact_percent(), Some(97));
+        let mut merged = ZodeConfig::default();
+        merged.merge_from(pct);
+        assert_eq!(merged.compact.auto_compact_percent, Some(75));
 
         // camelCase keys parse; explicit values win.
         let cfg: ZodeConfig = serde_json::from_str(

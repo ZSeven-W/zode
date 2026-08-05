@@ -76,7 +76,17 @@ mode and execute.";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_384;
 const DEFAULT_MODEL_MAX_TOKENS: u32 = 200_000;
 const FILE_CACHE_ENTRIES: usize = 1024;
-const PRE_TURN_COMPACT_PERCENT: u64 = 98;
+/// Default occupancy percent (prompt alone vs the window — the badge value)
+/// at which the between-turn auto-compaction fires. Overridable via
+/// `compact.autoCompactPercent`. 85 tracks the runtime's own ~83.5%
+/// threshold on a 200k window; the old combined `prompt + completion ≥ 98%`
+/// formula let small-completion models coast to 95%+ before compacting.
+const PRE_TURN_COMPACT_PERCENT: u64 = 85;
+/// Fixed validation-safety percent: the provider validates
+/// `prompt + max_tokens`, so a huge completion budget (384k on a ~1M window)
+/// can 400 the request long before the prompt itself is full. This guard is
+/// not user-tunable — it exists to keep requests valid, not to shape UX.
+const PRE_TURN_SAFETY_PERCENT: u64 = 98;
 
 /// Process-cached models.dev catalog (parsed once) used to look up a model's
 /// published context window when the config doesn't pin one.
@@ -213,6 +223,15 @@ pub(crate) fn map_effort(
     }
 }
 
+/// Whether the next turn must be preceded by a compaction. Two triggers:
+///
+/// - **Occupancy** (`percent`, the `compact.autoCompactPercent` knob): the
+///   prompt alone has filled that share of the window. This is the trigger
+///   users experience, so it keys off the badge value directly.
+/// - **Validation safety** (fixed [`PRE_TURN_SAFETY_PERCENT`]): the prompt
+///   plus the FULL configured completion budget is nearly at the window, so
+///   the next request risks failing provider `prompt + max_tokens`
+///   validation even though the prompt alone still looks roomy.
 fn pre_turn_compact_needed(
     input_tokens: u32,
     context_window: u32,
@@ -222,13 +241,17 @@ fn pre_turn_compact_needed(
     if context_window == 0 {
         return false;
     }
-    let threshold = ((context_window as u64) * percent / 100) as u32;
+    let occupancy_threshold = ((context_window as u64) * percent / 100) as u32;
+    if input_tokens >= occupancy_threshold {
+        return true;
+    }
+    let safety_threshold = ((context_window as u64) * PRE_TURN_SAFETY_PERCENT / 100) as u32;
     let output_budget = if context_window <= 1 {
         max_output_tokens
     } else {
         max_output_tokens.min(context_window - 1)
     };
-    input_tokens.saturating_add(output_budget) >= threshold
+    input_tokens.saturating_add(output_budget) >= safety_threshold
 }
 
 /// Resolve the agent loop's runaway backstop. The loop already stops the moment
@@ -258,7 +281,7 @@ const FILE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const LITE_CONTEXT_CAP: u32 = 96_000;
 /// Output cap: less room for runaway thinking / degenerate repetition.
 const LITE_MAX_OUTPUT: u32 = 8_192;
-/// Occupancy percent for the pre-turn compact check (standard: 98).
+/// Occupancy percent for the pre-turn compact check (standard: 85).
 const LITE_PRE_TURN_COMPACT_PERCENT: u64 = 70;
 /// Re-anchor cadence: every N turns the per-turn reminder replays the todo
 /// list so the model doesn't lose the plot mid-task.
@@ -642,8 +665,9 @@ pub struct ZodeEngine {
     /// models are capped at [`LITE_CONTEXT_CAP`] — their capability decays
     /// with length faster than the window fills.
     pub model_max_tokens: u32,
-    /// Occupancy percent for the pre-turn compact check (98 standard, 70
-    /// lite — see [`ModelProfile`](crate::config::ModelProfile)).
+    /// Occupancy percent for the pre-turn compact check (85 standard —
+    /// overridable via `compact.autoCompactPercent` — 70 lite; see
+    /// [`ModelProfile`](crate::config::ModelProfile)).
     pub pre_turn_compact_percent: u64,
     /// Lite: replay the todo list into the per-turn reminder every N turns.
     pub reanchor_every: Option<u32>,
@@ -1812,10 +1836,16 @@ impl ZodeEngine {
                     resolved
                 }
             },
-            pre_turn_compact_percent: if lite {
-                LITE_PRE_TURN_COMPACT_PERCENT
-            } else {
-                PRE_TURN_COMPACT_PERCENT
+            pre_turn_compact_percent: {
+                let pct = cfg
+                    .compact
+                    .auto_compact_percent()
+                    .unwrap_or(PRE_TURN_COMPACT_PERCENT);
+                if lite {
+                    pct.min(LITE_PRE_TURN_COMPACT_PERCENT)
+                } else {
+                    pct
+                }
             },
             reanchor_every: lite.then_some(LITE_REANCHOR_EVERY),
             strict_loop_guard: lite,
@@ -1975,11 +2005,11 @@ impl ZodeEngine {
     /// resumed context, long `--no-tui` sessions). The QueryLoop already
     /// auto-compacts on a byte estimate, but that under-counts CJK; when the
     /// caller has the provider-reported prompt size (`context_tokens`, the last
-    /// turn's Usage), this checks the ACCURATE request budget (prompt tokens
-    /// plus the configured completion budget) and compacts before the next turn
-    /// so the conversation can't sail past provider `prompt + max_tokens`
-    /// validation and hard-400. `None` falls back to a byte estimate of the
-    /// store.
+    /// turn's Usage), this checks the ACCURATE occupancy against the
+    /// configurable percent (and the fixed `prompt + max_tokens` validation
+    /// guard) and compacts before the next turn, so the conversation neither
+    /// coasts to 95%+ occupancy nor hard-400s on provider validation. `None`
+    /// falls back to a byte estimate of the store.
     /// Best-effort: a compaction failure is logged, not surfaced. Returns
     /// whether a compaction ran.
     pub async fn auto_compact_if_needed(&self, context_tokens: Option<u32>) -> bool {
@@ -2055,13 +2085,12 @@ impl ZodeEngine {
         (system, tools)
     }
 
-    /// Whether `input_tokens` (accurate, provider-reported occupancy) plus the
-    /// configured completion budget crosses the pre-turn compaction threshold.
-    /// The TUI's between-turn guard uses this so it shares one definition of
-    /// "too full" with the headless pre-turn check — comparing occupancy alone
-    /// against the window ignores the output budget and lets a turn start with
-    /// so little headroom that the completion gets clamped to the floor and
-    /// truncates mid tool call.
+    /// Whether `input_tokens` (accurate, provider-reported occupancy) crosses
+    /// the pre-turn compaction threshold — either the configurable occupancy
+    /// percent, or the fixed validation-safety guard on `prompt + completion
+    /// budget` (see [`pre_turn_compact_needed`]). The TUI's between-turn
+    /// guard uses this so it shares one definition of "too full" with the
+    /// headless pre-turn check.
     pub fn needs_pre_turn_compact(&self, input_tokens: u32) -> bool {
         pre_turn_compact_needed(
             input_tokens,
@@ -3245,6 +3274,21 @@ impl EngineTemplate {
         engine.model = model.clone();
         engine.model_max_tokens = context_window;
         engine.max_output_tokens = max_output_tokens;
+        // Same derivation as `assemble`, against the engine's (unchanged)
+        // profile — the host forces a full reassembly when the swap crosses
+        // the standard↔lite boundary, so `lite_profile` is accurate here.
+        engine.pre_turn_compact_percent = {
+            let pct = template
+                .cfg
+                .compact
+                .auto_compact_percent()
+                .unwrap_or(PRE_TURN_COMPACT_PERCENT);
+            if engine.lite_profile {
+                pct.min(LITE_PRE_TURN_COMPACT_PERCENT)
+            } else {
+                pct
+            }
+        };
         engine
             .model_runtime
             .update(engine.provider.clone(), model.clone());
@@ -5791,8 +5835,9 @@ mod tests {
     fn pre_turn_compact_reserves_completion_budget() {
         // Reported Anthropic failure:
         // messages=871_190, completion=384_000, window=1_048_565.
-        // Input alone is only ~83% of the window, so an input-only 98% guard
-        // would skip compaction, but providers validate prompt + max_tokens.
+        // Input alone is only ~83% of the window, so an occupancy-only guard
+        // would skip compaction, but providers validate prompt + max_tokens —
+        // the fixed safety trigger fires regardless of the percent knob.
         assert!(pre_turn_compact_needed(871_190, 1_048_565, 384_000, 98));
 
         // The same prompt with a normal 16k completion still has enough room.
@@ -5802,6 +5847,29 @@ mod tests {
 
         // Preserve the old near-full prompt behavior even with small outputs.
         assert!(pre_turn_compact_needed(1_030_000, 1_048_565, 512, 98));
+    }
+
+    #[test]
+    fn pre_turn_compact_occupancy_trigger_uses_the_badge_value() {
+        // The occupancy trigger keys off the prompt alone: at the default 85
+        // percent, a 200k-window prompt compacts at 170k even though prompt +
+        // a small completion budget is nowhere near the window. The old
+        // combined formula (prompt + completion vs 98%) waited until ~94%
+        // here.
+        assert!(pre_turn_compact_needed(
+            170_000,
+            200_000,
+            8_192,
+            PRE_TURN_COMPACT_PERCENT
+        ));
+        assert!(!pre_turn_compact_needed(
+            160_000,
+            200_000,
+            8_192,
+            PRE_TURN_COMPACT_PERCENT
+        ));
+        // Degenerate window still short-circuits.
+        assert!(!pre_turn_compact_needed(0, 0, 8_192, 85));
     }
 
     #[test]
