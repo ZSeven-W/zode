@@ -76,7 +76,11 @@ async fn wait_for_pid(path: &Path) -> i32 {
 
 #[cfg(unix)]
 async fn assert_process_group_gone(pgid: i32) {
-    for _ in 0..300 {
+    // Generous window: the kill itself is prompt, but under a fully loaded
+    // machine (workspace-wide `cargo test` saturating every core) the reaper
+    // thread and the timer wheel both lag — 3s flaked twice in real runs.
+    // Returns as soon as the group is gone, so the happy path stays fast.
+    for _ in 0..1500 {
         let result = unsafe { libc::killpg(pgid, 0) };
         if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
             return;
