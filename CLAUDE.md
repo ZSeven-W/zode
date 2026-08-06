@@ -546,16 +546,17 @@ the dark `icons/zode-*.png` and light `icons/zode-light-*.png` sets. Static
 manifest icons stay dark.
 
 Install and update details live in `extensions/chrome/README.md`. The
-developer-keyed ID is `hcabdgpfhoclfgnknddadgfhhdnlkloc`; the manifest embeds
-the public key so unpacked and packed installs share it. The Rust bridge
-server checks the extension ID in the WebSocket Origin header AND in the
-native-messaging manifest's `allowed_origins` — but the accept list is
-**config-driven, not hardcoded**: `browser.extensionIds` (an array; unset →
-the developer ID) is installed via
+extension ID is `hmnlhofbekmkhmifkfkkmmpigijlkcca` — the Chrome-Web-Store
+build, the single shipping channel. The Rust bridge server checks that ID in
+the WebSocket Origin header AND in the native-messaging manifest's
+`allowed_origins` — but the accept list is **config-driven, not hardcoded**:
+`browser.extensionIds` (an array; unset → the published ID) is installed via
 `bridge::server::set_allowed_extension_ids` before any listener accepts a
-connection. The Chrome Web Store mints a NEW ID on publish (it ignores the
-manifest `key`), so a store install requires adding that store ID to
-`browser.extensionIds`. Store upload ZIP: `extensions/chrome/pack-store.sh`
+connection. Setting the key REPLACES the list, and its FIRST entry is also
+what the pairing/connect popup URL targets (`primary_extension_id()`). A
+locally-built extension is NOT covered by the store's key — the manifest's
+own `key` yields a different ID (unpacked/CRX), so add that ID there to pair
+against a dev build. Store upload ZIP: `extensions/chrome/pack-store.sh`
 (strips the `key`); `is_invocation_arg` shape-checks any
 `chrome-extension://<id>/` origin (it runs before config loads; real access
 stays gated by the manifest allowlist + WS token/Origin).

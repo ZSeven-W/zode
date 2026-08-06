@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>zode bridge — Chrome Web Store screenshots</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display",
+          "Segoe UI", sans-serif;
+        background: #07101f;
+      }
+
+      * { box-sizing: border-box; }
+      html, body { width: 1280px; height: 800px; margin: 0; overflow: hidden; }
+      body { background: #07101f; }
+      .shot { display: none; position: relative; width: 1280px; height: 800px; overflow: hidden; }
+      .shot.active { display: block; }
+      .aurora { position: absolute; inset: 0; background: #07101f url("aurora-background.png") center / cover no-repeat; }
+      .aurora::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(5, 12, 28, .38), rgba(5, 12, 28, .04) 52%, rgba(5, 12, 28, .3)); }
+      .grain { position: absolute; inset: 0; opacity: .28; background-image: radial-gradient(rgba(255,255,255,.17) .55px, transparent .7px); background-size: 7px 7px; mix-blend-mode: overlay; }
+      .brand { position: absolute; z-index: 2; top: 30px; left: 52px; display: flex; align-items: center; gap: 10px; color: rgba(236, 244, 255, .94); font-size: 16px; font-weight: 700; letter-spacing: -.02em; }
+      .brand img { width: 28px; height: 28px; border-radius: 8px; box-shadow: 0 7px 22px rgba(54, 113, 255, .28); }
+      .brand span { color: rgba(167, 187, 255, .78); font-weight: 560; }
+      .kicker { position: absolute; z-index: 2; top: 82px; left: 52px; display: inline-flex; align-items: center; gap: 8px; color: #aec5ff; font-size: 13px; font-weight: 700; letter-spacing: .11em; text-transform: uppercase; }
+      .kicker::before { content: ""; width: 19px; height: 1px; background: #7ea7ff; }
+      .headline { position: absolute; z-index: 2; top: 108px; left: 50px; width: 810px; margin: 0; color: #f8fbff; font-size: 42px; line-height: 1.06; font-weight: 730; letter-spacing: -.046em; text-shadow: 0 4px 30px rgba(0,0,0,.18); }
+      .headline .accent { color: #a9c6ff; }
+      .subtitle { position: absolute; z-index: 2; top: 206px; left: 53px; width: 700px; margin: 0; color: rgba(215, 226, 246, .86); font-size: 17px; line-height: 1.45; letter-spacing: -.012em; }
+      .footnote { position: absolute; z-index: 2; bottom: 26px; left: 54px; color: rgba(191, 207, 235, .68); font-size: 12px; letter-spacing: .01em; }
+      .page-count { position: absolute; z-index: 2; right: 53px; bottom: 27px; color: rgba(191, 207, 235, .58); font-size: 12px; font-variant-numeric: tabular-nums; letter-spacing: .08em; }
+
+      .browser { position: absolute; z-index: 3; left: 52px; right: 52px; bottom: 57px; height: 506px; overflow: hidden; border: 1px solid rgba(187, 209, 255, .26); border-radius: 18px; background: #f8fafc; box-shadow: 0 30px 70px rgba(0,0,0,.42), 0 1px 0 rgba(255,255,255,.22) inset; }
+      .chrome-bar { height: 58px; padding: 9px 14px 7px; border-bottom: 1px solid #dce3ed; background: linear-gradient(#f7f9fd, #eef3fa); }
+      .tab-row { display: flex; align-items: center; gap: 7px; height: 23px; }
+      .tab { display: flex; align-items: center; gap: 7px; width: 194px; height: 23px; padding: 0 10px; border-radius: 8px 8px 0 0; color: #475569; font-size: 10px; background: #e6ebf2; }
+      .tab.active { color: #1e293b; background: #fff; box-shadow: 0 1px 2px rgba(15,23,42,.05); }
+      .tab-dot { width: 9px; height: 9px; border-radius: 3px; background: linear-gradient(135deg, #9d7aea, #4f70ee); }
+      .tab .x { margin-left: auto; color: #94a3b8; font-size: 13px; line-height: 1; }
+      .plus { margin-left: 3px; color: #64748b; font-size: 18px; font-weight: 300; line-height: 18px; }
+      .omnibox-row { display: flex; align-items: center; gap: 9px; margin-top: 5px; }
+      .nav { display: flex; width: 47px; justify-content: space-between; color: #64748b; font-size: 16px; }
+      .omnibox { display: flex; align-items: center; gap: 8px; flex: 1; height: 23px; padding: 0 10px; border: 1px solid #dce3ed; border-radius: 12px; color: #64748b; background: #fff; font-size: 10px; }
+      .lock { color: #20a875; font-size: 11px; }
+      .chrome-profile { display: grid; width: 21px; height: 21px; place-items: center; border-radius: 50%; color: #fff; background: linear-gradient(135deg,#6a5de9,#2a76db); font-size: 9px; font-weight: 700; }
+      .browser-body { display: flex; height: calc(100% - 58px); color: #1e293b; }
+      .website { position: relative; flex: 1; overflow: hidden; background: #f8fafc; }
+      .side-panel { display: flex; flex-direction: column; width: 375px; min-width: 375px; border-left: 1px solid #dce3ed; background: #f7f7f6; color: #18171b; }
+
+      .site-top { display: flex; align-items: center; height: 50px; padding: 0 20px; border-bottom: 1px solid #e7eaf0; background: rgba(255,255,255,.9); }
+      .site-mark { display: flex; align-items: center; gap: 8px; color: #172033; font-size: 13px; font-weight: 730; letter-spacing: -.02em; }
+      .site-orb { width: 17px; height: 17px; border-radius: 6px; background: conic-gradient(from 140deg, #293ae3, #65a9ff, #835af5, #293ae3); }
+      .site-links { display: flex; gap: 19px; margin-left: auto; color: #718096; font-size: 11px; }
+      .site-content { padding: 28px 32px; }
+      .crumb { color: #64748b; font-size: 10px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
+      .site-title { margin: 10px 0 7px; color: #182235; font-size: 24px; line-height: 1.14; font-weight: 735; letter-spacing: -.04em; }
+      .site-copy { max-width: 465px; margin: 0; color: #667085; font-size: 12px; line-height: 1.55; }
+      .metric-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; margin-top: 20px; }
+      .metric { padding: 13px; border: 1px solid #e3e9f2; border-radius: 10px; background: #fff; box-shadow: 0 4px 14px rgba(22,34,51,.035); }
+      .metric-label { color: #8190a5; font-size: 10px; font-weight: 620; }
+      .metric-value { margin-top: 5px; color: #1d2939; font-size: 18px; font-weight: 735; letter-spacing: -.04em; }
+      .article-card { margin-top: 17px; padding: 17px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; box-shadow: 0 8px 24px rgba(21,34,50,.04); }
+      .article-card h3 { margin: 0 0 7px; color: #1c283a; font-size: 14px; letter-spacing: -.018em; }
+      .lines { display: grid; gap: 7px; }
+      .line { height: 7px; border-radius: 8px; background: #e9edf3; }
+      .line.blue { background: linear-gradient(90deg, #dce9ff, #ecf4ff); }
+      .line:nth-child(1) { width: 91%; } .line:nth-child(2) { width: 77%; } .line:nth-child(3) { width: 86%; } .line:nth-child(4) { width: 59%; }
+      .tag-row { display: flex; gap: 7px; margin-top: 15px; }
+      .tag { padding: 4px 7px; border-radius: 6px; color: #3064ba; background: #edf5ff; font-size: 9px; font-weight: 650; }
+      .tag.gray { color: #667085; background: #f1f3f6; }
+
+      .panel-head { display: flex; align-items: center; height: 56px; padding: 0 13px; border-bottom: 1px solid #dfdcdf; background: rgba(255,255,255,.7); }
+      .panel-head img { width: 27px; height: 27px; border-radius: 7px; }
+      .panel-name { margin-left: 8px; font-size: 13px; font-weight: 730; letter-spacing: -.02em; }
+      .connected { display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; color: #21835b; font-size: 9px; font-weight: 700; }
+      .connected::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #32a977; box-shadow: 0 0 0 3px rgba(50,169,119,.1); }
+      .work-badge { margin-left: auto; max-width: 83px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 6px; border-radius: 6px; color: #635f68; background: #efeeed; font-size: 9px; font-weight: 600; }
+      .task-select { display: flex; align-items: center; gap: 8px; height: 39px; margin: 10px 11px 0; padding: 0 10px; border-radius: 8px; color: #35323a; background: #eeecf2; font-size: 10px; font-weight: 680; }
+      .task-select .chev { margin-left: auto; color: #7a7480; }
+      .panel-scroll { min-height: 0; flex: 1 1 auto; padding: 17px 13px 8px; overflow: hidden; }
+      .message { display: flex; gap: 8px; margin-bottom: 14px; }
+      .message.user { flex-direction: row-reverse; }
+      .avatar { display: grid; width: 24px; height: 24px; flex: 0 0 auto; place-items: center; border: 1px solid #dfdcdf; border-radius: 7px; color: #2563eb; background: #fff; font-size: 11px; font-weight: 800; }
+      .message.user .avatar { color: #fff; border-color: #b7d0ff; background: #2563eb; }
+      .bubble-wrap { min-width: 0; max-width: 294px; }
+      .role { margin: 1px 3px 5px; color: #8b858f; font-size: 8px; font-weight: 760; letter-spacing: .12em; text-transform: uppercase; }
+      .message.user .role { text-align: right; }
+      .bubble { padding: 10px 11px; border-radius: 10px; color: #34313a; background: #fff; font-size: 10px; line-height: 1.48; box-shadow: 0 1px 1px rgba(24,20,29,.02); }
+      .message.user .bubble { border: 1px solid rgba(37,99,235,.16); background: rgba(37,99,235,.075); }
+      .bubble strong { color: #1e293b; font-weight: 720; }
+      .list { display: grid; gap: 4px; margin-top: 6px; }
+      .list-item { display: flex; align-items: flex-start; gap: 5px; }
+      .check { display: grid; width: 12px; height: 12px; flex: 0 0 auto; place-items: center; margin-top: 1px; border-radius: 50%; color: #21835b; background: #dff7e8; font-size: 8px; font-weight: 800; }
+      .tool-card { overflow: hidden; margin: 4px 0 14px 32px; border: 1px solid #dfdcdf; border-radius: 9px; background: #fff; }
+      .tool-row { display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px; border-top: 1px solid #eeeaf0; color: #54505a; font-size: 9px; font-weight: 600; }
+      .tool-row:first-child { border-top: 0; }
+      .tool-ok { color: #21835b; font-size: 11px; font-weight: 800; }
+      .tool-state { margin-left: auto; color: #8b858f; font-size: 8px; font-weight: 600; }
+      .composer { flex: 0 0 auto; margin: 0 10px; padding: 7px; border-top: 1px solid #dfdcdf; }
+      .composer-box { min-height: 53px; padding: 8px 9px; border: 1px solid #d9d5dc; border-radius: 10px; color: #6f6b74; background: #fff; font-size: 10px; box-shadow: 0 1px 2px rgba(24,20,29,.03); }
+      .composer-bottom { display: flex; align-items: center; margin-top: 7px; color: #8a8490; font-size: 13px; }
+      .access { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 4px 6px; border-radius: 6px; color: #57515d; background: #f2f0f3; font-size: 9px; font-weight: 650; }
+      .send { display: grid; width: 24px; height: 24px; place-items: center; margin-left: 6px; border-radius: 7px; color: #fff; background: #2563eb; font-size: 12px; font-weight: 700; }
+      .selected-chip { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; padding: 6px 7px; border: 1px solid rgba(37,99,235,.2); border-radius: 7px; color: #2458b2; background: rgba(37,99,235,.055); font-size: 8px; font-weight: 650; }
+      .selected-chip .target-icon { display: grid; width: 14px; height: 14px; place-items: center; border-radius: 4px; color: #2563eb; background: #dbeafe; font-size: 10px; }
+      .selected-chip .remove { margin-left: auto; color: #7c88a1; font-size: 11px; }
+
+      /* Screenshot 2 — element selection */
+      .settings-nav { position: absolute; top: 50px; bottom: 0; left: 0; width: 118px; padding: 22px 13px; border-right: 1px solid #e3e8f0; background: #fcfdff; }
+      .settings-nav .nav-label { margin: 0 0 11px 6px; color: #93a0b4; font-size: 9px; font-weight: 730; letter-spacing: .08em; text-transform: uppercase; }
+      .settings-nav .nav-item { padding: 7px 7px; border-radius: 6px; color: #657187; font-size: 10px; }
+      .settings-nav .nav-item.active { color: #2258b1; background: #edf4ff; font-weight: 700; }
+      .settings-main { margin-left: 118px; padding: 26px 30px; }
+      .settings-main h2 { margin: 0; color: #172033; font-size: 22px; letter-spacing: -.04em; }
+      .settings-main > p { margin: 7px 0 21px; color: #748197; font-size: 11px; }
+      .setting-card { position: relative; display: flex; align-items: center; gap: 14px; margin-top: 11px; padding: 15px; border: 1px solid #e2e8f0; border-radius: 11px; background: #fff; box-shadow: 0 5px 16px rgba(22,34,51,.035); }
+      .setting-icon { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 9px; color: #426bbb; background: #edf4ff; font-size: 16px; }
+      .setting-name { color: #253147; font-size: 12px; font-weight: 720; }
+      .setting-help { margin-top: 4px; color: #7b8798; font-size: 10px; }
+      .toggle { position: relative; width: 35px; height: 20px; margin-left: auto; border-radius: 12px; background: #4c82ef; box-shadow: 0 0 0 5px rgba(74,131,240,.11); }
+      .toggle::after { content: ""; position: absolute; right: 3px; top: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.18); }
+      .selection-outline { position: absolute; right: 9px; top: 8px; width: 62px; height: 42px; border: 2px solid #3777f3; border-radius: 8px; box-shadow: 0 0 0 3px rgba(55,119,243,.18); pointer-events: none; }
+      .pointer { position: absolute; right: 55px; top: 49px; z-index: 2; width: 0; height: 0; border-top: 16px solid #2563eb; border-right: 9px solid transparent; filter: drop-shadow(0 2px 1px rgba(0,0,0,.16)); transform: rotate(-24deg); }
+      .pointer::after { content: ""; position: absolute; width: 5px; height: 19px; top: -2px; left: -2px; border-radius: 4px; background: #2563eb; transform: rotate(-35deg); transform-origin: top; }
+      .focus-popover { position: absolute; right: 15px; top: 58px; z-index: 3; padding: 7px 9px; border: 1px solid rgba(37,99,235,.25); border-radius: 7px; color: #255bbd; background: rgba(255,255,255,.96); box-shadow: 0 8px 24px rgba(37,99,235,.15); font-size: 9px; font-weight: 700; }
+
+      /* Screenshot 3 — task timeline */
+      .board-head { display: flex; align-items: center; padding: 18px 24px 0; }
+      .board-head h2 { margin: 0; color: #182235; font-size: 20px; letter-spacing: -.04em; }
+      .soft-button { margin-left: auto; padding: 7px 10px; border-radius: 7px; color: #fff; background: #2f6ce0; font-size: 10px; font-weight: 700; }
+      .board-tabs { display: flex; gap: 17px; margin: 15px 24px 0; border-bottom: 1px solid #e2e8f0; color: #7b8798; font-size: 10px; }
+      .board-tabs span { padding: 0 1px 9px; }
+      .board-tabs .on { color: #265bb5; border-bottom: 2px solid #2f6ce0; font-weight: 720; }
+      .issue-list { padding: 14px 24px; }
+      .issue { display: flex; align-items: center; gap: 11px; padding: 10px 0; border-bottom: 1px solid #edf0f5; }
+      .issue-icon { display: grid; width: 23px; height: 23px; place-items: center; border-radius: 50%; color: #b07822; background: #fff6e5; font-size: 11px; }
+      .issue strong { color: #2a3548; font-size: 11px; }
+      .issue small { display: block; margin-top: 3px; color: #8490a1; font-size: 9px; }
+      .pill { margin-left: auto; padding: 4px 6px; border-radius: 99px; color: #3365b7; background: #edf4ff; font-size: 8px; font-weight: 700; }
+      .task-callout { position: absolute; left: 26px; right: 26px; bottom: 20px; display: flex; align-items: center; gap: 10px; padding: 13px; border: 1px solid #d9e6ff; border-radius: 10px; background: #f7faff; }
+      .task-callout .spark { display: grid; width: 29px; height: 29px; place-items: center; border-radius: 8px; color: #2563eb; background: #e6efff; font-size: 14px; }
+      .task-callout strong { color: #334155; font-size: 10px; }
+      .task-callout p { margin: 3px 0 0; color: #748197; font-size: 9px; }
+
+      /* Screenshot 4 — approval */
+      .deploy-hero { padding: 25px 32px 0; }
+      .deploy-hero h2 { margin: 0; color: #172033; font-size: 23px; letter-spacing: -.045em; }
+      .deploy-hero p { margin: 7px 0 18px; color: #748197; font-size: 11px; }
+      .deploy-card { padding: 19px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; box-shadow: 0 8px 23px rgba(22,34,51,.045); }
+      .deploy-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid #edf0f5; }
+      .deploy-row:first-child { padding-top: 0; border-top: 0; }
+      .deploy-dot { width: 8px; height: 8px; border-radius: 50%; background: #6aa577; }
+      .deploy-dot.warn { background: #e5a142; }
+      .deploy-row strong { color: #334155; font-size: 11px; }
+      .deploy-row small { display: block; margin-top: 3px; color: #8490a1; font-size: 9px; }
+      .deploy-action { margin-left: auto; padding: 7px 10px; border-radius: 7px; color: #fff; background: #2f6ce0; font-size: 9px; font-weight: 700; }
+      .approval { margin: 17px 13px 0; padding: 12px; border: 1px solid rgba(163,92,25,.24); border-radius: 10px; background: rgba(255,249,239,.96); }
+      .approval-head { display: flex; gap: 9px; }
+      .approval-icon { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; border-radius: 8px; color: #a35c19; background: #fff0d6; font-size: 14px; }
+      .approval strong { color: #3f3428; font-size: 11px; }
+      .waiting { float: right; padding: 3px 5px; border-radius: 5px; color: #a35c19; background: #fff0d6; font-size: 8px; font-weight: 700; }
+      .approval p { margin: 4px 0 0; color: #796c5b; font-size: 9px; line-height: 1.45; }
+      .approval-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+      .approval-actions span { padding: 6px 7px; border: 1px solid #e7dccd; border-radius: 6px; color: #665846; background: #fff; font-size: 8px; font-weight: 650; }
+      .approval-actions span:last-child { color: #fff; border-color: #b86d1c; background: #b86d1c; }
+
+      /* Screenshot 5 — trusted local connection */
+      .workspace-page { padding: 27px 31px; }
+      .workspace-page h2 { margin: 0; color: #172033; font-size: 22px; letter-spacing: -.043em; }
+      .workspace-page > p { margin: 7px 0 20px; color: #748197; font-size: 11px; }
+      .workspace-grid { display: grid; grid-template-columns: 1.28fr .92fr; gap: 12px; }
+      .project-card { min-height: 170px; padding: 16px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; box-shadow: 0 7px 19px rgba(22,34,51,.035); }
+      .project-card .label { color: #8490a1; font-size: 9px; font-weight: 720; letter-spacing: .07em; text-transform: uppercase; }
+      .project-card h3 { margin: 8px 0 8px; color: #273449; font-size: 15px; letter-spacing: -.025em; }
+      .member-row { display: flex; align-items: center; margin-top: 18px; }
+      .member { display: grid; width: 22px; height: 22px; margin-right: -5px; place-items: center; border: 2px solid #fff; border-radius: 50%; color: #fff; background: linear-gradient(135deg,#5369d9,#af77e4); font-size: 7px; font-weight: 800; }
+      .member:nth-child(2) { background: linear-gradient(135deg,#2aa881,#3182ce); }
+      .member:nth-child(3) { background: linear-gradient(135deg,#e79063,#e1b13c); }
+      .signed-in { display: flex; align-items: center; gap: 7px; margin-top: 17px; color: #4d647f; font-size: 9px; }
+      .signed-in .shield { display: grid; width: 17px; height: 17px; place-items: center; border-radius: 5px; color: #21835b; background: #e7f7ee; font-size: 10px; }
+      .local-card { margin: 5px 13px 0; padding: 12px; border: 1px solid rgba(33,131,91,.2); border-radius: 10px; color: #355a49; background: #f1fbf5; }
+      .local-card .local-top { display: flex; align-items: center; gap: 8px; }
+      .local-card .local-icon { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 8px; color: #21835b; background: #dff6e8; font-size: 13px; }
+      .local-card strong { font-size: 10px; }
+      .local-card p { margin: 3px 0 0; color: #59806b; font-size: 9px; }
+      .local-card .host { margin-top: 9px; padding: 6px 7px; border-radius: 6px; color: #277655; background: rgba(255,255,255,.78); font: 8px ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .trust-note { position: absolute; z-index: 5; right: 25px; bottom: 18px; display: inline-flex; align-items: center; gap: 7px; padding: 7px 9px; border: 1px solid rgba(33,131,91,.17); border-radius: 7px; color: #497562; background: rgba(241,251,245,.93); font-size: 9px; font-weight: 700; }
+
+      .shot-5 .headline { width: 910px; }
+      .shot-4 .headline { width: 850px; }
+    </style>
+  </head>
+  <body>
+    <section class="shot shot-1" data-shot="1">
+      <div class="aurora"></div><div class="grain"></div>
+      <div class="brand"><img src="../../../../../assets/logo.png" alt="" />zode <span>Chrome bridge</span></div>
+      <div class="kicker">Your current tab, understood</div>
+      <h1 class="headline">Ask about the page<br />you’re <span class="accent">already on.</span></h1>
+      <p class="subtitle">zode reads the page beside you—no copying URLs or page text.</p>
+      <div class="browser">
+        <div class="chrome-bar"><div class="tab-row"><div class="tab active"><span class="tab-dot"></span>Observability guide <span class="x">×</span></div><div class="tab"><span class="tab-dot"></span>zode docs <span class="x">×</span></div><span class="plus">+</span></div><div class="omnibox-row"><span class="nav">‹ › ⟳</span><div class="omnibox"><span class="lock">●</span>docs.summit.dev/guides/observability</div><span class="chrome-profile">M</span></div></div>
+        <div class="browser-body">
+          <main class="website"><div class="site-top"><div class="site-mark"><span class="site-orb"></span>summit</div><div class="site-links"><span>Guides</span><span>Reference</span><span>Support</span></div></div><div class="site-content"><div class="crumb">Engineering guide / 08 min read</div><h2 class="site-title">Make production signals<br />useful before you need them.</h2><p class="site-copy">A practical checklist for tracing, alerting, and reducing the time it takes to understand a customer-impacting incident.</p><div class="metric-row"><div class="metric"><div class="metric-label">Response time</div><div class="metric-value">−38%</div></div><div class="metric"><div class="metric-label">Coverage</div><div class="metric-value">94%</div></div><div class="metric"><div class="metric-label">Owner clarity</div><div class="metric-value">↑ 2.4×</div></div></div><article class="article-card"><h3>What a useful signal includes</h3><div class="lines"><div class="line blue"></div><div class="line"></div><div class="line"></div><div class="line"></div></div><div class="tag-row"><span class="tag">Tracing</span><span class="tag">Alerting</span><span class="tag gray">Runbooks</span></div></article></div></main>
+          <aside class="side-panel"><div class="panel-head"><img src="../../../../../assets/logo.png" alt="" /><span class="panel-name">zode</span><span class="connected">Connected</span><span class="work-badge">summit-web</span></div><div class="task-select">Review observability guide <span class="chev">⌄</span></div><div class="panel-scroll"><div class="message user"><span class="avatar">U</span><div class="bubble-wrap"><div class="role">You</div><div class="bubble">Summarize this page and call out the action items.</div></div></div><div class="tool-card"><div class="tool-row"><span class="tool-ok">✓</span>Read current page <span class="tool-state">completed</span></div></div><div class="message"><span class="avatar">›_</span><div class="bubble-wrap"><div class="role">Zode</div><div class="bubble"><strong>It’s a practical observability checklist.</strong><div class="list"><div class="list-item"><span class="check">✓</span><span>Set ownership for each customer-facing signal.</span></div><div class="list-item"><span class="check">✓</span><span>Link alerts to a concise runbook.</span></div><div class="list-item"><span class="check">✓</span><span>Review trace coverage before the next release.</span></div></div></div></div></div></div><div class="composer"><div class="composer-box">Ask zode to work on this task…<div class="composer-bottom">＋　⌖ <span class="access">♢ Ask</span><span class="send">↑</span></div></div></div></aside>
+        </div>
+      </div>
+      <div class="footnote">Real page context • Side-panel chat • Shared tasks</div><div class="page-count">01 / 05</div>
+    </section>
+
+    <section class="shot shot-2" data-shot="2">
+      <div class="aurora"></div><div class="grain"></div>
+      <div class="brand"><img src="../../../../../assets/logo.png" alt="" />zode <span>Chrome bridge</span></div>
+      <div class="kicker">Precise page context</div>
+      <h1 class="headline">Point at an element.<br />Make intent <span class="accent">obvious.</span></h1>
+      <p class="subtitle">Select a button, field, or block so zode knows exactly what you mean.</p>
+      <div class="browser">
+        <div class="chrome-bar"><div class="tab-row"><div class="tab active"><span class="tab-dot"></span>Billing preferences <span class="x">×</span></div><div class="tab"><span class="tab-dot"></span>Workspace <span class="x">×</span></div><span class="plus">+</span></div><div class="omnibox-row"><span class="nav">‹ › ⟳</span><div class="omnibox"><span class="lock">●</span>app.northstar.tools/settings/billing</div><span class="chrome-profile">A</span></div></div>
+        <div class="browser-body"><main class="website"><div class="site-top"><div class="site-mark"><span class="site-orb"></span>northstar</div><div class="site-links"><span>Workspace</span><span>Help</span><span>⌄</span></div></div><aside class="settings-nav"><div class="nav-label">Settings</div><div class="nav-item">Profile</div><div class="nav-item">Workspace</div><div class="nav-item active">Billing</div><div class="nav-item">Members</div><div class="nav-item">Security</div></aside><div class="settings-main"><h2>Billing preferences</h2><p>Control invoices, plan changes, and renewal behavior for your workspace.</p><div class="setting-card"><span class="setting-icon">▣</span><div><div class="setting-name">Auto-renew subscription</div><div class="setting-help">Renew your plan on the next billing date.</div></div><span class="toggle"></span><span class="selection-outline"></span><span class="pointer"></span><span class="focus-popover">Selected: button</span></div><div class="setting-card"><span class="setting-icon">⌁</span><div><div class="setting-name">Usage alerts</div><div class="setting-help">Get notified when usage reaches your selected threshold.</div></div><span class="toggle" style="background:#c5ceda;box-shadow:none"></span></div><div class="setting-card"><span class="setting-icon">⇩</span><div><div class="setting-name">Invoice delivery</div><div class="setting-help">Receive a copy when a new invoice is available.</div></div><span style="margin-left:auto;color:#53657a;font-size:10px;font-weight:700">Monthly ›</span></div></div></main><aside class="side-panel"><div class="panel-head"><img src="../../../../../assets/logo.png" alt="" /><span class="panel-name">zode</span><span class="connected">Connected</span><span class="work-badge">northstar</span></div><div class="task-select">Update billing preference <span class="chev">⌄</span></div><div class="panel-scroll"><div class="message user"><span class="avatar">U</span><div class="bubble-wrap"><div class="role">You</div><div class="bubble">Explain this option, then turn off auto-renew.</div></div></div><div class="message"><span class="avatar">›_</span><div class="bubble-wrap"><div class="role">Zode</div><div class="bubble">I can explain the effect first, then request approval before changing it.</div></div></div></div><div class="composer"><div class="composer-box"><div class="selected-chip"><span class="target-icon">⌖</span>button · Auto-renew subscription <span class="remove">×</span></div>Ask zode to work on this task…<div class="composer-bottom">＋　⌖ <span class="access">♢ Ask</span><span class="send">↑</span></div></div></div></aside></div>
+      </div>
+      <div class="footnote">Element picker • Context chip • Fewer back-and-forths</div><div class="page-count">02 / 05</div>
+    </section>
+
+    <section class="shot shot-3" data-shot="3">
+      <div class="aurora"></div><div class="grain"></div>
+      <div class="brand"><img src="../../../../../assets/logo.png" alt="" />zode <span>Chrome bridge</span></div>
+      <div class="kicker">Browser tasks, visible progress</div>
+      <h1 class="headline">Give it a browser task.<br />See <span class="accent">every step.</span></h1>
+      <p class="subtitle">Every read, click, type, and result stays visible in the side panel.</p>
+      <div class="browser">
+        <div class="chrome-bar"><div class="tab-row"><div class="tab active"><span class="tab-dot"></span>Release board <span class="x">×</span></div><div class="tab"><span class="tab-dot"></span>Docs draft <span class="x">×</span></div><span class="plus">+</span></div><div class="omnibox-row"><span class="nav">‹ › ⟳</span><div class="omnibox"><span class="lock">●</span>workspace.shipyard.dev/releases/0.2</div><span class="chrome-profile">S</span></div></div>
+        <div class="browser-body"><main class="website"><div class="site-top"><div class="site-mark"><span class="site-orb"></span>shipyard</div><div class="site-links"><span>Releases</span><span>Activity</span><span>Team</span></div></div><div class="board-head"><h2>Release 0.2</h2><span class="soft-button">Create update</span></div><div class="board-tabs"><span class="on">Issues 6</span><span>Release notes</span><span>Activity</span></div><div class="issue-list"><div class="issue"><span class="issue-icon">!</span><div><strong>Improve setup instructions</strong><small>docs · assigned to you</small></div><span class="pill">ready</span></div><div class="issue"><span class="issue-icon">!</span><div><strong>Clarify browser pairing flow</strong><small>docs · unassigned</small></div><span class="pill">ready</span></div><div class="issue"><span class="issue-icon">!</span><div><strong>Add troubleshooting note</strong><small>support · assigned to you</small></div><span class="pill">ready</span></div></div><div class="task-callout"><span class="spark">✦</span><div><strong>Release notes draft is ready</strong><p>3 updates summarized from the current board.</p></div></div></main><aside class="side-panel"><div class="panel-head"><img src="../../../../../assets/logo.png" alt="" /><span class="panel-name">zode</span><span class="connected">Connected</span><span class="work-badge">shipyard</span></div><div class="task-select">Draft release notes <span class="chev">⌄</span></div><div class="panel-scroll"><div class="message user"><span class="avatar">U</span><div class="bubble-wrap"><div class="role">You</div><div class="bubble">Draft release notes from the ready issues, then check for console errors.</div></div></div><div class="tool-card"><div class="tool-row"><span class="tool-ok">✓</span>Read release board <span class="tool-state">completed</span></div><div class="tool-row"><span class="tool-ok">✓</span>Open release notes <span class="tool-state">completed</span></div><div class="tool-row"><span class="tool-ok">✓</span>Type draft <span class="tool-state">completed</span></div><div class="tool-row"><span class="tool-ok">✓</span>Check console <span class="tool-state">completed</span></div></div><div class="message"><span class="avatar">›_</span><div class="bubble-wrap"><div class="role">Zode</div><div class="bubble"><strong>Done.</strong> I drafted three release-note items and found no console errors on the page.</div></div></div></div><div class="composer"><div class="composer-box">Ask zode to work on this task…<div class="composer-bottom">＋　⌖ <span class="access">♢ Ask</span><span class="send">↑</span></div></div></div></aside></div>
+      </div>
+      <div class="footnote">Read • Click • Type • Inspect • Report</div><div class="page-count">03 / 05</div>
+    </section>
+
+    <section class="shot shot-4" data-shot="4">
+      <div class="aurora"></div><div class="grain"></div>
+      <div class="brand"><img src="../../../../../assets/logo.png" alt="" />zode <span>Chrome bridge</span></div>
+      <div class="kicker">Control stays with you</div>
+      <h1 class="headline">You decide when<br />a change <span class="accent">happens.</span></h1>
+      <p class="subtitle">Keep browser work moving while important actions wait for your approval.</p>
+      <div class="browser">
+        <div class="chrome-bar"><div class="tab-row"><div class="tab active"><span class="tab-dot"></span>Production release <span class="x">×</span></div><div class="tab"><span class="tab-dot"></span>Runbook <span class="x">×</span></div><span class="plus">+</span></div><div class="omnibox-row"><span class="nav">‹ › ⟳</span><div class="omnibox"><span class="lock">●</span>console.forgeops.dev/releases/production</div><span class="chrome-profile">R</span></div></div>
+        <div class="browser-body"><main class="website"><div class="site-top"><div class="site-mark"><span class="site-orb"></span>forgeops</div><div class="site-links"><span>Overview</span><span>Deployments</span><span>Audit log</span></div></div><div class="deploy-hero"><h2>Production release</h2><p>Review the environment checks before the deployment can begin.</p><div class="deploy-card"><div class="deploy-row"><span class="deploy-dot"></span><div><strong>Build verification</strong><small>All checks passed · 4 minutes ago</small></div><span style="margin-left:auto;color:#21835b;font-size:10px;font-weight:700">Ready</span></div><div class="deploy-row"><span class="deploy-dot"></span><div><strong>Migration plan</strong><small>No destructive changes detected</small></div><span style="margin-left:auto;color:#21835b;font-size:10px;font-weight:700">Ready</span></div><div class="deploy-row"><span class="deploy-dot warn"></span><div><strong>Production deployment</strong><small>Requires confirmation to start</small></div><span class="deploy-action">Deploy now</span></div></div></div></main><aside class="side-panel"><div class="panel-head"><img src="../../../../../assets/logo.png" alt="" /><span class="panel-name">zode</span><span class="connected">Connected</span><span class="work-badge">forgeops</span></div><div class="task-select">Review production deploy <span class="chev">⌄</span></div><div class="panel-scroll"><div class="message user"><span class="avatar">U</span><div class="bubble-wrap"><div class="role">You</div><div class="bubble">Confirm the checks and deploy this release.</div></div></div><div class="tool-card"><div class="tool-row"><span class="tool-ok">✓</span>Read environment checks <span class="tool-state">completed</span></div></div><article class="approval"><div class="approval-head"><span class="approval-icon">♢</span><div><span class="waiting">Waiting</span><strong>Approval required</strong><p>Click “Deploy now” in the paired production tab.</p></div></div><div class="approval-actions"><span>Deny</span><span>Always allow</span><span>Allow once</span></div></article></div><div class="composer"><div class="composer-box">Ask zode to work on this task…<div class="composer-bottom">＋　⌖ <span class="access">♢ Ask</span><span class="send">↑</span></div></div></div></aside></div>
+      </div>
+      <div class="footnote">Inline approvals • Clear action context • Your choice</div><div class="page-count">04 / 05</div>
+    </section>
+
+    <section class="shot shot-5" data-shot="5">
+      <div class="aurora"></div><div class="grain"></div>
+      <div class="brand"><img src="../../../../../assets/logo.png" alt="" />zode <span>Chrome bridge</span></div>
+      <div class="kicker">Your profile, your local bridge</div>
+      <h1 class="headline">Work where you’re signed in.<br /><span class="accent">Stay in your real Chrome.</span></h1>
+      <p class="subtitle">Work with the tab and session you explicitly pair to your local zode CLI.</p>
+      <div class="browser">
+        <div class="chrome-bar"><div class="tab-row"><div class="tab active"><span class="tab-dot"></span>Northstar workspace <span class="x">×</span></div><div class="tab"><span class="tab-dot"></span>Project brief <span class="x">×</span></div><span class="plus">+</span></div><div class="omnibox-row"><span class="nav">‹ › ⟳</span><div class="omnibox"><span class="lock">●</span>app.northstar.tools/workspace/meridian</div><span class="chrome-profile">A</span></div></div>
+        <div class="browser-body"><main class="website"><div class="site-top"><div class="site-mark"><span class="site-orb"></span>northstar</div><div class="site-links"><span>Projects</span><span>People</span><span>Settings</span></div></div><div class="workspace-page"><h2>Meridian workspace</h2><p>Everything your team needs to keep the next release moving.</p><div class="workspace-grid"><article class="project-card"><div class="label">Current project</div><h3>Chrome bridge launch</h3><div class="lines"><div class="line blue"></div><div class="line"></div><div class="line" style="width:68%"></div></div><div class="member-row"><span class="member">A</span><span class="member">M</span><span class="member">J</span><span style="margin-left:11px;color:#758298;font-size:9px">3 collaborators</span></div></article><article class="project-card"><div class="label">Today</div><h3 style="font-size:16px">4 tasks</h3><div class="tag-row"><span class="tag">In review</span></div><div class="signed-in"><span class="shield">✓</span>Signed in as Alex Morgan</div></article></div></div></main><aside class="side-panel"><div class="panel-head"><img src="../../../../../assets/logo.png" alt="" /><span class="panel-name">zode</span><span class="connected">Connected</span><span class="work-badge">meridian</span></div><div class="task-select">Plan this release <span class="chev">⌄</span></div><div class="panel-scroll"><div class="message user"><span class="avatar">U</span><div class="bubble-wrap"><div class="role">You</div><div class="bubble">Use this workspace to summarize the open launch tasks.</div></div></div><div class="tool-card"><div class="tool-row"><span class="tool-ok">✓</span>Read current page <span class="tool-state">completed</span></div></div><div class="message"><span class="avatar">›_</span><div class="bubble-wrap"><div class="role">Zode</div><div class="bubble">I found four launch tasks. The release notes and browser pairing guide are the remaining blockers.</div></div></div></div><div class="local-card"><div class="local-top"><span class="local-icon">⌁</span><div><strong>Local bridge connected</strong><p>Connects only to your local zode CLI.</p></div></div><div class="host">ws://127.0.0.1:17657</div></div><div class="trust-note">✓ Your paired tab stays in context</div></aside></div>
+      </div>
+      <div class="footnote">Paired tab • Existing session • Localhost connection</div><div class="page-count">05 / 05</div>
+    </section>
+    <script>
+      const shot = new URLSearchParams(location.search).get('shot') || '1';
+      document.querySelector(`[data-shot="${shot}"]`)?.classList.add('active');
+    </script>
+  </body>
+</html>

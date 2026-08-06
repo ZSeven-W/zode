@@ -42,7 +42,7 @@
 
 - **Multi-provider** — Anthropic, OpenAI, and any OpenAI-compatible API (DeepSeek, Moonshot, OpenRouter dialects), plus local Ollama. Supports large-output and **1M-context** models (`contextWindow` / `maxOutputTokens` are configurable)
 - **Rich tool surface** — file read/write/edit, code & content search, foreground and background shells, git, web fetch, notebooks, TODO tracking
-- **Browser control** — built-in `browser_*` tools can drive a managed Chromium instance or your real Chrome profile through the zode Chrome bridge extension: navigate, click/type, inspect DOM, capture screenshots, read console/network logs, and group zode-opened tabs
+- **Browser control** — built-in `browser_*` tools can drive a managed Chromium instance or your real Chrome profile through the [zode Chrome bridge extension](https://chromewebstore.google.com/detail/zode/hmnlhofbekmkhmifkfkkmmpigijlkcca): navigate, click/type, inspect DOM, capture screenshots, read console/network logs, and group zode-opened tabs
 - **Non-blocking permissions** — every mutating tool is gated (allow once / always / deny), but the prompt docks inline and never blocks you: keep typing to queue a follow-up while a tool waits, with hard-deny rules
 - **OS sandbox, on by default** — shell commands run under sandbox-exec (macOS) / bwrap (Linux) in `read-only` or `workspace-write` mode, with **outbound network denied by default**. Toggle live with `/sandbox`; the model can request an escape for a single command (`dangerouslyDisableSandbox`) which **you authorize** at the prompt
 - **Full-screen TUI** — streaming markdown with syntax highlighting, diff previews, slash-command autocomplete, prompt history (Up/Down), 11 built-in themes, settings & help overlays, resilient right sidebar sections, **15-language UI** (`/language`)
@@ -934,12 +934,13 @@ There are two browser targets:
 
 - **managed** — zode launches and controls a dedicated Chromium profile.
 - **bridge** — zode controls the Chrome profile you are already using through
-  the bundled MV3 extension in [`extensions/chrome/`](extensions/chrome/).
+  the MV3 extension on the
+  [Chrome Web Store](https://chromewebstore.google.com/detail/zode/hmnlhofbekmkhmifkfkkmmpigijlkcca)
+  (source in [`extensions/chrome/`](extensions/chrome/)).
 
-For the bridge target, load the extension once from `extensions/chrome`, then
-run `/browser pair`. Zode opens the extension page with the local WebSocket
-port and pairing code pre-filled; after the first pairing, the extension stores
-a token. It reconnects to a running CLI or auto-starts an extension-only zode
+For the bridge target, install the extension once, then run `/browser pair`.
+Zode opens the extension page with the local WebSocket port and pairing code
+pre-filled; after the first pairing, the extension stores a token. It reconnects to a running CLI or auto-starts an extension-only zode
 daemon when needed. Tabs opened by zode are placed in a Chrome tab group named
 `zode`.
 

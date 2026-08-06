@@ -2,8 +2,24 @@
 
 This MV3 extension lets zode drive the Chrome window you are already using, including logged-in sites. It connects only to a local `ws://127.0.0.1:<port>` bridge started by zode.
 
-Stable extension ID: `hcabdgpfhoclfgnknddadgfhhdnlkloc`
+**Chrome Web Store:** <https://chromewebstore.google.com/detail/zode/hmnlhofbekmkhmifkfkkmmpigijlkcca>
+
+Extension ID: `hmnlhofbekmkhmifkfkkmmpigijlkcca`
 Default bridge port: `17657`
+
+## Install
+
+1. Add it from the [Chrome Web Store](https://chromewebstore.google.com/detail/zode/hmnlhofbekmkhmifkfkkmmpigijlkcca).
+2. In zode, run `/browser pair` — zode opens the extension page with the WS port and pairing code pre-filled and auto-connects it.
+3. Run `/browser target bridge` before using browser tools against this Chrome profile.
+
+A locally built extension gets a different ID (the manifest's own `key` for an
+unpacked/CRX load), which zode does not accept by default. Point it at yours —
+this also steers the popup `/browser pair` auto-opens:
+
+```json
+{ "browser": { "extensionIds": ["<your-local-id>"] } }
+```
 
 ## Load unpacked
 

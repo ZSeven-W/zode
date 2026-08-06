@@ -13050,17 +13050,21 @@ fn open_in_os_viewer(path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Both popup URLs target the FIRST configured extension ID: zode cannot tell
+/// which channel's build is actually installed, and only one tab can be
+/// opened. Pairing still succeeds for every id in the accept list — a wrong
+/// guess only costs the auto-open convenience, and the code is printed too.
 fn browser_extension_pairing_url(port: u16, code: &str) -> String {
     format!(
         "chrome-extension://{}/popup.html?port={port}&code={code}&connect=1",
-        zode_core::browser::bridge::server::EXTENSION_ID
+        zode_core::browser::bridge::server::primary_extension_id()
     )
 }
 
 fn browser_extension_connect_url(port: u16) -> String {
     format!(
         "chrome-extension://{}/popup.html?port={port}&connect=1",
-        zode_core::browser::bridge::server::EXTENSION_ID
+        zode_core::browser::bridge::server::primary_extension_id()
     )
 }
 
@@ -13575,7 +13579,7 @@ mod tests {
 
         assert!(url.starts_with(&format!(
             "chrome-extension://{}/popup.html?",
-            zode_core::browser::bridge::server::EXTENSION_ID
+            zode_core::browser::bridge::server::primary_extension_id()
         )));
         assert!(url.contains("port=17657"));
         assert!(url.contains("code=123456"));
@@ -13590,7 +13594,7 @@ mod tests {
             url,
             format!(
                 "chrome-extension://{}/popup.html?port=17657&connect=1",
-                zode_core::browser::bridge::server::EXTENSION_ID
+                zode_core::browser::bridge::server::primary_extension_id()
             )
         );
     }

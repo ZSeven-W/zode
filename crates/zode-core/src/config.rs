@@ -509,9 +509,9 @@ pub struct BrowserConfig {
     pub default_target: Option<String>,
     pub viewport: Option<ViewportConfig>,
     /// The bridge extension IDs zode accepts (WebSocket Origin check and the
-    /// native-messaging manifest). Unset → the developer-keyed build's ID.
-    /// Set this to REPLACE the list — e.g. add the Chrome-Web-Store-published
-    /// ID alongside the default, or drop the default entirely.
+    /// native-messaging manifest). Unset → the published extension's ID. Set
+    /// this to REPLACE the list; the FIRST entry is also the one the pairing
+    /// popup URL targets, so a locally-keyed build pins its own ID here.
     pub extension_ids: Option<Vec<String>>,
 }
 

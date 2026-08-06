@@ -19,12 +19,12 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::Message;
 
 pub const DEFAULT_BRIDGE_PORT: u16 = 17657;
-/// The developer-keyed extension ID (unpacked / packed CRX installs — the
-/// manifest embeds the public key so both share it). This is only the
-/// DEFAULT value of the `browser.extensionIds` config list — the runtime
-/// accept list is config-driven, never hardcoded: a Chrome-Web-Store install
-/// gets a store-minted ID, which users (or a future default) add there.
-pub const EXTENSION_ID: &str = "hcabdgpfhoclfgnknddadgfhhdnlkloc";
+/// The extension ID zode pairs with: the Chrome-Web-Store-published build,
+/// the single shipping channel. This is only the DEFAULT value of the
+/// `browser.extensionIds` config list — the runtime accept list is
+/// config-driven, never hardcoded, so a locally-keyed build (unpacked or CRX,
+/// which the store's key does not cover) is added there.
+pub const EXTENSION_ID: &str = "hmnlhofbekmkhmifkfkkmmpigijlkcca";
 
 /// The effective accept list, installed from `browser.extensionIds` at
 /// startup (before the listener accepts its first connection). `None` until
@@ -54,13 +54,22 @@ pub fn set_allowed_extension_ids(ids: Vec<String>) {
 }
 
 /// Every extension ID the bridge accepts (config-driven; defaults to the
-/// developer-keyed build's ID).
+/// published extension's ID).
 pub fn allowed_extension_ids() -> Vec<String> {
     ALLOWED_EXTENSION_IDS
         .lock()
         .ok()
         .and_then(|g| g.clone())
         .unwrap_or_else(|| vec![EXTENSION_ID.to_string()])
+}
+
+/// The extension ID the pairing/connect popup URL targets: the first entry of
+/// the effective accept list, so a locally-keyed build steers it via config.
+pub fn primary_extension_id() -> String {
+    allowed_extension_ids()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| EXTENSION_ID.to_string())
 }
 
 #[derive(Debug)]
@@ -1253,16 +1262,18 @@ mod tests {
     #[test]
     #[serial_test::serial(bridge_extension_ids)]
     fn config_accept_list_uses_replace_semantics() {
-        // REPLACE: a config list installs verbatim (dropping the developer
-        // default), and a store ID is honored.
-        let store = "abcdefghijklmnopabcdefghijklmnop";
-        set_allowed_extension_ids(vec![store.to_string()]);
-        assert_eq!(allowed_extension_ids(), vec![store.to_string()]);
+        // REPLACE: a config list installs verbatim (dropping the default),
+        // and it also steers the pairing popup URL.
+        let local = "abcdefghijklmnopabcdefghijklmnop";
+        set_allowed_extension_ids(vec![local.to_string()]);
+        assert_eq!(allowed_extension_ids(), vec![local.to_string()]);
+        assert_eq!(primary_extension_id(), local);
         // Malformed entries are skipped; an all-bad list falls back to default.
         set_allowed_extension_ids(vec!["nope".into(), "  ".into()]);
         assert_eq!(allowed_extension_ids(), vec![EXTENSION_ID.to_string()]);
+        assert_eq!(primary_extension_id(), EXTENSION_ID);
         // Restore the default for any later bridge test in this process.
-        set_allowed_extension_ids(vec![EXTENSION_ID.to_string()]);
+        set_allowed_extension_ids(Vec::new());
     }
 
     #[tokio::test]
