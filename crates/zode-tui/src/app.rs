@@ -225,13 +225,29 @@ fn sanitize_prompt_history(entries: Vec<String>) -> Vec<String> {
     out
 }
 
+/// True for text that is not a human-typed prompt: engine/runtime-injected
+/// reminder blocks and the goal-loop driver prompts. These reach the chat view
+/// as `Role::User` rows (scheduler/goal turns render like turns), but recalling
+/// them with Up/Down would hand the user prompts they never wrote. Also used
+/// to scrub previously-polluted persisted history on load.
+fn is_synthetic_prompt(text: &str) -> bool {
+    let t = text.trim();
+    t.contains("<system-reminder>")
+        || t == GOAL_LOOP_START_PROMPT
+        || t == GOAL_LOOP_CONTINUE_PROMPT
+        || is_post_compact_restore_block(t)
+}
+
 fn record_prompt_history_entry(history: &mut Vec<String>, text: &str) -> bool {
     let text = text.trim();
     // Skip blanks, consecutive dups, and a bare single-line slash command
     // (e.g. `/sandbox`, `/model x`) — those are UI actions, not prompts worth
     // recalling. A multi-line message that happens to start with `/` is kept.
+    // Synthetic prompts (reminder blocks, goal-loop drivers) are never
+    // recallable input.
     if text.is_empty()
         || (text.starts_with('/') && !text.contains('\n'))
+        || is_synthetic_prompt(text)
         || history.last().map(String::as_str) == Some(text)
     {
         return false;
@@ -250,7 +266,10 @@ fn seed_prompt_history_for_tab(tab: &mut SessionTab) {
     tab.prompt_history_key = format!("project:{}", tab.engine.cwd.display());
     let mut history = load_prompt_history(&tab.prompt_history_key);
     for msg in tab.chat.messages() {
-        if msg.role == crate::ui::chat::Role::User {
+        // `synthetic` marks rows the app itself submitted (scheduler / goal
+        // loop); restored transcripts rely on the text-shape filter inside
+        // `record_prompt_history_entry`.
+        if msg.role == crate::ui::chat::Role::User && !msg.synthetic {
             record_prompt_history_entry(&mut history, &msg.text);
         }
     }
@@ -8859,6 +8878,14 @@ impl TuiApp {
             cleanup_clipboard_temp(&mut self.clipboard_temps, &image.path);
         }
         tab.chat.push_user_with_images(&submitted_text, previews);
+        // Scheduler- and goal-loop-submitted turns render like turns but are
+        // not recallable input — exclude them from prompt-history seeding.
+        if scheduler_owned
+            || submitted_text == GOAL_LOOP_START_PROMPT
+            || submitted_text == GOAL_LOOP_CONTINUE_PROMPT
+        {
+            tab.chat.mark_last_user_synthetic();
+        }
         // No begin_assistant(): push_delta lazily opens an assistant segment,
         // so text after a tool card starts a fresh segment.
         tab.mode = Mode::Thinking;
@@ -12871,12 +12898,49 @@ fn attached_file_summary(text: &str) -> Option<String> {
     Some(format!("[Attached file: {name} ({media_type})]"))
 }
 
+/// Strip every LEADING `<system-reminder>…</system-reminder>` block. Reminder
+/// blocks are engine/runtime-injected context (per-turn reminders, steering
+/// wrappers, loop-guard nudges) prepended to — or standing in for — the user's
+/// text; they are model-directed and must never render as user-authored chat.
+/// A nudge that is nothing BUT a reminder strips to empty, which callers treat
+/// as "no visible row". An unterminated block is left alone (better to show a
+/// stray tag than to eat the user's words).
+fn strip_leading_reminders(text: &str) -> &str {
+    let mut t = text.trim_start();
+    loop {
+        let Some(rest) = t.strip_prefix("<system-reminder>") else {
+            return t;
+        };
+        let Some(end) = rest.find("</system-reminder>") else {
+            return t;
+        };
+        t = rest[end + "</system-reminder>".len()..].trim_start();
+    }
+}
+
+/// True for a text block belonging to the post-compaction restore message
+/// (file re-attachments, noema recall pack, session ledger). That message is
+/// engine-assembled context riding a user role — it must not render as a user
+/// bubble on resume nor enter Up/Down prompt history.
+fn is_post_compact_restore_block(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("[Post-compaction file restoration:")
+        || t.starts_with("[Post-compaction memory recall]")
+        || t.starts_with("[Session ledger")
+}
+
 /// Remove engine-injected context before rendering a stored user text block.
 /// The browser side-panel hint is model-only, and noema recall must be stripped
 /// before classifying attachment-only turns because it prefixes the envelope.
+/// Reminder blocks are stripped on both sides of the recall pack — the engine
+/// prepends reminders after recall, so either can be outermost.
 fn stored_user_text_for_display(text: &str) -> String {
+    let text = strip_leading_reminders(text);
     let text = strip_recalled_memory(text);
-    if text.trim() == extension_tasks::SIDE_PANEL_BROWSER_CONTEXT.trim() {
+    let text = strip_leading_reminders(text);
+    if text.trim() == extension_tasks::SIDE_PANEL_BROWSER_CONTEXT.trim()
+        || is_post_compact_restore_block(text)
+    {
         return String::new();
     }
     attached_file_summary(text).unwrap_or_else(|| text.to_string())
@@ -12887,6 +12951,16 @@ fn rebuild_chat_from_store(store: &MessageStore) -> ChatView {
     for msg in store.iter() {
         match msg {
             Message::User { content, .. } => {
+                // The post-compaction restore message rides a user role but is
+                // engine-assembled context (restored files + recall + ledger).
+                // Its `--- path ---` file blocks carry no marker of their own,
+                // so the whole message is skipped when any block is marked.
+                if content.iter().any(|b| match b {
+                    ContentBlock::Text { text } => is_post_compact_restore_block(text),
+                    _ => false,
+                }) {
+                    continue;
+                }
                 let mut text_parts = Vec::new();
                 let mut images = Vec::new();
                 for (idx, block) in content.iter().enumerate() {
@@ -18839,6 +18913,114 @@ mod tests {
         );
         let ordinary = "用户明确提到了 <browser_side_panel_context> 标签";
         assert_eq!(stored_user_text_for_display(ordinary), ordinary);
+    }
+
+    #[test]
+    fn stored_user_display_drops_reminder_only_nudges() {
+        // Runtime loop-guard / truncation nudges are pure reminder blocks —
+        // a restored transcript must not render them as user bubbles.
+        let nudge = "<system-reminder>Command-repeat guard: you have run `grep` \
+                     5 times this turn.</system-reminder>";
+        assert!(stored_user_text_for_display(nudge).is_empty());
+    }
+
+    #[test]
+    fn stored_user_display_strips_leading_reminder_from_real_prompts() {
+        // Per-turn reminders and the steering wrapper prepend a block to the
+        // user's own words; only the words render.
+        let steered =
+            "<system-reminder>The user interjected mid-task.</system-reminder>\nfix the bug";
+        assert_eq!(stored_user_text_for_display(steered), "fix the bug");
+        // Two stacked blocks strip too.
+        let double =
+            "<system-reminder>a</system-reminder>\n<system-reminder>b</system-reminder>\nhello";
+        assert_eq!(stored_user_text_for_display(double), "hello");
+        // An unterminated tag never eats the text.
+        let broken = "<system-reminder>oops no close\nreal text";
+        assert_eq!(stored_user_text_for_display(broken), broken);
+    }
+
+    #[test]
+    fn stored_user_display_strips_reminder_around_recall_pack() {
+        // The engine prepends reminders AFTER noema recall, so the reminder is
+        // outermost; both must strip in either order.
+        let stored = "<system-reminder>note</system-reminder>\n## Relevant Memories\n- m\n## Subconscious Hints\n- h\n\nreal prompt";
+        assert_eq!(stored_user_text_for_display(stored), "real prompt");
+    }
+
+    #[test]
+    fn post_compact_restore_message_never_renders_or_recalls() {
+        // Display: every restore block empties.
+        for block in [
+            "[Post-compaction file restoration: 3 file(s) attached below.]",
+            "[Post-compaction memory recall]\n- fact",
+            "[Session ledger — harness-maintained; recorded as it happened]",
+        ] {
+            assert!(
+                stored_user_text_for_display(block).is_empty(),
+                "should hide: {block}"
+            );
+            assert!(is_synthetic_prompt(block), "should not recall: {block}");
+        }
+        // Whole-message skip on rebuild: the unmarked `--- path ---` file
+        // blocks vanish with the marked preamble in the same message.
+        let mut store = MessageStore::new();
+        store
+            .push(agent::message::Message::User {
+                header: agent::message::Header::new(),
+                content: vec![
+                    agent::message::ContentBlock::Text {
+                        text: "[Post-compaction file restoration: 1 file(s) attached below.]"
+                            .into(),
+                    },
+                    agent::message::ContentBlock::Text {
+                        text: "--- /work/a.rs ---\nfn main() {}".into(),
+                    },
+                ],
+            })
+            .unwrap();
+        store
+            .push(agent::message::Message::User {
+                header: agent::message::Header::new(),
+                content: vec![agent::message::ContentBlock::Text {
+                    text: "real question".into(),
+                }],
+            })
+            .unwrap();
+        let chat = rebuild_chat_from_store(&store);
+        let users: Vec<&str> = chat
+            .messages()
+            .iter()
+            .filter(|m| m.role == crate::ui::chat::Role::User)
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(users, vec!["real question"]);
+    }
+
+    #[test]
+    fn prompt_history_rejects_synthetic_entries() {
+        let mut history = Vec::new();
+        assert!(!record_prompt_history_entry(
+            &mut history,
+            "<system-reminder>Command-repeat guard</system-reminder>"
+        ));
+        assert!(!record_prompt_history_entry(
+            &mut history,
+            GOAL_LOOP_START_PROMPT
+        ));
+        assert!(!record_prompt_history_entry(
+            &mut history,
+            GOAL_LOOP_CONTINUE_PROMPT
+        ));
+        assert!(record_prompt_history_entry(&mut history, "real prompt"));
+        assert_eq!(history, vec!["real prompt".to_string()]);
+        // Load-time scrub: previously polluted persisted entries vanish.
+        let cleaned = sanitize_prompt_history(vec![
+            "<system-reminder>x</system-reminder>".into(),
+            "keep me".into(),
+            GOAL_LOOP_START_PROMPT.into(),
+        ]);
+        assert_eq!(cleaned, vec!["keep me".to_string()]);
     }
 
     /// Diagnostic (not run in CI): load a REAL session file and render it the
