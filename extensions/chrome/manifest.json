@@ -2,7 +2,8 @@
   "manifest_version": 3,
   "minimum_chrome_version": "116",
   "name": "zode",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "version_name": "0.2.0-beta.1",
   "description": "Pairs your Chrome with the local zode CLI so its agent can drive this browser.",
   "permissions": ["debugger", "tabs", "storage", "tabGroups", "webNavigation", "offscreen", "downloads", "sidePanel", "nativeMessaging"],
   "icons": {
