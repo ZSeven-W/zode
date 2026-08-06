@@ -9617,7 +9617,27 @@ impl TuiApp {
                             tab.recent_tools.pop_front();
                         }
                         if let Some(line) = process_line_for_event(&event, None) {
-                            tab.chat.push_tool_call(&line, name);
+                            // File edits carry a diff preview computed NOW —
+                            // the tool has not applied yet, so the on-disk
+                            // pre-image is still readable.
+                            let diff = matches!(name.as_str(), "FileWrite" | "FileEdit")
+                                .then(|| {
+                                    crate::ui::diff::diff_rows_from_tool_input(
+                                        input,
+                                        tab.engine.cwd.as_path(),
+                                    )
+                                })
+                                .flatten();
+                            match diff {
+                                Some(rows) if !rows.is_empty() => {
+                                    tab.chat.push_tool_call_with_diff(
+                                        &line,
+                                        name,
+                                        std::sync::Arc::new(rows),
+                                    )
+                                }
+                                _ => tab.chat.push_tool_call(&line, name),
+                            }
                         }
                     }
                     Event::ToolResult { ref id, .. } => {

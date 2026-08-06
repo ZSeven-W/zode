@@ -111,9 +111,9 @@ fn mid_size_runs_keep_their_rows_visible() {
 }
 
 #[test]
-fn a_collapsed_result_row_leaks_its_first_output_line() {
-    // The one-line fold of a result row carries the beginning of the output
-    // beside its status, so a closed transcript still says what came back.
+fn a_short_result_row_shows_its_whole_output() {
+    // Output that fits the preview budget renders in full — no click needed
+    // to read what a command actually returned.
     let theme = ThemeStore::with_builtins().resolve(None);
     let mut chat = ChatView::new();
     chat.push_user("run it");
@@ -123,15 +123,28 @@ fn a_collapsed_result_row_leaks_its_first_output_line() {
 
     let built = chat.build_lines(&theme, test_meta(), 100);
     let text = joined_text(&built.lines);
-    assert!(
-        text.contains("Tool Bash done · Compiling zode v0.1.0"),
-        "folded result leaks its first content line: {text}"
-    );
-    assert!(text.contains("(+2)"), "fold count still shown: {text}");
-    assert!(
-        !text.contains("Finished dev"),
-        "later output lines stay folded: {text}"
-    );
+    assert!(text.contains("Compiling zode v0.1.0"), "{text}");
+    assert!(text.contains("Finished dev"), "{text}");
+    assert!(!text.contains("(+"), "nothing to fold: {text}");
+}
+
+#[test]
+fn a_long_result_row_previews_a_few_rows_and_folds_the_tail() {
+    // Past the budget the row keeps a readable head and folds the rest.
+    let theme = ThemeStore::with_builtins().resolve(None);
+    let mut chat = ChatView::new();
+    chat.push_user("run it");
+    chat.push_tool_call("Tool Bash cargo build", "Bash");
+    let body: String = (0..30).map(|i| format!("\n    step {i}")).collect();
+    chat.push_tool_result(&format!("Tool Bash done{body}"));
+    chat.end_turn();
+
+    let built = chat.build_lines(&theme, test_meta(), 100);
+    let text = joined_text(&built.lines);
+    assert!(text.contains("step 0"), "head of the output stays: {text}");
+    assert!(text.contains("step 6"), "several rows preview: {text}");
+    assert!(!text.contains("step 20"), "the tail folds away: {text}");
+    assert!(text.contains("(+23)"), "hidden count shown: {text}");
 }
 
 #[test]
@@ -380,8 +393,9 @@ fn clicking_a_group_summary_reveals_the_rows_it_stands_for() {
     let text = joined_text(&built.lines);
     assert!(text.contains("cargo step0"), "call row revealed: {text}");
     assert!(text.contains("Usage"), "usage row revealed too: {text}");
-    // The rows inside keep their own folds, one line each.
-    assert!(text.contains("(+1)"), "result output still folded: {text}");
+    // Rows inside a revealed group render at full detail — each is short
+    // enough to fit the preview budget, so nothing stays folded.
+    assert!(text.contains("some output"), "result body revealed: {text}");
 
     // Clicking the header again folds the group back up.
     assert!(chat.toggle_collapse_at(&theme, meta, area, summary_line as u16));

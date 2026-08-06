@@ -67,6 +67,14 @@ pub struct ChatMessage {
     /// member of a run reads it. Kept apart from `collapsed` so opening a
     /// group reveals its per-call rows still folded, one row each.
     pub group_open: bool,
+    /// File-edit preview attached to a FileEdit/FileWrite call row: numbered
+    /// diff rows rendered under the call line. Captured at ToolUse time (the
+    /// pre-image is still on disk then). Arc: messages clone on every rebuild.
+    pub diff: Option<std::sync::Arc<Vec<crate::ui::diff::DiffRow>>>,
+    /// True for user rows the app submitted itself (scheduler occurrences,
+    /// goal-loop driver turns). They render like turns but are excluded from
+    /// Up/Down prompt-history seeding — the user never typed them.
+    pub synthetic: bool,
 }
 
 impl ChatMessage {
@@ -78,6 +86,8 @@ impl ChatMessage {
             collapsed: false,
             activity: None,
             group_open: false,
+            diff: None,
+            synthetic: false,
         }
     }
 }
@@ -91,6 +101,13 @@ pub struct ImagePreview {
 
 const THINKING_PREFIX: &str = "Thinking: ";
 const ASSISTANT_BODY_INDENT: &str = "  ";
+
+/// How many painted rows of a folded TOOL block stay visible. Folding a
+/// multi-line shell command — or a file edit's diff — down to one row hid the
+/// very thing worth reading; a short preview keeps the call legible while the
+/// long tail still folds away behind `… (+N)`. Thinking blocks are exempt:
+/// reasoning is opt-in chrome and keeps its single-row header.
+const TOOL_PREVIEW_ROWS: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChatRenderMeta<'a> {
@@ -210,6 +227,9 @@ fn message_cache_key(
     let mut h = DefaultHasher::new();
     msg.role.hash(&mut h);
     msg.text.hash(&mut h);
+    if let Some(rows) = &msg.diff {
+        rows.hash(&mut h);
+    }
     width.hash(&mut h);
     theme_name.hash(&mut h);
     language.code().hash(&mut h);
@@ -249,6 +269,19 @@ impl ChatView {
         self.bump_revision();
     }
 
+    /// Tag the most recent user row as app-submitted (scheduler occurrence,
+    /// goal-loop driver turn) so prompt-history seeding skips it.
+    pub fn mark_last_user_synthetic(&mut self) {
+        if let Some(msg) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == Role::User)
+        {
+            msg.synthetic = true;
+        }
+    }
+
     pub fn push_system(&mut self, text: &str) {
         self.live_tail = false;
         self.messages
@@ -270,6 +303,21 @@ impl ChatView {
                 tool: tool.to_string(),
             }),
         );
+    }
+
+    /// A file-edit call row carrying its diff preview. It folds like any other
+    /// tool row — the [`TOOL_PREVIEW_ROWS`] budget already shows the head of
+    /// the diff, and a whole-file rewrite shouldn't flood the transcript.
+    pub fn push_tool_call_with_diff(
+        &mut self,
+        text: &str,
+        tool: &str,
+        diff: std::sync::Arc<Vec<crate::ui::diff::DiffRow>>,
+    ) {
+        self.push_tool_call(text, tool);
+        if let Some(msg) = self.messages.last_mut() {
+            msg.diff = Some(diff);
+        }
     }
 
     /// The result row for the call above it. Folded under the group summary;
@@ -911,12 +959,17 @@ impl ChatView {
         let last = self.messages.len().saturating_sub(1);
         let skip_cache = Some(i) == self.active_assistant_index || (self.streaming && i == last);
         let full = self.render_message_cached(msg, theme, width, meta.theme_name, skip_cache);
-        // A tool/thinking block taller than one row is collapsible: its first
-        // painted row becomes a click target, and while collapsed only a
-        // `▸ …` header renders.
-        if msg.role == Role::Tool && full.len() > 1 {
+        // A tool/thinking block taller than its preview budget is collapsible:
+        // its first painted row becomes a click target. Thinking folds to the
+        // single `▸ …` header; a tool block keeps [`TOOL_PREVIEW_ROWS`] rows
+        // visible and folds only the tail.
+        let is_thinking = msg.text.starts_with(THINKING_PREFIX);
+        let preview_rows = if is_thinking { 1 } else { TOOL_PREVIEW_ROWS };
+        if msg.role == Role::Tool && full.len() > preview_rows {
             built.toggles.insert(out.len(), i);
-            if msg.collapsed {
+            if !msg.collapsed {
+                out.extend(tool_block_lines(msg, theme, width, '▾'));
+            } else if is_thinking {
                 out.extend(render_tool_collapsed(
                     &msg.text,
                     full.len().saturating_sub(1),
@@ -924,7 +977,11 @@ impl ChatView {
                     width,
                 ));
             } else {
-                out.extend(render_tool_line_marked(&msg.text, theme, width, '▾'));
+                let mut lines = tool_block_lines(msg, theme, width, '▸');
+                let hidden = lines.len().saturating_sub(preview_rows);
+                lines.truncate(preview_rows);
+                lines.push(hidden_rows_hint(hidden, theme));
+                out.extend(lines);
             }
         } else {
             out.extend(full);
@@ -1042,7 +1099,13 @@ impl ChatView {
                 Style::default().fg(theme.fg_subtle),
                 width,
             ),
-            Role::Tool => render_tool_line(&msg.text, theme, width),
+            Role::Tool => {
+                let mut lines = render_tool_line(&msg.text, theme, width);
+                if let Some(rows) = &msg.diff {
+                    lines.extend(crate::ui::diff::render_diff_rows(rows, theme, width));
+                }
+                lines
+            }
         }
     }
 }
@@ -1329,6 +1392,31 @@ fn render_tool_line(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>>
     render_tool_process_line(&label, &body, label_style, body_style, width)
 }
 
+/// A tool block's marked render: the header rows plus any attached diff body.
+/// `render_tool_line_marked` re-renders from `msg.text` alone, so the diff has
+/// to be appended here or a marked edit row would lose it.
+fn tool_block_lines(
+    msg: &ChatMessage,
+    theme: &Theme,
+    width: u16,
+    marker: char,
+) -> Vec<Line<'static>> {
+    let mut lines = render_tool_line_marked(&msg.text, theme, width, marker);
+    if let Some(rows) = &msg.diff {
+        lines.extend(crate::ui::diff::render_diff_rows(rows, theme, width));
+    }
+    lines
+}
+
+/// The dim `… (+N)` row standing in for the rows a preview folded away.
+/// Indented to sit under the block body (two-space gutter + the `▸ ` glyph).
+fn hidden_rows_hint(hidden: usize, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("    … (+{hidden})"),
+        Style::default().fg(theme.fg_subtle),
+    ))
+}
+
 /// Full (expanded) render of a collapsible block, its first row marked
 /// with the fold glyph so the click target is visible.
 fn render_tool_line_marked(
@@ -1587,6 +1675,8 @@ mod tests {
             collapsed: false,
             activity: None,
             group_open: false,
+            diff: None,
+            synthetic: false,
         };
         assert_ne!(
             message_cache_key(&message, 80, "minimal", zode_core::i18n::Lang::En),
@@ -1612,32 +1702,51 @@ mod tests {
     }
 
     #[test]
-    fn multi_row_tool_blocks_collapse_by_default_and_expand_on_toggle() {
+    fn tool_blocks_within_the_preview_budget_render_whole() {
+        // A short block is not worth a click: it renders in full, unmarked.
+        let theme = ThemeStore::with_builtins().resolve(None);
+        let mut chat = ChatView::new();
+        chat.push_tool("Bash done\n    line one\n    line two");
+        let built = chat.build_lines(&theme, test_meta(), 80);
+        let text = joined_text(&built.lines);
+        assert!(text.contains("line two"), "whole body renders: {text}");
+        assert!(!text.contains("▸") && !text.contains("(+"), "{text}");
+        assert!(built.toggles.is_empty(), "nothing to toggle");
+    }
+
+    #[test]
+    fn oversized_tool_blocks_preview_then_expand_on_toggle() {
         let theme = ThemeStore::with_builtins().resolve(None);
         let meta = test_meta();
         let mut chat = ChatView::new();
-        chat.push_tool("Bash done\n    line one\n    line two");
+        let body: String = (0..20).map(|i| format!("\n    line {i}")).collect();
+        chat.push_tool(&format!("Bash done{body}"));
 
-        // Collapsed by default: a single ▸ header with the hidden-row count;
-        // the output lines stay hidden.
+        // Folded by default: the ▸ header plus a preview of the body, with the
+        // tail replaced by a hidden-row count.
         let built = chat.build_lines(&theme, meta, 80);
         let (lines, toggles) = (built.lines, built.toggles);
         let text = joined_text(&lines);
-        assert!(text.contains("▸"), "collapsed block shows the fold marker");
+        assert!(text.contains("▸"), "folded block shows the fold marker");
         assert!(text.contains("Bash done"), "header keeps the first line");
-        assert!(text.contains("(+2)"), "hidden row count shown: {text}");
-        assert!(!text.contains("line two"), "folded body must not render");
+        assert!(text.contains("line 5"), "body previews: {text}");
+        assert!(!text.contains("line 15"), "the tail folds away: {text}");
+        assert!(text.contains("(+13)"), "hidden row count shown: {text}");
         assert_eq!(toggles.len(), 1, "one collapsible block registered");
+        let painted = lines
+            .iter()
+            .filter(|l| !plain_line_text(l).trim().is_empty())
+            .count();
+        assert_eq!(painted, TOOL_PREVIEW_ROWS + 1, "preview rows + the hint");
 
         // Expanding shows the whole block, marked with ▾.
         chat.messages[0].collapsed = false;
         chat.bump_revision();
         let built = chat.build_lines(&theme, meta, 80);
-        let (lines, _) = (built.lines, built.toggles);
-        let text = joined_text(&lines);
+        let text = joined_text(&built.lines);
         assert!(text.contains("▾"));
-        assert!(text.contains("line two"));
-        assert!(!text.contains("(+2)"));
+        assert!(text.contains("line 15"));
+        assert!(!text.contains("(+13)"));
     }
 
     #[test]
@@ -1703,7 +1812,9 @@ mod tests {
         let theme = ThemeStore::with_builtins().resolve(None);
         let meta = test_meta();
         let mut chat = ChatView::new();
-        chat.push_tool("Bash done\n    output line");
+        // Long enough to exceed the preview budget, so it is collapsible.
+        let body: String = (0..20).map(|i| format!("\n    output {i}")).collect();
+        chat.push_tool(&format!("Bash done{body}"));
         let area = Rect::new(0, 0, 80, 24);
 
         // Paint once so last_render_start reflects a real frame.
@@ -2371,6 +2482,8 @@ mod tests {
                 collapsed: false,
                 activity: None,
                 group_open: false,
+                diff: None,
+                synthetic: false,
             },
             &theme,
             80,
@@ -2397,6 +2510,8 @@ mod tests {
                 collapsed: false,
                 activity: None,
                 group_open: false,
+                diff: None,
+                synthetic: false,
             },
             &theme,
             80,
@@ -2422,6 +2537,8 @@ mod tests {
                 collapsed: false,
                 activity: None,
                 group_open: false,
+                diff: None,
+                synthetic: false,
             },
             &theme,
             80,
@@ -2459,6 +2576,8 @@ mod tests {
                 collapsed: false,
                 activity: None,
                 group_open: false,
+                diff: None,
+                synthetic: false,
             },
             &theme,
             80,
@@ -2632,6 +2751,8 @@ mod tests {
                 collapsed: false,
                 activity: None,
                 group_open: false,
+                diff: None,
+                synthetic: false,
             },
             &theme,
             80,
@@ -2660,6 +2781,8 @@ mod tests {
                 collapsed: false,
                 activity: None,
                 group_open: false,
+                diff: None,
+                synthetic: false,
             },
             &theme,
             80,
