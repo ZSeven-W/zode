@@ -64,6 +64,27 @@ impl InputBox {
         self.area.insert_newline();
     }
 
+    /// Enter fallback for terminals that cannot report Shift+Enter (only the
+    /// kitty keyboard protocol distinguishes it from plain Enter — legacy
+    /// terminals send the identical byte): a single trailing backslash under
+    /// the cursor continues the line instead of submitting. Returns `true`
+    /// when handled. A doubled `\\` stays literal, and a backslash anywhere
+    /// but the very end of the text (Windows paths, regexes) never triggers.
+    pub fn continue_backslash_line(&mut self) -> bool {
+        let (row, col) = self.area.cursor();
+        let lines = self.area.lines();
+        let Some(last) = lines.last() else {
+            return false;
+        };
+        let at_text_end = row + 1 == lines.len() && col == last.chars().count();
+        if !at_text_end || !last.ends_with('\\') || last.ends_with("\\\\") {
+            return false;
+        }
+        self.area.delete_char(); // drop the continuation backslash
+        self.area.insert_newline();
+        true
+    }
+
     /// Forward a key event to the textarea.
     pub fn input(&mut self, ev: crossterm::event::KeyEvent) {
         self.area.input(ev);
@@ -671,6 +692,31 @@ mod tests {
             !buf[(2, 1)].modifier.contains(Modifier::UNDERLINED),
             "input text should not inherit tui-textarea's default cursor-line underline"
         );
+    }
+
+    #[test]
+    fn backslash_continuation_breaks_the_line_only_at_a_trailing_backslash() {
+        let mut ib = InputBox::new();
+        ib.insert_str("first line\\");
+        assert!(ib.continue_backslash_line());
+        ib.insert_str("second");
+        assert_eq!(ib.text(), "first line\nsecond");
+
+        // Mid-text backslash (cursor not at end) never triggers.
+        let mut ib = InputBox::new();
+        ib.insert_str("C:\\path\\to");
+        ib.area.move_cursor(tui_textarea::CursorMove::Head);
+        assert!(!ib.continue_backslash_line());
+
+        // Doubled backslash stays literal.
+        let mut ib = InputBox::new();
+        ib.insert_str("literal\\\\");
+        assert!(!ib.continue_backslash_line());
+
+        // No backslash → plain submit path.
+        let mut ib = InputBox::new();
+        ib.insert_str("plain");
+        assert!(!ib.continue_backslash_line());
     }
 
     #[test]

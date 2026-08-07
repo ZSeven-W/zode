@@ -5383,6 +5383,12 @@ impl TuiApp {
             (KeyCode::Enter, m)
                 if !m.contains(KeyModifiers::SHIFT) && !m.contains(KeyModifiers::ALT) =>
             {
+                // Trailing-backslash continuation: the universal newline path
+                // for terminals where Shift+Enter is byte-identical to Enter
+                // (anything without the kitty keyboard protocol).
+                if self.input.continue_backslash_line() {
+                    return;
+                }
                 let text = self.input.take();
                 self.reset_input_browse_state();
                 if self.finish_queued_edit(text.clone()) {

@@ -40,9 +40,9 @@ pub static KEYMAP: &[Binding] = &[
         help: "Send message",
     },
     Binding {
-        keys: "Shift/Alt+Enter",
+        keys: "Shift/Alt+Enter or \\+Enter",
         action: ActionId::Newline,
-        help: "Newline",
+        help: "Newline (Shift needs kitty-protocol terminals; \\+Enter works everywhere)",
     },
     Binding {
         keys: "Ctrl+C",
