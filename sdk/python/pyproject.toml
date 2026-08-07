@@ -1,6 +1,6 @@
 [project]
 name = "zode-sdk"
-version = "0.2.0b1"
+version = "0.2.0b2"
 description = "Zero-dependency Python SDK for the zode app-server JSON-RPC 2.0 stdio protocol."
 readme = "README.md"
 requires-python = ">=3.9"
