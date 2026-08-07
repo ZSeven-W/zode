@@ -27,6 +27,70 @@ pub(crate) static TEST_ENV_LOCK: Lazy<tokio::sync::Mutex<()>> =
 use crate::ui::chat::ChatView;
 use crate::ui::status::Mode;
 
+/// Append watermark with identity: how many messages are already in the
+/// session file, plus the uuid and tombstone-kind of the LAST one written.
+/// `Session::append` alone validates only the message COUNT — a compaction
+/// tombstones messages IN PLACE (count preserved) and splices boundary +
+/// summary, so a count check can pass while the prefix changed and an
+/// index-based tail append would write shifted duplicates (bricking the
+/// transcript on load) or splice a summary after live originals. The
+/// identity check catches every such rewrite: an in-place tombstone flips
+/// the kind bit, and a mid-store splice shifts the uuid at the watermark.
+#[derive(Default)]
+pub struct PersistedWatermark {
+    count: std::sync::atomic::AtomicUsize,
+    /// `(uuid, was_tombstone)` of the message at `count - 1` when it was
+    /// last persisted. `None` with `count > 0` means "unknown identity"
+    /// (legacy seed) and fails closed into a full rewrite.
+    last: std::sync::Mutex<Option<(uuid::Uuid, bool)>>,
+}
+
+impl PersistedWatermark {
+    pub fn count(&self) -> usize {
+        self.count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record that `snapshot` is now fully persisted.
+    pub fn record(&self, snapshot: &agent::message::MessageStore) {
+        let last = snapshot.last().map(|msg| {
+            (
+                msg.uuid(),
+                matches!(msg, agent::message::Message::Tombstone { .. }),
+            )
+        });
+        if let Ok(mut slot) = self.last.lock() {
+            *slot = last;
+        }
+        self.count
+            .store(snapshot.len(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether `snapshot` still starts with the exact prefix this watermark
+    /// recorded — the precondition for appending instead of rewriting.
+    pub fn prefix_matches(&self, snapshot: &agent::message::MessageStore) -> bool {
+        let count = self.count();
+        if count == 0 {
+            return true;
+        }
+        if snapshot.len() < count {
+            return false;
+        }
+        let Ok(slot) = self.last.lock() else {
+            return false;
+        };
+        let Some((uuid, was_tombstone)) = *slot else {
+            return false; // count > 0 with unknown identity → fail closed
+        };
+        match snapshot.iter().nth(count - 1) {
+            Some(msg) => {
+                msg.uuid() == uuid
+                    && matches!(msg, agent::message::Message::Tombstone { .. }) == was_tombstone
+            }
+            None => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolActivity {
     pub id: String,
@@ -46,16 +110,23 @@ pub struct SessionTab {
     /// Whether the session index entry has been stamped with a real title
     /// (false until the first user turn for a fresh tab).
     pub titled: bool,
-    /// Count of messages already written to the session file — the append
-    /// watermark. Shared with the detached save task (updated under the
-    /// global save lock) so a long session persists a turn's new messages
-    /// by APPENDING rather than rewriting the whole transcript each turn
-    /// (was O(n²) per session). Seeded to the loaded length on resume.
-    pub persisted_msgs: Arc<std::sync::atomic::AtomicUsize>,
+    /// Messages already written to the session file — the append watermark
+    /// (count + identity of the last persisted message). Shared with the
+    /// detached save task (updated under the global save lock) so a long
+    /// session persists a turn's new messages by APPENDING rather than
+    /// rewriting the whole transcript each turn (was O(n²) per session).
+    /// Seeded from the loaded store on resume.
+    pub persisted_msgs: Arc<PersistedWatermark>,
     /// Set when the store's PREFIX changed since the last save (a
     /// compaction rewrote/tombstoned earlier messages, `/clear`, undo/redo)
     /// — an append would corrupt, so the next save is a full rewrite.
     pub store_dirty: bool,
+    /// The last turn was cut off by the context-window limit. When the next
+    /// compaction succeeds, the app auto-queues a continuation turn — without
+    /// this, "compact after overflow" left the tab silently idle and the
+    /// interrupted task never resumed. Cleared when the user submits their
+    /// own prompt (their instruction supersedes the auto-resume) or `/clear`s.
+    pub resume_after_compact: bool,
     /// Abort handle for the in-flight turn, if any.
     pub turn_abort: Option<AbortController>,
     /// Tokio worker that owns the provider stream. Keeping the JoinHandle (not
@@ -232,8 +303,9 @@ impl SessionTab {
             chat: ChatView::new(),
             session_id,
             titled: false,
-            persisted_msgs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            persisted_msgs: Arc::new(PersistedWatermark::default()),
             store_dirty: false,
+            resume_after_compact: false,
             turn_abort: None,
             turn_task: None,
             watchdog_recorder: None,
@@ -356,7 +428,7 @@ pub async fn persist_session(
     session_id: String,
     engine: Arc<ZodeEngine>,
     title: String,
-    persisted: Arc<std::sync::atomic::AtomicUsize>,
+    persisted: Arc<PersistedWatermark>,
     allow_append: bool,
 ) -> bool {
     let snapshot = match engine.store.lock() {
@@ -372,11 +444,10 @@ pub async fn persist_session_snapshot(
     session_id: String,
     engine: Arc<ZodeEngine>,
     title: String,
-    persisted: Arc<std::sync::atomic::AtomicUsize>,
+    persisted: Arc<PersistedWatermark>,
     allow_append: bool,
     snapshot: agent::message::MessageStore,
 ) -> bool {
-    use std::sync::atomic::Ordering;
     // Serialize all saves: prevents same-session transcript temp-file races and
     // SessionIndex lost updates across concurrent tab saves.
     let _guard = SAVE_LOCK.lock().await;
@@ -396,18 +467,60 @@ pub async fn persist_session_snapshot(
     meta.title = title;
     meta.cwd = engine.cwd.display().to_string();
     meta.model = engine.model.clone();
-    let result = if allow_append {
-        let expected = persisted.load(Ordering::Relaxed).min(total);
-        store.save_incremental(&meta, &snapshot, expected).await
+    // Two prefix guards on top of the caller's `allow_append` intent:
+    // - the engine's event-independent compaction latch (set by the
+    //   PostCompact hook, so a dropped UI notice can't be missed), and
+    // - the watermark identity check (uuid + tombstone-kind of the last
+    //   persisted message), which catches ANY prefix rewrite including
+    //   in-place tombstoning that preserves the message count.
+    // `Session::append`'s own count check alone would pass in exactly
+    // those cases and splice index-shifted duplicates into the file.
+    let compaction_latched = engine.take_prefix_dirty();
+    let append_safe = allow_append && !compaction_latched && persisted.prefix_matches(&snapshot);
+    // Display originals captured at compaction time ride along so the
+    // archive can preserve even messages that never reached disk before
+    // being tombstoned (compacted within their very first unsaved turn).
+    let overlay = engine.compacted_overlay_snapshot();
+    let result = if append_safe {
+        let expected = persisted.count().min(total);
+        store
+            .save_incremental_with_originals(&meta, &snapshot, expected, &overlay)
+            .await
     } else {
-        store.save(&meta, &snapshot).await
+        store.save_with_originals(&meta, &snapshot, &overlay).await
     };
     if let Err(error) = result {
+        // The latch was consumed above but the rewrite never landed —
+        // restore it so the NEXT save is still forced to a full rewrite.
+        // (The watermark identity check would catch the dangerous shapes
+        // anyway; this keeps both guards armed.)
+        if compaction_latched {
+            engine.mark_prefix_dirty();
+        }
         tracing::warn!("durable session save failed: {error}");
         return false;
     }
-    persisted.store(total, Ordering::Relaxed);
+    persisted.record(&snapshot);
     true
+}
+
+/// Remove a session's compacted archive under the global save lock, so the
+/// removal cannot interleave with an in-flight save that would re-create it
+/// from a pre-`/clear` snapshot.
+pub async fn remove_compacted_archive_serialized(session_id: String) {
+    let _guard = SAVE_LOCK.lock().await;
+    if let Ok(store) = SessionStore::open_default() {
+        if let Ok(path) = store.compacted_archive_path(&session_id) {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+}
+
+/// Delete a session (transcript + sidecar + index) under the global save
+/// lock so a queued save cannot interleave with the removal.
+pub async fn delete_session_serialized(id: &str) -> Result<(), zode_core::CoreError> {
+    let _guard = SAVE_LOCK.lock().await;
+    SessionIndex::delete_session_file_and_index(id).await
 }
 
 /// Run synchronous index I/O on the blocking pool while holding the same lock
@@ -595,16 +708,166 @@ mod tests {
             session_id.into(),
             engine,
             "Current title".into(),
-            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            Arc::new(PersistedWatermark::default()),
             false,
         )
         .await;
-
         let reloaded = SessionIndex::load().unwrap();
         let meta = reloaded.find_prefix(session_id).unwrap();
         assert_eq!(meta.title, "Current title");
         assert_eq!(meta.cwd, cwd.path().display().to_string());
         assert_eq!(meta.model, "current-model");
         assert!(meta.updated_at > 1);
+    }
+
+    /// A compaction rewrites the store's PREFIX while `Session::append`'s
+    /// own guard checks only the message COUNT. If a dropped compact notice
+    /// leaves `allow_append=true`, the watermark's identity check must still
+    /// force a full rewrite — an index-based append here would splice
+    /// duplicate uuids into the transcript and brick it on load.
+    #[tokio::test]
+    async fn persist_forces_full_rewrite_when_the_prefix_was_compacted() {
+        use agent::message::{ContentBlock, Header, Message, MessageStore};
+        use zode_core::config::{NoemaSettings, ProviderConfig, ProviderKind, ZodeConfig};
+        use zode_core::sessions::SessionStore;
+        use zode_core::EngineTemplate;
+
+        let config = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let _env_lock = TEST_ENV_LOCK.lock().await;
+        let _env = EnvVarGuard::set("ZODE_CONFIG_DIR", config.path());
+        let cfg = ZodeConfig {
+            provider: ProviderConfig {
+                r#type: Some(ProviderKind::Ollama),
+                base_url: Some("http://localhost:11434".into()),
+                model: Some("m".into()),
+                ..Default::default()
+            },
+            noema: NoemaSettings {
+                enabled: Some(false),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let engine = Arc::new(
+            EngineTemplate::new(
+                cfg,
+                cwd.path().to_path_buf(),
+                None,
+                false,
+                None,
+                "2026-08-07".into(),
+            )
+            .assemble()
+            .await
+            .unwrap(),
+        );
+
+        let user = |text: &str| Message::User {
+            header: Header::new(),
+            content: vec![ContentBlock::Text { text: text.into() }],
+        };
+        let a = user("first");
+        let b = user("second");
+        {
+            let mut store = engine.store.lock().unwrap();
+            store.push(a.clone()).unwrap();
+            store.push(b.clone()).unwrap();
+        }
+        let watermark = Arc::new(PersistedWatermark::default());
+        let session_id = "prefix-guard";
+        assert!(
+            persist_session(
+                session_id.into(),
+                engine.clone(),
+                "t".into(),
+                watermark.clone(),
+                false,
+            )
+            .await
+        );
+
+        // Simulate an EarliestHalf compaction the UI never heard about:
+        // tombstone `a` in place and splice boundary + summary BEFORE `b`.
+        // Count on disk (2) equals the watermark, so Session::append's own
+        // check would pass and append [summary, b] — duplicating `b`.
+        let tombstone_a = Message::Tombstone {
+            header: a.header().clone(),
+            reason: "compacted".into(),
+        };
+        let boundary = Message::System {
+            header: Header::new(),
+            text: "boundary".into(),
+        };
+        let summary = user("[Context summary]\nfirst was discussed.");
+        {
+            let mut store = engine.store.lock().unwrap();
+            let mut rewritten = MessageStore::new();
+            rewritten.push(tombstone_a.clone()).unwrap();
+            rewritten.push(boundary).unwrap();
+            rewritten.push(summary).unwrap();
+            rewritten.push(b.clone()).unwrap();
+            *store = rewritten;
+        }
+        // Drain the latch compact_sized would normally have set — this test
+        // must prove the WATERMARK guard alone forces the rewrite.
+        let _ = engine.take_prefix_dirty();
+
+        assert!(
+            persist_session(
+                session_id.into(),
+                engine.clone(),
+                "t".into(),
+                watermark.clone(),
+                true, // caller believes an append is fine
+            )
+            .await
+        );
+
+        let loaded = SessionStore::open_default()
+            .unwrap()
+            .load(session_id)
+            .await
+            .unwrap()
+            .messages;
+        assert_eq!(loaded.len(), 4, "full rewrite, no spliced duplicates");
+        assert!(matches!(
+            loaded.iter().next(),
+            Some(Message::Tombstone { .. })
+        ));
+
+        // In-place FULL compaction: same uuid at the watermark but the kind
+        // flipped to tombstone — the identity check must catch that too.
+        let tombstone_b = Message::Tombstone {
+            header: b.header().clone(),
+            reason: "compacted".into(),
+        };
+        {
+            let mut store = engine.store.lock().unwrap();
+            let snapshot: Vec<Message> = store.iter().cloned().collect();
+            let mut rewritten = MessageStore::new();
+            for msg in snapshot {
+                if msg.uuid() == b.uuid() {
+                    rewritten.push(tombstone_b.clone()).unwrap();
+                } else {
+                    rewritten.push(msg).unwrap();
+                }
+            }
+            *store = rewritten;
+        }
+        let _ = engine.take_prefix_dirty();
+        assert!(persist_session(session_id.into(), engine, "t".into(), watermark, true).await);
+        let reloaded = SessionStore::open_default()
+            .unwrap()
+            .load(session_id)
+            .await
+            .unwrap()
+            .messages;
+        assert_eq!(reloaded.len(), 4);
+        let tombstones = reloaded
+            .iter()
+            .filter(|m| matches!(m, Message::Tombstone { .. }))
+            .count();
+        assert_eq!(tombstones, 2, "in-place tombstone flip was persisted");
     }
 }

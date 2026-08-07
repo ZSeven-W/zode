@@ -207,7 +207,15 @@ pub(crate) async fn attach_session(
             Ok(store) => {
                 let short: String = meta.id.chars().take(8).collect();
                 eprintln!("zode: resumed session {short} ({})", meta.title);
-                (engine.with_store(store), Some(meta.id))
+                let engine = engine.with_store(store);
+                // Archived originals of compaction-tombstoned messages: the
+                // TUI merges them over the tombstones so the resumed
+                // transcript still shows the pre-compaction conversation.
+                if let Ok(sessions) = SessionStore::open_default() {
+                    let archive = sessions.load_compacted_archive(&meta.id).await;
+                    engine.seed_compacted_overlay(&archive);
+                }
+                (engine, Some(meta.id))
             }
             Err(e) => {
                 eprintln!("zode: could not load session {}: {e}", meta.id);

@@ -96,6 +96,27 @@ const GOAL_LOOP_CONTINUE_PROMPT: &str =
      is fully complete, call the GoalComplete tool with a short summary — do \
      not call it prematurely.";
 
+/// Continuation turn queued when a successful compaction follows a turn that
+/// was cut off by the context-window limit (see `SessionTab::resume_after_compact`).
+const COMPACT_RESUME_PROMPT: &str =
+    "The previous turn was interrupted by the context-window limit and the \
+     conversation has been compacted. Continue the interrupted task from \
+     where it left off — do not restart work that is already complete.";
+
+/// Recognize a turn failure caused by the context window filling up — the
+/// recoverable class that compaction fixes. Matches the vendor pinned-context
+/// hard stop plus the provider-side overflow rejections (Anthropic / OpenAI
+/// dialects).
+fn is_context_overflow_error(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("context window is effectively full")
+        || m.contains("prompt is too long")
+        || m.contains("context_length_exceeded")
+        || m.contains("maximum context length")
+        || m.contains("context length exceeded")
+        || (m.contains("input length") && m.contains("max_tokens"))
+}
+
 /// Default cap on autonomous goal-loop turns when `autoLoopMaxTurns` is unset.
 /// Without a default an unbounded loop can burn tokens indefinitely; the user
 /// can raise it via config or just resume by sending a message.
@@ -235,6 +256,7 @@ fn is_synthetic_prompt(text: &str) -> bool {
     t.contains("<system-reminder>")
         || t == GOAL_LOOP_START_PROMPT
         || t == GOAL_LOOP_CONTINUE_PROMPT
+        || t == COMPACT_RESUME_PROMPT
         || is_post_compact_restore_block(t)
 }
 
@@ -503,7 +525,7 @@ struct PendingForcedTurnStop {
 struct ScheduledTurnPersistence {
     session_id: String,
     title: String,
-    persisted: Arc<std::sync::atomic::AtomicUsize>,
+    persisted: Arc<crate::tab::PersistedWatermark>,
 }
 
 struct PendingScheduleLease {
@@ -1035,13 +1057,19 @@ impl TuiApp {
         // A resumed session (--continue/--resume): replay its transcript into
         // the chat and restore its title (the engine already holds the store).
         if let Some(id) = &resumed_id {
+            // Overlay first (own lock) so no two engine locks are ever nested.
+            let overlay = tab0.engine.compacted_overlay_snapshot();
             if let Ok(store) = tab0.engine.store.lock() {
-                tab0.chat = rebuild_chat_from_store(&store);
+                // Merge archived originals over compaction tombstones for
+                // DISPLAY only — context/watermark stay on the raw store.
+                tab0.chat = rebuild_chat_from_store(
+                    &zode_core::sessions::overlay_compacted_originals(&store, &overlay),
+                );
                 tab0.context_tokens = estimate_store_tokens(&store);
-                // Seed the append watermark to the loaded length (see the
-                // ResumeTab reassemble effect for the rationale).
-                tab0.persisted_msgs
-                    .store(store.len(), std::sync::atomic::Ordering::Relaxed);
+                // Seed the append watermark (count + last-message identity)
+                // from the loaded store (see the ResumeTab reassemble effect
+                // for the rationale).
+                tab0.persisted_msgs.record(&store);
             }
             if let Some(meta) = SessionIndex::load()
                 .ok()
@@ -2971,24 +2999,28 @@ impl TuiApp {
             ReassembleEffect::ResumeTab | ReassembleEffect::ExtensionResumeTab { .. } => {
                 let rebuilt = {
                     let tab = &self.tabs[tab_idx];
+                    // Overlay snapshot before the store lock (never nested).
+                    let overlay = tab.engine.compacted_overlay_snapshot();
                     tab.engine.store.lock().ok().map(|store| {
+                        // Seed the append watermark (count + last-message
+                        // identity) so the first post-resume save appends
+                        // onto the existing file instead of rewriting it.
+                        tab.persisted_msgs.record(&store);
                         (
-                            rebuild_chat_from_store(&store),
+                            // Archived originals replace compaction tombstones
+                            // for display; tokens/watermark use the raw store.
+                            rebuild_chat_from_store(
+                                &zode_core::sessions::overlay_compacted_originals(&store, &overlay),
+                            ),
                             estimate_store_tokens(&store),
-                            store.len(),
                         )
                     })
                 };
-                if let Some((chat, tokens, len)) = rebuilt {
+                if let Some((chat, tokens)) = rebuilt {
                     let tab = &mut self.tabs[tab_idx];
                     tab.chat = chat;
                     tab.context_tokens = tokens;
                     seed_prompt_history_for_tab(tab);
-                    // Seed the append watermark to the loaded length so the
-                    // first post-resume save appends onto the existing file
-                    // instead of mismatching and rewriting it.
-                    tab.persisted_msgs
-                        .store(len, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             ReassembleEffect::ExtensionReconfigure { access, .. } => {
@@ -3553,6 +3585,7 @@ impl TuiApp {
             .with_tool_access(zode_core::ToolAccessMode::Prompt)
             .with_plan_mode(false);
         let tx = agent_tx.clone();
+        let session_id = meta.id.clone();
         tokio::spawn(async move {
             let result = async {
                 let store = Session::load(&path)
@@ -3562,9 +3595,17 @@ impl TuiApp {
                     .assemble_tab(cwd_override, Some(id.to_string()))
                     .await
                     .map_err(|e| format!("{}: {e}", crate::tr("assemble failed")))?;
+                let engine = engine.with_store(store);
+                // Archived originals of compaction-tombstoned messages — the
+                // ResumeTab rebuild merges them back so the restored
+                // transcript shows the pre-compaction conversation.
+                if let Ok(sessions) = zode_core::sessions::SessionStore::open_default() {
+                    let archive = sessions.load_compacted_archive(&session_id).await;
+                    engine.seed_compacted_overlay(&archive);
+                }
                 Ok(ReassembledEngine {
                     template: clean_template,
-                    engine: engine.with_store(store),
+                    engine,
                 })
             }
             .await;
@@ -3577,15 +3618,16 @@ impl TuiApp {
         });
     }
 
-    /// Delete a saved session's transcript file and index entry. Open tabs are
-    /// untouched (they re-create the file on the next save). The index write
-    /// goes through the shared lock so it can't race a concurrent save.
+    /// Delete a saved session: transcript, index entry, AND the sidecar
+    /// directory (journal, checkpoints, snapshots, compacted archive) — the
+    /// same full cleanup the CLI `session rm` does. Leaving the sidecar
+    /// behind would keep deleted conversation content on disk. Open tabs are
+    /// untouched (they re-create the files on the next save).
     async fn delete_session(&mut self, id: &str) {
-        if let Ok(path) = SessionIndex::session_path(id) {
-            let _ = std::fs::remove_file(path);
+        match crate::tab::delete_session_serialized(id).await {
+            Ok(()) => self.toast = Some(Toast::info(crate::tr("session deleted"))),
+            Err(error) => self.toast = Some(Toast::error(format!("{error}"))),
         }
-        crate::tab::index_remove(id).await;
-        self.toast = Some(Toast::info(crate::tr("session deleted")));
     }
 
     /// Open the background tasks panel (Ctrl+B / /tasks).
@@ -5009,12 +5051,14 @@ impl TuiApp {
                 // any messages (the store is the source of truth). Use `/clear`
                 // to actually discard the conversation.
                 let tab = &mut self.tabs[self.active];
-                let rebuilt = tab
-                    .engine
-                    .store
-                    .lock()
-                    .ok()
-                    .map(|store| rebuild_chat_from_store(&store));
+                // Overlay snapshot before the store lock (never nested); it
+                // restores compaction-tombstoned history in the redraw.
+                let overlay = tab.engine.compacted_overlay_snapshot();
+                let rebuilt = tab.engine.store.lock().ok().map(|store| {
+                    rebuild_chat_from_store(&zode_core::sessions::overlay_compacted_originals(
+                        &store, &overlay,
+                    ))
+                });
                 if let Some(chat) = rebuilt {
                     tab.chat = chat;
                 }
@@ -6260,7 +6304,9 @@ impl TuiApp {
                 let open_note =
                     browser_extension_open_note(&url, session.open_extension_url(&url).await);
                 self.active_tab_mut().chat.push_system(&format!(
-                    "Pairing code: {} (valid 2 min). WS port {}. {open_note}",
+                    "Pairing code: {} (valid 2 min). WS port {}. {open_note} Pairing is \
+                     one-time: the extension stores a token and reconnects automatically \
+                     on later zode launches.",
                     handle.code, handle.port
                 ));
             }
@@ -8883,8 +8929,14 @@ impl TuiApp {
         if scheduler_owned
             || submitted_text == GOAL_LOOP_START_PROMPT
             || submitted_text == GOAL_LOOP_CONTINUE_PROMPT
+            || submitted_text == COMPACT_RESUME_PROMPT
         {
             tab.chat.mark_last_user_synthetic();
+        }
+        // A human prompt supersedes any pending auto-resume: their new
+        // instruction decides what happens next, not the harness.
+        if submitted_text != COMPACT_RESUME_PROMPT {
+            tab.resume_after_compact = false;
         }
         // No begin_assistant(): push_delta lazily opens an assistant segment,
         // so text after a tool card starts a fresh segment.
@@ -9322,6 +9374,18 @@ impl TuiApp {
                         }
                     } else {
                         tab.auto_compact_failures = 0;
+                        // The previous turn was cut off by the context limit
+                        // and this compaction freed the window — queue the
+                        // continuation so the interrupted task resumes on the
+                        // very next event-loop drain instead of sitting idle.
+                        if tab.resume_after_compact {
+                            tab.resume_after_compact = false;
+                            tab.chat.push_system(crate::tr(
+                                "context freed — resuming the interrupted task",
+                            ));
+                            tab.queued_input
+                                .push_back(COMPACT_RESUME_PROMPT.to_string());
+                        }
                     }
                 }
                 Err(e) => {
@@ -9749,7 +9813,9 @@ impl TuiApp {
                     // pre-compact count until the next Usage event (which
                     // never arrives if the turn errors first).
                     Event::Notice { ref code, .. }
-                        if code == "agent.compact.ok" || code == "agent.compact.micro" =>
+                        if code == "agent.compact.ok"
+                            || code == "agent.compact.micro"
+                            || code == "agent.compact.emergency" =>
                     {
                         if let Ok(store) = tab.engine.store.lock() {
                             tab.context_tokens = estimate_store_tokens(&store);
@@ -9852,6 +9918,16 @@ impl TuiApp {
                             ));
                         }
                         tab.chat.push_system(&line);
+                        // A context-overflow cut is recoverable: compaction
+                        // frees the window, and the flag makes the next
+                        // successful compaction auto-queue a continuation —
+                        // otherwise "overflow → compact" left the tab silent
+                        // and the interrupted task never resumed. Interactive
+                        // turns only: scheduler turns keep the fail-closed
+                        // retry policy.
+                        if scheduled_job.is_none() && is_context_overflow_error(e) {
+                            tab.resume_after_compact = true;
+                        }
                         // A tool-loop abort is definitive weak-model evidence
                         // — record the learned verdict (auto-lite, no config;
                         // see the agent.loop.repeat notice arm for the nudge
@@ -10184,6 +10260,8 @@ impl TuiApp {
                     // The store was emptied (prefix discarded) — the next save
                     // must be a full rewrite, not an append onto the old file.
                     tab.store_dirty = true;
+                    // A pending auto-resume belongs to the discarded task.
+                    tab.resume_after_compact = false;
                     // The runtime's compaction latches (no-progress, failure
                     // breaker) describe the conversation just discarded —
                     // reset them or the QueryLoop's own auto-compaction
@@ -10195,6 +10273,14 @@ impl TuiApp {
                     // not have the discarded one's requests/notes re-injected
                     // after its first compaction.
                     tab.engine.ledger.clear();
+                    // And every conversation-scoped tracker: restore latch,
+                    // recent read set, reminder baselines, display overlay —
+                    // all describe the conversation just discarded.
+                    tab.engine.clear_conversation_state();
+                    // Serialized under the save lock: a queued pre-clear
+                    // save must not re-create the archive after removal.
+                    let session_id = tab.session_id.clone();
+                    tokio::spawn(crate::tab::remove_compacted_archive_serialized(session_id));
                 }
             }
             "theme" => self.handle_theme(args),
@@ -11212,7 +11298,10 @@ impl TuiApp {
             if tab.auto_compact_failures >= AUTO_COMPACT_MAX_FAILURES {
                 continue;
             }
-            if tab.engine.needs_pre_turn_compact(tab.context_tokens) {
+            // `resume_after_compact` also triggers: an overflow-cut turn
+            // needs a compaction even when the badge value is stale or
+            // under-counted (the provider just proved the window is full).
+            if tab.engine.needs_pre_turn_compact(tab.context_tokens) || tab.resume_after_compact {
                 self.start_compaction(idx, agent_tx, true);
             }
         }
@@ -13166,9 +13255,25 @@ fn browser_extension_open_note(
     url: &str,
     result: Result<(), zode_core::browser::BrowserError>,
 ) -> String {
+    // Chrome sometimes refuses `chrome-extension://` URLs handed over from
+    // the command line (the tab opens blank), and the URL is always dead
+    // when the extension isn't installed — so a "successful" open still
+    // needs the manual path and the install link.
+    let install = format!(
+        "https://chromewebstore.google.com/detail/{}",
+        zode_core::browser::bridge::server::primary_extension_id()
+    );
     match result {
-        Ok(()) => "Opened the zode extension page in Chrome.".into(),
-        Err(error) => format!("Could not open Chrome automatically: {error}. Open manually: {url}"),
+        Ok(()) => format!(
+            "Opened the zode extension page in Chrome. If the tab is blank or errors, click \
+             the zode toolbar icon and enter the port + code shown above. Extension not \
+             installed yet? {install}"
+        ),
+        Err(error) => format!(
+            "Could not open Chrome automatically: {error}. Open manually: {url} — or click \
+             the zode toolbar icon and enter the port + code shown above. Extension not \
+             installed yet? {install}"
+        ),
     }
 }
 
@@ -13694,11 +13799,17 @@ mod tests {
     }
 
     #[test]
-    fn browser_extension_open_note_reports_success() {
-        assert_eq!(
-            browser_extension_open_note("chrome-extension://zode/popup.html", Ok(())),
-            "Opened the zode extension page in Chrome."
-        );
+    fn browser_extension_open_note_reports_success_with_fallbacks() {
+        let note = browser_extension_open_note("chrome-extension://zode/popup.html", Ok(()));
+        // Even a "successful" open needs the manual path (Chrome may drop
+        // chrome-extension:// URLs from the command line) and install link.
+        for expected in [
+            "Opened the zode extension page in Chrome.",
+            "toolbar icon",
+            "chromewebstore.google.com/detail/",
+        ] {
+            assert!(note.contains(expected), "missing {expected}: {note}");
+        }
     }
 
     #[test]
@@ -14111,7 +14222,11 @@ mod tests {
             Some(approval_queue),
             false,
             None,
-            "2026-06-15".to_string(),
+            // The REAL current date: a stale baked date would trip the
+            // midnight-crossing reminder and prepend a <system-reminder>
+            // block to the first turn's user text, breaking exact-text
+            // assertions (exactly what it does for a real overnight session).
+            chrono::Utc::now().format("%Y-%m-%d").to_string(),
         )
         .with_question_queue(Some(question_queue));
         let engine = template.assemble().await.unwrap();
@@ -14165,7 +14280,7 @@ mod tests {
             Some(approval_queue),
             true,
             None,
-            "2026-07-13".into(),
+            chrono::Utc::now().format("%Y-%m-%d").to_string(),
         )
         .with_question_queue(Some(question_queue));
         let resume_template = clean_template.with_tool_access(zode_core::ToolAccessMode::Prompt);
@@ -19102,6 +19217,86 @@ mod tests {
             "Thinking: The user asked for a file."
         );
         assert_eq!(chat.messages()[1].text, "I wrote hello.rs.");
+    }
+
+    /// A resumed post-compaction store holds tombstones where the original
+    /// conversation used to be; merged with the compacted archive, the
+    /// rebuild must show the original text again (the raw store alone would
+    /// render only the `[Context summary]` message).
+    #[test]
+    fn rebuild_chat_restores_compacted_history_through_the_overlay() {
+        let original_user = Message::User {
+            header: agent::message::Header::new(),
+            content: vec![ContentBlock::Text {
+                text: "帮我设计一个记忆系统".into(),
+            }],
+        };
+        let original_reply = Message::Assistant {
+            header: agent::message::Header::new(),
+            content: vec![ContentBlock::Text {
+                text: "方案如下：append-only 写入。".into(),
+            }],
+        };
+
+        // What the transcript looks like after compaction persisted it.
+        let mut store = MessageStore::new();
+        for msg in [&original_user, &original_reply] {
+            store
+                .push(Message::Tombstone {
+                    header: msg.header().clone(),
+                    reason: "compacted".into(),
+                })
+                .unwrap();
+        }
+        store
+            .push(Message::User {
+                header: agent::message::Header::new(),
+                content: vec![ContentBlock::Text {
+                    text: "[Context summary]\n设计了一个记忆系统。".into(),
+                }],
+            })
+            .unwrap();
+
+        // Raw store: history is gone (this was the bug).
+        let bare = rebuild_chat_from_store(&store);
+        assert_eq!(bare.messages().len(), 1);
+
+        let mut archive = MessageStore::new();
+        archive.push(original_user).unwrap();
+        archive.push(original_reply).unwrap();
+        let merged = zode_core::sessions::overlay_compacted_originals(&store, &archive);
+        let chat = rebuild_chat_from_store(&merged);
+
+        let texts: Vec<&str> = chat.messages().iter().map(|m| m.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("帮我设计一个记忆系统")));
+        assert!(texts.iter().any(|t| t.contains("append-only 写入")));
+        assert!(
+            texts.iter().any(|t| t.contains("[Context summary]")),
+            "the summary stays visible alongside the restored history"
+        );
+    }
+
+    #[test]
+    fn context_overflow_errors_are_recognized_for_auto_resume() {
+        for message in [
+            "provider error: prompt is too long: 210000 tokens > 200000 maximum",
+            "context window is effectively full and auto-compaction cannot make progress \
+             (compaction circuit breaker / no-progress latch is set); run a manual compact \
+             or clear the session before continuing",
+            "openai: context_length_exceeded",
+            "This model's maximum context length is 128000 tokens",
+            "input length and `max_tokens` exceed context limit",
+        ] {
+            assert!(is_context_overflow_error(message), "missed: {message}");
+        }
+        for message in [
+            "tool-call loop detected",
+            "connection reset by peer",
+            "429 rate limited",
+            "user interrupted the turn",
+        ] {
+            assert!(!is_context_overflow_error(message), "false hit: {message}");
+        }
     }
 
     #[test]

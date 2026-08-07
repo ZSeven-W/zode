@@ -319,7 +319,12 @@ async fn save_durable_session(
         .lock()
         .map_err(|_| zode_core::CoreError::Other("message store lock poisoned".into()))?
         .clone();
-    SessionStore::open_default()?.save(meta, &snapshot).await
+    // Overlay originals ride along so compaction-tombstoned messages stay
+    // archivable even when they never reached disk before compaction.
+    let overlay = engine.compacted_overlay_snapshot();
+    SessionStore::open_default()?
+        .save_with_originals(meta, &snapshot, &overlay)
+        .await
 }
 
 pub(crate) fn now_secs() -> u64 {

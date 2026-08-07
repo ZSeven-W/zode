@@ -67,6 +67,18 @@ pub async fn run_repl(engine: ZodeEngine, resumed_id: Option<String>) -> i32 {
                             save_session(&engine, &session_id).await;
                             continue;
                         }
+                        CmdFlow::Cleared => {
+                            // Persist the emptied transcript FIRST, then drop
+                            // the compacted archive; /clear + /exit must not
+                            // leave the old conversation on disk.
+                            save_session(&engine, &session_id).await;
+                            if let Ok(store) = SessionStore::open_default() {
+                                if let Ok(path) = store.compacted_archive_path(&session_id) {
+                                    let _ = tokio::fs::remove_file(path).await;
+                                }
+                            }
+                            continue;
+                        }
                     }
                 }
 
@@ -109,6 +121,9 @@ enum CmdFlow {
     /// The command mutated the message store (e.g. /compact); persist the
     /// session before continuing so the change survives a resume.
     Save,
+    /// `/clear`: persist the emptied transcript AND drop the compacted
+    /// archive — the old conversation must not survive on disk.
+    Cleared,
 }
 
 async fn dispatch_command(
@@ -133,7 +148,16 @@ async fn dispatch_command(
             if let Ok(mut store) = engine.store.lock() {
                 *store = MessageStore::new();
             }
+            // Conversation-scoped tracker state (restore latch, read set,
+            // reminder baselines, display overlay) and the ledger describe
+            // the discarded conversation — same cleanup as the TUI /clear.
+            engine.clear_conversation_state();
+            engine.ledger.clear();
+            if let Ok(mut s) = engine.compact_state.lock() {
+                *s = agent::compact::AutoCompactState::default();
+            }
             println!("(context cleared)");
+            return CmdFlow::Cleared;
         }
         "model" => {
             if args.is_empty() {
@@ -460,7 +484,9 @@ async fn save_session(engine: &ZodeEngine, id: &str) {
             meta
         }
     };
-    if let Err(error) = store.save(&meta, &snapshot).await {
+    // Overlay originals ride along (same rationale as the TUI persist path).
+    let overlay = engine.compacted_overlay_snapshot();
+    if let Err(error) = store.save_with_originals(&meta, &snapshot, &overlay).await {
         tracing::warn!("session save failed: {error}");
     }
 }

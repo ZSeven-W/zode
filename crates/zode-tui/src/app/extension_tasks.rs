@@ -265,7 +265,7 @@ impl ExtensionSessionRepository {
         session_id: String,
         engine: Arc<ZodeEngine>,
         title: String,
-        persisted: Arc<std::sync::atomic::AtomicUsize>,
+        persisted: Arc<crate::tab::PersistedWatermark>,
         allow_append: bool,
     ) {
         if self.root.is_none() {
@@ -292,9 +292,13 @@ impl ExtensionSessionRepository {
             Err(_) => return,
         };
         let total = snapshot.len();
+        // Same prefix guards as `persist_session_snapshot`: the compaction
+        // latch and the watermark identity check both force a full rewrite.
+        let append_safe =
+            allow_append && !engine.take_prefix_dirty() && persisted.prefix_matches(&snapshot);
         let mut appended = false;
-        if allow_append {
-            let expected = persisted.load(Ordering::Relaxed).min(total);
+        if append_safe {
+            let expected = persisted.count().min(total);
             let tail: Vec<Message> = snapshot.iter().skip(expected).cloned().collect();
             match Session::append(&path, &tail, expected).await {
                 Ok(true) => appended = true,
@@ -310,7 +314,7 @@ impl ExtensionSessionRepository {
                 return;
             }
         }
-        persisted.store(total, Ordering::Relaxed);
+        persisted.record(&snapshot);
         drop(_guard);
 
         let meta = SessionMeta {
@@ -1100,12 +1104,20 @@ struct SnapshotHistory {
     tools: Vec<HistoryTool>,
 }
 
+/// Where a snapshot's history comes from: the tab's live store plus the
+/// compacted-display overlay that restores tombstoned messages.
+struct HistorySource {
+    task_id: String,
+    store: Arc<std::sync::Mutex<MessageStore>>,
+    overlay: Arc<std::sync::Mutex<MessageStore>>,
+}
+
 struct PendingSnapshot {
     workspace: WorkspaceSummary,
     tasks: Vec<TaskSummary>,
     current_task_id: String,
     models: Vec<String>,
-    history_source: Option<(String, Arc<std::sync::Mutex<MessageStore>>)>,
+    history_source: Option<HistorySource>,
 }
 
 impl PendingSnapshot {
@@ -3192,6 +3204,7 @@ impl TuiApp {
             .with_plan_mode(false)
             .with_browser_target_override(Some(zode_core::browser::BrowserTarget::Bridge));
         let tx = agent_tx.clone();
+        let session_id = meta.id.clone();
         tokio::spawn(async move {
             let cwd_override = match tokio::fs::metadata(&saved_cwd).await {
                 Ok(metadata) if metadata.is_dir() => Some(saved_cwd),
@@ -3202,13 +3215,22 @@ impl TuiApp {
                 engine_template.assemble_tab(cwd_override, Some(tab_id.to_string()))
             );
             let (result, failure_code) = match (store, engine) {
-                (Ok(store), Ok(engine)) => (
-                    Ok(ReassembledEngine {
-                        template: clean_template,
-                        engine: engine.with_store(store),
-                    }),
-                    None,
-                ),
+                (Ok(store), Ok(engine)) => {
+                    let engine = engine.with_store(store);
+                    // Restore display copies of compaction-tombstoned
+                    // history, exactly like the TUI ResumeTab path.
+                    if let Ok(sessions) = zode_core::sessions::SessionStore::open_default() {
+                        let archive = sessions.load_compacted_archive(&session_id).await;
+                        engine.seed_compacted_overlay(&archive);
+                    }
+                    (
+                        Ok(ReassembledEngine {
+                            template: clean_template,
+                            engine,
+                        }),
+                        None,
+                    )
+                }
                 (Err(error), _) => (
                     Err(format!("load failed: {error}")),
                     Some("session_load_failed"),
@@ -3278,7 +3300,11 @@ impl TuiApp {
             .tabs
             .iter()
             .find(|tab| tab.session_id == selected && !tab.reassemble_pending)
-            .map(|tab| (selected.clone(), tab.engine.store.clone()));
+            .map(|tab| HistorySource {
+                task_id: selected.clone(),
+                store: tab.engine.store.clone(),
+                overlay: tab.engine.compacted_overlay.clone(),
+            });
         let selected_task = tasks
             .iter()
             .find(|task| task.id == selected)
@@ -3501,7 +3527,12 @@ fn complete_pending_snapshot(
     if !should_run() {
         return Ok(None);
     }
-    let history = if let Some((task_id, store)) = &pending.history_source {
+    let history = if let Some(HistorySource {
+        task_id,
+        store,
+        overlay,
+    }) = &pending.history_source
+    {
         let snapshot = {
             let store = store
                 .lock()
@@ -3512,6 +3543,16 @@ fn complete_pending_snapshot(
             store.clone()
         };
         // Release the live engine store before walking or serializing history.
+        if !should_run() {
+            return Ok(None);
+        }
+        // Swap compaction tombstones back to their archived originals so the
+        // panel history keeps showing the pre-compaction conversation.
+        let overlay = overlay
+            .lock()
+            .map(|overlay| overlay.clone())
+            .unwrap_or_default();
+        let snapshot = zode_core::sessions::overlay_compacted_originals(&snapshot, &overlay);
         if !should_run() {
             return Ok(None);
         }
