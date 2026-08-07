@@ -510,10 +510,17 @@ stores a long-term token in Chrome storage and in `~/.zode/browser-bridge.json`
 automatically (browser startup, install/update, and a 1-minute `chrome.alarms`
 retry while disconnected; requires the `alarms` permission, extension reload
 needed after this update). The auto path only reconnects, never launches zode.
-The `/browser pair` chat note always includes the manual fallback (toolbar
-icon + port/code) and the Web Store install link, because Chrome may drop
-`chrome-extension://` URLs handed over from the command line and the URL is
-dead when the extension isn't installed.
+Chrome BLOCKS `chrome-extension://` URLs launched by external programs
+(ERR_BLOCKED_BY_CLIENT — macOS `open`, Windows `start`, Linux `xdg-open`
+alike), so zode cannot reliably open the pairing page. The extension opens
+it ITSELF: a pre-auth `probe` hello (`ClientHello::Probe` →
+`ServerHello::PairingStatus { active }`, answer-and-close, origin-checked,
+reveals only the pairing-window bit) lets the worker poll the default
+bridge port on its ~30s alarm; while a window is active it opens
+`popup.html?port=…` via `chrome.tabs.create` (extension-origin navigation
+is not blocked), deduped by a 2-minute cooldown. The `/browser pair` note
+explains this and keeps the type-the-URL-in-the-address-bar fallback
+(typed navigation is browser-initiated and allowed) plus the store link.
 
 Extension version 0.5.0 also requests `nativeMessaging`. Every normal TUI
 launch registers the running zode executable as host

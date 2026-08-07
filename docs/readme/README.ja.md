@@ -708,7 +708,7 @@ target は 2 種類です。
 - **managed** — zode が専用の Chromium profile を起動して制御します。
 - **bridge** — zode が [`extensions/chrome/`](../../extensions/chrome/) に同梱された MV3 拡張を通じて、あなたが既に使っている Chrome profile を制御します。
 
-bridge target では、拡張を `extensions/chrome` から一度 load し、`/browser pair` を実行します。Zode はローカル WebSocket port と pairing code を事前入力した拡張ページを開きます — そのタブが空白で表示される場合（Chrome はコマンドラインからの `chrome-extension://` URL を拒否することがあります）、ツールバーの zode アイコンをクリックして port と pairing code を手動で入力してください。**ペアリングは一度だけです**：拡張は長期 token を保存して自動的に再接続します — ブラウザー起動時、拡張の更新時、切断中は 1 分間隔のリトライで — そのため zode を再起動しても再ペアリングを求められることはありません。実行中の CLI に再接続するか、必要に応じて extension-only の zode daemon を自動起動します。zode が開いた tab は `zode` という名前の Chrome tab group に置かれます。
+bridge target では、拡張を `extensions/chrome` から一度 load し、`/browser pair` を実行します。Chrome は外部プログラムが開く `chrome-extension://` URL をブロックするため（ERR_BLOCKED_BY_CLIENT、macOS/Windows/Linux いずれも同様）、zode 自身によるページのオープンは失敗することがあります — 代わりに、`/browser pair` の実行から約 30 秒以内に拡張自身が pairing ページを開きます（port は事前入力済みなので、チャットに表示される 6 桁の pairing code を入力してください）。手動の代替手段として、`chrome-extension://…/popup.html?port=…` の URL をアドレスバーに自分で入力して開くこともできます（手入力によるナビゲーションはブラウザー起点なのでブロックされません）。**ペアリングは一度だけです**：拡張は長期 token を保存して自動的に再接続します — ブラウザー起動時、拡張の更新時、切断中は約 30 秒間隔のリトライで — そのため zode を再起動しても再ペアリングを求められることはありません。実行中の CLI に再接続するか、必要に応じて extension-only の zode daemon を自動起動します。zode が開いた tab は `zode` という名前の Chrome tab group に置かれます。
 
 ### Chrome task side panel
 

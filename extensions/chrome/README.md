@@ -105,6 +105,14 @@ version now tracks zode, it is numerically lower than the extension's old
 independent line — Chrome refuses to *update* a packed install to a lower
 version, so remove that install and load this directory unpacked instead.
 
+Chrome blocks `chrome-extension://` URLs opened by external programs
+(ERR_BLOCKED_BY_CLIENT on every OS), so zode cannot reliably open the pairing
+page for you. Instead the extension polls the local bridge (a pre-auth probe
+that reveals only "is a pairing window open") and opens its own pairing page
+within ~30 seconds of `/browser pair`. Manual fallback: type the
+`chrome-extension://…/popup.html?port=…` URL into the address bar yourself —
+typed navigation is allowed.
+
 After the first pairing, the extension stores a token — pairing is one-time.
 The service worker reconnects with that token automatically: on browser
 startup, on extension install/update, and (while disconnected) on a one-minute

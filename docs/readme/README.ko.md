@@ -722,10 +722,14 @@ Zode 는 `tools:browser` 도구 그룹을 제공합니다.
 이는 고정된 extension ID 만 호출을 허용하는 Chrome Native Messaging host 를
 등록합니다. **페어링은 한 번만 필요합니다**: extension 이 장기 token 을 저장한
 뒤 자동으로 다시 연결됩니다 — 브라우저 시작 시, extension 업데이트 시, 연결이
-끊긴 동안에는 1분마다 재시도하므로 zode 를 재시작해도 다시 페어링할 필요가
-없습니다. 자동으로 열린 extension 페이지가 비어 있으면(Chrome 이 명령줄에서
-전달된 `chrome-extension://` URL 을 거부할 때가 있습니다) toolbar 의 zode
-아이콘을 클릭해 포트와 페어링 코드를 직접 입력하세요. 이후에는 Zode CLI 를 열어 두지 않아도 side panel 이 terminal 없는
+끊긴 동안에는 약 30초마다 재시도하므로 zode 를 재시작해도 다시 페어링할 필요가
+없습니다. Chrome 은 외부 프로그램이 여는 `chrome-extension://` URL 을
+차단하므로(ERR_BLOCKED_BY_CLIENT — macOS/Windows/Linux 모두 동일) zode 가
+직접 페이지를 여는 시도는 실패할 수 있습니다. 대신 `/browser pair` 후 약 30초
+안에 **extension 스스로** pairing 페이지를 엽니다(포트는 미리 입력되어 있으니
+채팅에 표시된 6자리 페어링 코드를 입력하세요). 수동 대안으로
+`chrome-extension://…/popup.html?port=…` URL 을 주소창에 직접 입력해 열 수도
+있습니다(직접 입력한 내비게이션은 브라우저가 시작한 것이라 차단되지 않습니다). 이후에는 Zode CLI 를 열어 두지 않아도 side panel 이 terminal 없는
 로컬 Zode daemon 을 자동으로 시작하고, 저장된 token 으로 task 와 기록을
 복원합니다. side panel 에서 task 를 제출하면 브라우저 도구가 panel 옆의 현재
 페이지에 바인딩되므로 "현재 페이지 분석" 은 새 탭을 만들지 않고 기존 탭을 바로

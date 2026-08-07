@@ -892,12 +892,15 @@ tab; `browser_act` สำหรับ navigate, click, type, key press และ
   bundle มาใน [`extensions/chrome/`](../../extensions/chrome/)
 
 สำหรับ target bridge ให้โหลด extension จาก `extensions/chrome` ครั้งเดียว แล้วรัน
-`/browser pair` Zode จะเปิดหน้า extension พร้อมกรอก local WebSocket port และ pairing
-code ให้ — หากหน้าที่เปิดอัตโนมัตินั้นว่างเปล่า (บางครั้ง Chrome ปฏิเสธ URL
-`chrome-extension://` ที่ส่งมาจาก command line) ให้คลิกไอคอน zode บน toolbar
-แล้วกรอก port และ pairing code เอง **การ pair ทำเพียงครั้งเดียว**: extension
+`/browser pair` Chrome จะบล็อก URL `chrome-extension://` ที่เปิดโดยโปรแกรมภายนอก
+(ERR_BLOCKED_BY_CLIENT — เหมือนกันทั้งบน macOS, Windows และ Linux) ดังนั้นความ
+พยายามของ zode เองที่จะเปิดหน้านั้นอาจล้มเหลว — แต่ extension จะเปิดหน้า pairing
+ของตัวเองภายในราว 30 วินาทีหลัง `/browser pair` โดยกรอก port ให้ล่วงหน้าแล้ว
+ให้กรอก pairing code 6 หลักที่แสดงในแชท หรือใช้วิธีสำรองด้วยการพิมพ์ URL
+`chrome-extension://…/popup.html?port=…` ลงในแถบที่อยู่ด้วยตัวเอง (การนำทาง
+ที่พิมพ์เองถือว่าเริ่มโดย browser จึงไม่ถูกบล็อก) **การ pair ทำเพียงครั้งเดียว**: extension
 เก็บ token ระยะยาวไว้และ reconnect อัตโนมัติ — ตอน browser เริ่มทำงาน ตอน
-extension อัปเดต และ retry ทุกหนึ่งนาทีระหว่างที่ขาดการเชื่อมต่อ — ดังนั้นการ
+extension อัปเดต และ retry ราวทุก 30 วินาทีระหว่างที่ขาดการเชื่อมต่อ — ดังนั้นการ
 restart zode ไม่ต้อง pair ใหม่ มันจะ reconnect กับ CLI ที่รันอยู่
 หรือ auto-start zode daemon แบบ extension-only เมื่อจำเป็น tab ที่ zode เปิดจะถูกวางใน
 Chrome tab group ชื่อ `zode`

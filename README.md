@@ -953,10 +953,12 @@ There are two browser targets:
   (source in [`extensions/chrome/`](extensions/chrome/)).
 
 For the bridge target, install the extension once, then run `/browser pair`.
-Zode opens the extension page with the local WebSocket port and pairing code
-pre-filled — if that tab comes up blank (Chrome sometimes refuses
-`chrome-extension://` URLs from the command line), click the zode toolbar icon
-and enter the port + code shown in the chat instead. **Pairing is one-time**:
+The extension detects the pairing window and opens its own pairing page
+within ~30 seconds, with the port pre-filled — enter the 6-digit code from
+the chat. (Chrome blocks `chrome-extension://` URLs launched by external
+programs on every OS, so zode's own attempt to open the page may show
+ERR_BLOCKED_BY_CLIENT; typing the URL into the address bar manually also
+works.) **Pairing is one-time**:
 the extension stores a long-term token and reconnects automatically — on
 browser startup, on extension updates, and on a one-minute retry cadence while
 disconnected — so restarting zode never asks you to pair again. The automatic

@@ -915,13 +915,19 @@ Ada dua target browser:
   ekstensi MV3 bawaan di [`extensions/chrome/`](../../extensions/chrome/).
 
 Untuk target bridge, muat ekstensi sekali dari `extensions/chrome`, lalu
-jalankan `/browser pair`. Zode membuka halaman ekstensi dengan port WebSocket
-lokal dan kode pairing terisi otomatis — jika tab itu muncul kosong (Chrome
-kadang menolak URL `chrome-extension://` dari command line), klik ikon zode
-di toolbar dan masukkan port + kode pairing secara manual. **Pairing hanya
+jalankan `/browser pair`. Chrome memblokir URL `chrome-extension://` yang
+dibuka oleh program eksternal (ERR_BLOCKED_BY_CLIENT — sama saja di macOS,
+Windows, dan Linux), sehingga upaya zode sendiri membuka halaman itu bisa
+gagal — sebagai gantinya, ekstensi sendiri membuka halaman pairing-nya
+dalam ~30 detik setelah `/browser pair`, dengan port sudah terisi; masukkan
+kode pairing 6 digit yang ditampilkan di chat. Sebagai fallback manual,
+ketik sendiri URL `chrome-extension://…/popup.html?port=…` di address bar
+(navigasi yang diketik manual dianggap dimulai oleh browser dan
+diizinkan). **Pairing hanya
 dilakukan sekali**: ekstensi menyimpan token jangka panjang dan menyambung
 ulang secara otomatis — saat browser dinyalakan, saat ekstensi diperbarui,
-dan dengan percobaan ulang setiap satu menit selama terputus — sehingga
+dan dengan percobaan ulang kira-kira setiap 30 detik selama terputus —
+sehingga
 me-restart zode tidak pernah meminta pairing lagi. Ia menyambung ulang ke
 CLI yang berjalan atau menjalankan otomatis daemon zode khusus-ekstensi saat
 diperlukan. Tab yang dibuka zode ditempatkan di grup tab Chrome bernama
