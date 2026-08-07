@@ -206,6 +206,8 @@ async function connectAttempt(port, code, attempt) {
         authenticated = true;
         settled = true;
         socket.cancelConnect = null;
+        // Connected — stop the background retry cadence until we drop.
+        clearReconnectAlarm();
         announceTaskTransport(socket);
         resolve(statusSnapshot(numericPort, token));
       }
@@ -288,6 +290,9 @@ async function connectAttempt(port, code, attempt) {
       ws = null;
       downloadSessionActive = false;
       disconnectTaskTransport("zode task connection closed");
+      // Dropped (zode exited / restarted): arm the quiet retry cadence so
+      // the stored token reconnects without the user re-pairing.
+      scheduleReconnectAlarm();
       if (!authenticated) {
         rejectAuth(new Error("zode bridge connection closed"));
       }
@@ -489,6 +494,78 @@ async function reconnectOrStart(port) {
     }
     return await reconnectStored(native.port || port);
   }
+}
+
+// ── Automatic reconnect ────────────────────────────────────────────────
+// Pairing has always been persistent (long-term token in chrome.storage +
+// ~/.zode/browser-bridge.json); what was missing is a TRIGGER — reconnect
+// logic only ran when the popup/side panel explicitly asked, so every zode
+// restart looked like it needed re-pairing. Reconnect silently on browser
+// startup / extension install, and while disconnected with a stored token
+// retry on a periodic alarm (alarms survive MV3 worker suspension).
+// Deliberately reconnect-only — never startNativeZode() here: auto-starting
+// the native host on a timer would keep relaunching zode after the user
+// closed it.
+const RECONNECT_ALARM = "zode-auto-reconnect";
+const RECONNECT_PERIOD_MINUTES = 1;
+
+async function attemptStoredReconnect(reason) {
+  if (ws != null) {
+    return; // already connected or connecting
+  }
+  const [port, token] = await Promise.all([getPort(), getToken()]);
+  if (port == null || token == null) {
+    clearReconnectAlarm(); // never paired (or unpaired) — nothing to retry
+    return;
+  }
+  try {
+    await reconnectStored(port);
+    console.debug("zode auto-reconnect ok", reason);
+  } catch (error) {
+    console.debug(
+      "zode auto-reconnect failed",
+      reason,
+      String((error && error.message) || error),
+    );
+  }
+}
+
+function scheduleReconnectAlarm() {
+  if (!chrome.alarms) {
+    return;
+  }
+  Promise.resolve(
+    chrome.alarms.create(RECONNECT_ALARM, {
+      periodInMinutes: RECONNECT_PERIOD_MINUTES,
+    }),
+  ).catch(() => {});
+}
+
+function clearReconnectAlarm() {
+  if (!chrome.alarms) {
+    return;
+  }
+  Promise.resolve(chrome.alarms.clear(RECONNECT_ALARM)).catch(() => {});
+}
+
+if (chrome.alarms && chrome.alarms.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === RECONNECT_ALARM) {
+      attemptStoredReconnect("alarm").catch(() => {});
+    }
+  });
+}
+if (chrome.runtime && chrome.runtime.onStartup) {
+  chrome.runtime.onStartup.addListener(() => {
+    scheduleReconnectAlarm();
+    attemptStoredReconnect("startup").catch(() => {});
+  });
+}
+if (chrome.runtime && chrome.runtime.onInstalled) {
+  chrome.runtime.onInstalled.addListener(() => {
+    scheduleReconnectAlarm();
+    attemptStoredReconnect("installed").catch(() => {});
+  });
 }
 
 function closeSocket() {

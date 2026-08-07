@@ -105,11 +105,16 @@ version now tracks zode, it is numerically lower than the extension's old
 independent line — Chrome refuses to *update* a packed install to a lower
 version, so remove that install and load this directory unpacked instead.
 
-After the first pairing, the extension stores a token. If zode is not running,
-the extension starts an extension-only background daemon through Chrome Native
-Messaging and reconnects to its local WebSocket. Closing Chrome or unloading the
-extension closes the native port and stops that daemon. Tabs opened through
-zode's bridge are grouped into a Chrome tab group named `zode`.
+After the first pairing, the extension stores a token — pairing is one-time.
+The service worker reconnects with that token automatically: on browser
+startup, on extension install/update, and (while disconnected) on a one-minute
+`chrome.alarms` cadence, so restarting zode never requires re-pairing. The
+automatic path only ever *reconnects* to an already-listening zode; it never
+launches one. Separately, when the side panel is opened while zode is not
+running, the extension starts an extension-only background daemon through
+Chrome Native Messaging and reconnects to its local WebSocket. Closing Chrome
+or unloading the extension closes the native port and stops that daemon. Tabs
+opened through zode's bridge are grouped into a Chrome tab group named `zode`.
 
 The extension also reports downloads created after the current bridge WebSocket
 connection was established. It never searches or returns earlier Chrome profile

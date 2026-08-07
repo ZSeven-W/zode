@@ -98,6 +98,7 @@ function testManifestDeclaresRequiredPermissions() {
     "downloads",
     "sidePanel",
     "nativeMessaging",
+    "alarms",
   ]);
 }
 
