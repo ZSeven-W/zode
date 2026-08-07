@@ -100,6 +100,9 @@ https://github.com/ZSeven-W/zode。
   navigate the tab manually.
 - **storage** — Persist the pairing token so the extension reconnects to the
   local zode without re-pairing every time.
+- **alarms** — Periodic local reconnect check while disconnected, and
+  self-opening the pairing page (Chrome blocks externally launched
+  chrome-extension:// URLs). Local connections to 127.0.0.1 only.
 - **downloads** — Report files the agent's actions caused the page to download,
   so the CLI can find them.
 - **offscreen** — Detect the browser's light/dark theme to swap the toolbar
@@ -117,6 +120,9 @@ https://github.com/ZSeven-W/zode。
 - **tabs / tabGroups / webNavigation** —— 定位配对标签页,把 zode 自己的后台标签页归入独立
   分组,并在用户手动导航该标签页时把控制权交还给用户。
 - **storage** —— 保存配对令牌,以便扩展重连本机 zode 时无需每次重新配对。
+- **alarms** —— 断线时约每 30 秒做一次本地重连检查,并在用户从 CLI 发起配对时由
+  扩展自行打开配对页(Chrome 会拦截外部程序打开的 chrome-extension:// 地址)。
+  仅连接 127.0.0.1,不访问网页、不传输数据。
 - **downloads** —— 报告助手操作导致页面下载的文件,便于 CLI 找到它们。
 - **offscreen** —— 检测浏览器明暗主题以切换工具栏图标;不读取任何页面内容。
 - **sidePanel** —— 承载"就本页提问"的界面。
@@ -169,6 +175,16 @@ continuing to drive a page the user has moved away from.
 Persists the pairing token and minimal connection state locally so the
 extension reconnects to the user's local zode CLI without repeating the pairing
 step every session. No browsing data is stored.
+
+**alarms**
+
+Schedules a lightweight periodic check (about every 30 seconds, only while
+disconnected) so the extension can silently re-establish the bridge to the
+user's local zode CLI after it restarts, and can open the pairing page when
+the user starts pairing from the CLI — Chrome blocks locally launched
+chrome-extension:// URLs, so the extension must open that page itself. The
+alarm triggers only local connection attempts to 127.0.0.1; it never accesses
+web pages or transmits any data.
 
 **downloads**
 
