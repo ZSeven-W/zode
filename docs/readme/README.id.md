@@ -43,13 +43,13 @@
 ## Sorotan
 
 - **Multi-provider**: Anthropic, OpenAI, dan API apa pun yang kompatibel dengan OpenAI (dialek DeepSeek, Moonshot, OpenRouter), serta Ollama lokal. Mendukung model dengan output besar dan **konteks 1M** (`contextWindow` / `maxOutputTokens` dapat dikonfigurasi).
-- **Tool surface yang kaya**: baca/tulis/edit file, pencarian kode dan konten, foreground/background shell, git, web fetch, notebook, dan TODO tracking.
-- **Kontrol browser**: tool `browser_*` bawaan dapat mengendalikan managed Chromium atau profil Chrome asli Anda melalui ekstensi Chrome bridge zode: navigasi, klik/ketik, inspeksi DOM, tangkap screenshot, baca log console/network, dan kelompokkan tab yang dibuka zode.
+- **Tool surface yang kaya**: baca/tulis/edit file (termasuk `MultiEdit` multi-hunk yang atomik), pencarian kode dan konten, foreground/background shell, git, web fetch (plus `WebSearch` opsional dengan Tavily key), notebook, dan TODO tracking.
+- **Kontrol browser**: tool `browser_*` bawaan dapat mengendalikan managed Chromium atau profil Chrome asli Anda melalui ekstensi Chrome bridge zode: navigasi, klik/ketik, inspeksi DOM, tangkap screenshot, baca log console/network, dan kelompokkan tab yang dibuka zode. Pairing hanya dilakukan sekali — ekstensi menyambung ulang secara otomatis di antara restart zode.
 - **Kontrol desktop**: tool `desktop_read`/`desktop_act`/`desktop_screenshot` menggerakkan aplikasi native lewat API accessibility OS (macOS AX / Windows UIA / Linux AT-SPI / Electron CDP), lengkap dengan ghost cursor dan penghenti Esc global.
 - **Permission non-blocking**: setiap tool yang mengubah state melewati gate (allow once / always / deny), tetapi prompt-nya tampil inline dan tidak pernah memblokir Anda: Anda bisa terus mengetik untuk mengantrekan lanjutan sementara sebuah tool menunggu, disertai aturan hard-deny.
 - **OS sandbox, aktif secara default**: perintah shell berjalan di bawah sandbox-exec (macOS) / bwrap (Linux) dalam mode `read-only` atau `workspace-write`, dengan **outbound network ditolak secara default**. Ubah live dengan `/sandbox`; model dapat meminta escape untuk satu perintah (`dangerouslyDisableSandbox`) yang **Anda otorisasi** di prompt.
 - **TUI layar penuh**: streaming Markdown dengan syntax highlighting, diff preview, autocomplete slash-command, riwayat prompt (Up/Down), 11 tema bawaan, overlay settings & help, section sidebar kanan yang tangguh, dan **UI 15 bahasa** (`/language`).
-- **Session persisten dan kompatibel V1**: mempertahankan kontrak transcript `<id>.jsonl` yang ada sambil menambahkan journal, checkpoint, rewind, fork, dan Git worktree terisolasi sebagai data sidecar.
+- **Session persisten dan kompatibel V1**: mempertahankan kontrak transcript `<id>.jsonl` yang ada sambil menambahkan journal, checkpoint, rewind, fork, dan Git worktree terisolasi sebagai data sidecar. Kompaksi konteks tidak pernah menghilangkan percakapan yang terlihat — session yang di-resume memutar ulang riwayat lengkap pra-kompaksi sementara konteks model tetap ringkas.
 - **Permukaan otomasi**: output headless JSON/JSONL yang stabil, penargetan session yang eksak, filter tool, exit code deterministik, ACP melalui stdio, dan dashboard operasi lokal.
 - **Tab multi-session**: jalankan beberapa percakapan berdampingan (`Ctrl+T`), masing-masing agent terisolasi; resume session lama dengan replay riwayat penuh.
 - **Sub-agents, team & workflows**: delegasikan pekerjaan sekali jalan lewat tool Task, rekrut teammate internal atau CLI eksternal yang persisten, koordinasikan mereka dengan board bersama dan klaim file, serta kelola lewat `/agents`, `/team`, dan `/workflows`.
@@ -405,6 +405,15 @@ memulihkan isi file yang di-track dan prefix transcript, melaporkan konflik
 alih-alih menimpa perubahan yang lebih baru, dan mencatat cabang journal logis
 baru alih-alih menghapus riwayat. Fork worktree dapat di-apply-back secara
 eksplisit ketika eksperimen sudah siap.
+
+**Kompaksi tidak pernah menghilangkan percakapan yang terlihat.** Saat
+kompaksi konteks mengganti pesan lama dengan ringkasan, aslinya disimpan
+dalam sidecar aditif (`~/.zode/sessions/<id>/compacted.jsonl`). Me-resume
+session, menekan `Ctrl+L`, `/export`, dan side panel Chrome semuanya
+menampilkan riwayat lengkap pra-kompaksi, sementara model tetap hanya
+menerima konteks yang sudah dikompaksi. Fork membawa arsip itu (difilter ke
+transcript-nya sendiri), `/clear` menghapusnya, dan menghapus session
+menghapus seluruh sidecar.
 
 ### Aturan permission dan profile sandbox
 
@@ -786,9 +795,15 @@ dan `dialect`. Key top-level opsional (semuanya punya default yang wajar):
   "contextWindow": 1000000,      // context window model — set 1000000 untuk model 1M
   "temperature": 0,              // makin rendah makin deterministik
   "language": "id",              // bahasa UI (15 locale); juga via /language
-  "effort": "medium",            // reasoning effort default; juga via /effort
+  "effort": "medium",            // reasoning effort; di Anthropic, medium/high dipetakan ke thinking budget nyata
   "autonomousOrchestration": true, // orkestrasi sub-agent + workflow (default aktif)
   "subagentMaxIterations": 0,      // guard anak opsional; dihilangkan/0 = tak terbatas
+  "tools": {
+    "deferNonCore": false        // true: pertahankan ~20 tool sehari-hari tetap terlihat, tunda sisanya di balik ToolSearch
+  },
+  "webSearch": {
+    "tavilyApiKey": null         // mengaktifkan tool WebSearch (atau set $TAVILY_API_KEY)
+  },
   "sandbox": {
     "enabled": true,             // OS sandbox untuk perintah shell (default aktif)
     "mode": "workspace-write",   // "workspace-write" | "read-only"
@@ -901,10 +916,16 @@ Ada dua target browser:
 
 Untuk target bridge, muat ekstensi sekali dari `extensions/chrome`, lalu
 jalankan `/browser pair`. Zode membuka halaman ekstensi dengan port WebSocket
-lokal dan kode pairing terisi otomatis; setelah pairing pertama, ekstensi
-menyimpan sebuah token. Ia menyambung ulang ke CLI yang berjalan atau
-menjalankan otomatis daemon zode khusus-ekstensi saat diperlukan. Tab yang
-dibuka zode ditempatkan di grup tab Chrome bernama `zode`.
+lokal dan kode pairing terisi otomatis — jika tab itu muncul kosong (Chrome
+kadang menolak URL `chrome-extension://` dari command line), klik ikon zode
+di toolbar dan masukkan port + kode pairing secara manual. **Pairing hanya
+dilakukan sekali**: ekstensi menyimpan token jangka panjang dan menyambung
+ulang secara otomatis — saat browser dinyalakan, saat ekstensi diperbarui,
+dan dengan percobaan ulang setiap satu menit selama terputus — sehingga
+me-restart zode tidak pernah meminta pairing lagi. Ia menyambung ulang ke
+CLI yang berjalan atau menjalankan otomatis daemon zode khusus-ekstensi saat
+diperlukan. Tab yang dibuka zode ditempatkan di grup tab Chrome bernama
+`zode`.
 
 ### Side panel task Chrome
 

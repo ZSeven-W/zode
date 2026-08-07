@@ -43,12 +43,12 @@
 ## Highlights
 
 - **Multi-provider** — Anthropic, OpenAI, और कोई भी OpenAI-compatible API (DeepSeek, Moonshot, OpenRouter dialects), साथ ही local Ollama. Large-output और **1M-context** models support करता है (`contextWindow` / `maxOutputTokens` configurable हैं)।
-- **Rich tool surface** — file read/write/edit, code व content search, foreground और background shells, git, web fetch, notebooks, TODO tracking.
-- **Browser control** — built-in `browser_*` tools एक managed Chromium instance या zode Chrome bridge extension के जरिए आपके real Chrome profile को drive कर सकते हैं: navigate, click/type, DOM inspect, screenshots, console/network logs पढ़ना, और zode द्वारा खोले गए tabs को group करना।
+- **Rich tool surface** — file read/write/edit (atomic multi-hunk `MultiEdit` सहित), code व content search, foreground और background shells, git, web fetch (Tavily key से optional `WebSearch` भी), notebooks, TODO tracking.
+- **Browser control** — built-in `browser_*` tools एक managed Chromium instance या zode Chrome bridge extension के जरिए आपके real Chrome profile को drive कर सकते हैं: navigate, click/type, DOM inspect, screenshots, console/network logs पढ़ना, और zode द्वारा खोले गए tabs को group करना। Pairing सिर्फ एक बार होती है — zode restarts के बाद extension अपने-आप reconnect हो जाता है।
 - **Non-blocking permissions** — हर mutating tool gated है (allow once / always / deny), पर prompt inline dock होता है और आपको block नहीं करता: एक tool के इंतज़ार में भी आप follow-up type करके queue कर सकते हैं, और hard-deny rules रहते हैं।
 - **OS sandbox, default on** — shell commands sandbox-exec (macOS) / bwrap (Linux) के तहत `read-only` या `workspace-write` mode में चलते हैं, और **outbound network default रूप से denied** है। `/sandbox` से live toggle करें; model एक single command के लिए escape माँग सकता है (`dangerouslyDisableSandbox`) जिसे **आप** prompt पर authorize करते हैं।
 - **Full-screen TUI** — syntax highlighting के साथ streaming markdown, diff previews, slash-command autocomplete, prompt history (Up/Down), 11 built-in themes, settings व help overlays, resilient right sidebar sections, और **15-language UI** (`/language`)।
-- **Durable, V1-compatible sessions** — मौजूदा `<id>.jsonl` transcript contract बरकरार, साथ ही sidecar data के रूप में journals, checkpoints, rewind, fork और isolated Git worktrees।
+- **Durable, V1-compatible sessions** — मौजूदा `<id>.jsonl` transcript contract बरकरार, साथ ही sidecar data के रूप में journals, checkpoints, rewind, fork और isolated Git worktrees। Context compaction visible conversation कभी नहीं खोती — resume की गई sessions compaction से पहले की पूरी history replay करती हैं, जबकि model context compact रहता है।
 - **Automation surfaces** — stable JSON/JSONL headless output, exact session targeting, tool filters, deterministic exit codes, stdio पर ACP, और एक local operations dashboard।
 - **Multi-session tabs** — `Ctrl+T` से कई conversations साथ-साथ चलाएँ, हर एक isolated agent; पुरानी sessions को पूरी history replay के साथ resume करें।
 - **Sub-agents, teams और workflows** — Task tool से one-shot काम delegate करें, persistent internal या external-CLI teammates hire करें, shared board व file claims से coordinate करें, और `/agents`, `/team`, `/workflows` से manage करें।
@@ -320,6 +320,8 @@ zode session delete <id> --remove-worktree
 ```
 
 हर mutating turn से पहले एक checkpoint capture होता है। Rewind tracked file content और transcript prefix restore करता है, newer changes को overwrite करने के बजाय conflicts report करता है, और history मिटाने के बजाय एक नई logical journal branch record करता है। Worktree forks को experiment तैयार होने पर explicitly apply back किया जा सकता है।
+
+**Compaction visible conversation कभी नहीं खोती।** जब context compaction पुराने messages को एक summary से replace करती है, तो originals एक additive sidecar में संरक्षित रहते हैं (`~/.zode/sessions/<id>/compacted.jsonl`)। Session resume करना, `Ctrl+L` दबाना, `/export` और Chrome side panel — सभी compaction से पहले की पूरी history दिखाते हैं, जबकि model को सिर्फ compacted context ही मिलता रहता है। Forks archive साथ ले जाते हैं (अपने ही transcript पर filtered), `/clear` इसे हटा देता है, और session delete करने पर पूरा sidecar हट जाता है।
 
 ### Permission rules और sandbox profiles
 
@@ -611,9 +613,15 @@ cargo run -p zode-pty-harness --bin zode-pty-scenario -- scenario.json
   "contextWindow": 1000000,      // model context window — 1M model के लिए 1000000 सेट करें
   "temperature": 0,              // कम = अधिक deterministic
   "language": "hi",              // UI language (15 locales); /language से भी
-  "effort": "medium",            // default reasoning effort; /effort से भी
+  "effort": "medium",            // reasoning effort; Anthropic पर medium/high असली thinking budgets पर map होते हैं
   "autonomousOrchestration": true, // sub-agent + workflow orchestration (default on)
   "subagentMaxIterations": 0,      // optional child guard; omitted/0 = unbounded
+  "tools": {
+    "deferNonCore": false        // true: ~20 everyday tools visible रखें, बाकी को ToolSearch के पीछे defer करें
+  },
+  "webSearch": {
+    "tavilyApiKey": null         // WebSearch tool enable करता है (या $TAVILY_API_KEY सेट करें)
+  },
   "sandbox": {
     "enabled": true,             // shell commands के लिए OS sandbox (default on)
     "mode": "workspace-write",   // "workspace-write" | "read-only"
@@ -696,7 +704,7 @@ Zode में browser automation के लिए एक `tools:browser` group 
 - **managed** — zode एक dedicated Chromium profile launch और control करता है।
 - **bridge** — zode [`extensions/chrome/`](../../extensions/chrome/) में bundled MV3 extension के जरिए आपके पहले से इस्तेमाल हो रहे Chrome profile को control करता है।
 
-Bridge target के लिए extension को एक बार `extensions/chrome` से load करें, फिर `/browser pair` चलाएँ। Zode extension page को local WebSocket port और pairing code pre-filled के साथ खोलता है; पहली pairing के बाद extension एक token store कर लेता है। यह एक चल रही CLI से reconnect करता है या ज़रूरत होने पर एक extension-only zode daemon auto-start करता है। Zode द्वारा खोले गए tabs `zode` नामक Chrome tab group में रखे जाते हैं।
+Bridge target के लिए extension को एक बार `extensions/chrome` से load करें, फिर `/browser pair` चलाएँ। Zode extension page को local WebSocket port और pairing code pre-filled के साथ खोलता है — अगर वह tab blank खुले (Chrome कभी-कभी command line से आए `chrome-extension://` URLs reject कर देता है), तो zode toolbar icon पर click करके port + pairing code manually enter करें। **Pairing सिर्फ एक बार होती है**: extension एक long-term token store करता है और अपने-आप reconnect होता है — browser startup पर, extension updates पर, और disconnected रहते हुए हर एक minute पर retry करके — इसलिए zode restart करने पर दोबारा pair करने को कभी नहीं कहा जाता। यह एक चल रही CLI से reconnect करता है या ज़रूरत होने पर एक extension-only zode daemon auto-start करता है। Zode द्वारा खोले गए tabs `zode` नामक Chrome tab group में रखे जाते हैं।
 
 ### Chrome task side panel
 

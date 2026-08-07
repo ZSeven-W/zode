@@ -57,6 +57,43 @@ Dependency direction: `zode` → `zode-tui` → `zode-core` → `vendor/agent`.
   `AfterToolUse` hook tracks fs-tool mtimes / TodoWrite calls; `turn_blocks`
   prepends a `<system-reminder>` block for external file changes, stale todo
   lists, and git-branch drift. Every notice fires once (baselines advance).
+- **Compacted history stays displayable** (`zode-core/src/sessions/archive.rs`):
+  compaction tombstones replaced messages in the live store, and the
+  transcript `.jsonl` persists that view. Before any full transcript rewrite,
+  newly-tombstoned originals are diffed off the old file into an additive
+  sidecar (`<sessions>/<id>/compacted.jsonl`). The engine keeps a
+  display-only `compacted_overlay` (populated by `compact_sized`, seeded from
+  the sidecar on resume, carried in `CarryState`); resume/Ctrl+L/extension
+  history rebuilds merge it over tombstones via
+  `sessions::overlay_compacted_originals`, so restoring a session no longer
+  loses the pre-compaction conversation while the model context stays
+  compacted. `/clear` drops both overlay and archive; `fork` copies the
+  archive; the TUI session delete removes the whole sidecar dir (same as
+  CLI `session rm`). The engine's display overlay is ALSO fed into the
+  archive at save time (`save_with_originals`), so messages compacted
+  before their first save still get preserved when the harness captured
+  them; `/export` renders through the overlay too. Accepted tradeoffs
+  (reviewed): archive writes stay best-effort (never fail the transcript
+  save — losing the current turn to protect old history is the worse
+  trade); no cross-process transaction spans old-transcript read + archive
+  merge + rewrite (two zode processes writing the SAME session id is not a
+  supported flow; in-process saves are serialized by the TUI save lock);
+  team-internal teammate transcripts persist raw (compacted resume equals
+  the live teammate's context; no UI renders their history); the in-loop
+  QueryLoop auto-compact still can't capture originals the engine never
+  saw (vendor hooks carry no message payload — upstream agent-rs work).
+- **Append safety is identity-checked, not count-checked**: compaction
+  tombstones IN PLACE (count preserved), so `Session::append`'s count guard
+  alone can pass on a rewritten prefix and splice index-shifted duplicates
+  (bricking the transcript on load). Two zode-side guards force a full
+  rewrite instead: the engine's `prefix_dirty` latch (set by the PostCompact
+  hook + `compact_sized`, event-loss-proof — a compact notice dropped by the
+  abort fence can't be missed) and the `PersistedWatermark` identity check
+  in `zode-tui/src/tab.rs` (uuid + tombstone-kind of the last persisted
+  message). Residual benign gap: in-loop microcompact rewrites tool-result
+  payloads in place without firing hooks, so an abort-raced micro notice can
+  leave un-elided tool results on disk (larger resume context, never
+  corruption).
 - **Session ledger** (`zode-core/src/session_ledger.rs`): the L2 memory layer
   between the transcript (L1) and noema (L3). Harness-maintained write-ahead
   working state — user requests verbatim, shell-command heads with latest
@@ -66,10 +103,38 @@ Dependency direction: `zode` → `zode-tui` → `zode-core` → `vendor/agent`.
   can't erase session facts. Session-scoped: carried via `CarryState`,
   wiped by `/clear`, never persisted to disk.
 - **Effort maps to real knobs**: `map_effort` (engine.rs) forwards `low|medium|high`
-  when reasoning is opted in; on Anthropic, `/effort high` maps to a thinking
-  budget on legacy models and to adaptive thinking (`thinking:{type:"adaptive"}`
-  + `output_config.effort`) on Opus 4.6+/Sonnet 4.6+/Sonnet 5/Opus 4.7/4.8/Fable 5;
-  OpenAI reasoning requests use `max_completion_tokens`.
+  when reasoning is opted in; on Anthropic, `/effort high` maps to an 8192
+  thinking budget and `/effort medium` to 4096 (`low` stays thinking-free —
+  the fast tier) on legacy models, and to adaptive thinking
+  (`thinking:{type:"adaptive"}` + `output_config.effort`) on Opus 4.6+/Sonnet
+  4.6+/Sonnet 5/Opus 4.7/4.8/Fable 5; OpenAI reasoning requests use
+  `max_completion_tokens`. Interleaved thinking (reasoning carried across
+  tool calls in one turn) needs the vendor Anthropic provider to add the
+  beta + block handling — upstream agent-rs work, not zode-side.
+- **Tool surface extras**: `MultiEdit` (zode-native,
+  `zode-core/src/tools/multi-edit.rs`) applies several FileEdit-style
+  replacements to one file atomically (all validated in memory, one write,
+  any failure leaves the file untouched); tracked by undo/reminder hooks and
+  the fs-escalation pass like FileEdit. `WebSearch` registers only when a
+  Tavily key exists (`webSearch.tavilyApiKey` config or `$TAVILY_API_KEY`) —
+  no key, no tool, so the model never sees an uncallable name.
+  `tools.deferNonCore` (default false) opts the standard profile into the
+  lite-style narrowing: ~20 everyday tools stay visible, the long tail
+  (browser/desktop/op/team/LSP/…) is reachable via ToolSearch.
+- **Per-turn date drift**: the system prompt's date is frozen at session
+  start for prompt-cache stability; `ReminderTracker::note_date` reports a
+  midnight crossing once per day change through the per-turn reminder.
+  (Tests that assemble engines with a hardcoded past date and assert exact
+  stored user text will trip this reminder — assemble with today's date.)
+- **Auto-resume after overflow compaction**: a turn cut off by the context
+  limit (`is_context_overflow_error` in zode-tui app.rs) latches
+  `SessionTab::resume_after_compact`; the latch also forces the between-turn
+  auto-compaction to run, and the next SUCCESSFUL compaction queues
+  `COMPACT_RESUME_PROMPT` so the interrupted task continues instead of the
+  tab sitting silently idle. Interactive tabs only (scheduler turns keep
+  fail-closed retries); a user-typed prompt or `/clear` clears the latch;
+  the synthetic prompt is excluded from prompt history like the goal-loop
+  prompts.
 
 ### Data flow
 
@@ -441,7 +506,14 @@ The bridge target controls the user's real Chrome profile. Run `/browser pair`
 to start a `127.0.0.1` WebSocket listener, then open the zode bridge extension
 popup and enter the displayed WS port and 6-digit code. A successful pairing
 stores a long-term token in Chrome storage and in `~/.zode/browser-bridge.json`
-(0600), so reconnects can authenticate with the token.
+(0600); pairing is ONE-TIME — the extension reconnects with the token
+automatically (browser startup, install/update, and a 1-minute `chrome.alarms`
+retry while disconnected; requires the `alarms` permission, extension reload
+needed after this update). The auto path only reconnects, never launches zode.
+The `/browser pair` chat note always includes the manual fallback (toolbar
+icon + port/code) and the Web Store install link, because Chrome may drop
+`chrome-extension://` URLs handed over from the command line and the URL is
+dead when the extension isn't installed.
 
 Extension version 0.5.0 also requests `nativeMessaging`. Every normal TUI
 launch registers the running zode executable as host

@@ -43,12 +43,12 @@
 ## 亮點
 
 - **多供應商**：支援 Anthropic、OpenAI、OpenAI 相容 API（DeepSeek、Moonshot、OpenRouter 等）以及本機 Ollama。
-- **豐富的工具面**：檔案讀寫與編輯、程式碼與內容搜尋、前景/背景 shell、git、網頁擷取、notebook、TODO 追蹤。
-- **瀏覽器控制**：內建 `browser_*` 工具可驅動託管的 Chromium，或透過 Chrome bridge 擴充功能控制你正在使用的 Chrome。
+- **豐富的工具面**：檔案讀寫與編輯（含原子多處編輯 `MultiEdit`）、程式碼與內容搜尋、前景/背景 shell、git、網頁擷取（搭配 Tavily key 可啟用 `WebSearch`）、notebook、TODO 追蹤。
+- **瀏覽器控制**：內建 `browser_*` 工具可驅動託管的 Chromium，或透過 Chrome bridge 擴充功能控制你正在使用的 Chrome。配對只需一次——擴充功能會在 zode 重新啟動後自動重新連線。
 - **非阻塞式權限**：會變更狀態的工具都會經過 allow once / always / deny 審核，審核提示以行內方式顯示，不會阻擋你繼續輸入。
 - **預設開啟 OS 沙箱**：shell 命令在 macOS `sandbox-exec` 或 Linux `bwrap` 中執行，預設禁止對外網路。
 - **全螢幕 TUI**：串流 Markdown、語法高亮、diff 預覽、斜線命令補全、歷史輸入、11 套內建佈景主題、設定與說明浮層，以及 15 種 UI 語言（`/language`）。
-- **V1 相容的持久工作階段**：保留既有的 `<id>.jsonl` 工作階段協定，同時以旁路資料新增 journal、checkpoint、rewind、fork 與隔離的 Git worktree。
+- **V1 相容的持久工作階段**：保留既有的 `<id>.jsonl` 工作階段協定，同時以旁路資料新增 journal、checkpoint、rewind、fork 與隔離的 Git worktree。上下文壓縮不會遺失可見對話——還原工作階段時會完整重播壓縮前的歷史，模型上下文仍維持壓縮後的精簡形態。
 - **自動化介面**：穩定的 JSON/JSONL headless 輸出、精確工作階段定位、工具過濾、確定性結束碼、stdio ACP 與本機 dashboard。
 - **多工作階段分頁**：用 `Ctrl+T` 並排執行多個隔離的工作階段，並可還原歷史工作階段。
 - **子代理、團隊與工作流程**：透過 Task 委派一次性任務，手動註冊內部或外部 CLI 隊友，並用 `/agents`、`/team`、`/workflows` 管理。
@@ -268,6 +268,12 @@ zode session delete <id> --remove-worktree
 系統會在有變更副作用的 turn 前建立 checkpoint。Rewind 會還原已追蹤檔案與
 工作階段訊息前綴，遇到新變更時回報衝突而不是覆寫；歷史 journal 不會被刪除，
 而是建立新的邏輯分支。worktree fork 的結果需要透過 `apply-back` 明確合回。
+
+**壓縮不遺失可見對話。** 上下文壓縮把舊訊息替換為摘要時，原文會保存到旁路封存
+（`~/.zode/sessions/<id>/compacted.jsonl`）。還原工作階段、`Ctrl+L` 重繪、
+`/export` 與 Chrome 側欄都會顯示壓縮前的完整歷史，而模型收到的仍是壓縮後的
+上下文。fork 會攜帶封存（依自身 transcript 過濾），`/clear` 會刪除封存，
+刪除工作階段時整個旁路目錄一併移除。
 
 ### 權限規則與沙箱 profile
 
@@ -674,7 +680,11 @@ Zode 提供 `tools:browser` 工具組：
 - **bridge**：透過 [`extensions/chrome/`](../../extensions/chrome/) 中的 MV3 擴充功能控制你正在使用的 Chrome profile。
 
 首次升級後執行一次新版 Zode 並執行 `/browser pair`。這會註冊僅允許固定擴充功能 ID
-呼叫的 Chrome Native Messaging host。之後即使沒有開啟 Zode CLI，側欄也會自動
+呼叫的 Chrome Native Messaging host。**配對只需一次**：擴充功能儲存長期 token 後
+會自動重新連線——瀏覽器啟動、擴充功能更新、以及斷線後每分鐘靜默重試，zode
+重新啟動不再需要重新配對。若自動開啟的擴充功能頁面是空白的（Chrome 有時會拒絕
+命令列傳入的 `chrome-extension://` 網址），點選工具列的 zode 圖示手動輸入
+連接埠與配對碼即可。之後即使沒有開啟 Zode CLI，側欄也會自動
 啟動一個無終端機的本機 Zode daemon，並使用已儲存的 token 還原任務與歷史記錄。
 從側欄提交任務時，瀏覽器工具會綁定側欄旁邊的目前頁面，因此「分析目前頁面」會
 直接讀取現有分頁，不再新建分頁；獨立的 TUI/CLI 自動化仍使用 `zode` 分頁群組。

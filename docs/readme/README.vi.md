@@ -43,12 +43,12 @@
 ## Điểm nổi bật
 
 - **Multi-provider**: Anthropic, OpenAI và mọi API tương thích OpenAI (các dialect DeepSeek, Moonshot, OpenRouter), cùng Ollama local. Hỗ trợ model output lớn và **context 1M** (`contextWindow` / `maxOutputTokens` đều cấu hình được).
-- **Bộ công cụ rộng**: đọc/ghi/sửa file, tìm kiếm code và content, foreground/background shell, git, web fetch, notebooks và TODO tracking.
-- **Browser control**: công cụ `browser_*` tích hợp có thể điều khiển một managed Chromium hoặc Chrome profile thật của bạn qua Chrome bridge extension — navigate, click/type, kiểm tra DOM, chụp screenshot, đọc console/network logs và gom nhóm các tab do zode mở.
+- **Bộ công cụ rộng**: đọc/ghi/sửa file (gồm `MultiEdit` sửa nhiều đoạn nguyên tử), tìm kiếm code và content, foreground/background shell, git, web fetch (cộng `WebSearch` tùy chọn với Tavily key), notebooks và TODO tracking.
+- **Browser control**: công cụ `browser_*` tích hợp có thể điều khiển một managed Chromium hoặc Chrome profile thật của bạn qua Chrome bridge extension — navigate, click/type, kiểm tra DOM, chụp screenshot, đọc console/network logs và gom nhóm các tab do zode mở. Pairing chỉ cần một lần — extension tự reconnect qua các lần khởi động lại zode.
 - **Permission không block**: mọi mutating tool đều đi qua cổng phê duyệt (allow once / always / deny), nhưng prompt hiển thị inline và không chặn bạn — cứ tiếp tục gõ để xếp hàng lệnh kế tiếp trong khi một tool đang chờ, kèm cả hard-deny rules.
 - **OS sandbox, bật mặc định**: shell commands chạy dưới sandbox-exec (macOS) / bwrap (Linux) ở chế độ `read-only` hoặc `workspace-write`, với **outbound network bị từ chối theo mặc định**. Bật/tắt live bằng `/sandbox`; model có thể xin thoát sandbox cho một lệnh (`dangerouslyDisableSandbox`) mà **bạn tự phê duyệt** ở prompt.
 - **TUI toàn màn hình**: streaming Markdown kèm syntax highlighting, diff preview, slash-command autocomplete, prompt history (Up/Down), 11 chủ đề tích hợp, settings/help overlays, sidebar phải với các mục co giãn ổn định và **UI 15 ngôn ngữ** (`/language`).
-- **Session bền, tương thích V1**: giữ nguyên contract transcript `<id>.jsonl` hiện có, đồng thời bổ sung journals, checkpoints, rewind, fork và Git worktree tách biệt dưới dạng dữ liệu sidecar.
+- **Session bền, tương thích V1**: giữ nguyên contract transcript `<id>.jsonl` hiện có, đồng thời bổ sung journals, checkpoints, rewind, fork và Git worktree tách biệt dưới dạng dữ liệu sidecar. Context compaction không bao giờ làm mất hội thoại nhìn thấy — resume replay đầy đủ lịch sử trước compaction trong khi context của model vẫn giữ dạng compact.
 - **Bề mặt automation**: JSON/JSONL headless output ổn định, nhắm session chính xác, tool filters, exit code xác định, ACP qua stdio và một dashboard vận hành cục bộ.
 - **Multi-session tabs**: chạy nhiều conversation song song (`Ctrl+T`), mỗi tab là một agent tách biệt; resume session cũ với replay đầy đủ lịch sử.
 - **Sub-agents, team và workflows**: delegate việc một lần qua Task tool, thuê teammate nội bộ hoặc external-CLI bền, điều phối chúng bằng board chung và file claims, quản lý qua `/agents`, `/team` và `/workflows`.
@@ -325,6 +325,8 @@ zode session delete <id> --remove-worktree
 ```
 
 Một checkpoint được chụp trước một turn có mutate. Rewind khôi phục nội dung file được theo dõi và prefix transcript, báo cáo conflict thay vì ghi đè thay đổi mới hơn, và ghi một nhánh journal logic mới thay vì xóa lịch sử. Worktree fork có thể được apply-back rõ ràng khi thử nghiệm sẵn sàng.
+
+**Compaction không bao giờ làm mất phần hội thoại nhìn thấy.** Khi context compaction thay các message cũ bằng một bản tóm tắt, bản gốc được giữ trong một sidecar bổ sung (`~/.zode/sessions/<id>/compacted.jsonl`). Resume một session, nhấn `Ctrl+L`, `/export` và Chrome side panel đều hiển thị đầy đủ lịch sử trước compaction, trong khi model vẫn chỉ nhận context đã compact. Fork mang theo archive (được lọc theo transcript của chính nó), `/clear` xóa nó, và xóa session sẽ xóa toàn bộ sidecar.
 
 ### Permission rules và sandbox profiles
 
@@ -624,9 +626,15 @@ Các key config cấp cao tùy chọn (đều có mặc định hợp lý):
   "contextWindow": 1000000,      // context window của model — đặt 1000000 cho model 1M
   "temperature": 0,              // càng thấp càng xác định
   "language": "vi",              // ngôn ngữ UI (15 locale); cũng đổi qua /language
-  "effort": "medium",            // reasoning effort mặc định; cũng đổi qua /effort
+  "effort": "medium",            // reasoning effort; trên Anthropic, medium/high map sang thinking budget thật
   "autonomousOrchestration": true, // điều phối sub-agent + workflow (mặc định bật)
   "subagentMaxIterations": 0,      // guard con tùy chọn; bỏ/0 = không giới hạn
+  "tools": {
+    "deferNonCore": false        // true: giữ ~20 tool thường dùng hiển thị, defer phần còn lại sau ToolSearch
+  },
+  "webSearch": {
+    "tavilyApiKey": null         // bật tool WebSearch (hoặc đặt $TAVILY_API_KEY)
+  },
   "sandbox": {
     "enabled": true,             // OS sandbox cho shell commands (mặc định bật)
     "mode": "workspace-write",   // "workspace-write" | "read-only"
@@ -709,7 +717,7 @@ Có hai browser target:
 - **managed** — zode launch và điều khiển một Chromium profile riêng.
 - **bridge** — zode điều khiển chính Chrome profile bạn đang dùng thông qua extension MV3 đóng gói sẵn trong [`extensions/chrome/`](../../extensions/chrome/).
 
-Với target bridge, hãy nạp extension một lần từ `extensions/chrome`, rồi chạy `/browser pair`. Zode mở trang extension với WebSocket port cục bộ và pairing code điền sẵn; sau lần pair đầu, extension lưu một token. Nó tự reconnect vào một CLI đang chạy hoặc tự khởi động một zode daemon chỉ-extension khi cần. Các tab do zode mở được đặt vào một Chrome tab group tên `zode`.
+Với target bridge, hãy nạp extension một lần từ `extensions/chrome`, rồi chạy `/browser pair`. Zode mở trang extension với WebSocket port cục bộ và pairing code điền sẵn — nếu tab đó mở ra trống (đôi khi Chrome từ chối URL `chrome-extension://` truyền từ command line), hãy bấm biểu tượng zode trên toolbar và nhập port + pairing code thủ công. **Pairing chỉ cần một lần**: extension lưu một token dài hạn và tự reconnect — khi browser khởi động, khi extension cập nhật, và retry mỗi phút trong lúc mất kết nối — nên khởi động lại zode không bao giờ yêu cầu pair lại. Nó tự reconnect vào một CLI đang chạy hoặc tự khởi động một zode daemon chỉ-extension khi cần. Các tab do zode mở được đặt vào một Chrome tab group tên `zode`.
 
 ### Chrome task side panel
 

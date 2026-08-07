@@ -43,13 +43,13 @@
 ## Puntos destacados
 
 - **Múltiples proveedores**: Anthropic, OpenAI y cualquier API compatible con OpenAI (dialectos de DeepSeek, Moonshot, OpenRouter), además de Ollama local. Admite modelos de gran salida y de **contexto de 1M** (`contextWindow` / `maxOutputTokens` son configurables).
-- **Amplia superficie de herramientas**: lectura/escritura/edición de archivos, búsqueda de código y contenido, shells en primer y segundo plano, git, web fetch, notebooks y seguimiento de TODOs.
-- **Control del navegador**: las herramientas `browser_*` integradas manejan un Chromium gestionado o tu perfil real de Chrome mediante la extensión Chrome bridge de zode: navegar, hacer clic/escribir, inspeccionar el DOM, capturar pantallas, leer logs de console/network y agrupar las pestañas que abre zode.
+- **Amplia superficie de herramientas**: lectura/escritura/edición de archivos (incluido `MultiEdit` atómico multi-hunk), búsqueda de código y contenido, shells en primer y segundo plano, git, web fetch (más `WebSearch` opcional con una clave de Tavily), notebooks y seguimiento de TODOs.
+- **Control del navegador**: las herramientas `browser_*` integradas manejan un Chromium gestionado o tu perfil real de Chrome mediante la extensión Chrome bridge de zode: navegar, hacer clic/escribir, inspeccionar el DOM, capturar pantallas, leer logs de console/network y agrupar las pestañas que abre zode. El emparejamiento se hace una sola vez: la extensión se reconecta automáticamente entre reinicios de zode.
 - **Control del escritorio**: las herramientas `desktop_*` conducen aplicaciones nativas a través de las APIs de accesibilidad del sistema (AX en macOS, UIA en Windows, AT-SPI en Linux, CDP en Electron), con un cursor fantasma y parada global con **Esc**.
 - **Permisos sin bloqueo**: toda herramienta con efectos secundarios pasa por aprobación (allow once / always / deny), pero el prompt se acopla en línea y nunca te bloquea: puedes seguir escribiendo para encolar lo siguiente mientras una herramienta espera, con reglas de denegación estricta.
 - **Sandbox del sistema operativo, activado por defecto**: los comandos shell se ejecutan bajo sandbox-exec (macOS) / bwrap (Linux) en modo `read-only` o `workspace-write`, con **red saliente denegada por defecto**. Alterna en vivo con `/sandbox`; el modelo puede solicitar una excepción para un solo comando (`dangerouslyDisableSandbox`) que **tú autorizas** en el prompt.
 - **TUI de pantalla completa**: Markdown en streaming con resaltado de sintaxis, vistas de diff, autocompletado de slash commands, historial de prompts (Up/Down), 11 temas integrados, paneles de settings/help, secciones resilientes en la barra lateral derecha y UI en **15 idiomas** (`/language`).
-- **Sesiones duraderas y compatibles con V1**: mantiene el contrato de transcript `<id>.jsonl` existente mientras añade journals, checkpoints, rewind, fork y Git worktrees aislados como datos laterales.
+- **Sesiones duraderas y compatibles con V1**: mantiene el contrato de transcript `<id>.jsonl` existente mientras añade journals, checkpoints, rewind, fork y Git worktrees aislados como datos laterales. La compactación de contexto nunca pierde la conversación visible: las sesiones reanudadas reproducen todo el historial previo a la compactación mientras el contexto del modelo se mantiene compacto.
 - **Superficies de automatización**: salida headless estable en JSON/JSONL, direccionamiento exacto de sesiones, filtros de herramientas, códigos de salida deterministas, ACP sobre stdio y un panel de operaciones local.
 - **Pestañas multi-sesión**: ejecuta varias conversaciones en paralelo (`Ctrl+T`), cada una un agente aislado; reanuda sesiones anteriores con reproducción completa del historial.
 - **Sub-agentes, equipos y workflows**: delega trabajo puntual mediante la herramienta Task, contrata teammates internos o de CLI externas persistentes, coordínalos con un board compartido y claims de archivos, y administra todo con `/agents`, `/team` y `/workflows`.
@@ -325,6 +325,8 @@ zode session delete <id> --remove-worktree
 ```
 
 Se captura un checkpoint antes de un turno con efectos secundarios. Rewind restaura el contenido de los archivos rastreados y el prefijo del transcript, informa de conflictos en lugar de sobrescribir cambios más recientes, y registra una nueva rama lógica del journal en vez de borrar historial. Los forks de worktree se pueden aplicar de vuelta explícitamente cuando el experimento está listo.
+
+**La compactación nunca pierde la conversación visible.** Cuando la compactación de contexto reemplaza mensajes antiguos por un resumen, los originales se conservan en un sidecar aditivo (`~/.zode/sessions/<id>/compacted.jsonl`). Reanudar una sesión, pulsar `Ctrl+L`, `/export` y el panel lateral de Chrome muestran todo el historial previo a la compactación, mientras el modelo sigue recibiendo solo el contexto compactado. Los forks llevan el archivo (filtrado a su propio transcript), `/clear` lo elimina, y borrar una sesión elimina el sidecar completo.
 
 ### Reglas de permisos y profiles de sandbox
 
@@ -626,9 +628,15 @@ Claves de configuración opcionales de nivel superior (todas con valores por def
   "contextWindow": 1000000,      // ventana de contexto del modelo — pon 1000000 para un modelo de 1M
   "temperature": 0,              // más bajo = más determinista
   "language": "zh-CN",           // idioma de la UI (15 locales); también con /language
-  "effort": "medium",            // esfuerzo de razonamiento por defecto; también con /effort
+  "effort": "medium",            // esfuerzo de razonamiento; en Anthropic, medium/high se asignan a presupuestos de thinking reales
   "autonomousOrchestration": true, // orquestación de sub-agentes + workflows (activado por defecto)
   "subagentMaxIterations": 0,      // guard opcional de hijos; omitido/0 = sin límite
+  "tools": {
+    "deferNonCore": false        // true: mantener visibles ~20 herramientas cotidianas y diferir el resto tras ToolSearch
+  },
+  "webSearch": {
+    "tavilyApiKey": null         // habilita la herramienta WebSearch (o define $TAVILY_API_KEY)
+  },
   "sandbox": {
     "enabled": true,             // sandbox del OS para comandos shell (activado por defecto)
     "mode": "workspace-write",   // "workspace-write" | "read-only"
@@ -713,7 +721,7 @@ Hay dos targets de navegador:
 - **managed** — zode lanza y controla un perfil de Chromium dedicado.
 - **bridge** — zode controla el perfil de Chrome que ya estás usando mediante la extensión MV3 incluida en [`extensions/chrome/`](../../extensions/chrome/).
 
-Para el target bridge, carga la extensión una vez desde `extensions/chrome`, luego ejecuta `/browser pair`. Zode abre la página de la extensión con el puerto WebSocket local y el código de emparejamiento ya rellenados; tras el primer emparejamiento, la extensión almacena un token. Se reconecta a una CLI en ejecución o auto-inicia un daemon zode exclusivo de la extensión cuando hace falta. Las pestañas que abre zode se colocan en un grupo de pestañas de Chrome llamado `zode`.
+Para el target bridge, carga la extensión una vez desde `extensions/chrome`, luego ejecuta `/browser pair`. Zode abre la página de la extensión con el puerto WebSocket local y el código de emparejamiento ya rellenados; si esa pestaña aparece en blanco (Chrome a veces rechaza URLs `chrome-extension://` desde la línea de comandos), haz clic en el icono de zode en la barra de herramientas e introduce el puerto y el código de emparejamiento manualmente. **El emparejamiento se hace una sola vez**: la extensión almacena un token de larga duración y se reconecta automáticamente — al arrancar el navegador, al actualizarse la extensión y con un reintento cada minuto mientras esté desconectada — así que reiniciar zode nunca vuelve a pedirte emparejar. Se reconecta a una CLI en ejecución o auto-inicia un daemon zode exclusivo de la extensión cuando hace falta. Las pestañas que abre zode se colocan en un grupo de pestañas de Chrome llamado `zode`.
 
 ### Panel lateral de tareas en Chrome
 

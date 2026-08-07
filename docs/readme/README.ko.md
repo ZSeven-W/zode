@@ -43,12 +43,12 @@
 ## 주요 특징
 
 - **다중 provider**: Anthropic, OpenAI, OpenAI-compatible API(DeepSeek, Moonshot, OpenRouter 등), 로컬 Ollama 지원.
-- **넓은 도구 표면**: 파일 읽기/쓰기/편집, 코드 및 콘텐츠 검색, foreground/background shell, git, web fetch, notebook, TODO tracking.
-- **브라우저 제어**: 내장 `browser_*` 도구로 managed Chromium 을 제어하거나 Chrome bridge extension 으로 현재 사용 중인 Chrome 을 제어합니다.
+- **넓은 도구 표면**: 파일 읽기/쓰기/편집(원자적 multi-hunk `MultiEdit` 포함), 코드 및 콘텐츠 검색, foreground/background shell, git, web fetch(Tavily key 로 선택적 `WebSearch` 활성화), notebook, TODO tracking.
+- **브라우저 제어**: 내장 `browser_*` 도구로 managed Chromium 을 제어하거나 Chrome bridge extension 으로 현재 사용 중인 Chrome 을 제어합니다. 페어링은 한 번만 하면 되며, extension 은 zode 를 재시작해도 자동으로 다시 연결됩니다.
 - **비차단 권한**: 상태를 변경하는 도구는 allow once / always / deny 승인을 거치며, 승인 prompt 는 인라인으로 표시되어 입력을 막지 않습니다.
 - **OS sandbox 기본 활성화**: shell 명령은 macOS `sandbox-exec` 또는 Linux `bwrap` 안에서 실행되며 outbound network 는 기본 차단됩니다.
 - **전체 화면 TUI**: streaming Markdown, syntax highlighting, diff preview, slash-command autocomplete, prompt history, 11개 내장 테마, settings/help overlay, 15개 UI 언어(`/language`).
-- **V1 호환 지속 세션**: 기존 `<id>.jsonl` 세션 프로토콜을 유지하면서 sidecar 데이터로 journal, checkpoint, rewind, fork, 격리된 Git worktree 를 추가합니다.
+- **V1 호환 지속 세션**: 기존 `<id>.jsonl` 세션 프로토콜을 유지하면서 sidecar 데이터로 journal, checkpoint, rewind, fork, 격리된 Git worktree 를 추가합니다. 컨텍스트 압축은 보이는 대화를 잃지 않습니다 — resume 시 압축 전 전체 히스토리를 다시 재생하고, 모델 컨텍스트는 압축된 상태를 유지합니다.
 - **자동화 인터페이스**: 안정적인 JSON/JSONL headless 출력, 정확한 세션 타깃팅, 도구 필터링, 결정적 exit code, stdio ACP, 로컬 dashboard.
 - **멀티 세션 tabs**: `Ctrl+T` 로 여러 isolated conversation 을 나란히 실행하고 과거 session 을 resume 할 수 있습니다.
 - **Sub-agents, team 및 workflows**: Task 로 일회성 작업을 위임하고 내부 또는 외부 CLI teammate 를 수동 등록하여 `/agents`, `/team`, `/workflows` 로 관리합니다.
@@ -280,6 +280,13 @@ zode session delete <id> --remove-worktree
 파일과 session 메시지 prefix 를 복원하고, 새 변경을 만나면 덮어쓰지 않고 충돌로
 보고합니다. 과거 journal 은 삭제되지 않고 새 논리 branch 를 만듭니다. worktree
 fork 의 결과는 `apply-back` 으로 명시적으로 병합해야 합니다.
+
+**압축은 보이는 대화를 잃지 않습니다.** 컨텍스트 압축이 오래된 메시지를 요약으로
+대체할 때 원본은 추가 전용 sidecar(`~/.zode/sessions/<id>/compacted.jsonl`)
+에 보존됩니다. session resume, `Ctrl+L`, `/export`, Chrome side panel 은 모두
+압축 전 전체 히스토리를 표시하고, 모델은 계속 압축된 컨텍스트만 받습니다.
+fork 는 자신의 transcript 로 필터링된 archive 를 함께 가져가고, `/clear` 는
+archive 를 삭제하며, session 을 삭제하면 sidecar 전체가 제거됩니다.
 
 ### 권한 규칙과 sandbox profile
 
@@ -713,7 +720,12 @@ Zode 는 `tools:browser` 도구 그룹을 제공합니다.
 
 업그레이드 후에는 새 버전 Zode 를 한 번 실행하고 `/browser pair` 를 실행하세요.
 이는 고정된 extension ID 만 호출을 허용하는 Chrome Native Messaging host 를
-등록합니다. 이후에는 Zode CLI 를 열어 두지 않아도 side panel 이 terminal 없는
+등록합니다. **페어링은 한 번만 필요합니다**: extension 이 장기 token 을 저장한
+뒤 자동으로 다시 연결됩니다 — 브라우저 시작 시, extension 업데이트 시, 연결이
+끊긴 동안에는 1분마다 재시도하므로 zode 를 재시작해도 다시 페어링할 필요가
+없습니다. 자동으로 열린 extension 페이지가 비어 있으면(Chrome 이 명령줄에서
+전달된 `chrome-extension://` URL 을 거부할 때가 있습니다) toolbar 의 zode
+아이콘을 클릭해 포트와 페어링 코드를 직접 입력하세요. 이후에는 Zode CLI 를 열어 두지 않아도 side panel 이 terminal 없는
 로컬 Zode daemon 을 자동으로 시작하고, 저장된 token 으로 task 와 기록을
 복원합니다. side panel 에서 task 를 제출하면 브라우저 도구가 panel 옆의 현재
 페이지에 바인딩되므로 "현재 페이지 분석" 은 새 탭을 만들지 않고 기존 탭을 바로

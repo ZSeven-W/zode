@@ -43,12 +43,12 @@
 ## จุดเด่น
 
 - **รองรับหลาย provider**: Anthropic, OpenAI และ API ที่ compatible กับ OpenAI (DeepSeek, Moonshot, OpenRouter และ dialect อื่น ๆ) รวมถึง Ollama ในเครื่อง รองรับโมเดล output ขนาดใหญ่และ **context 1M** (`contextWindow` / `maxOutputTokens` ตั้งค่าได้)
-- **เครื่องมือครบ**: อ่าน/เขียน/แก้ไขไฟล์, ค้นหา code และ content, foreground/background shell, git, web fetch, notebooks และ TODO tracking
-- **ควบคุม browser**: เครื่องมือ `browser_*` ในตัวควบคุม managed Chromium หรือ Chrome profile จริงของคุณผ่าน Chrome bridge extension ของ zode ได้ ทั้ง navigate, click/type, ตรวจ DOM, ถ่าย screenshot, อ่าน console/network log และจัดกลุ่ม tab ที่ zode เปิด
+- **เครื่องมือครบ**: อ่าน/เขียน/แก้ไขไฟล์ (รวม `MultiEdit` แก้หลายจุดแบบ atomic), ค้นหา code และ content, foreground/background shell, git, web fetch (บวก `WebSearch` แบบ optional เมื่อมี Tavily key), notebooks และ TODO tracking
+- **ควบคุม browser**: เครื่องมือ `browser_*` ในตัวควบคุม managed Chromium หรือ Chrome profile จริงของคุณผ่าน Chrome bridge extension ของ zode ได้ ทั้ง navigate, click/type, ตรวจ DOM, ถ่าย screenshot, อ่าน console/network log และจัดกลุ่ม tab ที่ zode เปิด การ pair ทำเพียงครั้งเดียว — extension จะ reconnect อัตโนมัติข้ามการ restart ของ zode
 - **Permission ไม่ block งาน**: เครื่องมือที่มี side effect ทุกตัวต้องผ่านการอนุมัติ (allow once / always / deny) แต่ prompt จะปักอยู่ inline และไม่ block คุณ พิมพ์ต่อเพื่อ queue คำสั่งถัดไปได้ขณะที่เครื่องมือรออนุมัติ พร้อมกฎ hard-deny
 - **เปิด OS sandbox เป็นค่าเริ่มต้น**: shell commands รันภายใต้ sandbox-exec (macOS) / bwrap (Linux) ในโหมด `read-only` หรือ `workspace-write` โดย **outbound network ถูก deny เป็นค่าเริ่มต้น** สลับได้สดด้วย `/sandbox`; model ขอ escape สำหรับคำสั่งเดียวได้ (`dangerouslyDisableSandbox`) ซึ่ง **คุณเป็นผู้อนุมัติ** ที่ prompt
 - **TUI เต็มจอ**: streaming Markdown พร้อม syntax highlighting, diff preview, slash-command autocomplete, prompt history (Up/Down), ธีมในตัว 11 แบบ, settings/help overlays, sidebar ด้านขวาที่ทนทาน และ **UI 15 ภาษา** (`/language`)
-- **Session ที่คงทนและ V1-compatible**: คงสัญญา transcript `<id>.jsonl` เดิมไว้ พร้อมเพิ่ม journal, checkpoint, rewind, fork และ Git worktree แบบ isolated เป็นข้อมูล sidecar
+- **Session ที่คงทนและ V1-compatible**: คงสัญญา transcript `<id>.jsonl` เดิมไว้ พร้อมเพิ่ม journal, checkpoint, rewind, fork และ Git worktree แบบ isolated เป็นข้อมูล sidecar การ compact context ไม่ทำให้บทสนทนาที่มองเห็นหายไป — การ resume จะ replay ประวัติเต็มก่อน compact ขณะที่ context ของโมเดลยังคงกะทัดรัด
 - **ช่องทาง automation**: JSON/JSONL headless output ที่เสถียร, การระบุ session ที่แม่นยำ, tool filters, exit code แบบ deterministic, ACP ผ่าน stdio และ operations dashboard ในเครื่อง
 - **Multi-session tabs**: รันหลาย conversation เคียงกัน (`Ctrl+T`) แต่ละอันเป็น agent แยกกัน และ resume session เก่าพร้อม replay ประวัติเต็ม
 - **Sub-agents, teams และ workflows**: delegate งานครั้งเดียวผ่าน Task tool, จ้าง teammate ทั้งแบบ internal และ external CLI, ประสานงานกันด้วย shared board และ file claim แล้วจัดการทั้งหมดผ่าน `/agents`, `/team` และ `/workflows`
@@ -386,6 +386,14 @@ checkpoint จะถูกจับก่อน turn ที่มีการแ
 และ prefix ของ transcript, รายงาน conflict แทนที่จะเขียนทับการเปลี่ยนแปลงใหม่กว่า
 และบันทึกเป็น branch เชิงตรรกะใหม่แทนการลบประวัติ ผลของ worktree fork สามารถ
 apply กลับได้อย่างชัดเจนเมื่อการทดลองพร้อม
+
+**การ compact ไม่ทำให้บทสนทนาที่มองเห็นหายไป** เมื่อการ compact context
+แทนที่ข้อความเก่าด้วย summary ต้นฉบับจะถูกเก็บไว้ใน sidecar แบบ additive
+(`~/.zode/sessions/<id>/compacted.jsonl`) การ resume session, การกด `Ctrl+L`,
+`/export` และ side panel ของ Chrome จะแสดงประวัติเต็มก่อน compact
+ขณะที่โมเดลยังได้รับเฉพาะ context ที่ compact แล้ว fork จะพกไฟล์เก็บถาวรไปด้วย
+(กรองตาม transcript ของตัวเอง), `/clear` จะลบมัน และการลบ session จะลบ
+sidecar ทั้งหมด
 
 ### Permission rules และ sandbox profiles
 
@@ -772,9 +780,15 @@ key config ระดับบนสุดที่เป็น option (ทุก
   "contextWindow": 1000000,      // context window ของโมเดล — ตั้ง 1000000 สำหรับโมเดล 1M
   "temperature": 0,              // ต่ำ = deterministic มากขึ้น
   "language": "th",              // ภาษา UI (15 locale); ผ่าน /language ได้เช่นกัน
-  "effort": "medium",            // reasoning effort เริ่มต้น; ผ่าน /effort ได้เช่นกัน
+  "effort": "medium",            // reasoning effort; บน Anthropic ค่า medium/high จะ map เป็น thinking budget จริง
   "autonomousOrchestration": true, // orchestration ของ sub-agent + workflow (เปิดเป็นค่าเริ่มต้น)
   "subagentMaxIterations": 0,      // guard ของ child เป็น option; ละไว้/0 = ไม่จำกัด
+  "tools": {
+    "deferNonCore": false        // true: คงเครื่องมือใช้ประจำ ~20 ตัวให้มองเห็น ที่เหลือ defer ไว้หลัง ToolSearch
+  },
+  "webSearch": {
+    "tavilyApiKey": null         // เปิดใช้เครื่องมือ WebSearch (หรือตั้ง $TAVILY_API_KEY)
+  },
   "sandbox": {
     "enabled": true,             // OS sandbox สำหรับ shell commands (เปิดเป็นค่าเริ่มต้น)
     "mode": "workspace-write",   // "workspace-write" | "read-only"
@@ -879,7 +893,12 @@ tab; `browser_act` สำหรับ navigate, click, type, key press และ
 
 สำหรับ target bridge ให้โหลด extension จาก `extensions/chrome` ครั้งเดียว แล้วรัน
 `/browser pair` Zode จะเปิดหน้า extension พร้อมกรอก local WebSocket port และ pairing
-code ให้; หลัง pair ครั้งแรก extension จะเก็บ token ไว้ มันจะ reconnect กับ CLI ที่รันอยู่
+code ให้ — หากหน้าที่เปิดอัตโนมัตินั้นว่างเปล่า (บางครั้ง Chrome ปฏิเสธ URL
+`chrome-extension://` ที่ส่งมาจาก command line) ให้คลิกไอคอน zode บน toolbar
+แล้วกรอก port และ pairing code เอง **การ pair ทำเพียงครั้งเดียว**: extension
+เก็บ token ระยะยาวไว้และ reconnect อัตโนมัติ — ตอน browser เริ่มทำงาน ตอน
+extension อัปเดต และ retry ทุกหนึ่งนาทีระหว่างที่ขาดการเชื่อมต่อ — ดังนั้นการ
+restart zode ไม่ต้อง pair ใหม่ มันจะ reconnect กับ CLI ที่รันอยู่
 หรือ auto-start zode daemon แบบ extension-only เมื่อจำเป็น tab ที่ zode เปิดจะถูกวางใน
 Chrome tab group ชื่อ `zode`
 

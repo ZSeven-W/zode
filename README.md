@@ -41,12 +41,12 @@
 ## Highlights
 
 - **Multi-provider** — Anthropic, OpenAI, and any OpenAI-compatible API (DeepSeek, Moonshot, OpenRouter dialects), plus local Ollama. Supports large-output and **1M-context** models (`contextWindow` / `maxOutputTokens` are configurable)
-- **Rich tool surface** — file read/write/edit, code & content search, foreground and background shells, git, web fetch, notebooks, TODO tracking
-- **Browser control** — built-in `browser_*` tools can drive a managed Chromium instance or your real Chrome profile through the [zode Chrome bridge extension](https://chromewebstore.google.com/detail/zode/hmnlhofbekmkhmifkfkkmmpigijlkcca): navigate, click/type, inspect DOM, capture screenshots, read console/network logs, and group zode-opened tabs
+- **Rich tool surface** — file read/write/edit (including atomic multi-hunk `MultiEdit`), code & content search, foreground and background shells, git, web fetch (plus optional `WebSearch` with a Tavily key), notebooks, TODO tracking
+- **Browser control** — built-in `browser_*` tools can drive a managed Chromium instance or your real Chrome profile through the [zode Chrome bridge extension](https://chromewebstore.google.com/detail/zode/hmnlhofbekmkhmifkfkkmmpigijlkcca): navigate, click/type, inspect DOM, capture screenshots, read console/network logs, and group zode-opened tabs. Pairing is one-time — the extension reconnects automatically across zode restarts
 - **Non-blocking permissions** — every mutating tool is gated (allow once / always / deny), but the prompt docks inline and never blocks you: keep typing to queue a follow-up while a tool waits, with hard-deny rules
 - **OS sandbox, on by default** — shell commands run under sandbox-exec (macOS) / bwrap (Linux) in `read-only` or `workspace-write` mode, with **outbound network denied by default**. Toggle live with `/sandbox`; the model can request an escape for a single command (`dangerouslyDisableSandbox`) which **you authorize** at the prompt
 - **Full-screen TUI** — streaming markdown with syntax highlighting, diff previews, slash-command autocomplete, prompt history (Up/Down), 11 built-in themes, settings & help overlays, resilient right sidebar sections, **15-language UI** (`/language`)
-- **Durable, V1-compatible sessions** — keep the existing `<id>.jsonl` transcript contract while adding journals, checkpoints, rewind, fork, and isolated Git worktrees as sidecar data
+- **Durable, V1-compatible sessions** — keep the existing `<id>.jsonl` transcript contract while adding journals, checkpoints, rewind, fork, and isolated Git worktrees as sidecar data; context compaction never loses the visible conversation — resumed sessions replay the full pre-compaction history while the model context stays compact
 - **Automation surfaces** — stable JSON/JSONL headless output, exact session targeting, tool filters, deterministic exit codes, ACP over stdio, and a local operations dashboard
 - **Multi-session tabs** — run several conversations side by side (`Ctrl+T`), each an isolated agent; resume past sessions with full history replay
 - **Sub-agents, teams & workflows** — delegate one-shot work through the Task tool (sub-agents can delegate again, with a three-level depth limit), hire persistent internal or external-CLI teammates, coordinate them with a shared board and file claims, and manage the surfaces with `/agents`, `/team`, and `/workflows`
@@ -436,6 +436,14 @@ newer changes, and records a new logical journal branch rather than deleting
 history. Worktree forks can be applied back explicitly when the experiment is
 ready.
 
+**Compaction never loses the visible conversation.** When context compaction
+replaces old messages with a summary, the originals are preserved in an
+additive sidecar (`~/.zode/sessions/<id>/compacted.jsonl`). Resuming a
+session, pressing `Ctrl+L`, `/export`, and the Chrome side panel all display
+the full pre-compaction history, while the model keeps receiving only the
+compacted context. Forks carry the archive (filtered to their own transcript),
+`/clear` removes it, and deleting a session removes the whole sidecar.
+
 ### Permission rules and sandbox profiles
 
 Rules can live under `permissions.rules` in `config.json`, or in a standalone
@@ -814,9 +822,15 @@ Optional top-level config keys (all have sensible defaults):
   "contextWindow": 1000000,      // model context window — set 1000000 for a 1M model
   "temperature": 0,              // lower = more deterministic
   "language": "zh-CN",           // UI language (15 locales); also via /language
-  "effort": "medium",            // default reasoning effort; also via /effort
+  "effort": "medium",            // reasoning effort; on Anthropic, medium/high map to real thinking budgets
   "autonomousOrchestration": true, // sub-agent + workflow orchestration (default on)
   "subagentMaxIterations": 0,      // optional child guard; omitted/0 = unbounded
+  "tools": {
+    "deferNonCore": false        // true: keep ~20 everyday tools visible, defer the rest behind ToolSearch
+  },
+  "webSearch": {
+    "tavilyApiKey": null         // enables the WebSearch tool (or set $TAVILY_API_KEY)
+  },
   "sandbox": {
     "enabled": true,             // OS sandbox for shell commands (default on)
     "mode": "workspace-write",   // "workspace-write" | "read-only"
@@ -940,9 +954,15 @@ There are two browser targets:
 
 For the bridge target, install the extension once, then run `/browser pair`.
 Zode opens the extension page with the local WebSocket port and pairing code
-pre-filled; after the first pairing, the extension stores a token. It reconnects to a running CLI or auto-starts an extension-only zode
-daemon when needed. Tabs opened by zode are placed in a Chrome tab group named
-`zode`.
+pre-filled — if that tab comes up blank (Chrome sometimes refuses
+`chrome-extension://` URLs from the command line), click the zode toolbar icon
+and enter the port + code shown in the chat instead. **Pairing is one-time**:
+the extension stores a long-term token and reconnects automatically — on
+browser startup, on extension updates, and on a one-minute retry cadence while
+disconnected — so restarting zode never asks you to pair again. The automatic
+path only reconnects to a running zode; opening the side panel can also
+auto-start an extension-only zode daemon when no CLI is running. Tabs opened
+by zode are placed in a Chrome tab group named `zode`.
 
 ### Chrome task side panel
 

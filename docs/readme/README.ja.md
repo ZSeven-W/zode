@@ -43,12 +43,12 @@
 ## ハイライト
 
 - **複数プロバイダー** — Anthropic、OpenAI、OpenAI 互換 API（DeepSeek、Moonshot、OpenRouter 方言）、およびローカル Ollama。大容量出力と **1M コンテキスト**モデルにも対応（`contextWindow` / `maxOutputTokens` は設定可能）。
-- **豊富なツール** — ファイルの読み書きと編集、コード/コンテンツ検索、foreground/background shell、git、web fetch、notebook、TODO tracking。
-- **ブラウザー制御** — 組み込みの `browser_*` ツールで、managed Chromium インスタンスや zode Chrome bridge 拡張経由の既存 Chrome プロファイルを操作：navigate、click/type、DOM 検査、screenshot 取得、console/network log 読み取り、zode が開いた tab のグループ化。
+- **豊富なツール** — ファイルの読み書きと編集（アトミックなマルチハンク `MultiEdit` を含む）、コード/コンテンツ検索、foreground/background shell、git、web fetch（Tavily key で任意の `WebSearch` も有効化可能）、notebook、TODO tracking。
+- **ブラウザー制御** — 組み込みの `browser_*` ツールで、managed Chromium インスタンスや zode Chrome bridge 拡張経由の既存 Chrome プロファイルを操作：navigate、click/type、DOM 検査、screenshot 取得、console/network log 読み取り、zode が開いた tab のグループ化。ペアリングは一度きりで、拡張は zode の再起動をまたいで自動的に再接続します。
 - **ノンブロッキング権限** — 変更を伴うツールはすべて allow once / always / deny で確認されますが、プロンプトはインラインに表示され作業を妨げません。ツールが待機中でも入力を続けて次の指示を queue でき、hard-deny ルールも併用できます。
 - **OS サンドボックスが標準有効** — shell コマンドは sandbox-exec（macOS）/ bwrap（Linux）の `read-only` または `workspace-write` モードで実行され、**outbound network はデフォルトで拒否**。`/sandbox` でライブ切り替え可能。モデルは 1 コマンド単位で脱出を要求でき（`dangerouslyDisableSandbox`）、それを**承認するのはあなた**です。
 - **フルスクリーン TUI** — syntax highlight 付きの streaming Markdown、diff preview、slash command autocomplete、プロンプト履歴（Up/Down）、11 個の組み込みテーマ、設定/ヘルプ overlay、レジリエントな右サイドバーセクション、**15 言語 UI**（`/language`）。
-- **永続的で V1 互換の session** — 既存の `<id>.jsonl` transcript 契約を維持しつつ、journal、checkpoint、rewind、fork、独立した Git worktree を sidecar データとして追加。
+- **永続的で V1 互換の session** — 既存の `<id>.jsonl` transcript 契約を維持しつつ、journal、checkpoint、rewind、fork、独立した Git worktree を sidecar データとして追加。コンテキスト圧縮で可視の会話が失われることはありません — 復元した session は圧縮前の履歴を完全に再生し、モデルのコンテキストはコンパクトなまま保たれます。
 - **自動化インターフェイス** — 安定した JSON/JSONL headless 出力、正確な session ターゲティング、tool filter、決定的な exit code、stdio 上の ACP、ローカル operations dashboard。
 - **マルチセッション tabs** — 複数の会話を並行実行（`Ctrl+T`）。各 tab は独立した agent で、過去の session を完全な履歴再生付きで復元できます。
 - **サブエージェント、team、workflow** — Task tool で一回限りの作業を委任し、永続的な内部/外部 CLI の teammate を hire、共有 board と file claim で連携させ、`/agents`、`/team`、`/workflows` で管理。
@@ -324,6 +324,8 @@ zode session delete <id> --remove-worktree
 ```
 
 checkpoint は変更を伴う turn の前に取得されます。rewind は追跡済みファイル内容と transcript prefix を復元し、より新しい変更を上書きせず conflict を報告し、履歴を削除する代わりに新しい論理 journal branch を記録します。worktree fork は実験の準備ができたら明示的に apply back できます。
+
+**圧縮で可視の会話は失われません。** コンテキスト圧縮が古いメッセージを要約に置き換えるとき、原文は追加的な sidecar（`~/.zode/sessions/<id>/compacted.jsonl`）に保存されます。session の復元、`Ctrl+L`、`/export`、Chrome side panel はいずれも圧縮前の完全な履歴を表示し、モデルは圧縮後のコンテキストだけを受け取り続けます。fork はアーカイブを（自身の transcript にフィルタして）引き継ぎ、`/clear` はアーカイブを削除し、session を削除すると sidecar 全体が削除されます。
 
 ### 権限ルールとサンドボックス profile
 
@@ -625,9 +627,15 @@ cargo run -p zode-pty-harness --bin zode-pty-scenario -- scenario.json
   "contextWindow": 1000000,      // モデルの context window — 1M モデルなら 1000000
   "temperature": 0,              // 低いほど決定的
   "language": "ja",              // UI 言語（15 locale）；/language でも変更
-  "effort": "medium",            // デフォルトの reasoning effort；/effort でも変更
+  "effort": "medium",            // reasoning effort；Anthropic では medium/high が実際の thinking budget にマップされます
   "autonomousOrchestration": true, // サブエージェント + workflow orchestration（デフォルト ON）
   "subagentMaxIterations": 0,      // 任意の子ガード；省略/0 = 無制限
+  "tools": {
+    "deferNonCore": false        // true: 約 20 個の日常ツールを見えるまま残し、残りを ToolSearch の背後に遅延
+  },
+  "webSearch": {
+    "tavilyApiKey": null         // WebSearch ツールを有効化（$TAVILY_API_KEY でも可）
+  },
   "sandbox": {
     "enabled": true,             // shell コマンド用 OS サンドボックス（デフォルト ON）
     "mode": "workspace-write",   // "workspace-write" | "read-only"
@@ -700,7 +708,7 @@ target は 2 種類です。
 - **managed** — zode が専用の Chromium profile を起動して制御します。
 - **bridge** — zode が [`extensions/chrome/`](../../extensions/chrome/) に同梱された MV3 拡張を通じて、あなたが既に使っている Chrome profile を制御します。
 
-bridge target では、拡張を `extensions/chrome` から一度 load し、`/browser pair` を実行します。Zode はローカル WebSocket port と pairing code を事前入力した拡張ページを開きます。初回 pairing 後、拡張は token を保存します。実行中の CLI に再接続するか、必要に応じて extension-only の zode daemon を自動起動します。zode が開いた tab は `zode` という名前の Chrome tab group に置かれます。
+bridge target では、拡張を `extensions/chrome` から一度 load し、`/browser pair` を実行します。Zode はローカル WebSocket port と pairing code を事前入力した拡張ページを開きます — そのタブが空白で表示される場合（Chrome はコマンドラインからの `chrome-extension://` URL を拒否することがあります）、ツールバーの zode アイコンをクリックして port と pairing code を手動で入力してください。**ペアリングは一度だけです**：拡張は長期 token を保存して自動的に再接続します — ブラウザー起動時、拡張の更新時、切断中は 1 分間隔のリトライで — そのため zode を再起動しても再ペアリングを求められることはありません。実行中の CLI に再接続するか、必要に応じて extension-only の zode daemon を自動起動します。zode が開いた tab は `zode` という名前の Chrome tab group に置かれます。
 
 ### Chrome task side panel
 

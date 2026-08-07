@@ -43,12 +43,12 @@
 ## Öne çıkanlar
 
 - **Multi-provider** — Anthropic, OpenAI ve herhangi bir OpenAI-compatible API (DeepSeek, Moonshot, OpenRouter dialect'leri) ile yerel Ollama. Large-output ve **1M-context** modelleri destekler (`contextWindow` / `maxOutputTokens` yapılandırılabilir).
-- **Zengin araç yüzeyi** — file read/write/edit, code ve content search, foreground/background shells, git, web fetch, notebooks ve TODO tracking.
-- **Browser control** — yerleşik `browser_*` araçları managed bir Chromium örneğini ya da zode Chrome bridge extension üzerinden gerçek Chrome profilinizi sürebilir: navigate, click/type, DOM inceleme, screenshot alma, console/network loglarını okuma ve zode'un açtığı sekmeleri gruplama.
+- **Zengin araç yüzeyi** — file read/write/edit (atomik çok parçalı `MultiEdit` dâhil), code ve content search, foreground/background shells, git, web fetch (artı Tavily key ile opsiyonel `WebSearch`), notebooks ve TODO tracking.
+- **Browser control** — yerleşik `browser_*` araçları managed bir Chromium örneğini ya da zode Chrome bridge extension üzerinden gerçek Chrome profilinizi sürebilir: navigate, click/type, DOM inceleme, screenshot alma, console/network loglarını okuma ve zode'un açtığı sekmeleri gruplama. Pairing tek seferliktir — extension zode yeniden başlatmaları arasında otomatik olarak yeniden bağlanır.
 - **Non-blocking permissions** — durum değiştiren her araç gate'lenir (allow once / always / deny), ama prompt satır içinde durur ve sizi engellemez: bir araç beklerken yazmaya devam edip sıradaki isteği kuyruğa alabilirsiniz; hard-deny kuralları geçerlidir.
 - **Varsayılan açık OS sandbox** — shell komutları sandbox-exec (macOS) / bwrap (Linux) altında `read-only` veya `workspace-write` modunda, **outbound network varsayılan olarak kapalı** çalışır. `/sandbox` ile canlı olarak değiştirin; model tek bir komut için escape isteyebilir (`dangerouslyDisableSandbox`), buna **siz** prompt'ta izin verirsiniz.
 - **Full-screen TUI** — syntax highlighting'li streaming Markdown, diff önizlemeleri, slash-command autocomplete, prompt geçmişi (Up/Down), 11 yerleşik tema, settings/help overlay'leri, dayanıklı sağ sidebar bölümleri ve **15-language UI** (`/language`).
-- **Dayanıklı, V1-uyumlu oturumlar** — mevcut `<id>.jsonl` transcript sözleşmesi korunurken journal, checkpoint, rewind, fork ve izole Git worktree'ler yan veri olarak eklenir.
+- **Dayanıklı, V1-uyumlu oturumlar** — mevcut `<id>.jsonl` transcript sözleşmesi korunurken journal, checkpoint, rewind, fork ve izole Git worktree'ler yan veri olarak eklenir. Context compaction görünür konuşmayı asla kaybetmez — resume, compaction öncesi tam history'yi yeniden oynatırken model context'i compact kalır.
 - **Otomasyon yüzeyleri** — kararlı JSON/JSONL headless çıktı, tam oturum hedefleme, tool filter'ları, deterministik exit code'lar, stdio üzerinden ACP ve yerel operasyon dashboard'u.
 - **Multi-session tabs** — birden çok konuşmayı yan yana çalıştırın (`Ctrl+T`), her biri izole bir agent; geçmiş oturumları tam history replay ile resume edin.
 - **Sub-agents, teams ve workflows** — Task aracıyla tek seferlik işleri delege edin, kalıcı internal veya external-CLI teammate'leri hire edin, onları paylaşılan bir board ve file claim'leriyle koordine edin ve yüzeyleri `/agents`, `/team`, `/workflows` ile yönetin.
@@ -324,6 +324,8 @@ zode session delete <id> --remove-worktree
 ```
 
 Durum değiştiren bir turn'den önce bir checkpoint yakalanır. Rewind, izlenen dosya içeriğini ve transcript prefix'ini geri yükler, daha yeni değişiklikleri üzerine yazmak yerine conflict'leri raporlar ve history'yi silmek yerine yeni bir mantıksal journal branch kaydeder. Worktree fork'ları deney hazır olduğunda açıkça apply-back edilebilir.
+
+**Compaction görünür konuşmayı asla kaybetmez.** Context compaction eski mesajları bir özetle değiştirdiğinde, orijinaller additive bir sidecar'da (`~/.zode/sessions/<id>/compacted.jsonl`) korunur. Bir oturumu resume etmek, `Ctrl+L`, `/export` ve Chrome side panel'i compaction öncesi tam history'yi gösterir; model ise yalnızca compact edilmiş context'i almaya devam eder. Fork'lar arşivi (kendi transcript'lerine filtrelenmiş olarak) taşır, `/clear` onu kaldırır ve bir oturumu silmek tüm sidecar'ı kaldırır.
 
 ### Permission kuralları ve sandbox profile'ları
 
@@ -623,9 +625,15 @@ Opsiyonel top-level config anahtarları (hepsinin makul varsayılanları vardır
   "contextWindow": 1000000,      // model context window — set 1000000 for a 1M model
   "temperature": 0,              // lower = more deterministic
   "language": "tr",              // UI language (15 locales); also via /language
-  "effort": "medium",            // default reasoning effort; also via /effort
+  "effort": "medium",            // reasoning effort; Anthropic'te medium/high gerçek thinking budget'larına eşlenir
   "autonomousOrchestration": true, // sub-agent + workflow orchestration (default on)
   "subagentMaxIterations": 0,      // optional child guard; omitted/0 = unbounded
+  "tools": {
+    "deferNonCore": false        // true: ~20 günlük aracı görünür tut, kalanını ToolSearch arkasına ertele
+  },
+  "webSearch": {
+    "tavilyApiKey": null         // WebSearch aracını etkinleştirir (veya $TAVILY_API_KEY ayarlayın)
+  },
   "sandbox": {
     "enabled": true,             // OS sandbox for shell commands (default on)
     "mode": "workspace-write",   // "workspace-write" | "read-only"
@@ -710,7 +718,7 @@ Zode, browser otomasyonu için bir `tools:browser` grubu içerir. Agent şunlar�
 - **managed** — zode özel bir Chromium profile'ını başlatır ve kontrol eder.
 - **bridge** — zode, [`extensions/chrome/`](../../extensions/chrome/) içindeki paketlenmiş MV3 extension aracılığıyla zaten kullandığınız Chrome profile'ını kontrol eder.
 
-Bridge target için extension'ı `extensions/chrome` üzerinden bir kez yükleyin, sonra `/browser pair` çalıştırın. Zode extension sayfasını yerel WebSocket portu ve pairing kodu önceden doldurulmuş şekilde açar; ilk pairing'ten sonra extension bir token saklar. Çalışan bir CLI'ye yeniden bağlanır ya da gerektiğinde yalnızca-extension bir zode daemon'unu otomatik başlatır. Zode tarafından açılan tab'lar `zode` adlı bir Chrome tab group'una yerleştirilir.
+Bridge target için extension'ı `extensions/chrome` üzerinden bir kez yükleyin, sonra `/browser pair` çalıştırın. Zode extension sayfasını yerel WebSocket portu ve pairing kodu önceden doldurulmuş şekilde açar — o sekme boş gelirse (Chrome bazen komut satırından verilen `chrome-extension://` URL'lerini reddeder), zode toolbar simgesine tıklayıp portu ve pairing kodunu elle girin. **Pairing tek seferliktir**: extension uzun ömürlü bir token saklar ve otomatik olarak yeniden bağlanır — browser başlangıcında, extension güncellemelerinde ve bağlantı kopukken dakikada bir retry ile — böylece zode'u yeniden başlatmak asla yeni bir pairing istemez. Çalışan bir CLI'ye yeniden bağlanır ya da gerektiğinde yalnızca-extension bir zode daemon'unu otomatik başlatır. Zode tarafından açılan tab'lar `zode` adlı bir Chrome tab group'una yerleştirilir.
 
 ### Chrome task side panel
 

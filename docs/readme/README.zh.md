@@ -43,12 +43,12 @@
 ## 亮点
 
 - **多提供商**：支持 Anthropic、OpenAI、OpenAI 兼容 API（DeepSeek、Moonshot、OpenRouter 等）以及本地 Ollama。
-- **丰富工具面**：文件读写与编辑、代码和内容搜索、前台/后台 shell、git、网页抓取、notebook、TODO 跟踪。
-- **浏览器控制**：内置 `browser_*` 工具可驱动托管 Chromium，或通过 Chrome bridge 扩展控制你正在使用的 Chrome。
+- **丰富工具面**：文件读写与编辑（含原子多处编辑 `MultiEdit`）、代码和内容搜索、前台/后台 shell、git、网页抓取（配 Tavily key 可启用 `WebSearch`）、notebook、TODO 跟踪。
+- **浏览器控制**：内置 `browser_*` 工具可驱动托管 Chromium，或通过 Chrome bridge 扩展控制你正在使用的 Chrome。配对只需一次——扩展会在 zode 重启后自动重连。
 - **非阻塞权限**：会修改状态的工具都经过 allow once / always / deny 审批，审批提示内联显示，不阻塞你继续输入。
 - **默认开启 OS 沙箱**：shell 命令在 macOS `sandbox-exec` 或 Linux `bwrap` 中运行，默认禁止出站网络。
 - **全屏 TUI**：流式 Markdown、语法高亮、diff 预览、斜杠命令补全、历史输入、11 套内置主题、设置与帮助浮层，以及 15 种 UI 语言（`/language`）。
-- **V1 兼容的持久会话**：保留原有 `<id>.jsonl` 会话协议，同时以旁路数据增加 journal、checkpoint、rewind、fork 和隔离 Git worktree。
+- **V1 兼容的持久会话**：保留原有 `<id>.jsonl` 会话协议，同时以旁路数据增加 journal、checkpoint、rewind、fork 和隔离 Git worktree。上下文压缩不会丢失可见对话——恢复会话时完整回放压缩前的历史，模型上下文仍保持压缩后的精简形态。
 - **自动化接口**：稳定的 JSON/JSONL headless 输出、精确会话定位、工具过滤、确定性退出码、stdio ACP 和本地 dashboard。
 - **多会话标签页**：用 `Ctrl+T` 并排运行多个隔离会话，并可恢复历史会话。
 - **子代理、团队与工作流**：通过 Task 委派一次性任务；子代理也能继续委派（最多三层），还可手动注册内部或外部 CLI 队友，并用 `/agents`、`/team`、`/workflows` 管理。
@@ -303,6 +303,12 @@ zode session delete <id> --remove-worktree
 系统会在有修改副作用的 turn 前创建 checkpoint。Rewind 会恢复已跟踪文件和
 会话消息前缀，遇到新改动时报告冲突而不是覆盖；历史 journal 不会被删除，
 而是建立新的逻辑分支。worktree fork 的结果需要通过 `apply-back` 显式合回。
+
+**压缩不丢可见对话。** 上下文压缩把旧消息替换为摘要时，原文会保存到旁路归档
+（`~/.zode/sessions/<id>/compacted.jsonl`）。恢复会话、`Ctrl+L` 重绘、
+`/export` 和 Chrome 侧栏都会显示压缩前的完整历史，而模型收到的仍是压缩后的
+上下文。fork 会携带归档（按自身 transcript 过滤），`/clear` 会删除归档，
+删除会话时整个旁路目录一并移除。
 
 ### 权限规则和沙箱 profile
 
@@ -715,7 +721,11 @@ Zode 提供 `tools:browser` 工具组：
 - **bridge**：通过 [`extensions/chrome/`](../../extensions/chrome/) 中的 MV3 扩展控制你正在使用的 Chrome profile。
 
 首次升级后运行一次新版 Zode 并执行 `/browser pair`。这会注册仅允许固定扩展 ID
-调用的 Chrome Native Messaging host。之后即使没有打开 Zode CLI，侧栏也会自动
+调用的 Chrome Native Messaging host。**配对只需一次**：扩展保存长期 token 后
+会自动重连——浏览器启动、扩展更新、以及断线后每分钟静默重试，zode 重启不再
+需要重新配对。若自动打开的扩展页空白（Chrome 有时拒绝命令行传入的
+`chrome-extension://` 地址），点击工具栏 zode 图标手动输入端口和配对码即可。
+之后即使没有打开 Zode CLI，侧栏也会自动
 启动一个无终端的本地 Zode daemon，并使用已保存的 token 恢复任务和历史记录。
 从侧栏提交任务时，浏览器工具会绑定侧栏旁边的当前页面，因此“分析当前页面”会
 直接读取现有标签页，不再新建标签页；独立的 TUI/CLI 自动化仍使用 `zode` 标签组。
