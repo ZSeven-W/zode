@@ -45,7 +45,7 @@ Tailwind CSS, and local shadcn/ui components. Source files live in
 machine remain framework-independent and continue to be covered by the Node
 test suite. The extension ships with zode and carries the same version: the
 manifest's `version_name` is the full workspace version (for example
-`0.2.0-beta.1`) and `version` is its numeric core, because Chrome only accepts
+`0.2.0-beta.2`) and `version` is its numeric core, because Chrome only accepts
 dotted integers there. Native Messaging auto-start (the daemon uses the last
 workspace registered by a normal zode launch) and the element picker described
 below both arrived with this numbering; extensions built before it used an
@@ -115,7 +115,7 @@ typed navigation is allowed.
 
 After the first pairing, the extension stores a token — pairing is one-time.
 The service worker reconnects with that token automatically: on browser
-startup, on extension install/update, and (while disconnected) on a one-minute
+startup, on extension install/update, and (while disconnected) on a ~30-second
 `chrome.alarms` cadence, so restarting zode never requires re-pairing. The
 automatic path only ever *reconnects* to an already-listening zode; it never
 launches one. Separately, when the side panel is opened while zode is not

@@ -110,18 +110,29 @@ function testNativeMessagingAutostartContract() {
 }
 
 // The extension ships with zode, so its version follows the workspace crate
-// version. Chrome only accepts dotted integers in `version`, so a prerelease
-// tag such as `0.1.0-beta.9` lives in `version_name` and `version` carries the
-// numeric core.
+// version. Chrome only accepts dotted integers in `version` AND the Web Store
+// requires every published version to be strictly greater than the last, so
+// two prereleases cannot share a numeric core: `X.Y.Z-beta.N` maps to the
+// four-part `X.Y.Z.N` (0.2.0-beta.1 → 0.2.0.1 < 0.2.0.2 < …) with the full
+// tag in `version_name`. A stable `X.Y.Z` keeps the plain three-part core and
+// omits `version_name` — note Chrome orders `X.Y.Z` BELOW `X.Y.Z.N`, so a
+// stable that follows store-published betas of the same core must ship as the
+// next patch version instead.
 function testExtensionVersionTracksTheZodeVersion() {
   assert.match(zodeVersion, /^\d+\.\d+\.\d+/, "workspace version is unreadable");
-  const numericCore = /^(\d+(?:\.\d+){0,3})/.exec(zodeVersion)[1];
+  const numericCore = /^(\d+(?:\.\d+){0,2})/.exec(zodeVersion)[1];
   assert.equal(packageJson.version, zodeVersion);
-  assert.equal(manifest.version, numericCore);
   assert.match(manifest.version, /^\d+(\.\d+){0,3}$/, "Chrome rejects non-numeric versions");
   if (zodeVersion === numericCore) {
+    assert.equal(manifest.version, numericCore);
     assert.equal(Object.hasOwn(manifest, "version_name"), false);
   } else {
+    const prerelease = /-[A-Za-z]+\.(\d+)$/.exec(zodeVersion);
+    assert.ok(
+      prerelease,
+      "prerelease versions must end in -<tag>.<number> so the store version stays monotonic",
+    );
+    assert.equal(manifest.version, `${numericCore}.${prerelease[1]}`);
     assert.equal(manifest.version_name, zodeVersion);
   }
 }
