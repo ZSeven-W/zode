@@ -4,9 +4,12 @@
 //! surface. Journal, checkpoint, and worktree data live in an additive sidecar
 //! directory; old clients can keep reading and writing the V1 JSONL contract.
 
+pub mod archive;
 pub mod checkpoint;
 pub mod journal;
 pub mod worktree;
+
+pub use archive::overlay_compacted_originals;
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -179,6 +182,19 @@ impl SessionStore {
         meta: &DurableSessionMeta,
         messages: &MessageStore,
     ) -> Result<(), CoreError> {
+        self.save_with_originals(meta, messages, &MessageStore::new())
+            .await
+    }
+
+    /// [`Self::save`] with an extra source of compacted-message originals
+    /// (the engine's display overlay) — covers messages that were compacted
+    /// before any save put their originals on disk.
+    pub async fn save_with_originals(
+        &self,
+        meta: &DurableSessionMeta,
+        messages: &MessageStore,
+        originals: &MessageStore,
+    ) -> Result<(), CoreError> {
         validate_session_id(&meta.id)?;
         if meta.schema_version != SESSION_SIDECAR_SCHEMA {
             return Err(CoreError::Other(
@@ -187,6 +203,11 @@ impl SessionStore {
         }
         let dir = self.session_dir(&meta.id)?;
         std::fs::create_dir_all(&dir)?;
+        // A full rewrite may replace messages a compaction tombstoned since
+        // the last save — copy their originals (disk + overlay) into the
+        // sidecar archive first so exiting + resuming can still display them.
+        self.preserve_compacted_originals(&meta.id, messages, originals)
+            .await;
         Session::save(self.transcript_path(&meta.id)?, messages)
             .await
             .map_err(|error| CoreError::Other(error.to_string()))?;
@@ -201,6 +222,19 @@ impl SessionStore {
         meta: &DurableSessionMeta,
         messages: &MessageStore,
         expected: usize,
+    ) -> Result<(), CoreError> {
+        self.save_incremental_with_originals(meta, messages, expected, &MessageStore::new())
+            .await
+    }
+
+    /// [`Self::save_incremental`] with an extra originals source for the
+    /// fallback rewrite (see [`Self::save_with_originals`]).
+    pub async fn save_incremental_with_originals(
+        &self,
+        meta: &DurableSessionMeta,
+        messages: &MessageStore,
+        expected: usize,
+        originals: &MessageStore,
     ) -> Result<(), CoreError> {
         validate_session_id(&meta.id)?;
         if meta.schema_version != SESSION_SIDECAR_SCHEMA {
@@ -223,6 +257,10 @@ impl SessionStore {
             }
         };
         if !appended {
+            // The refused-append rewrite is exactly the post-compaction path
+            // (the prefix changed) — preserve tombstoned originals first.
+            self.preserve_compacted_originals(&meta.id, messages, originals)
+                .await;
             Session::save(self.transcript_path(&meta.id)?, messages)
                 .await
                 .map_err(|error| CoreError::Other(error.to_string()))?;
@@ -353,6 +391,11 @@ impl SessionStore {
             &self.session_dir(&request.source_id)?.join("snapshots"),
             &self.session_dir(&request.target_id)?.join("snapshots"),
         )?;
+        // The fork carries the source's tombstones; give it the archived
+        // originals too (filtered to ITS transcript's tombstones — a
+        // checkpoint fork must not retain post-boundary history).
+        self.copy_compacted_archive(&request.source_id, &request.target_id, &messages)
+            .await;
         self.journal(&request.target_id)?.append(
             "session.forked",
             serde_json::json!({

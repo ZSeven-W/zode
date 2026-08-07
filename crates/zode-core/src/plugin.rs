@@ -87,6 +87,7 @@ pub const TOOL_GROUPS: &[(&str, &str, &[&str])] = &[
             "FileRead",
             "FileWrite",
             "FileEdit",
+            "MultiEdit",
             "ListDir",
             "Mkdir",
             "Move",

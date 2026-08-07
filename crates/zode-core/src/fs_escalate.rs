@@ -31,6 +31,7 @@ use crate::approval::{Approval, ApprovalGate};
 pub const MUTATING_FS_TOOLS: &[&str] = &[
     "FileWrite",
     "FileEdit",
+    "MultiEdit",
     "Mkdir",
     "Move",
     "Remove",

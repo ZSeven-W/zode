@@ -3,3 +3,5 @@
 
 pub mod git;
 pub mod memory;
+#[path = "multi-edit.rs"]
+pub mod multi_edit;

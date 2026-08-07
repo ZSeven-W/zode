@@ -439,6 +439,18 @@ pub struct ToolsConfig {
     /// Whether RTK-style Bash stdout compression is enabled. None -> true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compress_output: Option<bool>,
+    /// Opt-in standard-profile tool narrowing: keep only the everyday core
+    /// visible per request and defer the long tail (browser/desktop/op/team/
+    /// LSP/…) behind ToolSearch — the same mechanism the lite profile always
+    /// uses, with a broader core. None -> false (full surface).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defer_non_core: Option<bool>,
+}
+
+impl ToolsConfig {
+    pub fn defer_non_core(&self) -> bool {
+        self.defer_non_core.unwrap_or(false)
+    }
 }
 
 /// Default OpenPencil release the installer/launcher targets. zode and
@@ -570,6 +582,29 @@ impl DesktopConfig {
     }
     pub fn overlay_helper_path(&self) -> Option<&str> {
         self.overlay_helper_path.as_deref()
+    }
+}
+
+/// Web search backend configuration (`webSearch` config key). Tavily is the
+/// only built-in backend today; the key can also come from `$TAVILY_API_KEY`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WebSearchConfig {
+    /// Tavily Search API key. Absent (and no `$TAVILY_API_KEY`) → the
+    /// `WebSearch` tool is not registered at all, so the model never sees a
+    /// name it cannot call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tavily_api_key: Option<String>,
+}
+
+impl WebSearchConfig {
+    /// Resolve the effective key: config first, then `$TAVILY_API_KEY`.
+    pub fn resolved_tavily_key(&self) -> Option<String> {
+        self.tavily_api_key
+            .clone()
+            .or_else(|| std::env::var("TAVILY_API_KEY").ok())
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
     }
 }
 
@@ -1046,6 +1081,10 @@ pub struct ZodeConfig {
     /// Built-in desktop control configuration (the `desktop_*` tools).
     #[serde(skip_serializing_if = "is_default")]
     pub desktop: DesktopConfig,
+    /// Web search backend configuration (the `WebSearch` tool). The tool is
+    /// registered only when a key is available — here or `$TAVILY_API_KEY`.
+    #[serde(skip_serializing_if = "is_default")]
+    pub web_search: WebSearchConfig,
     /// External agent CLIs exposed as Task `agent_type`s.
     #[serde(skip_serializing_if = "ExternalAgentsConfig::is_default")]
     pub external_agents: ExternalAgentsConfig,

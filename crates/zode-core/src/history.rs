@@ -33,7 +33,7 @@ pub struct EditSnapshot {
 
 /// Tools whose effect is a single-path content change we can snapshot.
 pub fn is_tracked(tool: &str) -> bool {
-    matches!(tool, "FileWrite" | "FileEdit" | "Remove")
+    matches!(tool, "FileWrite" | "FileEdit" | "MultiEdit" | "Remove")
 }
 
 #[derive(Debug)]

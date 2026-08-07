@@ -34,6 +34,11 @@ struct Inner {
     turns_since_todo_write: u32,
     /// Last git branch reported to (or baked into) the prompt.
     git_branch: Option<Option<String>>,
+    /// Last calendar date (YYYY-MM-DD, UTC) reported to (or baked into) the
+    /// prompt. The system prompt's date is frozen at session start for
+    /// prompt-cache stability; long-running sessions cross midnight and the
+    /// model keeps asserting yesterday's date without this.
+    local_date: Option<String>,
     /// Tracked-file count at the last read-set recap (0 = none yet).
     files_recap_at: usize,
     /// Turns since the last periodic task re-anchor (lite-model cadence).
@@ -51,6 +56,12 @@ pub struct ReminderTracker {
 impl ReminderTracker {
     /// Hook handler for `HookRunner`: records fs-tool touches and TodoWrite
     /// calls. Registered alongside `compact_tracker_hook` / `tool_trace.hook()`.
+    ///
+    /// Known (accepted) TOCTOU: the mtime is stat'ed at `AfterToolUse` time,
+    /// not at the tool's own read time — an external write landing in that
+    /// gap records the NEW mtime as the baseline, so that one change is
+    /// never reported (a missed notice, never a false one). Closing it would
+    /// need the fs tools themselves to echo the mtime they read.
     pub fn hook(&self) -> RustHookHandler {
         let inner = self.inner.clone();
         RustHookHandler::new("reminder-tracker", move |event| {
@@ -62,7 +73,7 @@ impl ReminderTracker {
             } = event
             {
                 match tool.as_str() {
-                    "FileRead" | "FileEdit" | "FileWrite" => {
+                    "FileRead" | "FileEdit" | "FileWrite" | "MultiEdit" => {
                         // Prefer the tool-resolved absolute path echoed in
                         // `output.path` — the fs tools resolve relative
                         // `input.path` against the tool's own cwd/sandbox
@@ -164,8 +175,9 @@ impl ReminderTracker {
                     .collect();
                 notices.push(format!(
                     "You have already read or edited {n} file(s) this session — their \
-                     contents are in the conversation above. Do not re-read or re-search \
-                     them unless a reminder says one changed. Most recent: {}.",
+                     contents (or, after a compaction, a summary of them) are above. Do \
+                     not re-read or re-search them wholesale; when you need exact text \
+                     again, read only the relevant range. Most recent: {}.",
                     recent.join(", ")
                 ));
                 g.files_recap_at = n;
@@ -226,6 +238,60 @@ impl ReminderTracker {
             }
         }
         notices
+    }
+
+    /// Forget all tracked state (`/clear`): the read set, recap watermark,
+    /// todo cadence, anchor cadence, and branch baseline all describe the
+    /// conversation just discarded — keeping them would tell the fresh
+    /// conversation "you already read N files" or replay stale drift.
+    pub fn clear(&self) {
+        if let Ok(mut g) = self.inner.lock() {
+            *g = Inner::default();
+        }
+    }
+
+    /// Establish the branch baseline ONLY when none is recorded yet. Engine
+    /// reassembly re-renders the prompt with the SESSION-START branch; a
+    /// carried tracker may have since advanced its baseline to a reported
+    /// drift, and re-seeding the old value would re-fire the same "branch
+    /// changed" notice after every rebuild. Fresh trackers still need the
+    /// baked branch as their baseline — this seeds exactly that case.
+    pub fn seed_git_branch(&self, branch: Option<String>) {
+        let mut g = self.inner.lock().unwrap();
+        if g.git_branch.is_none() {
+            g.git_branch = Some(branch);
+        }
+    }
+
+    /// Establish the date baseline ONLY when none is recorded yet (the
+    /// date baked into the system prompt at session start).
+    pub fn seed_date(&self, date: String) {
+        let mut g = self.inner.lock().unwrap();
+        if g.local_date.is_none() {
+            g.local_date = Some(date);
+        }
+    }
+
+    /// Report a calendar-date change exactly once per day, then re-baseline
+    /// — the cached system prompt keeps its session-start date, so drift
+    /// reaches the model through the per-turn reminder instead.
+    pub fn note_date(&self, current: String) -> Option<String> {
+        let mut g = self.inner.lock().unwrap();
+        match &g.local_date {
+            None => {
+                g.local_date = Some(current);
+                None
+            }
+            Some(prev) if *prev == current => None,
+            Some(prev) => {
+                let note = format!(
+                    "Today's date is now {current} (the session started on {prev}; the \
+                     system prompt still shows the start date)."
+                );
+                g.local_date = Some(current);
+                Some(note)
+            }
+        }
     }
 
     /// Report a branch change exactly once, then re-baseline. The first call

@@ -169,11 +169,13 @@ pub fn skills_index(registry: &SkillRegistry) -> String {
 }
 
 const SKILL_DISCIPLINE: &str = "\n### Using skills\n\
-Before starting non-trivial work, scan the Available Skills above; if one plausibly \
-applies, invoke it with the Skill tool FIRST and state which you're using. For \
-multi-step features or changes, prefer a plan-first flow — use any available \
-planning/brainstorming skill before writing code, and follow test-driven development \
-if a testing skill applies.\n";
+Before starting non-trivial work, scan the Available Skills above; if one CLEARLY \
+matches the task, invoke it with the Skill tool FIRST and state which you're using \
+— loading a skill that merely might apply wastes the context it occupies. For \
+large multi-step features, prefer a plan-first flow (use a planning skill if one \
+matches); for small fixes and analysis, just do the work. Follow a testing skill's \
+workflow when the task is about writing or changing tested behavior, not as a \
+blanket ritual.\n";
 
 /// Provider-ready skills section shared by root and Task child prompts.
 /// Keeping one renderer prevents child agents from seeing a different set of

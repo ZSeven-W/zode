@@ -144,6 +144,13 @@ impl SessionLedger {
         })
     }
 
+    /// Known (accepted) impurity: host-synthesized prompts (the goal-loop
+    /// continue nudge, scheduler job prompts) arrive through the same turn
+    /// path as human input and are recorded as "user requests". Consecutive
+    /// dedup collapses the repeats, and the harness cannot reliably tell
+    /// them apart at this layer without threading an origin flag through
+    /// every turn API — not worth it for a display-only ledger line.
+    ///
     /// Wipe everything — `/clear` starts a new conversation on the same
     /// engine, and a fresh session must not have last session's narrative
     /// restored after its first compaction.
@@ -167,41 +174,55 @@ impl SessionLedger {
             "[Session ledger — harness-maintained; recorded as it happened, \
              so it is authoritative over the compaction summary]\n",
         );
-        let push_line = |out: &mut String, line: &str| -> bool {
-            if out.len() + line.len() + 1 > RENDER_MAX_CHARS {
+        // Budget in CHARS, matching the sibling `*_MAX_CHARS` constants and
+        // the token-cap intent — `String::len()` counts BYTES and would
+        // under-fill a CJK-heavy ledger ~3x.
+        let mut used = out.chars().count();
+        let push_line = |out: &mut String, used: &mut usize, line: &str| -> bool {
+            let line_chars = line.chars().count() + 1;
+            if *used + line_chars > RENDER_MAX_CHARS {
                 return false;
             }
             out.push_str(line);
             out.push('\n');
+            *used += line_chars;
             true
         };
         if !g.requests.is_empty() {
-            let _ = push_line(&mut out, "## User requests this session (oldest first)");
+            let _ = push_line(
+                &mut out,
+                &mut used,
+                "## User requests this session (oldest first)",
+            );
             for (i, req) in g.requests.iter().enumerate() {
                 let line = format!("{}. {}", i + 1, req.replace('\n', " "));
-                if !push_line(&mut out, &line) {
+                if !push_line(&mut out, &mut used, &line) {
                     break;
                 }
             }
         }
         if !g.notes.is_empty() {
-            let _ = push_line(&mut out, "## Working notes");
+            let _ = push_line(&mut out, &mut used, "## Working notes");
             for (kind, text) in &g.notes {
                 let line = format!("- {}: {}", kind_label(*kind), text.replace('\n', " "));
-                if !push_line(&mut out, &line) {
+                if !push_line(&mut out, &mut used, &line) {
                     break;
                 }
             }
         }
         if !g.commands.is_empty() {
-            let _ = push_line(&mut out, "## Commands run (head · runs · last result)");
+            let _ = push_line(
+                &mut out,
+                &mut used,
+                "## Commands run (head · runs · last result)",
+            );
             for (head, stat) in &g.commands {
                 let line = format!(
                     "- `{head}` · {}× · last: {}",
                     stat.runs,
                     if stat.last_ok { "ok" } else { "FAILED" }
                 );
-                if !push_line(&mut out, &line) {
+                if !push_line(&mut out, &mut used, &line) {
                     break;
                 }
             }
@@ -232,11 +253,20 @@ fn command_head(command: &str) -> String {
         rest = after.trim_start();
     }
     let action = rest.split(['|', '>']).next().unwrap_or(rest);
-    action
-        .split_whitespace()
-        .take(4)
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut tokens: Vec<&str> = action.split_whitespace().take(4).collect();
+    // An fd redirect (`2>&1`, `2>err`) splits at '>' and strands the fd
+    // digits as a trailing token — `cargo build 2>&1` must bucket as
+    // `cargo build`, not `cargo build 2`. Only when the cut really was a
+    // '>' (a trailing number before a PIPE is genuine command text).
+    if rest[action.len()..].starts_with('>')
+        && tokens.len() > 1
+        && tokens
+            .last()
+            .is_some_and(|t| t.chars().all(|c| c.is_ascii_digit()))
+    {
+        tokens.pop();
+    }
+    tokens.join(" ")
 }
 
 fn truncate_chars(value: &str, max: usize) -> String {
@@ -250,6 +280,37 @@ fn truncate_chars(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use agent::hook::HookHandler;
+
+    #[test]
+    fn command_head_drops_stranded_fd_redirect_digits() {
+        // `2>&1` splits at '>' and would strand the fd digit in the bucket key.
+        assert_eq!(command_head("cargo build 2>&1"), "cargo build");
+        assert_eq!(
+            command_head("cargo test --workspace 2>err.log"),
+            "cargo test --workspace"
+        );
+        // A trailing number that is genuine command text stays.
+        assert_eq!(command_head("sleep 2"), "sleep 2");
+        assert_eq!(command_head("echo 2 | wc"), "echo 2");
+        assert_eq!(command_head("cd /tmp && git log -1"), "git log -1");
+    }
+
+    #[test]
+    fn render_budget_counts_chars_not_bytes() {
+        // A CJK-heavy ledger (3 bytes/char) must fill toward the same CHAR
+        // budget as ASCII — the old byte cap under-filled it ~3x.
+        let ledger = SessionLedger::default();
+        for i in 0..30 {
+            ledger.note_user_request(&format!("请求 {i}：{}", "上下文压缩后恢复原文".repeat(40)));
+        }
+        let text = ledger.render().expect("non-empty");
+        let chars = text.chars().count();
+        assert!(chars <= RENDER_MAX_CHARS + 1, "over char budget: {chars}");
+        assert!(
+            chars > RENDER_MAX_CHARS / 2,
+            "under-filled — byte cap regression: {chars}"
+        );
+    }
 
     #[test]
     fn requests_dedup_consecutive_and_keep_the_first_on_overflow() {

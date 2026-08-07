@@ -28,6 +28,12 @@ pub struct PermissionGatedTool {
     inner: Arc<dyn Tool>,
     gate: Arc<dyn ApprovalGate>,
     always: Arc<AtomicBool>,
+    /// When `false`, an `AllowAlways` answer is honored for THAT call only
+    /// (never stored). Set for tools the user force-listed in
+    /// `permissions.ask`: they must prompt on every call, and stacking a
+    /// second context-blind gate outside a context-aware one (the browser /
+    /// desktop pre-wrapped tools) is not an acceptable way to get that.
+    persist_always: AtomicBool,
     /// Serializes the check-approve-store sequence so concurrent calls to
     /// the same tool in one turn don't double-prompt; the second waiter
     /// re-checks `always` inside the lock and skips the prompt.
@@ -44,6 +50,7 @@ impl PermissionGatedTool {
             inner,
             gate,
             always: Arc::new(AtomicBool::new(false)),
+            persist_always: AtomicBool::new(true),
             approve_lock: tokio::sync::Mutex::new(()),
             view: None,
         }
@@ -60,9 +67,17 @@ impl PermissionGatedTool {
             inner,
             gate,
             always: Arc::new(AtomicBool::new(false)),
+            persist_always: AtomicBool::new(true),
             approve_lock: tokio::sync::Mutex::new(()),
             view: Some(view),
         }
+    }
+
+    /// Force a prompt on EVERY call: an `AllowAlways` answer is applied to
+    /// that call only and never cached (`permissions.ask` semantics for
+    /// pre-wrapped, context-aware gates).
+    pub fn set_always_persist(&self, persist: bool) {
+        self.persist_always.store(persist, Ordering::Relaxed);
     }
 
     pub fn is_always_allowed(&self) -> bool {
@@ -107,7 +122,11 @@ impl Tool for PermissionGatedTool {
                 };
                 match self.gate.approve(self.inner.name(), &shown).await {
                     Approval::AllowOnce => {}
-                    Approval::AllowAlways => self.always.store(true, Ordering::Relaxed),
+                    Approval::AllowAlways => {
+                        if self.persist_always.load(Ordering::Relaxed) {
+                            self.always.store(true, Ordering::Relaxed);
+                        }
+                    }
                     Approval::Deny => {
                         return Err(AgentError::other(format!(
                             "Tool '{}' denied by user",

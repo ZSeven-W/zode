@@ -154,9 +154,10 @@ impl SessionMemoryStore for NoemaSessionStore {
 }
 
 /// Most-recently-touched files, newest first, deduped, capped. Fed by the
-/// tracker hook from every successful tool call carrying a `file_path`
-/// input (Read / Edit / Write / NotebookEdit all match by shape, so new
-/// file tools are covered without a name whitelist).
+/// tracker hook from every successful tool call carrying a `path` /
+/// `file_path` / `notebook_path` input or output (FileRead / FileEdit /
+/// FileWrite / NotebookEdit all match by shape, so new file tools are
+/// covered without a name whitelist).
 const RECENT_FILES_CAP: usize = 32;
 
 #[derive(Debug, Clone, Default)]
@@ -180,6 +181,14 @@ impl RecentFiles {
             .map(|q| q.iter().take(n).cloned().collect())
             .unwrap_or_default()
     }
+
+    /// Forget everything (`/clear`): a discarded conversation's read set
+    /// must not feed the next conversation's post-compact restore.
+    pub fn clear(&self) {
+        if let Ok(mut q) = self.inner.lock() {
+            q.clear();
+        }
+    }
 }
 
 /// Hook that (a) records the `file_path` of every successful tool call and
@@ -187,21 +196,47 @@ impl RecentFiles {
 /// messages, so the engine injects the restoration message at the start of
 /// the next turn. Fires for both auto (QueryLoop) and manual (`/compact`)
 /// paths — both run `compact_with_hooks`.
+///
+/// It also latches `prefix_dirty`: the durable-save layer consults it so a
+/// post-compaction persist is forced to a full rewrite even when the UI
+/// event that normally marks the tab dirty was dropped (e.g. the compaction
+/// raced an Esc interrupt and the notice was fenced off with the aborted
+/// turn's events). Hook delivery is in-process and event-loss-proof.
 pub fn compact_tracker_hook(
     recent: RecentFiles,
     restore_pending: Arc<AtomicBool>,
+    prefix_dirty: Arc<AtomicBool>,
 ) -> RustHookHandler {
     RustHookHandler::new("compact-tracker", move |event| {
         match event {
             HookEvent::AfterToolUse {
-                input, ok: true, ..
+                input,
+                output,
+                ok: true,
+                ..
             } => {
-                if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
+                // The agent-tools-code fs tools name their parameter `path`
+                // (NotebookEdit: `notebook_path`); `file_path` is kept for
+                // MCP/plugin tools that use Claude-style naming. Prefer the
+                // tool-RESOLVED absolute path echoed in the output — raw
+                // relative inputs resolve against the tool's cwd, not ours
+                // (same policy as the reminder tracker and checkpoints).
+                const PATH_KEYS: [&str; 3] = ["path", "file_path", "notebook_path"];
+                let path = PATH_KEYS
+                    .iter()
+                    .find_map(|key| output.get(key).and_then(|v| v.as_str()))
+                    .or_else(|| {
+                        PATH_KEYS
+                            .iter()
+                            .find_map(|key| input.get(key).and_then(|v| v.as_str()))
+                    });
+                if let Some(path) = path {
                     recent.record(PathBuf::from(path));
                 }
             }
             HookEvent::PostCompact { replaced_count, .. } if *replaced_count > 0 => {
                 restore_pending.store(true, Ordering::SeqCst);
+                prefix_dirty.store(true, Ordering::SeqCst);
             }
             _ => {}
         }
@@ -403,12 +438,24 @@ mod tests {
 
         let rf = RecentFiles::default();
         let pending = std::sync::Arc::new(AtomicBool::new(false));
-        let hook = compact_tracker_hook(rf.clone(), pending.clone());
+        let prefix_dirty = std::sync::Arc::new(AtomicBool::new(false));
+        let hook = compact_tracker_hook(rf.clone(), pending.clone(), prefix_dirty.clone());
 
         hook.handle(&HookEvent::AfterToolUse {
             tool: "Read".into(),
             input: serde_json::json!({"file_path": "/tmp/read.rs"}),
             output: serde_json::json!({}),
+            ok: true,
+        })
+        .await;
+        // The production shape: agent-tools-code fs tools use `path` and
+        // echo the resolved absolute path in output.path — the tracker must
+        // record from THAT key (a `file_path`-only tracker recorded nothing
+        // in production and post-compact file restore was dead).
+        hook.handle(&HookEvent::AfterToolUse {
+            tool: "FileRead".into(),
+            input: serde_json::json!({"path": "relative.rs"}),
+            output: serde_json::json!({"path": "/tmp/resolved.rs"}),
             ok: true,
         })
         .await;
@@ -427,7 +474,15 @@ mod tests {
             ok: true,
         })
         .await;
-        assert_eq!(rf.top(10), vec![PathBuf::from("/tmp/read.rs")]);
+        assert_eq!(
+            rf.top(10),
+            vec![
+                PathBuf::from("/tmp/resolved.rs"),
+                PathBuf::from("/tmp/read.rs")
+            ]
+        );
+        rf.clear();
+        assert!(rf.top(10).is_empty(), "clear() empties the read set");
 
         // Zero-replacement compactions (failures) do not latch.
         hook.handle(&HookEvent::PostCompact {
@@ -437,6 +492,7 @@ mod tests {
         })
         .await;
         assert!(!pending.load(Ordering::SeqCst));
+        assert!(!prefix_dirty.load(Ordering::SeqCst));
         hook.handle(&HookEvent::PostCompact {
             pre_tokens: 100,
             post_tokens: 10,
@@ -444,6 +500,9 @@ mod tests {
         })
         .await;
         assert!(pending.load(Ordering::SeqCst));
+        // The durable-save layer's event-independent dirty latch rides the
+        // same hook, so a dropped UI notice can't skip the full rewrite.
+        assert!(prefix_dirty.load(Ordering::SeqCst));
     }
 
     #[test]

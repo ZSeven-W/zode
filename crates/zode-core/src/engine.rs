@@ -207,16 +207,22 @@ pub(crate) fn map_effort(
     reasoning_opt_in: bool,
 ) -> (Option<agent::provider::ThinkingConfig>, Option<String>) {
     let norm = effort.map(str::trim).map(str::to_ascii_lowercase);
-    // Precedence: a native thinking budget (Anthropic) wins for "high" — the
-    // effort string rides along too, so the vendor adaptive-thinking path
-    // can emit output_config.effort for models that require adaptive
-    // thinking. Otherwise the opt-in OpenAI-style effort string is
-    // forwarded verbatim (including an explicit "medium"); "medium" is the
-    // provider default and maps to no knob at all when not opted in.
+    // Precedence: a native thinking budget (Anthropic) wins for "high" and
+    // "medium" — the effort string rides along too, so the vendor
+    // adaptive-thinking path can emit output_config.effort for models that
+    // require adaptive thinking. An explicit "medium" used to map to NO
+    // thinking at all on Anthropic (only "high" got a budget), leaving a
+    // whole tier of the ladder dead; it now gets a half budget. "low" stays
+    // thinking-free on purpose — that tier is the fast path. Otherwise the
+    // opt-in OpenAI-style effort string is forwarded verbatim.
     match norm.as_deref() {
         Some("high") if supports_thinking => (
             Some(agent::provider::ThinkingConfig::new(8192)),
             Some("high".to_string()),
+        ),
+        Some("medium") if supports_thinking => (
+            Some(agent::provider::ThinkingConfig::new(4096)),
+            Some("medium".to_string()),
         ),
         Some(e @ ("low" | "medium" | "high")) if reasoning_opt_in => (None, Some(e.to_string())),
         _ => (None, None),
@@ -305,6 +311,35 @@ const LITE_VISIBLE_TOOLS: &[&str] = &[
     "RunCheck",
     "GoalComplete",
     "MemoryImport",
+];
+
+/// The tool surface that stays VISIBLE under the OPT-IN standard-profile
+/// narrowing (`tools.deferNonCore`): the lite core plus the everyday tools a
+/// capable model reaches for constantly. Dozens of schemas per request
+/// degrade tool selection for strong models too — this keeps ~20 visible and
+/// the long tail (browser/desktop/op/team/LSP/…) reachable via ToolSearch.
+const STANDARD_VISIBLE_TOOLS: &[&str] = &[
+    "FileRead",
+    "FileWrite",
+    "FileEdit",
+    "MultiEdit",
+    "ListDir",
+    "Grep",
+    "Glob",
+    "Bash",
+    "BashRun",
+    "BashOutput",
+    "KillShell",
+    "TodoWrite",
+    "Task",
+    "Skill",
+    "AskUserQuestion",
+    "RunCheck",
+    "GoalComplete",
+    "MemoryImport",
+    "WebFetch",
+    "WebSearch",
+    "NotebookEdit",
 ];
 
 /// Test-only re-export so `fs_escalate`'s end-to-end test can build the very
@@ -432,6 +467,18 @@ pub struct CarryState {
     pub bash_sessions: Option<BashSessionRegistry>,
     pub todo_state: Option<TodoState>,
     pub compact_state: Option<Arc<Mutex<AutoCompactState>>>,
+    /// Display-only originals of compaction-tombstoned messages — carried so
+    /// a mid-session rebuild doesn't blank the restored history view.
+    pub compacted_overlay: Option<Arc<Mutex<MessageStore>>>,
+    /// Unconsumed prefix-rewrite latch — carried so a compaction right
+    /// before a hot-swap still forces the next save to a full rewrite.
+    pub prefix_dirty: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Unconsumed post-compact restore latch — carried so a compaction
+    /// followed by `/model`/`/yolo`/… before the next turn still injects
+    /// the ledger/recall/files restoration that compaction triggered.
+    pub restore_pending: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Undisplayed restore note (same rebuild-survival rationale).
+    pub last_restore_note: Option<Arc<std::sync::Mutex<Option<String>>>>,
     pub subagents: Option<crate::subagents::SubAgentRegistry>,
     /// External-agent trust grants (fingerprints). Session-scoped by design:
     /// carried across engine rebuilds, never persisted to disk.
@@ -464,6 +511,10 @@ impl ZodeEngine {
             bash_sessions: Some(self.bash_sessions.clone()),
             todo_state: Some(self.todo_state.clone()),
             compact_state: Some(self.compact_state.clone()),
+            compacted_overlay: Some(self.compacted_overlay.clone()),
+            prefix_dirty: Some(self.prefix_dirty.clone()),
+            restore_pending: Some(self.restore_pending.clone()),
+            last_restore_note: Some(self.last_restore_note.clone()),
             subagents: Some(self.subagents.clone()),
             external_grants: Some(self.external_grants.clone()),
             team: self.team.clone(),
@@ -592,8 +643,10 @@ fn render_runtime_system_prompt(
         .as_deref()
     {
         Some("high") => system.push_str(
-            "\n\n# Effort: high\nBe thorough and exhaustive — explore broadly, \
-             verify carefully, and prefer completeness over brevity.",
+            "\n\n# Effort: high\nBe thorough — cover every part of the request, \
+             verify carefully, and prefer completeness over brevity. Thoroughness \
+             means covering what MATTERS, not re-reading what you already know or \
+             running checks nobody asked for.",
         ),
         Some("low") => system.push_str(
             "\n\n# Effort: low\nBe fast and concise — minimal exploration, direct \
@@ -610,18 +663,23 @@ fn render_runtime_system_prompt(
             .collect::<Vec<_>>()
             .join("\n");
         system.push_str(&format!(
-            "\n\n# Autonomous orchestration\nFor multi-part or large tasks, decompose the \
-             work and delegate independent sub-tasks to sub-agents with the Task tool \
-             instead of doing everything in one context. Available sub-agent types:\n{types}\n\
-             If no existing type fits, create one with the define_agent tool, then spawn it. \
-             Keep the main thread focused on planning and integrating the results.",
+            "\n\n# Autonomous orchestration\nDelegate to sub-agents (Task tool) only when \
+             the work genuinely exceeds one context — several independent sub-tasks that \
+             can run in parallel, or a sweep too large to hold in this conversation. A \
+             task you can finish directly in a few steps is ALWAYS cheaper done here: \
+             every sub-agent starts cold and re-reads what you already know. Available \
+             sub-agent types:\n{types}\n\
+             Only create a new type with define_agent when no existing type fits AND the \
+             need will recur. Keep the main thread focused on planning and integrating \
+             the results.",
         ));
         system.push_str(
-            "\nFor a repeatable multi-step process, capture it as a reusable JS \
+            "\nIf the user asks to make a multi-step process repeatable (or you have \
+             already run the same process more than once), capture it as a reusable JS \
              workflow with the define_workflow tool (an orchestration script using \
              agent()/parallel()/pipeline()), then execute it with the run_workflow \
              tool — zode runs the script deterministically; do not re-follow its \
-             steps by hand.",
+             steps by hand. Do not create workflows for one-off tasks.",
         );
         if !workflow_defs.is_empty() {
             let wfs = workflow_defs
@@ -646,6 +704,12 @@ pub struct ZodeEngine {
     /// their session/turn ids; the shared hook captures mutating tool inputs.
     pub checkpoints: crate::sessions::checkpoint::CheckpointTracker,
     pub store: Arc<Mutex<MessageStore>>,
+    /// Display-only copies of messages a compaction tombstoned in `store`,
+    /// keyed by their original uuids. Populated by [`Self::compact_sized`]
+    /// and seeded from the on-disk compacted archive on resume; the UI merges
+    /// it over tombstones (`sessions::overlay_compacted_originals`) so
+    /// history stays readable. Never sent to the model.
+    pub compacted_overlay: Arc<Mutex<MessageStore>>,
     pub file_cache: Arc<FileStateCache>,
     pub compact_state: Arc<Mutex<AutoCompactState>>,
     /// Mid-turn steering: the host sends user messages here while a turn is
@@ -715,6 +779,14 @@ pub struct ZodeEngine {
     /// Latched by the tracker hook when a compaction replaced messages;
     /// consumed (swap-false) at the start of the next turn.
     restore_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// Latched (by the same tracker hook, plus [`Self::compact_sized`]) when
+    /// a compaction rewrote the store's PREFIX. Consumed by the durable-save
+    /// layer ([`Self::take_prefix_dirty`]) to force a full transcript rewrite
+    /// — an event-loss-proof twin of the TUI's `store_dirty` flag, so an
+    /// interrupt that drops the compact notice can't lead persistence into
+    /// appending onto a rewritten prefix (index-shifted duplicates would
+    /// brick the transcript on load).
+    prefix_dirty: Arc<std::sync::atomic::AtomicBool>,
     /// UI note produced by the last restoration, consumed by the front-end
     /// via [`Self::take_restore_note`].
     last_restore_note: Arc<std::sync::Mutex<Option<String>>>,
@@ -1022,6 +1094,12 @@ impl ZodeEngine {
         let reminders = carry.reminders.clone().unwrap_or_default();
         let ledger = carry.ledger.clone().unwrap_or_default();
         register_default_with_todo(&mut base, policy.clone(), todo_state.clone());
+        // MultiEdit rides the same policy as the default fs tools and must be
+        // registered BEFORE the escalation pass so a sandbox denial gets the
+        // same escalate-with-consent path as FileEdit.
+        base.register(Arc::new(crate::tools::multi_edit::MultiEditTool::new(
+            policy.clone(),
+        )));
         // A sandbox-blocked file write must ask the user to escalate rather than
         // dead-end: otherwise the model retries the same write and finally works
         // around it with a `Bash` heredoc + `require_escalated`, which is both
@@ -1031,7 +1109,14 @@ impl ZodeEngine {
         if sandbox.is_some() {
             let mut unconfined = ToolRegistry::new();
             let unconfined_policy = build_workspace_policy(&cwd, &None)?.into_arc();
-            register_default_with_todo(&mut unconfined, unconfined_policy, todo_state.clone());
+            register_default_with_todo(
+                &mut unconfined,
+                unconfined_policy.clone(),
+                todo_state.clone(),
+            );
+            unconfined.register(Arc::new(crate::tools::multi_edit::MultiEditTool::new(
+                unconfined_policy,
+            )));
             base = crate::fs_escalate::apply_fs_escalation(base, &unconfined, &gate);
         }
         base.register(Arc::new(BashTool::with_compress_output(
@@ -1048,6 +1133,15 @@ impl ZodeEngine {
             cfg.compress_output(),
         )));
         base.register(Arc::new(KillShellTool::new(bash_sessions.clone())));
+        // WebSearch: registered only when a backend key exists (config
+        // `webSearch.tavilyApiKey` or `$TAVILY_API_KEY`). The `web` tool
+        // group has always LISTED the name; registering it conditionally
+        // keeps the model from ever seeing a tool it cannot call.
+        if let Some(key) = cfg.web_search.resolved_tavily_key() {
+            base.register(Arc::new(agent_tools_code::WebSearchTool::new(Arc::new(
+                agent_tools_code::TavilyBackend::new(key),
+            ))));
+        }
 
         // Goal auto-loop completion signal. Created BEFORE tool registration so
         // the `GoalComplete` tool and the engine struct share the SAME `Arc`:
@@ -1155,6 +1249,11 @@ impl ZodeEngine {
                 None => None,
             };
 
+        // Pre-wrapped (context-aware) permission gates registered below —
+        // collected so a `permissions.ask` hit pins the INNER gate to
+        // prompt-every-call instead of stacking a second, context-blind
+        // `PermissionGatedTool` outside it (double prompt, no `_target`).
+        let mut pre_gated_tools: Vec<Arc<crate::gated_tool::PermissionGatedTool>> = Vec::new();
         // Built-in browser control (browser_*). Disable via `tools:browser`.
         // browser_read is ReadOnly and registered un-gated, like op_read.
         // The mutating trio (act/eval/tabs) is wrapped in `browser_gated`
@@ -1183,12 +1282,14 @@ impl ZodeEngine {
                 Arc::new(BrowserEvalTool::new(deps.clone())),
                 Arc::new(BrowserTabsTool::new(deps)),
             ] {
-                base.register(crate::browser::gate::browser_gated_as(
+                let gated = crate::browser::gate::browser_gated_as(
                     tool,
                     gate.clone(),
                     browser_session.clone(),
                     browser_target_override.clone(),
-                ));
+                );
+                pre_gated_tools.push(gated.clone());
+                base.register(gated);
             }
         }
 
@@ -1234,6 +1335,7 @@ impl ZodeEngine {
                     desktop_session.clone(),
                 );
                 desktop_mutating_names.push(gated.name().to_string());
+                pre_gated_tools.push(gated.clone());
                 base.register(gated);
             }
         }
@@ -1336,10 +1438,22 @@ impl ZodeEngine {
         hook_runner.register(Arc::new(BgShellHook::new(bg_shells_meta.clone())));
         hook_runner.register(Arc::new(checkpoints.clone()));
         let recent_files = carry.recent_files.clone().unwrap_or_default();
-        let restore_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Carried: a compaction can latch a restore right before a rebuild
+        // (`/model` etc.); a fresh latch here would silently drop it.
+        let restore_pending = carry
+            .restore_pending
+            .clone()
+            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        // Carried across rebuilds: a compaction latched right before a
+        // hot-swap must still force the next save to a full rewrite.
+        let prefix_dirty = carry
+            .prefix_dirty
+            .clone()
+            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
         hook_runner.register(Arc::new(crate::compact_memory::compact_tracker_hook(
             recent_files.clone(),
             restore_pending.clone(),
+            prefix_dirty.clone(),
         )));
         hook_runner.register(Arc::new(crate::verification::verification_hook(
             verification.clone(),
@@ -1639,6 +1753,18 @@ impl ZodeEngine {
                 force_ask.push(rule.tool_name.clone());
             }
         }
+        // `ask` on a pre-wrapped (context-aware) gate is honored INSIDE that
+        // gate: pin it to prompt-every-call (AllowAlways never cached). The
+        // alternative — letting `wrap_mutating_tools` stack a second gate —
+        // yields two prompts per call, the outer one blind to `_target` /
+        // `_page_url`. The names are also exempted below via `self_gated`.
+        let mut pre_gated_names: Vec<String> = Vec::new();
+        for gated in &pre_gated_tools {
+            pre_gated_names.push(gated.name().to_string());
+            if force_ask.iter().any(|a| a == gated.name()) {
+                gated.set_always_persist(false);
+            }
+        }
         // A tool force-gated ONLY by scoped ask rules keeps its base
         // disposition for non-matching inputs: if it would run ungated
         // (read-only or user-allow-listed), unmatched calls auto-allow instead
@@ -1665,6 +1791,9 @@ impl ZodeEngine {
                 "TeamBoardAppend",
             ]);
         }
+        // Pre-wrapped context-aware gates count as self-gated: their `ask`
+        // handling is the always-persist pin above, never a second wrapper.
+        self_gated_names.extend(pre_gated_names.iter().map(String::as_str));
         let self_gated: &[&str] = &self_gated_names;
         let mut gated = wrap_mutating_tools(base, &gate, &mutating_allow, &force_ask, self_gated);
 
@@ -1693,12 +1822,24 @@ impl ZodeEngine {
         //    everything else stays reachable through ToolSearch. When the
         //    filter excludes ToolSearch (no recovery path), the full set is
         //    kept instead of silently losing tools.
-        let tools = if lite && tool_filter.is_none_or(|filter| filter.allows("ToolSearch")) {
+        // Standard-profile narrowing is opt-in (`tools.deferNonCore`): a
+        // full assembly ships dozens of schemas per request, which is a
+        // known tool-selection degrader even for strong models.
+        let visible_core: Option<&[&str]> = if lite {
+            Some(LITE_VISIBLE_TOOLS)
+        } else if cfg.tools.defer_non_core() {
+            Some(STANDARD_VISIBLE_TOOLS)
+        } else {
+            None
+        };
+        let tools = if let Some(core) =
+            visible_core.filter(|_| tool_filter.is_none_or(|filter| filter.allows("ToolSearch")))
+        {
             let candidates = Arc::new(gated.clone());
             let mut visible = ToolRegistry::new();
             let keep: Vec<String> = candidates
                 .names()
-                .filter(|n| LITE_VISIBLE_TOOLS.contains(n))
+                .filter(|n| core.contains(n))
                 .map(str::to_string)
                 .collect();
             for name in keep {
@@ -1737,9 +1878,14 @@ impl ZodeEngine {
             }
         };
         // Seed the drift-tracker baseline with the branch that's about to be
-        // baked into the system prompt, so `check_branch_drift` only fires on
-        // a REAL change observed after this prompt was rendered.
-        reminders.note_git_branch(git_branch.clone());
+        // baked into the system prompt — but only when the tracker has no
+        // baseline yet. A carried tracker may have advanced to a reported
+        // drift; re-baselining it to the baked branch would re-fire the same
+        // "branch changed" notice after every rebuild.
+        reminders.seed_git_branch(git_branch.clone());
+        // Same seed-only contract for the calendar date baked into the
+        // prompt — `note_date` reports midnight crossings per turn.
+        reminders.seed_date(date.to_string());
         let baked_git_branch = git_branch.clone();
         let has_todo_tool = tools.get("TodoWrite").is_some();
         let has_run_check_tool = tools.get("RunCheck").is_some();
@@ -1809,6 +1955,10 @@ impl ZodeEngine {
                 .compact_state
                 .clone()
                 .unwrap_or_else(|| Arc::new(Mutex::new(AutoCompactState::default()))),
+            compacted_overlay: carry
+                .compacted_overlay
+                .clone()
+                .unwrap_or_else(|| Arc::new(Mutex::new(MessageStore::new()))),
             steer_tx,
             steer_rx,
             model,
@@ -1873,7 +2023,11 @@ impl ZodeEngine {
             session_store,
             recent_files,
             restore_pending,
-            last_restore_note: Arc::new(std::sync::Mutex::new(None)),
+            prefix_dirty,
+            last_restore_note: carry
+                .last_restore_note
+                .clone()
+                .unwrap_or_else(|| Arc::new(std::sync::Mutex::new(None))),
             ledger,
             model_runtime,
             bash_sessions,
@@ -2013,6 +2167,71 @@ impl ZodeEngine {
         self
     }
 
+    /// Seed the display overlay with archived originals of compaction-
+    /// tombstoned messages (resume paths load these from the session's
+    /// compacted archive). Duplicates of already-captured uuids are ignored.
+    pub fn seed_compacted_overlay(&self, archive: &MessageStore) {
+        if archive.is_empty() {
+            return;
+        }
+        if let Ok(mut overlay) = self.compacted_overlay.lock() {
+            for msg in archive.iter() {
+                let _ = overlay.push(msg.clone());
+            }
+        }
+    }
+
+    /// Snapshot of the display overlay (empty on lock poisoning).
+    pub fn compacted_overlay_snapshot(&self) -> MessageStore {
+        self.compacted_overlay
+            .lock()
+            .map(|overlay| overlay.clone())
+            .unwrap_or_default()
+    }
+
+    /// Consume the prefix-rewrite latch. `true` means a compaction rewrote
+    /// the store prefix since the last durable save — the caller must do a
+    /// full transcript rewrite, never an append. Consuming is safe even when
+    /// the caller was already going to rewrite: the rewrite makes the file
+    /// current either way.
+    pub fn take_prefix_dirty(&self) -> bool {
+        self.prefix_dirty
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Latch the prefix-rewrite flag (store prefix changed outside the
+    /// hook-observed compaction paths, e.g. `/clear`).
+    pub fn mark_prefix_dirty(&self) {
+        self.prefix_dirty
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Drop the display overlay (`/clear`): a discarded conversation must
+    /// not keep its compacted originals around in memory.
+    pub fn clear_compacted_overlay(&self) {
+        if let Ok(mut overlay) = self.compacted_overlay.lock() {
+            *overlay = MessageStore::new();
+        }
+    }
+
+    /// Reset every piece of conversation-scoped tracker state for `/clear`:
+    /// the post-compact restore latch (+ its undisplayed note), the recent
+    /// read set, the reminder tracker, and the compacted display overlay.
+    /// Without this the FIRST turn of the fresh conversation inherits the
+    /// discarded one's restore message, "already read N files" recap, and
+    /// drift baselines. (The ledger and `compact_state` are cleared by the
+    /// caller alongside the store swap, as before.)
+    pub fn clear_conversation_state(&self) {
+        self.restore_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut note) = self.last_restore_note.lock() {
+            *note = None;
+        }
+        self.recent_files.clear();
+        self.reminders.clear();
+        self.clear_compacted_overlay();
+    }
+
     /// Pre-turn safety compaction for headless callers (`-p` on a large
     /// resumed context, long `--no-tui` sessions). The QueryLoop already
     /// auto-compacts on a byte estimate, but that under-counts CJK; when the
@@ -2133,11 +2352,16 @@ impl ZodeEngine {
     }
 
     /// Render the conversation to a Markdown transcript (`/export`). Returns an
-    /// empty header-only document if the store mutex is poisoned.
+    /// empty header-only document if the store mutex is poisoned. Compaction
+    /// tombstones are swapped back to their display originals — an export is
+    /// a human-facing transcript, not the model context.
     pub fn export_markdown(&self) -> String {
+        // Overlay snapshot before the store lock (never nested).
+        let overlay = self.compacted_overlay_snapshot();
         match self.store.lock() {
             Ok(store) => {
-                crate::export::store_to_markdown_with_trace(&store, Some(self.tool_trace.path()))
+                let display = crate::sessions::overlay_compacted_originals(&store, &overlay);
+                crate::export::store_to_markdown_with_trace(&display, Some(self.tool_trace.path()))
             }
             Err(_) => "# Conversation\n\n".to_string(),
         }
@@ -2222,6 +2446,19 @@ impl ZodeEngine {
         let result = compact_with_hooks(self.hooks.as_ref(), self.provider.as_ref(), request)
             .await
             .map_err(|e| CoreError::Other(e.to_string()))?;
+        // Keep display copies of the messages this compaction is about to
+        // tombstone: the UI merges them back over the tombstones so the
+        // transcript stays readable (live redraws and resumed sessions).
+        if let Ok(mut overlay) = self.compacted_overlay.lock() {
+            for msg in &messages {
+                if result.replaced_uuids.contains(&msg.uuid())
+                    && !matches!(msg, agent::message::Message::Tombstone { .. })
+                {
+                    // DuplicateUuid = already captured by an earlier pass.
+                    let _ = overlay.push(msg.clone());
+                }
+            }
+        }
         {
             let mut store = self
                 .store
@@ -2229,6 +2466,9 @@ impl ZodeEngine {
                 .map_err(|_| CoreError::Other("compact: message store poisoned".into()))?;
             apply_compaction_to_store(&mut store, &result)?;
         }
+        // Belt to the PostCompact-hook latch: whatever path applied this
+        // compaction, the next durable save must be a full rewrite.
+        self.mark_prefix_dirty();
         // This compaction rewrote the store, so a previously latched
         // runtime "no progress" verdict is stale — clear it and let the
         // QueryLoop re-evaluate on the next turn (it re-latches if the
@@ -2283,7 +2523,7 @@ impl ZodeEngine {
         // Restore BEFORE recording: the injected ledger should reflect the
         // session up to (not including) this prompt — the prompt itself
         // lands in the transcript right after the restore message.
-        self.restore_after_compact(&query);
+        let restore_carried_recall = self.restore_after_compact(&query);
         self.ledger.note_user_request(&query);
         self.auto_remember_noema(&query);
         let mut notices = self
@@ -2293,12 +2533,27 @@ impl ZodeEngine {
         if let Some(n) = self.check_branch_drift().await {
             notices.push(n);
         }
+        // Midnight crossing: the prompt's date is frozen at session start
+        // (prompt-cache stability); tell the model once per day change.
+        if let Some(n) = self
+            .reminders
+            .note_date(chrono::Utc::now().format("%Y-%m-%d").to_string())
+        {
+            notices.push(n);
+        }
         let content = if notices.is_empty() {
             content
         } else {
             crate::reminders::prepend_reminder(content, &notices)
         };
-        let content = self.inject_noema_memory(content, &query);
+        // The post-compact restore message already carries a recall pack for
+        // this query — injecting the per-turn recall too would send largely
+        // the same memories twice in one request.
+        let content = if restore_carried_recall {
+            content
+        } else {
+            self.inject_noema_memory(content, &query)
+        };
         self.turn_blocks_raw(content, abort).await
     }
 
@@ -2361,11 +2616,14 @@ impl ZodeEngine {
     /// One-shot post-compaction restoration: when the tracker hook latched a
     /// compaction, push a synthetic user message (recent files re-read from
     /// disk + noema recall pack) into the store BEFORE this turn's user
-    /// prompt. Best-effort: any failure just skips that part.
-    fn restore_after_compact(&self, query: &str) {
+    /// prompt. Best-effort: any failure just skips that part. Returns `true`
+    /// when the injected message carried a recall pack, so the caller can
+    /// skip the per-turn recall injection — otherwise the same memories
+    /// would land twice in one request.
+    fn restore_after_compact(&self, query: &str) -> bool {
         use std::sync::atomic::Ordering;
         if !self.restore_pending.swap(false, Ordering::SeqCst) {
-            return;
+            return false;
         }
         let cfg = &self.compact_settings;
         let files = if cfg.restore_files() {
@@ -2395,21 +2653,24 @@ impl ZodeEngine {
             token_budget: cfg.restore_files_budget(),
             ..Default::default()
         };
+        let recall_included = recall.is_some();
         let Some((message, note)) = crate::compact_memory::build_restore_message(
             files,
             recall,
             self.ledger.render(),
             &pc_config,
         ) else {
-            return;
+            return false;
         };
         if let Ok(mut store) = self.store.lock() {
             if store.push(message).is_ok() {
                 if let Ok(mut n) = self.last_restore_note.lock() {
                     *n = Some(note);
                 }
+                return recall_included;
             }
         }
+        false
     }
 
     /// Take (and clear) the UI note produced by the last restoration.
@@ -3339,14 +3600,15 @@ impl EngineTemplate {
         // Reuse the SESSION-START branch when the engine carries one: baking
         // the current branch here would rewrite the provider-cached prompt
         // prefix on every /goal after a branch switch — drift reaches the
-        // model via the per-turn reminder instead. Re-seed the tracker with
-        // the same value that lands in the prompt so drift keeps firing
-        // relative to what the model actually sees.
+        // model via the per-turn reminder instead. Seed-only: a tracker that
+        // already advanced its baseline to a reported drift must not be
+        // dragged back to the baked branch (that re-fires the same notice
+        // after every hot-swap).
         let git_branch = match engine.session_git_branch.clone() {
             Some(session_branch) => session_branch,
             None => crate::instructions::detect_git_branch(&engine.cwd),
         };
-        engine.reminders.note_git_branch(git_branch.clone());
+        engine.reminders.seed_git_branch(git_branch.clone());
         render_runtime_system_prompt(
             &self.cfg,
             &engine.cwd,
@@ -3759,8 +4021,13 @@ mod tests {
             map_effort(Some("medium"), false, true).1.as_deref(),
             Some("medium")
         );
-        // medium without opt-in still maps to nothing (pure prose fallback).
+        // medium on a thinking-capable provider gets the half budget — an
+        // explicit /effort medium used to be a silent no-op on Anthropic.
         let (t, e) = map_effort(Some("medium"), true, false);
+        assert_eq!(t.map(|t| t.max_tokens), Some(4096));
+        assert_eq!(e.as_deref(), Some("medium"));
+        // low on a thinking-capable provider stays thinking-free (fast path).
+        let (t, e) = map_effort(Some("low"), true, false);
         assert!(t.is_none() && e.is_none());
         let (t, e) = map_effort(None, true, true);
         assert!(t.is_none() && e.is_none());
@@ -3862,6 +4129,7 @@ mod tests {
             hooks: Arc::new(HookRunner::new()),
             checkpoints: crate::sessions::checkpoint::CheckpointTracker::default(),
             store: Arc::new(Mutex::new(MessageStore::new())),
+            compacted_overlay: Arc::new(Mutex::new(MessageStore::new())),
             session_git_branch: None,
             pre_turn_compact_percent: PRE_TURN_COMPACT_PERCENT,
             reanchor_every: None,
@@ -3903,6 +4171,7 @@ mod tests {
             session_store: None,
             recent_files: crate::compact_memory::RecentFiles::default(),
             restore_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            prefix_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_restore_note: Arc::new(std::sync::Mutex::new(None)),
             model_runtime,
             bash_sessions: BashSessionRegistry::new(),
@@ -4697,6 +4966,33 @@ mod tests {
             )
         });
         assert!(has_summary, "summary message spliced in");
+        drop(store);
+
+        // The prefix-rewrite latch is armed for the durable-save layer and
+        // consumed exactly once.
+        assert!(eng.take_prefix_dirty(), "compaction latches prefix_dirty");
+        assert!(!eng.take_prefix_dirty(), "take consumes the latch");
+
+        // The tombstoned originals are captured for display: the overlay
+        // merged over the store restores the pre-compaction text.
+        let overlay = eng.compacted_overlay_snapshot();
+        assert_eq!(overlay.len(), 2, "originals captured in the overlay");
+        let store = eng.store.lock().unwrap();
+        let display = crate::sessions::overlay_compacted_originals(&store, &overlay);
+        let texts: Vec<String> = display
+            .iter()
+            .filter_map(|m| match m {
+                Message::User { content, .. } | Message::Assistant { content, .. } => {
+                    content.iter().find_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "set up the project"));
+        assert!(texts.iter().any(|t| t == "done, here is the scaffold"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
