@@ -507,7 +507,9 @@ async function reconnectOrStart(port) {
 // the native host on a timer would keep relaunching zode after the user
 // closed it.
 const RECONNECT_ALARM = "zode-auto-reconnect";
-const RECONNECT_PERIOD_MINUTES = 1;
+// 0.5 = Chrome's minimum alarm period (M120+): bounds the wait for the
+// self-opened pairing page after `/browser pair` to ~30s worst case.
+const RECONNECT_PERIOD_MINUTES = 0.5;
 
 async function attemptStoredReconnect(reason) {
   if (ws != null) {
@@ -515,7 +517,12 @@ async function attemptStoredReconnect(reason) {
   }
   const [port, token] = await Promise.all([getPort(), getToken()]);
   if (port == null || token == null) {
-    clearReconnectAlarm(); // never paired (or unpaired) — nothing to retry
+    // Never paired (or unpaired): probe for an ACTIVE pairing window on the
+    // default port and open our own pairing page. Chrome blocks
+    // chrome-extension:// URLs launched by external programs
+    // (ERR_BLOCKED_BY_CLIENT — macOS `open`, Windows `start`, Linux
+    // `xdg-open` alike), so zode cannot open the page; the extension can.
+    await maybeOpenPairingPage(port || DEFAULT_BRIDGE_PORT, reason);
     return;
   }
   try {
@@ -527,6 +534,82 @@ async function attemptStoredReconnect(reason) {
       reason,
       String((error && error.message) || error),
     );
+    // A live server that rejects our stored token means re-pairing is
+    // needed — surface the pairing page if a window is open.
+    await maybeOpenPairingPage(port, reason);
+  }
+}
+
+const DEFAULT_BRIDGE_PORT = 17657;
+const PAIRING_PROMPT_COOLDOWN_MS = 120_000;
+const PAIRING_PROBE_TIMEOUT_MS = 3_000;
+let lastPairingPromptAt = 0;
+
+/// Ask the bridge (pre-auth) whether a pairing window is open. Resolves
+/// false on any failure — no server, refused, timeout.
+function probePairingWindow(port) {
+  return new Promise((resolve) => {
+    let socket;
+    let settled = false;
+    const finish = (active) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (socket) socket.close();
+      } catch (_) {}
+      resolve(active);
+    };
+    const timer = setTimeout(() => finish(false), PAIRING_PROBE_TIMEOUT_MS);
+    try {
+      socket = new WebSocket(`ws://127.0.0.1:${port}`);
+    } catch (_) {
+      clearTimeout(timer);
+      resolve(false);
+      return;
+    }
+    socket.onopen = () => {
+      try {
+        socket.send(JSON.stringify({ type: "probe" }));
+      } catch (_) {
+        finish(false);
+      }
+    };
+    socket.onmessage = (event) => {
+      clearTimeout(timer);
+      try {
+        const reply = JSON.parse(event.data);
+        finish(reply && reply.type === "pairing_status" && reply.active === true);
+      } catch (_) {
+        finish(false);
+      }
+    };
+    socket.onerror = () => {
+      clearTimeout(timer);
+      finish(false);
+    };
+    socket.onclose = () => {
+      clearTimeout(timer);
+      finish(false);
+    };
+  });
+}
+
+async function maybeOpenPairingPage(port, reason) {
+  const now = Date.now();
+  if (now - lastPairingPromptAt < PAIRING_PROMPT_COOLDOWN_MS) {
+    return;
+  }
+  const active = await probePairingWindow(port);
+  if (!active || ws != null) {
+    return;
+  }
+  lastPairingPromptAt = now;
+  const url = chrome.runtime.getURL(`popup.html?port=${port}`);
+  try {
+    await chrome.tabs.create({ url });
+    console.debug("zode pairing page opened", reason, port);
+  } catch (error) {
+    console.debug("zode pairing page open failed", String(error));
   }
 }
 

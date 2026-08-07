@@ -326,7 +326,12 @@ impl BridgeServer {
 
         let hello = read_client_hello(&mut ws).await?;
         let server_hello = self.authenticate(hello)?;
-        if matches!(server_hello, ServerHello::Rejected { .. }) {
+        if matches!(
+            server_hello,
+            ServerHello::Rejected { .. } | ServerHello::PairingStatus { .. }
+        ) {
+            // Rejections and pre-auth probes answer-and-close: neither may
+            // enter the authenticated session loop.
             let text = encode_server_hello(&server_hello)?;
             let _ = ws.send(Message::text(text)).await;
             return Ok(());
@@ -403,6 +408,14 @@ impl BridgeServer {
                 .save()
                 .map_err(|e| BrowserError::Protocol(format!("bridge token save: {e}")))?;
                 Ok(ServerHello::Paired { token })
+            }
+            ClientHello::Probe => {
+                let active = self
+                    .lock_state()?
+                    .pairing
+                    .as_ref()
+                    .is_some_and(|pairing| pairing.redeemable(Instant::now()));
+                Ok(ServerHello::PairingStatus { active })
             }
             ClientHello::Auth { token } => {
                 let ok = BridgeToken::load()
@@ -681,6 +694,76 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    /// The pre-auth probe answers with the pairing-window state and closes —
+    /// it must never mint a session, and it must report `active: false` once
+    /// the code is consumed or absent. The probe exists because Chrome blocks
+    /// externally-launched `chrome-extension://` URLs (ERR_BLOCKED_BY_CLIENT
+    /// on macOS/Windows/Linux alike), so the extension polls and opens its
+    /// own pairing page instead.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn probe_reports_pairing_window_and_closes() {
+        let srv = BridgeServer::new_with_preferred_port(0);
+        let origin = format!("chrome-extension://{}", EXTENSION_ID);
+
+        // No pairing started → inactive.
+        let port = srv.ensure_listening().await.unwrap();
+        let mut ws = connect_with_origin(port, &origin).await;
+        ws.send(Message::text(
+            serde_json::to_string(&ClientHello::Probe).unwrap(),
+        ))
+        .await
+        .unwrap();
+        let status: ServerHello =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert!(matches!(
+            status,
+            ServerHello::PairingStatus { active: false }
+        ));
+        // Server tears down after answering a probe (close frame or abrupt
+        // drop, depending on shutdown timing) — never another data frame.
+        assert!(!matches!(ws.next().await, Some(Ok(Message::Text(_)))));
+
+        // Active pairing window → active: true.
+        let handle = srv.start_pairing().await.unwrap();
+        let mut ws = connect_with_origin(handle.port, &origin).await;
+        ws.send(Message::text(
+            serde_json::to_string(&ClientHello::Probe).unwrap(),
+        ))
+        .await
+        .unwrap();
+        let status: ServerHello =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert!(matches!(
+            status,
+            ServerHello::PairingStatus { active: true }
+        ));
+
+        // Redeeming the code closes the window → probe flips back to false.
+        let mut ws = connect_with_origin(handle.port, &origin).await;
+        ws.send(Message::text(
+            serde_json::to_string(&ClientHello::Pair { code: handle.code }).unwrap(),
+        ))
+        .await
+        .unwrap();
+        let paired: ServerHello =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert!(matches!(paired, ServerHello::Paired { .. }));
+        let mut probe = connect_with_origin(handle.port, &origin).await;
+        probe
+            .send(Message::text(
+                serde_json::to_string(&ClientHello::Probe).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let status: ServerHello =
+            serde_json::from_str(probe.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert!(matches!(
+            status,
+            ServerHello::PairingStatus { active: false }
+        ));
     }
 
     #[tokio::test]

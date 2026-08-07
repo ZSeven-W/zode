@@ -13255,24 +13255,28 @@ fn browser_extension_open_note(
     url: &str,
     result: Result<(), zode_core::browser::BrowserError>,
 ) -> String {
-    // Chrome sometimes refuses `chrome-extension://` URLs handed over from
-    // the command line (the tab opens blank), and the URL is always dead
-    // when the extension isn't installed — so a "successful" open still
-    // needs the manual path and the install link.
+    // Chrome BLOCKS `chrome-extension://` URLs launched by external
+    // programs (ERR_BLOCKED_BY_CLIENT — macOS `open`, Windows `start`,
+    // Linux `xdg-open` alike), so the launch below is best-effort at most.
+    // The reliable path is the extension itself: it probes the bridge every
+    // ~30s and opens its own pairing page while the window is active.
+    // Manual fallback: TYPE the URL into the address bar (typed navigation
+    // is browser-initiated and not blocked).
     let install = format!(
         "https://chromewebstore.google.com/detail/{}",
         zode_core::browser::bridge::server::primary_extension_id()
     );
     match result {
         Ok(()) => format!(
-            "Opened the zode extension page in Chrome. If the tab is blank or errors, click \
-             the zode toolbar icon and enter the port + code shown above. Extension not \
-             installed yet? {install}"
+            "If the pairing page did not appear (Chrome may block it with \
+             ERR_BLOCKED_BY_CLIENT), the extension opens it by itself within ~30s — or \
+             type this into Chrome's address bar: {url} . Extension not installed yet? \
+             {install}"
         ),
         Err(error) => format!(
-            "Could not open Chrome automatically: {error}. Open manually: {url} — or click \
-             the zode toolbar icon and enter the port + code shown above. Extension not \
-             installed yet? {install}"
+            "Could not open Chrome automatically: {error}. The extension opens the pairing \
+             page by itself within ~30s — or type this into Chrome's address bar: {url} . \
+             Extension not installed yet? {install}"
         ),
     }
 }
@@ -13801,11 +13805,14 @@ mod tests {
     #[test]
     fn browser_extension_open_note_reports_success_with_fallbacks() {
         let note = browser_extension_open_note("chrome-extension://zode/popup.html", Ok(()));
-        // Even a "successful" open needs the manual path (Chrome may drop
-        // chrome-extension:// URLs from the command line) and install link.
+        // Even a "successful" launch needs the fallbacks: Chrome blocks
+        // externally-launched chrome-extension:// URLs, so the note leads
+        // with the extension's self-opened pairing page, keeps the
+        // type-it-manually URL, and links the store install.
         for expected in [
-            "Opened the zode extension page in Chrome.",
-            "toolbar icon",
+            "opens it by itself",
+            "address bar",
+            "chrome-extension://zode/popup.html",
             "chromewebstore.google.com/detail/",
         ] {
             assert!(note.contains(expected), "missing {expected}: {note}");
@@ -13823,7 +13830,8 @@ mod tests {
             "Could not open Chrome automatically",
             "tried [local-app, program-files, path-a/chrome.exe]",
             "browser.executable",
-            "Open manually",
+            "opens the pairing page by itself",
+            "address bar",
             url,
         ] {
             assert!(note.contains(expected), "missing {expected}: {note}");

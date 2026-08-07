@@ -55,6 +55,12 @@ impl Pairing {
         &self.code
     }
 
+    /// Whether this challenge can still be redeemed at `now` — the probe
+    /// path reports "pairing active" only for a live, non-consumed window.
+    pub(crate) fn redeemable(&self, now: Instant) -> bool {
+        !self.consumed && self.attempts < MAX_PAIRING_ATTEMPTS && now < self.expiry
+    }
+
     pub(crate) fn redeem(&mut self, code: &str, now: Instant) -> Result<String, PairError> {
         if self.consumed || self.attempts >= MAX_PAIRING_ATTEMPTS {
             return Err(PairError::LockedOut);
@@ -162,16 +168,34 @@ pub(crate) struct RpcResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ClientHello {
-    Pair { code: String },
-    Auth { token: String },
+    Pair {
+        code: String,
+    },
+    Auth {
+        token: String,
+    },
+    /// Pre-auth probe: "is a pairing window active on this port?" Lets the
+    /// extension OPEN the pairing page itself (extension-origin navigation)
+    /// — Chrome blocks externally-launched `chrome-extension://` URLs with
+    /// ERR_BLOCKED_BY_CLIENT, so zode cannot reliably open it.
+    Probe,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ServerHello {
-    Paired { token: String },
+    Paired {
+        token: String,
+    },
     Ok,
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
+    /// Reply to [`ClientHello::Probe`]; reveals only whether a pairing
+    /// window is currently open (origin-checked, localhost-only).
+    PairingStatus {
+        active: bool,
+    },
 }
 
 fn token_path() -> std::io::Result<std::path::PathBuf> {
