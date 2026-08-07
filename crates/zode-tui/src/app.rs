@@ -13591,6 +13591,17 @@ fn setup_terminal(mouse_capture: bool) -> std::io::Result<Terminal<CrosstermBack
     {
         KITTY_KEYBOARD_PUSHED.store(true, std::sync::atomic::Ordering::SeqCst);
     }
+    // xterm modifyOtherKeys level 2, unconditionally: terminals that predate
+    // the kitty protocol but speak this older extension (iTerm2 < 3.5 most
+    // prominently — the "Shift+Enter submits instead of newline" report)
+    // deliver modified chords as `CSI 27;<mods>;<code>~`, which crossterm
+    // parses natively. Kitty-protocol terminals give their own protocol
+    // precedence, and terminals that support neither ignore the sequence —
+    // safe to emit always. Restored in `restore_terminal` / panic hook.
+    {
+        use std::io::Write;
+        let _ = stdout.write_all(b"\x1b[>4;2m").and_then(|_| stdout.flush());
+    }
     match Terminal::new(CrosstermBackend::new(stdout)) {
         Ok(term) => {
             install_panic_hook();
@@ -13717,6 +13728,11 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> std::i
     if KITTY_KEYBOARD_PUSHED.swap(false, std::sync::atomic::Ordering::SeqCst) {
         let _ = terminal.backend_mut().execute(PopKeyboardEnhancementFlags);
     }
+    {
+        use std::io::Write;
+        let out = terminal.backend_mut();
+        let _ = out.write_all(b"\x1b[>4;0m").and_then(|_| out.flush());
+    }
     terminal.backend_mut().execute(DisableBracketedPaste)?;
     terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
@@ -13734,6 +13750,11 @@ fn install_panic_hook() {
         let _ = disable_raw_mode();
         if KITTY_KEYBOARD_PUSHED.swap(false, std::sync::atomic::Ordering::SeqCst) {
             let _ = std::io::stdout().execute(PopKeyboardEnhancementFlags);
+        }
+        {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"\x1b[>4;0m").and_then(|_| out.flush());
         }
         let _ = std::io::stdout().execute(DisableBracketedPaste);
         let _ = std::io::stdout().execute(DisableMouseCapture);
