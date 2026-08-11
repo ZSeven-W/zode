@@ -114,7 +114,9 @@ fn is_context_overflow_error(message: &str) -> bool {
         || m.contains("context_length_exceeded")
         || m.contains("maximum context length")
         || m.contains("context length exceeded")
-        || m.contains("exceeds the context window")
+        // "exceed"/"exceeds" — DeepSeek's anthropic-compat endpoint uses
+        // both forms ("messages exceed the context window").
+        || (m.contains("context window") && m.contains("exceed"))
         || m.contains("context window limit")
         || (m.contains("input length") && m.contains("max_tokens"))
 }
