@@ -34,7 +34,7 @@
       "id": "mcp_secret_add",
       "kind": "mcp",
       "passed": true,
-      "detail": "missing '4542' in 'The resulting number is **4542**.'",
+      "detail": "missing '4542' in 'The `secret_add` tool returned **4542** for inputs 100 and 200.'",
       "tools": [
         "mcp__bench__secret_add"
       ]
@@ -43,17 +43,16 @@
       "id": "mcp_reverse",
       "kind": "mcp",
       "passed": true,
-      "detail": "missing '<<noitcurtsni>>' in \"The first call returned an error referencing `'text'`. Let me try with `text` as the param\"",
+      "detail": "missing '<<noitcurtsni>>' in 'The tool returned `<<noitcurtsni>>` (the token \"instruction\" reversed).'",
       "tools": [
-        "mcp__bench__reverse_token",
-        "tool"
+        "mcp__bench__reverse_token"
       ]
     },
     {
       "id": "mcp_magic",
       "kind": "mcp",
       "passed": true,
-      "detail": "missing 'ZQX-7731-PLUTO' in \"Today's magic word is: **ZQX-7731-PLUTO**\"",
+      "detail": "missing 'ZQX-7731-PLUTO' in \"Today's magic word is **ZQX-7731-PLUTO**.\"",
       "tools": [
         "mcp__bench__magic_word"
       ]
@@ -135,11 +134,10 @@
       "id": "hard_sequential",
       "kind": "hard",
       "passed": true,
-      "detail": "missing '<<OTULP-1377-XQZ>>' in '<<OTULP-1377-XQZ>>'",
+      "detail": "missing '<<OTULP-1377-XQZ>>' in '`<<OTULP-1377-XQZ>>`'",
       "tools": [
         "mcp__bench__magic_word",
-        "mcp__bench__reverse_token",
-        "tool"
+        "mcp__bench__reverse_token"
       ]
     },
     {
@@ -148,8 +146,7 @@
       "passed": true,
       "detail": "missing '4257' in '4257'",
       "tools": [
-        "mcp__bench__secret_add",
-        "tool"
+        "mcp__bench__secret_add"
       ]
     },
     {

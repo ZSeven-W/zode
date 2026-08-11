@@ -1,0 +1,166 @@
+{
+ "total": [
+  12,
+  12
+ ],
+ "by_dim": {
+  "exploration": [
+   3,
+   3
+  ],
+  "recovery": [
+   4,
+   4
+  ],
+  "toolchain": [
+   3,
+   3
+  ],
+  "zh-ops": [
+   2,
+   2
+  ]
+ },
+ "results": [
+  {
+   "id": "ex_compact_knobs",
+   "dim": "exploration",
+   "passed": true,
+   "detail": "",
+   "tools": [
+    "Grep"
+   ],
+   "secs": 9.0
+  },
+  {
+   "id": "ex_lite_constant",
+   "dim": "exploration",
+   "passed": true,
+   "detail": "",
+   "tools": [
+    "FileRead",
+    "Grep"
+   ],
+   "secs": 10.2
+  },
+  {
+   "id": "ex_mcp_prefix",
+   "dim": "exploration",
+   "passed": true,
+   "detail": "",
+   "tools": [
+    "FileRead",
+    "Grep"
+   ],
+   "secs": 14.6
+  },
+  {
+   "id": "rc_bad_syntax",
+   "dim": "recovery",
+   "passed": true,
+   "detail": "",
+   "tools": [
+    "Bash",
+    "FileEdit",
+    "FileRead",
+    "Glob"
+   ],
+   "secs": 14.7
+  },
+  {
+   "id": "rc_missing_module",
+   "dim": "recovery",
+   "passed": true,
+   "detail": "",
+   "tools": [
+    "FileRead",
+    "FileWrite",
+    "Glob",
+    "RunCheck"
+   ],
+   "secs": 13.4
+  },
+  {
+   "id": "rc_outside_workspace",
+   "dim": "recovery",
+   "passed": true,
+   "detail": "",
+   "tools": [
+    "Bash"
+   ],
+   "secs": 8.2
+  },
+  {
+   "id": "rc_wrong_api",
+   "dim": "recovery",
+   "passed": true,
+   "detail": "",
+   "tools": [
+    "Bash",
+    "FileEdit",
+    "RunCheck"
+   ],
+   "secs": 13.3
+  },
+  {
+   "id": "tc_buggy_calc",
+   "dim": "toolchain",
+   "passed": true,
+   "detail": "",
+   "tools": [
+    "Bash",
+    "FileEdit",
+    "RunCheck"
+   ],
+   "secs": 9.3
+  },
+  {
+   "id": "tc_pipeline",
+   "dim": "toolchain",
+   "passed": true,
+   "detail": "",
+   "tools": [
+    "Bash",
+    "FileEdit",
+    "RunCheck"
+   ],
+   "secs": 30.8
+  },
+  {
+   "id": "tc_refactor_dedup",
+   "dim": "toolchain",
+   "passed": true,
+   "detail": "",
+   "tools": [
+    "Bash",
+    "FileRead",
+    "FileWrite",
+    "RunCheck"
+   ],
+   "secs": 19.0
+  },
+  {
+   "id": "zh_read_summary",
+   "dim": "zh-ops",
+   "passed": true,
+   "detail": "",
+   "tools": [
+    "Bash",
+    "FileRead",
+    "Glob"
+   ],
+   "secs": 10.6
+  },
+  {
+   "id": "zh_script",
+   "dim": "zh-ops",
+   "passed": true,
+   "detail": "",
+   "tools": [
+    "FileWrite",
+    "RunCheck"
+   ],
+   "secs": 10.2
+  }
+ ]
+}

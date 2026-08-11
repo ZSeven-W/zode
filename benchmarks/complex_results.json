@@ -9,7 +9,8 @@
       "FileEdit",
       "FileRead",
       "FileWrite",
-      "Glob"
+      "Glob",
+      "RunCheck"
     ],
     "results": [
       {
@@ -20,10 +21,9 @@
         "tools": [
           "Bash",
           "FileRead",
-          "FileWrite",
-          "Glob"
+          "FileWrite"
         ],
-        "secs": 75.2
+        "secs": 37.4
       },
       {
         "id": "query_engine",
@@ -32,11 +32,10 @@
         "detail": "",
         "tools": [
           "Bash",
-          "FileRead",
           "FileWrite",
-          "Glob"
+          "RunCheck"
         ],
-        "secs": 23.6
+        "secs": 21.3
       },
       {
         "id": "expr_language",
@@ -45,11 +44,12 @@
         "detail": "",
         "tools": [
           "Bash",
+          "FileEdit",
           "FileRead",
           "FileWrite",
-          "Glob"
+          "RunCheck"
         ],
-        "secs": 68.2
+        "secs": 48.3
       },
       {
         "id": "build_resolver",
@@ -59,9 +59,10 @@
         "tools": [
           "Bash",
           "FileEdit",
-          "FileRead"
+          "FileRead",
+          "RunCheck"
         ],
-        "secs": 55.4
+        "secs": 22.2
       },
       {
         "id": "cross_file_precedence_bug",
@@ -74,7 +75,7 @@
           "FileRead",
           "Glob"
         ],
-        "secs": 24.6
+        "secs": 33.4
       }
     ]
   }

@@ -6,12 +6,12 @@
     ],
     "tools_seen": [
       "Bash",
-      "Edit",
       "FileEdit",
       "FileRead",
+      "FileWrite",
       "Glob",
       "Grep",
-      "tool"
+      "RunCheck"
     ],
     "results": [
       {
@@ -23,9 +23,10 @@
           "Bash",
           "FileEdit",
           "FileRead",
-          "Glob"
+          "Glob",
+          "RunCheck"
         ],
-        "secs": 23.0
+        "secs": 27.6
       },
       {
         "id": "closure_late_binding",
@@ -33,12 +34,12 @@
         "passed": true,
         "detail": "",
         "tools": [
-          "Bash",
           "FileEdit",
           "FileRead",
-          "Glob"
+          "Grep",
+          "RunCheck"
         ],
-        "secs": 20.0
+        "secs": 17.7
       },
       {
         "id": "dict_mutation_iter",
@@ -48,9 +49,10 @@
         "tools": [
           "Bash",
           "FileEdit",
-          "FileRead"
+          "FileRead",
+          "RunCheck"
         ],
-        "secs": 21.4
+        "secs": 19.5
       },
       {
         "id": "shallow_grid_aliasing",
@@ -60,9 +62,10 @@
         "tools": [
           "FileEdit",
           "FileRead",
-          "Grep"
+          "Grep",
+          "RunCheck"
         ],
-        "secs": 9.0
+        "secs": 15.8
       },
       {
         "id": "generator_consumed_twice",
@@ -70,12 +73,12 @@
         "passed": true,
         "detail": "",
         "tools": [
-          "Bash",
-          "FileEdit",
           "FileRead",
-          "Grep"
+          "FileWrite",
+          "Grep",
+          "RunCheck"
         ],
-        "secs": 16.8
+        "secs": 21.7
       },
       {
         "id": "is_vs_equals",
@@ -83,12 +86,12 @@
         "passed": true,
         "detail": "",
         "tools": [
-          "Bash",
           "FileEdit",
           "FileRead",
-          "Grep"
+          "Grep",
+          "RunCheck"
         ],
-        "secs": 14.4
+        "secs": 13.1
       },
       {
         "id": "shared_class_attr",
@@ -98,10 +101,9 @@
         "tools": [
           "Bash",
           "FileEdit",
-          "FileRead",
-          "Grep"
+          "RunCheck"
         ],
-        "secs": 13.0
+        "secs": 15.5
       },
       {
         "id": "float_truncation",
@@ -109,12 +111,12 @@
         "passed": true,
         "detail": "",
         "tools": [
-          "Bash",
           "FileEdit",
           "FileRead",
-          "Grep"
+          "Grep",
+          "RunCheck"
         ],
-        "secs": 13.7
+        "secs": 17.2
       },
       {
         "id": "off_by_one_window",
@@ -122,14 +124,12 @@
         "passed": true,
         "detail": "",
         "tools": [
-          "Bash",
-          "Edit",
           "FileEdit",
           "FileRead",
           "Glob",
-          "tool"
+          "RunCheck"
         ],
-        "secs": 20.8
+        "secs": 17.3
       }
     ]
   }

@@ -31,319 +31,319 @@
         5
       ]
     },
-    "tokens_in": 116157,
-    "tokens_out": 18477,
-    "cache_read": 96000,
+    "tokens_in": 34098,
+    "tokens_out": 20491,
+    "cache_read": 1055,
     "results": [
       {
         "id": "two_sum",
         "dim": "algorithms",
         "passed": true,
         "detail": "",
-        "secs": 4.8,
-        "input_tokens": 3194,
-        "output_tokens": 242,
-        "cache_read": 0
+        "secs": 6.2,
+        "input_tokens": 6302,
+        "output_tokens": 187,
+        "cache_read": 512
       },
       {
         "id": "lis_length",
         "dim": "algorithms",
         "passed": true,
         "detail": "",
-        "secs": 5.3,
-        "input_tokens": 3187,
-        "output_tokens": 314,
-        "cache_read": 0
+        "secs": 6.1,
+        "input_tokens": 6288,
+        "output_tokens": 284,
+        "cache_read": 512
       },
       {
         "id": "search_insert",
         "dim": "algorithms",
         "passed": true,
         "detail": "",
-        "secs": 4.5,
-        "input_tokens": 3190,
-        "output_tokens": 207,
-        "cache_read": 0
+        "secs": 6.1,
+        "input_tokens": 6294,
+        "output_tokens": 237,
+        "cache_read": 3
       },
       {
         "id": "merge_intervals",
         "dim": "algorithms",
         "passed": true,
         "detail": "",
-        "secs": 4.9,
-        "input_tokens": 3203,
-        "output_tokens": 264,
-        "cache_read": 0
+        "secs": 7.9,
+        "input_tokens": 6320,
+        "output_tokens": 431,
+        "cache_read": 1
       },
       {
         "id": "kth_largest",
         "dim": "algorithms",
         "passed": true,
         "detail": "",
-        "secs": 4.5,
-        "input_tokens": 3211,
-        "output_tokens": 238,
-        "cache_read": 0
+        "secs": 5.5,
+        "input_tokens": 448,
+        "output_tokens": 198,
+        "cache_read": 1
       },
       {
         "id": "is_palindrome",
         "dim": "strings",
         "passed": true,
         "detail": "",
-        "secs": 2.1,
-        "input_tokens": 3188,
-        "output_tokens": 127,
-        "cache_read": 3072
+        "secs": 6.1,
+        "input_tokens": 402,
+        "output_tokens": 261,
+        "cache_read": 1
       },
       {
         "id": "top_k_frequent_words",
         "dim": "strings",
         "passed": true,
         "detail": "",
-        "secs": 3.5,
-        "input_tokens": 3196,
-        "output_tokens": 247,
-        "cache_read": 3072
+        "secs": 6.2,
+        "input_tokens": 418,
+        "output_tokens": 296,
+        "cache_read": 1
       },
       {
         "id": "roman_to_int",
         "dim": "strings",
         "passed": true,
         "detail": "",
-        "secs": 3.4,
-        "input_tokens": 3180,
-        "output_tokens": 286,
-        "cache_read": 3072
+        "secs": 6.9,
+        "input_tokens": 258,
+        "output_tokens": 297,
+        "cache_read": 1
       },
       {
         "id": "longest_common_prefix",
         "dim": "strings",
         "passed": true,
         "detail": "",
-        "secs": 3.8,
-        "input_tokens": 3176,
-        "output_tokens": 243,
-        "cache_read": 3072
+        "secs": 7.0,
+        "input_tokens": 250,
+        "output_tokens": 305,
+        "cache_read": 1
       },
       {
         "id": "run_length_encode",
         "dim": "strings",
         "passed": true,
         "detail": "",
-        "secs": 3.0,
-        "input_tokens": 3210,
-        "output_tokens": 238,
-        "cache_read": 3072
+        "secs": 5.6,
+        "input_tokens": 318,
+        "output_tokens": 200,
+        "cache_read": 1
       },
       {
         "id": "lru_cache",
         "dim": "data-structures",
         "passed": true,
         "detail": "",
-        "secs": 11.6,
-        "input_tokens": 11170,
-        "output_tokens": 1001,
-        "cache_read": 10752
+        "secs": 6.6,
+        "input_tokens": 328,
+        "output_tokens": 452,
+        "cache_read": 1
       },
       {
         "id": "min_stack",
         "dim": "data-structures",
         "passed": true,
         "detail": "",
-        "secs": 5.8,
-        "input_tokens": 3197,
-        "output_tokens": 416,
-        "cache_read": 3072
+        "secs": 6.4,
+        "input_tokens": 292,
+        "output_tokens": 385,
+        "cache_read": 1
       },
       {
         "id": "valid_parentheses",
         "dim": "data-structures",
         "passed": true,
         "detail": "",
-        "secs": 8.0,
-        "input_tokens": 6957,
-        "output_tokens": 640,
-        "cache_read": 6656
+        "secs": 5.2,
+        "input_tokens": 262,
+        "output_tokens": 151,
+        "cache_read": 1
       },
       {
         "id": "flatten",
         "dim": "data-structures",
         "passed": true,
         "detail": "",
-        "secs": 3.1,
-        "input_tokens": 3194,
-        "output_tokens": 190,
-        "cache_read": 3072
+        "secs": 23.0,
+        "input_tokens": 286,
+        "output_tokens": 2495,
+        "cache_read": 1
       },
       {
         "id": "group_anagrams",
         "dim": "data-structures",
         "passed": true,
         "detail": "",
-        "secs": 9.9,
-        "input_tokens": 3726,
-        "output_tokens": 395,
-        "cache_read": 3456
+        "secs": 6.0,
+        "input_tokens": 284,
+        "output_tokens": 305,
+        "cache_read": 1
       },
       {
         "id": "gcd",
         "dim": "math",
         "passed": true,
         "detail": "",
-        "secs": 4.2,
-        "input_tokens": 3182,
-        "output_tokens": 305,
-        "cache_read": 3072
+        "secs": 6.4,
+        "input_tokens": 262,
+        "output_tokens": 342,
+        "cache_read": 1
       },
       {
         "id": "primes_upto",
         "dim": "math",
         "passed": true,
         "detail": "",
-        "secs": 3.5,
-        "input_tokens": 3182,
-        "output_tokens": 251,
-        "cache_read": 3072
+        "secs": 8.5,
+        "input_tokens": 262,
+        "output_tokens": 712,
+        "cache_read": 1
       },
       {
         "id": "is_power_of_two",
         "dim": "math",
         "passed": true,
         "detail": "",
-        "secs": 2.2,
-        "input_tokens": 3184,
-        "output_tokens": 108,
-        "cache_read": 3072
+        "secs": 6.0,
+        "input_tokens": 266,
+        "output_tokens": 317,
+        "cache_read": 1
       },
       {
         "id": "int_to_roman",
         "dim": "math",
         "passed": true,
         "detail": "",
-        "secs": 6.9,
-        "input_tokens": 3176,
-        "output_tokens": 635,
-        "cache_read": 3072
+        "secs": 6.5,
+        "input_tokens": 250,
+        "output_tokens": 376,
+        "cache_read": 1
       },
       {
         "id": "add_binary",
         "dim": "math",
         "passed": true,
         "detail": "",
-        "secs": 5.5,
-        "input_tokens": 3189,
-        "output_tokens": 456,
-        "cache_read": 3072
+        "secs": 5.6,
+        "input_tokens": 276,
+        "output_tokens": 233,
+        "cache_read": 1
       },
       {
         "id": "parse_query",
         "dim": "parsing",
         "passed": true,
         "detail": "",
-        "secs": 13.1,
-        "input_tokens": 3229,
-        "output_tokens": 1232,
-        "cache_read": 3072
+        "secs": 8.4,
+        "input_tokens": 356,
+        "output_tokens": 721,
+        "cache_read": 1
       },
       {
         "id": "eval_expr",
         "dim": "parsing",
         "passed": true,
         "detail": "",
-        "secs": 21.4,
-        "input_tokens": 8016,
-        "output_tokens": 1442,
-        "cache_read": 7552
+        "secs": 23.2,
+        "input_tokens": 418,
+        "output_tokens": 3426,
+        "cache_read": 1
       },
       {
         "id": "parse_ini",
         "dim": "parsing",
         "passed": true,
         "detail": "",
-        "secs": 19.6,
-        "input_tokens": 3222,
-        "output_tokens": 1708,
-        "cache_read": 3072
+        "secs": 11.3,
+        "input_tokens": 539,
+        "output_tokens": 1118,
+        "cache_read": 1
       },
       {
         "id": "csv_parse_row",
         "dim": "parsing",
         "passed": true,
         "detail": "",
-        "secs": 24.0,
-        "input_tokens": 3206,
-        "output_tokens": 1967,
-        "cache_read": 3072
+        "secs": 13.3,
+        "input_tokens": 507,
+        "output_tokens": 1552,
+        "cache_read": 1
       },
       {
         "id": "tokenize",
         "dim": "parsing",
         "passed": true,
         "detail": "",
-        "secs": 10.0,
-        "input_tokens": 3213,
-        "output_tokens": 871,
-        "cache_read": 3072
+        "secs": 13.2,
+        "input_tokens": 466,
+        "output_tokens": 1360,
+        "cache_read": 1
       },
       {
         "id": "my_atoi",
         "dim": "edge-cases",
         "passed": true,
         "detail": "",
-        "secs": 8.4,
-        "input_tokens": 3216,
-        "output_tokens": 690,
-        "cache_read": 3072
+        "secs": 6.5,
+        "input_tokens": 330,
+        "output_tokens": 394,
+        "cache_read": 1
       },
       {
         "id": "spiral_order",
         "dim": "edge-cases",
         "passed": true,
         "detail": "",
-        "secs": 15.3,
-        "input_tokens": 3186,
-        "output_tokens": 1624,
-        "cache_read": 3072
+        "secs": 11.0,
+        "input_tokens": 270,
+        "output_tokens": 1130,
+        "cache_read": 1
       },
       {
         "id": "rotate_right",
         "dim": "edge-cases",
         "passed": true,
         "detail": "",
-        "secs": 7.2,
-        "input_tokens": 3195,
-        "output_tokens": 605,
-        "cache_read": 3072
+        "secs": 10.4,
+        "input_tokens": 288,
+        "output_tokens": 796,
+        "cache_read": 1
       },
       {
         "id": "summarize_ranges",
         "dim": "edge-cases",
         "passed": true,
         "detail": "",
-        "secs": 9.0,
-        "input_tokens": 3220,
-        "output_tokens": 940,
-        "cache_read": 3072
+        "secs": 9.9,
+        "input_tokens": 338,
+        "output_tokens": 751,
+        "cache_read": 1
       },
       {
         "id": "jump_game",
         "dim": "edge-cases",
         "passed": true,
         "detail": "",
-        "secs": 3.6,
-        "input_tokens": 3184,
-        "output_tokens": 286,
-        "cache_read": 3072
+        "secs": 6.3,
+        "input_tokens": 266,
+        "output_tokens": 305,
+        "cache_read": 1
       },
       {
         "id": "merge_sorted",
         "dim": "algorithms",
         "passed": true,
         "detail": "",
-        "secs": 4.3,
-        "input_tokens": 3178,
-        "output_tokens": 309,
-        "cache_read": 3072
+        "secs": 8.0,
+        "input_tokens": 254,
+        "output_tokens": 474,
+        "cache_read": 1
       }
     ]
   }

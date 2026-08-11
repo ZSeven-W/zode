@@ -10,8 +10,7 @@
       "FileRead",
       "FileWrite",
       "Glob",
-      "ListDir",
-      "tool"
+      "RunCheck"
     ],
     "results": [
       {
@@ -23,9 +22,10 @@
           "Bash",
           "FileEdit",
           "FileRead",
-          "Glob"
+          "Glob",
+          "RunCheck"
         ],
-        "secs": 28.7
+        "secs": 84.9
       },
       {
         "id": "implement_lru",
@@ -34,11 +34,10 @@
         "detail": "",
         "tools": [
           "Bash",
-          "FileEdit",
-          "FileRead",
-          "Glob"
+          "FileWrite",
+          "RunCheck"
         ],
-        "secs": 20.2
+        "secs": 11.5
       },
       {
         "id": "mini_eval",
@@ -47,12 +46,13 @@
         "detail": "",
         "tools": [
           "Bash",
+          "FileEdit",
           "FileRead",
           "FileWrite",
           "Glob",
-          "tool"
+          "RunCheck"
         ],
-        "secs": 101.6
+        "secs": 27.0
       },
       {
         "id": "fix_three_bugs",
@@ -61,10 +61,11 @@
         "detail": "",
         "tools": [
           "Bash",
+          "FileEdit",
           "FileRead",
-          "FileWrite"
+          "RunCheck"
         ],
-        "secs": 16.1
+        "secs": 14.9
       },
       {
         "id": "topo_sort",
@@ -73,11 +74,9 @@
         "detail": "",
         "tools": [
           "Bash",
-          "FileRead",
-          "FileWrite",
-          "ListDir"
+          "FileWrite"
         ],
-        "secs": 50.7
+        "secs": 15.3
       },
       {
         "id": "refactor_extend",
@@ -85,11 +84,11 @@
         "passed": true,
         "detail": "",
         "tools": [
-          "Bash",
           "FileRead",
-          "FileWrite"
+          "FileWrite",
+          "RunCheck"
         ],
-        "secs": 28.3
+        "secs": 26.3
       }
     ]
   }
