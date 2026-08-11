@@ -109,15 +109,20 @@ pub fn mcp_tools(lifecycle: &Arc<Lifecycle>, tool_timeout: Option<Duration>) -> 
     out
 }
 
-/// A single MCP tool surfaced as an agent Tool. The Connection trait does
-/// not expose a per-tool JSON schema, so we advertise a permissive object
-/// schema (agent-rs gap) — the server validates the real shape.
+/// A single MCP tool surfaced as an agent Tool. The tool's input schema is
+/// the SERVER-DECLARED parameter contract when available — a permissive
+/// catch-all object made models guess argument names (e.g. passing
+/// `instruction` where the server declares `text`) and fail the first call
+/// every time.
 #[derive(Debug)]
 pub struct ZodeMcpTool {
     lifecycle: Arc<Lifecycle>,
     server: String,
     tool: String,
     display_name: String,
+    /// The server-declared input schema; a permissive object fallback when
+    /// the server omitted one.
+    schema: serde_json::Value,
     /// Per-call local timeout; `None` disables it.
     timeout: Option<Duration>,
 }
@@ -130,11 +135,15 @@ impl ZodeMcpTool {
         timeout: Option<Duration>,
     ) -> Self {
         let display_name = prefixed_tool_name(&server, &tool);
+        let schema = lifecycle
+            .tool_schema(&server, &tool)
+            .unwrap_or_else(|| serde_json::json!({"type": "object", "additionalProperties": true}));
         Self {
             lifecycle,
             server,
             tool,
             display_name,
+            schema,
             timeout,
         }
     }
@@ -230,7 +239,7 @@ impl Tool for ZodeMcpTool {
         "MCP server tool."
     }
     fn input_schema(&self) -> Value {
-        json!({"type": "object", "additionalProperties": true})
+        self.schema.clone()
     }
     fn safety_class(&self) -> SafetyClass {
         SafetyClass::Unknown // gated by default (unknown side effects)
