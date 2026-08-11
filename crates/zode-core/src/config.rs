@@ -1562,6 +1562,17 @@ impl ZodeConfig {
         if op.profile.is_some() {
             self.provider.profile = op.profile;
         }
+        // Sizing knobs merge like every other provider field — a project
+        // config that pins a smaller window or output cap for its model
+        // must not be silently dropped (the active provider would keep the
+        // global layer's values, and compaction/trim decisions would run
+        // against the wrong window).
+        if op.context_window.is_some() {
+            self.provider.context_window = op.context_window;
+        }
+        if op.max_output_tokens.is_some() {
+            self.provider.max_output_tokens = op.max_output_tokens;
+        }
         self.providers.extend(other.providers);
         if other.images.mode.is_some() {
             self.images.mode = other.images.mode;
@@ -2022,6 +2033,30 @@ mod tests {
         global.merge_from(ZodeConfig::default());
         assert_eq!(global.background_watchdog.enabled, Some(false));
         assert_eq!(global.background_watchdog.max_retries, Some(0));
+    }
+
+    #[test]
+    fn merge_from_carries_provider_sizing_knobs() {
+        // Regression: a project config pinning a smaller context window or
+        // output cap for the active provider must survive the merge — the
+        // active provider would otherwise keep the global layer's values
+        // and compaction/trim decisions would run against the wrong window.
+        let mut global: ZodeConfig = serde_json::from_str(
+            r#"{"provider":{"model":"m","contextWindow":200000,"maxOutputTokens":8192}}"#,
+        )
+        .unwrap();
+        let project: ZodeConfig = serde_json::from_str(
+            r#"{"provider":{"contextWindow":32000,"maxOutputTokens":4096}}"#,
+        )
+        .unwrap();
+        global.merge_from(project);
+        assert_eq!(global.provider.context_window, Some(32000));
+        assert_eq!(global.provider.max_output_tokens, Some(4096));
+        // Omitted project fields preserve the global layer.
+        assert_eq!(global.provider.model.as_deref(), Some("m"));
+        // An empty layer leaves everything intact.
+        global.merge_from(ZodeConfig::default());
+        assert_eq!(global.provider.context_window, Some(32000));
     }
 
     #[test]
