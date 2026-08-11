@@ -15,7 +15,7 @@ From GitHub Packages (authenticate npm with a token that has
 ```
 
 ```sh
-npm install @zseven-w/zode-sdk@0.2.0-beta.2
+npm install @zseven-w/zode-sdk@0.2.0-beta.3
 ```
 
 From this repository:
@@ -109,7 +109,7 @@ const client = await ZodeClient.connectWebSocket({
 
 ## Version
 
-`@zseven-w/zode-sdk` `0.2.0-beta.2`.
+`@zseven-w/zode-sdk` `0.2.0-beta.3`.
 
 ## Test
 

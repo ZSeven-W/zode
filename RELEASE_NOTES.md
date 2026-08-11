@@ -1,4 +1,94 @@
-# zode v0.2.0-beta.2
+# zode v0.2.0-beta.3
+
+**zode** is an open-source, AI-native coding assistant for your terminal: it
+reads your code, runs commands, searches files, and manages git from a fast
+Rust TUI with non-blocking permissions and an on-by-default OS sandbox.
+
+> ⚠️ **Beta.** APIs, configuration, and behavior may change before 0.2.0 is
+> stable. Please file issues with a minimal reproduction when something goes
+> wrong.
+
+This beta hardens the harness for long, CJK-heavy, weak-model sessions — the
+compaction 400s are gone for good, MCP tools finally show their real
+parameter contracts, and DeepSeek (flash included) drives tool loops that
+recover instead of wedging.
+
+## The compaction 400 wedge is closed
+
+- **Store splits are pair-safe in every shape.** The token-midpoint split
+  snaps to `tool_use → tool_result` boundaries via a balance sweep (a cut is
+  legal iff no unanswered tool_use crosses it), so no split can ever orphan
+  one half of a pair — including a transcript that is a single pair, and
+  multi-tool batches answered across several user messages.
+- **Every request is defensively sanitized.** A store damaged by an OLDER
+  compaction (a severed pair) is repaired on the request copy — orphans
+  downgraded to text instead of 400ing every subsequent request — and
+  sessions are repaired once at load time, so even old transcripts recover.
+- **Conservative CJK estimates.** CJK now counts 2 tokens per char (real BPE
+  runs 1.5–3): CJK-heavy sessions compact before the provider 400s instead
+  of after. The estimation-only paths can opt into exact tiktoken counts.
+- **Microcompaction keeps the useful bits.** Old tool results are pruned
+  head-and-tail around the marker (errors conventionally live at the END of
+  a command's output) instead of being wiped — weak models stop re-running
+  the same commands to recover what they just read — and interactive
+  question answers (AskUserQuestion) are never cleared.
+
+## Weak-model (lite) accommodations
+
+- **Empty responses retry once.** DeepSeek occasionally emits a bare `stop`;
+  the loop retries instead of silently ending the turn.
+- **Concrete loop nudges.** The identical-call / same-tool warnings now name
+  the repeated tools and preview the identical results, so a weak model sees
+  WHY its calls go nowhere.
+- **Lite surfaces keep MCP usable.** MCP tools stay visible under the
+  lite/deferred tool narrowing, and ToolSearch searches the executable set
+  only — no more discovering a tool you cannot call.
+
+## DeepSeek-first provider work
+
+- **Stream idle watchdog.** A provider stream that stalls between chunks
+  (default 300s) becomes a retryable timeout instead of pinning the turn.
+- **Reasoning passback (OpenAI dialect).** `reasoning_content` deltas surface
+  as thinking and replay on tool-call turns per DeepSeek's thinking-mode
+  rule; the hand-rolled SSE transport also honors `Retry-After`.
+- **MCP schemas on the wire.** Tools advertise the server-declared input
+  schema, so the model stops guessing argument names (passing `instruction`
+  where the server declares `text`) and failing the first call.
+- **Overflow wording recognized.** DeepSeek's anthropic-compat
+  "exceeds the context window" phrasing triggers the auto-compact resume.
+
+## Config fixes
+
+- Provider `contextWindow` / `maxOutputTokens` now merge across config
+  layers (a project pinning a smaller window no longer silently loses it).
+
+## Benchmarks
+
+- New `harness_extra` suite (12 tasks): long tool chains, failure recovery,
+  real-repo exploration with dynamic graders, and Chinese ops tasks.
+- Baseline refresh on DeepSeek-V4-Flash: humaneval 31/31, agentic 6/6,
+  complex 5/5, hardbugs 9/9, instructions 25/25, harness_extra 12/12.
+
+## Install
+
+```bash
+curl -fsSL https://zode.dev/install.sh | bash -s -- v0.2.0-beta.3   # macOS / Linux
+```
+
+Or download a prebuilt binary (see the beta.2 section below for the full
+platform matrix; substitute `0.2.0-beta.3` in the artifact names):
+
+| Platform | Artifact |
+|---|---|
+| macOS | Apple Silicon (M1+) | `zode-0.2.0-beta.3-arm64-mac.tar.gz` |
+| macOS | Intel | `zode-0.2.0-beta.3-x64-mac.tar.gz` |
+| Linux | x86_64 | `zode-0.2.0-beta.3-x64-linux.tar.gz` |
+| Linux | ARM64 (aarch64) | `zode-0.2.0-beta.3-arm64-linux.tar.gz` |
+| Windows | x64 | `zode-0.2.0-beta.3-x64-windows.zip` |
+
+---
+
+# zode v0.2.0-beta.2 (previous beta)
 
 **zode** is an open-source, AI-native coding assistant for your terminal: it
 reads your code, runs commands, searches files, and manages git from a fast
