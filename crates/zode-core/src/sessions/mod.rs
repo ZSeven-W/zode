@@ -167,13 +167,26 @@ impl SessionStore {
         // A sidecar can exist before the first transcript write (create()
         // runs before the first turn persists). Treat that as an empty
         // session instead of permanently bricking the id.
-        let messages = if transcript.is_file() {
+        let mut messages = if transcript.is_file() {
             Session::load(transcript)
                 .await
                 .map_err(|error| CoreError::Other(error.to_string()))?
         } else {
             MessageStore::new()
         };
+        // One-time repair for stores damaged by an OLDER compaction (a
+        // severed tool pair leaves an orphan half that 400s every request
+        // on strict gateways). Fix it HERE so the damage is not carried
+        // into every later request; the next save persists the repaired
+        // transcript.
+        let repaired = agent::compact::repair_store_pairing(&mut messages);
+        if repaired > 0 {
+            tracing::info!(
+                session = %id,
+                repaired,
+                "repaired severed tool pairs in loaded transcript"
+            );
+        }
         Ok(LoadedSession { meta, messages })
     }
 
