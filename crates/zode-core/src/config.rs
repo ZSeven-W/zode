@@ -2045,10 +2045,9 @@ mod tests {
             r#"{"provider":{"model":"m","contextWindow":200000,"maxOutputTokens":8192}}"#,
         )
         .unwrap();
-        let project: ZodeConfig = serde_json::from_str(
-            r#"{"provider":{"contextWindow":32000,"maxOutputTokens":4096}}"#,
-        )
-        .unwrap();
+        let project: ZodeConfig =
+            serde_json::from_str(r#"{"provider":{"contextWindow":32000,"maxOutputTokens":4096}}"#)
+                .unwrap();
         global.merge_from(project);
         assert_eq!(global.provider.context_window, Some(32000));
         assert_eq!(global.provider.max_output_tokens, Some(4096));
