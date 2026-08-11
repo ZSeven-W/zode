@@ -106,7 +106,7 @@ const COMPACT_RESUME_PROMPT: &str =
 /// Recognize a turn failure caused by the context window filling up — the
 /// recoverable class that compaction fixes. Matches the vendor pinned-context
 /// hard stop plus the provider-side overflow rejections (Anthropic / OpenAI
-/// dialects).
+/// dialects, incl. DeepSeek's anthropic-compat endpoint wording).
 fn is_context_overflow_error(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
     m.contains("context window is effectively full")
@@ -114,6 +114,8 @@ fn is_context_overflow_error(message: &str) -> bool {
         || m.contains("context_length_exceeded")
         || m.contains("maximum context length")
         || m.contains("context length exceeded")
+        || m.contains("exceeds the context window")
+        || m.contains("context window limit")
         || (m.contains("input length") && m.contains("max_tokens"))
 }
 
@@ -19321,6 +19323,8 @@ mod tests {
             "openai: context_length_exceeded",
             "This model's maximum context length is 128000 tokens",
             "input length and `max_tokens` exceed context limit",
+            "Input validation error: messages exceed the context window",
+            "anthropic: request exceeds the context window limit of 1000000 tokens",
         ] {
             assert!(is_context_overflow_error(message), "missed: {message}");
         }
