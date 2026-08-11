@@ -163,6 +163,12 @@ impl InternalSession {
             .root_turn_owner(false)
             .auto_compact(true)
             .microcompact(self.spec.microcompact)
+            .microcompact_protected_tools(
+                crate::engine::PROTECTED_MICROCOMPACT_TOOLS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
             .use_prompt_cache(self.spec.use_prompt_cache)
             .system(self.system.clone());
         if let Some(t) = self.spec.temperature {

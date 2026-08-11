@@ -885,6 +885,14 @@ pub struct CompactOutcome {
 /// the recent half survives verbatim (run compact again to halve further).
 const FULL_COMPACT_SAFE_PERCENT: u64 = 60;
 
+/// Tool NAMES whose tool-result payloads microcompaction must never clear.
+/// `AskUserQuestion` returns the user's ACTUAL input as its payload —
+/// clearing it makes the model believe it was never answered and re-ask
+/// the same question forever (observed live in long sessions). The
+/// exemption flows into the vendor `MicrocompactConfig` through the
+/// QueryLoop builder.
+pub(crate) const PROTECTED_MICROCOMPACT_TOOLS: &[&str] = &["AskUserQuestion"];
+
 /// Pick the compaction direction for a transcript of `context_tokens` against
 /// a `window`-token model. `window == 0` means "unknown" → Full (no basis to
 /// restrict).
@@ -1837,17 +1845,30 @@ impl ZodeEngine {
         {
             let candidates = Arc::new(gated.clone());
             let mut visible = ToolRegistry::new();
+            // MCP tools are ALWAYS visible: they are explicitly configured
+            // capabilities (often few, always user-intent), and hiding them
+            // behind ToolSearch made a lite-profile model discover one via
+            // ToolSearch and then fail to call it ("tool not registered" —
+            // the tool is in the candidate registry but not in the visible,
+            // executable set). Skill is kept visible for the same reason.
             let keep: Vec<String> = candidates
                 .names()
-                .filter(|n| core.contains(n))
+                .filter(|n| core.contains(n) || n.starts_with("mcp__"))
                 .map(str::to_string)
                 .collect();
-            for name in keep {
-                if let Some(tool) = candidates.get(&name) {
-                    visible.register(tool);
+            let mut searchable = ToolRegistry::new();
+            for name in &keep {
+                if let Some(tool) = candidates.get(name) {
+                    visible.register(tool.clone());
+                    searchable.register(tool);
                 }
             }
-            visible.register(Arc::new(ToolSearchTool::new(candidates)));
+            // ToolSearch searches the EXECUTABLE set (core + MCP), not the
+            // full candidate registry: a narrowed profile's long tail
+            // (browser/desktop/op/team/LSP/…) is deliberately not loaded,
+            // and advertising tools the model cannot actually call made it
+            // attempt them and fail with "tool not registered".
+            visible.register(Arc::new(ToolSearchTool::new(Arc::new(searchable))));
             Arc::new(visible)
         } else {
             if tool_filter.is_none_or(|filter| filter.allows("ToolSearch")) {
@@ -2417,8 +2438,8 @@ impl ZodeEngine {
         abort: AbortController,
     ) -> Result<CompactOutcome, CoreError> {
         use agent::compact::{
-            apply_compaction_to_store, compact_with_hooks, estimate_tokens, promote_to_store,
-            CompactTrigger, CompactWithHooksRequest,
+            apply_compaction_to_store, compact_with_hooks, promote_to_store, CompactTrigger,
+            CompactWithHooksRequest,
         };
         // Snapshot the transcript so the store lock is never held across the
         // provider await below.
@@ -2430,9 +2451,13 @@ impl ZodeEngine {
             store.iter().cloned().collect()
         };
         let tokens = context_tokens.unwrap_or_else(|| {
+            // Exact BPE count when tiktoken is available (agent `full`
+            // feature), heuristic fallback otherwise — a CJK-heavy
+            // transcript under-counted by the heuristic would pick the
+            // wrong compaction direction near the window.
             messages
                 .iter()
-                .map(estimate_tokens)
+                .map(|m| agent::tokenizer::exact_message_tokens(&self.model, m))
                 .fold(0u32, u32::saturating_add)
         });
         let mut request = CompactWithHooksRequest::new(&messages, self.model.clone())
@@ -2591,6 +2616,12 @@ impl ZodeEngine {
             .auto_compact(true)
             .strict_loop_guard(self.strict_loop_guard)
             .microcompact(self.compact_settings.microcompact())
+            .microcompact_protected_tools(
+                PROTECTED_MICROCOMPACT_TOOLS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
             .use_prompt_cache(self.prompt_cache)
             .steer(self.steer_rx.clone());
         if let Some(t) = self.temperature {
