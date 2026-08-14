@@ -7,7 +7,7 @@ Python SDK for `zode server` stdio JSON-RPC.
 Install the wheel attached to the GitHub Release:
 
 ```sh
-python3 -m pip install https://github.com/ZSeven-W/zode/releases/download/v0.2.0-beta.3/zode_sdk-0.2.0b3-py3-none-any.whl
+python3 -m pip install https://github.com/ZSeven-W/zode/releases/download/v0.2.0-beta.4/zode_sdk-0.2.0b3-py3-none-any.whl
 ```
 
 For local development from this repository:

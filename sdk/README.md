@@ -56,7 +56,7 @@ app connectors.
 | [Rust](rust/) | Tagged Git dependency plus a standalone source bundle on the GitHub Release |
 | [TypeScript](typescript/) | GitHub npm Packages: `@zseven-w/zode-sdk` |
 | [Python](python/) | Wheel and source distribution on the GitHub Release |
-| [Go](go/) | Go module tag: `sdk/go/v0.2.0-beta.3` |
+| [Go](go/) | Go module tag: `sdk/go/v0.2.0-beta.4` |
 | [Kotlin/JVM](kotlin/) | GitHub Maven Packages: `com.zseven.zode:zode-sdk` |
 
 Each SDK exposes a native `ProtocolMethod` enum or constant set with the current

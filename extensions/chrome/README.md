@@ -45,7 +45,7 @@ Tailwind CSS, and local shadcn/ui components. Source files live in
 machine remain framework-independent and continue to be covered by the Node
 test suite. The extension ships with zode and carries the same version: the
 manifest's `version_name` is the full workspace version (for example
-`0.2.0-beta.3`) and `version` is its numeric core, because Chrome only accepts
+`0.2.0-beta.4`) and `version` is its numeric core, because Chrome only accepts
 dotted integers there. Native Messaging auto-start (the daemon uses the last
 workspace registered by a normal zode launch) and the element picker described
 below both arrived with this numbering; extensions built before it used an

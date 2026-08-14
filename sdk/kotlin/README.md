@@ -5,7 +5,7 @@ Kotlin/JVM SDK for `zode server` stdio JSON-RPC.
 ## Install
 
 The SDK is published to GitHub Packages as
-`com.zseven.zode:zode-sdk:0.2.0-beta.3`. Configure the repository and
+`com.zseven.zode:zode-sdk:0.2.0-beta.4`. Configure the repository and
 credentials with a token that has `read:packages`:
 
 ```properties
@@ -26,7 +26,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.zseven.zode:zode-sdk:0.2.0-beta.3")
+    implementation("com.zseven.zode:zode-sdk:0.2.0-beta.4")
 }
 ```
 
@@ -119,7 +119,7 @@ unregistered or throwing handler denies.
 
 ## Version
 
-`0.2.0-beta.3`.
+`0.2.0-beta.4`.
 
 ## Test
 

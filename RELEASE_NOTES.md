@@ -1,3 +1,54 @@
+# zode v0.2.0-beta.4
+
+**zode** is an open-source, AI-native coding assistant for your terminal: it
+reads your code, runs commands, searches files, and manages git from a fast
+Rust TUI with non-blocking permissions and an on-by-default OS sandbox.
+
+> ⚠️ **Beta.** APIs, configuration, and behavior may change before 0.2.0 is
+> stable. Please file issues with a minimal reproduction when something goes
+> wrong.
+
+This beta makes the harness self-evolving: a Cordis-inspired plugin core
+(`crates/cordis-rs`), a fitness-driven evolution layer over zode's own
+capability units, and a QuickJS gene runtime so the agent can generate and
+hot-swap its own plugins — bounded in memory, quarantined on failure.
+
+## A self-evolving harness
+
+- **Cordis-inspired core** (`crates/cordis-rs`): scoped contexts
+  (extend/isolate/intercept), fiber-owned lifecycle (spawn/dispose/restart),
+  dependency scheduling (`inject`), a five-mode event bus, lazy services,
+  and hard `MemoryBudget` caps with live stats. Everything a plugin
+  acquires is freed when its fiber disposes — dropping the root context
+  collects the harness.
+- **Evolution layer** (`zode-core/src/evolution.rs`): tool results from the
+  hook pipeline feed per-group fitness (`uses − 10·failures − 100·panics −
+  5·restarts`); a bounded gene pool evicts the weakest genes as the agent
+  evolves new candidates; the genome persists to
+  `<config-dir>/evolution/genome.json` and restores with fitness across
+  restarts. Config: `evolution.*` (`enabled`/`capacity`/`maxRestarts`).
+- **QuickJS gene layer** (`zode-core/src/js_plugin.rs`): generated plugins
+  are JavaScript — no compiler required on the target machine. Each gene
+  runs in its own QuickJS runtime with a 16 MiB memory limit and per-call
+  interrupt deadlines; a runaway gene fails its fiber and quarantines
+  instead of harming zode. Built-in tools stay Rust.
+- **Subprocess plugins** (`crates/cordis-rs/src/process.rs`): any
+  executable speaking a JSON-lines protocol becomes a swappable plugin;
+  disposing the fiber kills the child process, so compiled binaries can be
+  hot-replaced where a compiler is available.
+- **Observability**: `internal/plugin`, `internal/status`, and
+  `internal/service` events; `unfit_groups()` names disable candidates for
+  the plugin manager.
+
+## Tests
+
+50 harness tests (including the process and evolution suites) plus
+zode-core evolution and QuickJS-gene integration tests; the end-to-end
+self-test (`cargo run -p zode-core --example evolution_self_test`) exercises
+the full generate → evaluate → select → retire loop and prints
+`SELF-TEST PASSED`. A test report is included in the README in all 15
+languages.
+
 # zode v0.2.0-beta.3
 
 **zode** is an open-source, AI-native coding assistant for your terminal: it
