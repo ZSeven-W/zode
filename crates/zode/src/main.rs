@@ -10,6 +10,7 @@ mod repl;
 mod server;
 mod session_cli;
 mod session_setup;
+mod ui_frontends;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -99,6 +100,8 @@ async fn run(args: Args) -> i32 {
         Some(c) => PathBuf::from(c),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
+    // UI deps snapshot (frontends mount as harness plugins).
+    let ui_deps_cwd = cwd.clone();
     // Subcommands short-circuit the normal launch.
     if let Some(command) = &args.command {
         match command {
@@ -344,7 +347,28 @@ async fn run(args: Args) -> i32 {
             }
         };
         let engine = engine.with_store(prepared.messages);
-        return headless::run_print(&engine, &prompt, prepared.meta, args.output_format).await;
+        let exit: std::sync::Arc<std::sync::Mutex<i32>> = Default::default();
+        let root = zode_core::cordis_rs::Context::root();
+        let host = zode_core::ui::UiHost::new(
+            &root,
+            Arc::new(zode_core::ui::UiDeps {
+                cwd: ui_deps_cwd.clone(),
+                cfg: cfg.clone(),
+            }),
+        )
+        .expect("ui host");
+        host.register(Arc::new(crate::ui_frontends::HeadlessUi {
+            engine: Arc::new(engine),
+            prompt,
+            meta: std::sync::Mutex::new(Some(prepared.meta)),
+            output_format: args.output_format,
+            exit: exit.clone(),
+        }));
+        if let Err(error) = host.run("headless").await {
+            eprintln!("zode: {error}");
+            return 1;
+        }
+        return *exit.lock().unwrap();
     }
 
     // Silently check GitHub Releases in the background and swap in a newer build
@@ -383,7 +407,26 @@ async fn run(args: Args) -> i32 {
             }
         };
         let (engine, resumed_id) = attach_session(engine, resume_meta).await;
-        return repl::run_repl(engine, resumed_id).await;
+        let exit: std::sync::Arc<std::sync::Mutex<i32>> = Default::default();
+        let root = zode_core::cordis_rs::Context::root();
+        let host = zode_core::ui::UiHost::new(
+            &root,
+            Arc::new(zode_core::ui::UiDeps {
+                cwd: ui_deps_cwd.clone(),
+                cfg: cfg.clone(),
+            }),
+        )
+        .expect("ui host");
+        host.register(Arc::new(crate::ui_frontends::ReadlineUi {
+            engine: std::sync::Mutex::new(Some(engine)),
+            resumed_id,
+            exit: exit.clone(),
+        }));
+        if let Err(error) = host.run("readline").await {
+            eprintln!("zode: {error}");
+            return 1;
+        }
+        return *exit.lock().unwrap();
     }
 
     // The TUI's approval flow is the interactive queue gate; a headless
@@ -454,42 +497,38 @@ async fn run(args: Args) -> i32 {
         needs_setup,
         update_applied: Some(update_applied),
     };
-    let app = zode_tui::TuiApp::new(
-        engine,
-        template,
-        ui,
-        approval_rx,
-        question_rx,
-        op_question_queue,
-        resumed_id,
-    );
-    let result = if args.browser_native_host {
-        match app.ensure_extension_bridge_listening().await {
-            Ok(port) => {
-                if let Err(error) = browser_native_host::write_ready(port) {
-                    return {
-                        eprintln!("zode native host: {error}");
-                        1
-                    };
-                }
-                app.run_extension_daemon(browser_native_host::spawn_disconnect_watcher())
-                    .await
-            }
-            Err(error) => {
-                let _ = browser_native_host::write_error(&error.to_string());
-                return 1;
-            }
-        }
-    } else {
-        app.run().await
-    };
-    match result {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("zode: {e}");
-            1
-        }
+    // Mount the TUI as a harness UI plugin: the host owns its lifecycle,
+    // so a future runtime swap (e.g. TUI -> app-server) is just a fiber
+    // dispose + mount away.
+    let exit: std::sync::Arc<std::sync::Mutex<i32>> = Default::default();
+    let root = zode_core::cordis_rs::Context::root();
+    let host = zode_core::ui::UiHost::new(
+        &root,
+        Arc::new(zode_core::ui::UiDeps {
+            cwd: ui_deps_cwd.clone(),
+            cfg: cfg.clone(),
+        }),
+    )
+    .expect("ui host");
+    host.register(Arc::new(crate::ui_frontends::TuiUi {
+        parts: std::sync::Mutex::new(Some(crate::ui_frontends::TuiParts {
+            engine,
+            template,
+            ui,
+            approval_rx,
+            question_rx,
+            op_question_queue,
+            resumed_id,
+        })),
+        browser_native_host: args.browser_native_host,
+        exit: exit.clone(),
+    }));
+    if let Err(error) = host.run("tui").await {
+        eprintln!("zode: {error}");
+        return 1;
     }
+    let code = *exit.lock().unwrap();
+    code
 }
 
 /// `zode update` / `zode upgrade`: explicit self-update with console output.

@@ -63,6 +63,11 @@ pub mod task_factory;
 #[path = "task-mode.rs"]
 pub mod task_mode;
 pub mod task_tool;
+pub mod ui;
+
+/// The harness crate behind the UI/evolution layers (re-exported so app
+/// crates can mount plugins without adding a separate dependency).
+pub use cordis_rs;
 pub mod team;
 pub mod telemetry;
 pub mod tool_filter;
