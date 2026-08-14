@@ -817,6 +817,33 @@ cargo fmt --all
 cargo deny check
 ```
 
+## 測試報告
+
+全部套件通過；端到端自測跑通真實進化閉環——工具組適應度 → 生成的 JS 基因 →
+容量淘汰 → 基因組持久化——並輸出 `SELF-TEST PASSED`：
+
+| 套件 | 命令 | 结果 |
+|---|---|---|
+| Harness 核心、进化层、进程插件 | `cargo test -p cordis-rs` | 50 passed |
+| 进化集成（工具组适应度、基因组恢复） | `cargo test -p zode-core --lib evolution::` | 5 passed |
+| QuickJS 基因层（源码热替换、中断、内存上限） | `cargo test -p zode-core --test js_plugin_it` | 4 passed |
+| zode-core 全量套件（含进化接线） | `cargo test -p zode-core --lib` | 983 passed |
+
+```sh
+cargo run -p zode-core --example evolution_self_test
+```
+
+- Hook 管線把每次工具結果按工具組計分（`uses − 10·failures − 100·panics − 5·restarts`）；
+  `unfit_groups()` 列出值得停用的組。
+- 基因池有硬性容量上限：agent 進化出新候選時，最弱的基因被淘汰（自測中依序淘汰
+  `git` → `todo` → `shell`）；最適者存活。
+- 生成基因是 JavaScript——無需編譯器——每個基因有記憶體上限與中斷時限；失控基因
+  被隔離而不會傷害 zode。
+- 基因組持久化到 `<config-dir>/evolution/genome.json`，重啟後帶著適應度恢復；
+  `dispose()` 回收全部 fiber、監聽器與事件歷史。
+
+完整報告（含實際輸出與被釘住的回歸）見 `crates/cordis-rs/README.md`。
+
 ## 貢獻
 
 歡迎貢獻。請遵循 [Conventional Commits](https://www.conventionalcommits.org/)：`<type>(<scope>): <subject>`，常見 scope 包括 `core`、`tui`、`cli`、`tools`、`config`、`build`、`ci`、`docs`。

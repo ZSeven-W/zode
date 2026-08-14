@@ -985,6 +985,39 @@ cargo fmt --all
 cargo deny check
 ```
 
+## Rapport de test
+
+Toutes les suites sont vertes ; l'auto-test de bout en bout exécute la vraie boucle
+d'évolution — fitness des groupes d'outils → gènes JS générés → sélection par capacité
+→ persistance du génome — et affiche `SELF-TEST PASSED` :
+
+| Suite | Commande | Résultat |
+|---|---|---|
+| Cœur du harness, couche d'évolution, plugins de processus | `cargo test -p cordis-rs` | 50 passed |
+| Intégration de l'évolution (fitness des groupes, restauration du génome) | `cargo test -p zode-core --lib evolution::` | 5 passed |
+| Couche de gènes QuickJS (échange de code, interruption, limite mémoire) | `cargo test -p zode-core --test js_plugin_it` | 4 passed |
+| Suite complète de zode-core (câblage de l'évolution inclus) | `cargo test -p zode-core --lib` | 983 passed |
+
+```sh
+cargo run -p zode-core --example evolution_self_test
+```
+
+- Le pipeline de hooks score chaque résultat d'outil contre son groupe
+  (`uses − 10·failures − 100·panics − 5·restarts`) ; `unfit_groups()` liste les groupes
+  qui méritent d'être désactivés.
+- Le pool de gènes a une capacité stricte : les gènes les plus faibles sont évincés
+  quand l'agent fait évoluer de nouveaux candidats (l'auto-test évince `git` → `todo` →
+  `shell`) ; les plus adaptés survivent.
+- Les gènes générés sont du JavaScript — aucun compilateur requis — avec des limites
+  mémoire et des délais d'interruption par gène ; un gène incontrôlé est mis en
+  quarantaine au lieu de nuire à zode.
+- Le génome persiste dans `<config-dir>/evolution/genome.json` et se restaure avec son
+  fitness après redémarrage ; `dispose()` libère chaque fiber, listener et entrée
+  d'historique.
+
+Le rapport complet avec la sortie observée et les régressions corrigées :
+`crates/cordis-rs/README.md`.
+
 ## Contribution
 
 Les contributions sont bienvenues. Suivez [Conventional Commits](https://www.conventionalcommits.org/) : `<type>(<scope>): <subject>`, avec des scopes courants comme `core`, `tui`, `cli`, `tools`, `config`, `build`, `ci`, `docs`.

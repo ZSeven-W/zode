@@ -957,6 +957,37 @@ cargo fmt --all
 cargo deny check
 ```
 
+## テストレポート
+
+全スイートがグリーン。エンドツーエンドのセルフテストは実際の進化ループ——ツール
+グループ適応度 → 生成された JS 遺伝子 → キャパシティ淘汰 → ゲノム永続化——を走らせ、
+`SELF-TEST PASSED` を出力します：
+
+| スイート | コマンド | 結果 |
+|---|---|---|
+| Harness コア・進化レイヤー・プロセスプラグイン | `cargo test -p cordis-rs` | 50 passed |
+| 進化インテグレーション（グループ適応度、ゲノム復元） | `cargo test -p zode-core --lib evolution::` | 5 passed |
+| QuickJS 遺伝子レイヤー（ソース差し替え、割り込み、メモリ上限） | `cargo test -p zode-core --test js_plugin_it` | 4 passed |
+| zode-core 全スイート（進化配線を含む） | `cargo test -p zode-core --lib` | 983 passed |
+
+```sh
+cargo run -p zode-core --example evolution_self_test
+```
+
+- フックパイプラインは各ツール結果をそのツールグループに対してスコアリングします
+  （`uses − 10·failures − 100·panics − 5·restarts`）。`unfit_groups()` は無効化候補の
+  グループを列挙します。
+- 遺伝子プールには厳格なキャパシティがあり、エージェントが新しい候補を進化させると
+  最弱の遺伝子が淘汰されます（セルフテストでは `git` → `todo` → `shell` の順）。
+  最適者が生き残ります。
+- 生成された遺伝子は JavaScript（コンパイラ不要）で、遺伝子ごとにメモリ上限と
+  割り込み期限があります。暴走した遺伝子は隔離され、zode に害を与えません。
+- ゲノムは `<config-dir>/evolution/genome.json` に永続化され、再起動時に適応度ごと
+  復元されます。`dispose()` は全 fiber・リスナー・イベント履歴を回収します。
+
+完全なレポート（観測出力と修正済みリグレッション）は `crates/cordis-rs/README.md` を
+参照してください。
+
 ## コントリビューション
 
 Contributions welcome! [Conventional Commits](https://www.conventionalcommits.org/) の `<type>(<scope>): <subject>` 形式に従ってください。scope は `core`、`tui`、`cli`、`tools`、`config`、`build`、`ci`、`docs` などです。

@@ -951,6 +951,37 @@ cargo fmt --all
 cargo deny check                        # licenses / advisories / bans
 ```
 
+## टेस्ट रिपोर्ट
+
+सभी सुइट हरे हैं; एंड-टू-एंड सेल्फ-टेस्ट असली इवोल्यूशन लूप चलाता है — टूल-ग्रुप
+फिटनेस → जनरेटेड JS जीन → क्षमता-आधारित चयन → जीनोम पर्सिस्टेंस — और
+`SELF-TEST PASSED` प्रिंट करता है:
+
+| सुइट | कमांड | परिणाम |
+|---|---|---|
+| Harness कोर, इवोल्यूशन लेयर, प्रोसेस प्लगइन | `cargo test -p cordis-rs` | 50 passed |
+| इवोल्यूशन इंटीग्रेशन (ग्रुप फिटनेस, जीनोम रीस्टोर) | `cargo test -p zode-core --lib evolution::` | 5 passed |
+| QuickJS जीन लेयर (कोड बदलाव, इंटरप्ट, मेमोरी लिमिट) | `cargo test -p zode-core --test js_plugin_it` | 4 passed |
+| zode-core पूर्ण सुइट (इवोल्यूशन वायरिंग सहित) | `cargo test -p zode-core --lib` | 983 passed |
+
+```sh
+cargo run -p zode-core --example evolution_self_test
+```
+
+- हुक पाइपलाइन हर टूल रिज़ल्ट को उसके टूल ग्रुप के विरुद्ध स्कोर करती है
+  (`uses − 10·failures − 100·panics − 5·restarts`); `unfit_groups()` बंद करने लायक ग्रुप
+  बताता है।
+- जीन पूल की क्षमता सीमित है: एजेंट जब नए उम्मीदवार विकसित करता है तो सबसे कमज़ोर
+  जीन हट जाते हैं (सेल्फ-टेस्ट में `git` → `todo` → `shell`); सबसे फ़िट बच जाते हैं।
+- जनरेटेड जीन JavaScript होते हैं — कंपाइलर की ज़रूरत नहीं — हर जीन की मेमोरी लिमिट
+  और इंटरप्ट डेडलाइन के साथ; बेकाबू जीन क्वारंटीन होता है, zode को नुकसान नहीं
+  पहुँचाता।
+- जीनोम `<config-dir>/evolution/genome.json` में सेव होता है और रीस्टार्ट के बाद
+  फिटनेस के साथ बहाल होता है; `dispose()` हर fiber, listener और इतिहास रिकॉर्ड
+  रिक्लेम करता है।
+
+पूरी रिपोर्ट (देखा गया आउटपुट और ठीक किए गए रिग्रेशन): `crates/cordis-rs/README.md`।
+
 ## Contributing
 
 Contributions का स्वागत है! कृपया [Conventional Commits](https://www.conventionalcommits.org/) follow करें — `<type>(<scope>): <subject>`, जिनमें scopes जैसे `core`, `tui`, `cli`, `tools`, `config`, `build`, `ci`, `docs`.

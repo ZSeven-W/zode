@@ -976,6 +976,39 @@ cargo fmt --all
 cargo deny check
 ```
 
+## Testbericht
+
+Alle Suites grün; der End-to-End-Selbsttest fährt den echten Evolutionskreislauf —
+Toolgruppen-Fitness → generierte JS-Gene → Kapazitätsauswahl → Genom-Persistenz — und
+gibt `SELF-TEST PASSED` aus:
+
+| Suite | Befehl | Ergebnis |
+|---|---|---|
+| Harness-Kern, Evolutionsschicht, Prozess-Plugins | `cargo test -p cordis-rs` | 50 passed |
+| Evolutions-Integration (Gruppen-Fitness, Genom-Wiederherstellung) | `cargo test -p zode-core --lib evolution::` | 5 passed |
+| QuickJS-Genschicht (Quellcode-Austausch, Interrupt, Speicherlimit) | `cargo test -p zode-core --test js_plugin_it` | 4 passed |
+| zode-core Gesamtsuite (inkl. Evolutions-Verdrahtung) | `cargo test -p zode-core --lib` | 983 passed |
+
+```sh
+cargo run -p zode-core --example evolution_self_test
+```
+
+- Die Hook-Pipeline bewertet jedes Tool-Ergebnis gegen seine Toolgruppe
+  (`uses − 10·failures − 100·panics − 5·restarts`); `unfit_groups()` nennt die Gruppen,
+  die sich zum Deaktivieren lohnen.
+- Der Genpool hat eine harte Kapazitätsgrenze: Die schwächsten Gene werden verdrängt,
+  sobald der Agent neue Kandidaten entwickelt (der Selbsttest verdrängt `git` → `todo` →
+  `shell`); die fittesten überleben.
+- Generierte Gene sind JavaScript — kein Compiler nötig — mit Speicherlimits und
+  Interrupt-Fristen pro Gen; ein außer Kontrolle geratenes Gen wird quarantänisiert,
+  statt zode zu schädigen.
+- Das Genom wird nach `<config-dir>/evolution/genome.json` persistiert und mit Fitness
+  über Neustarts hinweg wiederhergestellt; `dispose()` gibt alle Fiber, Listener und den
+  Ereignisverlauf frei.
+
+Der vollständige Bericht mit beobachteter Ausgabe und behobenen Regressionen:
+`crates/cordis-rs/README.md`.
+
 ## Beitragen
 
 Beiträge sind willkommen! Bitte folge [Conventional Commits](https://www.conventionalcommits.org/) – `<type>(<scope>): <subject>` mit Scopes wie `core`, `tui`, `cli`, `tools`, `config`, `build`, `ci`, `docs`.

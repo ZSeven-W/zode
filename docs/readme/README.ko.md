@@ -924,6 +924,36 @@ cargo fmt --all
 cargo deny check
 ```
 
+## 테스트 리포트
+
+모든 스위트가 통과했습니다. 엔드투엔드 자체 테스트는 실제 진화 루프——도구 그룹
+적합도 → 생성된 JS 유전자 → 용량 기반 선택 → 게놈 영속화——를 실행하고
+`SELF-TEST PASSED`를 출력합니다:
+
+| 스위트 | 명령 | 결과 |
+|---|---|---|
+| Harness 코어·진화 레이어·프로세스 플러그인 | `cargo test -p cordis-rs` | 50 passed |
+| 진화 통합(그룹 적합도, 게놈 복원) | `cargo test -p zode-core --lib evolution::` | 5 passed |
+| QuickJS 유전자 레이어(소스 교체, 인터럽트, 메모리 한도) | `cargo test -p zode-core --test js_plugin_it` | 4 passed |
+| zode-core 전체 스위트(진화 배선 포함) | `cargo test -p zode-core --lib` | 983 passed |
+
+```sh
+cargo run -p zode-core --example evolution_self_test
+```
+
+- 훅 파이프라인은 모든 도구 결과를 해당 도구 그룹 기준으로 점수화합니다
+  (`uses − 10·failures − 100·panics − 5·restarts`). `unfit_groups()`는 비활성화 후보
+  그룹을 나열합니다.
+- 유전자 풀에는 엄격한 용량 한도가 있습니다. 에이전트가 새 후보를 진화시키면 가장
+  약한 유전자가 퇴출되고(자체 테스트에서는 `git` → `todo` → `shell` 순), 가장
+  적합한 유전자가 살아남습니다.
+- 생성된 유전자는 JavaScript로 컴파일러가 필요 없으며, 유전자별 메모리 한도와
+  인터럽트 데드라인이 있습니다. 통제 불능 유전자는 zode를 해치지 않고 격리됩니다.
+- 게놈은 `<config-dir>/evolution/genome.json`에 영속화되고 재시작 시 적합도와 함께
+  복원됩니다. `dispose()`는 모든 fiber·리스너·이벤트 기록을 회수합니다.
+
+전체 보고서(관측된 출력과 수정된 회귀 포함): `crates/cordis-rs/README.md`.
+
 ## 기여
 
 기여를 환영합니다. [Conventional Commits](https://www.conventionalcommits.org/) 의

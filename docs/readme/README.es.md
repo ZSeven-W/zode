@@ -916,6 +916,39 @@ cargo fmt --all
 cargo deny check
 ```
 
+## Informe de pruebas
+
+Todas las suites en verde; la autoprueba de extremo a extremo ejecuta el ciclo real de
+evolución — aptitud de grupos de herramientas → genes JS generados → selección por
+capacidad → persistencia del genoma — e imprime `SELF-TEST PASSED`:
+
+| Suite | Comando | Resultado |
+|---|---|---|
+| Núcleo del harness, capa de evolución, plugins de proceso | `cargo test -p cordis-rs` | 50 passed |
+| Integración de evolución (fitness de grupos, restauración del genoma) | `cargo test -p zode-core --lib evolution::` | 5 passed |
+| Capa de genes QuickJS (intercambio de código, interrupción, límite de memoria) | `cargo test -p zode-core --test js_plugin_it` | 4 passed |
+| Suite completa de zode-core (incluido el cableado de evolución) | `cargo test -p zode-core --lib` | 983 passed |
+
+```sh
+cargo run -p zode-core --example evolution_self_test
+```
+
+- El pipeline de hooks puntúa cada resultado de herramienta contra su grupo
+  (`uses − 10·failures − 100·panics − 5·restarts`); `unfit_groups()` nombra los grupos
+  que merece la pena desactivar.
+- El acervo de genes tiene un límite de capacidad estricto: los genes más débiles se
+  desalojan cuando el agente evoluciona nuevos candidatos (la autoprueba desaloja
+  `git` → `todo` → `shell`); sobreviven los más aptos.
+- Los genes generados son JavaScript — sin compilador — con límites de memoria y
+  plazos de interrupción por gen; un gen descontrolado se pone en cuarentena en lugar
+  de dañar a zode.
+- El genoma persiste en `<config-dir>/evolution/genome.json` y se restaura con su
+  aptitud entre reinicios; `dispose()` libera cada fibra, listener y registro del
+  historial.
+
+El informe completo con la salida observada y las regresiones corregidas:
+`crates/cordis-rs/README.md`.
+
 ## Contribuir
 
 Las contribuciones son bienvenidas. Usa [Conventional Commits](https://www.conventionalcommits.org/): `<type>(<scope>): <subject>`, con scopes habituales como `core`, `tui`, `cli`, `tools`, `config`, `build`, `ci`, `docs`.

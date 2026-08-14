@@ -947,6 +947,39 @@ cargo fmt --all
 cargo deny check
 ```
 
+## Relatório de testes
+
+Todas as suítes verdes; o autoteste de ponta a ponta executa o ciclo real de evolução —
+aptidão dos grupos de ferramentas → genes JS gerados → seleção por capacidade →
+persistência do genoma — e imprime `SELF-TEST PASSED`:
+
+| Suíte | Comando | Resultado |
+|---|---|---|
+| Núcleo do harness, camada de evolução, plugins de processo | `cargo test -p cordis-rs` | 50 passed |
+| Integração da evolução (aptidão de grupos, restauração do genoma) | `cargo test -p zode-core --lib evolution::` | 5 passed |
+| Camada de genes QuickJS (troca de código, interrupção, limite de memória) | `cargo test -p zode-core --test js_plugin_it` | 4 passed |
+| Suíte completa do zode-core (incluindo a fiação da evolução) | `cargo test -p zode-core --lib` | 983 passed |
+
+```sh
+cargo run -p zode-core --example evolution_self_test
+```
+
+- O pipeline de hooks pontua cada resultado de ferramenta contra seu grupo
+  (`uses − 10·failures − 100·panics − 5·restarts`); `unfit_groups()` nomeia os grupos
+  que vale a pena desativar.
+- O pool de genes tem capacidade rígida: os genes mais fracos são despejados quando o
+  agente evolui novos candidatos (o autoteste despeja `git` → `todo` → `shell`); os mais
+  aptos sobrevivem.
+- Genes gerados são JavaScript — sem compilador — com limites de memória e prazos de
+  interrupção por gene; um gene descontrolado é colocado em quarentena em vez de
+  prejudicar o zode.
+- O genoma persiste em `<config-dir>/evolution/genome.json` e é restaurado com a
+  aptidão entre reinícios; `dispose()` recupera cada fiber, listener e registro de
+  histórico.
+
+O relatório completo com a saída observada e as regressões corrigidas:
+`crates/cordis-rs/README.md`.
+
 ## Contribuição
 
 Contribuições são bem-vindas. Use [Conventional Commits](https://www.conventionalcommits.org/): `<type>(<scope>): <subject>`, com scopes comuns como `core`, `tui`, `cli`, `tools`, `config`, `build`, `ci`, `docs`.

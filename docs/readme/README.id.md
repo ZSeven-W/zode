@@ -1334,6 +1334,39 @@ cargo fmt --all
 cargo deny check
 ```
 
+## Laporan Pengujian
+
+Semua suite hijau; self-test end-to-end menjalankan loop evolusi sungguhan — fitness
+grup alat → gen JS hasil generate → seleksi kapasitas → persistensi genom — dan
+mencetak `SELF-TEST PASSED`:
+
+| Suite | Perintah | Hasil |
+|---|---|---|
+| Inti harness, lapisan evolusi, plugin proses | `cargo test -p cordis-rs` | 50 passed |
+| Integrasi evolusi (fitness grup alat, pemulihan genom) | `cargo test -p zode-core --lib evolution::` | 5 passed |
+| Lapisan gen QuickJS (tukar kode, interupsi, batas memori) | `cargo test -p zode-core --test js_plugin_it` | 4 passed |
+| Suite lengkap zode-core (termasuk kabel evolusi) | `cargo test -p zode-core --lib` | 983 passed |
+
+```sh
+cargo run -p zode-core --example evolution_self_test
+```
+
+- Pipeline hook memberi skor setiap hasil alat terhadap grupnya
+  (`uses − 10·failures − 100·panics − 5·restarts`); `unfit_groups()` menyebut grup yang
+  layak dinonaktifkan.
+- Kumpulan gen memiliki kapasitas ketat: gen terlemah dikeluarkan saat agen
+  mengevolusi kandidat baru (self-test mengeluarkan `git` → `todo` → `shell`); yang
+  terkuat bertahan.
+- Gen hasil generate adalah JavaScript — tanpa kompiler — dengan batas memori dan
+  tenggat interupsi per gen; gen yang lepas kendali dikarantina alih-alih merusak
+  zode.
+- Genom dipersist ke `<config-dir>/evolution/genome.json` dan dipulihkan beserta
+  fitness setelah restart; `dispose()` mereklaim setiap fiber, listener, dan rekaman
+  riwayat.
+
+Laporan lengkap dengan output teramati dan regresi yang diperbaiki:
+`crates/cordis-rs/README.md`.
+
 ## Contributing
 
 Kontribusi diterima. Gunakan [Conventional Commits](https://www.conventionalcommits.org/):

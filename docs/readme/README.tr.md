@@ -986,6 +986,38 @@ cargo fmt --all
 cargo deny check                        # licenses / advisories / bans
 ```
 
+## Test raporu
+
+Tüm suitler yeşil; uçtan uca self-test gerçek evrim döngüsünü çalıştırır — araç grubu
+uygunluğu → üretilen JS genleri → kapasiteye dayalı seçilim → genom kalıcılığı — ve
+`SELF-TEST PASSED` yazdırır:
+
+| Suite | Komut | Sonuç |
+|---|---|---|
+| Harness çekirdeği, evrim katmanı, süreç eklentileri | `cargo test -p cordis-rs` | 50 passed |
+| Evrim entegrasyonu (grup uygunluğu, genom geri yükleme) | `cargo test -p zode-core --lib evolution::` | 5 passed |
+| QuickJS gen katmanı (kod değişimi, kesme, bellek sınırı) | `cargo test -p zode-core --test js_plugin_it` | 4 passed |
+| zode-core tam suite (evrim bağlantısı dahil) | `cargo test -p zode-core --lib` | 983 passed |
+
+```sh
+cargo run -p zode-core --example evolution_self_test
+```
+
+- Hook hattı her araç sonucunu kendi grubuna göre puanlar
+  (`uses − 10·failures − 100·panics − 5·restarts`); `unfit_groups()` devre dışı
+  bırakılmaya değer grupları listeler.
+- Gen havuzunun katı bir kapasite sınırı vardır: ajan yeni adaylar evrimleştirdikçe en
+  zayıf genler dışarı atılır (self-test `git` → `todo` → `shell` sırasıyla atar); en
+  uygunlar hayatta kalır.
+- Üretilen genler JavaScript'tir — derleyici gerekmez — gen başına bellek sınırı ve
+  kesme süresiyle; kontrolden çıkan bir gen zode'a zarar vermek yerine karantinaya
+  alınır.
+- Genom `<config-dir>/evolution/genome.json` konumuna kalıcılaştırılır ve yeniden
+  başlatmalarda uygunluk değeriyle geri yüklenir; `dispose()` tüm fiber'ları,
+  dinleyicileri ve geçmiş kayıtlarını geri kazanır.
+
+Gözlenen çıktı ve düzeltilen regresyonlarla tam rapor: `crates/cordis-rs/README.md`.
+
 ## Contributing
 
 Katkılar memnuniyetle karşılanır. Lütfen [Conventional Commits](https://www.conventionalcommits.org/) formatını kullanın: `<type>(<scope>): <subject>`; yaygın scope'lar `core`, `tui`, `cli`, `tools`, `config`, `build`, `ci`, `docs`.

@@ -1670,6 +1670,39 @@ cargo fmt --all
 cargo deny check                        # licenses / advisories / bans
 ```
 
+## Test Report
+
+All suites green; the end-to-end self-test exercises the real evolution
+loop — tool-group fitness → generated JS genes → capacity selection →
+genome persistence — and prints `SELF-TEST PASSED`:
+
+| Suite | Command | Result |
+|---|---|---|
+| Harness core, evolution layer, process plugins | `cargo test -p cordis-rs` | 50 passed |
+| Evolution integration (group fitness, genome restore) | `cargo test -p zode-core --lib evolution::` | 5 passed |
+| QuickJS gene layer (live source swap, interrupt, memory cap) | `cargo test -p zode-core --test js_plugin_it` | 4 passed |
+| zode-core full suite (evolution wiring included) | `cargo test -p zode-core --lib` | 983 passed |
+
+```sh
+cargo run -p zode-core --example evolution_self_test
+```
+
+- The hook pipeline scores every tool result against its tool group
+  (`uses − 10·failures − 100·panics − 5·restarts`); `unfit_groups()` names
+  the groups worth disabling.
+- The gene pool has a hard capacity: the weakest genes are evicted as the
+  agent evolves new candidates (the self-test evicts `git` → `todo` →
+  `shell`); the fittest survive.
+- Generated genes are JavaScript — no compiler required — with per-gene
+  memory limits and interrupt deadlines; a runaway gene quarantines
+  instead of harming zode.
+- The genome persists to `<config-dir>/evolution/genome.json` and restores
+  with fitness across restarts; `dispose()` reclaims every fiber,
+  listener, and history record.
+
+The full report with observed output and pinned regressions lives in
+`crates/cordis-rs/README.md`.
+
 ## Contributing
 
 Contributions welcome! Please follow [Conventional Commits](https://www.conventionalcommits.org/) — `<type>(<scope>): <subject>` with scopes like `core`, `tui`, `cli`, `tools`, `config`, `build`, `ci`, `docs`.

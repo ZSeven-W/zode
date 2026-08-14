@@ -974,6 +974,37 @@ cargo fmt --all
 cargo deny check
 ```
 
+## Báo cáo kiểm thử
+
+Tất cả các bộ kiểm thử đều xanh; self-test end-to-end chạy vòng tiến hóa thực —
+fitness nhóm công cụ → gen JS được sinh → chọn lọc theo dung lượng → lưu trữ bộ gen —
+và in ra `SELF-TEST PASSED`:
+
+| Bộ kiểm thử | Lệnh | Kết quả |
+|---|---|---|
+| Lõi harness, tầng tiến hóa, plugin tiến trình | `cargo test -p cordis-rs` | 50 passed |
+| Tích hợp tiến hóa (fitness nhóm công cụ, khôi phục bộ gen) | `cargo test -p zode-core --lib evolution::` | 5 passed |
+| Tầng gen QuickJS (thay mã nguồn, ngắt, giới hạn bộ nhớ) | `cargo test -p zode-core --test js_plugin_it` | 4 passed |
+| Toàn bộ suite zode-core (bao gồm hệ thống dây tiến hóa) | `cargo test -p zode-core --lib` | 983 passed |
+
+```sh
+cargo run -p zode-core --example evolution_self_test
+```
+
+- Pipeline hook chấm điểm từng kết quả công cụ theo nhóm của nó
+  (`uses − 10·failures − 100·panics − 5·restarts`); `unfit_groups()` liệt kê các nhóm
+  đáng tắt.
+- Bể gen có giới hạn dung lượng cứng: gen yếu nhất bị loại khi tác tử tiến hóa ứng
+  viên mới (self-test loại `git` → `todo` → `shell`); gen khỏe nhất sống sót.
+- Gen được sinh là JavaScript — không cần trình biên dịch — với giới hạn bộ nhớ và
+  hạn ngắt theo từng gen; gen mất kiểm soát bị cách ly thay vì gây hại cho zode.
+- Bộ gen được lưu tại `<config-dir>/evolution/genome.json` và khôi phục kèm fitness
+  qua các lần khởi động lại; `dispose()` thu hồi mọi fiber, listener và bản ghi lịch
+  sử.
+
+Báo cáo đầy đủ với đầu ra quan sát được và các hồi quy đã sửa:
+`crates/cordis-rs/README.md`.
+
 ## Contributing
 
 Hoan nghênh contributions. Vui lòng theo [Conventional Commits](https://www.conventionalcommits.org/): `<type>(<scope>): <subject>`, với các scope thường gặp như `core`, `tui`, `cli`, `tools`, `config`, `build`, `ci`, `docs`.
