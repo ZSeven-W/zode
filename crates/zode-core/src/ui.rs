@@ -174,8 +174,6 @@ impl UiHost {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use serde_json::json;
 
     use super::*;
@@ -270,13 +268,11 @@ mod tests {
     async fn mounting_a_new_ui_replaces_the_old_one() -> Result<(), CordisError> {
         let root = Context::root();
         let host = UiHost::new(&root, deps())?;
-        let runs = Arc::new(AtomicUsize::new(0));
         host.register(Arc::new(ProbeUi {
             id: "headless",
             log: Arc::new(Mutex::new(Vec::new())),
             swap_to: None,
         }));
-        let _ = &runs;
         host.register(Arc::new(ProbeUi {
             id: "readline",
             log: Arc::new(Mutex::new(Vec::new())),
