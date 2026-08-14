@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/cordis-rs",
   "crates/zode",
   "crates/zode-core",
   "crates/zode-tui",
@@ -16,7 +17,7 @@ members = [
 exclude = ["vendor/agent", "vendor/noema"]
 
 [workspace.package]
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.4"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"

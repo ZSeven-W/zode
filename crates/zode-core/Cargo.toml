@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 agent = { workspace = true }
 agent-tools-code = { workspace = true }
+cordis-rs = { path = "../cordis-rs" }
 tokio = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }

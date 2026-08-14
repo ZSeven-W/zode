@@ -1078,6 +1078,10 @@ pub struct ZodeConfig {
     /// Built-in browser control configuration (the `browser_*` tools).
     #[serde(skip_serializing_if = "is_default")]
     pub browser: BrowserConfig,
+    /// Self-evolving harness: observes tool-group fitness through the agent
+    /// hook pipeline and persists the genome across restarts.
+    #[serde(skip_serializing_if = "is_default")]
+    pub evolution: crate::evolution::EvolutionSettings,
     /// Built-in desktop control configuration (the `desktop_*` tools).
     #[serde(skip_serializing_if = "is_default")]
     pub desktop: DesktopConfig,

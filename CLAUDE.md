@@ -868,6 +868,48 @@ Opt-in real-CLI integration test:
 ZODE_EXTAGENT_IT=1 cargo test -p zode-core --test extagent_it -- --ignored
 ```
 
+## Self-evolving harness
+
+Zode carries a process-wide self-evolving harness
+('zode-core/src/evolution.rs', built on 'crates/cordis-rs') that runs a
+generate → evaluate → select → retire loop over its capability units:
+
+- **Built-in tools stay Rust.** The evolvable layer is **generated
+  JavaScript** evaluated by 'zode-core/src/js_plugin.rs' in a dedicated
+  QuickJS runtime (rquickjs, already a workspace dep) — no compiler is
+  required on the target machine, and hot replacement is just evaluating
+  new source. Each JsPlugin gets a hard memory limit
+  (JS_GENE_MEMORY_LIMIT, default 16 MiB) and a per-call interrupt deadline;
+  a runaway/leaking gene becomes a Failed fiber and quarantines through
+  the evolution layer instead of harming the host.
+- **Genes are tool groups today** (the same grouping '/plugin' uses); each
+  group is a lazily-spawned fiber in a bounded gene pool
+  ('evolution.capacity', default 64). Fitness comes from the agent hook
+  pipeline: every AfterToolUse/PostToolUseFailure event is attributed to
+  its tool group ('plugin::group_of') and scored
+  (uses − 10·failures − 100·panics − 5·restarts). 'unfit_groups()' names
+  candidates for the plugin manager to disable.
+- **Generated genes**: 'EvolutionHarness::spawn_js_gene(name, source,
+  config, provenance)' installs a JS gene into the same pool; the JS
+  source is the content hash (dedupe + the code key the agent persists
+  generated code under). The guest protocol is a factory returning
+  'apply(host)' with host.log/on/emit/effect/config; guest callbacks stay
+  inside the JS runtime under a global registry, so nothing 'js-lifetimed
+  crosses into Rust.
+- **Genome persistence**: '<config-dir>/evolution/genome.json' (atomic
+  write, debounced every 32 results + on drop); tool-group genes restore
+  with carried fitness on restart, generated JS genes are skipped unless
+  their source is respawned explicitly.
+- **Config** ('evolution', camelCase): 'enabled' (default true),
+  'capacity', 'maxRestarts'. 'init_from_config' runs from
+  'EngineTemplate::new', so every entry path (TUI/CLI/extension daemon)
+  shares one genome; engine tests disable it via 'test_cfg()' and cover
+  the hook path in 'assemble_registers_evolution_hook'.
+- The cordis-rs side ('crates/cordis-rs/src/process.rs') additionally
+  supports subprocess plugins (any executable speaking a JSON-lines
+  protocol) for environments that DO have a compiler: dispose kills the
+  child process, and swapping binaries = live replacement.
+
 ## Agent team (Phase B)
 
 Zode can build a collaborating team of internal and external agents on top of

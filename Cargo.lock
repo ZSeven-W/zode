@@ -905,6 +905,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cordis-rs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6025,7 +6038,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zode"
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.4"
 dependencies = [
  "agent",
  "agent-client-protocol",
@@ -6050,7 +6063,7 @@ dependencies = [
 
 [[package]]
 name = "zode-app-server"
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.4"
 dependencies = [
  "agent",
  "async-trait",
@@ -6072,7 +6085,7 @@ dependencies = [
 
 [[package]]
 name = "zode-app-server-protocol"
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.4"
 dependencies = [
  "anyhow",
  "pretty_assertions",
@@ -6084,7 +6097,7 @@ dependencies = [
 
 [[package]]
 name = "zode-app-server-transport"
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.4"
 dependencies = [
  "serde_json",
  "zode-app-server-protocol",
@@ -6092,7 +6105,7 @@ dependencies = [
 
 [[package]]
 name = "zode-core"
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.4"
 dependencies = [
  "accessibility-sys",
  "agent",
@@ -6103,6 +6116,7 @@ dependencies = [
  "chromiumoxide",
  "chrono",
  "cocoa",
+ "cordis-rs",
  "core-foundation",
  "core-graphics",
  "dirs",
@@ -6137,7 +6151,7 @@ dependencies = [
 
 [[package]]
 name = "zode-overlay"
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.4"
 dependencies = [
  "cocoa",
  "core-foundation",
@@ -6150,7 +6164,7 @@ dependencies = [
 
 [[package]]
 name = "zode-pty-harness"
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.4"
 dependencies = [
  "anyhow",
  "portable-pty",
@@ -6162,7 +6176,7 @@ dependencies = [
 
 [[package]]
 name = "zode-sdk-rust"
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -6173,7 +6187,7 @@ dependencies = [
 
 [[package]]
 name = "zode-tui"
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.4"
 dependencies = [
  "agent",
  "base64 0.22.1",

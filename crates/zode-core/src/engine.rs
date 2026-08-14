@@ -1469,6 +1469,9 @@ impl ZodeEngine {
         hook_runner.register(Arc::new(tool_trace.hook()));
         hook_runner.register(Arc::new(reminders.hook()));
         hook_runner.register(Arc::new(ledger.hook()));
+        if let Some(evolution) = crate::evolution::EvolutionHarness::global() {
+            hook_runner.register(Arc::new(evolution.hook()));
+        }
         // External hooks.json scripts (global ⊕ project).
         for h in load_hook_handlers(&cwd) {
             hook_runner.register(h);
@@ -2957,6 +2960,8 @@ impl EngineTemplate {
         sandbox: Option<crate::sandbox::SandboxConfig>,
         date: String,
     ) -> Self {
+        // One process-wide genome shared by every tab and entry path.
+        crate::evolution::EvolutionHarness::init_from_config(&cfg);
         let browser = BrowserSession::new(cfg.browser.clone(), Arc::new(ManagedFactory));
         let selected_provider_key = cfg.active_provider_key().map(str::to_string);
         Self {
@@ -4145,6 +4150,12 @@ mod tests {
             },
             noema: crate::config::NoemaSettings {
                 enabled: Some(false),
+                ..Default::default()
+            },
+            // Engine tests are hermetic: the process-wide evolution harness
+            // is initialized explicitly by the tests that cover it.
+            evolution: crate::evolution::EvolutionSettings {
+                enabled: false,
                 ..Default::default()
             },
             ..Default::default()
@@ -5828,6 +5839,35 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
+    async fn assemble_registers_evolution_hook() {
+        crate::evolution::reset_for_tests();
+        let genome_dir = tempfile::tempdir().unwrap();
+        let _harness = crate::evolution::EvolutionHarness::init(
+            genome_dir.path().to_path_buf(),
+            crate::evolution::EvolutionSettings::default(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let eng = ZodeEngine::assemble(
+            &test_cfg(),
+            dir.path().to_path_buf(),
+            Arc::new(BypassGate),
+            None,
+            "2026-06-13",
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        // The ninth hook is the self-evolving harness observer.
+        assert_eq!(eng.hooks.len(), 9);
+        crate::evolution::reset_for_tests();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     async fn assemble_registers_edit_history_hook() {
         let dir = tempfile::tempdir().unwrap();
         let eng = ZodeEngine::assemble(
