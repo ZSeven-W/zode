@@ -72,6 +72,9 @@ pub struct TuiParts {
     pub question_rx: zode_core::question::QuestionReceiver,
     pub op_question_queue: zode_core::question::QuestionQueue,
     pub resumed_id: Option<String>,
+    /// Written by the TUI's /ui command; the app reads it after the TUI
+    /// exits and hands the request to the host loop.
+    pub ui_swap_slot: Arc<Mutex<Option<String>>>,
 }
 
 /// The full ratatui frontend (including the browser-native-host daemon
@@ -109,13 +112,33 @@ impl Ui for TuiUi {
             Some(skin) => app.with_skin_state(skin),
             None => app,
         };
+        let app = app.with_ui_swap_slot(parts.ui_swap_slot.clone());
+        let swap_slot = parts.ui_swap_slot.clone();
+        // Agent tools / other frontends request a swap via 'ui/swap': mirror
+        // it into the latch the TUI's tick polls, so the running TUI quits
+        // and the host loop mounts the target.
+        {
+            let slot = swap_slot.clone();
+            let _ = ctx.on_dyn_global("ui/swap", move |event| {
+                let to = event
+                    .payload
+                    .get("to")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                if let Some(to) = to {
+                    *slot.lock().unwrap() = Some(to);
+                }
+                async { zode_core::cordis_rs::Flow::Continue }
+            });
+        }
         let browser_native_host = self.browser_native_host;
 
         // 'TuiApp' owns non-Sync terminal state (RefCell-backed views), so
         // its borrowed futures are not Send. Run the whole app on a
         // dedicated thread with its own single-thread runtime; this future
-        // only waits for the exit code, so the plugin stays Send-safe.
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<i32>();
+        // only waits for the exit code + a pending swap request, so the
+        // plugin stays Send-safe.
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<(i32, Option<String>)>();
         std::thread::Builder::new()
             .name("zode-tui".to_string())
             .spawn(move || {
@@ -160,10 +183,19 @@ impl Ui for TuiUi {
                         }
                     }
                 });
-                let _ = done_tx.send(code);
+                // The TUI may have requested a frontend handover (/ui).
+                let target = swap_slot.lock().unwrap().take();
+                let _ = done_tx.send((code, target));
             })
             .map_err(|error| CordisError::PluginStartup("tui".to_string(), error.to_string()))?;
-        let code = done_rx.await.unwrap_or(1);
+        let (code, swap_target) = done_rx.await.unwrap_or((1, None));
+        if let Some(target) = swap_target {
+            // Hand the swap request to the host loop (it unmounts this
+            // fiber and mounts the target frontend).
+            let _ = ctx
+                .parallel_dyn("ui/swap", &serde_json::json!({ "to": target }))
+                .await;
+        }
         *self.exit.lock().unwrap() = code;
         Ok(())
     }

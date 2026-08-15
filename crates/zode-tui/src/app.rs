@@ -3999,6 +3999,11 @@ impl TuiApp {
                     let _ = request.respond(None);
                 }
                 _ = ticker.tick() => {
+                    // A runtime swap request (agent tool or /ui) quits the
+                    // TUI; the host loop then mounts the target frontend.
+                    if self.ui_swap.lock().unwrap().is_some() {
+                        self.should_quit = true;
+                    }
                     self.cleanup_extension_attachments_at(std::time::Instant::now());
                     self.maybe_notice_self_update();
                 }
@@ -10289,6 +10294,44 @@ impl TuiApp {
                 } else {
                     *self.ui_swap.lock().unwrap() = Some(target);
                     self.should_quit = true;
+                }
+            }
+            "ui-file" => {
+                // One-sentence replacement: load an agent-written JS
+                // frontend from a file, register it, and swap to it.
+                let path = args.trim().to_string();
+                if path.is_empty() {
+                    self.toast = Some(Toast::info(
+                        "usage: /ui-file <file.js> — register a JS frontend and swap to it",
+                    ));
+                    return;
+                }
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(source) => {
+                        let id = std::path::Path::new(&path)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("js-frontend")
+                            .to_string();
+                        match zode_core::ui::global_host() {
+                            Some(host) => {
+                                // The id must live for the process lifetime.
+                                let id: &'static str = Box::leak(id.into_boxed_str());
+                                host.register_js(id, source);
+                                *self.ui_swap.lock().unwrap() = Some(id.to_string());
+                                self.should_quit = true;
+                                self.toast =
+                                    Some(Toast::info(format!("registered {id} — swapping now")));
+                            }
+                            None => {
+                                self.toast =
+                                    Some(Toast::error("ui host unavailable (not a harness launch)"))
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.toast = Some(Toast::error(format!("ui-file: {error}")));
+                    }
                 }
             }
             "skin" => {

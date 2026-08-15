@@ -62,6 +62,24 @@ impl Plugin for UiPlugin {
     }
 }
 
+/// The process-wide UI host (installed by the app entrypoint). Tools and
+/// commands register frontends and request swaps through it, so a single
+/// sentence to the agent can replace the UI at runtime.
+static HOST: Mutex<Option<Arc<UiHost>>> = Mutex::new(None);
+
+/// Install the process-wide UI host (idempotent; the first install wins).
+pub fn install_host(host: Arc<UiHost>) {
+    let mut slot = HOST.lock().unwrap();
+    if slot.is_none() {
+        *slot = Some(host);
+    }
+}
+
+/// The process-wide UI host, if installed.
+pub fn global_host() -> Option<Arc<UiHost>> {
+    HOST.lock().unwrap().clone()
+}
+
 /// The app-level UI host: register frontends, mount one at a time, and
 /// follow 'ui/swap' events to replace the active UI at runtime.
 pub struct UiHost {
@@ -114,6 +132,12 @@ impl UiHost {
     /// Register a frontend under its id.
     pub fn register(&self, ui: Arc<dyn Ui>) {
         self.registry.lock().unwrap().insert(ui.id(), ui);
+    }
+
+    /// Register an agent-written JavaScript frontend at runtime (no
+    /// compiler needed) — the last piece of one-sentence UI replacement.
+    pub fn register_js(&self, id: &'static str, source: String) {
+        self.register(Arc::new(crate::js_ui::JsUi::new(id, source)));
     }
 
     /// Ids of every registered frontend (sorted, deterministic).

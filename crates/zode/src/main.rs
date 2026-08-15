@@ -510,6 +510,10 @@ async fn run(args: Args) -> i32 {
         }),
     )
     .expect("ui host");
+    // Tools/commands reach the host through this registry (one-sentence
+    // UI replacement).
+    zode_core::ui::install_host(host.clone());
+    let ui_swap_slot: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
     host.register(Arc::new(crate::ui_frontends::TuiUi {
         parts: std::sync::Mutex::new(Some(crate::ui_frontends::TuiParts {
             engine,
@@ -519,6 +523,7 @@ async fn run(args: Args) -> i32 {
             question_rx,
             op_question_queue,
             resumed_id,
+            ui_swap_slot: ui_swap_slot.clone(),
         })),
         browser_native_host: args.browser_native_host,
         exit: exit.clone(),

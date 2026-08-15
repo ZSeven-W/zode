@@ -1108,6 +1108,12 @@ impl ZodeEngine {
         base.register(Arc::new(crate::tools::multi_edit::MultiEditTool::new(
             policy.clone(),
         )));
+        // One-sentence UI replacement: the agent registers JS frontends,
+        // swaps the active UI, or installs skins through the process-wide
+        // host (no-op errors when launched outside the harness).
+        base.register(Arc::new(crate::tools::ui_control::UiRegisterTool));
+        base.register(Arc::new(crate::tools::ui_control::UiSwapTool));
+        base.register(Arc::new(crate::tools::ui_control::SkinInstallTool));
         // A sandbox-blocked file write must ask the user to escalate rather than
         // dead-end: otherwise the model retries the same write and finally works
         // around it with a `Bash` heredoc + `require_escalated`, which is both

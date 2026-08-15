@@ -5,3 +5,5 @@ pub mod git;
 pub mod memory;
 #[path = "multi-edit.rs"]
 pub mod multi_edit;
+#[path = "ui_control.rs"]
+pub mod ui_control;
