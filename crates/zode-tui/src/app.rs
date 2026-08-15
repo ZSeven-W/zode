@@ -13631,9 +13631,10 @@ static KITTY_KEYBOARD_PUSHED: std::sync::atomic::AtomicBool =
 /// `"mouseCapture": false` leaves the mouse to the terminal instead: native
 /// drag selection, copied by the terminal's own ⌘C — at the cost of the
 /// wheel/in-app selection above.
-pub(crate) fn setup_terminal(
-    mouse_capture: bool,
-) -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
+// One line on purpose: app::tests::setup_gates_mouse_capture_* asserts the
+// exact source shape "(mouse_capture: bool)".
+#[rustfmt::skip]
+pub(crate) fn setup_terminal(mouse_capture: bool) -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     // Undo raw mode if any subsequent step fails, so we never leave the
