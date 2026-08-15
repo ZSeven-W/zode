@@ -184,6 +184,7 @@ const ZH_ONLY: &[(&str, &str, &str)] = &[
     ("Switch the display currency for cost (USD, CNY, EUR, …)", "切换费用显示货币（USD、CNY、EUR 等）", "切換費用顯示貨幣（USD、CNY、EUR 等）"),
     ("Drive OpenPencil (e.g. /op status, /op generate <prompt>)", "驱动 OpenPencil（例如 /op status、/op generate <prompt>）", "驅動 OpenPencil（例如 /op status、/op generate <prompt>）"),
     ("Browser control panel and commands (e.g. /browser, /browser status)", "浏览器控制面板和命令（例如 /browser、/browser status）", "瀏覽器控制面板和命令（例如 /browser、/browser status）"),
+    ("Install a runtime skin from a JSON file or inline JSON", "从 JSON 文件或内联 JSON 安装运行时皮肤", "從 JSON 檔案或內聯 JSON 安裝執行階段皮膚"),
     ("Desktop control status and CDP attach (e.g. /desktop status)", "桌面控制状态与 CDP 附加（例如 /desktop status）", "桌面控制狀態與 CDP 附加（例如 /desktop status）"),
     ("Show the agent team roster (e.g. /team, /team board, /team dismiss <name>)", "显示 agent 团队名册（例如 /team、/team board、/team dismiss <name>）", "顯示 agent 團隊名冊（例如 /team、/team board、/team dismiss <name>）"),
     ("Run a prompt on a recurring interval (this session)", "按固定间隔重复运行提示词（仅限本会话）", "按固定間隔重複執行提示詞（僅限本工作階段）"),
