@@ -114,6 +114,12 @@ pub static BUILTINS: &[SlashCommand] = &[
         action: CommandAction::Ui,
     },
     SlashCommand {
+        name: "skin",
+        description: "Install a runtime skin from a JSON file or inline JSON",
+        usage: "/skin <file.json | inline JSON>",
+        action: CommandAction::Ui,
+    },
+    SlashCommand {
         name: "sessions",
         description: "List and resume sessions",
         usage: "/sessions",

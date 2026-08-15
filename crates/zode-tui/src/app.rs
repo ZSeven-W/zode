@@ -6,7 +6,7 @@ use std::fs;
 use std::io::Stdout;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent::abort::AbortController;
@@ -646,6 +646,10 @@ pub struct TuiApp {
     skin_state: Option<std::sync::Arc<zode_core::skin::SkinState>>,
     last_skin_version: u64,
     should_quit: bool,
+    /// Pending runtime frontend handover target (`/ui <id>`). The owning
+    /// harness (`UiHost`) reads it when this frontend exits and dispatches
+    /// `ui/swap` to mount the target instead of quitting.
+    ui_swap: Arc<Mutex<Option<String>>>,
     /// One-shot transition that rejects UI/extension request sources before
     /// the scheduler finalizer drain begins.
     shutdown_cleanup_started: bool,
@@ -1256,6 +1260,7 @@ impl TuiApp {
             last_skin_version: 0,
             theme,
             should_quit: false,
+            ui_swap: Arc::new(Mutex::new(None)),
             shutdown_cleanup_started: false,
             esc_clear_armed: false,
             selected_image: None,
@@ -1330,6 +1335,14 @@ impl TuiApp {
     pub fn with_skin_state(mut self, skin: std::sync::Arc<zode_core::skin::SkinState>) -> Self {
         self.last_skin_version = skin.version();
         self.skin_state = Some(skin);
+        self
+    }
+
+    /// Attach the frontend-handover slot: `/ui <id>` writes the target here
+    /// and exits; the owning `Ui` adapter dispatches `ui/swap` from it before
+    /// returning so the harness mounts the target without a process restart.
+    pub fn with_ui_swap_slot(mut self, slot: Arc<Mutex<Option<String>>>) -> Self {
+        self.ui_swap = slot;
         self
     }
 
@@ -10267,6 +10280,47 @@ impl TuiApp {
         let name = lowered.as_str();
         match name {
             "exit" => self.should_quit = true,
+            "ui" => {
+                let target = args.trim().to_string();
+                if target.is_empty() {
+                    self.toast = Some(Toast::info(crate::tr(
+                        "usage: /ui <id> — hot-swap the active frontend (e.g. /ui tui-demo)",
+                    )));
+                } else {
+                    *self.ui_swap.lock().unwrap() = Some(target);
+                    self.should_quit = true;
+                }
+            }
+            "skin" => {
+                let arg = args.trim().to_string();
+                if arg.is_empty() {
+                    self.toast = Some(Toast::info(
+                        "usage: /skin <file.json | inline JSON> — install a runtime skin",
+                    ));
+                    return;
+                }
+                let json = if arg.starts_with('{') {
+                    arg.clone()
+                } else {
+                    match tokio::fs::read_to_string(&arg).await {
+                        Ok(text) => text,
+                        Err(error) => {
+                            self.toast = Some(Toast::error(format!("skin: {error}")));
+                            return;
+                        }
+                    }
+                };
+                match &self.skin_state {
+                    Some(skin) => match skin.install(&json) {
+                        Ok(()) => {
+                            self.toast =
+                                Some(Toast::info("skin installed — the next frame renders it"))
+                        }
+                        Err(error) => self.toast = Some(Toast::error(format!("skin: {error}"))),
+                    },
+                    None => self.toast = Some(Toast::error("skin slot unavailable")),
+                }
+            }
             "help" => self.show_help = true,
             "clear" | "new" => {
                 // Mutating the store mid-turn races the running QueryLoop.
@@ -13577,7 +13631,9 @@ static KITTY_KEYBOARD_PUSHED: std::sync::atomic::AtomicBool =
 /// `"mouseCapture": false` leaves the mouse to the terminal instead: native
 /// drag selection, copied by the terminal's own ⌘C — at the cost of the
 /// wheel/in-app selection above.
-fn setup_terminal(mouse_capture: bool) -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
+pub(crate) fn setup_terminal(
+    mouse_capture: bool,
+) -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     // Undo raw mode if any subsequent step fails, so we never leave the
@@ -13753,7 +13809,9 @@ fn truncate_at_char_boundary(s: &mut String, max_bytes: usize) {
     s.truncate(end);
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> std::io::Result<()> {
+pub(crate) fn restore_terminal(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+) -> std::io::Result<()> {
     // If teardown happens between Begin/EndSynchronizedUpdate (draw error,
     // panic path), unlock the terminal or it keeps presenting the old frame.
     let _ = terminal.backend_mut().execute(EndSynchronizedUpdate);
