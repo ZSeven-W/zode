@@ -58,6 +58,7 @@ pub mod session_ledger;
 pub mod session_meta;
 pub mod sessions;
 pub mod skills;
+pub mod skin;
 pub mod subagents;
 pub mod task_factory;
 #[path = "task-mode.rs"]

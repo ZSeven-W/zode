@@ -78,6 +78,9 @@ enum WorkerMessage {
     Listen { event: String },
     /// The guest dispatched an event on the host bus.
     Emit { event: String, payload: Value },
+    /// The guest installed a runtime skin (same schema as
+    /// ~/.zode/themes/*.json).
+    SetSkin { json: String },
 }
 
 fn js_stringify<'js>(ctx: &Ctx<'js>, value: &JsValue<'js>) -> Result<String, String> {
@@ -166,6 +169,17 @@ fn run_worker(
                     )
                     .map_err(|e| format!("__zode_register: {e}"))?;
             }
+            {
+                let msg_tx = msg_tx.clone();
+                globals
+                    .set(
+                        "__zode_set_skin",
+                        rquickjs::function::Func::from(move |json: String| {
+                            let _ = msg_tx.blocking_send(WorkerMessage::SetSkin { json });
+                        }),
+                    )
+                    .map_err(|e| format!("__zode_set_skin: {e}"))?;
+            }
             let config = ctx
                 .json_parse(config_json.as_bytes())
                 .map_err(|e| format!("config parse: {e}"))?;
@@ -185,6 +199,7 @@ fn run_worker(
   emit: __zode_emit,
   on: function (event, cb) { globalThis.__zode_handlers[event] = cb; __zode_register(event); },
   effect: function (cb) { globalThis.__zode_cleanup = cb; },
+  setSkin: __zode_set_skin,
   config: __zode_config,
 };"#
                     .as_bytes(),
@@ -370,6 +385,18 @@ impl Plugin for JsPlugin {
                     WorkerMessage::Emit { event, payload } => {
                         if let Err(err) = pump_ctx.emit_dyn(&event, &payload) {
                             tracing::warn!(gene = "js", event = %event, error = %err, "js emit failed");
+                        }
+                    }
+                    WorkerMessage::SetSkin { json } => {
+                        match pump_ctx.use_service::<Arc<crate::skin::SkinState>>("ui/skin") {
+                            Ok(state) => {
+                                if let Err(err) = state.install(&json) {
+                                    tracing::warn!(gene = "js", error = %err, "skin install failed");
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(gene = "js", error = %err, "ui/skin service unavailable");
+                            }
                         }
                     }
                 }

@@ -642,6 +642,9 @@ pub struct TuiApp {
     agent_models_at: Option<std::time::Instant>,
     theme_store: ThemeStore,
     theme: Theme,
+    /// Runtime skin slot (agent-installed, hot-swapped without restart).
+    skin_state: Option<std::sync::Arc<zode_core::skin::SkinState>>,
+    last_skin_version: u64,
     should_quit: bool,
     /// One-shot transition that rejects UI/extension request sources before
     /// the scheduler finalizer drain begins.
@@ -1249,6 +1252,8 @@ impl TuiApp {
             agent_models: HashMap::new(),
             agent_models_at: None,
             theme_store,
+            skin_state: None,
+            last_skin_version: 0,
             theme,
             should_quit: false,
             shutdown_cleanup_started: false,
@@ -1320,6 +1325,14 @@ impl TuiApp {
     /// so the profile switch happens here. Attempted once per tab — when
     /// explicit `profile: "standard"` config keeps the assembly standard,
     /// this must not spin.
+    /// Attach the harness skin slot: agent-installed skins hot-swap the
+    /// theme on the next frame (see `draw`).
+    pub fn with_skin_state(mut self, skin: std::sync::Arc<zode_core::skin::SkinState>) -> Self {
+        self.last_skin_version = skin.version();
+        self.skin_state = Some(skin);
+        self
+    }
+
     fn maybe_apply_learned_profile(&mut self, agent_tx: &mpsc::UnboundedSender<AppEvent>) {
         let tab = self.active_tab();
         let model = tab.engine.model.clone();
@@ -4286,6 +4299,22 @@ impl TuiApp {
     }
 
     fn draw(&mut self, f: &mut ratatui::Frame) {
+        // Hot-swap: if the agent installed a new skin since the last frame,
+        // re-parse it through the theme loader and apply it now.
+        if let Some(skin) = self.skin_state.clone() {
+            let version = skin.version();
+            if version != self.last_skin_version {
+                self.last_skin_version = version;
+                if let Some(json) = skin.current() {
+                    match crate::theme::loader::parse_theme("skin", &json) {
+                        Ok(theme) => self.theme = theme,
+                        Err(error) => {
+                            tracing::warn!(error = %error, "skin parse failed, keeping current theme")
+                        }
+                    }
+                }
+            }
+        }
         // Clone the theme so the &mut self field borrows below (autocomplete /
         // settings hold ListState) don't conflict with an immutable theme
         // borrow. Cheap relative to a frame at 10fps.

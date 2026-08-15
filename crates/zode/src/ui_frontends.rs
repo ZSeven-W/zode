@@ -88,8 +88,14 @@ impl Ui for TuiUi {
         "tui"
     }
 
-    async fn serve(&self, _ctx: Context, _deps: Arc<UiDeps>) -> Result<(), CordisError> {
+    async fn serve(&self, ctx: Context, _deps: Arc<UiDeps>) -> Result<(), CordisError> {
         let parts = self.parts.lock().unwrap().take().expect("parts present");
+        // Attach the harness skin slot so agent-installed skins hot-swap the
+        // theme at runtime.
+        let skin = ctx
+            .use_service::<std::sync::Arc<zode_core::skin::SkinState>>("ui/skin")
+            .ok()
+            .map(|skin| (*skin).clone());
         let app = zode_tui::TuiApp::new(
             parts.engine,
             parts.template,
@@ -99,6 +105,10 @@ impl Ui for TuiUi {
             parts.op_question_queue,
             parts.resumed_id,
         );
+        let app = match skin {
+            Some(skin) => app.with_skin_state(skin),
+            None => app,
+        };
         let browser_native_host = self.browser_native_host;
 
         // 'TuiApp' owns non-Sync terminal state (RefCell-backed views), so
