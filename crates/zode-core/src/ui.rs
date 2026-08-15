@@ -77,6 +77,9 @@ impl UiHost {
     pub fn new(ctx: &Context, deps: Arc<UiDeps>) -> Result<Arc<Self>, CordisError> {
         let deps = deps.as_ref().clone();
         ctx.provide("ui/deps", deps)?;
+        // The runtime skin slot: the agent (or any plugin) installs skins
+        // into it; frontends poll its version and re-render.
+        ctx.provide("ui/skin", crate::skin::SkinState::new())?;
 
         let swap_target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         {

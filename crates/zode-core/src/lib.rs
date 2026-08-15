@@ -36,6 +36,7 @@ pub mod images;
 pub mod instructions;
 pub mod js_hook;
 pub mod js_plugin;
+pub mod js_ui;
 pub mod lsp;
 pub mod mcp;
 pub mod models_dev;
